@@ -12,6 +12,59 @@ const pool = new pg.Pool({
   ssl: databaseUrl && (databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
 });
 
+// Verify if a URL is valid and live (does not 404 or redirect to an expired page)
+export async function verifyUrlLive(url: string, bypassLiveCheck = false): Promise<boolean> {
+  if (!url) return false;
+  if (bypassLiveCheck) {
+    return true;
+  }
+  
+  const validDomains = ["linkedin.com", "mycareersfuture.gov.sg", "efinancialcareers.com", "efinancialcareers.sg"];
+  
+  try {
+    const parsed = new URL(url);
+    if (!validDomains.some(domain => parsed.hostname.includes(domain))) {
+      console.log(`❌ URL Verification Failed: Domain not in scope (${url})`);
+      return false;
+    }
+  } catch {
+    console.log(`❌ URL Verification Failed: Invalid URL format (${url})`);
+    return false;
+  }
+
+  if (bypassLiveCheck) {
+    return true;
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(6000)
+    });
+
+    if (response.status === 404 || response.status === 410) {
+      console.log(`❌ URL Verification Failed: HTTP Status ${response.status} (${url})`);
+      return false;
+    }
+
+    const finalUrl = response.url.toLowerCase();
+    if (finalUrl.includes("expired") || finalUrl.includes("not-found") || finalUrl.includes("job-not-found") || finalUrl.includes("inactive")) {
+      console.log(`❌ URL Verification Failed: Redirected to expired page: ${response.url}`);
+      return false;
+    }
+
+    return true;
+  } catch (err: any) {
+    // Fail-open for timeout or scraper blocks if format/domain are correct
+    console.log(`⚠️ URL Verification Warning: Could not reach URL due to network/access restriction, allowing format-only check. (${err.message || err})`);
+    return true;
+  }
+}
+
 // Define the interface for a Job conforming to our Postgres schema
 export interface Job {
   id: string;
@@ -268,7 +321,13 @@ class PostgresDatabase {
     return res.rows.map(mapRowToJob);
   }
 
-  public async addJob(job: Omit<Job, "id">): Promise<Job> {
+  public async addJob(job: Omit<Job, "id">, bypassLiveCheck = false): Promise<Job> {
+    // Strictly validate the careers_portal_url before inserting
+    const isUrlValid = await verifyUrlLive(job.careers_portal_url, bypassLiveCheck);
+    if (!isUrlValid) {
+      throw new Error(`Invalid or expired careers_portal_url: ${job.careers_portal_url}`);
+    }
+
     // Check/insert company
     let companyId: string | null = null;
     const compRes = await pool.query("SELECT id FROM companies WHERE name = $1", [job.company]);
@@ -444,7 +503,7 @@ class PostgresDatabase {
     await pool.query("DELETE FROM interactions_log");
 
     for (const job of DEFAULT_JOBS) {
-      await this.addJob(job);
+      await this.addJob(job, true);
     }
   }
 }

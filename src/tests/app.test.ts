@@ -41,7 +41,7 @@ describe.sequential("Job Decision Engine Test Suite", () => {
       careers_portal_url: "https://www.florapharma.nl/careers"
     };
 
-    const addedJob = await db.addJob(newJobPayload);
+    const addedJob = await db.addJob(newJobPayload, true);
     expect(addedJob).toHaveProperty("id");
     expect(addedJob.title).toBe(newJobPayload.title);
     expect(addedJob.company).toBe(newJobPayload.company);

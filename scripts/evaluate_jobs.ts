@@ -1,7 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { getGeminiClient, runAgent } from "../src/services/agent.ts";
-import { db } from "../src/db/db.ts";
+import { db, verifyUrlLive } from "../src/db/db.ts";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -37,12 +37,60 @@ async function runPipeline() {
       for (const alert of emailRes.rows) {
         console.log(`\nParsing email: "${alert.subject}" (ID: ${alert.id})`);
         
+        // 1. Extract and validate all URLs in the email body
+        const rawBody = alert.body || "";
+        const validDomains = ["linkedin.com", "mycareersfuture.gov.sg", "efinancialcareers.com", "efinancialcareers.sg"];
+        
+        // Extract links starting with http:// or https://
+        const urlMatches = rawBody.match(/https?:\/\/[^\s"'>]+/g) || [];
+        const cleanUrls: string[] = [];
+        for (const url of urlMatches) {
+          const u = url.replace(/&amp;/g, "&").replace(/[,.;)]$/, "");
+          try {
+            const parsed = new URL(u);
+            if (validDomains.some(domain => parsed.hostname.includes(domain))) {
+              cleanUrls.push(u);
+            }
+          } catch {}
+        }
+        const uniqueUrls = Array.from(new Set(cleanUrls));
+        
+        // Run first validation check (HTTP live checks) on the extracted URLs
+        const verifiedUrls: string[] = [];
+        for (const u of uniqueUrls) {
+          console.log(`Validating extracted URL: ${u}...`);
+          const isLive = await verifyUrlLive(u, false);
+          if (isLive) {
+            verifiedUrls.push(u);
+          }
+        }
+        
+        console.log(`Found ${verifiedUrls.length} live job board URLs in email alert.`);
+        if (verifiedUrls.length === 0) {
+          console.log(`⚠️ Skipping email alert ${alert.id}: No active/valid URLs found for LinkedIn, MyCareersFuture, or eFinancialCareers.`);
+          await pool.query(
+            "UPDATE raw_email_alerts SET processed = TRUE, processed_at = NOW() WHERE id = $1",
+            [alert.id]
+          );
+          continue;
+        }
+
         const parsePrompt = `You are a high-fidelity data extraction agent. 
 Analyze the following email body (which contains job alerts) and extract every individual job advertisement.
+
+### STRICT RULES:
+1. You MUST ONLY extract jobs that correspond to a URL from the verified URLs list below.
+2. For each extracted job, assign the exact matching URL from the verified list to "careers_portal_url".
+3. Under no circumstances should you fabricate, estimate, or make up any URL. Only use URLs from the list below.
+4. If a job described in the email does not correspond to any URL in the list below, do not extract it.
+5. "careers_portal_url" MUST be a single full-string URL, not a composite or relative path.
 
 Email Subject: ${alert.subject}
 Email Body:
 ${alert.body}
+
+Verified URLs list (you must ONLY use URLs from this list):
+${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}
 
 Format the output as a valid JSON object matching this schema. Make sure you extract all jobs.
 Schema:
@@ -54,7 +102,7 @@ Schema:
       "source": "LinkedIn | MyCareersFuture | eFinancialCareers | Gmail",
       "salaryRange": "string (optional, e.g. SGD 15,000 - SGD 20,000)",
       "location": "string (optional, e.g. Singapore (Remote))",
-      "careers_portal_url": "string (Mandatory. The exact unique URL of the job advertisement on the source job board, e.g. https://www.mycareersfuture.gov.sg/job/12345 or https://www.efinancialcareers.sg/jobs/12345. Extract this directly from the email body links. Only fallback to a company careers page if no listing link is in the source)",
+      "careers_portal_url": "string (Mandatory. Choose the exact matching URL from the verified URLs list above)",
       "description": "Full details, requirements, and responsibilities parsed from the email text."
     }
   ]
@@ -82,19 +130,23 @@ Return nothing other than the JSON block.`;
           console.log(`Extracted ${jobsList.length} jobs from email alert.`);
 
           for (const rawJob of jobsList) {
-            // Insert job in DB as UNASSIGNED
-            const newJob = await db.addJob({
-              title: rawJob.title,
-              company: rawJob.company,
-              source: rawJob.source || "Gmail",
-              description: rawJob.description,
-              salaryRange: rawJob.salaryRange || undefined,
-              location: rawJob.location || "Singapore",
-              careers_portal_url: rawJob.careers_portal_url || `https://www.${rawJob.company.toLowerCase().replace(/[^a-z0-9]/g, "")}.com/careers`,
-              postedDate: new Date().toISOString().split("T")[0],
-              status: "UNASSIGNED"
-            });
-            console.log(`  -> Inserted unassigned job: "${newJob.title}" at ${newJob.company}`);
+            // Second validation check happens automatically inside db.addJob(..., false)
+            try {
+              const newJob = await db.addJob({
+                title: rawJob.title,
+                company: rawJob.company,
+                source: rawJob.source || "Gmail",
+                description: rawJob.description,
+                salaryRange: rawJob.salaryRange || undefined,
+                location: rawJob.location || "Singapore",
+                careers_portal_url: rawJob.careers_portal_url,
+                postedDate: new Date().toISOString().split("T")[0],
+                status: "UNASSIGNED"
+              }, false); // bypassLiveCheck = false, runs live verification check!
+              console.log(`  -> Inserted unassigned job: "${newJob.title}" at ${newJob.company}`);
+            } catch (insertErr: any) {
+              console.error(`  -> Failed to insert job "${rawJob.title}": ${insertErr.message || insertErr}`);
+            }
           }
 
           // Mark email alert as processed
