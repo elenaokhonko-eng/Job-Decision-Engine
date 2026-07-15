@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 import dotenv from "dotenv";
 import { runAgent } from "../src/services/agent.ts";
 import { db } from "../src/db/db.ts";
@@ -44,11 +44,19 @@ async function runEvals() {
   console.log(`Loaded ${questions.length} golden questions. Beginning evaluation run...\n`);
 
   // Reset database to ensure predictable state
-  db.resetToDefaults();
+  await db.resetToDefaults();
 
   const results: Array<{ id: number; question: string; status: "PASS" | "FAIL"; errors: string[] }> = [];
+  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+  let index = 0;
   for (const q of questions) {
+    if (index > 0) {
+      console.log("Waiting 12 seconds to avoid Gemini Free Tier RPM limits (5 requests/min)...");
+      await delay(12000);
+    }
+    index++;
+    
     console.log(`[Eval ${q.id}/10] Question: "${q.input}"`);
     const errors: string[] = [];
 

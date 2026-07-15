@@ -1,39 +1,26 @@
 {
-  "name": "react-example",
+  "name": "job-decision-engine-cron",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
-    "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "db:init": "tsx scripts/db_init.ts",
+    "eval:run": "tsx scripts/evaluate_jobs.ts",
+    "test": "vitest run",
+    "eval:golden": "tsx scripts/run_evals.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
-    "@tailwindcss/vite": "^4.1.14",
-    "@vitejs/plugin-react": "^5.0.4",
     "dotenv": "^17.2.3",
-    "express": "^4.21.2",
-    "lucide-react": "^0.546.0",
-    "motion": "^12.23.24",
-    "react": "^19.0.1",
-    "react-dom": "^19.0.1",
-    "vite": "^6.2.3"
+    "pg": "^8.11.5"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
-    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.14.0",
-    "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.0",
-    "js-yaml": "^5.2.1",
-    "tailwindcss": "^4.1.14",
+    "@types/pg": "^8.11.5",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "js-yaml": "^5.2.1",
+    "@types/js-yaml": "^4.0.9"
   }
 }

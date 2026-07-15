@@ -97,6 +97,18 @@ CREATE TABLE IF NOT EXISTS interactions_log (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Table: raw_email_alerts
+-- Stores raw Gmail email alert bodies before they are parsed into jobs by Gemini.
+CREATE TABLE IF NOT EXISTS raw_email_alerts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    subject VARCHAR(512),
+    body TEXT,
+    received_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    processed BOOLEAN DEFAULT FALSE,
+    processed_at TIMESTAMP WITH TIME ZONE
+);
+
+
 -- ====================================================================
 -- ANALYTICS VIEWS FOR NEURODIVERGENT (ND) COMMUNITIES
 -- ====================================================================

@@ -62,7 +62,7 @@ const fetchExternalMarketRatesTool: FunctionDeclaration = {
 
 // Tool implementations
 async function executeQueryDatabaseForJobs(args: { searchTerm?: string }): Promise<Job[]> {
-  return db.queryJobs(args.searchTerm);
+  return await db.queryJobs(args.searchTerm);
 }
 
 // Simulated REST API fetch
@@ -263,7 +263,7 @@ Schema Structure:
 
     for (const call of functionCalls) {
       trace.push(`Step ${trace.length + 1}: Agent triggered tool call: "${call.name}" with arguments: ${JSON.stringify(call.args)}`);
-      toolsUsed.push(call.name);
+      toolsUsed.push(call.name || "");
 
       let resultData: any;
       if (call.name === "queryDatabaseForJobs") {
@@ -327,15 +327,20 @@ Schema Structure:
   });
 
   let rawText = finalResponse.text || "{}";
-  if (rawText.startsWith("```json")) {
-    rawText = rawText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-  } else if (rawText.startsWith("```")) {
-    rawText = rawText.replace(/^```\s*/, "").replace(/\s*```$/, "");
-  }
-
   let parsedResult: AgentResult;
   try {
-    parsedResult = JSON.parse(rawText);
+    let cleaned = rawText.trim();
+    if (cleaned.startsWith("```json")) {
+      cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+    } else if (cleaned.startsWith("```")) {
+      cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    const startIdx = cleaned.indexOf("{");
+    const endIdx = cleaned.lastIndexOf("}");
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+      cleaned = cleaned.substring(startIdx, endIdx + 1);
+    }
+    parsedResult = JSON.parse(cleaned);
   } catch (err) {
     console.error("Failed to parse agent JSON output, returning fallback", err);
     trace.push(`Step ${trace.length + 1}: Formatting parsing failed. Initiated rule-based recovery fallback.`);
@@ -350,15 +355,15 @@ Schema Structure:
 
   // Write evaluation results BACK to the persistent database
   if (parsedResult.evaluated_jobs && parsedResult.evaluated_jobs.length > 0) {
+    const dbJobs = await db.queryJobs();
     for (const job of parsedResult.evaluated_jobs) {
-      const dbJobs = db.queryJobs();
       // Match by job title & company if ID is not set
       let matchedJob = dbJobs.find(
         (j) => j.id === job.job_id || (j.title === job.job_title && j.company === job.company)
       );
       
       if (matchedJob) {
-        db.updateJobEvaluation(matchedJob.id, {
+        await db.updateJobEvaluation(matchedJob.id, {
           status: job.status,
           assigned_track: job.assigned_track,
           confidence_level: job.confidence_level,
@@ -385,7 +390,7 @@ Schema Structure:
   }
 
   // Log interaction to persistent simulated Postgres DB
-  db.logInteraction(userQuestion, toolsUsed, parsedResult, trace);
+  await db.logInteraction(userQuestion, toolsUsed, parsedResult, trace);
 
   return {
     result: parsedResult,
@@ -472,9 +477,9 @@ export async function autoSyncExternalSources(enabled: {
     const crawledList = JSON.parse(rawText);
     
     if (Array.isArray(crawledList)) {
-      crawledList.forEach((cJob: any) => {
+      for (const cJob of crawledList) {
         const source = cJob.source || "LinkedIn";
-        const newJob = db.addJob({
+        const newJob = await db.addJob({
           title: cJob.title || "Senior Tech Architect",
           company: cJob.company || "Global Bio-Pharma Group",
           source: source,
@@ -488,7 +493,7 @@ export async function autoSyncExternalSources(enabled: {
         });
         importedJobs.push(newJob);
         logs.push(`Step ${logs.length + 1}: Imported unassigned raw job: "${newJob.title}" from ${newJob.company} [Source: ${newJob.source}].`);
-      });
+      }
     }
   } catch (err: any) {
     console.error("Auto Sync Engine error:", err);
@@ -520,11 +525,11 @@ export async function autoSyncExternalSources(enabled: {
       }
     ];
 
-    fallbackJobs.forEach((fJob) => {
-      const added = db.addJob(fJob);
+    for (const fJob of fallbackJobs) {
+      const added = await db.addJob(fJob);
       importedJobs.push(added);
       logs.push(`Step ${logs.length + 1}: Fallback Auto-Imported: "${added.title}" from ${added.company}.`);
-    });
+    }
   }
 
   logs.push(`Step ${logs.length + 1}: Automated Source Sync Engine successfully completed. Sourced ${importedJobs.length} new listings.`);

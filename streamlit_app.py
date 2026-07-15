@@ -1,8 +1,25 @@
 import os
-import json
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import datetime
 import pandas as pd
 import streamlit as st
+
+# Load environment variables from .env and .env.local if present
+def load_dotenv():
+    for filename in [".env", ".env.local"]:
+        if os.path.exists(filename):
+            with open(filename, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, val = line.split("=", 1)
+                        # Strip quotes if present
+                        val = val.strip("'\"")
+                        os.environ[key.strip()] = val
+
+load_dotenv()
+
 
 # Configure the page setting with modern style
 st.set_page_config(
@@ -34,144 +51,197 @@ st.markdown("""
         font-size: 11px;
         color: #888888;
     }
+    .top-rec-card {
+        background-color: #1a1a24;
+        border-left: 5px solid #22c55e;
+        padding: 15px;
+        margin-bottom: 12px;
+        border-radius: 6px;
+    }
 </style>
-""", unsafe_type=True)
+""", unsafe_allow_html=True)
 
-# Path to database file
-DB_DIR = "data"
-DB_FILE = os.path.join(DB_DIR, "postgres_db.json")
-
-# Default initial job listings seeding (matching the custom Node/Postgres seed file)
-DEFAULT_JOBS = [
-  {
-    "id": "job-1",
-    "title": "Lead AI & RegTech Platform Architect",
-    "company": "Apex Wealth Management",
-    "source": "eFinancialCareers",
-    "salaryRange": "SGD 24,000 - SGD 28,000 / month",
-    "postedDate": "2026-07-12",
-    "location": "Singapore (Hybrid, 1 day/week office)",
-    "careers_portal_url": "https://www.apexwealth.com/careers",
-    "description": "We are seeking a senior Hands-on Platform Architect with 15+ years of experience to design and build our next-generation AI compliance and risk governance platform. This role involves direct system design, Python engineering, agentic RAG system pipelines, and implementing strict LLM guardrails for $50B+ portfolio governance. You will enjoy complete technical autonomy, with no direct reports or stakeholder meetings. Work is highly asynchronous with dedicated focus hours. No travel required.",
-    "status": "STRONG MATCH",
-    "assigned_track": "Track A - Finance/AI",
-    "confidence_level": "High",
-    "total_score": 92,
-    "score_technical_autonomy": 29,
-    "score_compensation_potential": 24,
-    "score_domain_relevance": 19,
-    "score_environment_guardrails": 13,
-    "score_future_mobility": 7,
-    "nd_friendly_score": 88,
-    "politics_stress_score": 18,
-    "sensory_overload_index": 22,
-    "is_toxic": False,
-    "is_nd_approved": True,
-    "biological_stress_risk": "Highly secure and safe. Minimal meeting overhead, asynchronous specifications protect auDHD focus cycles.",
-    "strategic_value": "Excellent. Directly fulfills the SGD 22k/month comp target.",
-    "recommended_cv_version": "AI/RegTech Architect CV",
-    "next_action": "Apply Immediately with Technical Portfolio"
-  },
-  {
-    "id": "job-2",
-    "title": "Senior Bioinformatics Data Researcher",
-    "company": "BioBotanic Research Singapore",
-    "source": "MyCareersFuture",
-    "salaryRange": "SGD 12,000 - SGD 15,000 / month",
-    "postedDate": "2026-07-11",
-    "location": "Singapore (Remote)",
-    "careers_portal_url": "https://www.biobotanicresearch.nl/careers",
-    "description": "BioBotanic is looking for a senior scientific data developer to build pipelines for botanical and plant-based drug data collection. You will write clean Python code to analyze genomic and biochemical pathways, supporting a collaborative bridge with our clinical research labs in Amsterdam, Netherlands. Predictable schedule, direct culture, 0% travel.",
-    "status": "STRONG MATCH",
-    "assigned_track": "Track B - Pharma/Research",
-    "confidence_level": "High",
-    "total_score": 86,
-    "score_technical_autonomy": 27,
-    "score_compensation_potential": 14,
-    "score_domain_relevance": 20,
-    "score_environment_guardrails": 15,
-    "score_future_mobility": 10,
-    "nd_friendly_score": 95,
-    "politics_stress_score": 10,
-    "sensory_overload_index": 10,
-    "is_toxic": False,
-    "is_nd_approved": True,
-    "biological_stress_risk": "Perfect auDHD match. Fully remote, quiet focus, logical botanical scientific domain.",
-    "strategic_value": "Fulfills Track B pivot goals. Relocation paths to Netherlands.",
-    "recommended_cv_version": "Data Research/Bio-Tech CV",
-    "next_action": "Apply Immediately with Technical Portfolio"
-  },
-  {
-    "id": "job-3",
-    "title": "Global Program Manager - Corporate Treasury",
-    "company": "MegaCorp Institutional Bank",
-    "source": "LinkedIn",
-    "salaryRange": "SGD 26,000 - SGD 32,000 / month",
-    "postedDate": "2026-07-13",
-    "location": "Singapore (On-site, 5 days/week)",
-    "careers_portal_url": "https://www.megacorpbank.com/careers",
-    "description": "Looking for a seasoned Scrum Master & Program Manager to coordinate cross-border stakeholders across 12 countries. PowerPoint steering committees, high travel required.",
-    "status": "REJECTED",
-    "assigned_track": "Neither",
-    "confidence_level": "High",
-    "total_score": 0,
-    "nd_friendly_score": 12,
-    "politics_stress_score": 95,
-    "sensory_overload_index": 85,
-    "is_toxic": True,
-    "is_nd_approved": False,
-    "biological_stress_risk": "Extremely high risk of neurodivergent nervous system collapse.",
-    "strategic_value": "Fails to support any track.",
-    "recommended_cv_version": "Institutional Finance CV",
-    "next_action": "Skip / Delete"
-  }
-]
-
-# Core DB Operations
-def load_db():
-    if not os.path.exists(DB_DIR):
-        os.makedirs(DB_DIR)
+# Neon Database Helper
+def get_db_connection():
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        st.error("❌ DATABASE_URL environment variable is missing. Please set it in your environment or Streamlit Secrets.")
+        st.stop()
     
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    
-    # Bootstrap seeding
-    data = {"jobs": DEFAULT_JOBS, "interactions": []}
-    save_db(data)
-    return data
+    # Ensure sslmode=require for Neon serverless Postgres
+    if "sslmode=" not in database_url and "localhost" not in database_url and "127.0.0.1" not in database_url:
+        if "?" in database_url:
+            database_url += "&sslmode=require"
+        else:
+            database_url += "?sslmode=require"
+            
+    return psycopg2.connect(database_url)
 
-def save_db(data):
-    if not os.path.exists(DB_DIR):
-        os.makedirs(DB_DIR)
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+def fetch_jobs_from_db():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT id, title, company_name as company, source, raw_description as description, 
+                   salary_range as "salaryRange", posted_date::text as "postedDate", location, 
+                   careers_portal_url, status, assigned_track, confidence_level, total_score,
+                   score_technical_autonomy, score_compensation_potential, score_domain_relevance,
+                   score_environment_guardrails, score_future_mobility,
+                   nd_friendly_score, politics_stress_score, sensory_overload_index,
+                   biological_stress_risk, strategic_value, recommended_cv_version, next_action
+            FROM jobs 
+            ORDER BY total_score DESC, created_at DESC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        st.error(f"Failed to fetch jobs from database: {e}")
+        return []
 
-# Load data on refresh
-db_data = load_db()
-jobs_list = db_data.get("jobs", [])
+def delete_job_from_db(job_id):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get company ID before deletion to update ratings
+        cursor.execute("SELECT company_id FROM jobs WHERE id = %s", (job_id,))
+        row = cursor.fetchone()
+        company_id = row[0] if row else None
+        
+        cursor.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+        
+        # If company existed, recalculate metrics
+        if company_id:
+            cursor.execute("""
+                SELECT 
+                  AVG(nd_friendly_score) as avg_nd,
+                  AVG(politics_stress_score) as avg_pol,
+                  AVG(sensory_overload_index) as avg_sens,
+                  AVG(score_environment_guardrails) as avg_focus
+                FROM jobs 
+                WHERE company_id = %s AND status != 'UNASSIGNED'
+            """, (company_id,))
+            stats = cursor.fetchone()
+            if stats and stats[0] is not None:
+                avgND = float(stats[0])
+                avgPol = float(stats[1])
+                avgSens = float(stats[2])
+                avgFocus = float(stats[3])
+                isApproved = avgND >= 70 and avgPol < 40
+                isToxic = avgPol >= 60 or avgND <= 40
+                
+                cursor.execute("""
+                    UPDATE companies SET
+                       nd_friendly_avg_score = %s,
+                       politics_stress_avg_score = %s,
+                       sensory_overload_avg_index = %s,
+                       focus_protection_avg_score = %s,
+                       is_neurodivergent_approved = %s,
+                       is_toxic_culture_blacklisted = %s,
+                       updated_at = NOW()
+                    WHERE id = %s
+                """, (avgND, avgPol, avgSens, avgFocus, isApproved, isToxic, company_id))
+            else:
+                cursor.execute("DELETE FROM companies WHERE id = %s", (company_id,))
+                
+        conn.commit()
+        cursor.close()
+        conn.close()
+        st.success("Listing deleted successfully!")
+        return True
+    except Exception as e:
+        st.error(f"Failed to delete job: {e}")
+        return False
+
+def save_new_job_to_db(job):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get or create company
+        cursor.execute("SELECT id FROM companies WHERE name = %s", (job["company"],))
+        row = cursor.fetchone()
+        if row:
+            company_id = row[0]
+        else:
+            industry = "Life Sciences & Biotech" if "bio" in job["title"].lower() or "pharma" in job["title"].lower() else "Institutional Finance & Asset AI"
+            cursor.execute("""
+                INSERT INTO companies (name, industry, website_url, careers_page_url)
+                VALUES (%s, %s, %s, %s) RETURNING id
+            """, (
+                job["company"],
+                industry,
+                f"https://www.{job['company'].lower().replace(' ', '')}.com",
+                job["careers_portal_url"]
+            ))
+            company_id = cursor.fetchone()[0]
+
+        # Insert job
+        cursor.execute("""
+            INSERT INTO jobs (
+                company_name, company_id, title, source, raw_description, salary_range, location, posted_date, careers_portal_url, status, assigned_track
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'UNASSIGNED', 'Neither')
+        """, (
+            job["company"], company_id, job["title"], job["source"], job["description"],
+            job["salaryRange"], job["location"], job["postedDate"], job["careers_portal_url"]
+        ))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        st.success(f"Successfully saved {job['title']} as UNASSIGNED. The daily evaluation cron job will score this role.")
+        return True
+    except Exception as e:
+        st.error(f"Failed to save job: {e}")
+        return False
+
+def fetch_company_analytics_from_db():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT name as "Company", 
+                   industry as "Industry",
+                   nd_friendly_avg_score as "Avg ND Score",
+                   politics_stress_avg_score as "Avg Politics Score",
+                   sensory_overload_avg_index as "Avg Sensory Index",
+                   focus_protection_avg_score as "Avg Focus Score",
+                   is_neurodivergent_approved as "Approved",
+                   is_toxic_culture_blacklisted as "Toxic"
+            FROM companies
+            ORDER BY nd_friendly_avg_score DESC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        st.error(f"Failed to fetch company analytics: {e}")
+        return []
+
+# Fetch data
+jobs_list = fetch_jobs_from_db()
 
 # Title
 st.title("💼 Job Decision Engine — Streamlit Console")
 st.markdown("### *Multi-Stage Weighted auDHD Career Architect (Singapore)*")
 st.markdown("---")
 
-# Sidebar - Filters & Source Crawlers
+# Sidebar - Filters & Stats
 st.sidebar.header("🎯 Navigation & Filters")
 
-# Stats Metric Indicators
+# Metrics
 total_jobs = len(jobs_list)
 evaluated_count = sum(1 for j in jobs_list if j.get("status") and j.get("status") != "UNASSIGNED")
-approved_count = sum(1 for j in jobs_list if j.get("is_nd_approved"))
-toxic_count = sum(1 for j in jobs_list if j.get("is_toxic"))
+approved_count = sum(1 for j in jobs_list if j.get("status") == "STRONG MATCH")
+toxic_count = sum(1 for j in jobs_list if j.get("politics_stress_score", 0) >= 60 or j.get("nd_friendly_score", 100) <= 40)
 
 st.sidebar.subheader("📊 Engine Statistics")
 st.sidebar.metric("Total Vault Jobs", total_jobs)
 st.sidebar.metric("Fully Evaluated", evaluated_count)
-st.sidebar.metric("ND-Approved Sites", approved_count)
+st.sidebar.metric("Top Recommended (Strong)", approved_count)
 st.sidebar.metric("Toxicity Flags", toxic_count)
 
 st.sidebar.markdown("---")
@@ -196,10 +266,35 @@ if track_filter != "All Tracks":
 tab_dashboard, tab_add_job, tab_analytics = st.tabs(["📁 Postgres Job Vault", "➕ Add Job Ad", "🔥 ND Culture Analytics"])
 
 with tab_dashboard:
+    # Segment out Top Recommended Jobs (STRONG MATCH, sorted by score DESC, limited to 10)
+    top_recommended = [j for j in jobs_list if j.get("status") == "STRONG MATCH"]
+    top_recommended = sorted(top_recommended, key=lambda x: x.get("total_score", 0), reverse=True)[:10]
+
+    st.subheader("🏆 Top 10 Recommended Jobs")
+    if not top_recommended:
+        st.info("No STRONG MATCH recommendations found in the database. Run the evaluation cron job to process jobs.")
+    else:
+        cols = st.columns(2)
+        for idx, rjob in enumerate(top_recommended):
+            col_idx = idx % 2
+            with cols[col_idx]:
+                st.markdown(f"""
+                <div class="top-rec-card">
+                    <h4>⭐ #{idx+1} {rjob['title']}</h4>
+                    <p><b>Company:</b> {rjob['company']} | <b>Score:</b> <code style='font-size:14px;color:#22c55e;'>{rjob['total_score']}/100</code></p>
+                    <p><b>Salary:</b> {rjob.get('salaryRange') or 'Not specified'}</p>
+                    <p><b>Track:</b> {rjob.get('assigned_track')}</p>
+                    <p><b>ND Compatibility:</b> Friendly: {rjob.get('nd_friendly_score')}% | Politics: {rjob.get('politics_stress_score')}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+                st.markdown(f"🔗 [Verify Job Ad & Apply]({rjob['careers_portal_url']})")
+
+    st.markdown("---")
+
     col_left, col_right = st.columns([2, 3])
 
     with col_left:
-        st.subheader("📋 Available Listings")
+        st.subheader("📋 Available Listings Vault")
         if not filtered_jobs:
             st.info("No matching jobs in the current Postgres database.")
         else:
@@ -215,110 +310,72 @@ with tab_dashboard:
                 # Expandable card
                 with st.expander(f"{badge_style} {title} — {company} ({status})"):
                     st.markdown(f"**Source Board:** `{job.get('source')}`")
-                    st.markdown(f"**Salary Range:** {job.get('salaryRange', 'Not specified')}")
-                    st.markdown(f"**Location:** {job.get('location', 'Singapore')}")
+                    st.markdown(f"**Salary Range:** {job.get('salaryRange') or 'Not specified'}")
+                    st.markdown(f"**Location:** {job.get('location') or 'Singapore'}")
                     st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
                     st.markdown(f"**Match Score:** `{score}/100`")
-                    st.markdown(f"**ND Friendly Score:** `{job.get('nd_friendly_score', 'N/A')}%` | **Politics Stress:** `{job.get('politics_stress_score', 'N/A')}%`")
+                    st.markdown(f"**ND Friendly Score:** `{job.get('nd_friendly_score') or 'N/A'}%` | **Politics Stress:** `{job.get('politics_stress_score') or 'N/A'}%`")
                     st.text_area("Full Description Brief", job.get("description"), height=100, disabled=True, key=f"desc_{idx}")
                     
                     # Delete action
-                    if st.button("🗑️ Delete Listing", key=f"del_{job.get('id', idx)}"):
-                        db_data["jobs"] = [j for j in db_data["jobs"] if j.get("id") != job.get("id")]
-                        save_db(db_data)
-                        st.success(f"Deleted {title}!")
-                        st.rerun()
+                    if st.button("🗑️ Delete Listing", key=f"del_{job.get('id') or idx}"):
+                        if delete_job_from_db(job.get("id")):
+                            st.rerun()
 
     with col_right:
-        st.subheader("🤖 Evaluation Pipeline Client")
-        st.write("Trigger the 3-Stage Decision Engine directly using your Google Gemini API Key.")
+        st.subheader("🤖 Scoring & Match Analysis Details")
+        st.write("Select an evaluated job to view detailed auDHD match metrics, biological stress assessments, and strategic CV targeting.")
         
+        evaluated_jobs = [j for j in filtered_jobs if j.get("status") and j.get("status") != "UNASSIGNED"]
         selected_job_title = st.selectbox(
             "Select Job to Analyze", 
-            [f"{j.get('title')} ({j.get('company')})" for j in filtered_jobs] if filtered_jobs else ["No Jobs Available"]
+            [f"{j.get('title')} ({j.get('company')})" for j in evaluated_jobs] if evaluated_jobs else ["No Evaluated Jobs Available"]
         )
         
         # Get actual job object
-        job_to_eval = None
-        if filtered_jobs and selected_job_title != "No Jobs Available":
-            idx_selected = [f"{j.get('title')} ({j.get('company')})" for j in filtered_jobs].index(selected_job_title)
-            job_to_eval = filtered_jobs[idx_selected]
+        job_to_show = None
+        if evaluated_jobs and selected_job_title != "No Evaluated Jobs Available":
+            idx_selected = [f"{j.get('title')} ({j.get('company')})" for j in evaluated_jobs].index(selected_job_title)
+            job_to_show = evaluated_jobs[idx_selected]
 
-        if job_to_eval:
-            st.markdown(f"#### Analyzing: **{job_to_eval['title']}** at *{job_to_eval['company']}*")
-            st.markdown(f"**Portal Verification URL:** `{job_to_eval['careers_portal_url']}`")
+        if job_to_show:
+            st.markdown(f"#### Selected: **{job_to_show['title']}** at *{job_to_show['company']}*")
+            st.markdown(f"**Verifiable Careers Link:** `{job_to_show['careers_portal_url']}`")
             
-            # Simulated local Python engine execution fallback
-            if st.button("🚀 Run Multi-Stage Engine Evaluation", type="primary"):
-                with st.spinner("Executing Stage-1 Disqualifiers lookups & Stage-3 Multi-Point calculations..."):
-                    # Quick rule-based evaluation calculation mimicking Gemini logic!
-                    desc = job_to_eval["description"].lower()
-                    triggered_disqs = []
-                    
-                    if "travel" in desc and ("30%" in desc or "35%" in desc or "high travel" in desc):
-                        triggered_disqs.append("Mandatory travel exceeding 10%")
-                    if "program manager" in desc or "scrum master" in desc:
-                        triggered_disqs.append("Primary role is traditional Program/Project Manager or Scrum Master")
-                    if "sales" in desc or "presales" in desc or "quota" in desc:
-                        triggered_disqs.append("Primary role is Client Relationship Management, Sales, or Presales")
-                    if "5 days" in desc or "on-site" in desc:
-                        triggered_disqs.append("Office attendance required > 3 days per week")
-                    if "politics" in desc or "stakeholder" in desc:
-                        triggered_disqs.append("Clear indicators of high political overhead")
-
-                    if triggered_disqs:
-                        job_to_eval["status"] = "REJECTED"
-                        job_to_eval["assigned_track"] = "Neither"
-                        job_to_eval["total_score"] = 0
-                        job_to_eval["nd_friendly_score"] = 15
-                        job_to_eval["politics_stress_score"] = 85
-                        job_to_eval["sensory_overload_index"] = 80
-                        job_to_eval["is_toxic"] = True
-                        job_to_eval["is_nd_approved"] = False
-                        job_to_eval["biological_stress_risk"] = f"CRITICAL HAZARD: Triggered absolute disqualifiers: {', '.join(triggered_disqs)}."
-                        job_to_eval["strategic_value"] = "Fails biological safety thresholds."
-                        job_to_eval["next_action"] = "Skip / Delete"
-                        job_to_eval["recommended_cv_version"] = "N/A"
-                    else:
-                        # Success scoring
-                        track = "Track A - Finance/AI" if ("ai" in desc or "finance" in desc or "quant" in desc or "wealth" in desc) else "Track B - Pharma/Research"
-                        job_to_eval["status"] = "STRONG MATCH"
-                        job_to_eval["assigned_track"] = track
-                        job_to_eval["total_score"] = 88 if track == "Track A - Finance/AI" else 84
-                        job_to_eval["nd_friendly_score"] = 90
-                        job_to_eval["politics_stress_score"] = 15
-                        job_to_eval["sensory_overload_index"] = 20
-                        job_to_eval["is_toxic"] = False
-                        job_to_eval["is_nd_approved"] = True
-                        job_to_eval["biological_stress_risk"] = "Highly supportive. Minimal video calls, high technical focus blocks."
-                        job_to_eval["strategic_value"] = "Excellent trajectory path alignment."
-                        job_to_eval["next_action"] = "Apply Immediately"
-                        job_to_eval["recommended_cv_version"] = "AI/RegTech Architect CV" if track == "Track A - Finance/AI" else "Data Research/Bio-Tech CV"
-
-                    # Update and save
-                    save_db(db_data)
-                    st.success("Evaluation complete and successfully persisted in `postgres_db.json`!")
-                    st.rerun()
+            # Show score metrics
+            st.markdown("---")
+            st.markdown(f"### Match Score: `{job_to_show.get('total_score', 0)} / 100`")
             
-            # Show active parameters
-            if job_to_eval.get("status"):
-                st.markdown("---")
-                st.markdown(f"### Score Details: `{job_to_eval.get('total_score', 0)} / 100`")
-                st.json({
-                    "Grade Status": job_to_eval.get("status"),
-                    "Trajectory Track": job_to_eval.get("assigned_track"),
-                    "ND-Friendly Score": f"{job_to_eval.get('nd_friendly_score')}%",
-                    "Political Overhead Score": f"{job_to_eval.get('politics_stress_score')}%",
-                    "Sensory Overload Index": f"{job_to_eval.get('sensory_overload_index')}%",
-                    "Strategic Value / Relay Strategy": job_to_eval.get("strategic_value"),
-                    "Next Action": job_to_eval.get("next_action"),
-                    "Recommended CV Version": job_to_eval.get("recommended_cv_version")
-                })
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("ND Friendly Score", f"{job_to_show.get('nd_friendly_score')}%")
+            with col2:
+                st.metric("Politics Stress Score", f"{job_to_show.get('politics_stress_score')}%")
+            with col3:
+                st.metric("Sensory Overload Index", f"{job_to_show.get('sensory_overload_index')}%")
+
+            st.markdown("#### **Evaluation Axes Breakdown**")
+            st.json({
+                "Technical & Creative Autonomy (30%)": f"{job_to_show.get('score_technical_autonomy') or 0} pts",
+                "Compensation & Capital Potential (25%)": f"{job_to_show.get('score_compensation_potential') or 0} pts",
+                "Domain Relevance (20%)": f"{job_to_show.get('score_domain_relevance') or 0} pts",
+                "Environment & Biological Guardrails (15%)": f"{job_to_show.get('score_environment_guardrails') or 0} pts",
+                "Future-Proofing & Netherlands Mobility (10%)": f"{job_to_show.get('score_future_mobility') or 0} pts"
+            })
+
+            st.markdown("#### **Nervous System & Strategy Assessment**")
+            st.info(f"**Biological Stress Assessment:**\n{job_to_show.get('biological_stress_risk') or 'N/A'}")
+            st.success(f"**Strategic Career Value:**\n{job_to_show.get('strategic_value') or 'N/A'}")
+            
+            st.markdown(f"**Target Application Strategy:**")
+            st.write(f"📝 **Recommended CV:** `{job_to_show.get('recommended_cv_version') or 'N/A'}`")
+            st.write(f"🚀 **Next Action:** `{job_to_show.get('next_action') or 'N/A'}`")
         else:
-            st.info("Select a job listing to run calculations.")
+            st.info("No evaluated jobs in view. The daily automation pipeline automatically processes imported unread email jobs.")
 
 with tab_add_job:
     st.subheader("➕ Import a New Job Advertisement")
+    st.write("Add raw jobs manually to the Postgres Vault. The overnight daily evaluation cron job will automatically score and route them.")
     with st.form("custom_job_form"):
         title = st.text_input("Job Title", "Principal AI Architect")
         company = st.text_input("Company Name", "Novartis Pharmaceuticals")
@@ -328,10 +385,9 @@ with tab_add_job:
         careers_url = st.text_input("Careers Portal Direct Link (Verification)", "https://www.novartis.com/careers")
         desc = st.text_area("Job Description Raw text", "Paste raw details here...")
         
-        submitted = st.form_submit_with_rows_columns = st.form_submit_button("Import & Save to Postgres Vault")
+        submitted = st.form_submit_button("Import & Save to Postgres Vault")
         if submitted:
             new_job = {
-                "id": f"job-{int(datetime.datetime.now().timestamp() * 1000)}",
                 "title": title,
                 "company": company,
                 "source": source,
@@ -339,59 +395,39 @@ with tab_add_job:
                 "postedDate": str(datetime.date.today()),
                 "location": location,
                 "careers_portal_url": careers_url if careers_url else f"https://www.{company.lower().replace(' ', '')}.com/careers",
-                "description": desc,
-                "status": "UNASSIGNED",
-                "assigned_track": "Neither"
+                "description": desc
             }
-            db_data["jobs"].insert(0, new_job)
-            save_db(db_data)
-            st.success(f"Successfully saved {title} to `postgres_db.json`!")
-            st.rerun()
+            if save_new_job_to_db(new_job):
+                st.rerun()
 
 with tab_analytics:
     st.subheader("🔥 Neurodivergent Company Analytics")
-    st.write("Aggregated from evaluated roles. Approved: `ND Score >= 70 & Politics < 40`. Toxic: `Politics >= 60`.")
+    st.write("Consolidated employer ratings compiled directly from Postgres database tables.")
 
-    # Calculate statistics
-    companies = {}
-    for job in jobs_list:
-        if job.get("status") and job.get("status") != "UNASSIGNED":
-            comp = job.get("company")
-            if comp not in companies:
-                companies[comp] = {
-                    "ND Friendly": [],
-                    "Politics Stress": [],
-                    "Sensory Index": []
-                }
-            companies[comp]["ND Friendly"].append(job.get("nd_friendly_score", 50))
-            companies[comp]["Politics Stress"].append(job.get("politics_stress_score", 50))
-            companies[comp]["Sensory Index"].append(job.get("sensory_overload_index", 50))
+    analytics_data = fetch_company_analytics_from_db()
 
-    if companies:
-        analytics_rows = []
-        for name, metrics in companies.items():
-            avg_nd = int(sum(metrics["ND Friendly"]) / len(metrics["ND Friendly"]))
-            avg_pol = int(sum(metrics["Politics Stress"]) / len(metrics["Politics Stress"]))
-            avg_sens = int(sum(metrics["Sensory Index"]) / len(metrics["Sensory Index"]))
-            is_approved = avg_nd >= 70 and avg_pol < 40
-            is_toxic = avg_pol >= 60 or avg_nd <= 40
-            
-            analytics_rows.append({
-                "Company": name,
-                "Avg ND Score": avg_nd,
-                "Avg Politics Score": avg_pol,
-                "Avg Sensory Index": avg_sens,
-                "Safety Verdict": "🟢 APPROVED FOCUS ENVIRONMENT" if is_approved else ("🔴 HIGH POLITICS / TOXIC" if is_toxic else "🟡 REVIEW REQUIRED")
-            })
+    if analytics_data:
+        df = pd.DataFrame(analytics_data)
         
-        df = pd.DataFrame(analytics_rows)
-        st.dataframe(df, use_container_width=True)
+        # Map safety verdicts
+        def get_verdict(row):
+            if row["Approved"]:
+                return "🟢 APPROVED FOCUS ENVIRONMENT"
+            elif row["Toxic"]:
+                return "🔴 HIGH POLITICS / TOXIC"
+            else:
+                return "🟡 REVIEW REQUIRED"
+                
+        df["Safety Verdict"] = df.apply(get_verdict, axis=1)
+        
+        # Display table
+        st.dataframe(df[["Company", "Industry", "Avg ND Score", "Avg Politics Score", "Avg Sensory Index", "Avg Focus Score", "Safety Verdict"]], use_container_width=True)
         
         st.markdown("### 🏆 Top Safe Environments vs. ⚠️ Stress Alerts")
         st.bar_chart(df.set_index("Company")[["Avg ND Score", "Avg Politics Score"]])
     else:
-        st.info("No compiled analytics are available. Please evaluate listings in the first tab to build analytics charts.")
+        st.info("No compiled analytics are available. Please run the evaluation engine pipeline to score listings.")
 
 # Footer section
 st.markdown("---")
-st.markdown("<p class='disclaimer'>Job Decision Engine v3.0 • Built with Streamlit, Python & PostgreSQL JSON simulation</p>", unsafe_type=True)
+st.markdown("<p class='disclaimer'>Job Decision Engine v4.0 • Powered by Neon Postgres & GitHub Actions Automation</p>", unsafe_allow_html=True)
