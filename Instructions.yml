@@ -1,0 +1,32 @@
+scaffold: pydanticai-fastapi-postgres
+shape: ai-applications
+status: to-build
+stack:
+  - Pydantic AI
+  - FastAPI
+  - Postgres
+  - tool-calling agent (function tools + typed outputs)
+use_cases:
+  - "AI agents that *do* things, not just answer — look up data, call APIs, take actions"
+  - multi-step assistants
+  - "the conceptual step beyond A1/A2's prompt→response"
+reference_repos: []
+add_ons:
+  - agents-config
+  - testing-ci
+  - llm-evals
+
+# The instruction below is the authoritative brief for the AI IDE.
+prompt: |
+  Build a tool-calling AI agent app with Pydantic AI and FastAPI. Define one agent with a typed (Pydantic model) output and two function tools: one that queries a Postgres table, one that calls an external REST API with httpx. Expose POST /ask — the agent decides which tools to call; return the typed result PLUS the tool-call trace so the user can see each step the agent took. Log every interaction (question, tools used, answer) to Postgres. Include .env.example with loud-fail, scripts/verify_setup.sh, and a README that explains in plain language how an agent differs from a single prompt→response call.
+
+  Then layer on the following, integrated into the same project:
+
+  [agents-config]
+  Add an .agents/ configuration to this project, modeled on https://github.com/SwarupSG/agents-skill-companion: rules/ with explain-before-fix.md (explain the root cause before showing any fix) and cite-the-code.md (always reference specific files and line numbers), plus skills adapted to THIS codebase (trace-request, code-quality-review, teach-this-code). Update every file reference inside the skills to match this project's actual structure.
+
+  [testing-ci]
+  Add a testing layer to this project: pytest with the 5 highest-value tests (the happy path for each endpoint/command plus one failure case), using FastAPI's TestClient or equivalent — no dependencies beyond pytest and what the project already has. Add a GitHub Actions workflow that runs them on every push. Add a README section titled 'How to know it still works' explaining what each test protects.
+
+  [llm-evals]
+  Add an eval harness to this AI app: a golden_questions.yaml with 10 input/expected-property pairs, and a pytest-based runner that sends each input to the live endpoint and asserts properties of the response (must-contain, must-not-contain, max length, valid JSON shape) rather than exact strings. Print a pass/fail scorecard. README explains why evals differ from unit tests: the code can be correct while the AI's answers are bad, and this harness catches the second failure mode.

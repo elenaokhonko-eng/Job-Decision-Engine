@@ -1,0 +1,96 @@
+# Golden Questions for Job Decision Engine Evaluations
+# Format: List of 10 test cases, containing inputs and expected response properties.
+
+- id: 1
+  input: "Evaluate job advertisement: Lead AI & RegTech Platform Architect at Apex Wealth Management"
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "STRONG MATCH"
+    - type: "must_contain"
+      value: "Track A"
+    - type: "min_score"
+      value: 80
+    - type: "must_not_contain"
+      value: "REJECTED"
+
+- id: 2
+  input: "Evaluate job advertisement: Global Program Manager at MegaCorp Institutional Bank"
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "REJECTED"
+    - type: "must_contain"
+      value: "Program Manager"
+    - type: "max_score"
+      value: 0
+
+- id: 3
+  input: "What are the market salary benchmarks for a Bioinformatics Data Researcher in Singapore?"
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "SGD"
+    - type: "must_contain"
+      value: "BioBotanic"
+
+- id: 4
+  input: "Evaluate job advertisement: Director of Digital Advisory & Presales at FutureTech Consulting"
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "REJECTED"
+    - type: "must_contain"
+      value: "presales"
+
+- id: 5
+  input: "Is there any job in our database that perfectly matches Track B (Bio/Pharma Research)?"
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "Track B"
+    - type: "must_contain"
+      value: "BioBotanic"
+
+- id: 6
+  input: "Evaluate job advertisement: Principal Quantitative Risk Engineer at Quantum Capital Partners"
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "STRONG MATCH"
+    - type: "must_contain"
+      value: "Track A"
+    - type: "min_score"
+      value: 75
+
+- id: 7
+  input: "Which jobs in our database contain absolute disqualifiers and should be rejected?"
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "REJECTED"
+    - type: "must_contain"
+      value: "MegaCorp"
+
+- id: 8
+  input: "Evaluate a blank or irrelevant query: 'Make a coffee recipe'"
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "Neither"
+
+- id: 9
+  input: "Analyze salary potential for Principal Quantitative Risk Engineer using external market data"
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "Estimated"
+    - type: "must_contain"
+      value: "SGD 22,000"
+
+- id: 10
+  input: "Provide a dual-track strategic summary of all available job opportunities in the database."
+  assertions:
+    - type: "valid_json"
+    - type: "must_contain"
+      value: "evaluation_summary"

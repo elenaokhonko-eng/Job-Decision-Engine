@@ -1,0 +1,6 @@
+{
+  "name": "Job Decision Engine",
+  "description": "Multi-stage weighted decision and ranking agent for executive dual-track career pathways.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
