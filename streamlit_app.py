@@ -53,10 +53,21 @@ st.markdown("""
     }
     .top-rec-card {
         background-color: #1a1a24;
+        color: #e0e0e0;
         border-left: 5px solid #22c55e;
         padding: 15px;
         margin-bottom: 12px;
         border-radius: 6px;
+    }
+    .top-rec-card h4 {
+        color: #ffffff;
+        margin-top: 0;
+        margin-bottom: 8px;
+    }
+    .top-rec-card p {
+        color: #cccccc;
+        margin-bottom: 4px;
+        font-size: 14px;
     }
 </style>
 """, unsafe_allow_html=True)

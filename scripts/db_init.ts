@@ -30,9 +30,13 @@ async function initDatabase() {
     console.log(`Reading schema definitions from ${schemaPath}...`);
     const sql = fs.readFileSync(schemaPath, "utf-8");
 
-    console.log("Executing schema SQL...");
     await client.query(sql);
     console.log("✅ Schema initialized successfully!");
+
+    console.log("Seeding/resetting default job listings in the database...");
+    const { db } = await import("../src/db/db.ts");
+    await db.resetToDefaults();
+    console.log("✅ Seeding completed successfully!");
   } catch (err: any) {
     console.error("❌ Failed to initialize database:", err.message || err);
     process.exit(1);

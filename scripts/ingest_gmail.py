@@ -24,7 +24,8 @@ def main():
 
     gmail_user = os.environ.get("GMAIL_USER")
     gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
-    gmail_folder = os.environ.get("GMAIL_FOLDER", "Job Alerts")
+    gmail_folder = os.environ.get("GMAIL_FOLDER", "Jobs-Alerts")
+    gmail_processed_folder = os.environ.get("GMAIL_PROCESSED_FOLDER", "Jobs-Alerts-Processed")
 
     if not gmail_user or not gmail_password:
         print("⚠️ WARNING: GMAIL_USER or GMAIL_APP_PASSWORD environment variable is missing.")
@@ -39,10 +40,7 @@ def main():
         print(f"Selecting folder: '{gmail_folder}'...")
         status, messages = mail.select(gmail_folder)
         if status != "OK":
-            print(f"⚠️ Folder '{gmail_folder}' not found. Defaulting to 'INBOX'...")
-            status, messages = mail.select("INBOX")
-            if status != "OK":
-                raise Exception("Failed to select INBOX mailbox folder.")
+            raise Exception(f"Failed to select mailbox folder '{gmail_folder}'. Please make sure this label exists in Gmail.")
 
         # Search for UNREAD messages
         status, search_data = mail.search(None, "UNSEEN")
@@ -61,6 +59,9 @@ def main():
         print("Connecting to Neon Postgres database...")
         conn = psycopg2.connect(database_url)
         cursor = conn.cursor()
+
+        # Create the processed folder if it doesn't exist
+        mail.create(gmail_processed_folder)
 
         count = 0
         for mail_id in mail_ids:
@@ -106,13 +107,23 @@ def main():
             
             # Mark email as read by adding the \Seen flag
             mail.store(mail_id, "+FLAGS", "\\Seen")
+            
+            # Copy to processed folder (label)
+            mail.copy(mail_id, gmail_processed_folder)
+            
+            # Mark as deleted in current folder (removing the Jobs-Alerts label)
+            mail.store(mail_id, "+FLAGS", "\\Deleted")
+            
             count += 1
 
         conn.commit()
         cursor.close()
         conn.close()
 
-        print(f"✅ Successfully ingested {count} raw email alerts to Postgres database.")
+        # Permanently remove marked messages from current folder
+        mail.expunge()
+
+        print(f"✅ Successfully ingested {count} raw email alerts to Postgres and moved to '{gmail_processed_folder}'.")
         
         mail.close()
         mail.logout()

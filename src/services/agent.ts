@@ -203,7 +203,7 @@ You have tools to query the local jobs database ('queryDatabaseForJobs') and fet
 
 ### MANDATED TYPED OUTPUT FORMAT:
 You MUST return a JSON object matching this schema. Even if there is no job description, populate the 'evaluated_jobs' array with evaluated jobs from database or parsed input.
-**CRITICAL**: Every job description evaluated MUST include a valid, verifiable 'careers_portal_url' to establish it is a real job. If none is in the input, estimate a highly realistic corporate careers landing page for that company (e.g. 'https://www.gsk.com/en-gb/careers/', 'https://www.gic.com.sg/careers').
+**CRITICAL**: Every job description evaluated MUST use and preserve its exact unique source URL (such as the specific listing link on LinkedIn, MyCareersFuture, or eFinancialCareers) from where it was pulled. Only fallback to a generic company careers landing page (e.g., 'https://www.gic.com.sg/careers') if no unique job board posting URL is present in the source input.
 
 Schema Structure:
 {
@@ -213,7 +213,7 @@ Schema Structure:
       "job_id": "string (optional id)",
       "job_title": "string",
       "company": "string",
-      "careers_portal_url": "string (verifiable URL)",
+      "careers_portal_url": "string (The exact unique URL of the job advertisement on the source job board, e.g. LinkedIn, MyCareersFuture, eFinancialCareers. Only fallback to a company careers page if no listing URL is in the source)",
       "assigned_track": "Track A - Finance/AI | Track B - Pharma/Research | Neither",
       "status": "STRONG MATCH | REVIEW REQUIRED | REJECTED",
       "total_score": integer (0-100),
@@ -452,7 +452,7 @@ export async function autoSyncExternalSources(enabled: {
       "source": "LinkedIn | MyCareersFuture | eFinancialCareers | Gmail",
       "salaryRange": "string (e.g. SGD 23,000 - SGD 28,000 / month)",
       "location": "string (e.g. Singapore (Hybrid))",
-      "careers_portal_url": "string (verifiable, highly realistic direct URL, e.g. https://www.novartis.com/careers)",
+      "careers_portal_url": "string (The exact unique URL of the job listing on the source job board, e.g. https://www.mycareersfuture.gov.sg/job/123456789 or https://www.efinancialcareers.sg/jobs/123456789. Ensure this is a realistic direct link to the listing on that board, not a generic company website)",
       "description": "Comprehensive, multi-paragraph realistic JD detailing technical requirements (e.g., Python, LLM, Cloud) and team structure so that our auDHD model can evaluate it."
     }
   ]`;
@@ -507,7 +507,7 @@ export async function autoSyncExternalSources(enabled: {
         source: enabled.efinancialcareers ? "eFinancialCareers" : "LinkedIn",
         salaryRange: "SGD 25,000 - SGD 30,000 / month",
         location: "Singapore (Hybrid)",
-        careers_portal_url: "https://www.sc.com/en/careers/",
+        careers_portal_url: "https://www.efinancialcareers.sg/jobs/principal-ai-architect-standard-chartered-100234",
         description: "Standard Chartered is seeking a hands-on Principal Architect for our Asset AI labs. Direct coding in Python, PyTorch, and managing agentic risk guardrails. No client-facing workshops, no sales quotas. Highly structured, asynchronous workflows, and quiet workspaces.",
         postedDate: new Date().toISOString().split("T")[0],
         status: "UNASSIGNED"
@@ -518,7 +518,7 @@ export async function autoSyncExternalSources(enabled: {
         source: enabled.gmail ? "Gmail" : "MyCareersFuture",
         salaryRange: "SGD 16,000 - SGD 20,000 / month",
         location: "Singapore (Remote)",
-        careers_portal_url: "https://www.novartis.com/careers",
+        careers_portal_url: "https://www.mycareersfuture.gov.sg/job/senior-bioinformatics-novartis-482012",
         description: "Join Novartis Singapore to support chemical-pathway data research for plant-based drug development. Requires hands-on Python and bio-data pipeline design. Zero travel, 100% remote asynchronous focus hours, direct feedback loop, Dutch relocation options.",
         postedDate: new Date().toISOString().split("T")[0],
         status: "UNASSIGNED"

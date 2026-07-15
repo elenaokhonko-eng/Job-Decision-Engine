@@ -54,7 +54,7 @@ Schema:
       "source": "LinkedIn | MyCareersFuture | eFinancialCareers | Gmail",
       "salaryRange": "string (optional, e.g. SGD 15,000 - SGD 20,000)",
       "location": "string (optional, e.g. Singapore (Remote))",
-      "careers_portal_url": "string (Mandatory. Highly realistic corporate careers page URL if not present in email, e.g. https://www.novartis.com/careers)",
+      "careers_portal_url": "string (Mandatory. The exact unique URL of the job advertisement on the source job board, e.g. https://www.mycareersfuture.gov.sg/job/12345 or https://www.efinancialcareers.sg/jobs/12345. Extract this directly from the email body links. Only fallback to a company careers page if no listing link is in the source)",
       "description": "Full details, requirements, and responsibilities parsed from the email text."
     }
   ]
