@@ -10,7 +10,7 @@ def main():
     print("====================================================")
 
     # Load Database URL
-    database_url = os.environ.get("DATABASE_URL")
+    database_url = os.environ.get("DATABASE_URL", "").strip().strip('"').strip("'")
     if not database_url:
         print("❌ ERROR: DATABASE_URL environment variable is missing.")
         exit(1)
@@ -22,10 +22,14 @@ def main():
         else:
             database_url += "?sslmode=require"
 
-    gmail_user = os.environ.get("GMAIL_USER")
-    gmail_password = os.environ.get("GMAIL_APP_PASSWORD")
-    gmail_folder = os.environ.get("GMAIL_FOLDER", "Jobs-Alerts")
-    gmail_processed_folder = os.environ.get("GMAIL_PROCESSED_FOLDER", "Jobs-Alerts-Processed")
+    gmail_user = os.environ.get("GMAIL_USER", "").strip().strip('"').strip("'")
+    gmail_password = os.environ.get("GMAIL_APP_PASSWORD", "").strip().strip('"').strip("'")
+    gmail_folder = os.environ.get("GMAIL_FOLDER", "").strip().strip('"').strip("'")
+    if not gmail_folder:
+        gmail_folder = "Jobs-Alerts"
+    gmail_processed_folder = os.environ.get("GMAIL_PROCESSED_FOLDER", "").strip().strip('"').strip("'")
+    if not gmail_processed_folder:
+        gmail_processed_folder = "Jobs-Alerts-Processed"
 
     if not gmail_user or not gmail_password:
         print("⚠️ WARNING: GMAIL_USER or GMAIL_APP_PASSWORD environment variable is missing.")
