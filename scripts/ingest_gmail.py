@@ -71,17 +71,29 @@ def main():
         for mail_id in mail_ids:
             # Fetch raw RFC822 email content
             status, data = mail.fetch(mail_id, "(RFC822)")
-            if status != "OK":
-                print(f"Failed to fetch mail ID {mail_id}")
+            if status != "OK" or not data or not isinstance(data, list) or data[0] is None:
+                print(f"Failed to fetch mail ID {mail_id} or message no longer exists.")
+                continue
+
+            if not isinstance(data[0], tuple) or len(data[0]) < 2:
+                print(f"Unexpected format returned for mail ID {mail_id}")
                 continue
 
             raw_email = data[0][1]
             msg = email.message_from_bytes(raw_email)
 
             # Decode Subject
-            subject, encoding = decode_header(msg["Subject"])[0]
-            if isinstance(subject, bytes):
-                subject = subject.decode(encoding or "utf-8", errors="replace")
+            subject = "No Subject"
+            if msg["Subject"]:
+                try:
+                    decoded = decode_header(msg["Subject"])[0]
+                    subj_bytes, encoding = decoded
+                    if isinstance(subj_bytes, bytes):
+                        subject = subj_bytes.decode(encoding or "utf-8", errors="replace")
+                    elif subj_bytes:
+                        subject = str(subj_bytes)
+                except Exception as e:
+                    print(f"Warning: Failed to decode subject: {e}")
 
             print(f"Processing email: '{subject}'")
 
@@ -94,14 +106,17 @@ def main():
                     
                     if content_type == "text/plain" and "attachment" not in content_disposition:
                         payload = part.get_payload(decode=True)
-                        body = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
-                        break
+                        if payload:
+                            body = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                            break
                     elif content_type == "text/html" and "attachment" not in content_disposition:
                         payload = part.get_payload(decode=True)
-                        body = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                        if payload:
+                            body = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
             else:
                 payload = msg.get_payload(decode=True)
-                body = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+                if payload:
+                    body = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
 
             # Insert email details into raw_email_alerts table
             cursor.execute(
