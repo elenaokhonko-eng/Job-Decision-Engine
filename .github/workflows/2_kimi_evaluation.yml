@@ -1,0 +1,28 @@
+name: 2. Kimi AI Job Evaluation Only
+
+on:
+  workflow_dispatch:
+
+jobs:
+  evaluate-jobs-kimi:
+    name: Evaluate Staged Jobs via Kimi AI Engine
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Run AI Evaluation Pipeline
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          KIMI_MODEL: ${{ secrets.KIMI_MODEL }}
+        run: npx tsx scripts/evaluate_jobs.ts
