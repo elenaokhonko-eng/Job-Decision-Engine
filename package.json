@@ -13,15 +13,16 @@
   "dependencies": {
     "@google/genai": "^2.4.0",
     "dotenv": "^17.2.3",
+    "imapflow": "^1.4.7",
     "pg": "^8.11.5"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.14.0",
     "@types/pg": "^8.11.5",
+    "js-yaml": "^5.2.1",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vitest": "^4.1.10",
-    "js-yaml": "^5.2.1",
-    "@types/js-yaml": "^4.0.9"
+    "vitest": "^4.1.10"
   }
 }

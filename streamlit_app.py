@@ -256,9 +256,8 @@ if st.sidebar.button("🚀 Start Ingestion & AI Evaluation", help="Runs immediat
     with st.spinner("Ingesting new Gmail job alerts and running Kimi AI evaluation..."):
         # 1. Step 1: Run Gmail Ingestion
         try:
-            python_exe = sys.executable or "python"
             st.info("Step 1/2: Fetching new emails from 'Jobs-Alerts' folder...")
-            ingest_proc = subprocess.run([python_exe, "scripts/ingest_gmail.py"], capture_output=True, text=True, env=os.environ)
+            ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
             if ingest_proc.returncode == 0:
                 st.success("✅ Step 1/2 Complete: Gmail alert ingestion finished!")
             else:
