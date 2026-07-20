@@ -220,7 +220,7 @@ def fetch_company_analytics_from_db():
         cursor.execute("""
             SELECT name as "Company", 
                    industry as "Industry",
-                   nd_friendly_avg_score as "Avg ND Score",
+                   nd_friendly_avg_score as "Avg Autonomy Score",
                    politics_stress_avg_score as "Avg Politics Score",
                    sensory_overload_avg_index as "Avg Sensory Index",
                    focus_protection_avg_score as "Avg Focus Score",
@@ -380,7 +380,7 @@ with tab_dashboard:
                     <p><b>Company:</b> {rjob['company']} | <b>Score:</b> <code style='font-size:14px;color:#22c55e;'>{rjob['total_score']}/100</code></p>
                     <p><b>Salary:</b> {rjob.get('salaryRange') or 'Not specified'}</p>
                     <p><b>Track:</b> {rjob.get('assigned_track')}</p>
-                    <p><b>ND Compatibility:</b> Friendly: {rjob.get('nd_friendly_score')}% | Politics: {rjob.get('politics_stress_score')}%</p>
+                    <p><b>Workplace Autonomy:</b> Autonomy: {rjob.get('nd_friendly_score')}% | Politics: {rjob.get('politics_stress_score')}%</p>
                 </div>
                 """, unsafe_allow_html=True)
                 st.markdown(f"🔗 [Verify Job Ad & Apply]({rjob['careers_portal_url']})")
@@ -410,7 +410,7 @@ with tab_dashboard:
                     st.markdown(f"**Location:** {job.get('location') or 'Singapore'}")
                     st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
                     st.markdown(f"**Match Score:** `{score}/100`")
-                    st.markdown(f"**ND Friendly Score:** `{job.get('nd_friendly_score') or 'N/A'}%` | **Politics Stress:** `{job.get('politics_stress_score') or 'N/A'}%`")
+                    st.markdown(f"**Autonomy Score:** `{job.get('nd_friendly_score') or 'N/A'}%` | **Politics Stress:** `{job.get('politics_stress_score') or 'N/A'}%`")
                     st.text_area("Full Description Brief", job.get("description"), height=100, disabled=True, key=f"desc_{idx}")
                     
                     # Delete action
@@ -444,7 +444,7 @@ with tab_dashboard:
             
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("ND Friendly Score", f"{job_to_show.get('nd_friendly_score')}%")
+                st.metric("Autonomy Culture Score", f"{job_to_show.get('nd_friendly_score')}%")
             with col2:
                 st.metric("Politics Stress Score", f"{job_to_show.get('politics_stress_score')}%")
             with col3:
@@ -517,10 +517,10 @@ with tab_analytics:
         df["Safety Verdict"] = df.apply(get_verdict, axis=1)
         
         # Display table
-        st.dataframe(df[["Company", "Industry", "Avg ND Score", "Avg Politics Score", "Avg Sensory Index", "Avg Focus Score", "Safety Verdict"]], use_container_width=True)
+        st.dataframe(df[["Company", "Industry", "Avg Autonomy Score", "Avg Politics Score", "Avg Sensory Index", "Avg Focus Score", "Safety Verdict"]], use_container_width=True)
         
-        st.markdown("### 🏆 Top Safe Environments vs. ⚠️ Stress Alerts")
-        st.bar_chart(df.set_index("Company")[["Avg ND Score", "Avg Politics Score"]])
+        st.markdown("### 🏆 Top High-Autonomy Environments vs. ⚠️ Stress Alerts")
+        st.bar_chart(df.set_index("Company")[["Avg Autonomy Score", "Avg Politics Score"]])
     else:
         st.info("No compiled analytics are available. Please run the evaluation engine pipeline to score listings.")
 
