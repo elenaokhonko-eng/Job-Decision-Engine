@@ -5,7 +5,7 @@ export default defineConfig({
     exclude: [
       "**/node_modules/**",
       "**/dist/**",
-      "**/Jobs-Description-Ranking-for-Neurodivergent-Profiles/**"
+      "**/Job-Decision-Engine/**"
     ]
   }
 });

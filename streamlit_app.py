@@ -282,7 +282,7 @@ if st.sidebar.button("📨 1. Ingest Gmail Alerts Only", help="Connects to Gmail
         if github_token:
             try:
                 req = urllib.request.Request(
-                    "https://api.github.com/repos/elenaokhonko-eng/Jobs-Description-Ranking-for-Neurodivergent-Profiles/actions/workflows/1_gmail_ingestion.yml/dispatches",
+                    "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
                     data=json.dumps({"ref": "main"}).encode("utf-8"),
                     headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
                     method="POST"
@@ -313,7 +313,7 @@ if st.sidebar.button("🧠 2. Run Kimi AI Evaluation", help="Parses staged email
         if github_token:
             try:
                 req = urllib.request.Request(
-                    "https://api.github.com/repos/elenaokhonko-eng/Jobs-Description-Ranking-for-Neurodivergent-Profiles/actions/workflows/2_kimi_evaluation.yml/dispatches",
+                    "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_kimi_evaluation.yml/dispatches",
                     data=json.dumps({"ref": "main"}).encode("utf-8"),
                     headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
                     method="POST"

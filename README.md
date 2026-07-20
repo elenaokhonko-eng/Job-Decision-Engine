@@ -2,7 +2,7 @@
 
 [![Deploy to Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io)
 [![GitHub License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js CI](https://github.com/elenaokhonko-eng/Jobs-Description-Ranking-for-Neurodivergent-Profiles/actions/workflows/job_ingestion_cron.yml/badge.svg)](https://github.com/elenaokhonko-eng/Jobs-Description-Ranking-for-Neurodivergent-Profiles/actions)
+[![Node.js CI](https://github.com/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/job_ingestion_cron.yml/badge.svg)](https://github.com/elenaokhonko-eng/Job-Decision-Engine/actions)
 
 An automated, multi-stage **AI Career Architect & Workplace Evaluation Engine** designed for **Technical Founders, Software Architects, and High-Autonomy Builders**. 
 
@@ -85,7 +85,7 @@ Fork this repository to your GitHub account.
 ### Step 2: Connect Streamlit Community Cloud
 1. Navigate to **[share.streamlit.io](https://share.streamlit.io)** and log in with GitHub.
 2. Click **"Create app"** $\rightarrow$ **"Use existing repo"**.
-3. Select your repository (`your-username/Jobs-Description-Ranking-for-Neurodivergent-Profiles`).
+3. Select your repository (`your-username/Job-Decision-Engine`).
 4. Set **Main file path** to `streamlit_app.py`.
 
 ### Step 3: Configure Streamlit Cloud Secrets
@@ -111,8 +111,8 @@ Follow these steps to run the engine on your local machine:
 
 ### 1. Clone & Install Dependencies
 ```bash
-git clone https://github.com/elenaokhonko-eng/Jobs-Description-Ranking-for-Neurodivergent-Profiles.git
-cd Jobs-Description-Ranking-for-Neurodivergent-Profiles
+git clone https://github.com/elenaokhonko-eng/Job-Decision-Engine.git
+cd Job-Decision-Engine
 
 # Install Node.js dependencies
 npm install
