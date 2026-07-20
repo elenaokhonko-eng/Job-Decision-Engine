@@ -12,10 +12,10 @@ let aiClient: GoogleGenAI | null = null;
 
 export function getGeminiClient(): GoogleGenAI {
   if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_FLASH_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
       throw new Error(
-        "CRITICAL DATABASE OR API KEY CONFLICT: GEMINI_API_KEY environment variable is not configured. Please add GEMINI_API_KEY in the Secrets / Settings panel in the AI Studio UI."
+        "CRITICAL DATABASE OR API KEY CONFLICT: GEMINI_API_KEY / GOOGLE_API_KEY environment variable is not configured."
       );
     }
     aiClient = new GoogleGenAI({
@@ -482,8 +482,13 @@ Schema Structure:
   const isKimi = model.toLowerCase().includes("moonshot") || model.toLowerCase().includes("kimi") || apiKey.startsWith("sk-");
 
   if (isKimi) {
-    const result = await runKimiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
-    return { result, trace, toolsUsed };
+    try {
+      const result = await runKimiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
+      return { result, trace, toolsUsed };
+    } catch (kimiErr: any) {
+      console.warn(`⚠️ Kimi API call failed: ${kimiErr.message || kimiErr}. Falling back to Gemini 2.0 Flash...`);
+      trace.push(`Step ${trace.length + 1}: Kimi API unavailable or quota reached (${kimiErr.message || kimiErr}). Falling back to Gemini 2.0 Flash...`);
+    }
   }
 
   trace.push(`Step 1: Initiated agent connection to Gemini using customizable weights criteria.`);
