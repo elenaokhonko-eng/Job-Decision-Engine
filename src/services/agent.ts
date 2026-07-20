@@ -183,7 +183,7 @@ export async function generateContent(options: {
       body: JSON.stringify({
         model,
         messages,
-        temperature: 0.3,
+        temperature: 1,
         response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
       })
     });
@@ -271,7 +271,7 @@ async function runKimiAgentInternal(
     const reqBody: any = {
       model,
       messages,
-      temperature: 0.3
+      temperature: 1
     };
     if (loopCount === 1) {
       reqBody.tools = tools;
@@ -347,7 +347,7 @@ async function runKimiAgentInternal(
     body: JSON.stringify({
       model,
       messages,
-      temperature: 0.3,
+      temperature: 1,
       response_format: { type: "json_object" }
     })
   });

@@ -57,15 +57,14 @@ async function runPipeline() {
         }
         const uniqueUrls = Array.from(new Set(cleanUrls));
         
-        // Run first validation check (HTTP live checks) on the extracted URLs
-        const verifiedUrls: string[] = [];
-        for (const u of uniqueUrls) {
-          console.log(`Validating extracted URL: ${u}...`);
-          const isLive = await verifyUrlLive(u, false);
-          if (isLive) {
-            verifiedUrls.push(u);
-          }
-        }
+        // Run first validation check (HTTP live checks) on the extracted URLs in parallel
+        const urlChecks = await Promise.all(
+          uniqueUrls.map(async (u) => {
+            const isLive = await verifyUrlLive(u, false);
+            return isLive ? u : null;
+          })
+        );
+        const verifiedUrls: string[] = urlChecks.filter((u): u is string => u !== null);
         
         console.log(`Found ${verifiedUrls.length} live job board URLs in email alert.`);
         if (verifiedUrls.length === 0) {

@@ -15,10 +15,10 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- This enables aggregate analytics on ND culture.
 CREATE TABLE IF NOT EXISTS companies (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name VARCHAR(255) UNIQUE NOT NULL,
+    name TEXT UNIQUE NOT NULL,
     industry VARCHAR(100),
-    website_url VARCHAR(255),
-    careers_page_url VARCHAR(255),
+    website_url TEXT,
+    careers_page_url TEXT,
     
     -- Compiled ND Culture metrics (Aggregates)
     nd_friendly_avg_score NUMERIC(5, 2) DEFAULT 0.00,  -- 0 to 100 (higher = better)
@@ -38,15 +38,15 @@ CREATE TABLE IF NOT EXISTS companies (
 -- Tracks individual job postings sourced from job boards or Gmail notifications.
 CREATE TABLE IF NOT EXISTS jobs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    company_name VARCHAR(255) NOT NULL,
+    company_name TEXT NOT NULL,
     company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
-    title VARCHAR(255) NOT NULL,
+    title TEXT NOT NULL,
     source VARCHAR(50) NOT NULL, -- 'LinkedIn', 'MyCareersFuture', 'eFinancialCareers', 'Gmail'
     raw_description TEXT NOT NULL,
     salary_range VARCHAR(100),
-    location VARCHAR(150) DEFAULT 'Singapore',
+    location TEXT DEFAULT 'Singapore',
     posted_date DATE DEFAULT CURRENT_DATE,
-    careers_portal_url VARCHAR(512) NOT NULL, -- Direct URL to company's career page to verify real job
+    careers_portal_url TEXT NOT NULL, -- Direct URL to company's career page to verify real job
     
     -- Status in evaluation pipeline
     status VARCHAR(50) DEFAULT 'UNASSIGNED', -- 'STRONG MATCH', 'REVIEW REQUIRED', 'REJECTED'
@@ -67,8 +67,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     sensory_overload_index INTEGER DEFAULT 0, -- 0 to 100
     biological_stress_risk TEXT,
     strategic_value TEXT,
-    recommended_cv_version VARCHAR(100),
-    next_action VARCHAR(255),
+    recommended_cv_version TEXT,
+    next_action TEXT,
     is_top_ten BOOLEAN DEFAULT FALSE,
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -79,10 +79,10 @@ CREATE TABLE IF NOT EXISTS jobs (
 -- Staging table for companies before they are evaluated.
 CREATE TABLE IF NOT EXISTS raw_companies (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name VARCHAR(255) UNIQUE NOT NULL,
+    name TEXT UNIQUE NOT NULL,
     industry VARCHAR(100),
-    website_url VARCHAR(255),
-    careers_page_url VARCHAR(255),
+    website_url TEXT,
+    careers_page_url TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -90,14 +90,14 @@ CREATE TABLE IF NOT EXISTS raw_companies (
 -- Staging table for raw extracted job postings before they are evaluated.
 CREATE TABLE IF NOT EXISTS raw_jobs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    company_name VARCHAR(255) NOT NULL,
-    title VARCHAR(255) NOT NULL,
+    company_name TEXT NOT NULL,
+    title TEXT NOT NULL,
     source VARCHAR(50) NOT NULL,
     raw_description TEXT NOT NULL,
     salary_range VARCHAR(100),
-    location VARCHAR(150),
+    location TEXT,
     posted_date DATE DEFAULT CURRENT_DATE,
-    careers_portal_url VARCHAR(512) NOT NULL,
+    careers_portal_url TEXT NOT NULL,
     processed BOOLEAN DEFAULT FALSE,
     processed_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
