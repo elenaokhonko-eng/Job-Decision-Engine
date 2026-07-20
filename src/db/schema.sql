@@ -2,8 +2,8 @@
 -- BASELINE POSTGRES RELATIONAL DATABASE SCHEMA - JOB DECISION ENGINE
 -- ====================================================================
 -- This SQL file represents the production database schema designed to track
--- job postings, audit records, and neurodivergent-friendly culture analytics.
--- It enables auDHD builders to analyze company toxicity, political overhead,
+-- job postings, audit records, and high-autonomy workplace culture analytics.
+-- It enables tech builders to analyze company toxicity, political overhead,
 -- and focus protection indices.
 -- ====================================================================
 
@@ -142,10 +142,10 @@ CREATE TABLE IF NOT EXISTS raw_email_alerts (
 
 
 -- ====================================================================
--- ANALYTICS VIEWS FOR NEURODIVERGENT (ND) COMMUNITIES
+-- ANALYTICS VIEWS FOR HIGH-AUTONOMY BUILDER COMMUNITIES
 -- ====================================================================
 
--- View 1: Top 10 Best Companies for ND / auDHD Folks
+-- View 1: Top 10 Best Companies for High-Autonomy Builders
 -- High environmental score, high autonomy, low stress/politics
 CREATE OR REPLACE VIEW nd_approved_companies AS
 SELECT 
@@ -162,7 +162,7 @@ WHERE nd_friendly_avg_score >= 70 AND politics_stress_avg_score < 40
   AND EXISTS (SELECT 1 FROM jobs WHERE jobs.company_id = companies.id)
 ORDER BY nd_friendly_avg_score DESC;
 
--- View 2: High Risk / Toxic Culture Blacklist for auDHD Folks
+-- View 2: High Risk / Toxic Culture Blacklist for High-Autonomy Builders
 -- Low environmental score, high politics, high sensory overload, heavy micromanagement
 -- Hard rule: only can be blacklisted if the score is low (below 30% threshold: nd_friendly <= 30 or politics >= 70)
 CREATE OR REPLACE VIEW nd_blacklisted_companies AS

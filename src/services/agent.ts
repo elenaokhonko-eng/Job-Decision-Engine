@@ -136,7 +136,7 @@ export interface AgentResult {
       future_mobility: { score: number; rationale: string };
     };
     hard_disqualifiers_triggered: string[];
-    // Extended Neurodivergent Culture metrics determined by Gemini
+    // Extended Workplace Culture metrics determined by Gemini
     nd_friendly_score: number;      // 0 - 100
     politics_stress_score: number;   // 0 - 100
     sensory_overload_index: number;  // 0 - 100
@@ -333,8 +333,8 @@ async function runKimiAgentInternal(
     }
   }
 
-  trace.push(`Step ${trace.length + 1}: Enforcing strict JSON formatting with auDHD culture metrics.`);
-  const formattingPrompt = "Now, please compile all findings, evaluate each job description, and output ONLY a valid, parseable JSON object matching the requested schema. Make sure you score the neurodivergent cultural factors (nd_friendly_score, politics_stress_score, sensory_overload_index) and ensure every job has a direct careers_portal_url link. Return nothing other than the JSON block.";
+  trace.push(`Step ${trace.length + 1}: Enforcing strict JSON formatting with builder culture metrics.`);
+  const formattingPrompt = "Now, please compile all findings, evaluate each job description, and output ONLY a valid, parseable JSON object matching the requested schema. Make sure you score the workplace cultural factors (nd_friendly_score, politics_stress_score, sensory_overload_index) and ensure every job has a direct careers_portal_url link. Return nothing other than the JSON block.";
   messages.push({ role: "user", content: formattingPrompt });
 
   const finalResponse = await fetch(`${baseUrl}/chat/completions`, {
@@ -429,13 +429,13 @@ Evaluate and assign weights based on these customizable axes:
 
 ---
 
-### NEURODIVERGENT (ND) CULTURE ANALYTICS EVALUATION:
-You must grade the following indicators (0 to 100) based on raw job context and neurodivergent safety cues:
+### HIGH-AUTONOMY WORKPLACE & CULTURE ANALYTICS EVALUATION:
+You must grade the following indicators (0 to 100) based on raw job context and high-autonomy workplace safety cues:
 - **nd_friendly_score**: Safe focus blocks, async communication, written specifications, low performance theater, direct logical culture. Target: >= 70. (Matches: ${ND_CULTURE_CRITERIA.highSupportiveFactors.join(", ")})
 - **politics_stress_score**: High meeting overhead, corporate alignment theater, micromanagement, managing stakeholders without authority, influencing non-reportees, or wearing dual hats (acting as both technical specialist and sales/client representative simultaneously). Target: < 50. (Matches: ${ND_CULTURE_CRITERIA.highToxicFactors.join(", ")})
 - **sensory_overload_index**: High office attendance requirement, loud environments, constant video calls, or heavy on-site travel schedules.
 
-*Note: Blacklist threshold is politics_stress_score >= 70 OR nd_friendly_score < 50.*
+*Note: High-politics blacklist threshold is politics_stress_score >= 70 OR nd_friendly_score < 50.*
 
 ---
 
@@ -562,9 +562,9 @@ Schema Structure:
   }
 
   // 2. Final turn - ensure the model produces the strict JSON format matching Schema
-  trace.push(`Step ${trace.length + 1}: Enforcing strict JSON formatting with auDHD culture metrics.`);
+  trace.push(`Step ${trace.length + 1}: Enforcing strict JSON formatting with builder culture metrics.`);
   
-  const formattingPrompt = "Now, please compile all findings, evaluate each job description, and output ONLY a valid, parseable JSON object matching the requested schema. Make sure you score the neurodivergent cultural factors (nd_friendly_score, politics_stress_score, sensory_overload_index) and ensure every job has a direct careers_portal_url link. Return nothing other than the JSON block.";
+  const formattingPrompt = "Now, please compile all findings, evaluate each job description, and output ONLY a valid, parseable JSON object matching the requested schema. Make sure you score the workplace cultural factors (nd_friendly_score, politics_stress_score, sensory_overload_index) and ensure every job has a direct careers_portal_url link. Return nothing other than the JSON block.";
   conversationHistory.push({ role: "user", parts: [{ text: formattingPrompt }] });
 
   const finalResponse = await ai.models.generateContent({
@@ -703,7 +703,7 @@ export async function autoSyncExternalSources(enabled: {
       "salaryRange": "string (e.g. SGD 23,000 - SGD 28,000 / month)",
       "location": "string (e.g. Singapore (Hybrid))",
       "careers_portal_url": "string (The exact unique URL of the job listing on the source job board, e.g. https://www.mycareersfuture.gov.sg/job/123456789 or https://www.efinancialcareers.sg/jobs/123456789. Ensure this is a realistic direct link to the listing on that board, not a generic company website)",
-      "description": "Comprehensive, multi-paragraph realistic JD detailing technical requirements (e.g., Python, LLM, Cloud) and team structure so that our auDHD model can evaluate it."
+      "description": "Comprehensive, multi-paragraph realistic JD detailing technical requirements (e.g., Python, LLM, Cloud) and team structure so that our evaluation model can evaluate it."
     }
   ]`;
 

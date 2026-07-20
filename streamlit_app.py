@@ -242,7 +242,7 @@ jobs_list = fetch_jobs_from_db()
 
 # Title
 st.title("💼 Job Decision Engine — Streamlit Console")
-st.markdown("### *Multi-Stage Weighted auDHD Career Architect (Singapore)*")
+st.markdown("### *Multi-Stage Weighted High-Autonomy Tech Founder & Builder Career Architect*")
 st.markdown("---")
 
 # Sidebar - Filters & Stats
@@ -420,7 +420,7 @@ with tab_dashboard:
 
     with col_right:
         st.subheader("🤖 Scoring & Match Analysis Details")
-        st.write("Select an evaluated job to view detailed auDHD match metrics, biological stress assessments, and strategic CV targeting.")
+        st.write("Select an evaluated job to view detailed autonomy & focus match metrics, workplace stress assessments, and strategic CV targeting.")
         
         evaluated_jobs = [j for j in filtered_jobs if j.get("status") and j.get("status") != "UNASSIGNED"]
         selected_job_title = st.selectbox(

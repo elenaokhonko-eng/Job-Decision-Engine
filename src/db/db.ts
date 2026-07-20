@@ -152,7 +152,7 @@ const DEFAULT_JOBS: Omit<Job, "id">[] = [
     nd_friendly_score: 88,
     politics_stress_score: 18,
     sensory_overload_index: 22,
-    biological_stress_risk: "Highly secure and safe. Minimal meeting overhead, asynchronous specifications protect auDHD focus cycles. Isolated technical execution avoids emotional and political burnout.",
+    biological_stress_risk: "Highly secure and safe. Minimal meeting overhead, asynchronous specifications protect builder focus cycles. Isolated technical execution avoids emotional and political burnout.",
     strategic_value: "Excellent. Directly fulfills the SGD 22k/month comp target, adds institutional wealth AI credentials, and is located in Singapore with optimal focus blocks.",
     recommended_cv_version: "AI/RegTech Architect CV",
     next_action: "Apply Immediately with Technical Portfolio"
@@ -178,7 +178,7 @@ const DEFAULT_JOBS: Omit<Job, "id">[] = [
     nd_friendly_score: 95,
     politics_stress_score: 10,
     sensory_overload_index: 10,
-    biological_stress_risk: "Perfect auDHD match. Fully remote, quiet focus, logical botanical scientific domain, zero stakeholder politics or high-stimulus meeting schedules.",
+    biological_stress_risk: "Perfect builder match. Fully remote, quiet focus, logical botanical scientific domain, zero stakeholder politics or high-stimulus meeting schedules.",
     strategic_value: "Fulfills Track B pivot goals. Directly partners with Dutch researchers, establishing clear academic/professional mobility paths to the Netherlands and planned PhD studies.",
     recommended_cv_version: "Data Research/Bio-Tech CV",
     next_action: "Apply Immediately with Technical Portfolio"
@@ -199,7 +199,7 @@ const DEFAULT_JOBS: Omit<Job, "id">[] = [
     nd_friendly_score: 12,
     politics_stress_score: 95,
     sensory_overload_index: 85,
-    biological_stress_risk: "Extremely high risk of neurodivergent nervous system collapse. 5 days on-site, constant stakeholder confrontation, heavy politics, and high APAC travel requirement (35%) violate multiple non-negotiable criteria.",
+    biological_stress_risk: "Extremely high risk of severe burnout and high operational stress. 5 days on-site, constant stakeholder confrontation, heavy politics, and high APAC travel requirement (35%) violate multiple non-negotiable criteria.",
     strategic_value: "Fails to support either Track A hands-on tech engineering or Track B scientific relocations.",
     recommended_cv_version: "Institutional Finance CV",
     next_action: "Skip / Delete"
@@ -225,7 +225,7 @@ const DEFAULT_JOBS: Omit<Job, "id">[] = [
     nd_friendly_score: 91,
     politics_stress_score: 15,
     sensory_overload_index: 30,
-    biological_stress_risk: "Highly recommended. Complete architectural sovereignty over algorithms. Minimal live interactions, fully written asynchronous specification structures protect auDHD task-switching costs.",
+    biological_stress_risk: "Highly recommended. Complete architectural sovereignty over algorithms. Minimal live interactions, fully written asynchronous specification structures protect builder task-switching costs.",
     strategic_value: "Massive. High base salary easily exceeds the SGD 22k/month baseline. Accentuates high-value quant/risk engineering experience.",
     recommended_cv_version: "AI/RegTech Architect CV",
     next_action: "Apply Immediately with Technical Portfolio"

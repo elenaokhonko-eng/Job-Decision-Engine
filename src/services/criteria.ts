@@ -8,7 +8,7 @@ export const CANDIDATE_PROFILE = {
   name: "Elena Okhonko",
   age: 44,
   experienceYears: 20,
-  neurotype: "2E auDHD (Managed via atomoxetine/guanfacine)",
+  workplacePreference: "High-Autonomy Technical Founder & SME Builder",
   targetCompSgdMonth: 22000,
   maxTravelPercentage: 10,
   maxOfficeDaysPerWeek: 3,
@@ -34,7 +34,7 @@ export const EVALUATION_WEIGHTS = {
   // Axis 4: Environmental & Biological Guardrails (30%)
   environment_guardrails: {
     maxPoints: 30,
-    description: "Low-stress, high-clarity culture, protected focus blocks, asynchronous workflow, and perimenopause/auDHD-friendly support."
+    description: "Low-stress, high-clarity culture, protected focus blocks, asynchronous workflow, and high-autonomy builder support."
   },
   // Axis 1: Technical & Creative Autonomy (25%)
   technical_autonomy: {
@@ -70,7 +70,7 @@ export const HARD_DISQUALIFIERS = [
 ];
 
 /**
- * Neurodivergent (ND) & auDHD Nervous System Culture Metrics.
+ * High-Autonomy Workplace Culture & Focus Metrics.
  * These are used to run database analytics on which companies are supportive or toxic.
  */
 export const ND_CULTURE_CRITERIA = {

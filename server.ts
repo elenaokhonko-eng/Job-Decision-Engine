@@ -113,7 +113,7 @@ async function startServer() {
     }
   });
 
-  // Get neurodivergent culture aggregates and toxic blacklists
+  // Get workplace culture aggregates and toxic blacklists
   app.get("/api/analytics", (req, res) => {
     try {
       const analytics = db.getNdCultureAnalytics();
