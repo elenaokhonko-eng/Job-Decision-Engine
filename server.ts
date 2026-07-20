@@ -35,20 +35,20 @@ async function startServer() {
   });
 
   // Add a new job description to local database
-  app.post("/api/jobs", (req, res) => {
+  app.post("/api/jobs", async (req, res) => {
     try {
       const { title, company, source, description, salaryRange, location, careers_portal_url } = req.body;
       if (!title || !company || !source || !description) {
         res.status(400).json({ success: false, error: "Missing required fields (title, company, source, description)" });
         return;
       }
-      const newJob = db.addJob({
+      const newJob = await db.addRawJob({
         title,
-        company,
+        company_name: company,
         source,
-        description,
-        salaryRange,
-        postedDate: new Date().toISOString().split("T")[0],
+        raw_description: description,
+        salary_range: salaryRange,
+        posted_date: new Date().toISOString().split("T")[0],
         location,
         careers_portal_url: careers_portal_url || `https://www.${company.toLowerCase().replace(/[^a-z0-9]/g, "")}.com/careers`
       });

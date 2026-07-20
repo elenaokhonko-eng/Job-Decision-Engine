@@ -100,6 +100,23 @@ export interface Job {
   strategic_value?: string;
   recommended_cv_version?: string;
   next_action?: string;
+  is_top_ten?: boolean;
+}
+
+// Define the interface for a Raw Job conforming to raw_jobs staging schema
+export interface RawJob {
+  id: string;
+  company_name: string;
+  title: string;
+  source: string;
+  raw_description: string;
+  salary_range?: string;
+  posted_date?: string;
+  location?: string;
+  careers_portal_url: string;
+  processed?: boolean;
+  processed_at?: string;
+  created_at?: string;
 }
 
 // Define the interface for an Interaction
@@ -262,7 +279,8 @@ function mapRowToJob(row: any): Job {
     biological_stress_risk: row.biological_stress_risk || undefined,
     strategic_value: row.strategic_value || undefined,
     recommended_cv_version: row.recommended_cv_version || undefined,
-    next_action: row.next_action || undefined
+    next_action: row.next_action || undefined,
+    is_top_ten: row.is_top_ten || false
   };
 }
 
@@ -287,7 +305,7 @@ async function updateCompanyRatings(companyId: string) {
     const avgFocus = r.avg_focus ? parseFloat(r.avg_focus) : 0.00;
 
     const isApproved = avgND >= 70 && avgPol < 40;
-    const isToxic = avgPol >= 60 || avgND <= 40;
+    const isToxic = avgPol >= 70 || avgND <= 30;
 
     await pool.query(
       `UPDATE companies SET
@@ -322,6 +340,13 @@ class PostgresDatabase {
   }
 
   public async addJob(job: Omit<Job, "id">, bypassLiveCheck = false): Promise<Job> {
+    if (!job.status || job.status === "UNASSIGNED") {
+      throw new Error("Cannot insert unevaluated jobs into the final jobs table.");
+    }
+    if (!job.confidence_level) {
+      throw new Error("Cannot insert job into the final jobs table without a valid confidence_level.");
+    }
+
     // Strictly validate the careers_portal_url before inserting
     const isUrlValid = await verifyUrlLive(job.careers_portal_url, bypassLiveCheck);
     if (!isUrlValid) {
@@ -351,24 +376,25 @@ class PostgresDatabase {
       `INSERT INTO jobs (
         company_name, company_id, title, source, raw_description, salary_range, location, posted_date, careers_portal_url, status, assigned_track,
         confidence_level, total_score, score_technical_autonomy, score_compensation_potential, score_domain_relevance, score_environment_guardrails, score_future_mobility,
-        nd_friendly_score, politics_stress_score, sensory_overload_index, biological_stress_risk, strategic_value, recommended_cv_version, next_action
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25) RETURNING *`,
+        nd_friendly_score, politics_stress_score, sensory_overload_index, biological_stress_risk, strategic_value, recommended_cv_version, next_action, is_top_ten
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26) RETURNING *`,
       [
         job.company, companyId, job.title, job.source, job.description,
         job.salaryRange || null, job.location || null, job.postedDate || new Date().toISOString().split("T")[0],
-        job.careers_portal_url, job.status || "UNASSIGNED", job.assigned_track || "Neither",
+        job.careers_portal_url, job.status, job.assigned_track || "Neither",
         job.confidence_level || null, job.total_score || 0,
         job.score_technical_autonomy || 0, job.score_compensation_potential || 0,
         job.score_domain_relevance || 0, job.score_environment_guardrails || 0,
         job.score_future_mobility || 0, job.nd_friendly_score || 0,
         job.politics_stress_score || 0, job.sensory_overload_index || 0,
         job.biological_stress_risk || null, job.strategic_value || null,
-        job.recommended_cv_version || null, job.next_action || null
+        job.recommended_cv_version || null, job.next_action || null,
+        job.is_top_ten || false
       ]
     );
 
     // If evaluated already, update company averages
-    if (job.status && job.status !== "UNASSIGNED" && companyId) {
+    if (companyId) {
       await updateCompanyRatings(companyId);
     }
 
@@ -497,10 +523,46 @@ class PostgresDatabase {
     };
   }
 
+  public async addRawJob(job: Omit<RawJob, "id" | "processed" | "processed_at" | "created_at">): Promise<RawJob> {
+    const res = await pool.query(
+      `INSERT INTO raw_jobs (company_name, title, source, raw_description, salary_range, location, posted_date, careers_portal_url, processed)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE) RETURNING *`,
+      [
+        job.company_name,
+        job.title,
+        job.source,
+        job.raw_description,
+        job.salary_range || null,
+        job.location || null,
+        job.posted_date || new Date().toISOString().split("T")[0],
+        job.careers_portal_url
+      ]
+    );
+    return res.rows[0];
+  }
+
+  public async queryRawJobs(unprocessedOnly = true): Promise<RawJob[]> {
+    const queryStr = unprocessedOnly 
+      ? "SELECT * FROM raw_jobs WHERE processed = FALSE ORDER BY created_at DESC"
+      : "SELECT * FROM raw_jobs ORDER BY created_at DESC";
+    const res = await pool.query(queryStr);
+    return res.rows;
+  }
+
+  public async markRawJobProcessed(id: string): Promise<boolean> {
+    const res = await pool.query(
+      "UPDATE raw_jobs SET processed = TRUE, processed_at = NOW() WHERE id = $1",
+      [id]
+    );
+    return res.rowCount !== null && res.rowCount > 0;
+  }
+
   public async resetToDefaults(): Promise<void> {
     await pool.query("DELETE FROM jobs");
     await pool.query("DELETE FROM companies");
     await pool.query("DELETE FROM interactions_log");
+    await pool.query("DELETE FROM raw_jobs");
+    await pool.query("DELETE FROM raw_companies");
 
     for (const job of DEFAULT_JOBS) {
       await this.addJob(job, true);

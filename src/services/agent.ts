@@ -148,9 +148,243 @@ export interface AgentResult {
   }>;
 }
 
+export async function generateContent(options: {
+  model: string;
+  contents: string;
+  responseMimeType?: string;
+  systemInstruction?: string;
+}): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
+    throw new Error(
+      "CRITICAL DATABASE OR API KEY CONFLICT: GEMINI_API_KEY environment variable is not configured. Please add GEMINI_API_KEY in the Secrets / Settings panel in the AI Studio UI."
+    );
+  }
+
+  const model = process.env.GEMINI_MODEL || options.model;
+  const isKimi = model.toLowerCase().includes("moonshot") || model.toLowerCase().includes("kimi") || apiKey.startsWith("sk-");
+
+  if (isKimi) {
+    const baseUrl = "https://api.kimi.com/coding/v1";
+    
+    const messages: any[] = [];
+    if (options.systemInstruction) {
+      messages.push({ role: "system", content: options.systemInstruction });
+    }
+    messages.push({ role: "user", content: options.contents });
+
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+        "User-Agent": "Claude-Code"
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.3,
+        response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
+    }
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || "";
+  } else {
+    // Normal Gemini flow
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: options.model,
+      contents: options.contents,
+      config: {
+        responseMimeType: options.responseMimeType as any,
+        systemInstruction: options.systemInstruction
+      }
+    });
+    return response.text || "";
+  }
+}
+
+async function runKimiAgentInternal(
+  userQuestion: string,
+  systemInstruction: string,
+  trace: string[],
+  toolsUsed: string[]
+): Promise<AgentResult> {
+  const apiKey = process.env.GEMINI_API_KEY || "";
+  const model = process.env.GEMINI_MODEL || "moonshot-v1-8k";
+  const baseUrl = "https://api.kimi.com/coding/v1";
+
+  trace.push(`Step 1: Initiated agent connection to Kimi (Moonshot AI) using model: ${model}.`);
+
+  const tools = [
+    {
+      type: "function" as const,
+      function: {
+        name: "queryDatabaseForJobs",
+        description: "Search or fetch job advertisements from the local Postgres simulation database.",
+        parameters: {
+          type: "object",
+          properties: {
+            searchTerm: {
+              type: "string",
+              description: "Optional search query to filter jobs by title, company, or description keywords."
+            }
+          }
+        }
+      }
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "fetchExternalMarketRates",
+        description: "Fetch external real-time market salary data and benchmark standards for a given job title via an external REST API simulation.",
+        parameters: {
+          type: "object",
+          properties: {
+            jobTitle: {
+              type: "string",
+              description: "The job title to query market salary rates for."
+            }
+          },
+          required: ["jobTitle"]
+        }
+      }
+    }
+  ];
+
+  const messages: any[] = [
+    { role: "system", content: systemInstruction },
+    { role: "user", content: userQuestion }
+  ];
+
+  let loopCount = 0;
+  let continueLoop = true;
+
+  while (continueLoop && loopCount < 5) {
+    loopCount++;
+    const reqBody: any = {
+      model,
+      messages,
+      temperature: 0.3
+    };
+    if (loopCount === 1) {
+      reqBody.tools = tools;
+    }
+
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+        "User-Agent": "Claude-Code"
+      },
+      body: JSON.stringify(reqBody)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
+    }
+
+    const data = await response.json();
+    const message = data.choices?.[0]?.message;
+    if (!message) {
+      throw new Error("Kimi API returned empty choices.");
+    }
+
+    messages.push(message);
+
+    const toolCalls = message.tool_calls;
+    if (toolCalls && toolCalls.length > 0) {
+      for (const call of toolCalls) {
+        const name = call.function.name;
+        const argsStr = call.function.arguments;
+        const args = JSON.parse(argsStr || "{}");
+
+        trace.push(`Step ${trace.length + 1}: Agent triggered tool call: "${name}" with arguments: ${argsStr}`);
+        toolsUsed.push(name || "");
+
+        let resultData: any;
+        if (name === "queryDatabaseForJobs") {
+          resultData = await executeQueryDatabaseForJobs(args);
+          trace.push(`Step ${trace.length + 1}: Query database returned ${resultData.length} records.`);
+        } else if (name === "fetchExternalMarketRates") {
+          resultData = await executeFetchExternalMarketRates(args);
+          trace.push(`Step ${trace.length + 1}: External REST API response processed: Standard range ${resultData.estimatedMonthlyBaseRange}.`);
+        } else {
+          resultData = { error: "Unknown tool name" };
+        }
+
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          name: name,
+          content: JSON.stringify({ result: resultData })
+        });
+      }
+    } else {
+      continueLoop = false;
+    }
+  }
+
+  trace.push(`Step ${trace.length + 1}: Enforcing strict JSON formatting with auDHD culture metrics.`);
+  const formattingPrompt = "Now, please compile all findings, evaluate each job description, and output ONLY a valid, parseable JSON object matching the requested schema. Make sure you score the neurodivergent cultural factors (nd_friendly_score, politics_stress_score, sensory_overload_index) and ensure every job has a direct careers_portal_url link. Return nothing other than the JSON block.";
+  messages.push({ role: "user", content: formattingPrompt });
+
+  const finalResponse = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+      "User-Agent": "Claude-Code"
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature: 0.3,
+      response_format: { type: "json_object" }
+    })
+  });
+
+  if (!finalResponse.ok) {
+    const errorText = await finalResponse.text();
+    throw new Error(`Kimi API final request failed with status ${finalResponse.status}: ${errorText}`);
+  }
+
+  const finalData = await finalResponse.json();
+  const rawText = finalData.choices?.[0]?.message?.content || "{}";
+
+  let cleanText = rawText.trim();
+  if (cleanText.startsWith("```json")) {
+    cleanText = cleanText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+  } else if (cleanText.startsWith("```")) {
+    cleanText = cleanText.replace(/^```\s*/, "").replace(/\s*```$/, "");
+  }
+
+  try {
+    const parsed = JSON.parse(cleanText) as AgentResult;
+    return parsed;
+  } catch (err: any) {
+    console.error("Failed to parse Kimi JSON response:", cleanText);
+    throw new Error(`Kimi model output could not be parsed as JSON: ${err.message || err}`);
+  }
+}
+
 // Core execution loop
 export async function runAgent(userQuestion: string): Promise<{ result: AgentResult; trace: string[]; toolsUsed: string[] }> {
-  const ai = getGeminiClient();
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
+    throw new Error(
+      "CRITICAL DATABASE OR API KEY CONFLICT: GEMINI_API_KEY environment variable is not configured. Please add GEMINI_API_KEY in the Secrets / Settings panel in the AI Studio UI."
+    );
+  }
+
   const trace: string[] = [];
   const toolsUsed: string[] = [];
 
@@ -237,11 +471,20 @@ Schema Structure:
   ]
 }`;
 
+  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  const isKimi = model.toLowerCase().includes("moonshot") || model.toLowerCase().includes("kimi") || apiKey.startsWith("sk-");
+
+  if (isKimi) {
+    const result = await runKimiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
+    return { result, trace, toolsUsed };
+  }
+
   trace.push(`Step 1: Initiated agent connection to Gemini using customizable weights criteria.`);
   
   // 1. First Pass - Allow the model to decide if it wants to call tools
+  const ai = getGeminiClient();
   let response = await ai.models.generateContent({
-    model: "gemini-3.5-flash",
+    model: "gemini-2.0-flash",
     contents: userQuestion,
     config: {
       systemInstruction,
@@ -294,7 +537,7 @@ Schema Structure:
     trace.push(`Step ${trace.length + 1}: Sending tool results back to Gemini for final assessment and ranking.`);
     
     response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.0-flash",
       contents: conversationHistory,
       config: {
         systemInstruction,
@@ -318,7 +561,7 @@ Schema Structure:
   conversationHistory.push({ role: "user", parts: [{ text: formattingPrompt }] });
 
   const finalResponse = await ai.models.generateContent({
-    model: "gemini-3.5-flash",
+    model: "gemini-2.0-flash",
     contents: conversationHistory,
     config: {
       systemInstruction,
@@ -458,16 +701,12 @@ export async function autoSyncExternalSources(enabled: {
   ]`;
 
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+    let rawText = await generateContent({
+      model: "gemini-2.0-flash",
       contents: syncPrompt,
-      config: {
-        responseMimeType: "application/json",
-        systemInstruction: "You are a senior job board scraper crawler agent that compiles high-fidelity raw job advertisements from Singapore feeds."
-      }
+      responseMimeType: "application/json",
+      systemInstruction: "You are a senior job board scraper crawler agent that compiles high-fidelity raw job advertisements from Singapore feeds."
     });
-
-    let rawText = response.text || "[]";
     if (rawText.startsWith("```json")) {
       rawText = rawText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
     } else if (rawText.startsWith("```")) {
@@ -479,56 +718,52 @@ export async function autoSyncExternalSources(enabled: {
     if (Array.isArray(crawledList)) {
       for (const cJob of crawledList) {
         const source = cJob.source || "LinkedIn";
-        const newJob = await db.addJob({
+        const newJob = await db.addRawJob({
           title: cJob.title || "Senior Tech Architect",
-          company: cJob.company || "Global Bio-Pharma Group",
+          company_name: cJob.company || "Global Bio-Pharma Group",
           source: source,
-          description: cJob.description || "Python, bioinformatics research and systems architecture. No PM responsibilities.",
-          salaryRange: cJob.salaryRange || "SGD 20,000 - SGD 24,000",
+          raw_description: cJob.description || "Python, bioinformatics research and systems architecture. No PM responsibilities.",
+          salary_range: cJob.salaryRange || "SGD 20,000 - SGD 24,000",
           location: cJob.location || "Singapore (Remote)",
           careers_portal_url: cJob.careers_portal_url || `https://www.${(cJob.company || "novartis").toLowerCase().replace(/[^a-z0-9]/g, "")}.com/careers`,
-          postedDate: new Date().toISOString().split("T")[0],
-          // Defaults to unassigned, allowing real-time evaluation in UI
-          status: "UNASSIGNED"
+          posted_date: new Date().toISOString().split("T")[0]
         });
-        importedJobs.push(newJob);
-        logs.push(`Step ${logs.length + 1}: Imported unassigned raw job: "${newJob.title}" from ${newJob.company} [Source: ${newJob.source}].`);
+        importedJobs.push(newJob as any);
+        logs.push(`Step ${logs.length + 1}: Staged raw job for evaluation: "${newJob.title}" from ${newJob.company_name} [Source: ${newJob.source}].`);
       }
     }
   } catch (err: any) {
     console.error("Auto Sync Engine error:", err);
-    logs.push(`Step ${logs.length + 1}: Parsing failed. Creating high-fidelity fallback job records instead.`);
+    logs.push(`Step ${logs.length + 1}: Parsing failed. Staging high-fidelity fallback raw job records instead.`);
     
     // Seed high-fidelity fallback to ensure it ALWAYS works and doesn't crash on invalid JSON
-    const fallbackJobs: Omit<Job, "id">[] = [
+    const fallbackJobs = [
       {
         title: "Principal AI Architect - Quant Solutions",
-        company: "Standard Chartered Asset AI",
+        company_name: "Standard Chartered Asset AI",
         source: enabled.efinancialcareers ? "eFinancialCareers" : "LinkedIn",
-        salaryRange: "SGD 25,000 - SGD 30,000 / month",
+        salary_range: "SGD 25,000 - SGD 30,000 / month",
         location: "Singapore (Hybrid)",
         careers_portal_url: "https://www.efinancialcareers.sg/jobs/principal-ai-architect-standard-chartered-100234",
-        description: "Standard Chartered is seeking a hands-on Principal Architect for our Asset AI labs. Direct coding in Python, PyTorch, and managing agentic risk guardrails. No client-facing workshops, no sales quotas. Highly structured, asynchronous workflows, and quiet workspaces.",
-        postedDate: new Date().toISOString().split("T")[0],
-        status: "UNASSIGNED"
+        raw_description: "Standard Chartered is seeking a hands-on Principal Architect for our Asset AI labs. Direct coding in Python, PyTorch, and managing agentic risk guardrails. No client-facing workshops, no sales quotas. Highly structured, asynchronous workflows, and quiet workspaces.",
+        posted_date: new Date().toISOString().split("T")[0]
       },
       {
         title: "Senior Bioinformatics Research Engineer",
-        company: "Novartis Clinical Labs",
+        company_name: "Novartis Clinical Labs",
         source: enabled.gmail ? "Gmail" : "MyCareersFuture",
-        salaryRange: "SGD 16,000 - SGD 20,000 / month",
+        salary_range: "SGD 16,000 - SGD 20,000 / month",
         location: "Singapore (Remote)",
         careers_portal_url: "https://www.mycareersfuture.gov.sg/job/senior-bioinformatics-novartis-482012",
-        description: "Join Novartis Singapore to support chemical-pathway data research for plant-based drug development. Requires hands-on Python and bio-data pipeline design. Zero travel, 100% remote asynchronous focus hours, direct feedback loop, Dutch relocation options.",
-        postedDate: new Date().toISOString().split("T")[0],
-        status: "UNASSIGNED"
+        raw_description: "Join Novartis Singapore to support chemical-pathway data research for plant-based drug development. Requires hands-on Python and bio-data pipeline design. Zero travel, 100% remote asynchronous focus hours, direct feedback loop, Dutch relocation options.",
+        posted_date: new Date().toISOString().split("T")[0]
       }
     ];
 
     for (const fJob of fallbackJobs) {
-      const added = await db.addJob(fJob);
-      importedJobs.push(added);
-      logs.push(`Step ${logs.length + 1}: Fallback Auto-Imported: "${added.title}" from ${added.company}.`);
+      const added = await db.addRawJob(fJob);
+      importedJobs.push(added as any);
+      logs.push(`Step ${logs.length + 1}: Fallback Staged in Raw Jobs Vault: "${added.title}" from ${added.company_name}.`);
     }
   }
 

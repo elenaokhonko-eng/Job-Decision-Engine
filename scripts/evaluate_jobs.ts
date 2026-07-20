@@ -1,6 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { getGeminiClient, runAgent } from "../src/services/agent.ts";
+import { getGeminiClient, runAgent, generateContent } from "../src/services/agent.ts";
 import { db, verifyUrlLive } from "../src/db/db.ts";
 
 dotenv.config();
@@ -12,6 +12,8 @@ const pool = new pg.Pool({
   connectionString: databaseUrl,
   ssl: databaseUrl && (databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
 });
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function runPipeline() {
   console.log("====================================================");
@@ -110,15 +112,11 @@ Schema:
 Return nothing other than the JSON block.`;
 
         try {
-          const response = await ai.models.generateContent({
-            model: "gemini-3.5-flash",
+          let rawText = await generateContent({
+            model: "gemini-2.0-flash",
             contents: parsePrompt,
-            config: {
-              responseMimeType: "application/json"
-            }
+            responseMimeType: "application/json"
           });
-
-          let rawText = response.text || "{}";
           if (rawText.startsWith("```json")) {
             rawText = rawText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
           } else if (rawText.startsWith("```")) {
@@ -130,22 +128,20 @@ Return nothing other than the JSON block.`;
           console.log(`Extracted ${jobsList.length} jobs from email alert.`);
 
           for (const rawJob of jobsList) {
-            // Second validation check happens automatically inside db.addJob(..., false)
             try {
-              const newJob = await db.addJob({
+              const rawDbJob = await db.addRawJob({
+                company_name: rawJob.company,
                 title: rawJob.title,
-                company: rawJob.company,
                 source: rawJob.source || "Gmail",
-                description: rawJob.description,
-                salaryRange: rawJob.salaryRange || undefined,
+                raw_description: rawJob.description,
+                salary_range: rawJob.salaryRange || undefined,
                 location: rawJob.location || "Singapore",
-                careers_portal_url: rawJob.careers_portal_url,
-                postedDate: new Date().toISOString().split("T")[0],
-                status: "UNASSIGNED"
-              }, false); // bypassLiveCheck = false, runs live verification check!
-              console.log(`  -> Inserted unassigned job: "${newJob.title}" at ${newJob.company}`);
+                posted_date: new Date().toISOString().split("T")[0],
+                careers_portal_url: rawJob.careers_portal_url
+              });
+              console.log(`  -> Inserted raw staging job: "${rawDbJob.title}" at ${rawDbJob.company_name}`);
             } catch (insertErr: any) {
-              console.error(`  -> Failed to insert job "${rawJob.title}": ${insertErr.message || insertErr}`);
+              console.error(`  -> Failed to insert raw job "${rawJob.title}": ${insertErr.message || insertErr}`);
             }
           }
 
@@ -162,34 +158,121 @@ Return nothing other than the JSON block.`;
       }
     }
 
-    // 2. Fetch and evaluate UNASSIGNED jobs in database
-    console.log("\nQuerying database for UNASSIGNED jobs to evaluate...");
-    const jobs = await db.queryJobs();
-    const unassignedJobs = jobs.filter(j => j.status === "UNASSIGNED");
-    console.log(`Found ${unassignedJobs.length} UNASSIGNED jobs.`);
+    // 2. Fetch and evaluate unprocessed raw jobs in database
+    console.log("\nQuerying database for unprocessed raw jobs to evaluate...");
+    const rawJobs = await db.queryRawJobs(true);
+    console.log(`Found ${rawJobs.length} unprocessed raw jobs.`);
 
-    if (unassignedJobs.length > 0) {
-      for (const job of unassignedJobs) {
-        console.log(`\nEvaluating job: "${job.title}" at "${job.company}"`);
+    const evaluatedTodayIds: string[] = [];
+
+    if (rawJobs.length > 0) {
+      for (let i = 0; i < rawJobs.length; i++) {
+        const rawJob = rawJobs[i];
+        if (i > 0) {
+          console.log("Waiting 13 seconds before the next evaluation to avoid API rate limits...");
+          await sleep(13000);
+        }
+        console.log(`\nEvaluating raw job: "${rawJob.title}" at "${rawJob.company_name}"`);
         
-        const evalQuery = `Evaluate job advertisement: "${job.title}" at "${job.company}". 
-        Location: ${job.location || "Singapore"}. 
-        Salary Range: ${job.salaryRange || "Not specified"}. 
-        Description: ${job.description}`;
+        const evalQuery = `Evaluate job advertisement: "${rawJob.title}" at "${rawJob.company_name}". 
+        Location: ${rawJob.location || "Singapore"}. 
+        Salary Range: ${rawJob.salary_range || "Not specified"}. 
+        Description: ${rawJob.raw_description}`;
 
         try {
           const { result } = await runAgent(evalQuery);
           const evalResult = result.evaluated_jobs?.[0];
           if (evalResult) {
             console.log(`  -> Complete: Score = ${evalResult.total_score}/100, Status = ${evalResult.status}, Track = ${evalResult.assigned_track}`);
+            
+            const techScore = (evalResult as any).score_technical_autonomy ?? evalResult.score_breakdown?.technical_autonomy?.score ?? 0;
+            const compScore = (evalResult as any).score_compensation_potential ?? evalResult.score_breakdown?.compensation_potential?.score ?? 0;
+            const domainScore = (evalResult as any).score_domain_relevance ?? evalResult.score_breakdown?.domain_relevance?.score ?? 0;
+            const envScore = (evalResult as any).score_environment_guardrails ?? evalResult.score_breakdown?.environment_guardrails?.score ?? 0;
+            const mobilityScore = (evalResult as any).score_future_mobility ?? evalResult.score_breakdown?.future_mobility?.score ?? 0;
+            const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || null;
+
+            // Insert into the final jobs/companies table
+            const finalJob = await db.addJob({
+              title: rawJob.title,
+              company: rawJob.company_name,
+              source: rawJob.source as any,
+              description: rawJob.raw_description,
+              salaryRange: rawJob.salary_range || undefined,
+              location: rawJob.location || undefined,
+              careers_portal_url: rawJob.careers_portal_url,
+              postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
+              status: evalResult.status,
+              assigned_track: evalResult.assigned_track,
+              confidence_level: evalResult.confidence_level,
+              total_score: evalResult.total_score,
+              score_technical_autonomy: techScore,
+              score_compensation_potential: compScore,
+              score_domain_relevance: domainScore,
+              score_environment_guardrails: envScore,
+              score_future_mobility: mobilityScore,
+              nd_friendly_score: evalResult.nd_friendly_score,
+              politics_stress_score: evalResult.politics_stress_score,
+              sensory_overload_index: evalResult.sensory_overload_index,
+              biological_stress_risk: bioRisk,
+              strategic_value: evalResult.strategic_value,
+              recommended_cv_version: evalResult.recommended_cv_version,
+              next_action: evalResult.next_action,
+              is_top_ten: false
+            }, true); // bypass live check since it was validated at extraction
+            
+            console.log(`  -> Inserted evaluated job into final table with ID ${finalJob.id}`);
+            
+            // Mark raw job as processed
+            await db.markRawJobProcessed(rawJob.id);
+            evaluatedTodayIds.push(finalJob.id);
           } else {
             console.log("  -> Complete (warnings: no evaluation details returned in payload)");
           }
         } catch (err: any) {
-          console.error(`❌ Evaluation failed for job ID ${job.id}:`, err.message || err);
+          console.error(`❌ Evaluation failed for raw job ID ${rawJob.id}:`, err.message || err);
         }
       }
     }
+
+    // 3. Daily Top 10 Selection
+    console.log("\nSelecting daily Top 10 recommended jobs...");
+    const allJobs = await db.queryJobs();
+    
+    // Filter jobs that were evaluated in the current run and are eligible (status in 'STRONG MATCH', 'REVIEW REQUIRED')
+    const eligibleJobs = allJobs.filter(j => 
+      evaluatedTodayIds.includes(j.id) && 
+      (j.status === "STRONG MATCH" || j.status === "REVIEW REQUIRED")
+    );
+    
+    // Sort by total_score DESC
+    const sortedEligible = eligibleJobs.sort((a, b) => (b.total_score || 0) - (a.total_score || 0));
+    
+    const topTen = sortedEligible.slice(0, 10);
+    for (const job of topTen) {
+      await pool.query("UPDATE jobs SET is_top_ten = TRUE WHERE id = $1", [job.id]);
+    }
+    
+    const processedTodayCount = evaluatedTodayIds.length;
+    const topTenCount = topTen.length;
+    
+    console.log("====================================================");
+    console.log("             DAILY SELECTION SUMMARY                ");
+    console.log("====================================================");
+    console.log(`Processed raw jobs today: ${processedTodayCount}`);
+    if (processedTodayCount === 0) {
+      console.log("No new jobs were processed today.");
+    } else {
+      console.log(`Jobs making it to the Top 10 to apply: ${topTenCount}`);
+      if (topTenCount === 0) {
+        console.log("No jobs processed today met the criteria for applying.");
+      } else {
+        topTen.forEach((j, i) => {
+          console.log(`  [#${i+1}] ${j.title} at ${j.company} (Score: ${j.total_score}/100, Status: ${j.status})`);
+        });
+      }
+    }
+    console.log("====================================================");
 
     console.log("\n✅ Pipeline completed successfully!");
 

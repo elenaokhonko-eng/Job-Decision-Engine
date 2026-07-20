@@ -69,10 +69,42 @@ CREATE TABLE IF NOT EXISTS jobs (
     strategic_value TEXT,
     recommended_cv_version VARCHAR(100),
     next_action VARCHAR(255),
+    is_top_ten BOOLEAN DEFAULT FALSE,
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Table: raw_companies
+-- Staging table for companies before they are evaluated.
+CREATE TABLE IF NOT EXISTS raw_companies (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) UNIQUE NOT NULL,
+    industry VARCHAR(100),
+    website_url VARCHAR(255),
+    careers_page_url VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Table: raw_jobs
+-- Staging table for raw extracted job postings before they are evaluated.
+CREATE TABLE IF NOT EXISTS raw_jobs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    company_name VARCHAR(255) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    source VARCHAR(50) NOT NULL,
+    raw_description TEXT NOT NULL,
+    salary_range VARCHAR(100),
+    location VARCHAR(150),
+    posted_date DATE DEFAULT CURRENT_DATE,
+    careers_portal_url VARCHAR(512) NOT NULL,
+    processed BOOLEAN DEFAULT FALSE,
+    processed_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Ensure is_top_ten column is added if table exists
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_top_ten BOOLEAN DEFAULT FALSE;
 
 -- Table: agent_tool_logs
 -- Logs the tool calls made during Gemini multi-stage evaluation pipelines.
@@ -127,10 +159,12 @@ SELECT
     politics_stress_avg_score AS politics_index
 FROM companies
 WHERE nd_friendly_avg_score >= 70 AND politics_stress_avg_score < 40
+  AND EXISTS (SELECT 1 FROM jobs WHERE jobs.company_id = companies.id)
 ORDER BY nd_friendly_avg_score DESC;
 
 -- View 2: High Risk / Toxic Culture Blacklist for auDHD Folks
 -- Low environmental score, high politics, high sensory overload, heavy micromanagement
+-- Hard rule: only can be blacklisted if the score is low (below 30% threshold: nd_friendly <= 30 or politics >= 70)
 CREATE OR REPLACE VIEW nd_blacklisted_companies AS
 SELECT 
     id,
@@ -142,7 +176,8 @@ SELECT
     sensory_overload_avg_index AS sensory_hazard_index,
     nd_friendly_avg_score AS nd_score
 FROM companies
-WHERE politics_stress_avg_score >= 60 OR nd_friendly_avg_score <= 40
+WHERE (politics_stress_avg_score >= 70 OR nd_friendly_avg_score <= 30)
+  AND EXISTS (SELECT 1 FROM jobs WHERE jobs.company_id = companies.id)
 ORDER BY politics_stress_avg_score DESC;
 
 -- ====================================================================
