@@ -8,7 +8,7 @@ export const CANDIDATE_PROFILE = {
   name: "Elena Okhonko",
   age: 44,
   experienceYears: 20,
-  workplacePreference: "High-Autonomy Technical Founder & SME Builder",
+  workplacePreference: "High-Autonomy Technical Architect & SME Builder",
   targetCompSgdMonth: 22000,
   maxTravelPercentage: 10,
   maxOfficeDaysPerWeek: 3,

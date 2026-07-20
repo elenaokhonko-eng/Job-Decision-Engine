@@ -1,10 +1,10 @@
-# Job Decision Engine — High-Autonomy Tech Founder & Builder Career Architect
+# Job Decision Engine — High-Autonomy Technical Architect & Builder
 
 [![Deploy to Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io)
 [![GitHub License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js CI](https://github.com/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/job_ingestion_cron.yml/badge.svg)](https://github.com/elenaokhonko-eng/Job-Decision-Engine/actions)
 
-An automated, multi-stage **AI Career Architect & Workplace Evaluation Engine** designed for **Technical Founders, Software Architects, and High-Autonomy Builders**. 
+An automated, multi-stage **AI Career Architect & Workplace Evaluation Engine** designed for **Software Architects, SME Engineers, and High-Autonomy Builders**. 
 
 This system ingests job descriptions directly from **Gmail Job Alerts** (LinkedIn, MyCareersFuture, eFinancialCareers), parses live careers portal URLs, stages raw records in a serverless PostgreSQL vault ([Neon.tech](https://neon.tech)), and evaluates each opportunity through a weighted multi-axis AI agent (powered by LLM APIs).
 

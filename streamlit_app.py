@@ -242,7 +242,7 @@ jobs_list = fetch_jobs_from_db()
 
 # Title
 st.title("💼 Job Decision Engine — Streamlit Console")
-st.markdown("### *Multi-Stage Weighted High-Autonomy Tech Founder & Builder Career Architect*")
+st.markdown("### *Multi-Stage Weighted High-Autonomy Technical Architect & Builder Console*")
 st.markdown("---")
 
 # Sidebar - Filters & Stats
