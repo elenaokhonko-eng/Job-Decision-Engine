@@ -1,114 +1,169 @@
-# Job Decision Engine - Multi-Stage Weighted AI Agent
+# Job Decision Engine — High-Autonomy Tech Founder & Builder Career Architect
 
-Welcome to the **Job Decision Engine** dashboard! This full-stack application is custom-built to automate the tracking, filtering, ranking, and strategic evaluation of job advertisements from **LinkedIn**, **MyCareersFuture.gov.sg**, and **eFinancialCareers**. 
+[![Deploy to Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io)
+[![GitHub License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node.js CI](https://github.com/elenaokhonko-eng/Jobs-Description-Ranking-for-Neurodivergent-Profiles/actions/workflows/job_ingestion_cron.yml/badge.svg)](https://github.com/elenaokhonko-eng/Jobs-Description-Ranking-for-Neurodivergent-Profiles/actions)
 
-It is tailored for a highly specialized 44-year-old 2E auDHD executive technologist with 20+ years of IT architecture experience, bridging immediate financial milestones (accumulating an additional $1M SGD over 3–4 years in FinTech) with long-term scientific research aspirations (a transition toward a pharmaceutical or botanical bio-tech PhD in the Netherlands).
+An automated, multi-stage **AI Career Architect & Workplace Evaluation Engine** designed for **Technical Founders, Software Architects, and High-Autonomy Builders**. 
 
----
-
-## 🧭 How an Agent Differs from a Single Prompt → Response Call
-
-In traditional generative AI applications, a user makes a **single prompt → response call**. The LLM receives static text, evaluates it against its static pre-trained weights, and yields an output. It cannot look up real-time facts, search databases, or perform calculations beyond its immediate context window.
-
-An **AI Agent**, however, is **autonomous and action-driven**:
-1. **Dynamic Execution Loop**: Instead of immediately answering, the LLM analyzes the query and decides whether it needs extra information.
-2. **Tool-Calling Capabilities**: The agent is equipped with native tools. In this application, the agent has access to:
-   - `queryDatabaseForJobs`: A tool to query our persistent simulated Postgres database for job vacancies.
-   - `fetchExternalMarketRates`: A tool that calls an external REST API (fetching Bitcoin prices from Coindesk as an integration proof, plus loading localized monthly salary statistics for Singapore).
-3. **Multi-Turn Reasoning**: The agent calls these tools, processes their returns, and feeds the resulting context back into its reasoning loop. It iterates until it has all necessary data to formulate a fully grounded, multi-stage assessment.
+This system ingests job descriptions directly from **Gmail Job Alerts** (LinkedIn, MyCareersFuture, eFinancialCareers), parses live careers portal URLs, stages raw records in a serverless PostgreSQL vault ([Neon.tech](https://neon.tech)), and evaluates each opportunity through a weighted multi-axis AI agent (powered by LLM APIs).
 
 ---
 
-## 🛠️ Multi-Stage Weighted Decision Engine
+## 🎯 What the Engine Evaluates
 
-To protect the candidate’s cognitive and physical well-being (managing auDHD sensory and political load), the agent routes and scores every job description through three logical gates:
+The engine rates opportunities on a **100-Point Scale** tailored for high-focus technical experts who thrive in low-bureaucracy, high-autonomy environments.
 
-### Gate 1: Absolute Disqualifiers (Pass/Fail)
-The role is instantly set to `REJECTED` (with a score of 0) if it triggers any high-stress or client-wrangling parameters:
-* Travel exceeding 10%.
-* Traditional non-coding Program/Project Management or Scrum Master profiles.
-* Sales, Presales, or quota-carrying relationship management.
-* Office attendance exceeding 3 days per week (unless in a pure lab environment).
-* High organizational politics, ambiguity, or heavy presentation overhead.
+### ⚖️ Weighted Evaluation Axes (100 Points Total)
 
-### Gate 2: Dual-Track Domain Routing
-Categorizes valid roles into:
-* **Track A (Capital Accumulation)**: Institutional finance, asset management AI, or RegTech (Base target ≥ $20,000 SGD/month).
-* **Track B (Research Pivot)**: Bioinformatics, pharmaceutical research, or agricultural/plant data analysis.
-
-### Gate 3: Weighted Multi-Point Scoring (100-Point Scale)
-Scores opportunities across 5 distinct axes:
-1. **Technical & Creative Autonomy (30%)**: Hands-on systems, Python, agentic RAG.
-2. **Compensation & Capital Accumulation (25%)**: Top-tier bands aligned with the $1M goal.
-3. **Domain Relevance (20%)**: Direct alignment with Track A or Track B.
-4. **Environment & Biological Guardrails (15%)**: Autonomy, asynchronous culture, low politics.
-5. **Future-Proofing & Netherlands Mobility (10%)**: Ties to European markets, EU AI Act, or academia.
+| Axis | Weight | Key Evaluation Criteria |
+|---|:---:|---|
+| **1. Environmental & Biological Guardrails** | **30%** | WFH/Remote flexibility, asynchronous communication culture, minimal forced social/sensory overload, low office politics. |
+| **2. Technical & Creative Autonomy** | **25%** | SME expert authority, hands-on architecture, modern stack (FE, BE, DB/SQL), complex solutioning. Exclusion of micromanagement, low-frequency coding, or legacy C/C++ roles. |
+| **3. Domain Relevance & Impact** | **20%** | **Track A**: Institutional finance, private banking, wealth management, supranational funds (GIC/Temasek), AI startups.<br>**Track B**: Bioinformatics, pharmaceutical research, and plant-based medical research. |
+| **4. Compensation & Capital Potential** | **15%** | Alignment with high-yield executive/SME pay bands (Baseline ≥ SGD $22,000 / month). |
+| **5. Future-Proofing & Domain Growth** | **10%** | Growth domain trajectory (AI, ML, Data Science vs dying technical domains), industry growth trajectory, and job-specific career progression. |
 
 ---
 
-## 🧪 How to Know It Still Works
+### 🚫 Automatic Disqualifiers & Red Flags (Score forced to 0)
 
-We have implemented a dual-layer validation framework to ensure total operational safety.
+The engine automatically **REJECTS** opportunities that exhibit high administrative overhead or restrictive organizational structures:
 
-### 1. Unit & Integration Tests (Vitest)
-Run the test suite using:
+1. **Restricted Entities**:
+   - Local Singapore Retail/Commercial Banks (*DBS, UOB, OCBC*).
+   - Specific Insurance / Asset Managers (*AIA, AIAIM*).
+   - Specific Recruitment Agency Postings (*Argyll Scott*).
+2. **High-Stress Operational Overheads**:
+   - Heavy stakeholder management without formal authority.
+   - High non-reportee influence overhead.
+   - Dual-hat roles requiring technical engineering + quota-carrying sales/presales.
+   - Travel requirements exceeding 10–15%.
+
+---
+
+## 🏗️ System Architecture
+
+```
+                    ┌─────────────────────────┐
+                    │   Gmail Job Alerts      │
+                    └───────────┬─────────────┘
+                                │ (IMAP Sync)
+                                ▼
+                    ┌─────────────────────────┐
+                    │  Serverless Postgres    │
+                    │   (raw_email_alerts)    │
+                    └───────────┬─────────────┘
+                                │ (URL Extraction)
+                                ▼
+                    ┌─────────────────────────┐
+                    │      raw_jobs           │
+                    │    Staging Table        │
+                    └───────────┬─────────────┘
+                                │ (Kimi AI Evaluation)
+                                ▼
+                    ┌─────────────────────────┐
+                    │       jobs &            │
+                    │    companies Vault      │
+                    └───────────┬─────────────┘
+                                │ (Live Analytics)
+                                ▼
+                    ┌─────────────────────────┐
+                    │   Streamlit Console     │
+                    └─────────────────────────┘
+```
+
+---
+
+## 🛠️ Production Deployment Guide (Streamlit Community Cloud)
+
+You can deploy the Streamlit Console to **Streamlit Community Cloud (`share.streamlit.io`)** for **FREE** in under 3 minutes:
+
+### Step 1: Fork & Push Code to GitHub
+Fork this repository to your GitHub account.
+
+### Step 2: Connect Streamlit Community Cloud
+1. Navigate to **[share.streamlit.io](https://share.streamlit.io)** and log in with GitHub.
+2. Click **"Create app"** $\rightarrow$ **"Use existing repo"**.
+3. Select your repository (`your-username/Jobs-Description-Ranking-for-Neurodivergent-Profiles`).
+4. Set **Main file path** to `streamlit_app.py`.
+
+### Step 3: Configure Streamlit Cloud Secrets
+In the deployment setup screen, click **"Advanced settings..."** $\rightarrow$ **"Secrets"**, and paste your environment variables in TOML format:
+
+```toml
+DATABASE_URL = "postgresql://neondb_owner:YOUR_NEON_PASSWORD@ep-xxx.neon.tech/neondb?sslmode=require"
+GEMINI_API_KEY = "sk-kimi-YOUR_API_KEY"
+KIMI_MODEL = "moonshot-v1-8k"
+GMAIL_USER = "your.email@gmail.com"
+GMAIL_APP_PASSWORD = "your-16-char-app-password"
+GMAIL_FOLDER = "Jobs-Alerts"
+GMAIL_PROCESSED_FOLDER = "Jobs-Alerts-Processed"
+```
+
+5. Click **"Deploy!"** Your app will be live on your custom `https://your-app.streamlit.app` URL.
+
+---
+
+## 💻 Local Self-Hosting & Forking Guide
+
+Follow these steps to run the engine on your local machine:
+
+### 1. Clone & Install Dependencies
 ```bash
+git clone https://github.com/elenaokhonko-eng/Jobs-Description-Ranking-for-Neurodivergent-Profiles.git
+cd Jobs-Description-Ranking-for-Neurodivergent-Profiles
+
+# Install Node.js dependencies
+npm install
+
+# Install Python dependencies (for Streamlit dashboard)
+pip install streamlit pandas psycopg2-binary
+```
+
+### 2. Configure Environment (`.env.local`)
+Create a `.env.local` file in the root directory:
+
+```env
+DATABASE_URL="postgresql://neondb_owner:YOUR_PASSWORD@ep-xxx.neon.tech/neondb?sslmode=require"
+GEMINI_API_KEY="sk-kimi-YOUR_KIMI_OR_GEMINI_KEY"
+KIMI_MODEL="moonshot-v1-8k"
+GMAIL_USER="your.email@gmail.com"
+GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
+GMAIL_FOLDER="Jobs-Alerts"
+GMAIL_PROCESSED_FOLDER="Jobs-Alerts-Processed"
+```
+
+### 3. Setup Database (Neon Postgres or Supabase)
+Initialize database schema tables by running:
+```bash
+npm run db:init
+```
+
+### 4. Setup Gmail Job Alerts Label
+1. Log into Gmail $\rightarrow$ Settings $\rightarrow$ Labels $\rightarrow$ Create label **`Jobs-Alerts`**.
+2. Create label **`Jobs-Alerts-Processed`**.
+3. Generate a 16-character **App Password** under Google Account Security $\rightarrow$ 2-Step Verification $\rightarrow$ App Passwords.
+
+### 5. Launch Local Console
+```bash
+streamlit run streamlit_app.py
+```
+Open `http://localhost:8501` in your browser.
+
+---
+
+## 🧪 Testing & Validation
+
+```bash
+# Run unit test suite (Vitest)
 npm run test
-```
-The suite runs 5 high-value sequential tests:
-* **Test 1: Seed Read Verification**: Guarantees that our persistent simulated Postgres database initializes and reads seeded job entries correctly.
-* **Test 2: Add Job (Write path)**: Ensures that custom-pasted or imported job advertisements are successfully added to the database.
-* **Test 3: Delete Job (Delete path)**: Protects against data retention issues and verifies record cleanup.
-* **Test 4: Interaction Logger**: Verifies that every question, selected tool, and final structured response is logged to the Postgres-like audit trail.
-* **Test 5: Loud-Fail Config Guard**: Simulates a blank environment to ensure the app fails loud immediately with a helpful configuration warning if `GEMINI_API_KEY` is missing.
 
-### 2. LLM Evaluations (`llm-evals`)
-Run the evaluation harness using:
-```bash
-npx tsx scripts/run_evals.ts
+# Run LLM evaluation benchmark harness
+npm run eval:golden
 ```
-**Why Evals Differ from Unit Tests**: 
-* A unit test checks if the *code* compiles and returns a status. The code can be 100% correct while the AI's *answers* are poor, off-target, or hallucinated.
-* The evaluation harness sends **10 Golden Questions** from `golden_questions.yaml` to the live agent and asserts logical properties of the response (verifies JSON schema integrity, min/max score constraints, presence of disqualifiers, and track routing correctness) rather than matching exact strings. It prints a pass/fail scorecard.
 
 ---
 
-## 📂 Configuration and Workspace Rules
-
-This workspace includes an `.agents/` configuration containing:
-* **`rules/explain-before-fix.md`**: Enforces explaining the root cause of compilation or logic bugs before proposing any visual edits.
-* **`rules/cite-the-code.md`**: Mandates citing specific lines and files during reviews.
-* **`skills/`**: Customized helper guides for request tracing (`trace-request.md`), code reviews (`code-quality-review.md`), and codebase training (`teach-this-code.md`).
-
----
-
-## 🚀 Quick Start
-
-You can run the application either as a highly responsive **React + Express SPA** or as a **Python Streamlit Dashboard**. Both environments read and update the exact same file-backed simulated PostgreSQL database database (`data/postgres_db.json`)!
-
-### Choice A: Custom React + Express Web App (Default)
-
-1. **Verify Setup**:
-   ```bash
-   ./scripts/verify_setup.sh
-   ```
-2. **Run Development Mode** (Vite + Express on Port 3000):
-   ```bash
-   npm run dev
-   ```
-3. **Compile / Build**:
-   ```bash
-   npm run build
-   ```
-
-### Choice B: Python Streamlit Dashboard (Companion Console)
-
-Perfect for Python developers or quick Streamlit-native cloud deployment:
-1. **Install Dependencies**:
-   ```bash
-   pip install streamlit pandas
-   ```
-2. **Run Streamlit Server**:
-   ```bash
-   streamlit run streamlit_app.py
-   ```
+## 📜 License
+Distributed under the **MIT License**. See `LICENSE` for more information.

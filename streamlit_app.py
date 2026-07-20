@@ -9,8 +9,18 @@ import datetime
 import pandas as pd
 import streamlit as st
 
-# Load environment variables from .env and .env.local if present
+# Load environment variables from Streamlit secrets, .env, and .env.local
 def load_dotenv():
+    # Load from Streamlit Cloud Secrets if available
+    try:
+        if hasattr(st, "secrets") and st.secrets:
+            for key, val in st.secrets.items():
+                if isinstance(val, str):
+                    os.environ[key] = val
+    except Exception:
+        pass
+
+    # Load from local .env and .env.local files
     for filename in [".env", ".env.local"]:
         if os.path.exists(filename):
             with open(filename, "r", encoding="utf-8") as f:
@@ -18,16 +28,16 @@ def load_dotenv():
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         key, val = line.split("=", 1)
-                        # Strip quotes if present
                         val = val.strip("'\"")
-                        os.environ[key.strip()] = val
+                        if key.strip() not in os.environ:
+                            os.environ[key.strip()] = val
 
 load_dotenv()
 
 
 # Configure the page setting with modern style
 st.set_page_config(
-    page_title="Job Decision Engine - auDHD Career Architect",
+    page_title="Job Decision Engine - High-Autonomy Career Architect",
     page_icon="💼",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -438,19 +448,19 @@ with tab_dashboard:
             with col2:
                 st.metric("Politics Stress Score", f"{job_to_show.get('politics_stress_score')}%")
             with col3:
-                st.metric("Sensory Overload Index", f"{job_to_show.get('sensory_overload_index')}%")
+                st.metric("Environmental Stress Index", f"{job_to_show.get('sensory_overload_index')}%")
 
             st.markdown("#### **Evaluation Axes Breakdown**")
             st.json({
-                "Technical & Creative Autonomy (30%)": f"{job_to_show.get('score_technical_autonomy') or 0} pts",
-                "Compensation & Capital Potential (25%)": f"{job_to_show.get('score_compensation_potential') or 0} pts",
+                "Environmental & Biological Guardrails (30%)": f"{job_to_show.get('score_environment_guardrails') or 0} pts",
+                "Technical & Creative Autonomy (25%)": f"{job_to_show.get('score_technical_autonomy') or 0} pts",
                 "Domain Relevance (20%)": f"{job_to_show.get('score_domain_relevance') or 0} pts",
-                "Environment & Biological Guardrails (15%)": f"{job_to_show.get('score_environment_guardrails') or 0} pts",
-                "Future-Proofing & Netherlands Mobility (10%)": f"{job_to_show.get('score_future_mobility') or 0} pts"
+                "Compensation & Capital Potential (15%)": f"{job_to_show.get('score_compensation_potential') or 0} pts",
+                "Future-Proofing & Domain Growth (10%)": f"{job_to_show.get('score_future_mobility') or 0} pts"
             })
 
-            st.markdown("#### **Nervous System & Strategy Assessment**")
-            st.info(f"**Biological Stress Assessment:**\n{job_to_show.get('biological_stress_risk') or 'N/A'}")
+            st.markdown("#### **Workplace & Strategic Assessment**")
+            st.info(f"**Workplace Stress & Politics Risk:**\n{job_to_show.get('biological_stress_risk') or 'N/A'}")
             st.success(f"**Strategic Career Value:**\n{job_to_show.get('strategic_value') or 'N/A'}")
             
             st.markdown(f"**Target Application Strategy:**")
@@ -461,7 +471,7 @@ with tab_dashboard:
 
 with tab_add_job:
     st.subheader("➕ Import a New Job Advertisement")
-    st.write("Add raw jobs manually to the Postgres Vault. The overnight daily evaluation cron job will automatically score and route them.")
+    st.write("Add raw jobs manually to the Postgres Vault. The daily evaluation cron job will automatically score and route them.")
     with st.form("custom_job_form"):
         title = st.text_input("Job Title", "Principal AI Architect")
         company = st.text_input("Company Name", "Novartis Pharmaceuticals")
@@ -487,7 +497,7 @@ with tab_add_job:
                 st.rerun()
 
 with tab_analytics:
-    st.subheader("🔥 Neurodivergent Company Analytics")
+    st.subheader("🔥 Company Autonomy & Culture Analytics")
     st.write("Consolidated employer ratings compiled directly from Postgres database tables.")
 
     analytics_data = fetch_company_analytics_from_db()
@@ -498,9 +508,9 @@ with tab_analytics:
         # Map safety verdicts
         def get_verdict(row):
             if row["Approved"]:
-                return "🟢 APPROVED FOCUS ENVIRONMENT"
+                return "🟢 HIGH AUTONOMY / OPTIMAL FOCUS"
             elif row["Toxic"]:
-                return "🔴 HIGH POLITICS / TOXIC"
+                return "🔴 HIGH POLITICS / BUREAUCRATIC"
             else:
                 return "🟡 REVIEW REQUIRED"
                 
