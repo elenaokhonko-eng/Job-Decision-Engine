@@ -140,8 +140,8 @@ def delete_job_from_db(job_id):
                 avgPol = float(stats[1])
                 avgSens = float(stats[2])
                 avgFocus = float(stats[3])
-                isApproved = avgND >= 70 and avgPol < 40
-                isToxic = avgPol >= 70 or avgND <= 30
+                isApproved = avgND >= 70 and avgPol < 50
+                isToxic = avgPol >= 70 or avgND < 50
                 
                 cursor.execute("""
                     UPDATE companies SET
@@ -178,31 +178,22 @@ def save_new_job_to_db(job):
             company_id = row[0]
         else:
             industry = "Life Sciences & Biotech" if "bio" in job["title"].lower() or "pharma" in job["title"].lower() else "Institutional Finance & Asset AI"
-            cursor.execute("""
-                INSERT INTO raw_companies (name, industry, website_url, careers_page_url)
-                VALUES (%s, %s, %s, %s) RETURNING id
-            """, (
-                job["company"],
-                industry,
-                f"https://www.{job['company'].lower().replace(' ', '')}.com",
-                job["careers_portal_url"]
-            ))
+            cursor.execute("INSERT INTO raw_companies (name, industry) VALUES (%s, %s) RETURNING id", (job["company"], industry))
             company_id = cursor.fetchone()[0]
 
-        # Insert raw job
         cursor.execute("""
             INSERT INTO raw_jobs (
-                company_name, title, source, raw_description, salary_range, location, posted_date, careers_portal_url, processed
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+                company_name, title, source, raw_description, salary_range, location, careers_portal_url, processed
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
         """, (
             job["company"], job["title"], job["source"], job["description"],
-            job["salaryRange"], job["location"], job["postedDate"], job["careers_portal_url"]
+            job.get("salaryRange"), job.get("location", "Singapore"), job["careers_portal_url"]
         ))
         
         conn.commit()
         cursor.close()
         conn.close()
-        st.success(f"Successfully saved {job['title']} to the Raw Jobs Vault. The next daily evaluation will score and finalize this role.")
+        st.success(f"Successfully added '{job['title']}' to Staging Vault for AI evaluation!")
         return True
     except Exception as e:
         st.error(f"Failed to save job: {e}")
@@ -247,7 +238,7 @@ st.sidebar.header("🎯 Navigation & Filters")
 total_jobs = len(jobs_list)
 evaluated_count = sum(1 for j in jobs_list if j.get("status") and j.get("status") != "UNASSIGNED")
 approved_count = sum(1 for j in jobs_list if j.get("status") == "STRONG MATCH")
-toxic_count = sum(1 for j in jobs_list if j.get("politics_stress_score", 0) >= 70 or j.get("nd_friendly_score", 100) <= 30)
+toxic_count = sum(1 for j in jobs_list if j.get("politics_stress_score", 0) >= 70 or j.get("nd_friendly_score", 100) < 50)
 
 st.sidebar.subheader("📊 Engine Statistics")
 st.sidebar.metric("Total Vault Jobs", total_jobs)

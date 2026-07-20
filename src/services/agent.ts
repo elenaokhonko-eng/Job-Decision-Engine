@@ -410,25 +410,32 @@ ${HARD_DISQUALIFIERS.map((dis, idx) => `- ${dis}`).join("\n")}
 
 #### STAGE 2: DUAL-TRACK HORIZON ROUTING
 Identify whether the role serves:
-- **Track A (Finance/AI)**: High-earning hands-on architecture in fintech, capital management, and RAG pipelines.
-- **Track B (Pharma/Research)**: Roles in botanical/plant-based data analytics, biochemistry, or bioinformatics targeting Netherlands PhD mobility.
+- **Track A (Finance/AI)**: Private banks, wealth management, supranational fund managers (GIC, Temasek), top 20 global fund managers & banks (especially European banks & insurers), investment management, hedge funds, growth-stage AI startups, and major tech firms. Exclude local banks (DBS, UOB, OCBC), AIA/AIAIM, and agency recruiter posts from Argyll Scott.
+- **Track B (Pharma/Medical/Research)**: Roles in medical firms, pharmaceuticals, bioinformatics, or plant-based medical research. **Assign a higher score weighting boost to Track B if it involves plant-based medical research.**
 - **Neither**
 
 #### STAGE 3: MULTI-POINT SCORING (100-Point Scale)
 Evaluate and assign weights based on these customizable axes:
-1. **Technical & Creative Autonomy**: Max ${EVALUATION_WEIGHTS.technical_autonomy.maxPoints} pts. (${EVALUATION_WEIGHTS.technical_autonomy.description})
-2. **Compensation & Capital Potential**: Max ${EVALUATION_WEIGHTS.compensation_potential.maxPoints} pts. (${EVALUATION_WEIGHTS.compensation_potential.description})
+1. **Environment & Biological Guardrails**: Max ${EVALUATION_WEIGHTS.environment_guardrails.maxPoints} pts. (${EVALUATION_WEIGHTS.environment_guardrails.description})
+2. **Technical & Creative Autonomy**: Max ${EVALUATION_WEIGHTS.technical_autonomy.maxPoints} pts. (${EVALUATION_WEIGHTS.technical_autonomy.description})
 3. **Domain Relevance**: Max ${EVALUATION_WEIGHTS.domain_relevance.maxPoints} pts. (${EVALUATION_WEIGHTS.domain_relevance.description})
-4. **Environment & Biological Guardrails**: Max ${EVALUATION_WEIGHTS.environment_guardrails.maxPoints} pts. (${EVALUATION_WEIGHTS.environment_guardrails.description})
-5. **Future-Proofing & Netherlands Mobility**: Max ${EVALUATION_WEIGHTS.future_mobility.maxPoints} pts. (${EVALUATION_WEIGHTS.future_mobility.description})
+4. **Compensation & Capital Potential**: Max ${EVALUATION_WEIGHTS.compensation_potential.maxPoints} pts. (${EVALUATION_WEIGHTS.compensation_potential.description})
+5. **Future-Proofing**: Max ${EVALUATION_WEIGHTS.future_mobility.maxPoints} pts. (${EVALUATION_WEIGHTS.future_mobility.description})
+
+#### STATUS ASSIGNMENT CUT-OFF TARGETS:
+- **STRONG MATCH**: Total Score > 70 (and 0 hard disqualifiers triggered).
+- **REVIEW REQUIRED**: Total Score between 50 and 70.
+- **REJECTED**: Total Score < 50 OR any Hard Disqualifier triggered (force total_score to 0).
 
 ---
 
 ### NEURODIVERGENT (ND) CULTURE ANALYTICS EVALUATION:
 You must grade the following indicators (0 to 100) based on raw job context and neurodivergent safety cues:
-- **nd_friendly_score**: Safe focus blocks, async communication, written specifications, low performance theater, direct logical culture. (Matches: ${ND_CULTURE_CRITERIA.highSupportiveFactors.join(", ")})
-- **politics_stress_score**: High meeting overhead, corporate alignment theater, sales/presales tasks, micromanagement, high sensory overwhelm. (Matches: ${ND_CULTURE_CRITERIA.highToxicFactors.join(", ")})
+- **nd_friendly_score**: Safe focus blocks, async communication, written specifications, low performance theater, direct logical culture. Target: >= 70. (Matches: ${ND_CULTURE_CRITERIA.highSupportiveFactors.join(", ")})
+- **politics_stress_score**: High meeting overhead, corporate alignment theater, micromanagement, managing stakeholders without authority, influencing non-reportees, or wearing dual hats (acting as both technical specialist and sales/client representative simultaneously). Target: < 50. (Matches: ${ND_CULTURE_CRITERIA.highToxicFactors.join(", ")})
 - **sensory_overload_index**: High office attendance requirement, loud environments, constant video calls, or heavy on-site travel schedules.
+
+*Note: Blacklist threshold is politics_stress_score >= 70 OR nd_friendly_score < 50.*
 
 ---
 

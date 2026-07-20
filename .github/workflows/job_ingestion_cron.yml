@@ -7,9 +7,9 @@ on:
   workflow_dispatch: # Allows manual triggering from the GitHub Actions UI
 
 jobs:
-  ingest-and-evaluate:
+  ingest-raw-gmail-alerts:
+    name: 1. Ingest Raw Gmail Job Alerts
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v4
@@ -32,6 +32,14 @@ jobs:
           GMAIL_FOLDER: ${{ secrets.GMAIL_FOLDER }}
         run: python scripts/ingest_gmail.py
 
+  evaluate-jobs-kimi:
+    name: 2. Evaluate Staged Jobs via Kimi AI Engine
+    needs: ingest-raw-gmail-alerts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -45,4 +53,5 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          KIMI_MODEL: ${{ secrets.KIMI_MODEL }}
         run: npx tsx scripts/evaluate_jobs.ts

@@ -46,8 +46,8 @@ def main():
         if status != "OK":
             raise Exception(f"Failed to select mailbox folder '{gmail_folder}'. Please make sure this label exists in Gmail.")
 
-        # Search for UNREAD messages
-        status, search_data = mail.search(None, "UNSEEN")
+        # Search for ALL messages in the Jobs-Alerts folder
+        status, search_data = mail.search(None, "ALL")
         if status != "OK":
             print("No unread messages found.")
             mail.logout()

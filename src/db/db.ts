@@ -304,8 +304,8 @@ async function updateCompanyRatings(companyId: string) {
     const avgSens = r.avg_sens ? parseFloat(r.avg_sens) : 0.00;
     const avgFocus = r.avg_focus ? parseFloat(r.avg_focus) : 0.00;
 
-    const isApproved = avgND >= 70 && avgPol < 40;
-    const isToxic = avgPol >= 70 || avgND <= 30;
+    const isApproved = avgND >= 70 && avgPol < 50;
+    const isToxic = avgPol >= 70 || avgND < 50;
 
     await pool.query(
       `UPDATE companies SET
@@ -345,6 +345,18 @@ class PostgresDatabase {
     }
     if (!job.confidence_level) {
       throw new Error("Cannot insert job into the final jobs table without a valid confidence_level.");
+    }
+
+    // Check for existing job to prevent duplicate rows in jobs table
+    const existingJob = await pool.query(
+      "SELECT id FROM jobs WHERE (company_name = $1 AND title = $2) OR careers_portal_url = $3",
+      [job.company, job.title, job.careers_portal_url]
+    );
+    if (existingJob.rows.length > 0) {
+      const existingId = existingJob.rows[0].id;
+      await this.updateJobEvaluation(existingId, job);
+      const updated = await pool.query("SELECT * FROM jobs WHERE id = $1", [existingId]);
+      return mapRowToJob(updated.rows[0]);
     }
 
     // Strictly validate the careers_portal_url before inserting
@@ -524,6 +536,20 @@ class PostgresDatabase {
   }
 
   public async addRawJob(job: Omit<RawJob, "id" | "processed" | "processed_at" | "created_at">): Promise<RawJob> {
+    // Populate raw_companies table automatically
+    if (job.company_name) {
+      const industry = job.title.toLowerCase().includes("bio") || job.title.toLowerCase().includes("pharma") ? "Life Sciences & Biotech" : "Institutional Finance & Asset AI";
+      await pool.query(
+        "INSERT INTO raw_companies (name, industry, website_url, careers_page_url) VALUES ($1, $2, $3, $4) ON CONFLICT (name) DO NOTHING",
+        [
+          job.company_name,
+          industry,
+          `https://www.${job.company_name.toLowerCase().replace(/[^a-z0-9]/g, "")}.com`,
+          job.careers_portal_url
+        ]
+      );
+    }
+
     const res = await pool.query(
       `INSERT INTO raw_jobs (company_name, title, source, raw_description, salary_range, location, posted_date, careers_portal_url, processed)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE) RETURNING *`,

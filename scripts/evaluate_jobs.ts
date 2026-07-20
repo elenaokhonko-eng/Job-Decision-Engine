@@ -26,6 +26,16 @@ async function runPipeline() {
   }
 
   try {
+    // 0. Clean up any duplicate jobs in the final jobs table
+    console.log("Deduplicating any existing duplicate records in final jobs table...");
+    await pool.query(`
+      DELETE FROM jobs j1
+      USING jobs j2
+      WHERE j1.id < j2.id
+        AND j1.company_name = j2.company_name
+        AND j1.title = j2.title
+    `);
+
     // 1. Fetch unprocessed raw email alerts
     console.log("Querying database for unprocessed raw email alerts...");
     const emailRes = await pool.query(
@@ -191,6 +201,15 @@ Return nothing other than the JSON block.`;
             const mobilityScore = (evalResult as any).score_future_mobility ?? evalResult.score_breakdown?.future_mobility?.score ?? 0;
             const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || null;
 
+            let finalStatus = evalResult.status;
+            if (evalResult.total_score > 70 && finalStatus !== "REJECTED") {
+              finalStatus = "STRONG MATCH";
+            } else if (evalResult.total_score >= 50 && finalStatus !== "REJECTED") {
+              finalStatus = "REVIEW REQUIRED";
+            } else {
+              finalStatus = "REJECTED";
+            }
+
             // Insert into the final jobs/companies table
             const finalJob = await db.addJob({
               title: rawJob.title,
@@ -201,7 +220,7 @@ Return nothing other than the JSON block.`;
               location: rawJob.location || undefined,
               careers_portal_url: rawJob.careers_portal_url,
               postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-              status: evalResult.status,
+              status: finalStatus,
               assigned_track: evalResult.assigned_track,
               confidence_level: evalResult.confidence_level,
               total_score: evalResult.total_score,
