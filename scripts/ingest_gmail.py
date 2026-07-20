@@ -127,11 +127,16 @@ def main():
             # Mark email as read by adding the \Seen flag
             mail.store(mail_id, "+FLAGS", "\\Seen")
             
-            # Copy to processed folder (label)
-            mail.copy(mail_id, gmail_processed_folder)
-            
-            # Mark as deleted in current folder (removing the Jobs-Alerts label)
-            mail.store(mail_id, "+FLAGS", "\\Deleted")
+            # Use Gmail native IMAP label management to cleanly move the message:
+            # 1. Add destination label (Jobs-Alerts-Processed)
+            # 2. Remove source label (Jobs-Alerts)
+            try:
+                mail.store(mail_id, "+X-GM-LABELS", f'"{gmail_processed_folder}"')
+                mail.store(mail_id, "-X-GM-LABELS", f'"{gmail_folder}"')
+            except Exception as label_err:
+                # Fallback for standard non-Gmail IMAP servers
+                mail.copy(mail_id, gmail_processed_folder)
+                mail.store(mail_id, "+FLAGS", "\\Deleted")
             
             count += 1
 
@@ -140,7 +145,10 @@ def main():
         conn.close()
 
         # Permanently remove marked messages from current folder
-        mail.expunge()
+        try:
+            mail.expunge()
+        except Exception:
+            pass
 
         print(f"✅ Successfully ingested {count} raw email alerts to Postgres and moved to '{gmail_processed_folder}'.")
         
