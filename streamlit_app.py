@@ -1,4 +1,8 @@
 import os
+import sys
+import subprocess
+import urllib.request
+import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import datetime
@@ -245,6 +249,56 @@ st.sidebar.metric("Total Vault Jobs", total_jobs)
 st.sidebar.metric("Fully Evaluated", evaluated_count)
 st.sidebar.metric("Top Recommended (Strong)", approved_count)
 st.sidebar.metric("Toxicity Flags", toxic_count)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("⚡ Unscheduled Action")
+if st.sidebar.button("🚀 Start Ingestion & AI Evaluation", help="Runs immediate Gmail alert ingestion and Kimi AI evaluation pipeline without opening GitHub."):
+    with st.spinner("Ingesting new Gmail job alerts and running Kimi AI evaluation..."):
+        # 1. Step 1: Run Gmail Ingestion
+        try:
+            python_exe = sys.executable or "python"
+            st.info("Step 1/2: Fetching new emails from 'Jobs-Alerts' folder...")
+            ingest_proc = subprocess.run([python_exe, "scripts/ingest_gmail.py"], capture_output=True, text=True, env=os.environ)
+            if ingest_proc.returncode == 0:
+                st.success("✅ Step 1/2 Complete: Gmail alert ingestion finished!")
+            else:
+                st.warning(f"Ingestion Note: {ingest_proc.stdout or ingest_proc.stderr}")
+        except Exception as e:
+            st.error(f"Ingestion Error: {e}")
+
+        # 2. Step 2: Run AI Evaluation Pipeline
+        try:
+            st.info("Step 2/2: Staging jobs and running Kimi AI evaluation engine...")
+            eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+            if eval_proc.returncode == 0:
+                st.success("✅ Step 2/2 Complete: Kimi AI evaluation finished!")
+            else:
+                st.info(f"Evaluation Details:\n{eval_proc.stdout}")
+        except Exception as e:
+            st.error(f"Evaluation Execution Error: {e}")
+
+        # 3. Optional: Trigger GitHub Actions remote dispatch if token exists
+        github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_PAT")
+        if github_token:
+            try:
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/elenaokhonko-eng/Jobs-Description-Ranking-for-Neurodivergent-Profiles/actions/workflows/job_ingestion_cron.yml/dispatches",
+                    data=json.dumps({"ref": "main"}).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {github_token}",
+                        "Accept": "application/vnd.github.v3+json",
+                        "User-Agent": "StreamlitConsole"
+                    },
+                    method="POST"
+                )
+                with urllib.request.urlopen(req) as resp:
+                    if resp.status in (204, 200, 201):
+                        st.success("🐙 Triggered GitHub Actions remote workflow run as well!")
+            except Exception as gh_err:
+                st.caption(f"GitHub Dispatch info: {gh_err}")
+
+        st.balloons()
+        st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔍 Filter Listings")
