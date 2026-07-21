@@ -53,5 +53,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           KIMI_MODEL: ${{ secrets.KIMI_MODEL }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
         run: npx tsx scripts/evaluate_jobs.ts

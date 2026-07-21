@@ -391,7 +391,7 @@ export async function runAgent(userQuestion: string): Promise<{ result: AgentRes
 - Name: ${CANDIDATE_PROFILE.name}
 - Age: ${CANDIDATE_PROFILE.age}
 - Experience: ${CANDIDATE_PROFILE.experienceYears}+ years in ${CANDIDATE_PROFILE.coreSkills[0]} and ${CANDIDATE_PROFILE.coreSkills[1]}.
-- Neurotype: ${CANDIDATE_PROFILE.neurotype}
+- Workplace Preference: ${CANDIDATE_PROFILE.workplacePreference}
 
 ### NON-NEGOTIABLE CRITERIA & GUARDRAILS:
 ${CANDIDATE_PROFILE.nonNegotiables.map((item, idx) => `${idx + 1}. ${item}`).join("\n")}
