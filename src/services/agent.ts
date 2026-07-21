@@ -491,14 +491,32 @@ Schema Structure:
   
   // 1. First Pass - Allow the model to decide if it wants to call tools
   const ai = getGeminiClient();
-  let response = await ai.models.generateContent({
-    model: "gemini-2.0-flash",
-    contents: userQuestion,
-    config: {
-      systemInstruction,
-      tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
-    },
-  });
+  let response: any;
+  try {
+    response = await ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: userQuestion,
+      config: {
+        systemInstruction,
+        tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
+      },
+    });
+  } catch (gErr: any) {
+    if (gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429) {
+      console.warn("⏳ Gemini rate limit reached. Waiting 60s before retrying...");
+      await new Promise((resolve) => setTimeout(resolve, 60000));
+      response = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: userQuestion,
+        config: {
+          systemInstruction,
+          tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
+        },
+      });
+    } else {
+      throw gErr;
+    }
+  }
 
   let functionCalls = response.functionCalls;
   let conversationHistory: any[] = [
