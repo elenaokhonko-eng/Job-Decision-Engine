@@ -12,10 +12,10 @@ let aiClient: GoogleGenAI | null = null;
 
 export function getGeminiClient(): GoogleGenAI {
   if (!aiClient) {
-    const apiKey = process.env.GEMINI_FLASH_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_FLASH_API_KEY || (!process.env.GEMINI_API_KEY?.startsWith("sk-") ? process.env.GEMINI_API_KEY : "");
     if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
       throw new Error(
-        "CRITICAL DATABASE OR API KEY CONFLICT: GEMINI_API_KEY / GOOGLE_API_KEY environment variable is not configured."
+        "CRITICAL API KEY CONFLICT: Neither GOOGLE_API_KEY nor GEMINI_API_KEY is configured for Gemini 2.0 Flash."
       );
     }
     aiClient = new GoogleGenAI({
@@ -154,60 +154,56 @@ export async function generateContent(options: {
   responseMimeType?: string;
   systemInstruction?: string;
 }): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
-    throw new Error(
-      "CRITICAL DATABASE OR API KEY CONFLICT: GEMINI_API_KEY environment variable is not configured. Please add GEMINI_API_KEY in the Secrets / Settings panel in the AI Studio UI."
-    );
-  }
+  const kimiKey = process.env.KIMI_API_KEY || (process.env.GEMINI_API_KEY?.startsWith("sk-") ? process.env.GEMINI_API_KEY : "");
 
-  const model = process.env.GEMINI_MODEL || options.model;
-  const isKimi = model.toLowerCase().includes("moonshot") || model.toLowerCase().includes("kimi") || apiKey.startsWith("sk-");
-
-  if (isKimi) {
-    const baseUrl = "https://api.kimi.com/coding/v1";
-    
-    const messages: any[] = [];
-    if (options.systemInstruction) {
-      messages.push({ role: "system", content: options.systemInstruction });
-    }
-    messages.push({ role: "user", content: options.contents });
-
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-        "User-Agent": "Claude-Code"
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 1,
-        response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
-      })
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
-    }
-
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || "";
-  } else {
-    // Normal Gemini flow
-    const ai = getGeminiClient();
-    const response = await ai.models.generateContent({
-      model: options.model,
-      contents: options.contents,
-      config: {
-        responseMimeType: options.responseMimeType as any,
-        systemInstruction: options.systemInstruction
+  if (kimiKey) {
+    try {
+      const baseUrl = "https://api.kimi.com/coding/v1";
+      const model = process.env.KIMI_MODEL || process.env.GEMINI_MODEL || "moonshot-v1-8k";
+      const messages: any[] = [];
+      if (options.systemInstruction) {
+        messages.push({ role: "system", content: options.systemInstruction });
       }
-    });
-    return response.text || "";
+      messages.push({ role: "user", content: options.contents });
+
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${kimiKey}`,
+          "User-Agent": "Claude-Code"
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: 1,
+          response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || "";
+    } catch (err: any) {
+      console.warn(`⚠️ Kimi generateContent failed: ${err.message || err}. Falling back to Gemini 2.0 Flash...`);
+    }
   }
+
+  // Normal Gemini flow fallback
+  const ai = getGeminiClient();
+  const response = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: options.contents,
+    config: {
+      responseMimeType: options.responseMimeType as any,
+      systemInstruction: options.systemInstruction
+    }
+  });
+  return response.text || "";
 }
 
 async function runKimiAgentInternal(
@@ -216,8 +212,8 @@ async function runKimiAgentInternal(
   trace: string[],
   toolsUsed: string[]
 ): Promise<AgentResult> {
-  const apiKey = process.env.GEMINI_API_KEY || "";
-  const model = process.env.GEMINI_MODEL || "moonshot-v1-8k";
+  const apiKey = process.env.KIMI_API_KEY || process.env.GEMINI_API_KEY || "";
+  const model = process.env.KIMI_MODEL || process.env.GEMINI_MODEL || "moonshot-v1-8k";
   const baseUrl = "https://api.kimi.com/coding/v1";
 
   trace.push(`Step 1: Initiated agent connection to Kimi (Moonshot AI) using model: ${model}.`);
@@ -478,8 +474,8 @@ Schema Structure:
   ]
 }`;
 
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-  const isKimi = model.toLowerCase().includes("moonshot") || model.toLowerCase().includes("kimi") || apiKey.startsWith("sk-");
+  const kimiKey = process.env.KIMI_API_KEY || (process.env.GEMINI_API_KEY?.startsWith("sk-") ? process.env.GEMINI_API_KEY : "");
+  const isKimi = Boolean(kimiKey);
 
   if (isKimi) {
     try {
