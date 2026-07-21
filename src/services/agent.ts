@@ -374,10 +374,10 @@ async function runKimiAgentInternal(
 
 // Core execution loop
 export async function runAgent(userQuestion: string): Promise<{ result: AgentResult; trace: string[]; toolsUsed: string[] }> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.KIMI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_FLASH_API_KEY || process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
     throw new Error(
-      "CRITICAL DATABASE OR API KEY CONFLICT: GEMINI_API_KEY environment variable is not configured. Please add GEMINI_API_KEY in the Secrets / Settings panel in the AI Studio UI."
+      "CRITICAL API KEY CONFLICT: Neither KIMI_API_KEY, GOOGLE_API_KEY, nor GEMINI_API_KEY environment variable is configured."
     );
   }
 

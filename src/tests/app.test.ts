@@ -129,18 +129,23 @@ describe.sequential("Job Decision Engine Test Suite", () => {
   // Test 5: Agent Initialization Key Validation Failure Case (Loud Fail)
   it("Test 5: should fail loud if GEMINI_API_KEY is not configured", async () => {
     if (!process.env.DATABASE_URL) return;
-    // Temporarily save original key
-    const originalKey = process.env.GEMINI_API_KEY;
+    // Temporarily save original keys
+    const origKimi = process.env.KIMI_API_KEY;
+    const origGoogle = process.env.GOOGLE_API_KEY;
+    const origGemini = process.env.GEMINI_API_KEY;
     
-    // Explicitly delete or nullify the key to simulate a blank environment
-    process.env.GEMINI_API_KEY = "MY_GEMINI_API_KEY"; // Default placeholder
+    delete process.env.KIMI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    process.env.GEMINI_API_KEY = "MY_GEMINI_API_KEY";
 
     // Expect the agent run to fail loud with a descriptive API error
     await expect(runAgent("Analyze jobs")).rejects.toThrow(
-      "CRITICAL DATABASE OR API KEY CONFLICT: GEMINI_API_KEY environment variable is not configured."
+      "CRITICAL API KEY CONFLICT"
     );
 
-    // Restore original key to avoid breaking other states
-    process.env.GEMINI_API_KEY = originalKey;
+    // Restore original keys
+    if (origKimi) process.env.KIMI_API_KEY = origKimi;
+    if (origGoogle) process.env.GOOGLE_API_KEY = origGoogle;
+    if (origGemini) process.env.GEMINI_API_KEY = origGemini;
   });
 });
