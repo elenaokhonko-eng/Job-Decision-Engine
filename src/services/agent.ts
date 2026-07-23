@@ -12,10 +12,10 @@ let aiClient: GoogleGenAI | null = null;
 
 export function getGeminiClient(): GoogleGenAI {
   if (!aiClient) {
-    const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_FLASH_API_KEY || (!process.env.GEMINI_API_KEY?.startsWith("sk-") ? process.env.GEMINI_API_KEY : "");
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
     if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
       throw new Error(
-        "CRITICAL API KEY CONFLICT: Neither GOOGLE_API_KEY nor GEMINI_API_KEY is configured for Gemini 2.0 Flash."
+        "CRITICAL API KEY CONFLICT: GEMINI_API_KEY is not configured for Gemini 2.0 Flash."
       );
     }
     aiClient = new GoogleGenAI({
@@ -195,14 +195,32 @@ export async function generateContent(options: {
 
   // Normal Gemini flow fallback
   const ai = getGeminiClient();
-  const response = await ai.models.generateContent({
-    model: "gemini-2.0-flash",
-    contents: options.contents,
-    config: {
-      responseMimeType: options.responseMimeType as any,
-      systemInstruction: options.systemInstruction
+  let response: any;
+  try {
+    response = await ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: options.contents,
+      config: {
+        responseMimeType: options.responseMimeType as any,
+        systemInstruction: options.systemInstruction
+      }
+    });
+  } catch (gErr: any) {
+    if (gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429) {
+      console.warn("⏳ Gemini rate limit reached. Waiting 60s before retrying...");
+      await new Promise((resolve) => setTimeout(resolve, 60000));
+      response = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: options.contents,
+        config: {
+          responseMimeType: options.responseMimeType as any,
+          systemInstruction: options.systemInstruction
+        }
+      });
+    } else {
+      throw gErr;
     }
-  });
+  }
   return response.text || "";
 }
 
@@ -374,10 +392,10 @@ async function runKimiAgentInternal(
 
 // Core execution loop
 export async function runAgent(userQuestion: string): Promise<{ result: AgentResult; trace: string[]; toolsUsed: string[] }> {
-  const apiKey = process.env.KIMI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_FLASH_API_KEY || process.env.GEMINI_API_KEY;
+  const apiKey = process.env.KIMI_API_KEY || process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
     throw new Error(
-      "CRITICAL API KEY CONFLICT: Neither KIMI_API_KEY, GOOGLE_API_KEY, nor GEMINI_API_KEY environment variable is configured."
+      "CRITICAL API KEY CONFLICT: Neither KIMI_API_KEY nor GEMINI_API_KEY environment variable is configured."
     );
   }
 

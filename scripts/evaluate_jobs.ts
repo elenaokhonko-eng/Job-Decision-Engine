@@ -46,7 +46,12 @@ async function runPipeline() {
     if (emailRes.rows.length > 0) {
       const ai = getGeminiClient();
 
-      for (const alert of emailRes.rows) {
+      for (let i = 0; i < emailRes.rows.length; i++) {
+        const alert = emailRes.rows[i];
+        if (i > 0) {
+          console.log("Waiting 10 seconds before parsing the next email alert to avoid API rate limits...");
+          await sleep(10000);
+        }
         console.log(`\nParsing email: "${alert.subject}" (ID: ${alert.id})`);
         
         // 1. Extract and validate all URLs in the email body

@@ -131,11 +131,9 @@ describe.sequential("Job Decision Engine Test Suite", () => {
     if (!process.env.DATABASE_URL) return;
     // Temporarily save original keys
     const origKimi = process.env.KIMI_API_KEY;
-    const origGoogle = process.env.GOOGLE_API_KEY;
     const origGemini = process.env.GEMINI_API_KEY;
     
     delete process.env.KIMI_API_KEY;
-    delete process.env.GOOGLE_API_KEY;
     process.env.GEMINI_API_KEY = "MY_GEMINI_API_KEY";
 
     // Expect the agent run to fail loud with a descriptive API error
@@ -145,7 +143,6 @@ describe.sequential("Job Decision Engine Test Suite", () => {
 
     // Restore original keys
     if (origKimi) process.env.KIMI_API_KEY = origKimi;
-    if (origGoogle) process.env.GOOGLE_API_KEY = origGoogle;
     if (origGemini) process.env.GEMINI_API_KEY = origGemini;
   });
 });
