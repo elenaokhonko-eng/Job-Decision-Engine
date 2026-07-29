@@ -21,7 +21,9 @@ def load_dotenv():
         pass
 
     # Load from local .env and .env.local files
-    for filename in [".env", ".env.local"]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for name in [".env", ".env.local"]:
+        filename = os.path.join(script_dir, name)
         if os.path.exists(filename):
             with open(filename, "r", encoding="utf-8") as f:
                 for line in f:
