@@ -583,7 +583,7 @@ with tab_linkedin:
         st.markdown("### 📋 Option B: Manual Export & Upload")
         st.write("If your cookie expires or you prefer manual control, run the browser console script below and upload the exported JSON file.")
         
-        script_code = """(async function extractSavedJobs() {
+        script_code = r"""(async function extractSavedJobs() {
   console.log("🚀 Starting LinkedIn Saved Jobs extraction from Job Tracker...");
   
   let prevHeight = 0;
