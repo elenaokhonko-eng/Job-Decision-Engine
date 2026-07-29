@@ -12,7 +12,7 @@
 ---
 
 ## 🎯 CAREER OBJECTIVE / SUMMARY
-Senior Technical Program Director and Target Operating Model (TOM) Lead with 20+ years of experience delivering complex platform modernization, digital wealth architectures, and regulatory change programs across international private banking, wealth management, and institutional asset management in APAC. Expert in AI & Data Governance, combining deep financial market product knowledge (derivatives, fixed income, FX, structured products) with enterprise systems integration (BlackRock Aladdin, BNPP Calypso, Murex MX.3) and Responsible AI guardrails (MAS FEAT, NIST AI RMF, IMDA AI Verify). Licensed fund management professional and experienced enterprise solution architect.
+Senior Technical Program Director and Target Operating Model (TOM) Lead with a highly diverse, multi-disciplinary 20+ year trajectory spanning early careers in tourism, logistics import-export compliance, academic linguistics/English teaching, enterprise IT systems, and private wealth/asset management. Proven expertise designing and executing platform modernization and regulatory change projects (derivatives, fixed income, FX) across Tier-1 institutions in APAC, combined with cutting-edge innovations in Responsible AI, machine learning, and neuro-symbolic governance workflows. Licensed fund management professional and enterprise solution architect.
 
 ---
 
@@ -149,6 +149,34 @@ Senior Technical Program Director and Target Operating Model (TOM) Lead with 20+
 * **Key Achievements & Responsibilities**:
   * Architected web portals, data taxonomy, and digital collaboration workflows for the non-profit management consulting organization.
 
+### World Trade Center Chicago / Jobs for Youth (USA)
+* **Role**: Volunteer Project Assistant
+* **Period**: 2004 - 2005
+* **Location**: Chicago, USA
+* **Key Achievements & Responsibilities**:
+  * Volunteered across global business and youth development programs to coordinate trade statistics, corporate outreach, and youth career readiness initiatives.
+
+### Russian University & Language Academies
+* **Role**: Academic Linguistics Instructor & English Teacher
+* **Period**: 2005 - 2006
+* **Location**: Vladivostok, Russia
+* **Key Achievements & Responsibilities**:
+  * Conducted English language courses and translation services across academic groups.
+
+### Far East Russian Import-Export & Logistics Firm
+* **Role**: Import-Export Coordinator & HR Regulatory Assistant
+* **Period**: 2000 - 2002
+* **Location**: Vladivostok, Russia
+* **Key Achievements & Responsibilities**:
+  * Managed customs clearing documentation, import-export logs, and internal regulatory and HR compliance duties.
+
+### Vladivostok Tourism Agency
+* **Role**: Tourism Management Intern
+* **Period**: 1999 - 2000
+* **Location**: Vladivostok, Russia
+* **Key Achievements & Responsibilities**:
+  * Assisted in tour logistics coordination, travel agency operations, and customer relations management.
+
 ---
 
 ## 🎓 EDUCATION & STUDIES
@@ -191,4 +219,5 @@ Senior Technical Program Director and Target Operating Model (TOM) Lead with 20+
 * **Enterprise Architectures**: Target Operating Model (TOM) Design, BlackRock Aladdin, BNPP Calypso, Murex MX.3, Salesforce CRM, SAP HANA, SAP ERP, BNY Mellon LAMP, Bloomberg
 * **Regulatory Frameworks**: MAS FEAT Guidelines, NIST AI RMF, MAS TRM (Technology Risk Management), IFRS 17, MAS SF(RDC)R, AML/KYC
 * **Program Management**: PMO Setup & Governance, Agile/Scrum, PRINCE2 Practitioner, Release Management, Change Control, Vendor Management
+* **Multi-Disciplinary Competencies**: Tourism Management, Translation (Russian/English/Chinese/German/French/Korean), Cognitive Linguistics, Academic Teaching, Import-Export Logistics, HR & Administrative Compliance
 * **Languages**: English (Native/Bilingual), Russian (Native/Bilingual), German (Limited), Mandarin (Limited), French (Elementary), Korean (Elementary)
