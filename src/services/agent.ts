@@ -181,7 +181,7 @@ export async function generateContent(options: {
           temperature: 1,
           response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
         }),
-        signal: AbortSignal.timeout(20000)
+        signal: AbortSignal.timeout(90000)
       });
 
       if (!response.ok) {
@@ -255,7 +255,7 @@ export async function generateContent(options: {
             temperature: 1,
             response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
           }),
-          signal: AbortSignal.timeout(20000)
+          signal: AbortSignal.timeout(90000)
         });
 
         if (!response.ok) {
