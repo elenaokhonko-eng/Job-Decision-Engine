@@ -213,6 +213,54 @@ def save_new_job_to_db(job):
         st.error(f"Failed to save job: {e}")
         return False
 
+def ingest_linkedin_saved_json(jobs):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        inserted_count = 0
+        skipped_count = 0
+        
+        for job in jobs:
+            title = job.get("title", "").strip()
+            company = job.get("company", "").strip()
+            url = job.get("url", "").strip()
+            description = job.get("description", "").strip()
+            location = job.get("location", "Singapore").strip()
+            salary = job.get("salary")
+            
+            if not title or not company or not url or not description:
+                skipped_count += 1
+                continue
+                
+            # Check for duplicates in raw_jobs
+            cursor.execute("SELECT id FROM raw_jobs WHERE careers_portal_url = %s OR (title = %s AND company_name = %s)", (url, title, company))
+            if cursor.fetchone():
+                skipped_count += 1
+                continue
+                
+            # Check for duplicates in jobs
+            cursor.execute("SELECT id FROM jobs WHERE careers_portal_url = %s OR (title = %s AND company_name = %s)", (url, title, company))
+            if cursor.fetchone():
+                skipped_count += 1
+                continue
+                
+            cursor.execute("""
+                INSERT INTO raw_jobs 
+                (company_name, title, source, raw_description, salary_range, location, careers_portal_url, processed) 
+                VALUES (%s, %s, 'LinkedIn', %s, %s, %s, %s, FALSE)
+            """, (company, title, description, salary, location, url))
+            
+            inserted_count += 1
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return inserted_count, skipped_count
+    except Exception as e:
+        st.error(f"Database insertion failed: {e}")
+        return 0, 0
+
 def fetch_company_analytics_from_db():
     try:
         conn = get_db_connection()
@@ -259,6 +307,13 @@ st.sidebar.metric("Total Vault Jobs", total_jobs)
 st.sidebar.metric("Fully Evaluated", evaluated_count)
 st.sidebar.metric("Top Recommended (Strong)", approved_count)
 st.sidebar.metric("Toxicity Flags", toxic_count)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📅 Automated Schedules")
+st.sidebar.info("""
+* **Daily Ingestion & Evaluation**: Runs daily at **10:00 AM SGT** (02:00 UTC) via GitHub Actions.
+* **Weekly LinkedIn Auto-Sync**: Runs every **Sunday at 10:00 AM SGT** (02:00 UTC) via GitHub Actions.
+""")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚡ Unscheduled Action Controls")
@@ -359,7 +414,7 @@ if track_filter != "All Tracks":
         filtered_jobs = [j for j in filtered_jobs if j.get("assigned_track") == track_filter]
 
 # Main Dashboard Layout tabs
-tab_dashboard, tab_add_job, tab_analytics = st.tabs(["📁 Postgres Job Vault", "➕ Add Job Ad", "🔥 ND Culture Analytics"])
+tab_dashboard, tab_add_job, tab_linkedin, tab_analytics = st.tabs(["📁 Postgres Job Vault", "➕ Add Job Ad", "🔗 LinkedIn Saved Jobs", "🔥 ND Culture Analytics"])
 
 with tab_dashboard:
     # Segment out Top Recommended Jobs (STRONG MATCH, sorted by score DESC, limited to 10)
@@ -495,6 +550,158 @@ with tab_add_job:
             }
             if save_new_job_to_db(new_job):
                 st.rerun()
+
+with tab_linkedin:
+    st.subheader("🔗 Import Saved LinkedIn Jobs")
+    st.write("Sync your saved LinkedIn jobs, stage them in your Postgres database for evaluation, and automatically unsave them from LinkedIn.")
+    
+    col_auto, col_manual = st.columns(2)
+    
+    with col_auto:
+        st.markdown("### 🤖 Option A: Headless Auto-Sync")
+        st.write("Instantly log in to LinkedIn in a headless browser, pull all saved jobs, stage them in Neon Postgres, and click 'Saved' to unsave them automatically.")
+        
+        has_li_cookie = os.environ.get("LINKEDIN_LI_AT") is not None
+        if not has_li_cookie:
+            st.warning("⚠️ `LINKEDIN_LI_AT` cookie is not set in `.env.local`. Please configure it to enable 1-Click Sync.")
+            
+        if st.button("🚀 Start 1-Click Sync & Unsave", disabled=not has_li_cookie):
+            with st.spinner("Launching Puppeteer, connecting to LinkedIn, and processing saved jobs..."):
+                try:
+                    sync_proc = subprocess.run(["npx", "tsx", "scripts/sync_linkedin_saved.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    if sync_proc.returncode == 0:
+                        st.success("✅ Sync & Unsave completed successfully!")
+                        st.code(sync_proc.stdout, language="text")
+                    else:
+                        st.error(f"Sync failed with output:\n{sync_proc.stdout or sync_proc.stderr}")
+                except Exception as e:
+                    st.error(f"Execution Error: {e}")
+                st.rerun()
+
+    with col_manual:
+        st.markdown("### 📋 Option B: Manual Export & Upload")
+        st.write("If your cookie expires or you prefer manual control, run the browser console script below and upload the exported JSON file.")
+        
+        script_code = """(async function extractSavedJobs() {
+  console.log("🚀 Starting LinkedIn Saved Jobs extraction...");
+  
+  let prevHeight = 0;
+  let scrollAttempts = 0;
+  const maxScrollAttempts = 50;
+  
+  console.log("⏳ Scrolling to load all saved jobs. Please wait...");
+  while (scrollAttempts < maxScrollAttempts) {
+    window.scrollTo(0, document.body.scrollHeight);
+    const scrollContainer = document.querySelector('.scaffold-layout__list') || document.querySelector('.reusable-search__result-container')?.closest('div');
+    if (scrollContainer) {
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+    const newHeight = document.body.scrollHeight;
+    const currentJobsCount = document.querySelectorAll('a[href*="/jobs/view/"]').length;
+    console.log(`Loaded ${currentJobsCount} job link elements...`);
+    if (newHeight === prevHeight && scrollAttempts > 5) {
+      console.log("Reached bottom of the page.");
+      break;
+    }
+    prevHeight = newHeight;
+    scrollAttempts++;
+  }
+
+  const jobElements = Array.from(document.querySelectorAll('.reusable-search__result-container, .entity-list-item'));
+  const rawJobsList = [];
+  console.log(`🔍 Found ${jobElements.length} job cards. Extracting...`);
+  
+  for (const el of jobElements) {
+    const titleLink = el.querySelector('a[href*="/jobs/view/"]');
+    if (!titleLink) continue;
+    const url = titleLink.href.split('?')[0];
+    const title = titleLink.innerText.trim();
+    const companyEl = el.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
+    const company = companyEl ? companyEl.innerText.trim() : 'Unknown Company';
+    const locationEl = el.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
+    const location = locationEl ? locationEl.innerText.trim() : 'Singapore';
+    rawJobsList.push({ title, company, url, location });
+  }
+  
+  const uniqueJobs = Array.from(new Map(rawJobsList.map(item => [item.url, item])).values());
+  console.log(`📊 Total unique jobs: ${uniqueJobs.length}`);
+  
+  if (uniqueJobs.length === 0) {
+    console.warn("⚠️ No saved jobs identified.");
+    return;
+  }
+  
+  console.log("🧠 Fetching descriptions silently...");
+  const finalizedJobs = [];
+  const batchSize = 5;
+  for (let i = 0; i < uniqueJobs.length; i += batchSize) {
+    const batch = uniqueJobs.slice(i, i + batchSize);
+    console.log(`⏳ Fetching batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(uniqueJobs.length/batchSize)}...`);
+    await Promise.all(batch.map(async (job) => {
+      try {
+        const res = await fetch(job.url);
+        const html = await res.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        const descEl = doc.querySelector('.jobs-description-content') || 
+                      doc.querySelector('.show-more-less-html__markup') || 
+                      doc.querySelector('[id^="job-details"]') || 
+                      doc.querySelector('.jobs-box__html-content') ||
+                      doc.querySelector('.jobs-description');
+        const description = descEl ? descEl.innerText.trim() : '';
+        finalizedJobs.push({
+          ...job,
+          description: description || "Full description not available. Please visit job link to apply."
+        });
+        console.log(`✅ Fetched description for: "${job.title}" at ${job.company}`);
+      } catch (err) {
+        console.error(`❌ Failed: ${job.title}`, err);
+        finalizedJobs.push({ ...job, description: "Failed to fetch description automatically." });
+      }
+    }));
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  
+  const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(finalizedJobs, null, 2));
+  const downloadAnchor = document.createElement('a');
+  downloadAnchor.setAttribute("href", dataStr);
+  downloadAnchor.setAttribute("download", "linkedin_saved_jobs.json");
+  document.body.appendChild(downloadAnchor);
+  downloadAnchor.click();
+  downloadAnchor.remove();
+  console.log("🎉 SUCCESS!");
+})();"""
+        st.code(script_code, language="javascript")
+        
+        uploaded_file = st.file_uploader("Upload your exported 'linkedin_saved_jobs.json' file", type=["json"])
+        
+        if uploaded_file is not None:
+            try:
+                jobs_data = json.load(uploaded_file)
+                if not isinstance(jobs_data, list):
+                    st.error("Invalid file structure. Root must be a JSON array.")
+                else:
+                    st.success(f"Successfully parsed JSON. Found **{len(jobs_data)}** jobs in file.")
+                    
+                    # Show preview
+                    st.markdown("#### **Jobs Preview**")
+                    preview_df = pd.DataFrame([
+                        {"Title": j.get("title"), "Company": j.get("company"), "Location": j.get("location"), "URL": j.get("url")}
+                        for j in jobs_data[:10]
+                    ])
+                    st.dataframe(preview_df, use_container_width=True)
+                    if len(jobs_data) > 10:
+                        st.write(f"*... and {len(jobs_data) - 10} more jobs.*")
+                    
+                    # Ingest button
+                    if st.button("📥 Import All Saved Jobs to Staging Vault"):
+                        with st.spinner("Inserting jobs into staging table..."):
+                            inserted, skipped = ingest_linkedin_saved_json(jobs_data)
+                            st.success(f"✅ Ingestion complete! **{inserted}** new jobs imported, **{skipped}** skipped as duplicates/invalid.")
+                            st.rerun()
+            except Exception as e:
+                st.error(f"Error reading JSON file: {e}")
 
 with tab_analytics:
     st.subheader("🔥 Company Autonomy & Culture Analytics")

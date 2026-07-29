@@ -2,8 +2,8 @@ name: Daily Job Ingestion & Evaluation
 
 on:
   schedule:
-    # Runs at 18:00 UTC daily (which is 2:00 AM Singapore Time)
-    - cron: '0 18 * * *'
+    # Runs daily at 02:00 UTC (which is 10:00 AM Singapore Time)
+    - cron: '0 2 * * *'
   workflow_dispatch: # Allows manual triggering from the GitHub Actions UI
 
 jobs:

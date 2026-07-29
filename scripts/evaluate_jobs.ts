@@ -25,6 +25,9 @@ async function runPipeline() {
     process.exit(1);
   }
 
+  const evalSleepMs = parseInt(process.env.EVAL_SLEEP_MS || "10000", 10);
+  const evalJobSleepMs = parseInt(process.env.EVAL_JOB_SLEEP_MS || "13000", 10);
+
   try {
     // 0. Clean up any duplicate jobs in the final jobs table
     console.log("Deduplicating any existing duplicate records in final jobs table...");
@@ -48,9 +51,9 @@ async function runPipeline() {
 
       for (let i = 0; i < emailRes.rows.length; i++) {
         const alert = emailRes.rows[i];
-        if (i > 0) {
-          console.log("Waiting 10 seconds before parsing the next email alert to avoid API rate limits...");
-          await sleep(10000);
+        if (i > 0 && evalSleepMs > 0) {
+          console.log(`Waiting ${evalSleepMs / 1000} seconds before parsing the next email alert to avoid API rate limits...`);
+          await sleep(evalSleepMs);
         }
         console.log(`\nParsing email: "${alert.subject}" (ID: ${alert.id})`);
         
@@ -182,9 +185,9 @@ Return nothing other than the JSON block.`;
     if (rawJobs.length > 0) {
       for (let i = 0; i < rawJobs.length; i++) {
         const rawJob = rawJobs[i];
-        if (i > 0) {
-          console.log("Waiting 13 seconds before the next evaluation to avoid API rate limits...");
-          await sleep(13000);
+        if (i > 0 && evalJobSleepMs > 0) {
+          console.log(`Waiting ${evalJobSleepMs / 1000} seconds before the next evaluation to avoid API rate limits...`);
+          await sleep(evalJobSleepMs);
         }
         console.log(`\nEvaluating raw job: "${rawJob.title}" at "${rawJob.company_name}"`);
         
@@ -296,6 +299,42 @@ Return nothing other than the JSON block.`;
       }
     }
     console.log("====================================================");
+
+    // 4. Clean up Gmail Jobs-Alerts-Processed folder
+    const gmailUser = process.env.GMAIL_USER;
+    const gmailPassword = process.env.GMAIL_APP_PASSWORD;
+    const gmailProcessedFolder = process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
+
+    if (gmailUser && gmailPassword) {
+      console.log(`\nConnecting to Gmail to clean up "${gmailProcessedFolder}" folder...`);
+      const { ImapFlow } = await import("imapflow");
+      const imapClient = new ImapFlow({
+        host: "imap.gmail.com",
+        port: 993,
+        secure: true,
+        auth: {
+          user: gmailUser,
+          pass: gmailPassword
+        },
+        logger: false
+      });
+
+      try {
+        await imapClient.connect();
+        const mailbox = await imapClient.mailboxOpen(gmailProcessedFolder);
+        if (mailbox.exists > 0) {
+          console.log(`Deleting ${mailbox.exists} processed emails from Gmail folder "${gmailProcessedFolder}"...`);
+          await imapClient.messageFlagsAdd("1:*", ["\\Deleted"]);
+          await imapClient.mailboxClose();
+          console.log(`✅ Cleaned up "${gmailProcessedFolder}" folder.`);
+        } else {
+          console.log(`Gmail folder "${gmailProcessedFolder}" is already empty.`);
+        }
+        await imapClient.logout();
+      } catch (gmailErr: any) {
+        console.error(`⚠️ Failed to clean up Gmail "${gmailProcessedFolder}" folder:`, gmailErr.message || gmailErr);
+      }
+    }
 
     console.log("\n✅ Pipeline completed successfully!");
 

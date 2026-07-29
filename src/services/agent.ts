@@ -24,6 +24,7 @@ export function getGeminiClient(): GoogleGenAI {
         headers: {
           "User-Agent": "aistudio-build",
         },
+        timeout: 45000,
       },
     });
   }
@@ -155,8 +156,9 @@ export async function generateContent(options: {
   systemInstruction?: string;
 }): Promise<string> {
   const kimiKey = process.env.KIMI_API_KEY || (process.env.GEMINI_API_KEY?.startsWith("sk-") ? process.env.GEMINI_API_KEY : "");
+  const useKimi = kimiKey && !options.model?.toLowerCase().includes("gemini");
 
-  if (kimiKey) {
+  if (useKimi) {
     try {
       const baseUrl = "https://api.kimi.com/coding/v1";
       const model = process.env.KIMI_MODEL || process.env.GEMINI_MODEL || "moonshot-v1-8k";
@@ -178,7 +180,8 @@ export async function generateContent(options: {
           messages,
           temperature: 1,
           response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
-        })
+        }),
+        signal: AbortSignal.timeout(20000)
       });
 
       if (!response.ok) {
@@ -196,19 +199,9 @@ export async function generateContent(options: {
   // Normal Gemini flow fallback
   const ai = getGeminiClient();
   let response: any;
-  try {
-    response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: options.contents,
-      config: {
-        responseMimeType: options.responseMimeType as any,
-        systemInstruction: options.systemInstruction
-      }
-    });
-  } catch (gErr: any) {
-    if (gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429) {
-      console.warn("⏳ Gemini rate limit reached. Waiting 60s before retrying...");
-      await new Promise((resolve) => setTimeout(resolve, 60000));
+  const maxRetries = 5;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
       response = await ai.models.generateContent({
         model: "gemini-2.0-flash",
         contents: options.contents,
@@ -217,8 +210,17 @@ export async function generateContent(options: {
           systemInstruction: options.systemInstruction
         }
       });
-    } else {
-      throw gErr;
+      break; // Success, exit loop
+    } catch (gErr: any) {
+      const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
+      const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
+      
+      if ((isRateLimit || isTimeout) && attempt < maxRetries) {
+        console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Waiting 60s before retrying...`);
+        await new Promise((resolve) => setTimeout(resolve, 60000));
+      } else {
+        throw gErr;
+      }
     }
   }
   return response.text || "";
@@ -298,7 +300,8 @@ async function runKimiAgentInternal(
         "Authorization": `Bearer ${apiKey}`,
         "User-Agent": "Claude-Code"
       },
-      body: JSON.stringify(reqBody)
+      body: JSON.stringify(reqBody),
+      signal: AbortSignal.timeout(20000)
     });
 
     if (!response.ok) {
@@ -363,7 +366,8 @@ async function runKimiAgentInternal(
       messages,
       temperature: 1,
       response_format: { type: "json_object" }
-    })
+    }),
+    signal: AbortSignal.timeout(20000)
   });
 
   if (!finalResponse.ok) {

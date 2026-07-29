@@ -51,7 +51,7 @@ async function ingestGmail() {
     }
 
     const messages: any[] = [];
-    for await (const message of client.fetch("1:*", { envelope: true, source: true })) {
+    for await (const message of client.fetch("1:*", { envelope: true, source: true, uid: true })) {
       messages.push(message);
     }
 
@@ -70,17 +70,25 @@ async function ingestGmail() {
 
       // Move email message out of Jobs-Alerts to Jobs-Alerts-Processed
       try {
-        await client.messageMove(msg.seq, gmailProcessedFolder);
-      } catch (moveErr) {
+        await client.messageFlagsAdd(msg.uid, [gmailProcessedFolder], { uid: true, useLabels: true });
+        await client.messageFlagsRemove(msg.uid, [gmailFolder], { uid: true, useLabels: true });
+      } catch (labelErr) {
         try {
-          await client.messageCopy(msg.seq, gmailProcessedFolder);
-          await client.messageFlagsAdd(msg.seq, ["\\Seen", "\\Deleted"]);
-        } catch {}
+          await client.messageMove(msg.uid, gmailProcessedFolder, { uid: true });
+        } catch (moveErr) {
+          try {
+            await client.messageCopy(msg.uid, gmailProcessedFolder, { uid: true });
+            await client.messageFlagsAdd(msg.uid, ["\\Seen", "\\Deleted"], { uid: true });
+          } catch {}
+        }
       }
       count++;
     }
 
     console.log(`✅ Successfully ingested ${count} raw email alerts to Postgres and moved to "${gmailProcessedFolder}".`);
+    try {
+      await client.mailboxClose();
+    } catch {}
     await client.logout();
   } catch (err: any) {
     console.error("❌ Gmail ingestion error:", err.message || err);
