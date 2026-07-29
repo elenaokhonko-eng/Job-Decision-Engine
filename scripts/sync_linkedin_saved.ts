@@ -64,6 +64,8 @@ async function syncLinkedInSavedJobs() {
     let scrollAttempts = 0;
     const maxScrollAttempts = 30;
 
+    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for initial items to load
+
     while (scrollAttempts < maxScrollAttempts) {
       await page.evaluate(() => {
         window.scrollTo(0, document.body.scrollHeight);
@@ -86,24 +88,33 @@ async function syncLinkedInSavedJobs() {
       scrollAttempts++;
     }
 
-    // Extract basic metadata of saved jobs
+    // Extract basic metadata of saved jobs using a more robust link-based approach
     const jobsList = await page.evaluate(() => {
-      const jobElements = Array.from(document.querySelectorAll('.reusable-search__result-container, .entity-list-item'));
-      return jobElements.map(el => {
-        const titleLink = el.querySelector('a[href*="/jobs/view/"]') as HTMLAnchorElement | null;
-        if (!titleLink) return null;
+      const jobLinks = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
+      const rawList = [];
+      for (const a of jobLinks) {
+        const url = (a as HTMLAnchorElement).href.split('?')[0];
+        const title = (a as HTMLAnchorElement).innerText.trim();
+        if (!title || title.length < 3) continue; // Skip empty/icon links
         
-        const url = titleLink.href.split('?')[0];
-        const title = titleLink.innerText.trim();
+        // Traverse up to find container list item or card
+        const container = a.closest('li') || a.closest('.entity-list-item') || a.closest('div');
+        let company = 'Unknown Company';
+        let location = 'Singapore';
         
-        const companyEl = el.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
-        const company = companyEl ? (companyEl as HTMLElement).innerText.trim() : 'Unknown Company';
-        
-        const locationEl = el.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
-        const location = locationEl ? (locationEl as HTMLElement).innerText.trim() : 'Singapore';
-        
-        return { title, company, url, location };
-      }).filter((j): j is { title: string; company: string; url: string; location: string } => j !== null);
+        if (container) {
+          const companyEl = container.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
+          if (companyEl) {
+            company = (companyEl as HTMLElement).innerText.trim();
+          }
+          const locationEl = container.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
+          if (locationEl) {
+            location = (locationEl as HTMLElement).innerText.trim();
+          }
+        }
+        rawList.push({ title, company, url, location });
+      }
+      return rawList;
     });
 
     // Deduplicate
@@ -111,7 +122,8 @@ async function syncLinkedInSavedJobs() {
     console.log(`📊 Found ${uniqueJobs.length} unique saved jobs to process.`);
 
     if (uniqueJobs.length === 0) {
-      console.log("No saved jobs found. Exiting.");
+      console.log("No saved jobs found. Saving debug screenshot and exiting.");
+      await page.screenshot({ path: "linkedin_saved_debug.png" });
       return;
     }
 
