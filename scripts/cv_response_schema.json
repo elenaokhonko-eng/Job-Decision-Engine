@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TailoredCVResponse",
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "object",
+      "properties": {
+        "overall_fit_percentage": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Overall fit score based on overlap between profile and JD requirements"
+        },
+        "core_requirements_match_percentage": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Percentage match of critical core requirements"
+        },
+        "core_matches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "requirement": { "type": "string", "description": "Core requirement extracted from the JD" },
+              "user_match": { "type": "string", "description": "How the user matches this requirement based on their profile" }
+            },
+            "required": ["requirement", "user_match"]
+          }
+        },
+        "key_mismatches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "requirement": { "type": "string", "description": "JD requirement that the user lacks direct experience in" },
+              "parallel_exposure": { "type": "string", "description": "Relevant parallel or related industry/tool exposure the user has" },
+              "learning_plan": { "type": "string", "description": "Factual and proactive plan to learn this missing requirement fast" }
+            },
+            "required": ["requirement", "parallel_exposure", "learning_plan"]
+          }
+        },
+        "key_analysis_points": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Bulleted key analytical takeaways regarding the alignment of the profile and role"
+        }
+      },
+      "required": ["overall_fit_percentage", "core_requirements_match_percentage", "core_matches", "key_mismatches", "key_analysis_points"]
+    },
+    "tailored_cv_markdown": {
+      "type": "string",
+      "description": "The complete tailored CV markdown text"
+    }
+  },
+  "required": ["analysis", "tailored_cv_markdown"]
+}

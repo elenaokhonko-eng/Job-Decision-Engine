@@ -53,6 +53,14 @@ async function generateTailoredCV() {
 
     const masterProfile = fs.readFileSync(profilePath, "utf8");
 
+    // 2b. Read CV Response Schema from cv_response_schema.json
+    const schemaPath = path.join(process.cwd(), "scripts", "cv_response_schema.json");
+    if (!fs.existsSync(schemaPath)) {
+      console.error("❌ ERROR: 'cv_response_schema.json' not found in scripts directory.");
+      process.exit(1);
+    }
+    const cvResponseSchema = fs.readFileSync(schemaPath, "utf8");
+
     // 3. Construct the comprehensive single prompt for structured JSON CV response
     const prompt = `You are a professional, honest, and high-fidelity CV writer and alignment agent.
 Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing both the analysis and the tailored CV.
@@ -69,19 +77,7 @@ Your task is to analyze the user's master professional profile against the targe
 
 ### JSON RESPONSE SCHEMA:
 You MUST output a JSON object conforming exactly to this schema:
-{
-  "analysis": {
-    "overall_fit_percentage": number (0-100),
-    "core_requirements_match_percentage": number (0-100),
-    "core_matches": [
-      { "requirement": "string", "user_match": "string" }
-    ],
-    "key_mismatches": [
-      { "requirement": "string", "parallel_exposure": "string", "learning_plan": "string" }
-    ]
-  },
-  "tailored_cv_markdown": "string (the complete resume markdown text)"
-}
+${cvResponseSchema}
 
 ---
 ### TARGET JOB SPECIFICATION:

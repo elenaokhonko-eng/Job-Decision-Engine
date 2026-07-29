@@ -1011,15 +1011,32 @@ with tab_cv:
                                     with col2:
                                         st.metric("Core Requirements Match", f"{analysis.get('core_requirements_match_percentage', 0)}%")
 
-                                    # Show gaps briefly
+                                    # 1. Key Analysis Takeaways
+                                    points = analysis.get("key_analysis_points", [])
+                                    if points:
+                                        st.markdown("### **🎯 Key Analysis Takeaways**")
+                                        for pt in points:
+                                            st.markdown(f"- {pt}")
+                                        st.markdown("---")
+
+                                    # 2. Core Requirements Matches (Table)
+                                    core_matches = analysis.get("core_matches", [])
+                                    if core_matches:
+                                        st.markdown("### **✅ Core Requirements Match Details**")
+                                        match_df = pd.DataFrame(core_matches)
+                                        match_df.columns = ["Core Job Requirement", "My Corresponding Match"]
+                                        st.table(match_df)
+                                        st.markdown("---")
+
+                                    # 3. Mismatches / Gaps to Fill
                                     gaps = analysis.get("key_mismatches", [])
                                     if gaps:
-                                        with st.expander("⚠️ Identified Mismatches & Learning Plans"):
-                                            for gap in gaps:
-                                                st.markdown(f"**Missing Requirement**: {gap.get('requirement')}")
-                                                st.markdown(f"*Parallel Exposure*: {gap.get('parallel_exposure')}")
-                                                st.markdown(f"*Learning Plan*: {gap.get('learning_plan')}")
-                                                st.markdown("---")
+                                        st.markdown("### **⚠️ Identified Gaps & Learning Plans**")
+                                        for gap in gaps:
+                                            st.markdown(f"**Missing Requirement**: `{gap.get('requirement')}`")
+                                            st.markdown(f"*Parallel/Transferable Exposure*: {gap.get('parallel_exposure')}")
+                                            st.markdown(f"*Proactive Learning Plan*: {gap.get('learning_plan')}")
+                                            st.markdown("---")
 
                                     # Download files
                                     st.markdown("### **📥 Download Tailored Resume Documents**")
