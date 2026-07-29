@@ -293,6 +293,65 @@ def convert_markdown_to_pdf(md_text):
             
     return bytes(pdf.output())
 
+def python_generate_content(contents, system_instruction=None, response_mime_type=None):
+    # Load keys
+    kimi_key = os.environ.get("KIMI_API_KEY")
+    gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_FLASH_API_KEY")
+    
+    # Try Gemini first
+    if gemini_key:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
+            headers = {"Content-Type": "application/json"}
+            
+            body = {
+                "contents": [{"parts": [{"text": contents}]}],
+                "generationConfig": {}
+            }
+            if response_mime_type:
+                body["generationConfig"]["responseMimeType"] = response_mime_type
+            if system_instruction:
+                body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+                
+            req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=90) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
+                text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+                return text
+        except Exception as gemini_err:
+            st.warning(f"⚠️ Gemini request failed: {gemini_err}. Trying Kimi fallback...")
+            
+    # Try Kimi fallback
+    if kimi_key:
+        try:
+            url = "https://api.kimi.com/coding/v1/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {kimi_key}"
+            }
+            messages = []
+            if system_instruction:
+                messages.append({"role": "system", "content": system_instruction})
+            messages.append({"role": "user", "content": contents})
+            
+            body = {
+                "model": os.environ.get("KIMI_MODEL", "moonshot-v1-8k"),
+                "messages": messages,
+                "temperature": 1
+            }
+            if response_mime_type == "application/json":
+                body["response_format"] = {"type": "json_object"}
+                
+            req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=90) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
+                text = res_data["choices"][0]["message"]["content"]
+                return text
+        except Exception as kimi_err:
+            st.error(f"❌ Kimi fallback failed: {kimi_err}")
+            
+    raise Exception("Both Gemini and Kimi API requests failed.")
+
 def ingest_linkedin_saved_json(jobs):
     try:
         conn = get_db_connection()
@@ -979,23 +1038,60 @@ with tab_cv:
                             st.error("Job record not found in database.")
                         else:
                             db_job_id = db_row[0]
-                            result = subprocess.run(
-                                ["npx", "tsx", "scripts/generate_cv.ts", str(db_job_id)],
-                                capture_output=True,
-                                text=True,
-                                env=os.environ,
-                                shell=True
-                            )
+                            
+                            # Read master profile and schema
+                            with open("my_profile.md", "r", encoding="utf-8") as pf:
+                                master_profile = pf.read()
+                            with open("scripts/cv_response_schema.json", "r", encoding="utf-8") as sf:
+                                cv_response_schema = sf.read()
+                                
+                            # Fetch full job details
+                            conn = get_db_connection()
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT title, company_name, raw_description, location FROM jobs WHERE id = %s", (db_job_id,))
+                            job_data = cursor.fetchone()
+                            conn.close()
+                            
+                            # Construct prompt
+                            prompt = f"""You are a professional, honest, and high-fidelity CV writer and alignment agent.
+Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing both the analysis and the tailored CV.
 
-                            if result.returncode == 0:
-                                output = result.stdout
-                                # Extract CV content between start/end blocks if present
-                                json_text = ""
-                                if "CV_GENERATION_SUCCESS_START" in output:
-                                    parts = output.split("CV_GENERATION_SUCCESS_START")
-                                    json_text = parts[1].split("CV_GENERATION_SUCCESS_END")[0].strip()
-                                else:
-                                    json_text = output.strip()
+### STRICT RULES:
+1. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, or accomplishments. Keep everything 100% factual to the master profile.
+2. **HONEST GAP REPORTING**: Call out key mismatches/gaps where the user lacks direct experience. Under each mismatch:
+   - Provide factual parallel exposure (e.g. if the JD asks for Kubernetes and the user only has Docker/ECS, state that).
+   - Outline a brief, realistic learning plan to master it fast.
+3. **TAILORED CV MARKDOWN**: In the "tailored_cv_markdown" property, write the fully customized resume in clean Markdown format:
+   - At the top of the resume, introduce a summary section displaying overall fit %, core requirements % match, and key gaps (with parallel exposure/learning plan).
+   - Retell the work history focusing on aligned achievements, tools, and projects factually.
+   - Include studies, skills, and certifications.
+
+### JSON RESPONSE SCHEMA:
+You MUST output a JSON object conforming exactly to this schema:
+{cv_response_schema}
+
+---
+### TARGET JOB SPECIFICATION:
+- **Title**: {job_data[0]}
+- **Company**: {job_data[1]}
+- **Location**: {job_data[3] or 'Singapore'}
+- **Job Description**:
+{job_data[2]}
+
+---
+### USER MASTER PROFILE:
+{master_profile}
+
+---
+Ensure the output is clean JSON. Do not prepend or append markdown code blocks around the JSON object."""
+
+                            # Generate response directly
+                            json_text = python_generate_content(
+                                prompt,
+                                system_instruction="You are a professional CV tailoring system. You analyze profiles and output strictly structured JSON conforming to the requested schema.",
+                                response_mime_type="application/json"
+                            )
+                            json_text = json_text.strip()
 
                                 try:
                                     cv_data = json.loads(json_text)
