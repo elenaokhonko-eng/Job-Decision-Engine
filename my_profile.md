@@ -14,6 +14,8 @@
 ## 🎯 CAREER OBJECTIVE / SUMMARY
 Senior Technical Program Director and Target Operating Model (TOM) Lead with a highly diverse, multi-disciplinary 20+ year trajectory spanning early careers in tourism, logistics import-export compliance, academic linguistics/English teaching, enterprise IT systems, and private wealth/asset management. Proven expertise designing and executing platform modernization and regulatory change projects (derivatives, fixed income, FX) across Tier-1 institutions in APAC, combined with cutting-edge innovations in Responsible AI, machine learning, and neuro-symbolic governance workflows. Licensed fund management professional and enterprise solution architect.
 
+**Cognitive & Innovation Profile**: Characterized by a cross-disciplinary, cross-systems systemizing mind. Excels in rapid multi-threaded processing, pattern recognition, and connecting disparate domains to engineer clean, structured solutions. Highly focused on structured problem-solving, strategic innovation, and idea generation at scale, bringing strong cognitive diversity to enterprise leadership teams.
+
 ---
 
 ## 💼 WORK EXPERIENCE
@@ -197,6 +199,9 @@ Senior Technical Program Director and Target Operating Model (TOM) Lead with a h
 * **CFA Program (CFA Candidate)**
   * **Institution**: CFA Institute
   * **Period**: 2014 - 2015
+* **Advanced High School Academic Olympiads Program**
+  * **Level/Reference**: Ranked at the top tier of academic excellence (comparable to the **Raffles Institution / Raffles Junior College** elite academic stream in Singapore).
+  * **Achievements**: Multiple-time city and regional level winner of competitive academic Olympiads in Geography, Biology, History, and Economics. Strong foundational interest and studies in Chemistry, Physics, and Mathematics.
 
 ---
 
