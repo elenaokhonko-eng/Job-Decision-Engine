@@ -66,6 +66,10 @@ async function syncLinkedInSavedJobs() {
       secure: true
     });
 
+    console.log("Navigating to LinkedIn homepage for session initialization...");
+    await page.goto("https://www.linkedin.com", { waitUntil: "networkidle2" });
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
     console.log("Navigating to LinkedIn Saved Jobs tracker...");
     await page.goto("https://www.linkedin.com/my-items/saved-jobs/", { waitUntil: "networkidle2" });
 
