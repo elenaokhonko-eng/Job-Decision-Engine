@@ -447,7 +447,7 @@ if track_filter != "All Tracks":
         filtered_jobs = [j for j in filtered_jobs if j.get("assigned_track") == track_filter]
 
 # Main Dashboard Layout tabs
-tab_dashboard, tab_add_job, tab_linkedin, tab_analytics = st.tabs(["📁 Postgres Job Vault", "➕ Add Job Ad", "🔗 LinkedIn Saved Jobs", "🔥 ND Culture Analytics"])
+tab_dashboard, tab_add_job, tab_linkedin, tab_analytics, tab_cv = st.tabs(["📁 Postgres Job Vault", "➕ Add Job Ad", "🔗 LinkedIn Saved Jobs", "🔥 ND Culture Analytics", "📄 CV Customizer"])
 
 with tab_dashboard:
     # Segment out Top Recommended Jobs (STRONG MATCH, sorted by score DESC, limited to 10)
@@ -845,6 +845,94 @@ with tab_analytics:
         st.bar_chart(df.set_index("Company")[["Avg Autonomy Score", "Avg Politics Score"]])
     else:
         st.info("No compiled analytics are available. Please run the evaluation engine pipeline to score listings.")
+
+with tab_cv:
+    st.subheader("📄 AI CV Customizer & Tailoring Engine")
+    st.write("Align and customize your master professional profile against any evaluated job advertisement honestly and factually.")
+
+    # Check if my_profile.md exists
+    if not os.path.exists("my_profile.md"):
+        st.error("⚠️ `my_profile.md` not found in workspace root. Please create this file first to store your credentials and work history.")
+    else:
+        # Show master profile editor button / status
+        with st.expander("📝 View / Edit Master Profile (my_profile.md)"):
+            with open("my_profile.md", "r", encoding="utf-8") as pf:
+                profile_content = pf.read()
+            edited_profile = st.text_area("Master Profile Markdown", profile_content, height=300)
+            if edited_profile != profile_content:
+                if st.button("💾 Save Profile Changes"):
+                    with open("my_profile.md", "w", encoding="utf-8") as pf:
+                        pf.write(edited_profile)
+                    st.success("✅ Master profile saved successfully!")
+                    st.rerun()
+
+        # Select a job to customize against (only showing STRONG MATCH or REVIEW REQUIRED)
+        eligible_jobs = [j for j in jobs_list if j.get("status") in ("STRONG MATCH", "REVIEW REQUIRED")]
+        
+        if not eligible_jobs:
+            st.info("No eligible jobs found for tailoring. Only jobs evaluated as 'STRONG MATCH' or 'REVIEW REQUIRED' can be tailored.")
+        else:
+            job_options = {f"{j['company']} - {j['title']} ({j.get('status')})": j for j in eligible_jobs}
+            selected_job_name = st.selectbox("Select Target Job Ad", list(job_options.keys()))
+            selected_job = job_options[selected_job_name]
+
+            # Render selected job details
+            st.markdown(f"### **Target Role Details**")
+            st.markdown(f"**Company**: {selected_job['company']} | **Title**: {selected_job['title']} | **Location**: {selected_job.get('location', 'Singapore')}")
+            
+            with st.expander("🔍 View Target Job Description"):
+                st.write(selected_job.get("description", "No description available."))
+
+            # Button to trigger CV customization
+            st.markdown("---")
+            if st.button("✨ Generate Factual Customised CV"):
+                with st.spinner("AI is analyzing alignment, calling out experience gaps, and tailoring your CV..."):
+                    try:
+                        # We execute our scripts/generate_cv.ts with the selected job's ID
+                        # Let's get the job's database ID from the select query
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT id FROM jobs WHERE title = %s AND company_name = %s LIMIT 1", (selected_job['title'], selected_job['company']))
+                        db_row = cursor.fetchone()
+                        conn.close()
+
+                        if not db_row:
+                            st.error("Job record not found in database.")
+                        else:
+                            db_job_id = db_row[0]
+                            result = subprocess.run(
+                                ["npx", "tsx", "scripts/generate_cv.ts", str(db_job_id)],
+                                capture_output=True,
+                                text=True,
+                                env=os.environ,
+                                shell=True
+                            )
+
+                            if result.returncode == 0:
+                                output = result.stdout
+                                # Extract CV content between start/end blocks if present
+                                cv_text = ""
+                                if "CV_GENERATION_SUCCESS_START" in output:
+                                    parts = output.split("CV_GENERATION_SUCCESS_START")
+                                    cv_text = parts[1].split("CV_GENERATION_SUCCESS_END")[0].strip()
+                                else:
+                                    cv_text = output.strip()
+
+                                st.success("✅ Tailored CV generated successfully!")
+                                st.markdown(cv_text)
+
+                                # Downloader button
+                                clean_filename = f"CV_Tailored_{selected_job['company'].replace(' ', '_')}_{selected_job['title'].replace(' ', '_')}.md"
+                                st.download_button(
+                                    label="📥 Download Tailored CV (.md)",
+                                    data=cv_text,
+                                    file_name=clean_filename,
+                                    mime="text/markdown"
+                                )
+                            else:
+                                st.error(f"Tailoring failed with output:\n{result.stderr or result.stdout}")
+                    except Exception as e:
+                        st.error(f"Execution Error: {e}")
 
 # Footer section
 st.markdown("---")
