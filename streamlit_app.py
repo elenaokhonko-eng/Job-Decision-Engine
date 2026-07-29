@@ -1093,84 +1093,82 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                             )
                             json_text = json_text.strip()
 
-                                try:
-                                    cv_data = json.loads(json_text)
-                                    analysis = cv_data.get("analysis", {})
-                                    cv_text = cv_data.get("tailored_cv_markdown", "")
+                            try:
+                                cv_data = json.loads(json_text)
+                                analysis = cv_data.get("analysis", {})
+                                cv_text = cv_data.get("tailored_cv_markdown", "")
 
-                                    st.success("✅ Tailored CV generated successfully!")
-                                    
-                                    # Show high-level metrics
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        st.metric("Overall Fit Score", f"{analysis.get('overall_fit_percentage', 0)}%")
-                                    with col2:
-                                        st.metric("Core Requirements Match", f"{analysis.get('core_requirements_match_percentage', 0)}%")
+                                st.success("✅ Tailored CV generated successfully!")
+                                
+                                # Show high-level metrics
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.metric("Overall Fit Score", f"{analysis.get('overall_fit_percentage', 0)}%")
+                                with col2:
+                                    st.metric("Core Requirements Match", f"{analysis.get('core_requirements_match_percentage', 0)}%")
 
-                                    # 1. Key Analysis Takeaways
-                                    points = analysis.get("key_analysis_points", [])
-                                    if points:
-                                        st.markdown("### **🎯 Key Analysis Takeaways**")
-                                        for pt in points:
-                                            st.markdown(f"- {pt}")
+                                # 1. Key Analysis Takeaways
+                                points = analysis.get("key_analysis_points", [])
+                                if points:
+                                    st.markdown("### **🎯 Key Analysis Takeaways**")
+                                    for pt in points:
+                                        st.markdown(f"- {pt}")
+                                    st.markdown("---")
+
+                                # 2. Core Requirements Matches (Table)
+                                core_matches = analysis.get("core_matches", [])
+                                if core_matches:
+                                    st.markdown("### **✅ Core Requirements Match Details**")
+                                    match_df = pd.DataFrame(core_matches)
+                                    match_df.columns = ["Core Job Requirement", "My Corresponding Match"]
+                                    st.table(match_df)
+                                    st.markdown("---")
+
+                                # 3. Mismatches / Gaps to Fill
+                                gaps = analysis.get("key_mismatches", [])
+                                if gaps:
+                                    st.markdown("### **⚠️ Identified Gaps & Learning Plans**")
+                                    for gap in gaps:
+                                        st.markdown(f"**Missing Requirement**: `{gap.get('requirement')}`")
+                                        st.markdown(f"*Parallel/Transferable Exposure*: {gap.get('parallel_exposure')}")
+                                        st.markdown(f"*Proactive Learning Plan*: {gap.get('learning_plan')}")
                                         st.markdown("---")
 
-                                    # 2. Core Requirements Matches (Table)
-                                    core_matches = analysis.get("core_matches", [])
-                                    if core_matches:
-                                        st.markdown("### **✅ Core Requirements Match Details**")
-                                        match_df = pd.DataFrame(core_matches)
-                                        match_df.columns = ["Core Job Requirement", "My Corresponding Match"]
-                                        st.table(match_df)
-                                        st.markdown("---")
+                                # Download files
+                                st.markdown("### **📥 Download Tailored Resume Documents**")
+                                
+                                clean_company = selected_job['company'].replace(' ', '_')
+                                clean_title = selected_job['title'].replace(' ', '_')
+                                
+                                # 1. MD Download
+                                st.download_button(
+                                    label="📄 Download Markdown (.md)",
+                                    data=cv_text,
+                                    file_name=f"CV_Tailored_{clean_company}_{clean_title}.md",
+                                    mime="text/markdown"
+                                )
 
-                                    # 3. Mismatches / Gaps to Fill
-                                    gaps = analysis.get("key_mismatches", [])
-                                    if gaps:
-                                        st.markdown("### **⚠️ Identified Gaps & Learning Plans**")
-                                        for gap in gaps:
-                                            st.markdown(f"**Missing Requirement**: `{gap.get('requirement')}`")
-                                            st.markdown(f"*Parallel/Transferable Exposure*: {gap.get('parallel_exposure')}")
-                                            st.markdown(f"*Proactive Learning Plan*: {gap.get('learning_plan')}")
-                                            st.markdown("---")
+                                # 2. DOCX Download
+                                docx_bytes = convert_markdown_to_docx(cv_text)
+                                st.download_button(
+                                    label="💼 Download Word Document (.docx)",
+                                    data=docx_bytes,
+                                    file_name=f"CV_Tailored_{clean_company}_{clean_title}.docx",
+                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                )
 
-                                    # Download files
-                                    st.markdown("### **📥 Download Tailored Resume Documents**")
-                                    
-                                    clean_company = selected_job['company'].replace(' ', '_')
-                                    clean_title = selected_job['title'].replace(' ', '_')
-                                    
-                                    # 1. MD Download
-                                    st.download_button(
-                                        label="📄 Download Markdown (.md)",
-                                        data=cv_text,
-                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.md",
-                                        mime="text/markdown"
-                                    )
+                                # 3. PDF Download
+                                pdf_bytes = convert_markdown_to_pdf(cv_text)
+                                st.download_button(
+                                    label="📁 Download PDF Document (.pdf)",
+                                    data=pdf_bytes,
+                                    file_name=f"CV_Tailored_{clean_company}_{clean_title}.pdf",
+                                    mime="application/pdf"
+                                )
 
-                                    # 2. DOCX Download
-                                    docx_bytes = convert_markdown_to_docx(cv_text)
-                                    st.download_button(
-                                        label="💼 Download Word Document (.docx)",
-                                        data=docx_bytes,
-                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.docx",
-                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                    )
-
-                                    # 3. PDF Download
-                                    pdf_bytes = convert_markdown_to_pdf(cv_text)
-                                    st.download_button(
-                                        label="📁 Download PDF Document (.pdf)",
-                                        data=pdf_bytes,
-                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.pdf",
-                                        mime="application/pdf"
-                                    )
-
-                                except Exception as parse_err:
-                                    st.error(f"Failed to parse structured JSON response: {parse_err}")
-                                    st.code(json_text)
-                            else:
-                                st.error(f"Tailoring failed with output:\n{result.stderr or result.stdout}")
+                            except Exception as parse_err:
+                                st.error(f"Failed to parse structured JSON response: {parse_err}")
+                                st.code(json_text)
                     except Exception as e:
                         st.error(f"Execution Error: {e}")
 
