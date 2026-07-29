@@ -597,7 +597,7 @@ with tab_linkedin:
     }
     await new Promise(r => setTimeout(r, 2000));
     const newHeight = document.body.scrollHeight;
-    const currentJobsCount = document.querySelectorAll('a[href*="/jobs/view/"]').length;
+    const currentJobsCount = Array.from(document.querySelectorAll('a')).filter(a => a.href && a.href.includes('/jobs/')).length;
     console.log(`Loaded ${currentJobsCount} job link elements...`);
     if (newHeight === prevHeight && scrollAttempts > 5) {
       console.log("Reached bottom of the page.");
@@ -607,24 +607,47 @@ with tab_linkedin:
     scrollAttempts++;
   }
 
-  const jobElements = Array.from(document.querySelectorAll('.reusable-search__result-container, .entity-list-item'));
+  const jobLinks = Array.from(document.querySelectorAll('a')).filter(a => a.href && a.href.includes('/jobs/'));
   const rawJobsList = [];
-  console.log(`🔍 Found ${jobElements.length} job cards. Extracting...`);
+  console.log(`🔍 Found ${jobLinks.length} candidate job links. Filtering...`);
   
-  for (const el of jobElements) {
-    const titleLink = el.querySelector('a[href*="/jobs/view/"]');
-    if (!titleLink) continue;
-    const url = titleLink.href.split('?')[0];
-    const title = titleLink.innerText.trim();
-    const companyEl = el.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
-    const company = companyEl ? companyEl.innerText.trim() : 'Unknown Company';
-    const locationEl = el.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
-    const location = locationEl ? locationEl.innerText.trim() : 'Singapore';
+  for (const a of jobLinks) {
+    let url = a.href;
+    const title = a.innerText.trim();
+    if (!title || title.length < 3 || title.toLowerCase().includes('company') || title.toLowerCase().includes('school')) continue;
+    
+    let jobId = '';
+    if (url.includes('/jobs/view/')) {
+      const match = url.match(/\/jobs\/view\/(\d+)/);
+      if (match) jobId = match[1];
+    } else if (url.includes('jobId=')) {
+      const match = url.match(/jobId=(\d+)/);
+      if (match) jobId = match[1];
+    }
+    
+    if (!jobId) continue;
+    url = `https://www.linkedin.com/jobs/view/${jobId}/`;
+
+    const container = a.closest('li') || a.closest('.entity-list-item') || a.closest('div');
+    let company = 'Unknown Company';
+    let location = 'Singapore';
+    
+    if (container) {
+      const companyEl = container.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
+      if (companyEl) {
+        company = companyEl.innerText.trim();
+      }
+      const locationEl = container.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
+      if (locationEl) {
+        location = locationEl.innerText.trim();
+      }
+    }
+    
     rawJobsList.push({ title, company, url, location });
   }
   
   const uniqueJobs = Array.from(new Map(rawJobsList.map(item => [item.url, item])).values());
-  console.log(`📊 Total unique jobs: ${uniqueJobs.length}`);
+  console.log(`📊 Total unique jobs identified: ${uniqueJobs.length}`);
   
   if (uniqueJobs.length === 0) {
     console.warn("⚠️ No saved jobs identified.");
