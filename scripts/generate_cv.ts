@@ -53,27 +53,38 @@ async function generateTailoredCV() {
 
     const masterProfile = fs.readFileSync(profilePath, "utf8");
 
-    console.log(`🤖 Starting AI CV Customization for role: "${jdTitle}" at ${jdCompany}...`);
+    // 3. Construct the comprehensive single prompt for structured JSON CV response
+    const prompt = `You are a professional, honest, and high-fidelity CV writer and alignment agent.
+Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing both the analysis and the tailored CV.
 
-    // 3. Construct prompt
-    const prompt = `You are a high-fidelity CV tailoring assistant. Your task is to customize the user's master professional profile for a specific job description (JD).
+### STRICT RULES:
+1. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, or accomplishments. Keep everything 100% factual to the master profile.
+2. **HONEST GAP REPORTING**: Call out key mismatches/gaps where the user lacks direct experience. Under each mismatch:
+   - Provide factual parallel exposure (e.g. if the JD asks for Kubernetes and the user only has Docker/ECS, state that).
+   - Outline a brief, realistic learning plan to master it fast.
+3. **TAILORED CV MARKDOWN**: In the "tailored_cv_markdown" property, write the fully customized resume in clean Markdown format:
+   - At the top of the resume, introduce a summary section displaying overall fit %, core requirements % match, and key gaps (with parallel exposure/learning plan).
+   - Retell the work history focusing on aligned achievements, tools, and projects factually.
+   - Include studies, skills, and certifications.
 
-### MASTER RULES:
-1. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, projects, certifications, skills, or achievements that are not present in the master profile. Staying strictly honest is critical.
-2. **HONEST GAP REPORTING**: If there are key requirements in the JD that are not covered by the master profile:
-   - Do not hide them.
-   - List them explicitly in a "Key Mismatches / Gaps" section at the top.
-   - Under each gap, state what parallel/other exposure you have that is related, or state an honest, brief plan to learn it fast.
-3. **FRONT-PAGE FIT SUMMARY**: Introduce a summary block at the very top of the CV containing:
-   - Overall % Fit to JD requirements (estimate realistically based on overlap)
-   - Core Requirements % Match
-   - Key Mismatches / Gaps
-4. **EXPERIENCE FOCUS**: Retell the experience section focusing heavily on achievements, tools, and projects that align with the JD, but keep all facts and numbers strictly true to the master profile.
-5. **KEYWORDS**: Ensure key technical keywords from the JD that match the profile are prominent.
+### JSON RESPONSE SCHEMA:
+You MUST output a JSON object conforming exactly to this schema:
+{
+  "analysis": {
+    "overall_fit_percentage": number (0-100),
+    "core_requirements_match_percentage": number (0-100),
+    "core_matches": [
+      { "requirement": "string", "user_match": "string" }
+    ],
+    "key_mismatches": [
+      { "requirement": "string", "parallel_exposure": "string", "learning_plan": "string" }
+    ]
+  },
+  "tailored_cv_markdown": "string (the complete resume markdown text)"
+}
 
 ---
-
-### JOB SPECIFICATION:
+### TARGET JOB SPECIFICATION:
 - **Title**: ${jdTitle}
 - **Company**: ${jdCompany}
 - **Location**: ${jdLocation}
@@ -81,24 +92,23 @@ async function generateTailoredCV() {
 ${jdDescription}
 
 ---
-
 ### USER MASTER PROFILE:
 ${masterProfile}
 
 ---
+Ensure the output is clean JSON. Do not prepend or append markdown code blocks around the JSON object.`;
 
-Please output the completed tailored CV in clean Markdown format. Focus on professional styling and structure.`;
-
-    // 4. Run LLM generation
+    // 4. Run LLM generation with JSON output configuration
     const model = process.env.KIMI_API_KEY ? (process.env.KIMI_MODEL || "moonshot-v1-8k") : (process.env.GEMINI_MODEL || "gemini-2.0-flash");
-    const tailoredCV = await generateContent({
+    const jsonResponse = await generateContent({
       model,
       contents: prompt,
-      systemInstruction: "You are a professional, honest, and high-fidelity CV customization assistant. You output perfectly structured resumes in clean Markdown."
+      responseMimeType: "application/json",
+      systemInstruction: "You are a professional CV tailoring system. You analyze profiles and output strictly structured JSON conforming to the requested schema."
     });
 
     console.log("CV_GENERATION_SUCCESS_START");
-    console.log(tailoredCV);
+    console.log(jsonResponse.trim());
     console.log("CV_GENERATION_SUCCESS_END");
 
   } catch (err: any) {

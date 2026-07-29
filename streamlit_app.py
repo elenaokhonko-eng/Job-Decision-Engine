@@ -8,6 +8,9 @@ from psycopg2.extras import RealDictCursor
 import datetime
 import pandas as pd
 import streamlit as st
+import docx
+from fpdf import FPDF
+from io import BytesIO
 
 # Load environment variables from Streamlit secrets, .env, and .env.local
 def load_dotenv():
@@ -213,6 +216,82 @@ def save_new_job_to_db(job):
     except Exception as e:
         st.error(f"Failed to save job: {e}")
         return False
+
+def convert_markdown_to_docx(md_text):
+    doc = docx.Document()
+    for line in md_text.split("\n"):
+        line = line.strip()
+        if not line:
+            doc.add_paragraph()
+            continue
+        if line.startswith("# "):
+            doc.add_heading(line[2:], level=1)
+        elif line.startswith("## "):
+            doc.add_heading(line[3:], level=2)
+        elif line.startswith("### "):
+            doc.add_heading(line[4:], level=3)
+        elif line.startswith("* ") or line.startswith("- "):
+            p = doc.add_paragraph(style='List Bullet')
+            text = line[2:]
+            parts = text.split("**")
+            for idx, part in enumerate(parts):
+                run = p.add_run(part)
+                if idx % 2 == 1:
+                    run.bold = True
+        else:
+            p = doc.add_paragraph()
+            parts = line.split("**")
+            for idx, part in enumerate(parts):
+                run = p.add_run(part)
+                if idx % 2 == 1:
+                    run.bold = True
+    bio = BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+class PDFResume(FPDF):
+    def header(self):
+        pass
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('helvetica', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+def convert_markdown_to_pdf(md_text):
+    pdf = PDFResume()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_font("helvetica", size=10)
+    
+    for line in md_text.split("\n"):
+        line = line.strip()
+        if not line:
+            pdf.ln(4)
+            continue
+            
+        if line.startswith("# "):
+            pdf.set_font("helvetica", "B", 16)
+            pdf.cell(0, 10, line[2:], ln=True)
+            pdf.ln(2)
+        elif line.startswith("## "):
+            pdf.set_font("helvetica", "B", 13)
+            pdf.cell(0, 8, line[3:], ln=True)
+            pdf.ln(1)
+        elif line.startswith("### "):
+            pdf.set_font("helvetica", "B", 11)
+            pdf.cell(0, 6, line[4:], ln=True)
+            pdf.ln(1)
+        elif line.startswith("* ") or line.startswith("- "):
+            pdf.set_font("helvetica", "", 10)
+            text = line[2:]
+            text_clean = text.replace("**", "")
+            pdf.multi_cell(0, 5, f"o  {text_clean}")
+        else:
+            pdf.set_font("helvetica", "", 10)
+            text_clean = line.replace("**", "")
+            pdf.multi_cell(0, 5, text_clean)
+            
+    return bytes(pdf.output())
 
 def ingest_linkedin_saved_json(jobs):
     try:
@@ -911,24 +990,72 @@ with tab_cv:
                             if result.returncode == 0:
                                 output = result.stdout
                                 # Extract CV content between start/end blocks if present
-                                cv_text = ""
+                                json_text = ""
                                 if "CV_GENERATION_SUCCESS_START" in output:
                                     parts = output.split("CV_GENERATION_SUCCESS_START")
-                                    cv_text = parts[1].split("CV_GENERATION_SUCCESS_END")[0].strip()
+                                    json_text = parts[1].split("CV_GENERATION_SUCCESS_END")[0].strip()
                                 else:
-                                    cv_text = output.strip()
+                                    json_text = output.strip()
 
-                                st.success("✅ Tailored CV generated successfully!")
-                                st.markdown(cv_text)
+                                try:
+                                    cv_data = json.loads(json_text)
+                                    analysis = cv_data.get("analysis", {})
+                                    cv_text = cv_data.get("tailored_cv_markdown", "")
 
-                                # Downloader button
-                                clean_filename = f"CV_Tailored_{selected_job['company'].replace(' ', '_')}_{selected_job['title'].replace(' ', '_')}.md"
-                                st.download_button(
-                                    label="📥 Download Tailored CV (.md)",
-                                    data=cv_text,
-                                    file_name=clean_filename,
-                                    mime="text/markdown"
-                                )
+                                    st.success("✅ Tailored CV generated successfully!")
+                                    
+                                    # Show high-level metrics
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        st.metric("Overall Fit Score", f"{analysis.get('overall_fit_percentage', 0)}%")
+                                    with col2:
+                                        st.metric("Core Requirements Match", f"{analysis.get('core_requirements_match_percentage', 0)}%")
+
+                                    # Show gaps briefly
+                                    gaps = analysis.get("key_mismatches", [])
+                                    if gaps:
+                                        with st.expander("⚠️ Identified Mismatches & Learning Plans"):
+                                            for gap in gaps:
+                                                st.markdown(f"**Missing Requirement**: {gap.get('requirement')}")
+                                                st.markdown(f"*Parallel Exposure*: {gap.get('parallel_exposure')}")
+                                                st.markdown(f"*Learning Plan*: {gap.get('learning_plan')}")
+                                                st.markdown("---")
+
+                                    # Download files
+                                    st.markdown("### **📥 Download Tailored Resume Documents**")
+                                    
+                                    clean_company = selected_job['company'].replace(' ', '_')
+                                    clean_title = selected_job['title'].replace(' ', '_')
+                                    
+                                    # 1. MD Download
+                                    st.download_button(
+                                        label="📄 Download Markdown (.md)",
+                                        data=cv_text,
+                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.md",
+                                        mime="text/markdown"
+                                    )
+
+                                    # 2. DOCX Download
+                                    docx_bytes = convert_markdown_to_docx(cv_text)
+                                    st.download_button(
+                                        label="💼 Download Word Document (.docx)",
+                                        data=docx_bytes,
+                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.docx",
+                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                    )
+
+                                    # 3. PDF Download
+                                    pdf_bytes = convert_markdown_to_pdf(cv_text)
+                                    st.download_button(
+                                        label="📁 Download PDF Document (.pdf)",
+                                        data=pdf_bytes,
+                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.pdf",
+                                        mime="application/pdf"
+                                    )
+
+                                except Exception as parse_err:
+                                    st.error(f"Failed to parse structured JSON response: {parse_err}")
+                                    st.code(json_text)
                             else:
                                 st.error(f"Tailoring failed with output:\n{result.stderr or result.stdout}")
                     except Exception as e:
