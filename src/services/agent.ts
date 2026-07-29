@@ -161,46 +161,54 @@ export async function generateContent(options: {
   if (useKimi) {
     try {
       const baseUrl = "https://api.kimi.com/coding/v1";
-      const model = process.env.KIMI_MODEL || process.env.GEMINI_MODEL || "moonshot-v1-8k";
+      const model = process.env.KIMI_MODEL || "moonshot-v1-8k";
       const messages: any[] = [];
       if (options.systemInstruction) {
         messages.push({ role: "system", content: options.systemInstruction });
       }
       messages.push({ role: "user", content: options.contents });
 
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${kimiKey}`,
-          "User-Agent": "Claude-Code"
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: 1,
-          response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
-        }),
-        signal: AbortSignal.timeout(90000)
-      });
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const response = await fetch(`${baseUrl}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${kimiKey}`,
+              "User-Agent": "Claude-Code"
+            },
+            body: JSON.stringify({
+              model,
+              messages,
+              temperature: 1,
+              response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+            }),
+            signal: AbortSignal.timeout(60000)
+          });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
+          }
+
+          const data = await response.json();
+          return data.choices?.[0]?.message?.content || "";
+        } catch (err: any) {
+          if (attempt === 2) throw err;
+          console.warn(`⏳ Kimi request failed. Retrying in 5s...`);
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
       }
-
-      const data = await response.json();
-      return data.choices?.[0]?.message?.content || "";
     } catch (err: any) {
       console.warn(`⚠️ Kimi generateContent failed: ${err.message || err}. Falling back to Gemini 2.0 Flash...`);
     }
   }
 
-  // Normal Gemini flow fallback
+  // Normal Gemini flow
   try {
     const ai = getGeminiClient();
     let response: any;
-    const maxRetries = 5;
+    const maxRetries = 2;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         response = await ai.models.generateContent({
@@ -218,12 +226,12 @@ export async function generateContent(options: {
         const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
         
         if (isDailyQuota) {
-          throw gErr; // Skip retries for daily quota exhaustion
+          throw gErr;
         }
         
         if ((isRateLimit || isTimeout) && attempt < maxRetries) {
-          console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Waiting 60s before retrying...`);
-          await new Promise((resolve) => setTimeout(resolve, 60000));
+          console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Retrying in 5s...`);
+          await new Promise((resolve) => setTimeout(resolve, 5000));
         } else {
           throw gErr;
         }
@@ -231,7 +239,7 @@ export async function generateContent(options: {
     }
     throw new Error("Gemini generation failed after max retries");
   } catch (geminiError: any) {
-    if (kimiKey) {
+    if (kimiKey && !useKimi) {
       console.warn(`⚠️ Gemini generateContent failed (${geminiError.message || geminiError}). Falling back to Kimi API...`);
       try {
         const baseUrl = "https://api.kimi.com/coding/v1";
@@ -255,7 +263,7 @@ export async function generateContent(options: {
             temperature: 1,
             response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
           }),
-          signal: AbortSignal.timeout(90000)
+          signal: AbortSignal.timeout(60000)
         });
 
         if (!response.ok) {
