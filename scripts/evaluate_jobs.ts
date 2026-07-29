@@ -2,6 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { getGeminiClient, runAgent, generateContent } from "../src/services/agent.ts";
 import { db, verifyUrlLive } from "../src/db/db.ts";
+import { runDeduplication } from "./deduplicate.ts";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -29,7 +30,10 @@ async function runPipeline() {
   const evalJobSleepMs = parseInt(process.env.EVAL_JOB_SLEEP_MS || "13000", 10);
 
   try {
-    // 0. Clean up any duplicate jobs in the final jobs table
+    // 0. Clean up staging raw_jobs duplicates and already-evaluated items
+    await runDeduplication();
+
+    // 0b. Clean up any duplicate jobs in the final jobs table
     console.log("Deduplicating any existing duplicate records in final jobs table...");
     await pool.query(`
       DELETE FROM jobs j1
@@ -174,6 +178,9 @@ Return nothing other than the JSON block.`;
         }
       }
     }
+
+    // 1.5 Run deduplication after new email alerts are staged, to prevent evaluating duplicates
+    await runDeduplication();
 
     // 2. Fetch and evaluate unprocessed raw jobs in database
     console.log("\nQuerying database for unprocessed raw jobs to evaluate...");

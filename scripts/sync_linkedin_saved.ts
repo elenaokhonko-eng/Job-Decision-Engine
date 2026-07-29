@@ -1,6 +1,7 @@
 import puppeteer from "puppeteer";
 import pg from "pg";
 import dotenv from "dotenv";
+import { runDeduplication } from "./deduplicate.ts";
 
 // Load environment variables
 dotenv.config();
@@ -228,6 +229,11 @@ async function syncLinkedInSavedJobs() {
   } catch (err: any) {
     console.error("❌ Sync Error:", err.message || err);
   } finally {
+    try {
+      await runDeduplication();
+    } catch (e) {
+      console.error("❌ Deduplication during sync cleanup failed:", e);
+    }
     await browser.close();
     await pool.end();
   }
