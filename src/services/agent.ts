@@ -197,33 +197,82 @@ export async function generateContent(options: {
   }
 
   // Normal Gemini flow fallback
-  const ai = getGeminiClient();
-  let response: any;
-  const maxRetries = 5;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents: options.contents,
-        config: {
-          responseMimeType: options.responseMimeType as any,
-          systemInstruction: options.systemInstruction
+  try {
+    const ai = getGeminiClient();
+    let response: any;
+    const maxRetries = 5;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        response = await ai.models.generateContent({
+          model: "gemini-2.0-flash",
+          contents: options.contents,
+          config: {
+            responseMimeType: options.responseMimeType as any,
+            systemInstruction: options.systemInstruction
+          }
+        });
+        return response.text || "";
+      } catch (gErr: any) {
+        const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests");
+        const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
+        const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
+        
+        if (isDailyQuota) {
+          throw gErr; // Skip retries for daily quota exhaustion
         }
-      });
-      break; // Success, exit loop
-    } catch (gErr: any) {
-      const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
-      const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
-      
-      if ((isRateLimit || isTimeout) && attempt < maxRetries) {
-        console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Waiting 60s before retrying...`);
-        await new Promise((resolve) => setTimeout(resolve, 60000));
-      } else {
-        throw gErr;
+        
+        if ((isRateLimit || isTimeout) && attempt < maxRetries) {
+          console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Waiting 60s before retrying...`);
+          await new Promise((resolve) => setTimeout(resolve, 60000));
+        } else {
+          throw gErr;
+        }
       }
     }
+    throw new Error("Gemini generation failed after max retries");
+  } catch (geminiError: any) {
+    if (kimiKey) {
+      console.warn(`⚠️ Gemini generateContent failed (${geminiError.message || geminiError}). Falling back to Kimi API...`);
+      try {
+        const baseUrl = "https://api.kimi.com/coding/v1";
+        const model = process.env.KIMI_MODEL || "moonshot-v1-8k";
+        const messages: any[] = [];
+        if (options.systemInstruction) {
+          messages.push({ role: "system", content: options.systemInstruction });
+        }
+        messages.push({ role: "user", content: options.contents });
+
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${kimiKey}`,
+            "User-Agent": "Claude-Code"
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature: 1,
+            response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+          }),
+          signal: AbortSignal.timeout(20000)
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
+        }
+
+        const data = await response.json();
+        return data.choices?.[0]?.message?.content || "";
+      } catch (kimiErr: any) {
+        console.error(`❌ Both Gemini and Kimi failed. Kimi error: ${kimiErr.message || kimiErr}`);
+        throw geminiError;
+      }
+    } else {
+      throw geminiError;
+    }
   }
-  return response.text || "";
 }
 
 async function runKimiAgentInternal(
