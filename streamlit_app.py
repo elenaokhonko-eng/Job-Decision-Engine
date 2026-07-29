@@ -311,89 +311,120 @@ st.sidebar.metric("Toxicity Flags", toxic_count)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📅 Automated Schedules")
-st.sidebar.info("""
 * **Daily Ingestion & Evaluation**: Runs daily at **10:00 AM SGT** (02:00 UTC) via GitHub Actions.
 * **Weekly LinkedIn Auto-Sync**: Runs every **Sunday at 10:00 AM SGT** (02:00 UTC) via GitHub Actions.
 """)
 
-st.sidebar.markdown("---")
 st.sidebar.subheader("⚡ Unscheduled Action Controls")
+
+is_local = os.path.exists(".env.local")
+github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_PAT")
 
 # Button 1: Ingest Gmail Alerts Only
 if st.sidebar.button("📨 1. Ingest Gmail Alerts Only", help="Connects to Gmail, fetches unread alerts from 'Jobs-Alerts', stages them in Postgres, and moves them to 'Jobs-Alerts-Processed'."):
-    with st.spinner("Connecting to Gmail IMAP and ingesting raw email alerts..."):
-        try:
-            st.info("Fetching new emails from 'Jobs-Alerts' folder...")
-            ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-            if ingest_proc.returncode == 0:
-                st.success("✅ Gmail alert ingestion completed successfully!")
-                st.code(ingest_proc.stdout, language="text")
-            else:
-                st.warning(f"Ingestion Output: {ingest_proc.stdout or ingest_proc.stderr}")
-        except Exception as e:
-            st.error(f"Ingestion Error: {e}")
-
-        # Optional GitHub dispatch
-        github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_PAT")
+    if not is_local and not github_token:
+        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
+    else:
         if github_token:
-            try:
-                req = urllib.request.Request(
-                    "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
-                    data=json.dumps({"ref": "main"}).encode("utf-8"),
-                    headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req) as resp:
-                    if resp.status in (204, 200, 201):
-                        st.success("🐙 Triggered GitHub Actions 1_gmail_ingestion workflow!")
-            except Exception as gh_err:
-                pass
+            with st.spinner("Triggering GitHub Actions 1_gmail_ingestion workflow..."):
+                try:
+                    req = urllib.request.Request(
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
+                        data=json.dumps({"ref": "main"}).encode("utf-8"),
+                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req) as resp:
+                        if resp.status in (204, 200, 201):
+                            st.success("🐙 Triggered GitHub Actions 1_gmail_ingestion workflow!")
+                except Exception as gh_err:
+                    st.error(f"GitHub Trigger Error: {gh_err}")
+        else:
+            with st.spinner("Connecting to Gmail IMAP and ingesting raw email alerts..."):
+                try:
+                    st.info("Fetching new emails from 'Jobs-Alerts' folder...")
+                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    if ingest_proc.returncode == 0:
+                        st.success("✅ Gmail alert ingestion completed successfully!")
+                        st.code(ingest_proc.stdout, language="text")
+                    else:
+                        st.warning(f"Ingestion Output: {ingest_proc.stdout or ingest_proc.stderr}")
+                except Exception as e:
+                    st.error(f"Ingestion Error: {e}")
         st.rerun()
 
 # Button 2: Run Kimi AI Evaluation Only
 if st.sidebar.button("🧠 2. Run Kimi AI Evaluation", help="Parses staged email alerts, extracts job URLs, evaluates jobs with Kimi AI, updates final Postgres tables, and ranks Top 10."):
-    with st.spinner("Staging jobs and running Kimi AI evaluation engine..."):
-        try:
-            st.info("Executing Kimi AI job description evaluation pipeline...")
-            eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-            if eval_proc.returncode == 0:
-                st.success("✅ Kimi AI evaluation completed successfully!")
-                st.code(eval_proc.stdout, language="text")
-            else:
-                st.info(f"Evaluation Details:\n{eval_proc.stdout}")
-        except Exception as e:
-            st.error(f"Evaluation Error: {e}")
-
-        # Optional GitHub dispatch
-        github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_PAT")
+    if not is_local and not github_token:
+        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
+    else:
         if github_token:
-            try:
-                req = urllib.request.Request(
-                    "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_kimi_evaluation.yml/dispatches",
-                    data=json.dumps({"ref": "main"}).encode("utf-8"),
-                    headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req) as resp:
-                    if resp.status in (204, 200, 201):
-                        st.success("🐙 Triggered GitHub Actions 2_kimi_evaluation workflow!")
-            except Exception as gh_err:
-                pass
-        st.balloons()
+            with st.spinner("Triggering GitHub Actions 2_kimi_evaluation workflow..."):
+                try:
+                    req = urllib.request.Request(
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_kimi_evaluation.yml/dispatches",
+                        data=json.dumps({"ref": "main"}).encode("utf-8"),
+                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req) as resp:
+                        if resp.status in (204, 200, 201):
+                            st.success("🐙 Triggered GitHub Actions 2_kimi_evaluation workflow!")
+                            st.balloons()
+                except Exception as gh_err:
+                    st.error(f"GitHub Trigger Error: {gh_err}")
+        else:
+            with st.spinner("Staging jobs and running Kimi AI evaluation engine..."):
+                try:
+                    st.info("Executing Kimi AI job description evaluation pipeline...")
+                    eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    if eval_proc.returncode == 0:
+                        st.success("✅ Kimi AI evaluation completed successfully!")
+                        st.code(eval_proc.stdout, language="text")
+                    else:
+                        st.info(f"Evaluation Details:\n{eval_proc.stdout}")
+                except Exception as e:
+                    st.error(f"Evaluation Error: {e}")
         st.rerun()
 
 # Button 3: Run Full Pipeline
 if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Step 1 (Ingestion) followed by Step 2 (Evaluation) sequentially."):
-    with st.spinner("Running full pipeline (Ingestion + Kimi Evaluation)..."):
-        try:
-            st.info("Step 1/2: Fetching emails from 'Jobs-Alerts'...")
-            ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-            st.info("Step 2/2: Running Kimi AI evaluation pipeline...")
-            eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-            st.success("✅ Full pipeline execution finished!")
-            st.balloons()
-        except Exception as e:
-            st.error(f"Execution Error: {e}")
+    if not is_local and not github_token:
+        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
+    else:
+        if github_token:
+            with st.spinner("Triggering full pipeline via GitHub Actions workflows..."):
+                try:
+                    req1 = urllib.request.Request(
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
+                        data=json.dumps({"ref": "main"}).encode("utf-8"),
+                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
+                        method="POST"
+                    )
+                    req2 = urllib.request.Request(
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_kimi_evaluation.yml/dispatches",
+                        data=json.dumps({"ref": "main"}).encode("utf-8"),
+                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req1) as resp1:
+                        pass
+                    with urllib.request.urlopen(req2) as resp2:
+                        pass
+                    st.success("🐙 Triggered full pipeline workflows on GitHub Actions!")
+                except Exception as gh_err:
+                    st.error(f"GitHub Trigger Error: {gh_err}")
+        else:
+            with st.spinner("Running full pipeline (Ingestion + Kimi Evaluation) locally..."):
+                try:
+                    st.info("Step 1/2: Fetching emails from 'Jobs-Alerts'...")
+                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    st.info("Step 2/2: Running Kimi AI evaluation pipeline...")
+                    eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    st.success("✅ Full pipeline execution finished!")
+                    st.balloons()
+                except Exception as e:
+                    st.error(f"Execution Error: {e}")
         st.rerun()
 
 st.sidebar.markdown("---")
