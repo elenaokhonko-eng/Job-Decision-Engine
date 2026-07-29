@@ -670,7 +670,21 @@ with tab_linkedin:
   document.body.appendChild(downloadAnchor);
   downloadAnchor.click();
   downloadAnchor.remove();
-  console.log("🎉 SUCCESS!");
+  console.log("🎉 JSON File Downloaded successfully!");
+  
+  console.log("🧹 Starting automatic unsave cleanup on LinkedIn page...");
+  const cards = Array.from(document.querySelectorAll('.reusable-search__result-container, .entity-list-item'));
+  let unsavedCount = 0;
+  for (const card of cards) {
+    const btn = Array.from(card.querySelectorAll('button')).find(b => b.innerText.trim().toLowerCase() === 'saved');
+    if (btn) {
+      btn.click();
+      unsavedCount++;
+      await new Promise(r => setTimeout(r, 1000)); // sleep 1s between clicks
+    }
+  }
+  console.log(`🧹 Cleaned up/unsaved ${unsavedCount} jobs on LinkedIn!`);
+  console.log("🎉 ALL DONE SUCCESSFULLY!");
 })();"""
         st.code(script_code, language="javascript")
         
