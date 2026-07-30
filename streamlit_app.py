@@ -678,13 +678,17 @@ with tab_dashboard:
                     st.markdown(f"**Match Score:** `{score}/100`")
                     st.markdown(f"**Autonomy Score:** `{job.get('nd_friendly_score') or 'N/A'}%` | **Politics Stress:** `{job.get('politics_stress_score') or 'N/A'}%`")
                     desc_text = job.get("description", "")
-                    if desc_text.startswith("{"):
+                    parsed_desc = None
+                    if isinstance(desc_text, dict):
+                        parsed_desc = desc_text
+                        desc_text = parsed_desc.get("job_description", "")
+                    elif isinstance(desc_text, str) and desc_text.strip().startswith("{"):
                         try:
                             parsed_desc = json.loads(desc_text)
                             desc_text = parsed_desc.get("job_description", "")
                         except Exception:
                             pass
-                    st.text_area("Full Description Brief", desc_text, height=100, disabled=True, key=f"desc_{idx}")
+                    st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"desc_{idx}")
                     
                     # Delete action
                     if st.button("🗑️ Delete Listing", key=f"del_{job.get('id') or idx}"):
@@ -1069,57 +1073,72 @@ with tab_cv:
                 st.markdown(f"🔗 **Job Posting URL**: [{selected_job['careers_portal_url']}]({selected_job['careers_portal_url']})")
                 
             with st.expander("🔍 View Target Job Description"):
-                desc = selected_job.get("description", "").strip()
-                if not desc or desc == "No description available.":
+                desc = selected_job.get("description", "")
+                desc_stripped = desc.strip() if isinstance(desc, str) else desc
+                if not desc_stripped or desc_stripped == "No description available.":
                     st.warning("⚠️ No full job description is stored in the database. Please verify the link above or update this job record.")
                 else:
-                    if desc.startswith("{"):
+                    parsed_desc = None
+                    if isinstance(desc, dict):
+                        parsed_desc = desc
+                    elif isinstance(desc, str) and desc.strip().startswith("{"):
                         try:
                             parsed_desc = json.loads(desc)
-                            st.markdown("### 📝 **Overview**")
-                            st.write(parsed_desc.get("job_description", ""))
-                            
-                            if parsed_desc.get("key_responsibilities"):
-                                st.markdown("### 📋 **Key Responsibilities**")
-                                for r in parsed_desc["key_responsibilities"]:
-                                    st.markdown(f"- {r}")
-                                    
-                            if parsed_desc.get("technical_skills"):
-                                st.markdown("### 🛠️ **Technical Skills**")
-                                for s in parsed_desc["technical_skills"]:
-                                    st.markdown(f"- {s}")
-                                    
-                            if parsed_desc.get("qualifications_education"):
-                                st.markdown("### 🎓 **Qualifications & Education**")
-                                for q in parsed_desc["qualifications_education"]:
-                                    st.markdown(f"- {q}")
-                                    
-                            if parsed_desc.get("nice_to_haves"):
-                                st.markdown("### 🌟 **Nice-to-Haves**")
-                                for n in parsed_desc["nice_to_haves"]:
-                                    st.markdown(f"- {n}")
                         except Exception:
-                            st.write(desc)
+                            pass
+                    
+                    if parsed_desc is not None:
+                        st.markdown("### 📝 **Overview**")
+                        st.write(parsed_desc.get("job_description", ""))
+                        
+                        if parsed_desc.get("key_responsibilities"):
+                            st.markdown("### 📋 **Key Responsibilities**")
+                            for r in parsed_desc["key_responsibilities"]:
+                                st.markdown(f"- {r}")
+                                
+                        if parsed_desc.get("technical_skills"):
+                            st.markdown("### 🛠️ **Technical Skills**")
+                            for s in parsed_desc["technical_skills"]:
+                                st.markdown(f"- {s}")
+                                
+                        if parsed_desc.get("qualifications_education"):
+                            st.markdown("### 🎓 **Qualifications & Education**")
+                            for q in parsed_desc["qualifications_education"]:
+                                st.markdown(f"- {q}")
+                                
+                        if parsed_desc.get("nice_to_haves"):
+                            st.markdown("### 🌟 **Nice-to-Haves**")
+                            for n in parsed_desc["nice_to_haves"]:
+                                st.markdown(f"- {n}")
                     else:
                         st.write(desc)
 
             # Button to trigger CV customization
             st.markdown("---")
             if st.button("✨ Generate Factual Customised CV"):
-                desc_text = selected_job.get("description", "").strip()
+                desc_text = selected_job.get("description", "")
                 actual_text = desc_text
-                if desc_text.startswith("{"):
+                parsed = None
+                if isinstance(desc_text, dict):
+                    parsed = desc_text
+                elif isinstance(desc_text, str) and desc_text.strip().startswith("{"):
                     try:
                         parsed = json.loads(desc_text)
-                        actual_text = (
-                            (parsed.get("job_description") or "") + " " +
-                            " ".join(parsed.get("key_responsibilities") or []) + " " +
-                            " ".join(parsed.get("technical_skills") or []) + " " +
-                            " ".join(parsed.get("qualifications_education") or []) + " " +
-                            " ".join(parsed.get("nice_to_haves") or [])
-                        ).strip()
                     except Exception:
                         pass
+                
+                if parsed is not None:
+                    actual_text = (
+                        (parsed.get("job_description") or "") + " " +
+                        " ".join(parsed.get("key_responsibilities") or []) + " " +
+                        " ".join(parsed.get("technical_skills") or []) + " " +
+                        " ".join(parsed.get("qualifications_education") or []) + " " +
+                        " ".join(parsed.get("nice_to_haves") or [])
+                    ).strip()
+                elif isinstance(desc_text, str):
+                    actual_text = desc_text.strip()
+                else:
+                    actual_text = ""
                 
                 if not actual_text or actual_text == "No description available." or len(actual_text) < 150:
                     st.error("❌ Cannot generate CV: The target job description is missing, empty, or too short in the database. Please make sure the job details are scraped or populated before customizing.")
