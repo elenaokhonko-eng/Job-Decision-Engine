@@ -155,10 +155,98 @@ export async function generateContent(options: {
   responseMimeType?: string;
   systemInstruction?: string;
 }): Promise<string> {
-  const kimiKey = process.env.KIMI_API_KEY || (process.env.GEMINI_API_KEY?.startsWith("sk-") ? process.env.GEMINI_API_KEY : "");
-  const useKimi = kimiKey && !options.model?.toLowerCase().includes("gemini");
+  const kimiKey = process.env.KIMI_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
 
-  if (useKimi) {
+  // 1. Try Gemini first
+  if (geminiKey) {
+    try {
+      const ai = getGeminiClient();
+      let response: any;
+      const maxRetries = 2;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          response = await ai.models.generateContent({
+            model: "gemini-2.0-flash",
+            contents: options.contents,
+            config: {
+              responseMimeType: options.responseMimeType as any,
+              systemInstruction: options.systemInstruction
+            }
+          });
+          return response.text || "";
+        } catch (gErr: any) {
+          const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests");
+          const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
+          const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
+          
+          if (isDailyQuota) {
+            throw gErr;
+          }
+          
+          if ((isRateLimit || isTimeout) && attempt < maxRetries) {
+            console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Retrying in 5s...`);
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+          } else {
+            throw gErr;
+          }
+        }
+      }
+    } catch (geminiError: any) {
+      console.warn(`⚠️ Gemini generateContent failed (${geminiError.message || geminiError}). Falling back to OpenAI...`);
+    }
+  }
+
+  // 2. Try OpenAI second
+  if (openaiKey) {
+    try {
+      const baseUrl = "https://api.openai.com/v1";
+      const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+      const messages: any[] = [];
+      if (options.systemInstruction) {
+        messages.push({ role: "system", content: options.systemInstruction });
+      }
+      messages.push({ role: "user", content: options.contents });
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const response = await fetch(`${baseUrl}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${openaiKey}`,
+              "User-Agent": "Claude-Code"
+            },
+            body: JSON.stringify({
+              model,
+              messages,
+              temperature: 1,
+              response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+            }),
+            signal: AbortSignal.timeout(60000)
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`OpenAI API request failed with status ${response.status}: ${errorText}`);
+          }
+
+          const data = await response.json();
+          return data.choices?.[0]?.message?.content || "";
+        } catch (err: any) {
+          if (attempt === 2) throw err;
+          console.warn(`⏳ OpenAI request failed. Retrying in 5s...`);
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+      }
+    } catch (openaiError: any) {
+      console.warn(`⚠️ OpenAI generateContent failed (${openaiError.message || openaiError}). Falling back to Kimi...`);
+    }
+  }
+
+  // 3. Try Kimi third
+  if (kimiKey) {
     try {
       const baseUrl = "https://api.kimi.com/coding/v1";
       const model = process.env.KIMI_MODEL || "moonshot-v1-8k";
@@ -199,88 +287,13 @@ export async function generateContent(options: {
           await new Promise((resolve) => setTimeout(resolve, 5000));
         }
       }
-    } catch (err: any) {
-      console.warn(`⚠️ Kimi generateContent failed: ${err.message || err}. Falling back to Gemini 2.0 Flash...`);
+    } catch (kimiError: any) {
+      console.error(`❌ All models failed. Kimi error: ${kimiError.message || kimiError}`);
+      throw kimiError;
     }
   }
 
-  // Normal Gemini flow
-  try {
-    const ai = getGeminiClient();
-    let response: any;
-    const maxRetries = 2;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        response = await ai.models.generateContent({
-          model: "gemini-2.0-flash",
-          contents: options.contents,
-          config: {
-            responseMimeType: options.responseMimeType as any,
-            systemInstruction: options.systemInstruction
-          }
-        });
-        return response.text || "";
-      } catch (gErr: any) {
-        const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests");
-        const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
-        const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
-        
-        if (isDailyQuota) {
-          throw gErr;
-        }
-        
-        if ((isRateLimit || isTimeout) && attempt < maxRetries) {
-          console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Retrying in 5s...`);
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-        } else {
-          throw gErr;
-        }
-      }
-    }
-    throw new Error("Gemini generation failed after max retries");
-  } catch (geminiError: any) {
-    if (kimiKey && !useKimi) {
-      console.warn(`⚠️ Gemini generateContent failed (${geminiError.message || geminiError}). Falling back to Kimi API...`);
-      try {
-        const baseUrl = "https://api.kimi.com/coding/v1";
-        const model = process.env.KIMI_MODEL || "moonshot-v1-8k";
-        const messages: any[] = [];
-        if (options.systemInstruction) {
-          messages.push({ role: "system", content: options.systemInstruction });
-        }
-        messages.push({ role: "user", content: options.contents });
-
-        const response = await fetch(`${baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${kimiKey}`,
-            "User-Agent": "Claude-Code"
-          },
-          body: JSON.stringify({
-            model,
-            messages,
-            temperature: 1,
-            response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
-          }),
-          signal: AbortSignal.timeout(60000)
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
-        }
-
-        const data = await response.json();
-        return data.choices?.[0]?.message?.content || "";
-      } catch (kimiErr: any) {
-        console.error(`❌ Both Gemini and Kimi failed. Kimi error: ${kimiErr.message || kimiErr}`);
-        throw geminiError;
-      }
-    } else {
-      throw geminiError;
-    }
-  }
+  throw new Error("No active API keys found for Gemini, OpenAI, or Kimi.");
 }
 
 async function runKimiAgentInternal(
