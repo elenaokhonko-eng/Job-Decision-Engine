@@ -3,6 +3,8 @@ import dotenv from "dotenv";
 import { getGeminiClient, runAgent, generateContent } from "../src/services/agent.ts";
 import { db, verifyUrlLive } from "../src/db/db.ts";
 import { runDeduplication } from "./deduplicate.ts";
+import puppeteer from "puppeteer";
+
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -15,6 +17,119 @@ const pool = new pg.Pool({
 });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function scrapeJobDescription(url: string, browser: puppeteer.Browser): Promise<{ description: string; isExpired: boolean }> {
+  const page = await browser.newPage();
+  try {
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    await page.setViewport({ width: 1200, height: 800 });
+    
+    console.log(`- Scraping URL: ${url}`);
+    
+    // Check if it's LinkedIn guest API format to avoid login wall
+    if (url.includes("linkedin.com/jobs/view/")) {
+      const match = url.match(/\/view\/(\d+)/);
+      if (match && match[1]) {
+        const jobId = match[1];
+        const guestUrl = `https://www.linkedin.com/jobs-guest/jobs/api/jobDetail/${jobId}`;
+        console.log(`  -> Using LinkedIn guest detail API: ${guestUrl}`);
+        const response = await page.goto(guestUrl, { waitUntil: "networkidle2", timeout: 25000 });
+        if (response && (response.status() === 404 || response.status() === 410)) {
+          return { description: "", isExpired: true };
+        }
+        
+        const description = await page.evaluate(() => {
+          const descEl = document.querySelector('.description__text') || 
+                        document.querySelector('.show-more-less-html__markup') ||
+                        document.querySelector('.jobs-description-content');
+          return descEl ? (descEl as HTMLElement).innerText.trim() : '';
+        });
+        
+        const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
+        const isExpired = pageText.includes("no longer accepting applications") || pageText.includes("job has expired") || pageText.includes("expired");
+        
+        if (description && description.length >= 100) {
+          return { description, isExpired };
+        }
+      }
+    }
+
+    const response = await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+    if (!response || response.status() === 404 || response.status() === 410) {
+      console.log(`  -> Page returned status ${response ? response.status() : "null"}`);
+      return { description: "", isExpired: true };
+    }
+    
+    const finalUrl = page.url().toLowerCase();
+    if (finalUrl.includes("expired") || finalUrl.includes("not-found") || finalUrl.includes("job-not-found") || finalUrl.includes("inactive")) {
+      return { description: "", isExpired: true };
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
+    const expiredKeywords = [
+      "this job has expired",
+      "no longer accepting applications",
+      "job posting has expired",
+      "posting is no longer active",
+      "job is no longer available",
+      "expired job application"
+    ];
+    
+    if (expiredKeywords.some(keyword => pageText.includes(keyword))) {
+      return { description: "", isExpired: true };
+    }
+    
+    const description = await page.evaluate(() => {
+      let descEl = document.querySelector('.jobs-description-content') || 
+                   document.querySelector('.show-more-less-html__markup') || 
+                   document.querySelector('[id^="job-details"]') || 
+                   document.querySelector('.jobs-box__html-content') ||
+                   document.querySelector('.jobs-description');
+      
+      if (descEl) return (descEl as HTMLElement).innerText.trim();
+      
+      descEl = document.getElementById('job_description') || 
+               document.querySelector('.jobDescription') ||
+               document.querySelector('[class*="jobDescription"]') ||
+               document.querySelector('[class*="job-description"]');
+      if (descEl) return (descEl as HTMLElement).innerText.trim();
+      
+      descEl = document.querySelector('.job-details') || 
+               document.querySelector('.job-description') ||
+               document.querySelector('[class*="jobDetails"]') ||
+               document.querySelector('[class*="jobDescription"]');
+      if (descEl) return (descEl as HTMLElement).innerText.trim();
+      
+      const commonSelectors = [
+        'article', 
+        'main', 
+        '#description', 
+        '.description', 
+        '#job-description', 
+        '.job-description', 
+        '.jobdescription', 
+        '.job-details'
+      ];
+      for (const selector of commonSelectors) {
+        const el = document.querySelector(selector);
+        if (el && (el as HTMLElement).innerText.trim().length > 200) {
+          return (el as HTMLElement).innerText.trim();
+        }
+      }
+      return '';
+    });
+    
+    return { description, isExpired: false };
+    
+  } catch (err: any) {
+    console.error(`  -> Scraper error for ${url}: ${err.message || err}`);
+    return { description: "", isExpired: false };
+  } finally {
+    await page.close();
+  }
+}
 
 async function runPipeline() {
   console.log("====================================================");
@@ -186,85 +301,157 @@ Return nothing other than the JSON block.`;
     console.log("\nQuerying database for unprocessed raw jobs to evaluate...");
     const rawJobs = await db.queryRawJobs(true);
     console.log(`Found ${rawJobs.length} unprocessed raw jobs.`);
-
     const evaluatedTodayIds: string[] = [];
 
     if (rawJobs.length > 0) {
-      for (let i = 0; i < rawJobs.length; i++) {
-        const rawJob = rawJobs[i];
-        if (i > 0 && evalJobSleepMs > 0) {
-          console.log(`Waiting ${evalJobSleepMs / 1000} seconds before the next evaluation to avoid API rate limits...`);
-          await sleep(evalJobSleepMs);
-        }
-        console.log(`\nEvaluating raw job: "${rawJob.title}" at "${rawJob.company_name}"`);
-        
-        const evalQuery = `Evaluate job advertisement: "${rawJob.title}" at "${rawJob.company_name}". 
-        Location: ${rawJob.location || "Singapore"}. 
-        Salary Range: ${rawJob.salary_range || "Not specified"}. 
-        Description: ${rawJob.raw_description}`;
+      console.log("Launching headless browser for job description verification & scraping...");
+      const browser = await puppeteer.launch({
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-blink-features=AutomationControlled"
+        ]
+      });
 
-        try {
-          const { result } = await runAgent(evalQuery);
-          const evalResult = result.evaluated_jobs?.[0];
-          if (evalResult) {
-            console.log(`  -> Complete: Score = ${evalResult.total_score}/100, Status = ${evalResult.status}, Track = ${evalResult.assigned_track}`);
+      try {
+        for (let i = 0; i < rawJobs.length; i++) {
+          const rawJob = rawJobs[i];
+          console.log(`\n[${i + 1}/${rawJobs.length}] Verifying job: "${rawJob.title}" at "${rawJob.company_name}"`);
+          
+          let scrapeResult = { description: "", isExpired: false };
+          if (rawJob.careers_portal_url) {
+            scrapeResult = await scrapeJobDescription(rawJob.careers_portal_url, browser);
+          }
+          
+          if (scrapeResult.isExpired || (!scrapeResult.description && !rawJob.raw_description)) {
+            const reason = scrapeResult.isExpired 
+              ? "Job posting is expired or no longer active." 
+              : "Could not retrieve or parse the full job description (inactive listing or missing description).";
             
-            const techScore = (evalResult as any).score_technical_autonomy ?? evalResult.score_breakdown?.technical_autonomy?.score ?? 0;
-            const compScore = (evalResult as any).score_compensation_potential ?? evalResult.score_breakdown?.compensation_potential?.score ?? 0;
-            const domainScore = (evalResult as any).score_domain_relevance ?? evalResult.score_breakdown?.domain_relevance?.score ?? 0;
-            const envScore = (evalResult as any).score_environment_guardrails ?? evalResult.score_breakdown?.environment_guardrails?.score ?? 0;
-            const mobilityScore = (evalResult as any).score_future_mobility ?? evalResult.score_breakdown?.future_mobility?.score ?? 0;
-            const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || null;
-
-            let finalStatus = evalResult.status;
-            if (evalResult.total_score > 70 && finalStatus !== "REJECTED") {
-              finalStatus = "STRONG MATCH";
-            } else if (evalResult.total_score >= 50 && finalStatus !== "REJECTED") {
-              finalStatus = "REVIEW REQUIRED";
-            } else {
-              finalStatus = "REJECTED";
-            }
-
-            // Insert into the final jobs/companies table
+            console.log(`  -> ❌ REJECTED BEFORE EVALUATION: ${reason}`);
+            
+            // Insert directly to the rejected pile
             const finalJob = await db.addJob({
               title: rawJob.title,
               company: rawJob.company_name,
               source: rawJob.source as any,
-              description: rawJob.raw_description,
+              description: rawJob.raw_description || "No description available.",
               salaryRange: rawJob.salary_range || undefined,
               location: rawJob.location || undefined,
               careers_portal_url: rawJob.careers_portal_url,
               postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-              status: finalStatus,
-              assigned_track: evalResult.assigned_track,
-              confidence_level: evalResult.confidence_level,
-              total_score: evalResult.total_score,
-              score_technical_autonomy: techScore,
-              score_compensation_potential: compScore,
-              score_domain_relevance: domainScore,
-              score_environment_guardrails: envScore,
-              score_future_mobility: mobilityScore,
-              nd_friendly_score: evalResult.nd_friendly_score,
-              politics_stress_score: evalResult.politics_stress_score,
-              sensory_overload_index: evalResult.sensory_overload_index,
-              biological_stress_risk: bioRisk,
-              strategic_value: evalResult.strategic_value,
-              recommended_cv_version: evalResult.recommended_cv_version,
-              next_action: evalResult.next_action,
+              status: "REJECTED",
+              assigned_track: "Neither",
+              confidence_level: "Low",
+              total_score: 0,
+              score_technical_autonomy: 0,
+              score_compensation_potential: 0,
+              score_domain_relevance: 0,
+              score_environment_guardrails: 0,
+              score_future_mobility: 0,
+              nd_friendly_score: 0,
+              politics_stress_score: 0,
+              sensory_overload_index: 0,
+              biological_stress_risk: reason,
+              strategic_value: "Rejected due to inactive/expired listing.",
+              recommended_cv_version: "None",
+              next_action: "None",
               is_top_ten: false
-            }, true); // bypass live check since it was validated at extraction
+            }, true);
             
-            console.log(`  -> Inserted evaluated job into final table with ID ${finalJob.id}`);
-            
-            // Mark raw job as processed
             await db.markRawJobProcessed(rawJob.id);
-            evaluatedTodayIds.push(finalJob.id);
-          } else {
-            console.log("  -> Complete (warnings: no evaluation details returned in payload)");
+            continue;
           }
-        } catch (err: any) {
-          console.error(`❌ Evaluation failed for raw job ID ${rawJob.id}:`, err.message || err);
+          
+          // If description was successfully scraped, update it
+          if (scrapeResult.description) {
+            console.log(`  -> Full description retrieved (${scrapeResult.description.length} chars). Updating raw job in DB...`);
+            rawJob.raw_description = scrapeResult.description;
+            await pool.query(
+              "UPDATE raw_jobs SET raw_description = $1 WHERE id = $2",
+              [scrapeResult.description, rawJob.id]
+            );
+          }
+          
+          if (i > 0 && evalJobSleepMs > 0) {
+            console.log(`Waiting ${evalJobSleepMs / 1000} seconds before the next evaluation to avoid API rate limits...`);
+            await sleep(evalJobSleepMs);
+          }
+          
+          console.log(`Evaluating raw job: "${rawJob.title}" at "${rawJob.company_name}"`);
+          
+          const evalQuery = `Evaluate job advertisement: "${rawJob.title}" at "${rawJob.company_name}". 
+          Location: ${rawJob.location || "Singapore"}. 
+          Salary Range: ${rawJob.salary_range || "Not specified"}. 
+          Description: ${rawJob.raw_description}`;
+          
+          try {
+            const { result } = await runAgent(evalQuery);
+            const evalResult = result.evaluated_jobs?.[0];
+            if (evalResult) {
+              console.log(`  -> Complete: Score = ${evalResult.total_score}/100, Status = ${evalResult.status}, Track = ${evalResult.assigned_track}`);
+              
+              const techScore = (evalResult as any).score_technical_autonomy ?? evalResult.score_breakdown?.technical_autonomy?.score ?? 0;
+              const compScore = (evalResult as any).score_compensation_potential ?? evalResult.score_breakdown?.compensation_potential?.score ?? 0;
+              const domainScore = (evalResult as any).score_domain_relevance ?? evalResult.score_breakdown?.domain_relevance?.score ?? 0;
+              const envScore = (evalResult as any).score_environment_guardrails ?? evalResult.score_breakdown?.environment_guardrails?.score ?? 0;
+              const mobilityScore = (evalResult as any).score_future_mobility ?? evalResult.score_breakdown?.future_mobility?.score ?? 0;
+              const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || null;
+
+              let finalStatus = evalResult.status;
+              if (evalResult.total_score > 70 && finalStatus !== "REJECTED") {
+                finalStatus = "STRONG MATCH";
+              } else if (evalResult.total_score >= 50 && finalStatus !== "REJECTED") {
+                finalStatus = "REVIEW REQUIRED";
+              } else {
+                finalStatus = "REJECTED";
+              }
+
+              // Insert into the final jobs/companies table
+              const finalJob = await db.addJob({
+                title: rawJob.title,
+                company: rawJob.company_name,
+                source: rawJob.source as any,
+                description: rawJob.raw_description,
+                salaryRange: rawJob.salary_range || undefined,
+                location: rawJob.location || undefined,
+                careers_portal_url: rawJob.careers_portal_url,
+                postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
+                status: finalStatus,
+                assigned_track: evalResult.assigned_track,
+                confidence_level: evalResult.confidence_level,
+                total_score: evalResult.total_score,
+                score_technical_autonomy: techScore,
+                score_compensation_potential: compScore,
+                score_domain_relevance: domainScore,
+                score_environment_guardrails: envScore,
+                score_future_mobility: mobilityScore,
+                nd_friendly_score: evalResult.nd_friendly_score,
+                politics_stress_score: evalResult.politics_stress_score,
+                sensory_overload_index: evalResult.sensory_overload_index,
+                biological_stress_risk: bioRisk,
+                strategic_value: evalResult.strategic_value,
+                recommended_cv_version: evalResult.recommended_cv_version,
+                next_action: evalResult.next_action,
+                is_top_ten: false
+              }, true); // bypass live check since it was validated at extraction
+              
+              console.log(`  -> Inserted evaluated job into final table with ID ${finalJob.id}`);
+              
+              // Mark raw job as processed
+              await db.markRawJobProcessed(rawJob.id);
+              evaluatedTodayIds.push(finalJob.id);
+            } else {
+              console.log("  -> Complete (warnings: no evaluation details returned in payload)");
+            }
+          } catch (err: any) {
+            console.error(`❌ Evaluation failed for raw job ID ${rawJob.id}:`, err.message || err);
+          }
         }
+      } finally {
+        await browser.close();
       }
     }
 

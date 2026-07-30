@@ -1048,8 +1048,15 @@ with tab_cv:
             st.markdown(f"### **Target Role Details**")
             st.markdown(f"**Company**: {selected_job['company']} | **Title**: {selected_job['title']} | **Location**: {selected_job.get('location', 'Singapore')}")
             
+            if selected_job.get("careers_portal_url"):
+                st.markdown(f"🔗 **Job Posting URL**: [{selected_job['careers_portal_url']}]({selected_job['careers_portal_url']})")
+                
             with st.expander("🔍 View Target Job Description"):
-                st.write(selected_job.get("description", "No description available."))
+                desc = selected_job.get("description", "").strip()
+                if not desc or desc == "No description available.":
+                    st.warning("⚠️ No full job description is stored in the database. Please verify the link above or update this job record.")
+                else:
+                    st.write(desc)
 
             # Button to trigger CV customization
             st.markdown("---")
