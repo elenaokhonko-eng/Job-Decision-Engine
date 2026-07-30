@@ -414,11 +414,21 @@ def ingest_linkedin_saved_json(jobs):
                 skipped_count += 1
                 continue
                 
+            # Package description as structured JSON for the JSONB database column
+            structured_desc = {
+                "job_description": description,
+                "key_responsibilities": [],
+                "technical_skills": [],
+                "qualifications_education": [],
+                "nice_to_haves": []
+            }
+            description_json = json.dumps(structured_desc)
+            
             cursor.execute("""
                 INSERT INTO raw_jobs 
                 (company_name, title, source, raw_description, salary_range, location, careers_portal_url, processed) 
                 VALUES (%s, %s, 'LinkedIn', %s, %s, %s, %s, FALSE)
-            """, (company, title, description, salary, location, url))
+            """, (company, title, description_json, salary, location, url))
             
             inserted_count += 1
             
@@ -667,7 +677,14 @@ with tab_dashboard:
                     st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
                     st.markdown(f"**Match Score:** `{score}/100`")
                     st.markdown(f"**Autonomy Score:** `{job.get('nd_friendly_score') or 'N/A'}%` | **Politics Stress:** `{job.get('politics_stress_score') or 'N/A'}%`")
-                    st.text_area("Full Description Brief", job.get("description"), height=100, disabled=True, key=f"desc_{idx}")
+                    desc_text = job.get("description", "")
+                    if desc_text.startswith("{"):
+                        try:
+                            parsed_desc = json.loads(desc_text)
+                            desc_text = parsed_desc.get("job_description", "")
+                        except Exception:
+                            pass
+                    st.text_area("Full Description Brief", desc_text, height=100, disabled=True, key=f"desc_{idx}")
                     
                     # Delete action
                     if st.button("🗑️ Delete Listing", key=f"del_{job.get('id') or idx}"):
@@ -1056,13 +1073,55 @@ with tab_cv:
                 if not desc or desc == "No description available.":
                     st.warning("⚠️ No full job description is stored in the database. Please verify the link above or update this job record.")
                 else:
-                    st.write(desc)
+                    if desc.startswith("{"):
+                        try:
+                            parsed_desc = json.loads(desc)
+                            st.markdown("### 📝 **Overview**")
+                            st.write(parsed_desc.get("job_description", ""))
+                            
+                            if parsed_desc.get("key_responsibilities"):
+                                st.markdown("### 📋 **Key Responsibilities**")
+                                for r in parsed_desc["key_responsibilities"]:
+                                    st.markdown(f"- {r}")
+                                    
+                            if parsed_desc.get("technical_skills"):
+                                st.markdown("### 🛠️ **Technical Skills**")
+                                for s in parsed_desc["technical_skills"]:
+                                    st.markdown(f"- {s}")
+                                    
+                            if parsed_desc.get("qualifications_education"):
+                                st.markdown("### 🎓 **Qualifications & Education**")
+                                for q in parsed_desc["qualifications_education"]:
+                                    st.markdown(f"- {q}")
+                                    
+                            if parsed_desc.get("nice_to_haves"):
+                                st.markdown("### 🌟 **Nice-to-Haves**")
+                                for n in parsed_desc["nice_to_haves"]:
+                                    st.markdown(f"- {n}")
+                        except Exception:
+                            st.write(desc)
+                    else:
+                        st.write(desc)
 
             # Button to trigger CV customization
             st.markdown("---")
             if st.button("✨ Generate Factual Customised CV"):
                 desc_text = selected_job.get("description", "").strip()
-                if not desc_text or desc_text == "No description available." or len(desc_text) < 150:
+                actual_text = desc_text
+                if desc_text.startswith("{"):
+                    try:
+                        parsed = json.loads(desc_text)
+                        actual_text = (
+                            (parsed.get("job_description") or "") + " " +
+                            " ".join(parsed.get("key_responsibilities") or []) + " " +
+                            " ".join(parsed.get("technical_skills") or []) + " " +
+                            " ".join(parsed.get("qualifications_education") or []) + " " +
+                            " ".join(parsed.get("nice_to_haves") or [])
+                        ).strip()
+                    except Exception:
+                        pass
+                
+                if not actual_text or actual_text == "No description available." or len(actual_text) < 150:
                     st.error("❌ Cannot generate CV: The target job description is missing, empty, or too short in the database. Please make sure the job details are scraped or populated before customizing.")
                     st.stop()
                     

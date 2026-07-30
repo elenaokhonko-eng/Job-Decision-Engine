@@ -134,7 +134,20 @@ async function scrapeJobDescription(url: string, browser: puppeteer.Browser): Pr
 function checkDirectRejection(title: string, company: string, description: string): string | null {
   const t = title.toLowerCase();
   const c = company.toLowerCase();
-  const d = description.toLowerCase();
+  let d = description.toLowerCase();
+
+  if (description.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(description);
+      d = (
+        (parsed.job_description || "") + " " +
+        (parsed.key_responsibilities || []).join(" ") + " " +
+        (parsed.technical_skills || []).join(" ") + " " +
+        (parsed.qualifications_education || []).join(" ") + " " +
+        (parsed.nice_to_haves || []).join(" ")
+      ).toLowerCase();
+    } catch {}
+  }
 
   // 1. FDE (Forward Deployed Engineering) check
   if (t.includes("fde") || t.includes("forward deployed") || d.includes("forward deployed") || d.includes("fde ")) {
@@ -157,8 +170,27 @@ function checkDirectRejection(title: string, company: string, description: strin
     return `Rejected: Role is in an IT outsourcing or staffing deployment model.`;
   }
 
-  // 4. Contract check
+  // 3b. Recruitment Agency Contract check
   const contractKeywords = ["contract", "contractor", "temp", "temporary", "freelance"];
+  const agencyKeywords = [
+    "recruitment", "recruiting", "staffing", "talent acquisition",
+    "hays", "randstad", "pagegroup", "michael page", "adecco", 
+    "charterhouse", "huxley", "robert half", "robert walters", "kelly services", 
+    "monroe consulting", "recruit"
+  ];
+  const isAgency = agencyKeywords.some(kw => c.includes(kw)) || 
+                   d.includes("on behalf of our client") || 
+                   d.includes("our client is looking for") || 
+                   d.includes("hiring for our client");
+                   
+  if (isAgency) {
+    const isContract = contractKeywords.some(kw => t.includes(kw) || d.includes(kw)) || d.includes("renewable");
+    if (isContract) {
+      return "Rejected: Contract/renewable role posted by recruitment agency.";
+    }
+  }
+
+  // 4. Contract check
   for (const kw of contractKeywords) {
     if (t.includes(kw)) {
       if (t.includes("permanent contract") || d.includes("permanent contract")) {
@@ -301,7 +333,13 @@ Schema:
       "salaryRange": "string (optional, e.g. SGD 15,000 - SGD 20,000)",
       "location": "string (optional, e.g. Singapore (Remote))",
       "careers_portal_url": "string (Mandatory. Choose the exact matching URL from the verified URLs list above)",
-      "description": "Full details, requirements, and responsibilities parsed from the email text. You MUST structure this content into these exact headings in markdown:\n### 1. Job Description\n[content]\n### 2. Key Responsibilities\n[content]\n### 3. Technical and Other Skills\n[content]\n### 4. Qualifications, Licenses, Education\n[content]\n### 5. Nice-to-Haves\n[content]"
+      "description": {
+        "job_description": "High-level overview of the role and team context.",
+        "key_responsibilities": ["string (duties and expectations)"],
+        "technical_skills": ["string (languages, tools, cloud, etc.)"],
+        "qualifications_education": ["string (degrees, certifications)"],
+        "nice_to_haves": ["string (preferred attributes)"]
+      }
     }
   ]
 }
@@ -329,7 +367,7 @@ Return nothing other than the JSON block.`;
                 company_name: rawJob.company,
                 title: rawJob.title,
                 source: rawJob.source || "Gmail",
-                raw_description: rawJob.description,
+                raw_description: typeof rawJob.description === "object" ? JSON.stringify(rawJob.description) : rawJob.description,
                 salary_range: rawJob.salaryRange || undefined,
                 location: rawJob.location || "Singapore",
                 posted_date: new Date().toISOString().split("T")[0],
@@ -428,10 +466,18 @@ Return nothing other than the JSON block.`;
           // If description was successfully scraped, update it
           if (scrapeResult.description) {
             console.log(`  -> Full description retrieved (${scrapeResult.description.length} chars). Updating raw job in DB...`);
-            rawJob.raw_description = scrapeResult.description;
+            const structuredDesc = {
+              job_description: scrapeResult.description,
+              key_responsibilities: [],
+              technical_skills: [],
+              qualifications_education: [],
+              nice_to_haves: []
+            };
+            const descJson = JSON.stringify(structuredDesc);
+            rawJob.raw_description = descJson;
             await pool.query(
               "UPDATE raw_jobs SET raw_description = $1 WHERE id = $2",
-              [scrapeResult.description, rawJob.id]
+              [descJson, rawJob.id]
             );
           }
           

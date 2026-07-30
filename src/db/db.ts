@@ -384,6 +384,17 @@ class PostgresDatabase {
       companyId = insertComp.rows[0].id;
     }
 
+    let finalDesc = job.description;
+    if (finalDesc && !finalDesc.trim().startsWith("{")) {
+      finalDesc = JSON.stringify({
+        job_description: finalDesc,
+        key_responsibilities: [],
+        technical_skills: [],
+        qualifications_education: [],
+        nice_to_haves: []
+      });
+    }
+
     const insertJob = await pool.query(
       `INSERT INTO jobs (
         company_name, company_id, title, source, raw_description, salary_range, location, posted_date, careers_portal_url, status, assigned_track,
@@ -391,7 +402,7 @@ class PostgresDatabase {
         nd_friendly_score, politics_stress_score, sensory_overload_index, biological_stress_risk, strategic_value, recommended_cv_version, next_action, is_top_ten
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26) RETURNING *`,
       [
-        job.company, companyId, job.title, job.source, job.description,
+        job.company, companyId, job.title, job.source, finalDesc,
         job.salaryRange || null, job.location || null, job.postedDate || new Date().toISOString().split("T")[0],
         job.careers_portal_url, job.status, job.assigned_track || "Neither",
         job.confidence_level || null, job.total_score || 0,
@@ -550,6 +561,17 @@ class PostgresDatabase {
       );
     }
 
+    let finalRawDesc = job.raw_description;
+    if (finalRawDesc && !finalRawDesc.trim().startsWith("{")) {
+      finalRawDesc = JSON.stringify({
+        job_description: finalRawDesc,
+        key_responsibilities: [],
+        technical_skills: [],
+        qualifications_education: [],
+        nice_to_haves: []
+      });
+    }
+
     const res = await pool.query(
       `INSERT INTO raw_jobs (company_name, title, source, raw_description, salary_range, location, posted_date, careers_portal_url, processed)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE) RETURNING *`,
@@ -557,7 +579,7 @@ class PostgresDatabase {
         job.company_name,
         job.title,
         job.source,
-        job.raw_description,
+        finalRawDesc,
         job.salary_range || null,
         job.location || null,
         job.posted_date || new Date().toISOString().split("T")[0],
