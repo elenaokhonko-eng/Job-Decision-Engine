@@ -172,13 +172,18 @@ function checkDirectRejection(title: string, company: string, description: any):
 
   // 2. Consulting Firms check
   const consultingFirms = [
-    "accenture", "kpmg", "bcg", "mckinsey", "bain", "deloitte", "pwc", "ey", 
+    "accenture", "kpmg", "bcg", "mckinsey", "bain", "deloitte", "pwc", 
     "ernst & young", "pricewaterhousecoopers", "boston consulting group"
   ];
   for (const firm of consultingFirms) {
     if (c.includes(firm)) {
       return `Rejected: Company "${company}" is a consulting firm.`;
     }
+  }
+
+  // Exact or word-boundary check for "EY" (Ernst & Young) to avoid matching "Stanley" or "Disney"
+  if (c === "ey" || c === "ey pte ltd" || c.startsWith("ey ") || c.endsWith(" ey") || c.includes(" ey ") || c.includes("ey.com")) {
+    return `Rejected: Company "${company}" is a consulting firm (EY).`;
   }
 
   // 3. IT Outsourcing check

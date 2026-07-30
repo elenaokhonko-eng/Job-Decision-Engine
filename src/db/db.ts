@@ -385,7 +385,7 @@ class PostgresDatabase {
     }
 
     let finalDesc = job.description;
-    if (finalDesc && !finalDesc.trim().startsWith("{")) {
+    if (finalDesc && typeof finalDesc === "string" && !finalDesc.trim().startsWith("{")) {
       finalDesc = JSON.stringify({
         job_description: finalDesc,
         key_responsibilities: [],
@@ -562,7 +562,7 @@ class PostgresDatabase {
     }
 
     let finalRawDesc = job.raw_description;
-    if (finalRawDesc && !finalRawDesc.trim().startsWith("{")) {
+    if (finalRawDesc && typeof finalRawDesc === "string" && !finalRawDesc.trim().startsWith("{")) {
       finalRawDesc = JSON.stringify({
         job_description: finalRawDesc,
         key_responsibilities: [],
