@@ -131,22 +131,38 @@ async function scrapeJobDescription(url: string, browser: puppeteer.Browser): Pr
   }
 }
 
-function checkDirectRejection(title: string, company: string, description: string): string | null {
+function checkDirectRejection(title: string, company: string, description: any): string | null {
   const t = title.toLowerCase();
   const c = company.toLowerCase();
-  let d = description.toLowerCase();
+  let d = "";
 
-  if (description.trim().startsWith("{")) {
-    try {
-      const parsed = JSON.parse(description);
+  if (description) {
+    if (typeof description === "object") {
       d = (
-        (parsed.job_description || "") + " " +
-        (parsed.key_responsibilities || []).join(" ") + " " +
-        (parsed.technical_skills || []).join(" ") + " " +
-        (parsed.qualifications_education || []).join(" ") + " " +
-        (parsed.nice_to_haves || []).join(" ")
+        (description.job_description || "") + " " +
+        (description.key_responsibilities || []).join(" ") + " " +
+        (description.technical_skills || []).join(" ") + " " +
+        (description.qualifications_education || []).join(" ") + " " +
+        (description.nice_to_haves || []).join(" ")
       ).toLowerCase();
-    } catch {}
+    } else if (typeof description === "string") {
+      if (description.trim().startsWith("{")) {
+        try {
+          const parsed = JSON.parse(description);
+          d = (
+            (parsed.job_description || "") + " " +
+            (parsed.key_responsibilities || []).join(" ") + " " +
+            (parsed.technical_skills || []).join(" ") + " " +
+            (parsed.qualifications_education || []).join(" ") + " " +
+            (parsed.nice_to_haves || []).join(" ")
+          ).toLowerCase();
+        } catch {
+          d = description.toLowerCase();
+        }
+      } else {
+        d = description.toLowerCase();
+      }
+    }
   }
 
   // 1. FDE (Forward Deployed Engineering) check
@@ -524,10 +540,14 @@ Return nothing other than the JSON block.`;
           
           console.log(`Evaluating raw job: "${rawJob.title}" at "${rawJob.company_name}"`);
           
+          const descString = typeof rawJob.raw_description === "object" 
+            ? JSON.stringify(rawJob.raw_description, null, 2) 
+            : rawJob.raw_description;
+            
           const evalQuery = `Evaluate job advertisement: "${rawJob.title}" at "${rawJob.company_name}". 
           Location: ${rawJob.location || "Singapore"}. 
           Salary Range: ${rawJob.salary_range || "Not specified"}. 
-          Description: ${rawJob.raw_description}`;
+          Description: ${descString}`;
           
           try {
             const { result } = await runAgent(evalQuery);
