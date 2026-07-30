@@ -656,44 +656,94 @@ with tab_dashboard:
     col_left, col_right = st.columns([2, 3])
 
     with col_left:
+        # Sort and split active vs rejected jobs
+        def status_sort_key(j):
+            status = j.get("status", "UNASSIGNED")
+            score = j.get("total_score", 0)
+            if status == "STRONG MATCH":
+                return (0, -score)
+            elif status == "REVIEW REQUIRED":
+                return (1, -score)
+            elif status == "REJECTED":
+                return (2, -score)
+            else:
+                return (3, -score)
+
+        sorted_filtered_jobs = sorted(filtered_jobs, key=status_sort_key)
+        active_jobs = [j for j in sorted_filtered_jobs if j.get("status") != "REJECTED"]
+        rejected_jobs = [j for j in sorted_filtered_jobs if j.get("status") == "REJECTED"]
+
         st.subheader("📋 Available Listings Vault")
-        if not filtered_jobs:
+        if not active_jobs and not rejected_jobs:
             st.info("No matching jobs in the current Postgres database.")
         else:
-            for idx, job in enumerate(filtered_jobs):
-                status = job.get("status", "UNASSIGNED")
-                score = job.get("total_score", 0)
-                company = job.get("company", "Unknown")
-                title = job.get("title", "Job Title")
-                
-                # Visual badge colors
-                badge_style = "🔴" if status == "REJECTED" else ("🟢" if status == "STRONG MATCH" else "🟡")
-                
-                # Expandable card
-                with st.expander(f"{badge_style} {title} — {company} ({status})"):
-                    st.markdown(f"**Source Board:** `{job.get('source')}`")
-                    st.markdown(f"**Salary Range:** {job.get('salaryRange') or 'Not specified'}")
-                    st.markdown(f"**Location:** {job.get('location') or 'Singapore'}")
-                    st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
-                    st.markdown(f"**Match Score:** `{score}/100`")
-                    st.markdown(f"**Autonomy Score:** `{job.get('nd_friendly_score') or 'N/A'}%` | **Politics Stress:** `{job.get('politics_stress_score') or 'N/A'}%`")
-                    desc_text = job.get("description", "")
-                    parsed_desc = None
-                    if isinstance(desc_text, dict):
-                        parsed_desc = desc_text
-                        desc_text = parsed_desc.get("job_description", "")
-                    elif isinstance(desc_text, str) and desc_text.strip().startswith("{"):
-                        try:
-                            parsed_desc = json.loads(desc_text)
-                            desc_text = parsed_desc.get("job_description", "")
-                        except Exception:
-                            pass
-                    st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"desc_{idx}")
+            # Render Active (Green & Orange) Jobs
+            if active_jobs:
+                st.write(f"Showing {len(active_jobs)} Active Match Listings:")
+                for idx, job in enumerate(active_jobs):
+                    status = job.get("status", "UNASSIGNED")
+                    score = job.get("total_score", 0)
+                    company = job.get("company", "Unknown")
+                    title = job.get("title", "Job Title")
+                    badge_style = "🟢" if status == "STRONG MATCH" else "🟡"
                     
-                    # Delete action
-                    if st.button("🗑️ Delete Listing", key=f"del_{job.get('id') or idx}"):
-                        if delete_job_from_db(job.get("id")):
-                            st.rerun()
+                    with st.expander(f"{badge_style} {title} — {company} ({status})"):
+                        st.markdown(f"**Source Board:** `{job.get('source')}`")
+                        st.markdown(f"**Salary Range:** {job.get('salaryRange') or 'Not specified'}")
+                        st.markdown(f"**Location:** {job.get('location') or 'Singapore'}")
+                        st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
+                        st.markdown(f"**Match Score:** `{score}/100`")
+                        st.markdown(f"**Autonomy Score:** `{job.get('nd_friendly_score') or 'N/A'}%` | **Politics Stress:** `{job.get('politics_stress_score') or 'N/A'}%`")
+                        
+                        desc_text = job.get("description", "")
+                        parsed_desc = None
+                        if isinstance(desc_text, dict):
+                            parsed_desc = desc_text
+                            desc_text = parsed_desc.get("job_description", "")
+                        elif isinstance(desc_text, str) and desc_text.strip().startswith("{"):
+                            try:
+                                parsed_desc = json.loads(desc_text)
+                                desc_text = parsed_desc.get("job_description", "")
+                            except Exception:
+                                pass
+                        st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"active_desc_{idx}")
+                        
+                        if st.button("🗑️ Delete Listing", key=f"active_del_{job.get('id') or idx}"):
+                            if delete_job_from_db(job.get("id")):
+                                st.rerun()
+            else:
+                st.info("No active matching jobs (STRONG MATCH or REVIEW REQUIRED) are currently stored.")
+
+            # Render Rejected (Red) Jobs inside an expander
+            if rejected_jobs:
+                st.markdown("---")
+                with st.expander(f"🔴 View Rejected/Discarded Listings ({len(rejected_jobs)} jobs)"):
+                    for idx, job in enumerate(rejected_jobs):
+                        company = job.get("company", "Unknown")
+                        title = job.get("title", "Job Title")
+                        score = job.get("total_score", 0)
+                        
+                        with st.popover(f"🔴 {title} — {company}"):
+                            st.markdown(f"**Source Board:** `{job.get('source')}`")
+                            st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
+                            st.markdown(f"**Rejected Score:** `{score}/100`")
+                            
+                            desc_text = job.get("description", "")
+                            parsed_desc = None
+                            if isinstance(desc_text, dict):
+                                parsed_desc = desc_text
+                                desc_text = parsed_desc.get("job_description", "")
+                            elif isinstance(desc_text, str) and desc_text.strip().startswith("{"):
+                                try:
+                                    parsed_desc = json.loads(desc_text)
+                                    desc_text = parsed_desc.get("job_description", "")
+                                except Exception:
+                                    pass
+                            st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"rej_desc_{idx}")
+                            
+                            if st.button("🗑️ Delete Listing Permanent", key=f"rej_del_{job.get('id') or idx}"):
+                                if delete_job_from_db(job.get("id")):
+                                    st.rerun()
 
     with col_right:
         st.subheader("🤖 Scoring & Match Analysis Details")
