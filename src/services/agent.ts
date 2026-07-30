@@ -149,6 +149,126 @@ export interface AgentResult {
   }>;
 }
 
+async function tryGemini(geminiKey: string, options: any): Promise<string> {
+  const ai = getGeminiClient();
+  const maxRetries = 2;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: options.contents,
+        config: {
+          responseMimeType: options.responseMimeType as any,
+          systemInstruction: options.systemInstruction
+        }
+      });
+      return response.text || "";
+    } catch (gErr: any) {
+      const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests");
+      const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
+      const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
+      
+      if (isDailyQuota) {
+        throw gErr;
+      }
+      
+      if ((isRateLimit || isTimeout) && attempt < maxRetries) {
+        console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Retrying in 5s...`);
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+      } else {
+        throw gErr;
+      }
+    }
+  }
+  return "";
+}
+
+async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
+  const baseUrl = "https://api.openai.com/v1";
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const messages: any[] = [];
+  if (options.systemInstruction) {
+    messages.push({ role: "system", content: options.systemInstruction });
+  }
+  messages.push({ role: "user", content: options.contents });
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${openaiKey}`,
+          "User-Agent": "Claude-Code"
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: 1,
+          response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+        }),
+        signal: AbortSignal.timeout(60000)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenAI API request failed with status ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || "";
+    } catch (err: any) {
+      if (attempt === 2) throw err;
+      console.warn(`⏳ OpenAI request failed. Retrying in 5s...`);
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+  }
+  return "";
+}
+
+async function tryKimi(kimiKey: string, options: any): Promise<string> {
+  const baseUrl = "https://api.kimi.com/coding/v1";
+  const model = process.env.KIMI_MODEL || "moonshot-v1-8k";
+  const messages: any[] = [];
+  if (options.systemInstruction) {
+    messages.push({ role: "system", content: options.systemInstruction });
+  }
+  messages.push({ role: "user", content: options.contents });
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${kimiKey}`,
+          "User-Agent": "Claude-Code"
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: 1,
+          response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+        }),
+        signal: AbortSignal.timeout(60000)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || "";
+    } catch (err: any) {
+      if (attempt === 2) throw err;
+      console.warn(`⏳ Kimi request failed. Retrying in 5s...`);
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+  }
+  return "";
+}
+
 export async function generateContent(options: {
   model: string;
   contents: string;
@@ -159,141 +279,44 @@ export async function generateContent(options: {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
-  // 1. Try Gemini first
-  if (geminiKey) {
-    try {
-      const ai = getGeminiClient();
-      let response: any;
-      const maxRetries = 2;
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          response = await ai.models.generateContent({
-            model: "gemini-2.0-flash",
-            contents: options.contents,
-            config: {
-              responseMimeType: options.responseMimeType as any,
-              systemInstruction: options.systemInstruction
-            }
-          });
-          return response.text || "";
-        } catch (gErr: any) {
-          const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests");
-          const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
-          const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
-          
-          if (isDailyQuota) {
-            throw gErr;
-          }
-          
-          if ((isRateLimit || isTimeout) && attempt < maxRetries) {
-            console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Retrying in 5s...`);
-            await new Promise((resolve) => setTimeout(resolve, 5000));
-          } else {
-            throw gErr;
-          }
-        }
+  const forceOpenAI = process.env.FORCE_OPENAI === "true";
+  const order = forceOpenAI 
+    ? ["openai", "gemini", "kimi"] 
+    : ["gemini", "openai", "kimi"];
+
+  const tried = new Set<string>();
+
+  for (const provider of order) {
+    if (provider === "gemini" && geminiKey && !tried.has("gemini")) {
+      tried.add("gemini");
+      try {
+        const text = await tryGemini(geminiKey, options);
+        if (text) return text;
+      } catch (err: any) {
+        console.warn(`⚠️ Gemini request failed (${err.message || err}).`);
       }
-    } catch (geminiError: any) {
-      console.warn(`⚠️ Gemini generateContent failed (${geminiError.message || geminiError}). Falling back to OpenAI...`);
+    }
+    if (provider === "openai" && openaiKey && !tried.has("openai")) {
+      tried.add("openai");
+      try {
+        const text = await tryOpenAI(openaiKey, options);
+        if (text) return text;
+      } catch (err: any) {
+        console.warn(`⚠️ OpenAI request failed (${err.message || err}).`);
+      }
+    }
+    if (provider === "kimi" && kimiKey && !tried.has("kimi")) {
+      tried.add("kimi");
+      try {
+        const text = await tryKimi(kimiKey, options);
+        if (text) return text;
+      } catch (err: any) {
+        console.warn(`⚠️ Kimi request failed (${err.message || err}).`);
+      }
     }
   }
 
-  // 2. Try OpenAI second
-  if (openaiKey) {
-    try {
-      const baseUrl = "https://api.openai.com/v1";
-      const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-      const messages: any[] = [];
-      if (options.systemInstruction) {
-        messages.push({ role: "system", content: options.systemInstruction });
-      }
-      messages.push({ role: "user", content: options.contents });
-
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const response = await fetch(`${baseUrl}/chat/completions`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${openaiKey}`,
-              "User-Agent": "Claude-Code"
-            },
-            body: JSON.stringify({
-              model,
-              messages,
-              temperature: 1,
-              response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
-            }),
-            signal: AbortSignal.timeout(60000)
-          });
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`OpenAI API request failed with status ${response.status}: ${errorText}`);
-          }
-
-          const data = await response.json();
-          return data.choices?.[0]?.message?.content || "";
-        } catch (err: any) {
-          if (attempt === 2) throw err;
-          console.warn(`⏳ OpenAI request failed. Retrying in 5s...`);
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-        }
-      }
-    } catch (openaiError: any) {
-      console.warn(`⚠️ OpenAI generateContent failed (${openaiError.message || openaiError}). Falling back to Kimi...`);
-    }
-  }
-
-  // 3. Try Kimi third
-  if (kimiKey) {
-    try {
-      const baseUrl = "https://api.kimi.com/coding/v1";
-      const model = process.env.KIMI_MODEL || "moonshot-v1-8k";
-      const messages: any[] = [];
-      if (options.systemInstruction) {
-        messages.push({ role: "system", content: options.systemInstruction });
-      }
-      messages.push({ role: "user", content: options.contents });
-
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          const response = await fetch(`${baseUrl}/chat/completions`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${kimiKey}`,
-              "User-Agent": "Claude-Code"
-            },
-            body: JSON.stringify({
-              model,
-              messages,
-              temperature: 1,
-              response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
-            }),
-            signal: AbortSignal.timeout(60000)
-          });
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
-          }
-
-          const data = await response.json();
-          return data.choices?.[0]?.message?.content || "";
-        } catch (err: any) {
-          if (attempt === 2) throw err;
-          console.warn(`⏳ Kimi request failed. Retrying in 5s...`);
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-        }
-      }
-    } catch (kimiError: any) {
-      console.error(`❌ All models failed. Kimi error: ${kimiError.message || kimiError}`);
-      throw kimiError;
-    }
-  }
-
-  throw new Error("No active API keys found for Gemini, OpenAI, or Kimi.");
+  throw new Error("All model API calls failed or no API keys were configured.");
 }
 
 async function runKimiAgentInternal(
