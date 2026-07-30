@@ -234,7 +234,11 @@ async function syncLinkedInSavedJobs() {
     } catch (e) {
       console.error("❌ Deduplication during sync cleanup failed:", e);
     }
-    await browser.close();
+    try {
+      await browser.close();
+    } catch (e: any) {
+      console.warn("⚠️ Browser close cleanup warning in sync (non-fatal):", e.message || e);
+    }
     await pool.end();
   }
 }

@@ -618,7 +618,11 @@ Return nothing other than the JSON block.`;
           }
         }
       } finally {
-        await browser.close();
+        try {
+          await browser.close();
+        } catch (err: any) {
+          console.warn("⚠️ Browser close cleanup warning (non-fatal):", err.message || err);
+        }
       }
     }
 
