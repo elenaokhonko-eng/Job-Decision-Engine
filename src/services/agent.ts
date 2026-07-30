@@ -488,11 +488,153 @@ async function runKimiAgentInternal(
 }
 
 // Core execution loop
+function parseResultJson(rawText: string, trace: string[]): AgentResult {
+  try {
+    let cleaned = rawText.trim();
+    if (cleaned.startsWith("```json")) {
+      cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+    } else if (cleaned.startsWith("```")) {
+      cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    const startIdx = cleaned.indexOf("{");
+    const endIdx = cleaned.lastIndexOf("}");
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+      cleaned = cleaned.substring(startIdx, endIdx + 1);
+    }
+    return JSON.parse(cleaned);
+  } catch (err) {
+    console.error("Failed to parse agent JSON output, returning fallback", err);
+    trace.push(`Step ${trace.length + 1}: Formatting parsing failed. Initiated rule-based recovery fallback.`);
+    return {
+      evaluation_summary: "Parsing failed, raw output returned. Rationale analysis is stored.",
+      evaluated_jobs: []
+    };
+  }
+}
+
+async function runGeminiAgentInternal(
+  userQuestion: string,
+  systemInstruction: string,
+  trace: string[],
+  toolsUsed: string[]
+): Promise<AgentResult> {
+  trace.push(`Step ${trace.length + 1}: Initiated agent connection to Gemini using customizable weights criteria.`);
+  
+  const ai = getGeminiClient();
+  let response: any;
+  try {
+    response = await ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: userQuestion,
+      config: {
+        systemInstruction,
+        tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
+      },
+    });
+  } catch (gErr: any) {
+    if (gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429) {
+      console.warn("⏳ Gemini rate limit reached. Waiting 60s before retrying...");
+      await new Promise((resolve) => setTimeout(resolve, 60000));
+      response = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: userQuestion,
+        config: {
+          systemInstruction,
+          tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
+        },
+      });
+    } else {
+      throw gErr;
+    }
+  }
+
+  let functionCalls = response.functionCalls;
+  let conversationHistory: any[] = [
+    { role: "user", parts: [{ text: userQuestion }] },
+    { role: "model", parts: response.candidates?.[0]?.content?.parts || [] }
+  ];
+
+  let loopCount = 0;
+  while (functionCalls && functionCalls.length > 0 && loopCount < 5) {
+    loopCount++;
+    const functionResponsesParts: any[] = [];
+
+    for (const call of functionCalls) {
+      trace.push(`Step ${trace.length + 1}: Agent triggered tool call: "${call.name}" with arguments: ${JSON.stringify(call.args)}`);
+      toolsUsed.push(call.name || "");
+
+      let resultData: any;
+      if (call.name === "queryDatabaseForJobs") {
+        const args = (call.args as any) || {};
+        resultData = await executeQueryDatabaseForJobs(args);
+        trace.push(`Step ${trace.length + 1}: Query database returned ${resultData.length} records.`);
+      } else if (call.name === "fetchExternalMarketRates") {
+        const args = (call.args as any) || { jobTitle: "" };
+        resultData = await executeFetchExternalMarketRates(args);
+        trace.push(`Step ${trace.length + 1}: External REST API response processed: Standard range ${resultData.estimatedMonthlyBaseRange}.`);
+      } else {
+        resultData = { error: "Unknown tool name" };
+      }
+
+      functionResponsesParts.push({
+        functionResponse: {
+          name: call.name,
+          response: { result: resultData }
+        }
+      });
+    }
+
+    conversationHistory.push({
+      role: "user",
+      parts: functionResponsesParts
+    });
+
+    trace.push(`Step ${trace.length + 1}: Sending tool results back to Gemini for final assessment and ranking.`);
+    
+    response = await ai.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: conversationHistory,
+      config: {
+        systemInstruction,
+        tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
+      },
+    });
+
+    functionCalls = response.functionCalls;
+    if (response.candidates?.[0]?.content?.parts) {
+      conversationHistory.push({
+        role: "model",
+        parts: response.candidates[0].content.parts
+      });
+    }
+  }
+
+  trace.push(`Step ${trace.length + 1}: Enforcing strict JSON formatting with builder culture metrics.`);
+  const formattingPrompt = "Now, please compile all findings, evaluate each job description, and output ONLY a valid, parseable JSON object matching the requested schema. Make sure you score the workplace cultural factors (nd_friendly_score, politics_stress_score, sensory_overload_index) and ensure every job has a direct careers_portal_url link. Return nothing other than the JSON block.";
+  conversationHistory.push({ role: "user", parts: [{ text: formattingPrompt }] });
+
+  const finalResponse = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: conversationHistory,
+    config: {
+      systemInstruction,
+      responseMimeType: "application/json",
+    }
+  });
+
+  const rawText = finalResponse.text || "{}";
+  return parseResultJson(rawText, trace);
+}
+
+// Core execution loop
 export async function runAgent(userQuestion: string): Promise<{ result: AgentResult; trace: string[]; toolsUsed: string[] }> {
-  const apiKey = process.env.KIMI_API_KEY || process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
+  const kimiKey = process.env.KIMI_API_KEY || (process.env.GEMINI_API_KEY?.startsWith("sk-") ? process.env.GEMINI_API_KEY : "");
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+
+  if (!kimiKey && !geminiKey && !openaiKey) {
     throw new Error(
-      "CRITICAL API KEY CONFLICT: Neither KIMI_API_KEY nor GEMINI_API_KEY environment variable is configured."
+      "CRITICAL API KEY CONFLICT: Neither KIMI_API_KEY nor GEMINI_API_KEY nor OPENAI_API_KEY environment variable is configured."
     );
   }
 
@@ -551,7 +693,7 @@ You must grade the following indicators (0 to 100) based on raw job context and 
 ---
 
 ### DATABASE & EXTERNAL TOOLS CAPABILITY:
-You have tools to query the local jobs database ('queryDatabaseForJobs') and fetch external market standard salaries ('fetchExternalMarketRates'). Proactively use them if the user's question references existing jobs or market standards.
+You have tools to query the local jobs database ('queryDatabaseForJobs') and fetch external market standards ('fetchExternalMarketRates'). Proactively use them if the user's question references existing jobs or market standards.
 
 ### MANDATED TYPED OUTPUT FORMAT:
 You MUST return a JSON object matching this schema. Even if there is no job description, populate the 'evaluated_jobs' array with evaluated jobs from database or parsed input.
@@ -589,150 +731,59 @@ Schema Structure:
   ]
 }`;
 
-  const kimiKey = process.env.KIMI_API_KEY || (process.env.GEMINI_API_KEY?.startsWith("sk-") ? process.env.GEMINI_API_KEY : "");
-  const isKimi = Boolean(kimiKey);
+  const forceOpenAI = process.env.FORCE_OPENAI === "true";
+  const order = forceOpenAI 
+    ? ["openai", "gemini", "kimi"] 
+    : ["gemini", "openai", "kimi"];
 
-  if (isKimi) {
-    try {
-      const result = await runKimiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
-      return { result, trace, toolsUsed };
-    } catch (kimiErr: any) {
-      console.warn(`⚠️ Kimi API call failed: ${kimiErr.message || kimiErr}. Falling back to Gemini 2.0 Flash...`);
-      trace.push(`Step ${trace.length + 1}: Kimi API unavailable or quota reached (${kimiErr.message || kimiErr}). Falling back to Gemini 2.0 Flash...`);
-    }
-  }
+  const tried = new Set<string>();
+  let parsedResult: AgentResult | null = null;
 
-  trace.push(`Step 1: Initiated agent connection to Gemini using customizable weights criteria.`);
-  
-  // 1. First Pass - Allow the model to decide if it wants to call tools
-  const ai = getGeminiClient();
-  let response: any;
-  try {
-    response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: userQuestion,
-      config: {
-        systemInstruction,
-        tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
-      },
-    });
-  } catch (gErr: any) {
-    if (gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429) {
-      console.warn("⏳ Gemini rate limit reached. Waiting 60s before retrying...");
-      await new Promise((resolve) => setTimeout(resolve, 60000));
-      response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents: userQuestion,
-        config: {
-          systemInstruction,
-          tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
-        },
-      });
-    } else {
-      throw gErr;
-    }
-  }
-
-  let functionCalls = response.functionCalls;
-  let conversationHistory: any[] = [
-    { role: "user", parts: [{ text: userQuestion }] },
-    { role: "model", parts: response.candidates?.[0]?.content?.parts || [] }
-  ];
-
-  // Tool Call Execution Loop
-  let loopCount = 0;
-  while (functionCalls && functionCalls.length > 0 && loopCount < 5) {
-    loopCount++;
-    const functionResponsesParts: any[] = [];
-
-    for (const call of functionCalls) {
-      trace.push(`Step ${trace.length + 1}: Agent triggered tool call: "${call.name}" with arguments: ${JSON.stringify(call.args)}`);
-      toolsUsed.push(call.name || "");
-
-      let resultData: any;
-      if (call.name === "queryDatabaseForJobs") {
-        const args = (call.args as any) || {};
-        resultData = await executeQueryDatabaseForJobs(args);
-        trace.push(`Step ${trace.length + 1}: Query database returned ${resultData.length} records.`);
-      } else if (call.name === "fetchExternalMarketRates") {
-        const args = (call.args as any) || { jobTitle: "" };
-        resultData = await executeFetchExternalMarketRates(args);
-        trace.push(`Step ${trace.length + 1}: External REST API response processed: Standard range ${resultData.estimatedMonthlyBaseRange}.`);
-      } else {
-        resultData = { error: "Unknown tool name" };
+  for (const provider of order) {
+    if (provider === "openai" && openaiKey && !tried.has("openai")) {
+      tried.add("openai");
+      try {
+        trace.push(`Step ${trace.length + 1}: Running evaluation agent with OpenAI API...`);
+        const text = await tryOpenAI(openaiKey, {
+          contents: userQuestion,
+          responseMimeType: "application/json",
+          systemInstruction
+        });
+        parsedResult = parseResultJson(text, trace);
+        if (parsedResult) break;
+      } catch (err: any) {
+        console.warn(`⚠️ OpenAI agent run failed: ${err.message || err}`);
+        trace.push(`Step ${trace.length + 1}: OpenAI agent run failed: ${err.message || err}`);
       }
-
-      functionResponsesParts.push({
-        functionResponse: {
-          name: call.name,
-          response: { result: resultData }
-        }
-      });
     }
-
-    conversationHistory.push({
-      role: "user",
-      parts: functionResponsesParts
-    });
-
-    trace.push(`Step ${trace.length + 1}: Sending tool results back to Gemini for final assessment and ranking.`);
-    
-    response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: conversationHistory,
-      config: {
-        systemInstruction,
-        tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
-      },
-    });
-
-    functionCalls = response.functionCalls;
-    if (response.candidates?.[0]?.content?.parts) {
-      conversationHistory.push({
-        role: "model",
-        parts: response.candidates[0].content.parts
-      });
+    if (provider === "kimi" && kimiKey && !tried.has("kimi")) {
+      tried.add("kimi");
+      try {
+        trace.push(`Step ${trace.length + 1}: Running evaluation agent with Kimi API...`);
+        const result = await runKimiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
+        parsedResult = result;
+        if (parsedResult) break;
+      } catch (kimiErr: any) {
+        console.warn(`⚠️ Kimi agent run failed: ${kimiErr.message || kimiErr}.`);
+        trace.push(`Step ${trace.length + 1}: Kimi agent run failed: ${kimiErr.message || kimiErr}`);
+      }
+    }
+    if (provider === "gemini" && geminiKey && !tried.has("gemini")) {
+      tried.add("gemini");
+      try {
+        trace.push(`Step ${trace.length + 1}: Running evaluation agent with Gemini API...`);
+        const result = await runGeminiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
+        parsedResult = result;
+        if (parsedResult) break;
+      } catch (geminiErr: any) {
+        console.warn(`⚠️ Gemini agent run failed: ${geminiErr.message || geminiErr}.`);
+        trace.push(`Step ${trace.length + 1}: Gemini agent run failed: ${geminiErr.message || geminiErr}`);
+      }
     }
   }
 
-  // 2. Final turn - ensure the model produces the strict JSON format matching Schema
-  trace.push(`Step ${trace.length + 1}: Enforcing strict JSON formatting with builder culture metrics.`);
-  
-  const formattingPrompt = "Now, please compile all findings, evaluate each job description, and output ONLY a valid, parseable JSON object matching the requested schema. Make sure you score the workplace cultural factors (nd_friendly_score, politics_stress_score, sensory_overload_index) and ensure every job has a direct careers_portal_url link. Return nothing other than the JSON block.";
-  conversationHistory.push({ role: "user", parts: [{ text: formattingPrompt }] });
-
-  const finalResponse = await ai.models.generateContent({
-    model: "gemini-2.0-flash",
-    contents: conversationHistory,
-    config: {
-      systemInstruction,
-      responseMimeType: "application/json",
-    }
-  });
-
-  let rawText = finalResponse.text || "{}";
-  let parsedResult: AgentResult;
-  try {
-    let cleaned = rawText.trim();
-    if (cleaned.startsWith("```json")) {
-      cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-    } else if (cleaned.startsWith("```")) {
-      cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
-    }
-    const startIdx = cleaned.indexOf("{");
-    const endIdx = cleaned.lastIndexOf("}");
-    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-      cleaned = cleaned.substring(startIdx, endIdx + 1);
-    }
-    parsedResult = JSON.parse(cleaned);
-  } catch (err) {
-    console.error("Failed to parse agent JSON output, returning fallback", err);
-    trace.push(`Step ${trace.length + 1}: Formatting parsing failed. Initiated rule-based recovery fallback.`);
-    
-    parsedResult = {
-      evaluation_summary: "Parsing failed, raw output returned. Rationale analysis is stored.",
-      evaluated_jobs: []
-    };
+  if (!parsedResult) {
+    throw new Error("All model API calls failed during agent execution.");
   }
 
   trace.push(`Step ${trace.length + 1}: Multi-stage decision engine completed successfully.`);
