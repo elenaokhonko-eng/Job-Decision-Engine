@@ -104,7 +104,7 @@ async function run() {
     return;
   }
 
-  const browser = await puppeteer.launch({
+  let browser = await puppeteer.launch({
     headless: true,
     args: [
       "--no-sandbox",
@@ -128,7 +128,41 @@ async function run() {
         continue;
       }
 
-      const isExpired = await checkExpiry(url, browser);
+      let isExpired = false;
+      try {
+        if (!browser.connected) {
+          console.log("⚠️ Browser disconnected. Re-launching...");
+          browser = await puppeteer.launch({
+            headless: true,
+            args: [
+              "--no-sandbox",
+              "--disable-setuid-sandbox",
+              "--disable-dev-shm-usage",
+              "--disable-blink-features=AutomationControlled"
+            ]
+          });
+        }
+        isExpired = await checkExpiry(url, browser);
+      } catch (err: any) {
+        console.warn(`  -> Browser error checking URL, trying one-time re-launch: ${err.message || err}`);
+        try {
+          await browser.close().catch(() => {});
+          browser = await puppeteer.launch({
+            headless: true,
+            args: [
+              "--no-sandbox",
+              "--disable-setuid-sandbox",
+              "--disable-dev-shm-usage",
+              "--disable-blink-features=AutomationControlled"
+            ]
+          });
+          isExpired = await checkExpiry(url, browser);
+        } catch (retryErr: any) {
+          console.error(`  -> Persistent browser error on retry: ${retryErr.message}`);
+          continue;
+        }
+      }
+
       if (isExpired) {
         console.log(`  -> ⚠️ EXPIRED! Marking status as REJECTED and unsetting is_top_ten.`);
         await pool.query(
