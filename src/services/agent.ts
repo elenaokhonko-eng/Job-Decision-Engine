@@ -504,7 +504,7 @@ Identify whether the role serves:
 
 #### STAGE 3: MULTI-POINT SCORING (100-Point Scale)
 Evaluate and assign weights based on these customizable axes:
-1. **Environment & Biological Guardrails**: Max ${EVALUATION_WEIGHTS.environment_guardrails.maxPoints} pts. (${EVALUATION_WEIGHTS.environment_guardrails.description})
+1. **Environment & Biological Guardrails**: Max ${EVALUATION_WEIGHTS.environment_guardrails.maxPoints} pts. (${EVALUATION_WEIGHTS.environment_guardrails.description}) -> **CRITICAL**: If the job has non-binary management elements, client coordination, or multi-role context switching, you MUST deduct points heavily from this axis (up to the full 30 points).
 2. **Technical & Creative Autonomy**: Max ${EVALUATION_WEIGHTS.technical_autonomy.maxPoints} pts. (${EVALUATION_WEIGHTS.technical_autonomy.description})
 3. **Domain Relevance**: Max ${EVALUATION_WEIGHTS.domain_relevance.maxPoints} pts. (${EVALUATION_WEIGHTS.domain_relevance.description})
 4. **Compensation & Capital Potential**: Max ${EVALUATION_WEIGHTS.compensation_potential.maxPoints} pts. (${EVALUATION_WEIGHTS.compensation_potential.description})

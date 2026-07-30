@@ -131,6 +131,66 @@ async function scrapeJobDescription(url: string, browser: puppeteer.Browser): Pr
   }
 }
 
+function checkDirectRejection(title: string, company: string, description: string): string | null {
+  const t = title.toLowerCase();
+  const c = company.toLowerCase();
+  const d = description.toLowerCase();
+
+  // 1. FDE (Forward Deployed Engineering) check
+  if (t.includes("fde") || t.includes("forward deployed") || d.includes("forward deployed") || d.includes("fde ")) {
+    return "Rejected: Role is a Forward Deployed Engineering (FDE) position.";
+  }
+
+  // 2. Consulting Firms check
+  const consultingFirms = [
+    "accenture", "kpmg", "bcg", "mckinsey", "bain", "deloitte", "pwc", "ey", 
+    "ernst & young", "pricewaterhousecoopers", "boston consulting group"
+  ];
+  for (const firm of consultingFirms) {
+    if (c.includes(firm)) {
+      return `Rejected: Company "${company}" is a consulting firm.`;
+    }
+  }
+
+  // 3. IT Outsourcing check
+  if (c.includes("red hat") || d.includes("deployed to client") || d.includes("work for our clients") || d.includes("hired resource")) {
+    return `Rejected: Role is in an IT outsourcing or staffing deployment model.`;
+  }
+
+  // 4. Contract check
+  const contractKeywords = ["contract", "contractor", "temp", "temporary", "freelance"];
+  for (const kw of contractKeywords) {
+    if (t.includes(kw)) {
+      if (t.includes("permanent contract") || d.includes("permanent contract")) {
+        continue;
+      }
+      return `Rejected: Role is a contract or temporary position ("${kw}").`;
+    }
+  }
+
+  // 5. Kitchen-sink / Multi-role (Extreme management/delivery overhead)
+  const managementKeywords = ["manage large teams", "manage client teams", "manage client expectations", "client relationship management"];
+  for (const kw of managementKeywords) {
+    if (d.includes(kw)) {
+      return `Rejected: Role involves heavy management overhead / managing client teams (${kw}).`;
+    }
+  }
+
+  // Kitchen sink indicators (if 4 or more distinct roles are combined)
+  let rolesCount = 0;
+  if (d.includes("project manager") || d.includes("scrum master") || d.includes("project management")) rolesCount++;
+  if (d.includes("people manager") || d.includes("people management") || d.includes("line manager")) rolesCount++;
+  if (d.includes("client manager") || d.includes("delivery manager") || d.includes("account manager")) rolesCount++;
+  if (d.includes("architect") || d.includes("architecture")) rolesCount++;
+  if (d.includes("developer") || d.includes("engineer")) rolesCount++;
+
+  if (rolesCount >= 4) {
+    return "Rejected: Kitchen-sink posting combining too many distinct roles (Architect + PM + People Manager + Client/Delivery Manager).";
+  }
+
+  return null;
+}
+
 async function runPipeline() {
   console.log("====================================================");
   console.log("      JOB DESCRIPTION PARSING & EVALUATION PIPELINE  ");
@@ -241,7 +301,7 @@ Schema:
       "salaryRange": "string (optional, e.g. SGD 15,000 - SGD 20,000)",
       "location": "string (optional, e.g. Singapore (Remote))",
       "careers_portal_url": "string (Mandatory. Choose the exact matching URL from the verified URLs list above)",
-      "description": "Full details, requirements, and responsibilities parsed from the email text."
+      "description": "Full details, requirements, and responsibilities parsed from the email text. You MUST structure this content into these exact headings in markdown:\n### 1. Job Description\n[content]\n### 2. Key Responsibilities\n[content]\n### 3. Technical and Other Skills\n[content]\n### 4. Qualifications, Licenses, Education\n[content]\n### 5. Nice-to-Haves\n[content]"
     }
   ]
 }
@@ -373,6 +433,42 @@ Return nothing other than the JSON block.`;
               "UPDATE raw_jobs SET raw_description = $1 WHERE id = $2",
               [scrapeResult.description, rawJob.id]
             );
+          }
+          
+          // Run direct rejection checks on the raw job title, company, and description
+          const rejectionReason = checkDirectRejection(rawJob.title, rawJob.company_name, rawJob.raw_description);
+          if (rejectionReason) {
+            console.log(`  -> ❌ REJECTED BEFORE EVALUATION (Direct Disqualifier matched): ${rejectionReason}`);
+            await db.addJob({
+              title: rawJob.title,
+              company: rawJob.company_name,
+              source: rawJob.source as any,
+              description: rawJob.raw_description || "No description available.",
+              salaryRange: rawJob.salary_range || undefined,
+              location: rawJob.location || undefined,
+              careers_portal_url: rawJob.careers_portal_url,
+              postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
+              status: "REJECTED",
+              assigned_track: "Neither",
+              confidence_level: "Low",
+              total_score: 0,
+              score_technical_autonomy: 0,
+              score_compensation_potential: 0,
+              score_domain_relevance: 0,
+              score_environment_guardrails: 0,
+              score_future_mobility: 0,
+              nd_friendly_score: 0,
+              politics_stress_score: 0,
+              sensory_overload_index: 0,
+              biological_stress_risk: rejectionReason,
+              strategic_value: "Rejected due to direct disqualification rules.",
+              recommended_cv_version: "None",
+              next_action: "None",
+              is_top_ten: false
+            }, true);
+
+            await db.markRawJobProcessed(rawJob.id);
+            continue;
           }
           
           if (i > 0 && evalJobSleepMs > 0) {

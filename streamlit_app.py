@@ -1061,6 +1061,11 @@ with tab_cv:
             # Button to trigger CV customization
             st.markdown("---")
             if st.button("✨ Generate Factual Customised CV"):
+                desc_text = selected_job.get("description", "").strip()
+                if not desc_text or desc_text == "No description available." or len(desc_text) < 150:
+                    st.error("❌ Cannot generate CV: The target job description is missing, empty, or too short in the database. Please make sure the job details are scraped or populated before customizing.")
+                    st.stop()
+                    
                 with st.spinner("AI is analyzing alignment, calling out experience gaps, and tailoring your CV..."):
                     try:
                         # We execute our scripts/generate_cv.ts with the selected job's ID

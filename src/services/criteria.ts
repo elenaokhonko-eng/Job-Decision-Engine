@@ -23,6 +23,8 @@ export const CANDIDATE_PROFILE = {
   nonNegotiables: [
     "No traditional Program Manager / Project Manager / Scrum Master roles",
     "No Client Relationship Management, Sales, or Presales roles",
+    "No Forward Deployed Engineering (FDE) or outsourcing/consulting roles",
+    "No contract roles (only permanent FTE)",
     "Travel < 10%",
     "Max 3 days in-office",
     "Low stress / organizational politics",
@@ -34,7 +36,7 @@ export const EVALUATION_WEIGHTS = {
   // Axis 4: Environmental & Biological Guardrails (30%)
   environment_guardrails: {
     maxPoints: 30,
-    description: "Low-stress, high-clarity culture, protected focus blocks, asynchronous workflow, and high-autonomy builder support."
+    description: "Low-stress, high-clarity culture, protected focus blocks, asynchronous workflow, and high-autonomy builder support. Deduct heavily (up to 30%) if there are non-binary management overhead indicators, multi-role context switching, or hybrid delivery expectations."
   },
   // Axis 1: Technical & Creative Autonomy (25%)
   technical_autonomy: {
@@ -66,7 +68,12 @@ export const HARD_DISQUALIFIERS = [
   "Clear indicators of high political overhead, intense bureaucratic alignment, or presentation-heavy workloads",
   "Local Singapore banks: DBS, UOB, OCBC (automatic rejection)",
   "Insurance and asset management companies: AIA, AIAIM (AIA Investment Management)",
-  "Job postings sourced from recruitment agencies: Argyll Scott"
+  "Job postings sourced from recruitment agencies: Argyll Scott",
+  "Forward Deployed Engineering (FDE) / Forward Deployed roles (automatic rejection)",
+  "IT outsourcing or staffing companies seeking resources for client deployment (e.g., Red Hat, external contracting) (automatic rejection)",
+  "Consulting firms: Accenture, KPMG, BCG, McKinsey, Bain, Deloitte, PwC, EY, Boston Consulting Group, PricewaterhouseCoopers (automatic rejection)",
+  "Contract, Contractor, Temporary, or Freelance roles (only permanent FTE roles are accepted) (automatic rejection)",
+  "Kitchen-sink/multi-role postings combining multiple job roles (e.g., managing internal teams + managing client teams + delivery manager + architect + project manager) (automatic rejection)"
 ];
 
 /**
