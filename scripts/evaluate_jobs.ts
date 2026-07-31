@@ -424,7 +424,7 @@ Return nothing other than the JSON block.`;
 
     if (rawJobs.length > 0) {
       console.log("Launching headless browser for job description verification & scraping...");
-      const browser = await puppeteer.launch({
+      let browser = await puppeteer.launch({
         headless: true,
         args: [
           "--no-sandbox",
@@ -441,7 +441,38 @@ Return nothing other than the JSON block.`;
           
           let scrapeResult = { description: "", isExpired: false };
           if (rawJob.careers_portal_url) {
-            scrapeResult = await scrapeJobDescription(rawJob.careers_portal_url, browser);
+            try {
+              if (!browser.connected) {
+                console.log("⚠️ Browser disconnected. Re-launching...");
+                browser = await puppeteer.launch({
+                  headless: true,
+                  args: [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled"
+                  ]
+                });
+              }
+              scrapeResult = await scrapeJobDescription(rawJob.careers_portal_url, browser);
+            } catch (err: any) {
+              console.warn(`  -> Browser error checking URL, trying one-time re-launch: ${err.message || err}`);
+              try {
+                await browser.close().catch(() => {});
+                browser = await puppeteer.launch({
+                  headless: true,
+                  args: [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled"
+                  ]
+                });
+                scrapeResult = await scrapeJobDescription(rawJob.careers_portal_url, browser);
+              } catch (retryErr: any) {
+                console.error(`  -> Persistent browser error on retry: ${retryErr.message}`);
+              }
+            }
           }
           
           if (scrapeResult.isExpired || (!scrapeResult.description && !rawJob.raw_description)) {
