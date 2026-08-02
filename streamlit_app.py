@@ -199,12 +199,22 @@ def save_new_job_to_db(job):
             cursor.execute("INSERT INTO raw_companies (name, industry) VALUES (%s, %s) RETURNING id", (job["company"], industry))
             company_id = cursor.fetchone()[0]
 
+        # Package description as structured JSON for the JSONB database column
+        structured_desc = {
+            "job_description": job["description"],
+            "key_responsibilities": [],
+            "technical_skills": [],
+            "qualifications_education": [],
+            "nice_to_haves": []
+        }
+        description_json = json.dumps(structured_desc)
+
         cursor.execute("""
             INSERT INTO raw_jobs (
                 company_name, title, source, raw_description, salary_range, location, careers_portal_url, processed
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
         """, (
-            job["company"], job["title"], job["source"], job["description"],
+            job["company"], job["title"], job["source"], description_json,
             job.get("salaryRange"), job.get("location", "Singapore"), job["careers_portal_url"]
         ))
         
