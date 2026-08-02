@@ -475,7 +475,30 @@ Return nothing other than the JSON block.`;
             }
           }
           
-          if (scrapeResult.isExpired || (!scrapeResult.description && !rawJob.raw_description)) {
+          // Parse existing description if available
+          let hasExistingDesc = false;
+          if (rawJob.raw_description) {
+            try {
+              const parsed = JSON.parse(rawJob.raw_description);
+              const text = parsed.job_description || "";
+              if (text.length >= 100 && !text.startsWith("Paste raw details here")) {
+                hasExistingDesc = true;
+              }
+            } catch {
+              if (rawJob.raw_description.length >= 100 && !rawJob.raw_description.startsWith("Paste raw details here")) {
+                hasExistingDesc = true;
+              }
+            }
+          }
+
+          // If scraping returned expired or failed, but we already have a valid description, bypass the expiry check
+          if (scrapeResult.isExpired && hasExistingDesc) {
+            console.log("  -> Scraper flagged job as expired, but a valid pre-existing description is present. Proceeding with evaluation...");
+            scrapeResult.isExpired = false;
+            scrapeResult.description = ""; // Don't overwrite the existing description
+          }
+
+          if (scrapeResult.isExpired || (!scrapeResult.description && !hasExistingDesc)) {
             const reason = scrapeResult.isExpired 
               ? "Job posting is expired or no longer active." 
               : "Could not retrieve or parse the full job description (inactive listing or missing description).";
