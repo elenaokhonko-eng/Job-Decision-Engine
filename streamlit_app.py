@@ -653,6 +653,18 @@ with tab_dashboard:
 
     st.markdown("---")
 
+    # Interactive search filters inside the main tab
+    search_col1, search_col2 = st.columns(2)
+    with search_col1:
+        search_title = st.text_input("🔍 Search Job Title", "", key="search_title_main")
+    with search_col2:
+        search_company = st.text_input("🏢 Search Company Name", "", key="search_company_main")
+
+    if search_title:
+        filtered_jobs = [j for j in filtered_jobs if search_title.lower() in j.get("title", "").lower()]
+    if search_company:
+        filtered_jobs = [j for j in filtered_jobs if search_company.lower() in j.get("company", "").lower()]
+
     col_left, col_right = st.columns([2, 3])
 
     with col_left:
