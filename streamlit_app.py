@@ -542,13 +542,13 @@ if st.sidebar.button("📨 1. Ingest Gmail Alerts Only", help="Connects to Gmail
                     st.error(f"Ingestion Error: {e}")
         st.rerun()
 
-# Button 2: Run Kimi AI Evaluation Only
-if st.sidebar.button("🧠 2. Run Kimi AI Evaluation", help="Parses staged email alerts, extracts job URLs, evaluates jobs with Kimi AI, updates final Postgres tables, and ranks Top 10."):
+# Button 2: Run LLM Evaluation & Processing Only
+if st.sidebar.button("🧠 2. Run LLM Evaluation & Processing", help="Parses staged email alerts, extracts job URLs, evaluates jobs with LLM (Gemini, OpenAI, or Moonshot/Kimi as failover), updates final Postgres tables, and ranks Top 10."):
     if not is_local and not github_token:
         st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
     else:
         if github_token:
-            with st.spinner("Triggering GitHub Actions 2_kimi_evaluation workflow..."):
+            with st.spinner("Triggering GitHub Actions evaluation workflow..."):
                 try:
                     req = urllib.request.Request(
                         "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_kimi_evaluation.yml/dispatches",
@@ -558,17 +558,17 @@ if st.sidebar.button("🧠 2. Run Kimi AI Evaluation", help="Parses staged email
                     )
                     with urllib.request.urlopen(req) as resp:
                         if resp.status in (204, 200, 201):
-                            st.success("🐙 Triggered GitHub Actions 2_kimi_evaluation workflow!")
+                            st.success("🐙 Triggered GitHub Actions evaluation workflow!")
                             st.balloons()
                 except Exception as gh_err:
                     st.error(f"GitHub Trigger Error: {gh_err}")
         else:
-            with st.spinner("Staging jobs and running Kimi AI evaluation engine..."):
+            with st.spinner("Staging jobs and running LLM evaluation engine..."):
                 try:
-                    st.info("Executing Kimi AI job description evaluation pipeline...")
+                    st.info("Executing LLM job description evaluation pipeline...")
                     eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
                     if eval_proc.returncode == 0:
-                        st.success("✅ Kimi AI evaluation completed successfully!")
+                        st.success("✅ LLM evaluation completed successfully!")
                         st.code(eval_proc.stdout, language="text")
                     else:
                         st.info(f"Evaluation Details:\n{eval_proc.stdout}")
@@ -855,7 +855,7 @@ with tab_add_job:
                 "description": desc
             }
             if save_new_job_to_db(new_job):
-                st.session_state["manual_import_success"] = f"✅ Successfully added '{title}' to the Staging Vault! It is now pending evaluation. To evaluate it immediately, click the '🧠 2. Run Kimi AI Evaluation' button in the sidebar."
+                st.session_state["manual_import_success"] = f"✅ Successfully added '{title}' to the Staging Vault! It is now pending evaluation. To evaluate it immediately, click the '🧠 2. Run LLM Evaluation & Processing' button in the sidebar."
                 st.rerun()
 
 with tab_linkedin:
