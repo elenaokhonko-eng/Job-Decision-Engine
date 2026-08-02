@@ -478,14 +478,21 @@ Return nothing other than the JSON block.`;
           // Parse existing description if available
           let hasExistingDesc = false;
           if (rawJob.raw_description) {
-            try {
-              const parsed = JSON.parse(rawJob.raw_description);
+            let parsed: any = null;
+            if (typeof rawJob.raw_description === "object" && rawJob.raw_description !== null) {
+              parsed = rawJob.raw_description;
+            } else if (typeof rawJob.raw_description === "string") {
+              try {
+                parsed = JSON.parse(rawJob.raw_description);
+              } catch {
+                if (rawJob.raw_description.length >= 100 && !rawJob.raw_description.startsWith("Paste raw details here")) {
+                  hasExistingDesc = true;
+                }
+              }
+            }
+            if (parsed) {
               const text = parsed.job_description || "";
               if (text.length >= 100 && !text.startsWith("Paste raw details here")) {
-                hasExistingDesc = true;
-              }
-            } catch {
-              if (rawJob.raw_description.length >= 100 && !rawJob.raw_description.startsWith("Paste raw details here")) {
                 hasExistingDesc = true;
               }
             }
