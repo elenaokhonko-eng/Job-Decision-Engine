@@ -615,7 +615,7 @@ track_filter = st.sidebar.selectbox("Filter Engine Track", ["All Tracks", "Track
 # Apply filters
 filtered_jobs = jobs_list
 if search_query:
-    filtered_jobs = [j for j in filtered_jobs if search_query.lower() in j["title"].lower() or search_query.lower() in j["company"].lower() or search_query.lower() in j["description"].lower()]
+    filtered_jobs = [j for j in filtered_jobs if search_query.lower() in (j.get("title") or "").lower() or search_query.lower() in (j.get("company") or "").lower() or search_query.lower() in (j.get("description") or "").lower()]
 if board_filter != "All Sources":
     filtered_jobs = [j for j in filtered_jobs if j.get("source") == board_filter]
 if track_filter != "All Tracks":
@@ -661,9 +661,9 @@ with tab_dashboard:
         search_company = st.text_input("🏢 Search Company Name", "", key="search_company_main")
 
     if search_title:
-        filtered_jobs = [j for j in filtered_jobs if search_title.lower() in j.get("title", "").lower()]
+        filtered_jobs = [j for j in filtered_jobs if search_title.lower() in (j.get("title") or "").lower()]
     if search_company:
-        filtered_jobs = [j for j in filtered_jobs if search_company.lower() in j.get("company", "").lower()]
+        filtered_jobs = [j for j in filtered_jobs if search_company.lower() in (j.get("company") or "").lower()]
 
     col_left, col_right = st.columns([2, 3])
 
@@ -724,13 +724,19 @@ with tab_dashboard:
                             if delete_job_from_db(job.get("id")):
                                 st.rerun()
             else:
-                st.info("No active matching jobs (STRONG MATCH or REVIEW REQUIRED) are currently stored.")
+                if rejected_jobs:
+                    st.info(f"💡 No active matches found, but {len(rejected_jobs)} matching listings are in the Rejected/Discarded folder below.")
+                else:
+                    st.info("No active matching jobs (STRONG MATCH or REVIEW REQUIRED) are currently stored.")
 
             # Render Rejected (Red) Jobs inside an expander
             if rejected_jobs:
                 st.markdown("---")
-                with st.expander(f"🔴 View Rejected/Discarded Listings ({len(rejected_jobs)} jobs)"):
-                    for idx, job in enumerate(rejected_jobs):
+                is_search_active = bool(search_title or search_company or search_query)
+                with st.expander(f"🔴 View Rejected/Discarded Listings ({len(rejected_jobs)} jobs)", expanded=is_search_active):
+                    # Limit rendering of rejected popovers to top 50 to prevent severe browser lag
+                    display_limit = 50
+                    for idx, job in enumerate(rejected_jobs[:display_limit]):
                         company = job.get("company", "Unknown")
                         title = job.get("title", "Job Title")
                         score = job.get("total_score", 0)
@@ -756,6 +762,8 @@ with tab_dashboard:
                             if st.button("🗑️ Delete Listing Permanent", key=f"rej_del_{job.get('id') or idx}"):
                                 if delete_job_from_db(job.get("id")):
                                     st.rerun()
+                    if len(rejected_jobs) > display_limit:
+                        st.caption(f"⚠️ Showing first {display_limit} rejected listings to maintain UI performance. Use the search inputs above to filter down further.")
 
     with col_right:
         st.subheader("🤖 Scoring & Match Analysis Details")
