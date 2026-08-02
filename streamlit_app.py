@@ -829,6 +829,10 @@ with tab_dashboard:
 with tab_add_job:
     st.subheader("➕ Import a New Job Advertisement")
     st.write("Add raw jobs manually to the Postgres Vault. The daily evaluation cron job will automatically score and route them.")
+    if "manual_import_success" in st.session_state:
+        st.success(st.session_state["manual_import_success"])
+        del st.session_state["manual_import_success"]
+
     with st.form("custom_job_form"):
         title = st.text_input("Job Title", "Principal AI Architect")
         company = st.text_input("Company Name", "Novartis Pharmaceuticals")
@@ -851,6 +855,7 @@ with tab_add_job:
                 "description": desc
             }
             if save_new_job_to_db(new_job):
+                st.session_state["manual_import_success"] = f"✅ Successfully added '{title}' to the Staging Vault! It is now pending evaluation. To evaluate it immediately, click the '🧠 2. Run Kimi AI Evaluation' button in the sidebar."
                 st.rerun()
 
 with tab_linkedin:
