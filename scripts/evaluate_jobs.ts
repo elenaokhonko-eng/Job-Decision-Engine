@@ -729,10 +729,11 @@ Return nothing other than the JSON block.`;
     // 4. Clean up Gmail Jobs-Alerts-Processed folder
     const gmailUser = process.env.GMAIL_USER;
     const gmailPassword = process.env.GMAIL_APP_PASSWORD;
+    const gmailFolder = process.env.GMAIL_FOLDER || "Jobs-Alerts";
     const gmailProcessedFolder = process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
 
     if (gmailUser && gmailPassword) {
-      console.log(`\nConnecting to Gmail to clean up "${gmailProcessedFolder}" folder...`);
+      console.log(`\nConnecting to Gmail to purge both alert folders...`);
       const { ImapFlow } = await import("imapflow");
       const imapClient = new ImapFlow({
         host: "imap.gmail.com",
@@ -747,18 +748,32 @@ Return nothing other than the JSON block.`;
 
       try {
         await imapClient.connect();
-        const mailbox = await imapClient.mailboxOpen(gmailProcessedFolder);
-        if (mailbox.exists > 0) {
-          console.log(`Deleting ${mailbox.exists} processed emails from Gmail folder "${gmailProcessedFolder}"...`);
+
+        // 1. Purge main Jobs-Alerts folder
+        const mainMailbox = await imapClient.mailboxOpen(gmailFolder);
+        if (mainMailbox.exists > 0) {
+          console.log(`Deleting ${mainMailbox.exists} emails from Gmail folder "${gmailFolder}"...`);
           await imapClient.messageFlagsAdd("1:*", ["\\Deleted"]);
-          await imapClient.mailboxClose();
+          console.log(`✅ Cleaned up "${gmailFolder}" folder.`);
+        } else {
+          console.log(`Gmail folder "${gmailFolder}" is already empty.`);
+        }
+        await imapClient.mailboxClose();
+
+        // 2. Purge Jobs-Alerts-Processed folder
+        const processedMailbox = await imapClient.mailboxOpen(gmailProcessedFolder);
+        if (processedMailbox.exists > 0) {
+          console.log(`Deleting ${processedMailbox.exists} processed emails from Gmail folder "${gmailProcessedFolder}"...`);
+          await imapClient.messageFlagsAdd("1:*", ["\\Deleted"]);
           console.log(`✅ Cleaned up "${gmailProcessedFolder}" folder.`);
         } else {
           console.log(`Gmail folder "${gmailProcessedFolder}" is already empty.`);
         }
+        await imapClient.mailboxClose();
+
         await imapClient.logout();
       } catch (gmailErr: any) {
-        console.error(`⚠️ Failed to clean up Gmail "${gmailProcessedFolder}" folder:`, gmailErr.message || gmailErr);
+        console.error(`⚠️ Failed to clean up Gmail folders:`, gmailErr.message || gmailErr);
       }
     }
 
