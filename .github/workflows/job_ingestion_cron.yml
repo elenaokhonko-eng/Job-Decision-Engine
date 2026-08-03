@@ -56,4 +56,6 @@ jobs:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           KIMI_MODEL: ${{ secrets.KIMI_MODEL }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
         run: npx tsx scripts/evaluate_jobs.ts
