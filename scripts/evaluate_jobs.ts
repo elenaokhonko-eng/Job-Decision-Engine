@@ -16,6 +16,10 @@ const pool = new pg.Pool({
   ssl: databaseUrl && (databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
 });
 
+pool.on("error", (err) => {
+  console.error("Unexpected error on idle database client in evaluation script:", err.message || err);
+});
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function scrapeJobDescription(url: string, browser: puppeteer.Browser): Promise<{ description: string; isExpired: boolean }> {

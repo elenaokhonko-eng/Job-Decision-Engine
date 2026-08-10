@@ -12,6 +12,10 @@ const pool = new pg.Pool({
   ssl: databaseUrl && (databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
 });
 
+pool.on("error", (err) => {
+  console.error("Unexpected error on idle database client:", err.message || err);
+});
+
 // Verify if a URL is valid and live (does not 404 or redirect to an expired page)
 export async function verifyUrlLive(url: string, bypassLiveCheck = false): Promise<boolean> {
   if (!url) return false;
