@@ -226,48 +226,6 @@ async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
   return "";
 }
 
-async function tryKimi(kimiKey: string, options: any): Promise<string> {
-  const baseUrl = "https://api.kimi.com/coding/v1";
-  const model = process.env.KIMI_MODEL || "moonshot-v1-8k";
-  const messages: any[] = [];
-  if (options.systemInstruction) {
-    messages.push({ role: "system", content: options.systemInstruction });
-  }
-  messages.push({ role: "user", content: options.contents });
-
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${kimiKey}`,
-          "User-Agent": "Claude-Code"
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: 1,
-          response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
-        }),
-        signal: AbortSignal.timeout(60000)
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
-      }
-
-      const data = await response.json();
-      return data.choices?.[0]?.message?.content || "";
-    } catch (err: any) {
-      if (attempt === 2) throw err;
-      console.warn(`⏳ Kimi request failed. Retrying in 5s...`);
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
-  }
-  return "";
-}
 
 export async function generateContent(options: {
   model: string;
@@ -275,14 +233,13 @@ export async function generateContent(options: {
   responseMimeType?: string;
   systemInstruction?: string;
 }): Promise<string> {
-  const kimiKey = process.env.KIMI_API_KEY;
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
   const forceOpenAI = process.env.FORCE_OPENAI === "true";
   const order = forceOpenAI 
-    ? ["openai", "gemini", "kimi"] 
-    : ["gemini", "openai", "kimi"];
+    ? ["openai", "gemini"] 
+    : ["gemini", "openai"];
 
   const tried = new Set<string>();
 
@@ -305,187 +262,11 @@ export async function generateContent(options: {
         console.warn(`⚠️ OpenAI request failed (${err.message || err}).`);
       }
     }
-    if (provider === "kimi" && kimiKey && !tried.has("kimi")) {
-      tried.add("kimi");
-      try {
-        const text = await tryKimi(kimiKey, options);
-        if (text) return text;
-      } catch (err: any) {
-        console.warn(`⚠️ Kimi request failed (${err.message || err}).`);
-      }
-    }
   }
 
   throw new Error("All model API calls failed or no API keys were configured.");
 }
 
-async function runKimiAgentInternal(
-  userQuestion: string,
-  systemInstruction: string,
-  trace: string[],
-  toolsUsed: string[]
-): Promise<AgentResult> {
-  const apiKey = process.env.KIMI_API_KEY || process.env.GEMINI_API_KEY || "";
-  const model = process.env.KIMI_MODEL || process.env.GEMINI_MODEL || "moonshot-v1-8k";
-  const baseUrl = "https://api.kimi.com/coding/v1";
-
-  trace.push(`Step 1: Initiated agent connection to Kimi (Moonshot AI) using model: ${model}.`);
-
-  const tools = [
-    {
-      type: "function" as const,
-      function: {
-        name: "queryDatabaseForJobs",
-        description: "Search or fetch job advertisements from the local Postgres simulation database.",
-        parameters: {
-          type: "object",
-          properties: {
-            searchTerm: {
-              type: "string",
-              description: "Optional search query to filter jobs by title, company, or description keywords."
-            }
-          }
-        }
-      }
-    },
-    {
-      type: "function" as const,
-      function: {
-        name: "fetchExternalMarketRates",
-        description: "Fetch external real-time market salary data and benchmark standards for a given job title via an external REST API simulation.",
-        parameters: {
-          type: "object",
-          properties: {
-            jobTitle: {
-              type: "string",
-              description: "The job title to query market salary rates for."
-            }
-          },
-          required: ["jobTitle"]
-        }
-      }
-    }
-  ];
-
-  const messages: any[] = [
-    { role: "system", content: systemInstruction },
-    { role: "user", content: userQuestion }
-  ];
-
-  let loopCount = 0;
-  let continueLoop = true;
-
-  while (continueLoop && loopCount < 5) {
-    loopCount++;
-    const reqBody: any = {
-      model,
-      messages,
-      temperature: 1
-    };
-    if (loopCount === 1) {
-      reqBody.tools = tools;
-    }
-
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-        "User-Agent": "Claude-Code"
-      },
-      body: JSON.stringify(reqBody),
-      signal: AbortSignal.timeout(20000)
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Kimi API request failed with status ${response.status}: ${errorText}`);
-    }
-
-    const data = await response.json();
-    const message = data.choices?.[0]?.message;
-    if (!message) {
-      throw new Error("Kimi API returned empty choices.");
-    }
-
-    messages.push(message);
-
-    const toolCalls = message.tool_calls;
-    if (toolCalls && toolCalls.length > 0) {
-      for (const call of toolCalls) {
-        const name = call.function.name;
-        const argsStr = call.function.arguments;
-        const args = JSON.parse(argsStr || "{}");
-
-        trace.push(`Step ${trace.length + 1}: Agent triggered tool call: "${name}" with arguments: ${argsStr}`);
-        toolsUsed.push(name || "");
-
-        let resultData: any;
-        if (name === "queryDatabaseForJobs") {
-          resultData = await executeQueryDatabaseForJobs(args);
-          trace.push(`Step ${trace.length + 1}: Query database returned ${resultData.length} records.`);
-        } else if (name === "fetchExternalMarketRates") {
-          resultData = await executeFetchExternalMarketRates(args);
-          trace.push(`Step ${trace.length + 1}: External REST API response processed: Standard range ${resultData.estimatedMonthlyBaseRange}.`);
-        } else {
-          resultData = { error: "Unknown tool name" };
-        }
-
-        messages.push({
-          role: "tool",
-          tool_call_id: call.id,
-          name: name,
-          content: JSON.stringify({ result: resultData })
-        });
-      }
-    } else {
-      continueLoop = false;
-    }
-  }
-
-  trace.push(`Step ${trace.length + 1}: Enforcing strict JSON formatting with builder culture metrics.`);
-  const formattingPrompt = "Now, please compile all findings, evaluate each job description, and output ONLY a valid, parseable JSON object matching the requested schema. Make sure you score the workplace cultural factors (nd_friendly_score, politics_stress_score, sensory_overload_index) and ensure every job has a direct careers_portal_url link. Return nothing other than the JSON block.";
-  messages.push({ role: "user", content: formattingPrompt });
-
-  const finalResponse = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-      "User-Agent": "Claude-Code"
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: 1,
-      response_format: { type: "json_object" }
-    }),
-    signal: AbortSignal.timeout(20000)
-  });
-
-  if (!finalResponse.ok) {
-    const errorText = await finalResponse.text();
-    throw new Error(`Kimi API final request failed with status ${finalResponse.status}: ${errorText}`);
-  }
-
-  const finalData = await finalResponse.json();
-  const rawText = finalData.choices?.[0]?.message?.content || "{}";
-
-  let cleanText = rawText.trim();
-  if (cleanText.startsWith("```json")) {
-    cleanText = cleanText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-  } else if (cleanText.startsWith("```")) {
-    cleanText = cleanText.replace(/^```\s*/, "").replace(/\s*```$/, "");
-  }
-
-  try {
-    const parsed = JSON.parse(cleanText) as AgentResult;
-    return parsed;
-  } catch (err: any) {
-    console.error("Failed to parse Kimi JSON response:", cleanText);
-    throw new Error(`Kimi model output could not be parsed as JSON: ${err.message || err}`);
-  }
-}
 
 // Core execution loop
 function parseResultJson(rawText: string, trace: string[]): AgentResult {
@@ -628,13 +409,12 @@ async function runGeminiAgentInternal(
 
 // Core execution loop
 export async function runAgent(userQuestion: string): Promise<{ result: AgentResult; trace: string[]; toolsUsed: string[] }> {
-  const kimiKey = process.env.KIMI_API_KEY || (process.env.GEMINI_API_KEY?.startsWith("sk-") ? process.env.GEMINI_API_KEY : "");
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
-  if (!kimiKey && !geminiKey && !openaiKey) {
+  if (!geminiKey && !openaiKey) {
     throw new Error(
-      "CRITICAL API KEY CONFLICT: Neither KIMI_API_KEY nor GEMINI_API_KEY nor OPENAI_API_KEY environment variable is configured."
+      "CRITICAL API KEY CONFLICT: Neither GEMINI_API_KEY nor OPENAI_API_KEY environment variable is configured."
     );
   }
 
@@ -733,8 +513,8 @@ Schema Structure:
 
   const forceOpenAI = process.env.FORCE_OPENAI === "true";
   const order = forceOpenAI 
-    ? ["openai", "gemini", "kimi"] 
-    : ["gemini", "openai", "kimi"];
+    ? ["openai", "gemini"] 
+    : ["gemini", "openai"];
 
   const tried = new Set<string>();
   let parsedResult: AgentResult | null = null;
@@ -754,18 +534,6 @@ Schema Structure:
       } catch (err: any) {
         console.warn(`⚠️ OpenAI agent run failed: ${err.message || err}`);
         trace.push(`Step ${trace.length + 1}: OpenAI agent run failed: ${err.message || err}`);
-      }
-    }
-    if (provider === "kimi" && kimiKey && !tried.has("kimi")) {
-      tried.add("kimi");
-      try {
-        trace.push(`Step ${trace.length + 1}: Running evaluation agent with Kimi API...`);
-        const result = await runKimiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
-        parsedResult = result;
-        if (parsedResult) break;
-      } catch (kimiErr: any) {
-        console.warn(`⚠️ Kimi agent run failed: ${kimiErr.message || kimiErr}.`);
-        trace.push(`Step ${trace.length + 1}: Kimi agent run failed: ${kimiErr.message || kimiErr}`);
       }
     }
     if (provider === "gemini" && geminiKey && !tried.has("gemini")) {

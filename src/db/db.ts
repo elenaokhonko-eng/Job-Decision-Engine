@@ -332,7 +332,7 @@ class PostgresDatabase {
     const lower = `%${searchTerm.toLowerCase()}%`;
     const res = await pool.query(
       `SELECT * FROM jobs 
-       WHERE title ILIKE $1 OR company_name ILIKE $1 OR raw_description ILIKE $1 
+       WHERE title ILIKE $1 OR company_name ILIKE $1 OR raw_description::text ILIKE $1 
        ORDER BY created_at DESC`,
       [lower]
     );

@@ -305,7 +305,6 @@ def convert_markdown_to_pdf(md_text):
 
 def python_generate_content(contents, system_instruction=None, response_mime_type=None):
     # Load keys
-    kimi_key = os.environ.get("KIMI_API_KEY")
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_FLASH_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     
@@ -359,38 +358,9 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
                 text = res_data["choices"][0]["message"]["content"]
                 return text
         except Exception as openai_err:
-            st.warning(f"⚠️ OpenAI request failed: {openai_err}. Trying Kimi fallback...")
-
-    # 3. Try Kimi third
-    if kimi_key:
-        try:
-            url = "https://api.kimi.com/coding/v1/chat/completions"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {kimi_key}"
-            }
-            messages = []
-            if system_instruction:
-                messages.append({"role": "system", "content": system_instruction})
-            messages.append({"role": "user", "content": contents})
+            st.warning(f"⚠️ OpenAI request failed: {openai_err}.")
             
-            body = {
-                "model": os.environ.get("KIMI_MODEL", "moonshot-v1-8k"),
-                "messages": messages,
-                "temperature": 1
-            }
-            if response_mime_type == "application/json":
-                body["response_format"] = {"type": "json_object"}
-                
-            req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=90) as response:
-                res_data = json.loads(response.read().decode("utf-8"))
-                text = res_data["choices"][0]["message"]["content"]
-                return text
-        except Exception as kimi_err:
-            st.error(f"❌ Kimi fallback failed: {kimi_err}")
-            
-    raise Exception("All configured models (Gemini, OpenAI, Kimi) failed or no API keys are set.")
+    raise Exception("All configured models (Gemini, OpenAI) failed or no API keys are set.")
 
 def ingest_linkedin_saved_json(jobs):
     try:
@@ -543,7 +513,7 @@ if st.sidebar.button("📨 1. Ingest Gmail Alerts Only", help="Connects to Gmail
         st.rerun()
 
 # Button 2: Run LLM Evaluation & Processing Only
-if st.sidebar.button("🧠 2. Run LLM Evaluation & Processing", help="Parses staged email alerts, extracts job URLs, evaluates jobs with LLM (Gemini, OpenAI, or Moonshot/Kimi as failover), updates final Postgres tables, and ranks Top 10."):
+if st.sidebar.button("🧠 2. Run LLM Evaluation & Processing", help="Parses staged email alerts, extracts job URLs, evaluates jobs with LLM (Gemini or OpenAI as failover), updates final Postgres tables, and ranks Top 10."):
     if not is_local and not github_token:
         st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
     else:
@@ -551,7 +521,7 @@ if st.sidebar.button("🧠 2. Run LLM Evaluation & Processing", help="Parses sta
             with st.spinner("Triggering GitHub Actions evaluation workflow..."):
                 try:
                     req = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_kimi_evaluation.yml/dispatches",
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_ai_evaluation.yml/dispatches",
                         data=json.dumps({"ref": "main"}).encode("utf-8"),
                         headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
                         method="POST"
@@ -591,7 +561,7 @@ if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Step 1 (Ingestio
                         method="POST"
                     )
                     req2 = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_kimi_evaluation.yml/dispatches",
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_ai_evaluation.yml/dispatches",
                         data=json.dumps({"ref": "main"}).encode("utf-8"),
                         headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
                         method="POST"
@@ -604,11 +574,11 @@ if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Step 1 (Ingestio
                 except Exception as gh_err:
                     st.error(f"GitHub Trigger Error: {gh_err}")
         else:
-            with st.spinner("Running full pipeline (Ingestion + Kimi Evaluation) locally..."):
+            with st.spinner("Running full pipeline (Ingestion + AI Evaluation) locally..."):
                 try:
                     st.info("Step 1/2: Fetching emails from 'Jobs-Alerts'...")
                     ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    st.info("Step 2/2: Running Kimi AI evaluation pipeline...")
+                    st.info("Step 2/2: Running AI evaluation pipeline...")
                     eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
                     st.success("✅ Full pipeline execution finished!")
                     st.balloons()

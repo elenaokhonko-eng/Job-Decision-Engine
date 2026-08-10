@@ -60,7 +60,7 @@ The engine automatically **REJECTS** opportunities that exhibit high administrat
                     │      raw_jobs           │
                     │    Staging Table        │
                     └───────────┬─────────────┘
-                                │ (Kimi AI Evaluation)
+                                │ (AI Evaluation & Scoring)
                                 ▼
                     ┌─────────────────────────┐
                     │       jobs &            │
@@ -72,6 +72,17 @@ The engine automatically **REJECTS** opportunities that exhibit high administrat
                     │   Streamlit Console     │
                     └─────────────────────────┘
 ```
+
+---
+
+## 🔧 Recent Improvements & Production Fixes
+We regularly patch and optimize the engine. Recent stability updates include:
+1. **JSONB Alignment on Manual Add**: Manually submitted jobs via Streamlit are structured into JSON strings before insertion, aligning with Postgres `JSONB` schemas to eliminate ingestion exceptions.
+2. **Postgres Driver Deserialization Compatibility**: Refactored `evaluate_jobs.ts` to seamlessly handle both pre-parsed object types and raw strings for database description fields.
+3. **LinkedIn Scraper Expiry Bypass**: Bypasses the guest scraper's 404/expired checks when a valid description has already been staged (e.g., from manual adds or previous successful scrapes), preventing low-score rejects on active roles.
+4. **IMAP Dual Folder Purge**: The cleanup phase now connects to Gmail and expunges both the `Jobs-Alerts` and `Jobs-Alerts-Processed` folders to resolve duplicate labeling and prevent mail loops.
+5. **Speed Optimization (3s Sleep)**: Set `EVAL_SLEEP_MS: 3000` to speed up the ingestion and evaluation of large backlogs on GitHub Actions.
+6. **OpenAI Failover Integration**: Configured OpenAI as a fallback provider within workflows to guarantee seamless pipeline runs even during Gemini 429 rate limit events.
 
 ---
 
@@ -93,8 +104,9 @@ In the deployment setup screen, click **"Advanced settings..."** $\rightarrow$ *
 
 ```toml
 DATABASE_URL = "postgresql://neondb_owner:YOUR_NEON_PASSWORD@ep-xxx.neon.tech/neondb?sslmode=require"
-GEMINI_API_KEY = "sk-kimi-YOUR_API_KEY"
-KIMI_MODEL = "moonshot-v1-8k"
+GEMINI_API_KEY = "AIzaSy..."
+OPENAI_API_KEY = "sk-proj-..."
+OPENAI_MODEL = "gpt-4o-mini"
 GMAIL_USER = "your.email@gmail.com"
 GMAIL_APP_PASSWORD = "your-16-char-app-password"
 GMAIL_FOLDER = "Jobs-Alerts"
@@ -126,8 +138,9 @@ Create a `.env.local` file in the root directory:
 
 ```env
 DATABASE_URL="postgresql://neondb_owner:YOUR_PASSWORD@ep-xxx.neon.tech/neondb?sslmode=require"
-GEMINI_API_KEY="sk-kimi-YOUR_KIMI_OR_GEMINI_KEY"
-KIMI_MODEL="moonshot-v1-8k"
+GEMINI_API_KEY="AIzaSy..."
+OPENAI_API_KEY="sk-proj-..."
+OPENAI_MODEL="gpt-4o-mini"
 GMAIL_USER="your.email@gmail.com"
 GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"
 GMAIL_FOLDER="Jobs-Alerts"

@@ -1,11 +1,11 @@
-name: 2. Kimi AI Job Evaluation Only
+name: 2. AI Job Evaluation Only
 
 on:
   workflow_dispatch:
 
 jobs:
-  evaluate-jobs-kimi:
-    name: Evaluate Staged Jobs via Kimi AI Engine
+  evaluate-jobs:
+    name: Evaluate Staged Jobs via AI Engine
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository code
@@ -24,8 +24,6 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          KIMI_MODEL: ${{ secrets.KIMI_MODEL }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}

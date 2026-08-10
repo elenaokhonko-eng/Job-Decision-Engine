@@ -32,8 +32,8 @@ jobs:
           GMAIL_FOLDER: ${{ secrets.GMAIL_FOLDER }}
         run: python scripts/ingest_gmail.py
 
-  evaluate-jobs-kimi:
-    name: 2. Evaluate Staged Jobs via Kimi AI Engine
+  evaluate-jobs:
+    name: 2. Evaluate Staged Jobs via AI Engine
     needs: ingest-raw-gmail-alerts
     runs-on: ubuntu-latest
     steps:
@@ -53,8 +53,6 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          KIMI_MODEL: ${{ secrets.KIMI_MODEL }}
           GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
