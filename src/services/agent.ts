@@ -1,5 +1,7 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { db, Job } from "../db/db.ts";
+import { fetchGmailAlerts } from "./gmail";
+import { extractWithFallback } from "./llmFallback";
 import {
   CANDIDATE_PROFILE,
   EVALUATION_WEIGHTS,
@@ -224,6 +226,68 @@ async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
     }
   }
   return "";
+}
+
+export type Provider = "local" | "gemini" | "openai";
+
+/**
+ * Unified LLM call helper that selects provider based on workflow stage.
+ */
+export async function callLLM(
+  stage: "extract" | "evaluate" | "cv",
+  prompt: string,
+  extra?: any
+): Promise<string> {
+  // Resolve provider for the given stage
+  let provider: Provider;
+  if (stage === "extract") {
+    provider = "local"; // Ollama LLaMA
+  } else if (stage === "evaluate") {
+    provider = "gemini"; // Primary, fallback handled internally
+  } else {
+    provider = "openai"; // CV customization
+  }
+
+  switch (provider) {
+    case "local": {
+      const baseUrl = process.env.OLLAMA_API_BASE?.replace(/\/+$/, "");
+      const model = process.env.OLLAMA_MODEL;
+      if (!baseUrl || !model) {
+        throw new Error("Ollama configuration missing in .env.local (OLLAMA_API_BASE or OLLAMA_MODEL)");
+      }
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 1,
+          ...(extra?.options ?? {})
+        })
+      });
+      if (!response.ok) {
+        const err = await response.text();
+        throw new Error(`Ollama request failed: ${response.status} ${err}`);
+      }
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content ?? "";
+    }
+    case "gemini": {
+      const result = await runAgent(prompt);
+      // Return the result object as a JSON string for consistency
+      return JSON.stringify(result.result);
+    }
+    case "openai": {
+      const openaiKey = process.env.OPENAI_API_KEY || "";
+      return await tryOpenAI(openaiKey, {
+        contents: prompt,
+        model: process.env.OPENAI_MODEL,
+        responseMimeType: "application/json"
+      });
+    }
+    default:
+      throw new Error("Invalid provider");
+  }
 }
 
 
@@ -634,7 +698,42 @@ export async function autoSyncExternalSources(enabled: {
     logs.push("Step 4: [eFinancialCareers Agent] Parsing investment banking & quant platform architectures in Singapore...");
   }
   if (enabled.gmail) {
-    logs.push("Step 5: [Gmail Inbox Monitor Agent] Scanning incoming Google Workspace email alerts labeled 'job-matching'...");
+  logs.push("Step 5: [Gmail Inbox Monitor Agent] Scanning incoming Google Workspace email alerts...\n");
+  try {
+    const emails = await fetchGmailAlerts();
+    if (emails.length === 0) {
+      logs.push("Step 6: No new Gmail alerts found.");
+    } else {
+      for (const email of emails) {
+        try {
+          const extracted = await extractWithFallback(email);
+          const jobList = JSON.parse(extracted);
+          if (Array.isArray(jobList)) {
+            for (const cJob of jobList) {
+              const newJob = await db.addRawJob({
+                title: cJob.title,
+                company_name: cJob.company,
+                source: "Gmail",
+                raw_description: cJob.description,
+                salary_range: cJob.salaryRange,
+                location: cJob.location,
+                careers_portal_url: cJob.careers_portal_url,
+                posted_date: new Date().toISOString().split("T")[0],
+              });
+              importedJobs.push(newJob as any);
+              logs.push(`Step ${logs.length + 1}: Gmail‑extracted job "${newJob.title}" stored.`);
+            }
+          }
+        } catch (inner) {
+          logs.push(`Step ${logs.length + 1}: Failed to process a Gmail alert – ${inner}`);
+        }
+      }
+    }
+  } catch (gmailErr) {
+    logs.push(`Step ${logs.length + 1}: Gmail fetch error – ${gmailErr.message}`);
+  }
+}
+    
   }
 
   logs.push("Step 6: Executing raw alert text parsing via Gemini.");
