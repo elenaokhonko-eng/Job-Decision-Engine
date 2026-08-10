@@ -479,35 +479,42 @@ st.sidebar.subheader("⚡ Unscheduled Action Controls")
 is_local = os.path.exists(".env.local")
 github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_PAT")
 
-# Button 1: Ingest Gmail Alerts Only
-if st.sidebar.button("📨 1. Ingest Gmail Alerts Only", help="Connects to Gmail, fetches unread alerts from 'Jobs-Alerts', stages them in Postgres, and moves them to 'Jobs-Alerts-Processed'."):
+# Button 1: Ingest Job Alerts (Gmail & 65labs)
+if st.sidebar.button("📨 1. Ingest Job Alerts (Gmail & 65labs)", help="Fetches unread alerts from Gmail 'Jobs-Alerts' and scrapes curated AI roles from 65labs.org, staging all new roles in Postgres."):
     if not is_local and not github_token:
         st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
     else:
         if github_token:
-            with st.spinner("Triggering GitHub Actions 1_gmail_ingestion workflow..."):
+            with st.spinner("Triggering GitHub Actions job ingestion workflow..."):
                 try:
                     req = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_job_ingestion.yml/dispatches",
                         data=json.dumps({"ref": "main"}).encode("utf-8"),
                         headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
                         method="POST"
                     )
                     with urllib.request.urlopen(req) as resp:
                         if resp.status in (204, 200, 201):
-                            st.success("🐙 Triggered GitHub Actions 1_gmail_ingestion workflow!")
+                            st.success("🐙 Triggered GitHub Actions job ingestion workflow!")
                 except Exception as gh_err:
                     st.error(f"GitHub Trigger Error: {gh_err}")
         else:
-            with st.spinner("Connecting to Gmail IMAP and ingesting raw email alerts..."):
+            with st.spinner("Ingesting job alerts locally (Gmail + 65labs)..."):
                 try:
-                    st.info("Fetching new emails from 'Jobs-Alerts' folder...")
-                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    if ingest_proc.returncode == 0:
+                    st.info("Step 1/2: Fetching emails from Gmail 'Jobs-Alerts'...")
+                    gmail_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    if gmail_proc.returncode == 0:
                         st.success("✅ Gmail alert ingestion completed successfully!")
-                        st.code(ingest_proc.stdout, language="text")
                     else:
-                        st.warning(f"Ingestion Output: {ingest_proc.stdout or ingest_proc.stderr}")
+                        st.warning(f"Gmail Ingestion Output: {gmail_proc.stdout or gmail_proc.stderr}")
+
+                    st.info("Step 2/2: Ingesting curated AI roles from 65labs.org...")
+                    labs_proc = subprocess.run(["npx", "tsx", "scripts/ingest_65labs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    if labs_proc.returncode == 0:
+                        st.success("✅ 65labs ingestion completed successfully!")
+                        st.code(labs_proc.stdout, language="text")
+                    else:
+                        st.warning(f"65labs Ingestion Output: {labs_proc.stdout or labs_proc.stderr}")
                 except Exception as e:
                     st.error(f"Ingestion Error: {e}")
         st.rerun()
@@ -555,7 +562,7 @@ if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Step 1 (Ingestio
             with st.spinner("Triggering full pipeline via GitHub Actions workflows..."):
                 try:
                     req1 = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_job_ingestion.yml/dispatches",
                         data=json.dumps({"ref": "main"}).encode("utf-8"),
                         headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
                         method="POST"
@@ -576,9 +583,13 @@ if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Step 1 (Ingestio
         else:
             with st.spinner("Running full pipeline (Ingestion + AI Evaluation) locally..."):
                 try:
-                    st.info("Step 1/2: Fetching emails from 'Jobs-Alerts'...")
-                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    st.info("Step 2/2: Running AI evaluation pipeline...")
+                    st.info("Step 1/3: Fetching emails from Gmail 'Jobs-Alerts'...")
+                    subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], env=os.environ, shell=True)
+                    
+                    st.info("Step 2/3: Ingesting curated AI roles from 65labs.org...")
+                    subprocess.run(["npx", "tsx", "scripts/ingest_65labs.ts"], env=os.environ, shell=True)
+                    
+                    st.info("Step 3/3: Running AI evaluation pipeline...")
                     eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
                     st.success("✅ Full pipeline execution finished!")
                     st.balloons()
