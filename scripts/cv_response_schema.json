@@ -45,9 +45,57 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Bulleted key analytical takeaways regarding the alignment of the profile and role"
+        },
+        "ats_scoring_metrics": {
+          "type": "object",
+          "properties": {
+            "keyword_match_percentage": { 
+              "type": "integer", 
+              "minimum": 0, 
+              "maximum": 100,
+              "description": "Estimated percentage of JD keywords covered in the resume"
+            },
+            "formatting_compliance_score": { 
+              "type": "integer", 
+              "minimum": 0, 
+              "maximum": 100,
+              "description": "Adherence score to ATS layout rules (single-column, standard headings, no tables)"
+            },
+            "star_method_coverage_percentage": { 
+              "type": "integer", 
+              "minimum": 0, 
+              "maximum": 100,
+              "description": "Percentage of work experience bullets written using STAR (Situation, Task, Action, Result) format"
+            },
+            "ats_friendly_score": { 
+              "type": "integer", 
+              "minimum": 0, 
+              "maximum": 100,
+              "description": "Overall composite ATS compatibility score based on keyword match, format compliance, and action verbs"
+            },
+            "formatting_suggestions": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Specific recommendations to ensure parsing compatibility for systems like Workday or Taleo"
+            }
+          },
+          "required": [
+            "keyword_match_percentage", 
+            "formatting_compliance_score", 
+            "star_method_coverage_percentage", 
+            "ats_friendly_score", 
+            "formatting_suggestions"
+          ]
         }
       },
-      "required": ["overall_fit_percentage", "core_requirements_match_percentage", "core_matches", "key_mismatches", "key_analysis_points"]
+      "required": [
+        "overall_fit_percentage", 
+        "core_requirements_match_percentage", 
+        "core_matches", 
+        "key_mismatches", 
+        "key_analysis_points",
+        "ats_scoring_metrics"
+      ]
     },
     "tailored_cv_markdown": {
       "type": "string",

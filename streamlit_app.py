@@ -479,42 +479,68 @@ st.sidebar.subheader("⚡ Unscheduled Action Controls")
 is_local = os.path.exists(".env.local")
 github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_PAT")
 
-# Button 1: Ingest Job Alerts (Gmail & 65labs)
-if st.sidebar.button("📨 1. Ingest Job Alerts (Gmail & 65labs)", help="Fetches unread alerts from Gmail 'Jobs-Alerts' and scrapes curated AI roles from 65labs.org, staging all new roles in Postgres."):
+# Button 1: Ingest Gmail Alerts Only
+if st.sidebar.button("📨 1. Ingest Gmail Alerts Only", help="Connects to Gmail, fetches unread alerts from 'Jobs-Alerts', stages them in Postgres, and moves them to 'Jobs-Alerts-Processed'."):
     if not is_local and not github_token:
         st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
     else:
         if github_token:
-            with st.spinner("Triggering GitHub Actions job ingestion workflow..."):
+            with st.spinner("Triggering GitHub Actions 1_gmail_ingestion workflow..."):
                 try:
                     req = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_job_ingestion.yml/dispatches",
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
                         data=json.dumps({"ref": "main"}).encode("utf-8"),
                         headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
                         method="POST"
                     )
                     with urllib.request.urlopen(req) as resp:
                         if resp.status in (204, 200, 201):
-                            st.success("🐙 Triggered GitHub Actions job ingestion workflow!")
+                            st.success("🐙 Triggered GitHub Actions 1_gmail_ingestion workflow!")
                 except Exception as gh_err:
                     st.error(f"GitHub Trigger Error: {gh_err}")
         else:
-            with st.spinner("Ingesting job alerts locally (Gmail + 65labs)..."):
+            with st.spinner("Connecting to Gmail IMAP and ingesting raw email alerts..."):
                 try:
-                    st.info("Step 1/2: Fetching emails from Gmail 'Jobs-Alerts'...")
-                    gmail_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    if gmail_proc.returncode == 0:
+                    st.info("Fetching new emails from 'Jobs-Alerts' folder...")
+                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    if ingest_proc.returncode == 0:
                         st.success("✅ Gmail alert ingestion completed successfully!")
+                        st.code(ingest_proc.stdout, language="text")
                     else:
-                        st.warning(f"Gmail Ingestion Output: {gmail_proc.stdout or gmail_proc.stderr}")
+                        st.warning(f"Ingestion Output: {ingest_proc.stdout or ingest_proc.stderr}")
+                except Exception as e:
+                    st.error(f"Ingestion Error: {e}")
+        st.rerun()
 
-                    st.info("Step 2/2: Ingesting curated AI roles from 65labs.org...")
-                    labs_proc = subprocess.run(["npx", "tsx", "scripts/ingest_65labs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    if labs_proc.returncode == 0:
-                        st.success("✅ 65labs ingestion completed successfully!")
-                        st.code(labs_proc.stdout, language="text")
+# Button 1.5: Ingest 65labs Jobs Only
+if st.sidebar.button("🌐 1.5 Ingest 65labs Jobs", help="Connects to 65labs.org/jobs, fetches curated AI roles, stages them in Postgres, and runs deduplication."):
+    if not is_local and not github_token:
+        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
+    else:
+        if github_token:
+            with st.spinner("Triggering GitHub Actions 3_65labs_ingestion workflow..."):
+                try:
+                    req = urllib.request.Request(
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/3_65labs_ingestion.yml/dispatches",
+                        data=json.dumps({"ref": "main"}).encode("utf-8"),
+                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req) as resp:
+                        if resp.status in (204, 200, 201):
+                            st.success("🐙 Triggered GitHub Actions 3_65labs_ingestion workflow!")
+                except Exception as gh_err:
+                    st.error(f"GitHub Trigger Error: {gh_err}")
+        else:
+            with st.spinner("Ingesting 65labs jobs locally..."):
+                try:
+                    st.info("Fetching jobs from 65labs.org/jobs...")
+                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_65labs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    if ingest_proc.returncode == 0:
+                        st.success("✅ 65labs job ingestion completed successfully!")
+                        st.code(ingest_proc.stdout, language="text")
                     else:
-                        st.warning(f"65labs Ingestion Output: {labs_proc.stdout or labs_proc.stderr}")
+                        st.warning(f"Ingestion Output: {ingest_proc.stdout or ingest_proc.stderr}")
                 except Exception as e:
                     st.error(f"Ingestion Error: {e}")
         st.rerun()
@@ -554,7 +580,7 @@ if st.sidebar.button("🧠 2. Run LLM Evaluation & Processing", help="Parses sta
         st.rerun()
 
 # Button 3: Run Full Pipeline
-if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Step 1 (Ingestion) followed by Step 2 (Evaluation) sequentially."):
+if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Gmail Ingestion followed by AI Evaluation sequentially."):
     if not is_local and not github_token:
         st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
     else:
@@ -562,7 +588,7 @@ if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Step 1 (Ingestio
             with st.spinner("Triggering full pipeline via GitHub Actions workflows..."):
                 try:
                     req1 = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_job_ingestion.yml/dispatches",
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
                         data=json.dumps({"ref": "main"}).encode("utf-8"),
                         headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
                         method="POST"
@@ -583,13 +609,10 @@ if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Step 1 (Ingestio
         else:
             with st.spinner("Running full pipeline (Ingestion + AI Evaluation) locally..."):
                 try:
-                    st.info("Step 1/3: Fetching emails from Gmail 'Jobs-Alerts'...")
+                    st.info("Step 1/2: Fetching emails from Gmail 'Jobs-Alerts'...")
                     subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], env=os.environ, shell=True)
                     
-                    st.info("Step 2/3: Ingesting curated AI roles from 65labs.org...")
-                    subprocess.run(["npx", "tsx", "scripts/ingest_65labs.ts"], env=os.environ, shell=True)
-                    
-                    st.info("Step 3/3: Running AI evaluation pipeline...")
+                    st.info("Step 2/2: Running AI evaluation pipeline...")
                     eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
                     st.success("✅ Full pipeline execution finished!")
                     st.balloons()
@@ -1247,10 +1270,17 @@ Your task is to analyze the user's master professional profile against the targe
 2. **HONEST GAP REPORTING**: Call out key mismatches/gaps where the user lacks direct experience. Under each mismatch:
    - Provide factual parallel exposure (e.g. if the JD asks for Kubernetes and the user only has Docker/ECS, state that).
    - Outline a brief, realistic learning plan to master it fast.
-3. **TAILORED CV MARKDOWN**: In the "tailored_cv_markdown" property, write the fully customized resume in clean Markdown format:
-   - At the top of the resume, introduce a summary section displaying overall fit %, core requirements % match, and key gaps (with parallel exposure/learning plan).
-   - Retell the work history focusing on aligned achievements, tools, and projects factually.
-   - Include studies, skills, and certifications.
+3. **ATS FORMATTING AND COMPLIANCE RULES**:
+   - The output Markdown resume MUST be single-column.
+   - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes. These break typical parser algorithms (e.g. Workday, Taleo).
+   - Use standard headers: "# [Name]", "## Summary", "## Skills", "## Work Experience", "## Education", "## Certifications". Do not use creative section titles.
+   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document. Do not place them in headers/footers.
+4. **STAR METHOD BULLET POINTS**:
+   - Every bullet point in the "Work Experience" section MUST follow the STAR method (Situation/Task, Action, Result) factually mapped from the user's master profile.
+   - Quantify results using metrics, percentages, or numbers where factually available.
+5. **ATS SCORING METRICS**:
+   - In the "ats_scoring_metrics" JSON property, perform a realistic estimation of keyword match %, formatting compliance (no tables/shapes, standard sections), and STAR method coverage.
+6. **TAILORED CV MARKDOWN**: In the "tailored_cv_markdown" property, write the fully customized resume in clean Markdown format incorporating all the ATS formatting rules above.
 
 ### JSON RESPONSE SCHEMA:
 You MUST output a JSON object conforming exactly to this schema:
@@ -1292,6 +1322,27 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                     st.metric("Overall Fit Score", f"{analysis.get('overall_fit_percentage', 0)}%")
                                 with col2:
                                     st.metric("Core Requirements Match", f"{analysis.get('core_requirements_match_percentage', 0)}%")
+
+                                # Show ATS scoring metrics
+                                ats_metrics = analysis.get("ats_scoring_metrics", {})
+                                if ats_metrics:
+                                    st.markdown("### **📊 ATS Audit & Optimization Report**")
+                                    c1, c2, c3, c4 = st.columns(4)
+                                    with c1:
+                                        st.metric("ATS Compatibility Score", f"{ats_metrics.get('ats_friendly_score', 0)}%")
+                                    with c2:
+                                        st.metric("JD Keyword Match", f"{ats_metrics.get('keyword_match_percentage', 0)}%")
+                                    with c3:
+                                        st.metric("ATS Format Compliance", f"{ats_metrics.get('formatting_compliance_score', 0)}%")
+                                    with c4:
+                                        st.metric("STAR Method Coverage", f"{ats_metrics.get('star_method_coverage_percentage', 0)}%")
+                                    
+                                    suggestions = ats_metrics.get("formatting_suggestions", [])
+                                    if suggestions:
+                                        st.markdown("**ATS Parsing Guardrails & Suggestions:**")
+                                        for sug in suggestions:
+                                            st.markdown(f"- 💡 {sug}")
+                                    st.markdown("---")
 
                                 # 1. Key Analysis Takeaways
                                 points = analysis.get("key_analysis_points", [])

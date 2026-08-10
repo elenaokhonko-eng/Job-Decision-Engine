@@ -70,10 +70,17 @@ Your task is to analyze the user's master professional profile against the targe
 2. **HONEST GAP REPORTING**: Call out key mismatches/gaps where the user lacks direct experience. Under each mismatch:
    - Provide factual parallel exposure (e.g. if the JD asks for Kubernetes and the user only has Docker/ECS, state that).
    - Outline a brief, realistic learning plan to master it fast.
-3. **TAILORED CV MARKDOWN**: In the "tailored_cv_markdown" property, write the fully customized resume in clean Markdown format:
-   - At the top of the resume, introduce a summary section displaying overall fit %, core requirements % match, and key gaps (with parallel exposure/learning plan).
-   - Retell the work history focusing on aligned achievements, tools, and projects factually.
-   - Include studies, skills, and certifications.
+3. **ATS FORMATTING AND COMPLIANCE RULES**:
+   - The output Markdown resume MUST be single-column.
+   - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes. These break typical parser algorithms (e.g. Workday, Taleo).
+   - Use standard headers: "# [Name]", "## Summary", "## Skills", "## Work Experience", "## Education", "## Certifications". Do not use creative section titles.
+   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document. Do not place them in headers/footers.
+4. **STAR METHOD BULLET POINTS**:
+   - Every bullet point in the "Work Experience" section MUST follow the STAR method (Situation/Task, Action, Result) factually mapped from the user's master profile.
+   - Quantify results using metrics, percentages, or numbers where factually available.
+5. **ATS SCORING METRICS**:
+   - In the "ats_scoring_metrics" JSON property, perform a realistic estimation of keyword match %, formatting compliance (no tables/shapes, standard sections), and STAR method coverage.
+6. **TAILORED CV MARKDOWN**: In the "tailored_cv_markdown" property, write the fully customized resume in clean Markdown format incorporating all the ATS formatting rules above.
 
 ### JSON RESPONSE SCHEMA:
 You MUST output a JSON object conforming exactly to this schema:

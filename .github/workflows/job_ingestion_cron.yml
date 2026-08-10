@@ -32,30 +32,9 @@ jobs:
           GMAIL_FOLDER: ${{ secrets.GMAIL_FOLDER }}
         run: python scripts/ingest_gmail.py
 
-  ingest-65labs:
-    name: 1b. Ingest 65labs Jobs
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository code
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install Node.js dependencies
-        run: npm ci
-
-      - name: Run 65labs Ingestion
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npx tsx scripts/ingest_65labs.ts
-
   evaluate-jobs:
     name: 2. Evaluate Staged Jobs via AI Engine
-    needs: [ingest-raw-gmail-alerts, ingest-65labs]
+    needs: ingest-raw-gmail-alerts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository code
