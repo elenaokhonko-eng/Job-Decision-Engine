@@ -280,8 +280,8 @@ def convert_markdown_to_pdf(md_text):
     md_text = md_text.encode('latin-1', 'ignore').decode('latin-1')
     
     import re
-    # Break extremely long words/URLs that crash FPDF multi_cell
-    md_text = re.sub(r'(\S{75})', r'\1 ', md_text)
+    # Break extremely long words/URLs that crash FPDF multi_cell (40 chars to be ultra safe)
+    md_text = re.sub(r'(\S{40})', r'\1 ', md_text)
     
     pdf = PDFResume()
     pdf.add_page()
@@ -294,27 +294,32 @@ def convert_markdown_to_pdf(md_text):
             pdf.ln(4)
             continue
             
-        if line.startswith("# "):
-            pdf.set_font("helvetica", "B", 16)
-            pdf.cell(0, 10, line[2:], ln=True)
-            pdf.ln(2)
-        elif line.startswith("## "):
-            pdf.set_font("helvetica", "B", 13)
-            pdf.cell(0, 8, line[3:], ln=True)
-            pdf.ln(1)
-        elif line.startswith("### "):
-            pdf.set_font("helvetica", "B", 11)
-            pdf.cell(0, 6, line[4:], ln=True)
-            pdf.ln(1)
-        elif line.startswith("* ") or line.startswith("- "):
+        try:
+            if line.startswith("# "):
+                pdf.set_font("helvetica", "B", 16)
+                pdf.cell(0, 10, line[2:], ln=True)
+                pdf.ln(2)
+            elif line.startswith("## "):
+                pdf.set_font("helvetica", "B", 13)
+                pdf.cell(0, 8, line[3:], ln=True)
+                pdf.ln(1)
+            elif line.startswith("### "):
+                pdf.set_font("helvetica", "B", 11)
+                pdf.cell(0, 6, line[4:], ln=True)
+                pdf.ln(1)
+            elif line.startswith("* ") or line.startswith("- "):
+                pdf.set_font("helvetica", "", 10)
+                text = line[2:]
+                text_clean = text.replace("**", "")
+                pdf.multi_cell(0, 5, f"o  {text_clean}")
+            else:
+                pdf.set_font("helvetica", "", 10)
+                text_clean = line.replace("**", "")
+                pdf.multi_cell(0, 5, text_clean)
+        except Exception as e:
+            # Fallback for lines that completely break FPDF
             pdf.set_font("helvetica", "", 10)
-            text = line[2:]
-            text_clean = text.replace("**", "")
-            pdf.multi_cell(0, 5, f"o  {text_clean}")
-        else:
-            pdf.set_font("helvetica", "", 10)
-            text_clean = line.replace("**", "")
-            pdf.multi_cell(0, 5, text_clean)
+            pdf.multi_cell(0, 5, "[Error rendering line]")
             
     return bytes(pdf.output())
 
