@@ -1,6 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { getGeminiClient, runAgent, generateContent } from "../src/services/agent.ts";
+import { extractWithFallback } from "../src/services/llmFallback.ts";
 import { db, verifyUrlLive } from "../src/db/db.ts";
 import { runDeduplication } from "./deduplicate.ts";
 import puppeteer from "puppeteer";
@@ -371,11 +372,7 @@ Schema:
 Return nothing other than the JSON block.`;
 
         try {
-          let rawText = await generateContent({
-            model: "gemini-2.0-flash",
-            contents: parsePrompt,
-            responseMimeType: "application/json"
-          });
+          let rawText = await extractWithFallback(parsePrompt);
           if (rawText.startsWith("```json")) {
             rawText = rawText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
           } else if (rawText.startsWith("```")) {

@@ -157,7 +157,7 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
+        model: "gemini-1.5-flash",
         contents: options.contents,
         config: {
           responseMimeType: options.responseMimeType as any,
@@ -734,7 +734,7 @@ export async function autoSyncExternalSources(enabled: {
   }
 }
     
-  }
+  
 
   logs.push("Step 6: Executing raw alert text parsing via Gemini.");
 

@@ -46,7 +46,6 @@ async function ingestGmail() {
     if (mailbox.exists === 0) {
       console.log("No messages to process.");
       await client.logout();
-      await pool.end();
       return;
     }
 

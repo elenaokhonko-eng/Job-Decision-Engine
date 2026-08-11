@@ -1,4 +1,4 @@
-import { callLLM } from "./agent";
+import { callLLM, generateContent } from "./agent";
 import { OpenAI } from "openai";
 
 /** Helper to call OpenAI as the final fallback */
@@ -22,12 +22,7 @@ async function callOpenAI(raw: string): Promise<string> {
 export async function extractWithFallback(raw: string): Promise<string> {
   // 1️⃣ Ollama (local)
   try {
-    const ollamaRes = await callLLM({
-      stage: "extract",
-      provider: "local",
-      model: process.env.OLLAMA_MODEL,
-      content: raw,
-    } as any);
+    const ollamaRes = await callLLM("extract", raw);
     return ollamaRes;
   } catch (e) {
     console.warn("Ollama extraction failed, falling back to Gemini:", e);
@@ -35,12 +30,11 @@ export async function extractWithFallback(raw: string): Promise<string> {
 
   // 2️⃣ Gemini (requires GEMINI_API_KEY)
   try {
-    const geminiRes = await callLLM({
-      stage: "extract",
-      provider: "gemini",
+    const geminiRes = await generateContent({
       model: "gemini-2.0-flash",
-      content: raw,
-    } as any);
+      contents: raw,
+      responseMimeType: "application/json"
+    });
     return geminiRes;
   } catch (e) {
     console.warn("Gemini extraction failed, falling back to OpenAI:", e);

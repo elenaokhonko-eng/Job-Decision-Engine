@@ -268,6 +268,17 @@ class PDFResume(FPDF):
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
 def convert_markdown_to_pdf(md_text):
+    # Sanitize Unicode characters that helvetica (latin-1) cannot encode
+    replacements = {
+        '\u2013': '-', '\u2014': '-', '\u2018': "'", '\u2019': "'", 
+        '\u201c': '"', '\u201d': '"', '\u2022': '*', '\u00A0': ' ',
+        '\u2026': '...'
+    }
+    for k, v in replacements.items():
+        md_text = md_text.replace(k, v)
+    # Strip any remaining non-latin1 characters
+    md_text = md_text.encode('latin-1', 'ignore').decode('latin-1')
+    
     pdf = PDFResume()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -1313,6 +1324,10 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                 cv_data = json.loads(json_text)
                                 analysis = cv_data.get("analysis", {})
                                 cv_text = cv_data.get("tailored_cv_markdown", "")
+                                
+                                if not cv_text or cv_text.strip() == "":
+                                    st.error("The AI generated the analysis but failed to output the CV markdown due to length constraints. Please try generating again or use a shorter job description.")
+                                    st.stop()
 
                                 st.success("✅ Tailored CV generated successfully!")
                                 
