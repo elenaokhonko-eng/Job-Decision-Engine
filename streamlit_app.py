@@ -295,17 +295,19 @@ def convert_markdown_to_pdf(md_text):
             continue
             
         try:
+            # Force cursor to left margin to prevent 'Not enough horizontal space' errors
+            pdf.set_x(pdf.l_margin)
             if line.startswith("# "):
                 pdf.set_font("helvetica", "B", 16)
-                pdf.cell(0, 10, line[2:], ln=True)
+                pdf.multi_cell(0, 10, line[2:])
                 pdf.ln(2)
             elif line.startswith("## "):
                 pdf.set_font("helvetica", "B", 13)
-                pdf.cell(0, 8, line[3:], ln=True)
+                pdf.multi_cell(0, 8, line[3:])
                 pdf.ln(1)
             elif line.startswith("### "):
                 pdf.set_font("helvetica", "B", 11)
-                pdf.cell(0, 6, line[4:], ln=True)
+                pdf.multi_cell(0, 6, line[4:])
                 pdf.ln(1)
             elif line.startswith("* ") or line.startswith("- "):
                 pdf.set_font("helvetica", "", 10)
@@ -1455,13 +1457,17 @@ Output ONLY the raw Markdown text for the CV. Do not wrap it in a JSON object. D
                                 )
 
                                 # 3. PDF Download
-                                pdf_bytes = convert_markdown_to_pdf(cv_text)
-                                st.download_button(
-                                    label="📁 Download PDF Document (.pdf)",
-                                    data=pdf_bytes,
-                                    file_name=f"CV_Tailored_{clean_company}_{clean_title}.pdf",
-                                    mime="application/pdf"
-                                )
+                                try:
+                                    pdf_bytes = convert_markdown_to_pdf(cv_text)
+                                    st.download_button(
+                                        label="📁 Download PDF Document (.pdf)",
+                                        data=pdf_bytes,
+                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.pdf",
+                                        mime="application/pdf"
+                                    )
+                                except Exception as pdf_err:
+                                    st.error(f"⚠️ Could not generate PDF version: {pdf_err}. The Markdown and Word versions are still available above.")
+
 
                             except Exception as parse_err:
                                 st.error(f"Failed to parse structured JSON response: {parse_err}")
