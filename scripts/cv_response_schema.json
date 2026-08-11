@@ -96,11 +96,7 @@
         "key_analysis_points",
         "ats_scoring_metrics"
       ]
-    },
-    "tailored_cv_markdown": {
-      "type": "string",
-      "description": "The complete tailored CV markdown text"
     }
   },
-  "required": ["analysis", "tailored_cv_markdown"]
+  "required": ["analysis"]
 }

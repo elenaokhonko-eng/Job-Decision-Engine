@@ -1272,26 +1272,16 @@ with tab_cv:
                             job_data = cursor.fetchone()
                             conn.close()
                             
-                            # Construct prompt
-                            prompt = f"""You are a professional, honest, and high-fidelity CV writer and alignment agent.
-Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing both the analysis and the tailored CV.
+                            # Construct Stage 1 Prompt: Analysis
+                            analysis_prompt = f"""You are a professional, honest, and high-fidelity CV alignment agent.
+Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing the analysis.
 
 ### STRICT RULES:
-1. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, or accomplishments. Keep everything 100% factual to the master profile.
-2. **HONEST GAP REPORTING**: Call out key mismatches/gaps where the user lacks direct experience. Under each mismatch:
+1. **HONEST GAP REPORTING**: Call out key mismatches/gaps where the user lacks direct experience. Under each mismatch:
    - Provide factual parallel exposure (e.g. if the JD asks for Kubernetes and the user only has Docker/ECS, state that).
    - Outline a brief, realistic learning plan to master it fast.
-3. **ATS FORMATTING AND COMPLIANCE RULES**:
-   - The output Markdown resume MUST be single-column.
-   - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes. These break typical parser algorithms (e.g. Workday, Taleo).
-   - Use standard headers: "# [Name]", "## Summary", "## Skills", "## Work Experience", "## Education", "## Certifications". Do not use creative section titles.
-   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document. Do not place them in headers/footers.
-4. **STAR METHOD BULLET POINTS**:
-   - Every bullet point in the "Work Experience" section MUST follow the STAR method (Situation/Task, Action, Result) factually mapped from the user's master profile.
-   - Quantify results using metrics, percentages, or numbers where factually available.
-5. **ATS SCORING METRICS**:
+2. **ATS SCORING METRICS**:
    - In the "ats_scoring_metrics" JSON property, perform a realistic estimation of keyword match %, formatting compliance (no tables/shapes, standard sections), and STAR method coverage.
-6. **TAILORED CV MARKDOWN**: In the "tailored_cv_markdown" property, write the fully customized resume in clean Markdown format incorporating all the ATS formatting rules above.
 
 ### JSON RESPONSE SCHEMA:
 You MUST output a JSON object conforming exactly to this schema:
@@ -1312,9 +1302,9 @@ You MUST output a JSON object conforming exactly to this schema:
 ---
 Ensure the output is clean JSON. Do not prepend or append markdown code blocks around the JSON object."""
 
-                            # Generate response directly
+                            # Generate Stage 1 response
                             json_text = python_generate_content(
-                                prompt,
+                                analysis_prompt,
                                 system_instruction="You are a professional CV tailoring system. You analyze profiles and output strictly structured JSON conforming to the requested schema.",
                                 response_mime_type="application/json"
                             )
@@ -1323,11 +1313,57 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                             try:
                                 cv_data = json.loads(json_text)
                                 analysis = cv_data.get("analysis", {})
-                                cv_text = cv_data.get("tailored_cv_markdown", "")
+                                
+                                # Construct Stage 2 Prompt: CV Generation
+                                cv_prompt = f"""You are a professional, honest, and high-fidelity CV writer.
+Based on the provided Master Profile, the Job Description, and your own Analysis, generate the final tailored CV in Markdown format.
+
+### STRICT RULES:
+1. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, or accomplishments. Keep everything 100% factual to the master profile.
+2. **ATS FORMATTING AND COMPLIANCE RULES**:
+   - The output Markdown resume MUST be single-column.
+   - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes. These break typical parser algorithms (e.g. Workday, Taleo).
+   - Use standard headers: "# [Name]", "## Summary", "## Skills", "## Work Experience", "## Education", "## Certifications". Do not use creative section titles.
+   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document. Do not place them in headers/footers.
+3. **STAR METHOD BULLET POINTS**:
+   - Every bullet point in the "Work Experience" section MUST follow the STAR method (Situation/Task, Action, Result) factually mapped from the user's master profile.
+   - Quantify results using metrics, percentages, or numbers where factually available.
+
+OUTPUT FORMAT:
+Output ONLY the raw Markdown text for the CV. Do not wrap it in a JSON object. Do not wrap it in a markdown block (e.g. ```markdown).
+
+---
+### TARGET JOB SPECIFICATION:
+- **Title**: {job_data[0]}
+- **Company**: {job_data[1]}
+- **Location**: {job_data[3] or 'Singapore'}
+- **Job Description**:
+{job_data[2]}
+
+---
+### USER MASTER PROFILE:
+{master_profile}
+
+---
+### STAGE 1 ANALYSIS (For Context):
+{json.dumps(analysis, indent=2)}"""
+
+                                cv_text = python_generate_content(
+                                    cv_prompt,
+                                    system_instruction="You are an expert CV writer. Output ONLY the markdown text."
+                                )
                                 
                                 if not cv_text or cv_text.strip() == "":
                                     st.error("The AI generated the analysis but failed to output the CV markdown due to length constraints. Please try generating again or use a shorter job description.")
                                     st.stop()
+                                    
+                                # Remove ```markdown block if present
+                                cv_text = cv_text.strip()
+                                if cv_text.startswith("```markdown"):
+                                    cv_text = cv_text[11:]
+                                if cv_text.endswith("```"):
+                                    cv_text = cv_text[:-3]
+                                cv_text = cv_text.strip()
 
                                 st.success("✅ Tailored CV generated successfully!")
                                 
