@@ -29,12 +29,16 @@ export async function fetchGmailAlerts(): Promise<string[]> {
   const lock = await client.getMailboxLock("INBOX");
   try {
     // Search for unseen messages
-    const uids = await client.search({ unseen: true });
+    const uids = await client.search({ seen: false });
     const bodies: string[] = [];
+
+    if (!uids || uids.length === 0) {
+      return [];
+    }
 
     for await (const msg of client.fetch(uids, { source: true, flags: true, envelope: true })) {
       // Check for inbox label
-      const hasInboxLabel = msg.flags?.some((f) => f === inboxLabel);
+      const hasInboxLabel = msg.flags?.has(inboxLabel);
       if (!hasInboxLabel) continue;
 
       const raw = Buffer.from(msg.source!).toString("utf8");

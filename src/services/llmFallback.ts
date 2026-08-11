@@ -1,4 +1,4 @@
-import { callLLM, generateContent } from "./agent";
+import { callLLM, generateContent } from "./agent.js";
 import { OpenAI } from "openai";
 
 /** Helper to call OpenAI as the final fallback */

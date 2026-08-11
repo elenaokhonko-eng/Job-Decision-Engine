@@ -1,7 +1,7 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { db, Job } from "../db/db.ts";
-import { fetchGmailAlerts } from "./gmail";
-import { extractWithFallback } from "./llmFallback";
+import { fetchGmailAlerts } from "./gmail.js";
+import { extractWithFallback } from "./llmFallback.js";
 import {
   CANDIDATE_PROFILE,
   EVALUATION_WEIGHTS,
@@ -724,17 +724,15 @@ export async function autoSyncExternalSources(enabled: {
               logs.push(`Step ${logs.length + 1}: Gmail‑extracted job "${newJob.title}" stored.`);
             }
           }
-        } catch (inner) {
-          logs.push(`Step ${logs.length + 1}: Failed to process a Gmail alert – ${inner}`);
+        } catch (inner: any) {
+          logs.push(`Step ${logs.length + 1}: Failed to process a Gmail alert - ${inner}`);
         }
       }
     }
-  } catch (gmailErr) {
+  } catch (gmailErr: any) {
     logs.push(`Step ${logs.length + 1}: Gmail fetch error – ${gmailErr.message}`);
   }
 }
-    
-  
 
   logs.push("Step 6: Executing raw alert text parsing via Gemini.");
 
