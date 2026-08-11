@@ -279,6 +279,10 @@ def convert_markdown_to_pdf(md_text):
     # Strip any remaining non-latin1 characters
     md_text = md_text.encode('latin-1', 'ignore').decode('latin-1')
     
+    import re
+    # Break extremely long words/URLs that crash FPDF multi_cell
+    md_text = re.sub(r'(\S{75})', r'\1 ', md_text)
+    
     pdf = PDFResume()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
