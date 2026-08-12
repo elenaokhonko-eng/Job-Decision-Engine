@@ -343,7 +343,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
             messages.append({"role": "user", "content": contents})
             
             body = {
-                "model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
+                "model": os.environ.get("OPENAI_MODEL", "gpt-5.6-sol"),
                 "messages": messages,
                 "temperature": 1
             }
