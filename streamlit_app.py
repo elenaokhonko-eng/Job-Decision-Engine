@@ -330,30 +330,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_FLASH_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     
-    # 1. Try Gemini first
-    if gemini_key:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
-            headers = {"Content-Type": "application/json"}
-            
-            body = {
-                "contents": [{"parts": [{"text": contents}]}],
-                "generationConfig": {}
-            }
-            if response_mime_type:
-                body["generationConfig"]["responseMimeType"] = response_mime_type
-            if system_instruction:
-                body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-                
-            req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=90) as response:
-                res_data = json.loads(response.read().decode("utf-8"))
-                text = res_data["candidates"][0]["content"]["parts"][0]["text"]
-                return text
-        except Exception as gemini_err:
-            st.warning(f"⚠️ Gemini request failed: {gemini_err}. Trying OpenAI fallback...")
-            
-    # 2. Try OpenAI second
+    # 1. Try OpenAI first
     if openai_key:
         try:
             url = "https://api.openai.com/v1/chat/completions"
@@ -380,9 +357,32 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
                 text = res_data["choices"][0]["message"]["content"]
                 return text
         except Exception as openai_err:
-            st.warning(f"⚠️ OpenAI request failed: {openai_err}.")
+            st.warning(f"⚠️ OpenAI request failed: {openai_err}. Trying Gemini fallback...")
+
+    # 2. Try Gemini second
+    if gemini_key:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
+            headers = {"Content-Type": "application/json"}
             
-    raise Exception("All configured models (Gemini, OpenAI) failed or no API keys are set.")
+            body = {
+                "contents": [{"parts": [{"text": contents}]}],
+                "generationConfig": {}
+            }
+            if response_mime_type:
+                body["generationConfig"]["responseMimeType"] = response_mime_type
+            if system_instruction:
+                body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+                
+            req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=90) as response:
+                res_data = json.loads(response.read().decode("utf-8"))
+                text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+                return text
+        except Exception as gemini_err:
+            st.warning(f"⚠️ Gemini request failed: {gemini_err}.")
+            
+    raise Exception("All configured models (OpenAI, Gemini) failed or no API keys are set.")
 
 def ingest_linkedin_saved_json(jobs):
     try:
