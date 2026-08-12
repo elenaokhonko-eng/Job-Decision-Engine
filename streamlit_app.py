@@ -1329,13 +1329,18 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
 Based on the provided Master Profile, the Job Description, and your own Analysis, generate the final tailored CV in Markdown format.
 
 ### STRICT RULES:
-1. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, or accomplishments. Keep everything 100% factual to the master profile.
-2. **ATS FORMATTING AND COMPLIANCE RULES**:
+1. **ABSOLUTELY NO FABRICATIONS OR LYING**: 
+   - Do not invent jobs, certifications, projects, skills, or accomplishments. Keep everything 100% factual to the master profile.
+   - NEVER copy skills or experiences directly from the Job Description into the CV if they are not explicitly present in the User Master Profile.
+2. **TRANSFERABLE SKILLS FOCUS**:
+   - If a critical skill from the Job Description is missing from the Master Profile (e.g. "Computational Chemistry"), DO NOT fabricate it. 
+   - Instead, assess what existing experience or knowledge the user DOES have that is "close enough" or highly transferable (e.g. "Data Analytics", "Process Automation") and highlight that transferable skill to bridge the gap.
+3. **ATS FORMATTING AND COMPLIANCE RULES**:
    - The output Markdown resume MUST be single-column.
    - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes. These break typical parser algorithms (e.g. Workday, Taleo).
    - Use standard headers: "# [Name]", "## Summary", "## Skills", "## Work Experience", "## Education", "## Certifications". Do not use creative section titles.
    - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document. Do not place them in headers/footers.
-3. **STAR METHOD BULLET POINTS**:
+4. **STAR METHOD BULLET POINTS**:
    - Every bullet point in the "Work Experience" section MUST follow the STAR method (Situation/Task, Action, Result) factually mapped from the user's master profile.
    - Quantify results using metrics, percentages, or numbers where factually available.
 
