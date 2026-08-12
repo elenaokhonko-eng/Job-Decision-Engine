@@ -1369,9 +1369,23 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                             if res: return res
                                     return {}
                                 
+                                def find_customized_cv(data):
+                                    if isinstance(data, dict):
+                                        if "summary" in data and "work_experience" in data:
+                                            return data
+                                        if "customized_cv" in data and isinstance(data["customized_cv"], dict):
+                                            return data["customized_cv"]
+                                        for v in data.values():
+                                            res = find_customized_cv(v)
+                                            if res: return res
+                                    elif isinstance(data, list):
+                                        for item in data:
+                                            res = find_customized_cv(item)
+                                            if res: return res
+                                    return {}
+
                                 analysis = find_analysis(cv_data)
-                                
-                                customized_cv = cv_data.get("customized_cv", {})
+                                customized_cv = find_customized_cv(cv_data)
                                 
                                 def build_cv_markdown(cv):
                                     md = []
