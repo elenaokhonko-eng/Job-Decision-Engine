@@ -343,7 +343,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
             messages.append({"role": "user", "content": contents})
             
             body = {
-                "model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+                "model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
                 "messages": messages,
                 "temperature": 1
             }
@@ -1335,14 +1335,29 @@ Based on the provided Master Profile, the Job Description, and your own Analysis
 2. **TRANSFERABLE SKILLS FOCUS**:
    - If a critical skill from the Job Description is missing from the Master Profile (e.g. "Computational Chemistry"), DO NOT fabricate it. 
    - Instead, assess what existing experience or knowledge the user DOES have that is "close enough" or highly transferable (e.g. "Data Analytics", "Process Automation") and highlight that transferable skill to bridge the gap.
-3. **ATS FORMATTING AND COMPLIANCE RULES**:
+3. **ROLE TITLE MATCHING**:
+   - Adjust the user's past Role Titles to match the exact phrasing of the Job Description's desired titles, BUT ONLY IF the user's actual responsibilities in that role were "close enough" to justify it. Never lie, but frame the title appropriately.
+4. **VOCABULARY MIRRORING**:
+   - Preserve and heavily re-use the specific vocabulary, keywords, and tone used in the Job Description throughout the CV. The hiring manager must read the user's experience through the lens of their own JD's vocabulary.
+5. **CV STRUCTURE & ATS COMPLIANCE**:
    - The output Markdown resume MUST be single-column.
-   - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes. These break typical parser algorithms (e.g. Workday, Taleo).
-   - Use standard headers: "# [Name]", "## Summary", "## Skills", "## Work Experience", "## Education", "## Certifications". Do not use creative section titles.
-   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document. Do not place them in headers/footers.
-4. **STAR METHOD BULLET POINTS**:
-   - Every bullet point in the "Work Experience" section MUST follow the STAR method (Situation/Task, Action, Result) factually mapped from the user's master profile.
-   - Quantify results using metrics, percentages, or numbers where factually available.
+   - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes.
+   - Use standard overall headers: "# [Name]", "## Summary", "## Skills", "## Work Experience", "## Education", "## Certifications".
+   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document.
+   - Format EVERY role in "Work Experience" exactly as follows (do not deviate):
+   
+   ### [Adjusted Role Title] | [Company Name]
+   **[Period] | [Location]**
+   
+   **Key Responsibility / Objective**: [1-2 sentences summarizing the core ownership of the role using JD vocabulary]
+   
+   * **Result**: [Measurable Achievement 1 - What, Who, How Much, Impact]
+   * **Result**: [Measurable Achievement 2 - What, Who, How Much, Impact]
+   * **Result**: [Measurable Achievement 3 - What, Who, How Much, Impact]
+   
+6. **MEASURABLE RESULTS**:
+   - Ensure EVERY bullet point is framed as a measurable Result containing What, Who, How much, Why, and Impact. Do not output vague responsibilities as bullet points.
+   - You must generate AT LEAST 3 measurable results per role.
 
 OUTPUT FORMAT:
 Output ONLY the raw Markdown text for the CV. Do not wrap it in a JSON object. Do not wrap it in a markdown block (e.g. ```markdown).
