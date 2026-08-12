@@ -1340,10 +1340,34 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                 response_mime_type="application/json"
                             )
                             json_text = json_text.strip()
+                            if json_text.startswith("```json"):
+                                json_text = json_text[7:]
+                            if json_text.startswith("```"):
+                                json_text = json_text[3:]
+                            if json_text.endswith("```"):
+                                json_text = json_text[:-3]
+                            json_text = json_text.strip()
 
                             try:
                                 cv_data = json.loads(json_text)
-                                analysis = cv_data.get("analysis", {})
+                                
+                                # Robustly find the analysis dictionary regardless of nesting
+                                def find_analysis(data):
+                                    if isinstance(data, dict):
+                                        if "overall_fit_percentage" in data:
+                                            return data
+                                        if "analysis" in data and isinstance(data["analysis"], dict):
+                                            return data["analysis"]
+                                        for v in data.values():
+                                            res = find_analysis(v)
+                                            if res: return res
+                                    elif isinstance(data, list):
+                                        for item in data:
+                                            res = find_analysis(item)
+                                            if res: return res
+                                    return {}
+                                
+                                analysis = find_analysis(cv_data)
                                 
                                 # Construct Stage 2 Prompt: CV Generation
                                 cv_prompt = f"""You are a professional, honest, and high-fidelity CV writer.
@@ -1353,6 +1377,7 @@ Based on the provided Master Profile, the Job Description, and your own Analysis
 1. **ABSOLUTELY NO FABRICATIONS OR LYING**: 
    - Do not invent jobs, certifications, projects, skills, or accomplishments. Keep everything 100% factual to the master profile.
    - NEVER copy skills or experiences directly from the Job Description into the CV if they are not explicitly present in the User Master Profile.
+   - STRICT METRICS RULE: DO NOT hallucinate or alter any numbers, team sizes, budgets, or project counts. If the Master Profile says "team of 3", do not change it to "team of 15". If it says 1 project, do not say "multiple pilot projects". Preserve the EXACT quantifiable metrics provided in the profile.
 2. **TRANSFERABLE SKILLS FOCUS**:
    - If a critical skill from the Job Description is missing from the Master Profile (e.g. "Computational Chemistry"), DO NOT fabricate it. 
    - Instead, assess what existing experience or knowledge the user DOES have that is "close enough" or highly transferable (e.g. "Data Analytics", "Process Automation") and highlight that transferable skill to bridge the gap.
@@ -1363,21 +1388,29 @@ Based on the provided Master Profile, the Job Description, and your own Analysis
 5. **CV STRUCTURE & ATS COMPLIANCE**:
    - The output Markdown resume MUST be single-column.
    - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes.
-   - Use standard overall headers: "# [Name]", "## Summary", "## Skills", "## Work Experience", "## Education", "## Certifications".
-   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document.
+   - Use standard overall headers: "# [Name]", "## Summary", "## Core Competencies & Match", "## JD Keywords", "## Skills", "## Work Experience", "## Education", "## Certifications", "## Languages".
+   - **Core Competencies & Match MUST** be placed immediately after the Summary. Use the `key_skills_match` array from your Analysis. For each of the 4-5 key skills the hiring manager is looking for, output a bullet point formatted exactly like this: `* **[Skill Name] ([Match Percentage]%)**: [Justification]`.
+   - **JD Keywords MUST** be a separate section containing a comma-separated list of exact buzzwords, tools, and domain terms from the JD that match the user's actual experience.
+   - **Education, Certifications, and Skills MUST** be curated, ordered, and phrased to align perfectly with the priorities of the Job Description without fabricating facts. Omit irrelevant details.
+   - **Languages MUST ALWAYS be included** at the bottom of the CV.
+   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document. For links, just use plain text (e.g., `LinkedIn: linkedin.com/in/elenaokhonko`) and DO NOT use markdown link formatting like `[text](url)` to prevent duplicates.
+   - Do NOT add any closing sentences, meta-commentary, or summary paragraphs at the very end of the CV (e.g., "This CV reflects a deep expertise..."). Just end with the last section.
    - Format EVERY role in "Work Experience" exactly as follows (do not deviate):
    
    ### [Adjusted Role Title] | [Company Name]
    **[Period] | [Location]**
    
-   **Key Responsibility / Objective**: [1-2 sentences summarizing the core ownership of the role using JD vocabulary]
+   **Key Responsibility**: [1-2 sentences summarizing the core ownership of the role using JD vocabulary]
    
-   * **Result**: [Measurable Achievement 1 - What, Who, How Much, Impact]
-   * **Result**: [Measurable Achievement 2 - What, Who, How Much, Impact]
-   * **Result**: [Measurable Achievement 3 - What, Who, How Much, Impact]
+   **Key Achievements**:
+   * [Measurable bullet 1 starting with an action verb - What, Who, How Much, Impact]
+   * [Measurable bullet 2 starting with an action verb - What, Who, How Much, Impact]
+   * [Measurable bullet 3 starting with an action verb - What, Who, How Much, Impact]
    
-6. **MEASURABLE RESULTS**:
-   - Ensure EVERY bullet point is framed as a measurable Result containing What, Who, How much, Why, and Impact. Do not output vague responsibilities as bullet points.
+6. **MEASURABLE ACHIEVEMENTS**:
+   - Ensure EVERY bullet point is framed as a measurable achievement containing What, Who, How much, Why, and Impact. Do not output vague responsibilities as bullet points.
+   - ABSOLUTELY DO NOT prefix the bullet points with the word "Result:" or "Result -". This is strictly forbidden. Just start immediately with the action verb (e.g. "* Engineered...").
+   - Ensure all bullet points have uniform, single-space indentation and alignment.
    - You must generate AT LEAST 3 measurable results per role.
 
 OUTPUT FORMAT:

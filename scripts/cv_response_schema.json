@@ -46,6 +46,19 @@
           "items": { "type": "string" },
           "description": "Bulleted key analytical takeaways regarding the alignment of the profile and role"
         },
+        "key_skills_match": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "skill": { "type": "string", "description": "Key skill or quality the hiring manager is looking for (e.g. 'Data Engineering', 'Team Leadership')" },
+              "match_percentage": { "type": "integer", "description": "0 to 100 percentage match against the user's profile" },
+              "justification": { "type": "string", "description": "Brief explanation of why the user has this match percentage" }
+            },
+            "required": ["skill", "match_percentage", "justification"]
+          },
+          "description": "4-5 key skills or qualities the hiring manager is looking for, and the user's match against them"
+        },
         "ats_scoring_metrics": {
           "type": "object",
           "properties": {
@@ -94,6 +107,7 @@
         "core_matches", 
         "key_mismatches", 
         "key_analysis_points",
+        "key_skills_match",
         "ats_scoring_metrics"
       ]
     }

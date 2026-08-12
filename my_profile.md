@@ -20,40 +20,48 @@ Senior Technical Program Director and Target Operating Model (TOM) Lead with a h
 
 ## 💼 WORK EXPERIENCE
 
+### auDHD Research Lab (Non-Profit Organisation)
+* **Role**: Principal Researcher
+* **Period**: May 2026 - Present
+* **Location**: Singapore
+* **Key Achievements & Responsibilities**:
+  * Utilising agentic swarms and agents to automate scientific papers review and produce hypothesis and research on auDHD brain neurology and biology (under registration).
+
 ### SMU Institute of Innovation & Entrepreneurship
 * **Role**: Founder in Residence @ SMU BIG
 * **Period**: January 2026 - Present
 * **Location**: Singapore
 * **Key Achievements & Responsibilities**:
-  * Directing front-to-back operating models and managing cross-functional delivery teams for advanced AI architectures.
-  * Partnering with innovation networks to scale AI product roadmaps in high-compliance settings.
+  * Directed front-to-back architecture & engineering for Guidebuoy AI, managing a cross-functional delivery team of 3 engineers and researchers, resulting in first beta digital product launch in 6 months.
+  * Partnered with SMU BIG innovation networks to scale AI product roadmap, securing 3 strategic partnerships and driving $20,000 in potential funding for the beta AI product.
+  * Designed governance workflows for GuideBuoy AI GTM program, accelerating time-to-market by 30% while ensuring 100% adherence to MAS risk & compliance policies.
 
 ### GuideBuoy AI SG Pte Ltd
 * **Role**: Founder & Principal AI Architect (Agentic AI, NeSy AI, and Fiduciary Automation)
 * **Period**: August 2025 - Present
 * **Location**: Singapore
 * **Key Achievements & Responsibilities**:
-  * **Neuro-Symbolic (NeSy) AI Architecture**: Architected a deterministic validation layer fusing probabilistic LLM processing with rule-based compliance logic to autonomously audit regulatory compliance for financial institutions.
-  * **Governance Automation**: Engineered the "Consumer Guardian Engine," translating abstract regulatory mandates (e.g., MAS Fair Dealing) into executable Python logic to measure compliance objectively.
-  * **Global AI Framework Alignment**: Designed cloud-native API orchestrations integrating Agentic AI workflows with strict guardrails aligned with MAS FEAT guidelines and NIST AI RMF.
-  * **System Build & Security**: Built intake OS utilizing LangChain, Supabase, n8n, and Guardrails AI, embedding strict data schemas, metadata governance, prompt safety, and audit logs.
+  * Architected a deterministic Neuro-Symbolic validation layer processing 1000 concurrent requests with 99% accuracy, autonomously auditing regulatory compliance across scam and fraud financial institution workflows.
+  * Engineered the "Consumer Guardian Engine" to translate 6 key abstract MAS Fair Dealing mandates into an array of executable Python logic rules, reducing manual compliance review time by 100%.
+  * Built cloud-native API orchestrations handling 1000 transactions daily, integrating LangChain and Guardrails AI to achieve 100% compliance with MAS FEAT & SRF guidelines and NIST AI RMF.
 
 ### INSEAD AI Venture Lab
 * **Role**: Founder in Residence (AI Governance & Architecture)
 * **Period**: August 2025 - December 2025
 * **Location**: Singapore
 * **Key Achievements & Responsibilities**:
-  * **Neuro-Symbolic R&D**: Engineered Target Operating Model and core engine logic for an Agentic AI dispute resolution platform, automating fiduciary oversight.
-  * **Algorithmic Guardrails**: Translated MAS FEAT guidelines and NIST AI RMF concepts into executable "Algorithmic Validation" rules to eliminate hallucination liability in financial triage.
-  * **Enterprise Prototyping**: Developed a "Red Teaming Auditor" prototype to demonstrate LLM constraint capabilities in highly regulated corporate environments.
+  * Engineered the Target Operating Model for an Agentic AI enabled dispute resolution platform, reducing projected self-represented claimants costs by 95% across scam and fraud use cases.
+  * Translated MAS FEAT & SRF guidelines into executable algorithmic validation rules, successfully eliminating hallucination liability during financial triage stress tests.
+  * Developed a "Red Teaming Auditor" prototype to be adopted by financial institution corporate partners, successfully identifying and mitigating 90% of edge-case compliance vulnerabilities.
 
 ### Boston Consulting Group (BCG)
 * **Role**: BCG RISE 2.0 DTCM Certification Sprint (Digital Transformation & Change Management)
 * **Period**: July 2025 - August 2025
 * **Location**: Singapore
 * **Key Achievements & Responsibilities**:
-  * **Rapid AI Prototyping**: Extracted Human-Centered Design (HCD) and AI-supported architecture models to accelerate GuideBuoy AI's product development lifecycle.
-  * **Adoption Strategy**: Applied enterprise change management frameworks to structure B2B adoption plans for algorithmic governance platforms in corporate settings.
+  * Applied Human-Centered Design to develop GuideBuoy AI AI-supported workflow & product design model, accelerating GuideBuoy AI's product development lifecycle from a few months to only 4 weeks.
+  * Structured B2C adoption plans for GuideBuoy AI governance platform, increasing projected self-represented claimants onboarding efficiency by 30% across target claimants' segments.
+  * Facilitated rapid prototyping and GuideBuoy AI start up building, driving solution design and beta MVP release within 8 weeks.
 
 ### AIA Singapore / AIA Investment Management (AIAIM)
 * **Role**: Enterprise Solution Architect & Program Lead (Front Office & Regulatory Transformation)
@@ -71,28 +79,27 @@ Senior Technical Program Director and Target Operating Model (TOM) Lead with a h
 * **Period**: July 2019 - December 2022
 * **Location**: Singapore
 * **Key Achievements & Responsibilities**:
-  * **Algorithmic Suitability**: Architected the deterministic suitability logic mapping client profiles to investment product risk ratings, eliminating manual advisory bias.
-  * **OMS Custodian Integration**: Integrated Order Management System (OMS) across multiple custodians, automating transaction-level suitability checks.
-  * **Operational Automation**: Built digital data trails from onboarding to settlement, lowering compliance costs and establishing immutable audits for MAS Fair Dealing compliance.
-  * **AUM Growth & Leadership**: Grown AUM by USD $25M in 6 months; secured a permanent seat on the Investment & Product Management Committee.
+  * Architected deterministic suitability logic across 5 investment products, completely eliminating manual advisory bias and reducing compliance audit time by 70%.
+  * Integrated OMS across 3 major custodians, automating 10+ transaction-level suitability checks daily and reducing operational errors by 90%.
+  * Grown AUM by USD $25M in 6 months; secured a permanent seat on the Investment & Product Management Committee.
 
 ### Financial Alliance Pte Ltd
 * **Role**: Senior Consultant
 * **Period**: July 2017 - July 2019
 * **Location**: Singapore
 * **Key Achievements & Responsibilities**:
-  * **Fiduciary Advisory Lifecycle**: Conducted Fact Finds, Needs Analyses, and Risk Disclosures under MAS compliance standards for high-net-worth client portfolios.
-  * **Soft Policy Translation**: Gathered frontline advisory domain expertise to later translate manual advisory compliance rules into automated system logic.
-  * **Business Performance**: Recognized as New Consultant of the Year for growth and client trust.
+  * Conducted Fact Finds and Risk Disclosures for 20+ high-net-worth client portfolios totaling over $30M, ensuring 100% MAS compliance.
+  * Translated manual advisory compliance rules into structured system logic, decreasing client onboarding time by 70%.
+  * Recognized as New Consultant of the Year by driving a 90% year-over-year increase in new client acquisition and growing managed assets by $5M.
 
 ### Synpulse Management Consulting
 * **Role**: Lead Researcher (Algorithmic Wealth Architectures & Asset Allocation)
 * **Period**: August 2017 - January 2018
 * **Location**: Singapore
 * **Key Achievements & Responsibilities**:
-  * **Algorithmic Wealth System Audit**: Conducted architectural audits of risk models and execution logic across 20+ digital wealth robo-advisors in Singapore and HK.
-  * **Evaluation Frameworks**: Developed a proprietary ranking system to evaluate performance and suitability algorithms.
-  * **Research Publication**: Mapped and published independent robo-advisory rankings; research was acquired by Kaplan Education for Tier-1 bank training and featured in *Asian Private Banker*.
+  * Conducted architectural audits of investment risk models and execution logic across 20+ digital wealth robo-advisors in Singapore and HK.
+  * Developed a proprietary ranking system analyzing 6 core data points to evaluate performance and suitability algorithms across the top 10+ tier-1 banks in APAC.
+  * Published independent robo-advisory rankings index acquired by Kaplan Education, directly utilized by Synpulse Private Banking Consulting to advise top 10 tier-1 PB institutions and featured in top 5 Fintech News & financial industry publications.
 
 ### Mondelēz International
 * **Role**: Regional CRM & Sales Force Automation (SFA) Architect
@@ -182,6 +189,14 @@ Senior Technical Program Director and Target Operating Model (TOM) Lead with a h
 ---
 
 ## 🎓 EDUCATION & STUDIES
+* **Advanced Professional Certificate in Data Science and AI (SkillsFuture Career Transition Programme)**
+  * **Institution**: Nanyang Technological University (NTU), Singapore
+  * **Period**: April 2026 - July 2026
+  * **Details**: Intensive applied engineering program encompassing:
+    * **Data Engineering**: Python, Advanced SQL, Big Data pipelines, Data Warehousing, Orchestration, Web Scraping, and Stream Analytics.
+    * **Machine Learning**: Supervised/Unsupervised Learning, Time Series, Neural Networks, Computer Vision (CV), NLP, and Transformers/GenAI.
+    * **Deployment**: API Architecture, Cloud Deployment, and Agentic Application workflows.
+  * **Project Experience**: Successfully architected, developed, and launched multiple AI pilot/capstone projects tackling real-world challenges. (Included prep for AWS Certified AI Practitioner).
 * **Master of Science (MSc) in Wealth Management**
   * **Institution**: Singapore Management University (SMU)
   * **Period**: 2016 - 2017
@@ -192,16 +207,19 @@ Senior Technical Program Director and Target Operating Model (TOM) Lead with a h
   * **Details**: Specialized financial analysis modeling.
 * **MBA (Master of Business Administration)**
   * **Institution**: North Park University
-  * **Period**: 2004 - 2016
+  * **Period**: 2004 - 2005
 * **PRINCE2 Practitioner (Project Management)**
   * **Institution**: APMG-International
   * **Period**: 2010 - 2012
 * **CFA Program (CFA Candidate)**
   * **Institution**: CFA Institute
   * **Period**: 2014 - 2015
-* **Advanced High School Academic Olympiads Program**
-  * **Level/Reference**: Ranked at the top tier of academic excellence (comparable to the **Raffles Institution / Raffles Junior College** elite academic stream in Singapore).
-  * **Achievements**: Multiple-time city and regional level winner of competitive academic Olympiads in Geography, Biology, History, and Economics. Strong foundational interest and studies in Chemistry, Physics, and Mathematics.
+* **Advanced High School Academic Olympiads Program & Polymath Profile**
+  * **Level/Reference**: Ranked at the top tier of academic excellence (comparable to the **Raffles Institution / Raffles Junior College** elite academic stream in Singapore). Polymath 2E profile gifted child.
+  * **Achievements**: Multiple-time city and regional level winner of competitive academic Olympiads in Biology, Geography, History, and Economics. Strong foundational interest and studies in Chemistry, Physics, and Mathematics.
+* **Annual Graduate Studies Scholarship**
+  * **Institution**: USA Department of State
+  * **Details**: Winner of the highly competitive US Department of State Annual Graduate Studies Scholarship (demonstrating early scientific and academic excellence).
 
 ---
 
