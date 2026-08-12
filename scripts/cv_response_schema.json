@@ -110,58 +110,7 @@
         "key_skills_match",
         "ats_scoring_metrics"
       ]
-    },
-    "customized_cv": {
-      "type": "object",
-      "properties": {
-        "summary": { "type": "string", "description": "The professional summary tailored for the JD." },
-        "core_competencies": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Formatted bullet points for the core competencies match. E.g. '* **[Skill] ([Match]%)**: [Justification]'"
-        },
-        "jd_keywords": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "List of JD keywords matching the profile."
-        },
-        "work_experience": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "title": { "type": "string", "description": "Adjusted role title." },
-              "company": { "type": "string", "description": "Company name." },
-              "period": { "type": "string", "description": "Employment period." },
-              "location": { "type": "string", "description": "Location." },
-              "key_responsibility": { "type": "string", "description": "1-2 sentences summarizing core ownership." },
-              "achievements": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Measurable bullet points starting with an action verb."
-              }
-            },
-            "required": ["title", "company", "period", "location", "key_responsibility", "achievements"]
-          }
-        },
-        "education": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "List of education entries exactly matching profile."
-        },
-        "certifications": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Curated list of certifications."
-        },
-        "languages": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "List of languages."
-        }
-      },
-      "required": ["summary", "core_competencies", "jd_keywords", "work_experience", "education", "certifications", "languages"]
     }
   },
-  "required": ["analysis", "customized_cv"]
+  "required": ["analysis"]
 }

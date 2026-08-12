@@ -1293,28 +1293,15 @@ with tab_cv:
                             # Read master profile and schema
                             with open("my_profile.md", "r", encoding="utf-8") as pf:
                                 master_profile = pf.read()
+                            # Read schemas
                             with open("scripts/cv_response_schema.json", "r", encoding="utf-8") as sf:
                                 cv_response_schema = sf.read()
-                                
-                            # Fetch full job details
-                            conn = get_db_connection()
-                            cursor = conn.cursor()
-                            cursor.execute("SELECT title, company_name, raw_description, location FROM jobs WHERE id = %s", (db_job_id,))
-                            job_data = cursor.fetchone()
-                            conn.close()
-                            
-                            # Construct Stage 1 Prompt: Analysis & CV Generation
-                            analysis_prompt = f"""You are a professional, honest, and high-fidelity CV alignment agent.
-Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing the analysis AND the final tailored CV content.
+                            with open("scripts/cv_content_schema.json", "r", encoding="utf-8") as ccf:
+                                cv_content_schema = ccf.read()
 
-### STRICT RULES for `customized_cv`:
-1. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, skills, or accomplishments.
-2. **STRICT METRICS RULE**: DO NOT hallucinate or alter any numbers, team sizes, budgets, or project counts. Only use numbers explicitly written in the Master Profile.
-3. **TRANSFERABLE SKILLS FOCUS**: Highlight existing transferable skills if a JD requirement is missing.
-4. **ROLE TITLE MATCHING**: Adjust past Role Titles to match JD desired titles only if responsibilities align.
-5. **VOCABULARY MIRRORING**: Preserve and re-use JD vocabulary and keywords.
-6. **Core Competencies**: Output bullet points formatted as `* **[Skill Name] ([Match Percentage]%)**: [Justification]`
-7. **Work Experience**: Ensure every achievement bullet starts immediately with an action verb (DO NOT use "Result:"). Incorporate measurable achievements containing What, Who, How much, Why, and Impact.
+                            # --- STAGE 1: ANALYSIS ---
+                            analysis_prompt = f"""You are a professional CV analysis agent.
+Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing the alignment analysis metrics.
 
 ### JSON RESPONSE SCHEMA:
 You MUST output a JSON object conforming exactly to this schema:
@@ -1338,7 +1325,7 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                             # Generate Stage 1 response
                             json_text = python_generate_content(
                                 analysis_prompt,
-                                system_instruction="You are a professional CV tailoring system. You analyze profiles and output strictly structured JSON conforming to the requested schema.",
+                                system_instruction="You are a professional CV analysis system. You analyze profiles and output strictly structured JSON conforming to the requested schema.",
                                 response_mime_type="application/json"
                             )
                             json_text = json_text.strip()
@@ -1385,7 +1372,53 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                     return {}
 
                                 analysis = find_analysis(cv_data)
-                                customized_cv = find_customized_cv(cv_data)
+
+                                # --- STAGE 2: CV CONTENT GENERATION ---
+                                cv_content_prompt = f"""You are a professional, honest, and high-fidelity CV tailoring agent.
+Your task is to take the user's master profile, the Job Description, and the Stage 1 Analysis, and generate the final Tailored CV content.
+
+### STRICT RULES for `customized_cv`:
+1. **INCLUDE ALL EXPERIENCES**: You MUST include ALL jobs and experiences from the master profile. DO NOT cut or drop any roles. The CV can be up to 3 full pages to accommodate 20+ years of experience.
+2. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, skills, or accomplishments.
+3. **STRICT METRICS RULE**: DO NOT hallucinate or alter any numbers, team sizes, budgets, or project counts. Only use numbers explicitly written in the Master Profile.
+4. **ROLE TITLE MATCHING**: Adjust past Role Titles to match JD desired titles only if responsibilities align.
+5. **VOCABULARY MIRRORING**: Preserve and re-use JD vocabulary and keywords.
+6. **Work Experience**: Ensure every achievement bullet starts immediately with an action verb (DO NOT use "Result:"). Incorporate measurable achievements containing What, Who, How much, Why, and Impact.
+
+### JSON RESPONSE SCHEMA:
+You MUST output a JSON object conforming exactly to this schema:
+{cv_content_schema}
+
+---
+### TARGET JOB SPECIFICATION:
+- **Title**: {job_data[0]}
+- **Company**: {job_data[1]}
+
+### STAGE 1 ANALYSIS (For reference):
+{json.dumps(analysis, indent=2)}
+
+### USER MASTER PROFILE:
+{master_profile}
+
+---
+Ensure the output is clean JSON. Do not prepend or append markdown code blocks around the JSON object."""
+                                
+                                json_text_2 = python_generate_content(
+                                    cv_content_prompt,
+                                    system_instruction="You generate customized CV content strictly conforming to the requested JSON schema.",
+                                    response_mime_type="application/json"
+                                )
+                                json_text_2 = json_text_2.strip()
+                                if json_text_2.startswith("```json"):
+                                    json_text_2 = json_text_2[7:]
+                                if json_text_2.startswith("```"):
+                                    json_text_2 = json_text_2[3:]
+                                if json_text_2.endswith("```"):
+                                    json_text_2 = json_text_2[:-3]
+                                json_text_2 = json_text_2.strip()
+                                
+                                cv_data_2 = json.loads(json_text_2)
+                                customized_cv = find_customized_cv(cv_data_2)
                                 
                                 def build_cv_markdown(cv):
                                     md = []
@@ -1402,9 +1435,6 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                             md.append(comp)
                                         md.append("")
                                         
-                                    if cv.get("jd_keywords"):
-                                        md.append("## JD Keywords")
-                                        md.append(", ".join(cv["jd_keywords"]) + "\n")
                                         
                                     if cv.get("work_experience"):
                                         md.append("## Work Experience")
@@ -1442,6 +1472,10 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                             if lang.startswith("*"): md.append(lang)
                                             else: md.append(f"* {lang}")
                                         md.append("")
+                                        
+                                    if cv.get("jd_keywords"):
+                                        md.append("## JD Keywords")
+                                        md.append(", ".join(cv["jd_keywords"]) + "\n")
                                         
                                     return "\n".join(md)
                                 
