@@ -329,34 +329,55 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_FLASH_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
     
-    # 1. Try OpenAI first
+    # 1. Try OpenAI models in fallback sequence
     if openai_key:
-        try:
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {openai_key}"
-            }
-            messages = []
-            if system_instruction:
-                messages.append({"role": "system", "content": system_instruction})
-            messages.append({"role": "user", "content": contents})
-            
-            body = {
-                "model": os.environ.get("OPENAI_MODEL", "gpt-5.6-sol"),
-                "messages": messages,
-                "temperature": 1
-            }
-            if response_mime_type == "application/json":
-                body["response_format"] = {"type": "json_object"}
+        models_to_try = [
+            os.environ.get("OPENAI_MODEL", "gpt-5.6-sol"),
+            "gpt-5.6-terra",
+            "gpt-4o"
+        ]
+        
+        # Remove duplicates preserving order
+        unique_models = []
+        for m in models_to_try:
+            if m not in unique_models:
+                unique_models.append(m)
                 
-            req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=90) as response:
-                res_data = json.loads(response.read().decode("utf-8"))
-                text = res_data["choices"][0]["message"]["content"]
-                return text
-        except Exception as openai_err:
-            st.warning(f"⚠️ OpenAI request failed: {openai_err}. Trying Gemini fallback...")
+        openai_success = False
+        openai_text = ""
+        
+        for model_name in unique_models:
+            try:
+                url = "https://api.openai.com/v1/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {openai_key}"
+                }
+                messages = []
+                if system_instruction:
+                    messages.append({"role": "system", "content": system_instruction})
+                messages.append({"role": "user", "content": contents})
+                
+                body = {
+                    "model": model_name,
+                    "messages": messages,
+                    "temperature": 1
+                }
+                if response_mime_type == "application/json":
+                    body["response_format"] = {"type": "json_object"}
+                    
+                req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=90) as response:
+                    res_data = json.loads(response.read().decode("utf-8"))
+                    openai_text = res_data["choices"][0]["message"]["content"]
+                    openai_success = True
+                    break # Break out of the loop on success
+            except Exception as openai_err:
+                st.warning(f"⚠️ OpenAI model {model_name} failed: {openai_err}. Trying next fallback...")
+                continue
+                
+        if openai_success:
+            return openai_text
 
     # 2. Try Gemini second
     if gemini_key:
