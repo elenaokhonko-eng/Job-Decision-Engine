@@ -1303,16 +1303,18 @@ with tab_cv:
                             job_data = cursor.fetchone()
                             conn.close()
                             
-                            # Construct Stage 1 Prompt: Analysis
+                            # Construct Stage 1 Prompt: Analysis & CV Generation
                             analysis_prompt = f"""You are a professional, honest, and high-fidelity CV alignment agent.
-Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing the analysis.
+Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing the analysis AND the final tailored CV content.
 
-### STRICT RULES:
-1. **HONEST GAP REPORTING**: Call out key mismatches/gaps where the user lacks direct experience. Under each mismatch:
-   - Provide factual parallel exposure (e.g. if the JD asks for Kubernetes and the user only has Docker/ECS, state that).
-   - Outline a brief, realistic learning plan to master it fast.
-2. **ATS SCORING METRICS**:
-   - In the "ats_scoring_metrics" JSON property, perform a realistic estimation of keyword match %, formatting compliance (no tables/shapes, standard sections), and STAR method coverage.
+### STRICT RULES for `customized_cv`:
+1. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, skills, or accomplishments.
+2. **STRICT METRICS RULE**: DO NOT hallucinate or alter any numbers, team sizes, budgets, or project counts. Only use numbers explicitly written in the Master Profile.
+3. **TRANSFERABLE SKILLS FOCUS**: Highlight existing transferable skills if a JD requirement is missing.
+4. **ROLE TITLE MATCHING**: Adjust past Role Titles to match JD desired titles only if responsibilities align.
+5. **VOCABULARY MIRRORING**: Preserve and re-use JD vocabulary and keywords.
+6. **Core Competencies**: Output bullet points formatted as `* **[Skill Name] ([Match Percentage]%)**: [Justification]`
+7. **Work Experience**: Ensure every achievement bullet starts immediately with an action verb (DO NOT use "Result:"). Incorporate measurable achievements containing What, Who, How much, Why, and Impact.
 
 ### JSON RESPONSE SCHEMA:
 You MUST output a JSON object conforming exactly to this schema:
@@ -1369,86 +1371,67 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                 
                                 analysis = find_analysis(cv_data)
                                 
-                                # Construct Stage 2 Prompt: CV Generation
-                                cv_prompt = f"""You are a professional, honest, and high-fidelity CV writer.
-Based on the provided Master Profile, the Job Description, and your own Analysis, generate the final tailored CV in Markdown format.
-
-### STRICT RULES:
-1. **ABSOLUTELY NO FABRICATIONS OR LYING**: 
-   - Do not invent jobs, certifications, projects, skills, or accomplishments. Keep everything 100% factual to the master profile.
-   - NEVER copy skills or experiences directly from the Job Description into the CV if they are not explicitly present in the User Master Profile.
-   - STRICT METRICS RULE: DO NOT hallucinate or alter any numbers, team sizes, budgets, or project counts. If the Master Profile says "team of 3", do not change it to "team of 15". If it says 1 project, do not say "multiple pilot projects". Preserve the EXACT quantifiable metrics provided in the profile.
-2. **TRANSFERABLE SKILLS FOCUS**:
-   - If a critical skill from the Job Description is missing from the Master Profile (e.g. "Computational Chemistry"), DO NOT fabricate it. 
-   - Instead, assess what existing experience or knowledge the user DOES have that is "close enough" or highly transferable (e.g. "Data Analytics", "Process Automation") and highlight that transferable skill to bridge the gap.
-3. **ROLE TITLE MATCHING**:
-   - Adjust the user's past Role Titles to match the exact phrasing of the Job Description's desired titles, BUT ONLY IF the user's actual responsibilities in that role were "close enough" to justify it. Never lie, but frame the title appropriately.
-4. **VOCABULARY MIRRORING**:
-   - Preserve and heavily re-use the specific vocabulary, keywords, and tone used in the Job Description throughout the CV. The hiring manager must read the user's experience through the lens of their own JD's vocabulary.
-5. **CV STRUCTURE & ATS COMPLIANCE**:
-   - The output Markdown resume MUST be single-column.
-   - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes.
-   - Use standard overall headers: "# [Name]", "## Summary", "## Core Competencies & Match", "## JD Keywords", "## Skills", "## Work Experience", "## Education", "## Certifications", "## Languages".
-   - **Core Competencies & Match MUST** be placed immediately after the Summary. You MUST extract the `key_skills_match` array from the STAGE 1 ANALYSIS block provided at the bottom of this prompt. For each of the 4-5 key skills the hiring manager is looking for, output a bullet point formatted exactly like this: `* **[Skill Name] ([Match Percentage]%)**: [Justification]`.
-   - **JD Keywords MUST** be a separate section containing a comma-separated list of exact buzzwords, tools, and domain terms from the JD that match the user's actual experience.
-   - **Education MUST** be fully included without omitting anything. **Certifications and Skills MUST** be curated, ordered, and phrased to align perfectly with the priorities of the Job Description without fabricating facts. Omit irrelevant certifications, but NEVER omit Education.
-   - **Languages MUST ALWAYS be included** at the bottom of the CV.
-   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document. For links, just use plain text (e.g., `LinkedIn: linkedin.com/in/elenaokhonko`) and DO NOT use markdown link formatting like `[text](url)` to prevent duplicates.
-   - Do NOT add any closing sentences, meta-commentary, or summary paragraphs at the very end of the CV (e.g., "This CV reflects a deep expertise..."). Just end with the last section.
-   - Format EVERY role in "Work Experience" exactly as follows (do not deviate):
-   
-   ### [Adjusted Role Title] | [Company Name]
-   **[Period] | [Location]**
-   
-   **Key Responsibility**: [1-2 sentences summarizing the core ownership of the role using JD vocabulary]
-   
-   **Key Achievements**:
-   * [Measurable bullet 1 starting with an action verb - What, Who, How Much, Impact]
-   * [Measurable bullet 2 starting with an action verb - What, Who, How Much, Impact]
-   * [Measurable bullet 3 starting with an action verb - What, Who, How Much, Impact]
-   
-6. **MEASURABLE ACHIEVEMENTS**:
-   - Ensure EVERY bullet point is framed as a measurable achievement containing What, Who, How much, Why, and Impact. Do not output vague responsibilities as bullet points.
-   - **HARD RULE ON METRICS**: If `my_profile.md` does NOT contain a metric (number, percentage, budget, team size) for a specific achievement, DO NOT invent or calculate one. It is better to have no metric than a fake metric. Only use numbers explicitly written in the Master Profile.
-   - ABSOLUTELY DO NOT prefix the bullet points with the word "Result:" or "Result -". This is strictly forbidden. Just start immediately with the action verb (e.g. "* Engineered...").
-   - Ensure all bullet points have uniform, single-space indentation and alignment.
-   - You must generate AT LEAST 3 measurable results per role.
-
-OUTPUT FORMAT:
-Output ONLY the raw Markdown text for the CV. Do not wrap it in a JSON object. Do not wrap it in a markdown block (e.g. ```markdown).
-
----
-### TARGET JOB SPECIFICATION:
-- **Title**: {job_data[0]}
-- **Company**: {job_data[1]}
-- **Location**: {job_data[3] or 'Singapore'}
-- **Job Description**:
-{job_data[2]}
-
----
-### USER MASTER PROFILE:
-{master_profile}
-
----
-### STAGE 1 ANALYSIS (For Context):
-{json.dumps(analysis, indent=2)}"""
-
-                                cv_text = python_generate_content(
-                                    cv_prompt,
-                                    system_instruction="You are an expert CV writer. Output ONLY the markdown text."
-                                )
+                                customized_cv = cv_data.get("customized_cv", {})
                                 
-                                if not cv_text or cv_text.strip() == "":
-                                    st.error("The AI generated the analysis but failed to output the CV markdown due to length constraints. Please try generating again or use a shorter job description.")
-                                    st.stop()
+                                def build_cv_markdown(cv):
+                                    md = []
+                                    md.append("# Elena Okhonko")
+                                    md.append("Email: elena.okhonko@example.com | Location: Singapore | LinkedIn: linkedin.com/in/elenaokhonko\n")
                                     
-                                # Remove ```markdown block if present
-                                cv_text = cv_text.strip()
-                                if cv_text.startswith("```markdown"):
-                                    cv_text = cv_text[11:]
-                                if cv_text.endswith("```"):
-                                    cv_text = cv_text[:-3]
-                                cv_text = cv_text.strip()
+                                    if cv.get("summary"):
+                                        md.append("## Summary")
+                                        md.append(cv["summary"] + "\n")
+                                        
+                                    if cv.get("core_competencies"):
+                                        md.append("## Core Competencies & Match")
+                                        for comp in cv["core_competencies"]:
+                                            md.append(comp)
+                                        md.append("")
+                                        
+                                    if cv.get("jd_keywords"):
+                                        md.append("## JD Keywords")
+                                        md.append(", ".join(cv["jd_keywords"]) + "\n")
+                                        
+                                    if cv.get("work_experience"):
+                                        md.append("## Work Experience")
+                                        for role in cv["work_experience"]:
+                                            md.append(f"### {role.get('title', '')} | {role.get('company', '')}")
+                                            md.append(f"**{role.get('period', '')} | {role.get('location', '')}**\n")
+                                            md.append(f"**Key Responsibility**: {role.get('key_responsibility', '')}\n")
+                                            md.append("**Key Achievements**:")
+                                            for ach in role.get("achievements", []):
+                                                # Strip any accidental "Result:" prefixes just in case
+                                                ach_clean = ach.replace("Result:", "").replace("Result -", "").strip()
+                                                if ach_clean.startswith("*"):
+                                                    md.append(ach_clean)
+                                                else:
+                                                    md.append(f"* {ach_clean}")
+                                            md.append("")
+                                            
+                                    if cv.get("education"):
+                                        md.append("## Education")
+                                        for edu in cv["education"]:
+                                            if edu.startswith("*"): md.append(edu)
+                                            else: md.append(f"* {edu}")
+                                        md.append("")
+                                        
+                                    if cv.get("certifications"):
+                                        md.append("## Certifications")
+                                        for cert in cv["certifications"]:
+                                            if cert.startswith("*"): md.append(cert)
+                                            else: md.append(f"* {cert}")
+                                        md.append("")
+                                        
+                                    if cv.get("languages"):
+                                        md.append("## Languages")
+                                        for lang in cv["languages"]:
+                                            if lang.startswith("*"): md.append(lang)
+                                            else: md.append(f"* {lang}")
+                                        md.append("")
+                                        
+                                    return "\n".join(md)
+                                
+                                cv_text = build_cv_markdown(customized_cv)
 
                                 st.success("✅ Tailored CV generated successfully!")
                                 
