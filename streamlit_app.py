@@ -1409,6 +1409,7 @@ Based on the provided Master Profile, the Job Description, and your own Analysis
    
 6. **MEASURABLE ACHIEVEMENTS**:
    - Ensure EVERY bullet point is framed as a measurable achievement containing What, Who, How much, Why, and Impact. Do not output vague responsibilities as bullet points.
+   - **HARD RULE ON METRICS**: If `my_profile.md` does NOT contain a metric (number, percentage, budget, team size) for a specific achievement, DO NOT invent or calculate one. It is better to have no metric than a fake metric. Only use numbers explicitly written in the Master Profile.
    - ABSOLUTELY DO NOT prefix the bullet points with the word "Result:" or "Result -". This is strictly forbidden. Just start immediately with the action verb (e.g. "* Engineered...").
    - Ensure all bullet points have uniform, single-space indentation and alignment.
    - You must generate AT LEAST 3 measurable results per role.
