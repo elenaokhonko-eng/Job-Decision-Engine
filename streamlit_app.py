@@ -263,9 +263,8 @@ class PDFResume(FPDF):
     def header(self):
         pass
     def footer(self):
-        self.set_y(-15)
-        self.set_font('helvetica', 'I', 8)
-        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+        # Removed page numbers for ATS compatibility
+        pass
 
 def convert_markdown_to_pdf(md_text):
     # Sanitize Unicode characters that helvetica (latin-1) cannot encode
@@ -313,7 +312,7 @@ def convert_markdown_to_pdf(md_text):
                 pdf.set_font("helvetica", "", 10)
                 text = line[2:]
                 text_clean = text.replace("**", "")
-                pdf.multi_cell(0, 5, f"o  {text_clean}")
+                pdf.multi_cell(0, 5, f"-  {text_clean}")
             else:
                 pdf.set_font("helvetica", "", 10)
                 text_clean = line.replace("**", "")
