@@ -1389,7 +1389,7 @@ Based on the provided Master Profile, the Job Description, and your own Analysis
    - The output Markdown resume MUST be single-column.
    - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes.
    - Use standard overall headers: "# [Name]", "## Summary", "## Core Competencies & Match", "## JD Keywords", "## Skills", "## Work Experience", "## Education", "## Certifications", "## Languages".
-   - **Core Competencies & Match MUST** be placed immediately after the Summary. Use the `key_skills_match` array from your Analysis. For each of the 4-5 key skills the hiring manager is looking for, output a bullet point formatted exactly like this: `* **[Skill Name] ([Match Percentage]%)**: [Justification]`.
+   - **Core Competencies & Match MUST** be placed immediately after the Summary. You MUST extract the `key_skills_match` array from the STAGE 1 ANALYSIS block provided at the bottom of this prompt. For each of the 4-5 key skills the hiring manager is looking for, output a bullet point formatted exactly like this: `* **[Skill Name] ([Match Percentage]%)**: [Justification]`.
    - **JD Keywords MUST** be a separate section containing a comma-separated list of exact buzzwords, tools, and domain terms from the JD that match the user's actual experience.
    - **Education MUST** be fully included without omitting anything. **Certifications and Skills MUST** be curated, ordered, and phrased to align perfectly with the priorities of the Job Description without fabricating facts. Omit irrelevant certifications, but NEVER omit Education.
    - **Languages MUST ALWAYS be included** at the bottom of the CV.
