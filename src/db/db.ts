@@ -580,12 +580,12 @@ class PostgresDatabase {
       `INSERT INTO raw_jobs (company_name, title, source, raw_description, salary_range, location, posted_date, careers_portal_url, processed)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE) RETURNING *`,
       [
-        job.company_name,
-        job.title,
-        job.source,
+        (job.company_name || "Unknown").substring(0, 255),
+        (job.title || "Unknown").substring(0, 255),
+        (job.source || "Unknown").substring(0, 50),
         finalRawDesc,
-        job.salary_range || null,
-        job.location || null,
+        job.salary_range ? job.salary_range.substring(0, 255) : null,
+        job.location ? job.location.substring(0, 255) : null,
         job.posted_date || new Date().toISOString().split("T")[0],
         job.careers_portal_url
       ]

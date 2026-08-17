@@ -102,7 +102,7 @@ ${masterProfile}
 Ensure the output is clean JSON. Do not prepend or append markdown code blocks around the JSON object.`;
 
     // 4. Run LLM generation with JSON output configuration
-    const model = process.env.KIMI_API_KEY ? (process.env.KIMI_MODEL || "moonshot-v1-8k") : (process.env.GEMINI_MODEL || "gemini-2.0-flash");
+    const model = process.env.KIMI_API_KEY ? (process.env.KIMI_MODEL || "moonshot-v1-8k") : (process.env.GEMINI_MODEL || "gemini-3.6-flash");
     const jsonResponse = await generateContent({
       model,
       contents: prompt,

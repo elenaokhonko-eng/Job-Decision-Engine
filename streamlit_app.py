@@ -382,7 +382,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
     # 2. Try Gemini second
     if gemini_key:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
             headers = {"Content-Type": "application/json"}
             
             body = {

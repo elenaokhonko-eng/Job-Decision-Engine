@@ -31,7 +31,7 @@ export async function extractWithFallback(raw: string): Promise<string> {
   // 2️⃣ Gemini (requires GEMINI_API_KEY)
   try {
     const geminiRes = await generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-3.6-flash",
       contents: raw,
       responseMimeType: "application/json"
     });

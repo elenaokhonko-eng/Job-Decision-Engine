@@ -388,7 +388,7 @@ Return nothing other than the JSON block.`;
               const rawDbJob = await db.addRawJob({
                 company_name: rawJob.company,
                 title: rawJob.title,
-                source: rawJob.source || "Gmail",
+                source: (rawJob.source || "Gmail").substring(0, 50),
                 raw_description: typeof rawJob.description === "object" ? JSON.stringify(rawJob.description) : rawJob.description,
                 salary_range: rawJob.salaryRange || undefined,
                 location: rawJob.location || "Singapore",
