@@ -67,24 +67,16 @@ async function ingestGmail() {
         [subject, body]
       );
 
-      // Move email message out of Jobs-Alerts to Jobs-Alerts-Processed
+      // Delete the email from Gmail completely after staging it in the database
       try {
-        await client.messageFlagsAdd(msg.uid, [gmailProcessedFolder], { uid: true, useLabels: true });
-        await client.messageFlagsRemove(msg.uid, [gmailFolder], { uid: true, useLabels: true });
-      } catch (labelErr) {
-        try {
-          await client.messageMove(msg.uid, gmailProcessedFolder, { uid: true });
-        } catch (moveErr) {
-          try {
-            await client.messageCopy(msg.uid, gmailProcessedFolder, { uid: true });
-            await client.messageFlagsAdd(msg.uid, ["\\Seen", "\\Deleted"], { uid: true });
-          } catch {}
-        }
+        await client.messageFlagsAdd(msg.uid, ["\\Seen", "\\Deleted"], { uid: true });
+      } catch (err) {
+        console.warn(`Warning: Could not mark email UID ${msg.uid} for deletion`, err);
       }
       count++;
     }
 
-    console.log(`✅ Successfully ingested ${count} raw email alerts to Postgres and moved to "${gmailProcessedFolder}".`);
+    console.log(`✅ Successfully ingested ${count} raw email alerts to Postgres and permanently deleted them from the inbox.`);
     try {
       await client.mailboxClose();
     } catch {}
