@@ -587,6 +587,39 @@ if st.sidebar.button("🌐 1.5 Ingest 65labs Jobs", help="Connects to 65labs.org
                     st.error(f"Ingestion Error: {e}")
         st.rerun()
 
+# Button 1.6: Ingest AshbyHQ Jobs Only
+if st.sidebar.button("🌐 1.6 Ingest AshbyHQ (Protege) Jobs", help="Connects to Protege's AshbyHQ board, fetches roles, stages them in Postgres, and runs deduplication."):
+    if not is_local and not github_token:
+        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
+    else:
+        if github_token:
+            with st.spinner("Triggering GitHub Actions 4_ashbyhq_ingestion workflow..."):
+                try:
+                    req = urllib.request.Request(
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/4_ashbyhq_ingestion.yml/dispatches",
+                        data=json.dumps({"ref": "main"}).encode("utf-8"),
+                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req) as resp:
+                        if resp.status in (204, 200, 201):
+                            st.success("🐙 Triggered GitHub Actions 4_ashbyhq_ingestion workflow!")
+                except Exception as gh_err:
+                    st.error(f"GitHub Trigger Error: {gh_err}")
+        else:
+            with st.spinner("Ingesting AshbyHQ jobs locally..."):
+                try:
+                    st.info("Fetching jobs from jobs.ashbyhq.com/protege...")
+                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_ashbyhq.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    if ingest_proc.returncode == 0:
+                        st.success("✅ AshbyHQ job ingestion completed successfully!")
+                        st.code(ingest_proc.stdout, language="text")
+                    else:
+                        st.warning(f"Ingestion Output: {ingest_proc.stdout or ingest_proc.stderr}")
+                except Exception as e:
+                    st.error(f"Ingestion Error: {e}")
+        st.rerun()
+
 # Button 2: Run LLM Evaluation & Processing Only
 if st.sidebar.button("🧠 2. Run LLM Evaluation & Processing", help="Parses staged email alerts, extracts job URLs, evaluates jobs with LLM (Gemini or OpenAI as failover), updates final Postgres tables, and ranks Top 10."):
     if not is_local and not github_token:

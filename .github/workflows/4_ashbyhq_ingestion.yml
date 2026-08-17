@@ -1,0 +1,26 @@
+name: 4. AshbyHQ Ingestion Only
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ingest-ashbyhq:
+    name: Ingest AshbyHQ Jobs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Run AshbyHQ Ingestion
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx tsx scripts/ingest_ashbyhq.ts
