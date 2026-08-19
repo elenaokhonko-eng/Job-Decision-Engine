@@ -84,9 +84,11 @@ export const ND_CULTURE_CRITERIA = {
   highSupportiveFactors: [
     "Clear, direct, and written communication over unwritten rules",
     "Asynchronous work patterns (Slack/written spec first, fewer live standups)",
-    "Protected focus blocks (e.g., 'No-meeting Wednesdays')",
+    "Protected focus blocks (e.g., 'No-meeting Wednesdays', 'Deep Work')",
     "Results-Oriented Work Environment (ROWE) instead of seat-time surveillance",
-    "Transparent and predictable salary/evaluation structure"
+    "Transparent and predictable salary/evaluation structure",
+    "Remote-first or explicit low office attendance",
+    "Clear documentation and well-defined requirements"
   ],
   highToxicFactors: [
     "High corporate politics, backchannel alignment, and unwritten rules",
@@ -95,6 +97,13 @@ export const ND_CULTURE_CRITERIA = {
     "Wearing dual hats as both a technical specialist and a sales/client-facing representative simultaneously",
     "Frequent change in priorities or chaotic scrum sprints",
     "Heavy client hand-holding or emotional labor",
-    "Mandatory social team-bonding or high sensory overload (open office noise)"
+    "Mandatory social team-bonding or high sensory overload (open office noise)",
+    "Buzzword: 'Fast-paced, dynamic environment' (Red flag for chaotic priorities)",
+    "Buzzword: 'Thrive under pressure' or 'Comfortable with ambiguity' (Lack of clear requirements)",
+    "Buzzword: 'Wear many hats' or 'Roll up your sleeves' (High context-switching, multi-role expectations)",
+    "Buzzword: 'Work hard, play hard' (Boundary bleed and forced socialization)",
+    "Buzzword: 'Highly matrixed organization' (Intense political alignment and bureaucracy)",
+    "Over-emphasis on Agile/Scrum ceremonies, daily standups, and constant collaboration at the expense of deep work",
+    "Sensory red flags: 'open office', 'hot-desking', 'highly collaborative physical workspaces', 'constant video calls'"
   ]
 };

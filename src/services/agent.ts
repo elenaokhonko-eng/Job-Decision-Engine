@@ -527,10 +527,11 @@ Evaluate and assign weights based on these customizable axes:
 ---
 
 ### HIGH-AUTONOMY WORKPLACE & CULTURE ANALYTICS EVALUATION:
-You must grade the following indicators (0 to 100) based on raw job context and high-autonomy workplace safety cues:
+You must strictly grade the following indicators (0 to 100) based on raw job context and high-autonomy workplace safety cues:
 - **nd_friendly_score**: Safe focus blocks, async communication, written specifications, low performance theater, direct logical culture. Target: >= 70. (Matches: ${ND_CULTURE_CRITERIA.highSupportiveFactors.join(", ")})
-- **politics_stress_score**: High meeting overhead, corporate alignment theater, micromanagement, managing stakeholders without authority, influencing non-reportees, or wearing dual hats (acting as both technical specialist and sales/client representative simultaneously). Target: < 50. (Matches: ${ND_CULTURE_CRITERIA.highToxicFactors.join(", ")})
-- **sensory_overload_index**: High office attendance requirement, loud environments, constant video calls, or heavy on-site travel schedules.
+- **politics_stress_score**: High meeting overhead, corporate alignment theater, micromanagement, managing stakeholders without authority, influencing non-reportees, or wearing dual hats. Target: < 50. (Matches: ${ND_CULTURE_CRITERIA.highToxicFactors.join(", ")})
+  - **CRITICAL PENALTY**: You MUST aggressively raise the politics_stress_score (by 20-40 points) and lower the nd_friendly_score if you detect corporate buzzwords like "fast-paced", "dynamic environment", "wear many hats", "thrive under pressure", "ambiguity", "work hard play hard", or "highly matrixed". These are code for chaotic, undocumented, and highly stressful environments.
+- **sensory_overload_index**: High office attendance requirement, loud environments, constant video calls, or heavy on-site travel schedules. Raise this score if you see words like "open office", "hot-desking", or "highly collaborative".
 
 *Note: High-politics blacklist threshold is politics_stress_score >= 70 OR nd_friendly_score < 50.*
 
