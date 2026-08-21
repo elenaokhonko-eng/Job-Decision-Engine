@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CVValidation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "unsupported_claims",
+    "grounding_coverage_percentage",
+    "chronology_issues",
+    "requirement_coverage",
+    "human_review_questions"
+  ],
+  "properties": {
+    "unsupported_claims": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "grounding_coverage_percentage": { "type": "integer" },
+    "chronology_issues": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "requirement_coverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["requirement_id", "status"],
+        "properties": {
+          "requirement_id": { "type": "string" },
+          "status": {
+            "enum": [
+              "covered",
+              "partially_covered",
+              "intentionally_omitted",
+              "gap"
+            ]
+          }
+        }
+      }
+    },
+    "human_review_questions": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

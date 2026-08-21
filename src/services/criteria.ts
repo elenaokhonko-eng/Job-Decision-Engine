@@ -6,12 +6,12 @@
 
 export const CANDIDATE_PROFILE = {
   name: "Elena Okhonko",
-  age: 44,
   experienceYears: 20,
   workplacePreference: "High-Autonomy Technical Architect & SME Builder",
-  targetCompSgdMonth: 22000,
+  minAcceptableBaseSgdMonth: 22000,
   maxTravelPercentage: 10,
-  maxOfficeDaysPerWeek: 3,
+  idealOfficeDaysPerWeek: 2,
+  maxOfficeDaysPerWeek: 3, // Exceptions allowed for specialized physical laboratory environments
   coreSkills: [
     "IT Architecture",
     "Institutional Finance ($54B+ governance)",
@@ -26,84 +26,109 @@ export const CANDIDATE_PROFILE = {
     "No Forward Deployed Engineering (FDE) or outsourcing/consulting roles",
     "No contract roles (only permanent FTE)",
     "Travel < 10%",
-    "Max 3 days in-office",
+    "Max 3 days in-office (unless a physical scientific lab)",
     "Low stress / organizational politics",
     "Protected deep-focus time"
   ]
 };
 
-export const EVALUATION_WEIGHTS = {
-  // Axis 4: Environmental & Biological Guardrails (30%)
-  environment_guardrails: {
-    maxPoints: 30,
-    description: "Low-stress, high-clarity culture, protected focus blocks, asynchronous workflow, and high-autonomy builder support. Deduct heavily (up to 30%) if there are non-binary management overhead indicators, multi-role context switching, or hybrid delivery expectations."
+// Stage 1: Hard Disqualifiers (Objective evidence only, no vibes)
+export const HARD_DISQUALIFIERS = [
+  "Mandatory travel exceeding 10%",
+  "Primary role is traditional Program/Project Manager, Scrum Master, or Agile Coach",
+  "Primary role is Client Relationship Management, Sales, Presales, or Quota-carrying business development",
+  "Office attendance required > 3 days per week (except for specialized physical lab environments)",
+  "Employment Type: Contract, Contractor, Temporary, or Freelance (must be permanent FTE)",
+  "Company Type: Local Singapore banks (DBS, UOB, OCBC)",
+  "Company Type: Insurance and asset management companies specifically matching 'AIA' or 'AIA Investment Management'",
+  "Company Type: Job postings sourced from recruitment agencies (e.g., Argyll Scott)",
+  "Company Type: Forward Deployed Engineering (FDE)",
+  "Company Type: IT outsourcing/staffing (specifically exact matches for Red Hat, or external contracting agencies)",
+  "Company Type: Consulting firms (Accenture, KPMG, BCG, McKinsey, Bain, Deloitte, PwC, EY, Boston Consulting Group, PricewaterhouseCoopers)"
+];
+
+// Stage 2: Career Change Horizon Routes
+export const CAREER_HORIZON_ROUTES = {
+  SCIENTIFIC_AI_CONVERGENCE: {
+    scoreRange: "90-100",
+    description: "Ideal pivot. Hands-on AI/data roles directly within medical, pharma, bioinformatics, or plant-based research. Establishes the clear bridge for the PhD path."
   },
-  // Axis 1: Technical & Creative Autonomy (25%)
-  technical_autonomy: {
-    maxPoints: 25,
-    description: "Autonomy and expert SME roles (hands-on architecture, direct code, or complex transformation program solutioning; autonomous decision-making as an SME expert across modern tech stacks - FE, BE, DB/SQL; no low-frequency coding; no hardcore C/C++)."
+  AI_DATA_MASTERY_BRIDGE: {
+    scoreRange: "75-89",
+    description: "Excellent fallback. High-autonomy AI/ML architecture or Python data engineering within institutional finance or tech. Strengthens AI credentials but doesn't change the industry domain."
   },
-  // Axis 3: Domain Relevance (20%)
-  domain_relevance: {
-    maxPoints: 20,
-    description: "Alignment with Track A (Private banks, wealth management, supranationals like GIC/Temasek, top 20 fund managers/world banks - excluding local banks, major European banks & insurers, hedge funds, growth AI startups) or Track B (Medical, pharma, bioinformatics, plant-based medical research - extra weighting for plant medical research)."
+  SCIENCE_DOMAIN_BRIDGE: {
+    scoreRange: "60-74",
+    description: "Good domain pivot, lower tech mastery. A role in pharma/research but leaning more toward general IT architecture or systems rather than direct AI/ML/Data work."
   },
-  // Axis 2: Compensation & Capital Potential (15%)
-  compensation_potential: {
-    maxPoints: 15,
-    description: "Ability to hit/exceed the SGD 22k+/month base salary."
+  TECHNICAL_ARCHITECTURE_BRIDGE: {
+    scoreRange: "45-59",
+    description: "Status quo. Standard IT/Platform architecture in finance/corporate. Pays the bills and provides autonomy, but doesn't advance the AI or scientific pivot."
   },
-  // Axis 5: Future-Proofing (10%)
-  future_mobility: {
-    maxPoints: 10,
-    description: "Combination of specific job growth trajectory, technical domain trajectory (growing AI/ML/Data Science vs dying domain), and company industry (growing vs sunset)."
+  NONTECHNICAL_ADJACENCY: {
+    scoreRange: "25-44",
+    description: "Strategic risk. Roles leaning heavily into management, governance, or strategy with little to no hands-on technical execution."
+  },
+  STRATEGIC_DEAD_END: {
+    scoreRange: "0-24",
+    description: "Complete regression. Project management, sales, or roles in declining/legacy domains that actively harm the CV trajectory."
   }
 };
 
-export const HARD_DISQUALIFIERS = [
-  "Mandatory travel exceeding 10%",
-  "Primary role is traditional Program/Project Manager or Scrum Master (lack of hands-on coding/architecture)",
-  "Primary role is Client Relationship Management, Sales, Presales, or Quota-carrying business development",
-  "Office attendance required > 3 days per week (except for specialized physical lab environments)",
-  "Clear indicators of high political overhead, intense bureaucratic alignment, or presentation-heavy workloads",
-  "Local Singapore banks: DBS, UOB, OCBC (automatic rejection)",
-  "Insurance and asset management companies: AIA, AIAIM (AIA Investment Management)",
-  "Job postings sourced from recruitment agencies: Argyll Scott",
-  "Forward Deployed Engineering (FDE) / Forward Deployed roles (automatic rejection)",
-  "IT outsourcing or staffing companies seeking resources for client deployment (e.g., Red Hat, external contracting) (automatic rejection)",
-  "Consulting firms: Accenture, KPMG, BCG, McKinsey, Bain, Deloitte, PwC, EY, Boston Consulting Group, PricewaterhouseCoopers (automatic rejection)",
-  "Contract, Contractor, Temporary, or Freelance roles (only permanent FTE roles are accepted) (automatic rejection)",
-  "Kitchen-sink/multi-role postings combining multiple job roles (e.g., managing internal teams + managing client teams + delivery manager + architect + project manager) (automatic rejection)"
-];
+// Stage 3: Present-Day Role Value (100 Points Total)
+export const EVALUATION_WEIGHTS = {
+  hands_on_ai_data_mastery: {
+    maxPoints: 30,
+    description: "Direct involvement in Python, AI, ML, Data pipelines, or agentic RAG. Is the role actively building?"
+  },
+  technical_creative_autonomy: {
+    maxPoints: 25,
+    description: "Level of control over architecture and systems. Being an SME expert. Lack of micromanagement or heavy governance layers."
+  },
+  role_purity_output_clarity: {
+    maxPoints: 15,
+    description: "Is the job clearly defined? A pure technical role vs. a kitchen-sink role (e.g., 'wear many hats', 'manage internal and external clients')."
+  },
+  compensation_employment_quality: {
+    maxPoints: 20,
+    description: "Does it meet or exceed the base SGD 22k/month? Is it permanent FTE?"
+  },
+  market_durability_learning_signal: {
+    maxPoints: 10,
+    description: "Does the tech stack and domain signal growth (AI/ML, pharma) rather than sunsetting legacy systems?"
+  }
+};
 
-/**
- * High-Autonomy Workplace Culture & Focus Metrics.
- * These are used to run database analytics on which companies are supportive or toxic.
- */
-export const ND_CULTURE_CRITERIA = {
+// Independent Axis: Neurodivergent-Friendliness (0-100)
+// Scored based on evidence in the JD, independently of the 100-point core fit.
+export const ND_FRIENDLY_DIMENSIONS = {
   highSupportiveFactors: [
-    "Clear, direct, and written communication over unwritten rules",
-    "Asynchronous work patterns (Slack/written spec first, fewer live standups)",
+    "Clear, direct, and written communication mentioned",
+    "Asynchronous work patterns (Slack/written spec first)",
     "Protected focus blocks (e.g., 'No-meeting Wednesdays', 'Deep Work')",
-    "Results-Oriented Work Environment (ROWE) instead of seat-time surveillance",
-    "Transparent and predictable salary/evaluation structure",
-    "Remote-first or explicit low office attendance",
-    "Clear documentation and well-defined requirements"
+    "Results-Oriented Work Environment (ROWE)",
+    "Remote-first or explicit low office attendance (0-2 days)",
+    "Strong global ND or disability inclusion program (e.g., AstraZeneca, Microsoft, SAP, IBM)"
   ],
-  highToxicFactors: [
+  redFlags: [
+    "Open office environment explicitly mentioned",
+    "Heavy emphasis on 'highly collaborative physical workspaces' or 'constant video calls'",
+    "Mandatory social team-bonding"
+  ]
+};
+
+// Independent Axis: Politics & Stress Risk (0-100)
+// Scored based on evidence in the JD, independently of the 100-point core fit.
+export const POLITICS_STRESS_RISK_DIMENSIONS = {
+  highRiskFactors: [
     "High corporate politics, backchannel alignment, and unwritten rules",
     "Frequent presentation/storytelling to steer committees",
-    "Managing stakeholders without direct authority or influencing people who do not directly report to the role",
-    "Wearing dual hats as both a technical specialist and a sales/client-facing representative simultaneously",
-    "Frequent change in priorities or chaotic scrum sprints",
-    "Heavy client hand-holding or emotional labor",
-    "Mandatory social team-bonding or high sensory overload (open office noise)",
-    "Buzzword: 'Fast-paced, dynamic environment' (Red flag for chaotic priorities)",
-    "Buzzword: 'Thrive under pressure' or 'Comfortable with ambiguity' (Lack of clear requirements)",
-    "Buzzword: 'Wear many hats' or 'Roll up your sleeves' (High context-switching, multi-role expectations)",
-    "Buzzword: 'Work hard, play hard' (Boundary bleed and forced socialization)",
-    "Buzzword: 'Highly matrixed organization' (Intense political alignment and bureaucracy)",
-    "Over-emphasis on Agile/Scrum ceremonies, daily standups, and constant collaboration at the expense of deep work",
-    "Sensory red flags: 'open office', 'hot-desking', 'highly collaborative physical workspaces', 'constant video calls'"
+    "Managing stakeholders without direct authority ('highly matrixed')",
+    "Wearing dual hats as both a technical specialist and a sales/client-facing representative",
+    "Buzzword: 'Fast-paced, dynamic environment' (Minor penalty unless combined with other flags)",
+    "Buzzword: 'Thrive under pressure' or 'Comfortable with ambiguity'",
+    "Buzzword: 'Wear many hats' or 'Roll up your sleeves' (High context-switching)",
+    "Buzzword: 'Work hard, play hard' (Boundary bleed)",
+    "Over-emphasis on Agile/Scrum ceremonies, daily standups, and constant collaboration"
   ]
 };

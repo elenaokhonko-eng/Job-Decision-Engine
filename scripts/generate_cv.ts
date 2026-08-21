@@ -2,12 +2,24 @@ import pg from "pg";
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
-import { generateContent } from "../src/services/agent.ts";
+import { generateContent } from "../src/services/agent.js";
+import { generateDocx } from "../src/services/renderers/docx_renderer.js";
+import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const databaseUrl = process.env.DATABASE_URL;
+
+function cleanJsonResponse(rawText: string) {
+  let cleaned = rawText.trim();
+  if (cleaned.startsWith("```json")) {
+    cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+  }
+  return cleaned;
+}
 
 async function generateTailoredCV() {
   const jobId = process.argv[2];
@@ -21,7 +33,6 @@ async function generateTailoredCV() {
     process.exit(1);
   }
 
-  // 1. Fetch job description from Postgres database
   const pool = new pg.Pool({
     connectionString: databaseUrl,
     ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
@@ -42,77 +53,121 @@ async function generateTailoredCV() {
     const jdTitle = job.title;
     const jdCompany = job.company_name;
     const jdDescription = job.raw_description;
-    const jdLocation = job.location || "Singapore";
 
-    // 2. Read master profile from my_profile.md
-    const profilePath = path.join(process.cwd(), "my_profile.md");
+    // Load Schemas
+    const schemaDir = path.join(process.cwd(), "scripts", "schemas");
+    const jobAnalysisSchema = fs.readFileSync(path.join(schemaDir, "job_analysis.schema.json"), "utf8");
+    const tailoredCvSchema = fs.readFileSync(path.join(schemaDir, "tailored_cv.schema.json"), "utf8");
+
+    // Load Master Profile
+    const profilePath = path.join(process.cwd(), "master_profile.json");
     if (!fs.existsSync(profilePath)) {
-      console.error("❌ ERROR: 'my_profile.md' not found in workspace root. Please create it first.");
+      console.error("❌ ERROR: 'master_profile.json' not found. Run build_ledger.ts first.");
       process.exit(1);
     }
+    const masterProfile = JSON.parse(fs.readFileSync(profilePath, "utf8"));
 
-    const masterProfile = fs.readFileSync(profilePath, "utf8");
-
-    // 2b. Read CV Response Schema from cv_response_schema.json
-    const schemaPath = path.join(process.cwd(), "scripts", "cv_response_schema.json");
-    if (!fs.existsSync(schemaPath)) {
-      console.error("❌ ERROR: 'cv_response_schema.json' not found in scripts directory.");
-      process.exit(1);
-    }
-    const cvResponseSchema = fs.readFileSync(schemaPath, "utf8");
-
-    // 3. Construct the comprehensive single prompt for structured JSON CV response
-    const prompt = `You are a professional, honest, and high-fidelity CV writer and alignment agent.
-Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing both the analysis and the tailored CV.
-
-### STRICT RULES:
-1. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, or accomplishments. Keep everything 100% factual to the master profile.
-2. **HONEST GAP REPORTING**: Call out key mismatches/gaps where the user lacks direct experience. Under each mismatch:
-   - Provide factual parallel exposure (e.g. if the JD asks for Kubernetes and the user only has Docker/ECS, state that).
-   - Outline a brief, realistic learning plan to master it fast.
-3. **ATS FORMATTING AND COMPLIANCE RULES**:
-   - The output Markdown resume MUST be single-column.
-   - Do NOT use tables, markdown tables, HTML containers, text boxes, graphics, icons, or visual shapes. These break typical parser algorithms (e.g. Workday, Taleo).
-   - Use standard headers: "# [Name]", "## Summary", "## Skills", "## Work Experience", "## Education", "## Certifications". Do not use creative section titles.
-   - Place all contact details (email, phone, location, LinkedIn/GitHub) in plain text at the very top of the document. Do not place them in headers/footers.
-4. **STAR METHOD BULLET POINTS**:
-   - Every bullet point in the "Work Experience" section MUST follow the STAR method (Situation/Task, Action, Result) factually mapped from the user's master profile.
-   - Quantify results using metrics, percentages, or numbers where factually available.
-5. **ATS SCORING METRICS**:
-   - In the "ats_scoring_metrics" JSON property, perform a realistic estimation of keyword match %, formatting compliance (no tables/shapes, standard sections), and STAR method coverage.
-6. **TAILORED CV MARKDOWN**: In the "tailored_cv_markdown" property, write the fully customized resume in clean Markdown format incorporating all the ATS formatting rules above.
-
-### JSON RESPONSE SCHEMA:
-You MUST output a JSON object conforming exactly to this schema:
-${cvResponseSchema}
-
----
-### TARGET JOB SPECIFICATION:
-- **Title**: ${jdTitle}
-- **Company**: ${jdCompany}
-- **Location**: ${jdLocation}
-- **Job Description**:
-${jdDescription}
-
----
-### USER MASTER PROFILE:
-${masterProfile}
-
----
-Ensure the output is clean JSON. Do not prepend or append markdown code blocks around the JSON object.`;
-
-    // 4. Run LLM generation with JSON output configuration
     const model = process.env.KIMI_API_KEY ? (process.env.KIMI_MODEL || "moonshot-v1-8k") : (process.env.GEMINI_MODEL || "gemini-3.6-flash");
-    const jsonResponse = await generateContent({
-      model,
-      contents: prompt,
-      responseMimeType: "application/json",
-      systemInstruction: "You are a professional CV tailoring system. You analyze profiles and output strictly structured JSON conforming to the requested schema."
-    });
 
-    console.log("CV_GENERATION_SUCCESS_START");
-    console.log(jsonResponse.trim());
-    console.log("CV_GENERATION_SUCCESS_END");
+    // --- STAGE 1: JOB ANALYSIS ---
+    console.log("STAGE 1: Analyzing Job Description...");
+    const jobAnalysisPrompt = `Extract requirements, capabilities, and scale signals from this Job Description.
+Return ONLY valid JSON matching this schema:
+${jobAnalysisSchema}
+
+Job Description:
+${jdDescription}`;
+
+    const analysisRes = await generateContent({
+      model,
+      contents: jobAnalysisPrompt,
+      responseMimeType: "application/json",
+      systemInstruction: "You are an analytical engine extracting objective requirements from a job description."
+    });
+    const jobAnalysis = JSON.parse(cleanJsonResponse(analysisRes));
+
+    // --- STAGE 2: REQUIREMENT-TO-EVIDENCE MATCHING (Deterministic Simulation) ---
+    console.log("STAGE 2: Matching Requirements to Evidence...");
+    const matchedEvidence = [];
+    const allReqs = [...(jobAnalysis.mandatory_requirements || []), ...(jobAnalysis.preferred_requirements || [])];
+    
+    // In a full implementation, we'd do a vector or semantic search. 
+    // Here we use the LLM to map evidence dynamically.
+    const matchPrompt = `Map the following Job Requirements to the provided Master Profile Evidence Ledger.
+Requirements: ${JSON.stringify(allReqs)}
+Master Profile: ${JSON.stringify(masterProfile)}
+
+Output a JSON array of objects with keys: req_id, match_status ("direct_match"|"transferable_match"|"partial_match"|"gap"), and profile_fact_ids (array of fact IDs from the master profile).`;
+    
+    const matchRes = await generateContent({
+      model,
+      contents: matchPrompt,
+      responseMimeType: "application/json",
+      systemInstruction: "You strictly map job requirements to verifiable fact IDs in the master profile."
+    });
+    const evidenceMap = JSON.parse(cleanJsonResponse(matchRes));
+
+    // --- STAGE 3: EXECUTIVE STRATEGY ---
+    console.log("STAGE 3: Formulating Executive Strategy...");
+    const strategyPrompt = `Formulate an executive CV strategy for the target role: ${jdTitle} at ${jdCompany}.
+Use the Evidence Map: ${JSON.stringify(evidenceMap)}
+Use the Job Analysis: ${JSON.stringify(jobAnalysis)}
+
+Return a JSON object with: positioning_statement, leadership_themes (array of strings), signature_fact_ids (array of top 3-5 profile_fact_ids), keyword_plan (array of objects with 'term' and 'profile_fact_ids'), and prohibited_claims.`;
+    
+    const strategyRes = await generateContent({
+      model,
+      contents: strategyPrompt,
+      responseMimeType: "application/json",
+      systemInstruction: "You are an executive CV strategist."
+    });
+    const strategy = JSON.parse(cleanJsonResponse(strategyRes));
+
+    // --- STAGE 4: GENERATE SEMANTIC CV JSON ---
+    console.log("STAGE 4: Generating Semantic CV JSON...");
+    const cvPrompt = `Generate the final structured CV JSON based on the Executive Strategy, the Master Profile, and the Job Analysis.
+You MUST output JSON matching this EXACT schema:
+${tailoredCvSchema}
+
+Master Profile: ${JSON.stringify(masterProfile)}
+Strategy: ${JSON.stringify(strategy)}
+Target Title: ${jdTitle}
+Target Company: ${jdCompany}`;
+
+    const cvRes = await generateContent({
+      model,
+      contents: cvPrompt,
+      responseMimeType: "application/json",
+      systemInstruction: "You generate the final tailored JSON CV. DO NOT invent facts. Only use data from the master profile."
+    });
+    const finalCv = JSON.parse(cleanJsonResponse(cvRes));
+
+    // --- STAGE 5: EXPORT ---
+    console.log("STAGE 5: Rendering documents...");
+    
+    // Create exports dir
+    const exportDir = path.join(process.cwd(), "scripts", "exports");
+    if (!fs.existsSync(exportDir)) {
+      fs.mkdirSync(exportDir, { recursive: true });
+    }
+
+    const safeTitle = jdTitle.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 15);
+    const safeCompany = jdCompany.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 15);
+    const baseFilename = `Elena_Okhonko_${safeCompany}_${safeTitle}`;
+    
+    // Save JSON
+    fs.writeFileSync(path.join(exportDir, `${baseFilename}.cv.json`), JSON.stringify(finalCv, null, 2));
+    
+    // Save DOCX
+    await generateDocx(finalCv, path.join(exportDir, `${baseFilename}.docx`));
+    
+    // Save PDF
+    await generatePdf(finalCv, path.join(exportDir, `${baseFilename}.pdf`));
+
+    console.log(`✅ CV Generation Complete! Files saved to scripts/exports/:
+- ${baseFilename}.cv.json
+- ${baseFilename}.docx
+- ${baseFilename}.pdf`);
 
   } catch (err: any) {
     console.error("❌ Error generating tailored CV:", err.message || err);

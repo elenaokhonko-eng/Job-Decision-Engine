@@ -1,0 +1,1428 @@
+{
+  "contact": {
+    "full_name": "Elena Okhonko",
+    "email": "elena.okhonko@gmail.com",
+    "phone": "+65 9072 7915",
+    "linkedin": "linkedin.com/in/elenaokhonko",
+    "location": "Singapore"
+  },
+  "summary": "Senior Technical Program Director and Target Operating Model (TOM) Lead with a highly diverse, multi-disciplinary 20+ year trajectory spanning early careers in tourism, logistics import-export compliance, academic linguistics/English teaching, enterprise IT systems, and private wealth/asset management. Proven expertise designing and executing platform modernization and regulatory change projects (derivatives, fixed income, FX) across Tier-1 institutions in APAC, combined with cutting-edge innovations in Responsible AI, machine learning, and neuro-symbolic governance workflows. Licensed fund management professional and enterprise solution architect.\n\nCognitive & Innovation Profile: Characterized by a cross-disciplinary, cross-systems systemizing mind. Excels in rapid multi-threaded processing, pattern recognition, and connecting disparate domains to engineer clean, structured solutions. Highly focused on structured problem-solving, strategic innovation, and idea generation at scale, bringing strong cognitive diversity to enterprise leadership teams.",
+  "roles": [
+    {
+      "role_id": "audhd_research_lab_2026_present",
+      "employer": "auDHD Research Lab (Non-Profit Organisation)",
+      "title": "Principal Researcher",
+      "date_display": "May 2026 - Present",
+      "location": "Singapore"
+    },
+    {
+      "role_id": "smu_big_2026_present",
+      "employer": "SMU Institute of Innovation & Entrepreneurship",
+      "title": "Founder in Residence @ SMU BIG",
+      "date_display": "January 2026 - Present",
+      "location": "Singapore"
+    },
+    {
+      "role_id": "guidebuoy_ai_2025_present",
+      "employer": "GuideBuoy AI SG Pte Ltd",
+      "title": "Founder & Principal AI Architect (Agentic AI, NeSy AI, and Fiduciary Automation)",
+      "date_display": "August 2025 - Present",
+      "location": "Singapore"
+    },
+    {
+      "role_id": "insead_ai_venture_lab_2025",
+      "employer": "INSEAD AI Venture Lab",
+      "title": "Founder in Residence (AI Governance & Architecture)",
+      "date_display": "August 2025 - December 2025",
+      "location": "Singapore"
+    },
+    {
+      "role_id": "bcg_2025",
+      "employer": "Boston Consulting Group (BCG)",
+      "title": "BCG RISE 2.0 DTCM Certification Sprint (Digital Transformation & Change Management)",
+      "date_display": "July 2025 - August 2025",
+      "location": "Singapore"
+    },
+    {
+      "role_id": "aiaim_2023_2025",
+      "employer": "AIA Singapore / AIA Investment Management (AIAIM)",
+      "title": "Enterprise Solution Architect & Program Lead (Front Office & Regulatory Transformation)",
+      "date_display": "April 2023 - April 2025",
+      "location": "Singapore, Singapore"
+    },
+    {
+      "role_id": "farringdon_2019_2022",
+      "employer": "Farringdon Asset Management",
+      "title": "Associate Director (Multi-Asset Portfolios, DPM & Digital Wealth Architecture)",
+      "date_display": "July 2019 - December 2022",
+      "location": "Singapore"
+    },
+    {
+      "role_id": "financial_alliance_2017_2019",
+      "employer": "Financial Alliance Pte Ltd",
+      "title": "Senior Consultant",
+      "date_display": "July 2017 - July 2019",
+      "location": "Singapore"
+    },
+    {
+      "role_id": "synpulse_2017_2018",
+      "employer": "Synpulse Management Consulting",
+      "title": "Lead Researcher (Algorithmic Wealth Architectures & Asset Allocation)",
+      "date_display": "August 2017 - January 2018",
+      "location": "Singapore"
+    },
+    {
+      "role_id": "mondelez_2012_2017",
+      "employer": "Mondelēz International",
+      "title": "Regional CRM & Sales Force Automation (SFA) Architect",
+      "date_display": "February 2012 - September 2017",
+      "location": "Singapore"
+    },
+    {
+      "role_id": "pop_company_2009_2012",
+      "employer": "The POP Company",
+      "title": "Lead of PMO Governance & SFA Delivery Architecture",
+      "date_display": "October 2009 - January 2012",
+      "location": "Shanghai, China & Singapore"
+    },
+    {
+      "role_id": "chinasoft_2008_2009",
+      "employer": "Chinasoft International",
+      "title": "Agile Delivery Architect & Scrum Master (Microsoft MSN BEET Team)",
+      "date_display": "May 2008 - October 2009",
+      "location": "Shanghai, China"
+    },
+    {
+      "role_id": "dextrys_2007_2008",
+      "employer": "Dextrys",
+      "title": "Technical Delivery Lead & Systems Analyst (Localization Department PM)",
+      "date_display": "March 2007 - April 2008",
+      "location": "Suzhou, China"
+    },
+    {
+      "role_id": "english_village_2006_2007",
+      "employer": "English Village",
+      "title": "Information Center Manager & Cognitive Linguistics Facilitator",
+      "date_display": "March 2006 - February 2007",
+      "location": "Paju, South Korea"
+    },
+    {
+      "role_id": "institute_sustainable_development_2005_2006",
+      "employer": "Institute of Sustainable Development, Project Management",
+      "title": "Corporate Governance & Sustainability Analyst",
+      "date_display": "August 2005 - March 2006",
+      "location": "Vladivostok, Russia"
+    },
+    {
+      "role_id": "mun_russian_far_east_2002_2004",
+      "employer": "Model United Nations of the Russian Far East",
+      "title": "Digital Infrastructure Lead",
+      "date_display": "April 2002 - April 2004",
+      "location": "Vladivostok, Russia"
+    },
+    {
+      "role_id": "world_trade_center_chicago_2004_2005",
+      "employer": "World Trade Center Chicago / Jobs for Youth (USA)",
+      "title": "Volunteer Project Assistant",
+      "date_display": "2004 - 2005",
+      "location": "Chicago, USA"
+    },
+    {
+      "role_id": "russian_university_2005_2006",
+      "employer": "Russian University & Language Academies",
+      "title": "Academic Linguistics Instructor & English Teacher",
+      "date_display": "2005 - 2006",
+      "location": "Vladivostok, Russia"
+    },
+    {
+      "role_id": "far_east_import_export_2000_2002",
+      "employer": "Far East Russian Import-Export & Logistics Firm",
+      "title": "Import-Export Coordinator & HR Regulatory Assistant",
+      "date_display": "2000 - 2002",
+      "location": "Vladivostok, Russia"
+    },
+    {
+      "role_id": "vladivostok_tourism_1999_2000",
+      "employer": "Vladivostok Tourism Agency",
+      "title": "Tourism Management Intern",
+      "date_display": "1999 - 2000",
+      "location": "Vladivostok, Russia"
+    }
+  ],
+  "facts": [
+    {
+      "id": "audhd_agents_01",
+      "role_id": "audhd_research_lab_2026_present",
+      "fact_type": "responsibility",
+      "claim": "Utilising agentic swarms and agents to automate scientific papers review and produce hypothesis and research on auDHD brain neurology and biology (under registration).",
+      "metrics": [],
+      "skills": [
+        "Agentic AI",
+        "Scientific research automation"
+      ],
+      "domains": [
+        "Neurology",
+        "Biology",
+        "auDHD research"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#audhd-research-lab"
+    },
+    {
+      "id": "smu_architecture_01",
+      "role_id": "smu_big_2026_present",
+      "fact_type": "achievement",
+      "claim": "Directed front-to-back architecture & engineering for Guidebuoy AI, managing a cross-functional delivery team of 3 engineers and researchers, resulting in first beta digital product launch in 6 months.",
+      "metrics": [
+        {
+          "value": 3,
+          "unit": "engineers and researchers",
+          "meaning": "Cross-functional delivery team size"
+        },
+        {
+          "value": 6,
+          "unit": "months",
+          "meaning": "Time to first beta digital product launch"
+        }
+      ],
+      "skills": [
+        "Solution architecture",
+        "Engineering leadership",
+        "Cross-functional delivery"
+      ],
+      "domains": [
+        "AI products",
+        "Product development"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#smu-institute-of-innovation-entrepreneurship"
+    },
+    {
+      "id": "smu_partnerships_02",
+      "role_id": "smu_big_2026_present",
+      "fact_type": "achievement",
+      "claim": "Partnered with SMU BIG innovation networks to scale AI product roadmap, securing 3 strategic partnerships and driving $20,000 in potential funding for the beta AI product.",
+      "metrics": [
+        {
+          "value": 3,
+          "unit": "strategic partnerships",
+          "meaning": "Partnerships secured"
+        },
+        {
+          "value": "$20,000",
+          "unit": "potential funding",
+          "meaning": "Potential funding for beta AI product"
+        }
+      ],
+      "skills": [
+        "Partnership development",
+        "Product roadmap",
+        "Innovation networks"
+      ],
+      "domains": [
+        "AI products",
+        "Startup ecosystem"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#smu-institute-of-innovation-entrepreneurship"
+    },
+    {
+      "id": "smu_governance_03",
+      "role_id": "smu_big_2026_present",
+      "fact_type": "achievement",
+      "claim": "Designed governance workflows for GuideBuoy AI GTM program, accelerating time-to-market by 30% while ensuring 100% adherence to MAS risk & compliance policies.",
+      "metrics": [
+        {
+          "value": "30%",
+          "unit": "time-to-market acceleration",
+          "meaning": "Acceleration achieved"
+        },
+        {
+          "value": "100%",
+          "unit": "adherence",
+          "meaning": "Adherence to MAS risk and compliance policies"
+        }
+      ],
+      "skills": [
+        "AI governance",
+        "GTM strategy",
+        "Compliance workflows"
+      ],
+      "domains": [
+        "Financial regulation",
+        "AI products"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#smu-institute-of-innovation-entrepreneurship"
+    },
+    {
+      "id": "guidebuoy_nesy_01",
+      "role_id": "guidebuoy_ai_2025_present",
+      "fact_type": "achievement",
+      "claim": "Architected a deterministic Neuro-Symbolic validation layer processing 1000 concurrent requests with 99% accuracy, autonomously auditing regulatory compliance across scam and fraud financial institution workflows.",
+      "metrics": [
+        {
+          "value": 1000,
+          "unit": "concurrent requests",
+          "meaning": "Validation layer concurrent processing capacity"
+        },
+        {
+          "value": "99%",
+          "unit": "accuracy",
+          "meaning": "Validation layer accuracy"
+        }
+      ],
+      "skills": [
+        "Neuro-Symbolic AI",
+        "Deterministic validation",
+        "Regulatory compliance automation"
+      ],
+      "domains": [
+        "Financial services",
+        "Scam and fraud",
+        "Responsible AI"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#guidebuoy-ai-sg"
+    },
+    {
+      "id": "guidebuoy_consumer_guardian_02",
+      "role_id": "guidebuoy_ai_2025_present",
+      "fact_type": "achievement",
+      "claim": "Engineered the \"Consumer Guardian Engine\" to translate 6 key abstract MAS Fair Dealing mandates into an array of executable Python logic rules, reducing manual compliance review time by 100%.",
+      "metrics": [
+        {
+          "value": 6,
+          "unit": "MAS Fair Dealing mandates",
+          "meaning": "Abstract mandates translated into executable logic"
+        },
+        {
+          "value": "100%",
+          "unit": "reduction in manual compliance review time",
+          "meaning": "Manual compliance review-time reduction"
+        }
+      ],
+      "skills": [
+        "Python",
+        "Policy-as-code",
+        "Compliance automation"
+      ],
+      "domains": [
+        "MAS Fair Dealing",
+        "Financial regulation"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#guidebuoy-ai-sg"
+    },
+    {
+      "id": "guidebuoy_api_03",
+      "role_id": "guidebuoy_ai_2025_present",
+      "fact_type": "achievement",
+      "claim": "Built cloud-native API orchestrations handling 1000 transactions daily, integrating LangChain and Guardrails AI to achieve 100% compliance with MAS FEAT & SRF guidelines and NIST AI RMF.",
+      "metrics": [
+        {
+          "value": 1000,
+          "unit": "transactions daily",
+          "meaning": "API orchestration daily transaction capacity"
+        },
+        {
+          "value": "100%",
+          "unit": "compliance",
+          "meaning": "Compliance with MAS FEAT & SRF guidelines and NIST AI RMF"
+        }
+      ],
+      "skills": [
+        "Cloud-native APIs",
+        "LangChain",
+        "Guardrails AI"
+      ],
+      "domains": [
+        "MAS FEAT",
+        "MAS SRF",
+        "NIST AI RMF",
+        "Responsible AI"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#guidebuoy-ai-sg"
+    },
+    {
+      "id": "insead_tom_01",
+      "role_id": "insead_ai_venture_lab_2025",
+      "fact_type": "achievement",
+      "claim": "Engineered the Target Operating Model for an Agentic AI enabled dispute resolution platform, reducing projected self-represented claimants costs by 95% across scam and fraud use cases.",
+      "metrics": [
+        {
+          "value": "95%",
+          "unit": "cost reduction",
+          "meaning": "Projected self-represented claimant cost reduction"
+        }
+      ],
+      "skills": [
+        "Target Operating Model design",
+        "Agentic AI",
+        "Platform architecture"
+      ],
+      "domains": [
+        "Dispute resolution",
+        "Scam and fraud",
+        "Legal technology"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#insead-ai-venture-lab"
+    },
+    {
+      "id": "insead_validation_02",
+      "role_id": "insead_ai_venture_lab_2025",
+      "fact_type": "achievement",
+      "claim": "Translated MAS FEAT & SRF guidelines into executable algorithmic validation rules, successfully eliminating hallucination liability during financial triage stress tests.",
+      "metrics": [],
+      "skills": [
+        "Algorithmic validation",
+        "AI governance",
+        "Policy-as-code"
+      ],
+      "domains": [
+        "MAS FEAT",
+        "MAS SRF",
+        "Financial triage"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#insead-ai-venture-lab"
+    },
+    {
+      "id": "insead_red_team_03",
+      "role_id": "insead_ai_venture_lab_2025",
+      "fact_type": "achievement",
+      "claim": "Developed a \"Red Teaming Auditor\" prototype to be adopted by financial institution corporate partners, successfully identifying and mitigating 90% of edge-case compliance vulnerabilities.",
+      "metrics": [
+        {
+          "value": "90%",
+          "unit": "compliance vulnerabilities",
+          "meaning": "Edge-case compliance vulnerabilities identified and mitigated"
+        }
+      ],
+      "skills": [
+        "AI red teaming",
+        "Adversarial auditing",
+        "Compliance risk management"
+      ],
+      "domains": [
+        "Financial institutions",
+        "AI governance"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#insead-ai-venture-lab"
+    },
+    {
+      "id": "bcg_hcd_01",
+      "role_id": "bcg_2025",
+      "fact_type": "achievement",
+      "claim": "Applied Human-Centered Design to develop GuideBuoy AI AI-supported workflow & product design model, accelerating GuideBuoy AI's product development lifecycle from a few months to only 4 weeks.",
+      "metrics": [
+        {
+          "value": "4 weeks",
+          "unit": "product development lifecycle",
+          "meaning": "Accelerated product development lifecycle duration"
+        }
+      ],
+      "skills": [
+        "Human-Centered Design",
+        "Workflow design",
+        "Product design"
+      ],
+      "domains": [
+        "AI products",
+        "Digital transformation"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#boston-consulting-group"
+    },
+    {
+      "id": "bcg_adoption_02",
+      "role_id": "bcg_2025",
+      "fact_type": "achievement",
+      "claim": "Structured B2C adoption plans for GuideBuoy AI governance platform, increasing projected self-represented claimants onboarding efficiency by 30% across target claimants' segments.",
+      "metrics": [
+        {
+          "value": "30%",
+          "unit": "onboarding efficiency increase",
+          "meaning": "Projected self-represented claimant onboarding efficiency increase"
+        }
+      ],
+      "skills": [
+        "B2C adoption strategy",
+        "Change management",
+        "AI governance"
+      ],
+      "domains": [
+        "Dispute resolution",
+        "AI products"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#boston-consulting-group"
+    },
+    {
+      "id": "bcg_prototyping_03",
+      "role_id": "bcg_2025",
+      "fact_type": "achievement",
+      "claim": "Facilitated rapid prototyping and GuideBuoy AI start up building, driving solution design and beta MVP release within 8 weeks.",
+      "metrics": [
+        {
+          "value": 8,
+          "unit": "weeks",
+          "meaning": "Time to solution design and beta MVP release"
+        }
+      ],
+      "skills": [
+        "Rapid prototyping",
+        "MVP delivery",
+        "Startup building"
+      ],
+      "domains": [
+        "AI products",
+        "Digital transformation"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#boston-consulting-group"
+    },
+    {
+      "id": "aiaim_derivatives_01",
+      "role_id": "aiaim_2023_2025",
+      "fact_type": "achievement",
+      "claim": "Derivatives TOM & Architecture: Designed the Target Operating Model and modular integration architecture for a $25B derivatives portfolio, enabling interoperability between BlackRock Aladdin and BNPP Calypso.",
+      "metrics": [
+        {
+          "value": "$25B",
+          "unit": "derivatives portfolio",
+          "meaning": "Portfolio supported by TOM and integration architecture"
+        }
+      ],
+      "skills": [
+        "Target Operating Model design",
+        "Integration architecture",
+        "BlackRock Aladdin",
+        "BNPP Calypso"
+      ],
+      "domains": [
+        "Derivatives",
+        "Asset management",
+        "Front office"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#aia-singapore-aia-investment-management"
+    },
+    {
+      "id": "aiaim_collateral_02",
+      "role_id": "aiaim_2023_2025",
+      "fact_type": "achievement",
+      "claim": "Risk Reduction & Automation: Centralized collateral custody and outsourced critical margining workflows to BNP Paribas, replacing manual Excel-based processes with an automated system.",
+      "metrics": [],
+      "skills": [
+        "Collateral management",
+        "Margining",
+        "Workflow automation"
+      ],
+      "domains": [
+        "Derivatives",
+        "Risk management",
+        "Asset management"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#aia-singapore-aia-investment-management"
+    },
+    {
+      "id": "aiaim_fixed_income_03",
+      "role_id": "aiaim_2023_2025",
+      "fact_type": "achievement",
+      "claim": "Fixed Income Transformation: Directed the program converting a $54B fixed income portfolio from Buy-and-Hold to Total Return, centralizing liquidity data infrastructure with BNY Mellon.",
+      "metrics": [
+        {
+          "value": "$54B",
+          "unit": "fixed income portfolio",
+          "meaning": "Portfolio converted from Buy-and-Hold to Total Return"
+        }
+      ],
+      "skills": [
+        "Program leadership",
+        "Liquidity data infrastructure",
+        "BNY Mellon"
+      ],
+      "domains": [
+        "Fixed income",
+        "Asset management",
+        "Portfolio transformation"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#aia-singapore-aia-investment-management"
+    },
+    {
+      "id": "aiaim_liquidity_04",
+      "role_id": "aiaim_2023_2025",
+      "fact_type": "achievement",
+      "claim": "Performance Improvements: Centralizing liquidity management across 10 APAC entities and reducing SOFR payment differentials by approximately 300 bps.",
+      "metrics": [
+        {
+          "value": 10,
+          "unit": "APAC entities",
+          "meaning": "Entities covered by centralized liquidity management"
+        },
+        {
+          "value": "approximately 300",
+          "unit": "bps",
+          "meaning": "SOFR payment differential reduction"
+        }
+      ],
+      "skills": [
+        "Liquidity management",
+        "SOFR",
+        "Operating model transformation"
+      ],
+      "domains": [
+        "APAC",
+        "Fixed income",
+        "Treasury"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#aia-singapore-aia-investment-management"
+    },
+    {
+      "id": "aiaim_regulatory_05",
+      "role_id": "aiaim_2023_2025",
+      "fact_type": "responsibility",
+      "claim": "Regulatory Change Delivery: Led cross-functional delivery (BAs, Ops, Risk, Tech) for MAS-reportable investment operations, cash data timelines, and IFRS 17 accounting standards alignment.",
+      "metrics": [],
+      "skills": [
+        "Regulatory change delivery",
+        "Cross-functional leadership",
+        "IFRS 17"
+      ],
+      "domains": [
+        "MAS reporting",
+        "Investment operations",
+        "Accounting standards"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#aia-singapore-aia-investment-management"
+    },
+    {
+      "id": "farringdon_suitability_01",
+      "role_id": "farringdon_2019_2022",
+      "fact_type": "achievement",
+      "claim": "Architected deterministic suitability logic across 5 investment products, completely eliminating manual advisory bias and reducing compliance audit time by 70%.",
+      "metrics": [
+        {
+          "value": 5,
+          "unit": "investment products",
+          "meaning": "Products covered by deterministic suitability logic"
+        },
+        {
+          "value": "70%",
+          "unit": "compliance audit time reduction",
+          "meaning": "Compliance audit-time reduction"
+        }
+      ],
+      "skills": [
+        "Suitability logic",
+        "Digital wealth architecture",
+        "Compliance automation"
+      ],
+      "domains": [
+        "Wealth management",
+        "Investment advisory"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#farringdon-asset-management"
+    },
+    {
+      "id": "farringdon_oms_02",
+      "role_id": "farringdon_2019_2022",
+      "fact_type": "achievement",
+      "claim": "Integrated OMS across 3 major custodians, automating 10+ transaction-level suitability checks daily and reducing operational errors by 90%.",
+      "metrics": [
+        {
+          "value": 3,
+          "unit": "major custodians",
+          "meaning": "Custodians integrated with OMS"
+        },
+        {
+          "value": "10+",
+          "unit": "transaction-level suitability checks daily",
+          "meaning": "Daily automated suitability checks"
+        },
+        {
+          "value": "90%",
+          "unit": "operational error reduction",
+          "meaning": "Operational error reduction"
+        }
+      ],
+      "skills": [
+        "OMS integration",
+        "Suitability checks",
+        "Automation"
+      ],
+      "domains": [
+        "Wealth management",
+        "Custody operations"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#farringdon-asset-management"
+    },
+    {
+      "id": "farringdon_aum_03",
+      "role_id": "farringdon_2019_2022",
+      "fact_type": "achievement",
+      "claim": "Grown AUM by USD $25M in 6 months; secured a permanent seat on the Investment & Product Management Committee.",
+      "metrics": [
+        {
+          "value": "USD $25M",
+          "unit": "AUM growth",
+          "meaning": "Assets under management growth"
+        },
+        {
+          "value": 6,
+          "unit": "months",
+          "meaning": "Time period for AUM growth"
+        }
+      ],
+      "skills": [
+        "Asset gathering",
+        "Investment management",
+        "Product management"
+      ],
+      "domains": [
+        "Wealth management",
+        "Multi-asset portfolios"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#farringdon-asset-management"
+    },
+    {
+      "id": "financial_alliance_fact_finds_01",
+      "role_id": "financial_alliance_2017_2019",
+      "fact_type": "achievement",
+      "claim": "Conducted Fact Finds and Risk Disclosures for 20+ high-net-worth client portfolios totaling over $30M, ensuring 100% MAS compliance.",
+      "metrics": [
+        {
+          "value": "20+",
+          "unit": "high-net-worth client portfolios",
+          "meaning": "Portfolios served"
+        },
+        {
+          "value": "over $30M",
+          "unit": "portfolio value",
+          "meaning": "Total value of client portfolios"
+        },
+        {
+          "value": "100%",
+          "unit": "MAS compliance",
+          "meaning": "MAS compliance achieved"
+        }
+      ],
+      "skills": [
+        "Fact finding",
+        "Risk disclosures",
+        "Client advisory"
+      ],
+      "domains": [
+        "Private wealth",
+        "MAS compliance"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#financial-alliance"
+    },
+    {
+      "id": "financial_alliance_onboarding_02",
+      "role_id": "financial_alliance_2017_2019",
+      "fact_type": "achievement",
+      "claim": "Translated manual advisory compliance rules into structured system logic, decreasing client onboarding time by 70%.",
+      "metrics": [
+        {
+          "value": "70%",
+          "unit": "client onboarding time reduction",
+          "meaning": "Client onboarding time reduction"
+        }
+      ],
+      "skills": [
+        "System logic",
+        "Compliance automation",
+        "Client onboarding"
+      ],
+      "domains": [
+        "Financial advisory",
+        "Wealth management"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#financial-alliance"
+    },
+    {
+      "id": "financial_alliance_award_03",
+      "role_id": "financial_alliance_2017_2019",
+      "fact_type": "achievement",
+      "claim": "Recognized as New Consultant of the Year by driving a 90% year-over-year increase in new client acquisition and growing managed assets by $5M.",
+      "metrics": [
+        {
+          "value": "90%",
+          "unit": "year-over-year increase",
+          "meaning": "New client acquisition increase"
+        },
+        {
+          "value": "$5M",
+          "unit": "managed asset growth",
+          "meaning": "Growth in managed assets"
+        }
+      ],
+      "skills": [
+        "Client acquisition",
+        "Asset gathering",
+        "Financial advisory"
+      ],
+      "domains": [
+        "Wealth management",
+        "Private wealth"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#financial-alliance"
+    },
+    {
+      "id": "synpulse_audits_01",
+      "role_id": "synpulse_2017_2018",
+      "fact_type": "responsibility",
+      "claim": "Conducted architectural audits of investment risk models and execution logic across 20+ digital wealth robo-advisors in Singapore and HK.",
+      "metrics": [
+        {
+          "value": "20+",
+          "unit": "digital wealth robo-advisors",
+          "meaning": "Robo-advisors audited"
+        }
+      ],
+      "skills": [
+        "Architecture audit",
+        "Investment risk models",
+        "Execution logic"
+      ],
+      "domains": [
+        "Digital wealth",
+        "Robo-advisory",
+        "Singapore",
+        "Hong Kong"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#synpulse-management-consulting"
+    },
+    {
+      "id": "synpulse_ranking_02",
+      "role_id": "synpulse_2017_2018",
+      "fact_type": "achievement",
+      "claim": "Developed a proprietary ranking system analyzing 6 core data points to evaluate performance and suitability algorithms across the top 10+ tier-1 banks in APAC.",
+      "metrics": [
+        {
+          "value": 6,
+          "unit": "core data points",
+          "meaning": "Data points analyzed by proprietary ranking system"
+        },
+        {
+          "value": "10+",
+          "unit": "tier-1 banks",
+          "meaning": "APAC banks evaluated"
+        }
+      ],
+      "skills": [
+        "Data analysis",
+        "Ranking systems",
+        "Suitability algorithms"
+      ],
+      "domains": [
+        "Digital wealth",
+        "Private banking",
+        "APAC"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#synpulse-management-consulting"
+    },
+    {
+      "id": "synpulse_index_03",
+      "role_id": "synpulse_2017_2018",
+      "fact_type": "achievement",
+      "claim": "Published independent robo-advisory rankings index acquired by Kaplan Education, directly utilized by Synpulse Private Banking Consulting to advise top 10 tier-1 PB institutions and featured in top 5 Fintech News & financial industry publications.",
+      "metrics": [
+        {
+          "value": 10,
+          "unit": "tier-1 PB institutions",
+          "meaning": "Institutions advised using the rankings index"
+        },
+        {
+          "value": 5,
+          "unit": "Fintech News & financial industry publications",
+          "meaning": "Top publications featuring the index"
+        }
+      ],
+      "skills": [
+        "Research publication",
+        "Robo-advisory analysis",
+        "Private banking consulting"
+      ],
+      "domains": [
+        "Digital wealth",
+        "Private banking",
+        "Fintech media"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#synpulse-management-consulting"
+    },
+    {
+      "id": "mondelez_sfa_crm_01",
+      "role_id": "mondelez_2012_2017",
+      "fact_type": "achievement",
+      "claim": "SFA & CRM Transformation: Codified standardized retail workflows into Salesforce architecture for 1,300+ users across 16 APAC markets, supporting the $140M \"Winning In Store Execution\" program.",
+      "metrics": [
+        {
+          "value": "1,300+",
+          "unit": "users",
+          "meaning": "Users supported by Salesforce architecture"
+        },
+        {
+          "value": 16,
+          "unit": "APAC markets",
+          "meaning": "Markets covered"
+        },
+        {
+          "value": "$140M",
+          "unit": "program value",
+          "meaning": "Winning In Store Execution program supported"
+        }
+      ],
+      "skills": [
+        "Salesforce CRM",
+        "SFA",
+        "Enterprise architecture"
+      ],
+      "domains": [
+        "FMCG",
+        "Retail execution",
+        "APAC"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#mondelez-international"
+    },
+    {
+      "id": "mondelez_mdm_02",
+      "role_id": "mondelez_2012_2017",
+      "fact_type": "responsibility",
+      "claim": "Master Data Governance (MDM): Architected the CMDM data integration layer connecting Salesforce, SAP ERP, SAP BI HANA, and distributor databases.",
+      "metrics": [],
+      "skills": [
+        "Master Data Governance",
+        "Data integration",
+        "SAP ERP",
+        "SAP BI HANA",
+        "Salesforce"
+      ],
+      "domains": [
+        "FMCG",
+        "Enterprise data architecture"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#mondelez-international"
+    },
+    {
+      "id": "mondelez_program_03",
+      "role_id": "mondelez_2012_2017",
+      "fact_type": "achievement",
+      "claim": "Program Management: Managed external technology vendors (Infosys, Amazon) to deliver implementations on-schedule, realizing 61% IRR and $102M NPV.",
+      "metrics": [
+        {
+          "value": "61%",
+          "unit": "IRR",
+          "meaning": "Internal rate of return realized"
+        },
+        {
+          "value": "$102M",
+          "unit": "NPV",
+          "meaning": "Net present value realized"
+        }
+      ],
+      "skills": [
+        "Vendor management",
+        "Program management",
+        "Implementation delivery"
+      ],
+      "domains": [
+        "FMCG",
+        "Enterprise technology"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#mondelez-international"
+    },
+    {
+      "id": "pop_pmo_01",
+      "role_id": "pop_company_2009_2012",
+      "fact_type": "responsibility",
+      "claim": "PMO Governance: Set up the Project Management Office from scratch, defining software release lifecycles, QA parameters, and risk management guidelines.",
+      "metrics": [],
+      "skills": [
+        "PMO setup",
+        "Release management",
+        "QA",
+        "Risk management"
+      ],
+      "domains": [
+        "Program governance",
+        "Software delivery"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#the-pop-company"
+    },
+    {
+      "id": "pop_sfa_02",
+      "role_id": "pop_company_2009_2012",
+      "fact_type": "achievement",
+      "claim": "SFA Release Standardization: Managed and delivered SFA and BI solutions worth > $300,000 for top FMCG clients (Unilever) across China and Southeast Asia.",
+      "metrics": [
+        {
+          "value": "> $300,000",
+          "unit": "solution value",
+          "meaning": "Value of SFA and BI solutions delivered"
+        }
+      ],
+      "skills": [
+        "SFA",
+        "Business intelligence",
+        "Delivery management"
+      ],
+      "domains": [
+        "FMCG",
+        "China",
+        "Southeast Asia"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#the-pop-company"
+    },
+    {
+      "id": "pop_stakeholder_03",
+      "role_id": "pop_company_2009_2012",
+      "fact_type": "responsibility",
+      "claim": "Stakeholder Management: Coordinated cross-continental project streams and managed expectations among client business units and IT stakeholders.",
+      "metrics": [],
+      "skills": [
+        "Stakeholder management",
+        "Project coordination",
+        "Cross-continental delivery"
+      ],
+      "domains": [
+        "Program management",
+        "IT delivery"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#the-pop-company"
+    },
+    {
+      "id": "chinasoft_agile_01",
+      "role_id": "chinasoft_2008_2009",
+      "fact_type": "responsibility",
+      "claim": "Agile Release Architecture: Governed delivery pipelines for MSN's Branded Entertainment and Experience Team (BEET), running Scrum and Extreme Programming (XP) methodologies.",
+      "metrics": [],
+      "skills": [
+        "Agile",
+        "Scrum",
+        "Extreme Programming",
+        "Delivery pipelines"
+      ],
+      "domains": [
+        "Digital media",
+        "Software delivery"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#chinasoft-international"
+    },
+    {
+      "id": "chinasoft_quality_02",
+      "role_id": "chinasoft_2008_2009",
+      "fact_type": "achievement",
+      "claim": "Release Quality Control: Architected configuration management and change-control standards, delivering zero-defect web apps and Messenger game integrations for advertisers (Coca-Cola, Amex, P&G).",
+      "metrics": [
+        {
+          "value": "zero-defect",
+          "unit": "web apps and Messenger game integrations",
+          "meaning": "Quality outcome delivered"
+        }
+      ],
+      "skills": [
+        "Configuration management",
+        "Change control",
+        "Quality assurance"
+      ],
+      "domains": [
+        "Digital advertising",
+        "Web applications",
+        "Gaming integrations"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#chinasoft-international"
+    },
+    {
+      "id": "chinasoft_global_03",
+      "role_id": "chinasoft_2008_2009",
+      "fact_type": "achievement",
+      "claim": "Global Coordination: Coordinated offshore development teams (approx. 10 engineers) to complete online branded solutions worth > $1M.",
+      "metrics": [
+        {
+          "value": "approx. 10",
+          "unit": "engineers",
+          "meaning": "Offshore development team size"
+        },
+        {
+          "value": "> $1M",
+          "unit": "solution value",
+          "meaning": "Value of online branded solutions completed"
+        }
+      ],
+      "skills": [
+        "Offshore coordination",
+        "Team leadership",
+        "Delivery management"
+      ],
+      "domains": [
+        "Digital advertising",
+        "Software delivery"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#chinasoft-international"
+    },
+    {
+      "id": "dextrys_estimation_01",
+      "role_id": "dextrys_2007_2008",
+      "fact_type": "achievement",
+      "claim": "Estimation Frameworks: Built a project estimation tool using Delphi Expert Assessment to improve QA and dev scheduling accuracy for C++ projects.",
+      "metrics": [],
+      "skills": [
+        "Delphi Expert Assessment",
+        "Project estimation",
+        "C++",
+        "QA scheduling"
+      ],
+      "domains": [
+        "Software engineering",
+        "Localization"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#dextrys"
+    },
+    {
+      "id": "dextrys_localization_02",
+      "role_id": "dextrys_2007_2008",
+      "fact_type": "responsibility",
+      "claim": "Systemic Localization: Managed localization engineering for Dassault Systèmes' 3D Product Lifecycle Management (PLM) enterprise software suite.",
+      "metrics": [],
+      "skills": [
+        "Localization engineering",
+        "Technical delivery",
+        "PLM"
+      ],
+      "domains": [
+        "Enterprise software",
+        "Product lifecycle management"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#dextrys"
+    },
+    {
+      "id": "dextrys_offshore_03",
+      "role_id": "dextrys_2007_2008",
+      "fact_type": "responsibility",
+      "claim": "Offshore Communication: Implemented coordination workflows between US clients and Chinese development centers.",
+      "metrics": [],
+      "skills": [
+        "Offshore communication",
+        "Workflow implementation",
+        "Client coordination"
+      ],
+      "domains": [
+        "Software delivery",
+        "US-China operations"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#dextrys"
+    },
+    {
+      "id": "english_village_linguistics_01",
+      "role_id": "english_village_2006_2007",
+      "fact_type": "responsibility",
+      "claim": "Facilitated cognitive language immersion and linguistic programs inside Gyeonggi English Village, a government-sponsored educational initiative.",
+      "metrics": [],
+      "skills": [
+        "Cognitive linguistics",
+        "Language immersion",
+        "Teaching"
+      ],
+      "domains": [
+        "Education",
+        "Linguistics"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#english-village"
+    },
+    {
+      "id": "sustainable_development_audit_01",
+      "role_id": "institute_sustainable_development_2005_2006",
+      "fact_type": "responsibility",
+      "claim": "Designed audit frameworks to evaluate and index corporate governance and sustainability performance.",
+      "metrics": [],
+      "skills": [
+        "Audit framework design",
+        "Corporate governance",
+        "Sustainability analysis"
+      ],
+      "domains": [
+        "Sustainability",
+        "Corporate governance"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#institute-of-sustainable-development-project-management"
+    },
+    {
+      "id": "mun_digital_infrastructure_01",
+      "role_id": "mun_russian_far_east_2002_2004",
+      "fact_type": "responsibility",
+      "claim": "Architected web portals, data taxonomy, and digital collaboration workflows for the non-profit management consulting organization.",
+      "metrics": [],
+      "skills": [
+        "Web architecture",
+        "Data taxonomy",
+        "Digital collaboration"
+      ],
+      "domains": [
+        "Non-profit",
+        "Management consulting"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#model-united-nations-russian-far-east"
+    },
+    {
+      "id": "wtc_chicago_volunteer_01",
+      "role_id": "world_trade_center_chicago_2004_2005",
+      "fact_type": "responsibility",
+      "claim": "Volunteered across global business and youth development programs to coordinate trade statistics, corporate outreach, and youth career readiness initiatives.",
+      "metrics": [],
+      "skills": [
+        "Trade statistics",
+        "Corporate outreach",
+        "Program coordination"
+      ],
+      "domains": [
+        "Global business",
+        "Youth development"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#world-trade-center-chicago-jobs-for-youth"
+    },
+    {
+      "id": "russian_university_teaching_01",
+      "role_id": "russian_university_2005_2006",
+      "fact_type": "responsibility",
+      "claim": "Conducted English language courses and translation services across academic groups.",
+      "metrics": [],
+      "skills": [
+        "English teaching",
+        "Translation",
+        "Academic instruction"
+      ],
+      "domains": [
+        "Education",
+        "Linguistics"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#russian-university-language-academies"
+    },
+    {
+      "id": "import_export_compliance_01",
+      "role_id": "far_east_import_export_2000_2002",
+      "fact_type": "responsibility",
+      "claim": "Managed customs clearing documentation, import-export logs, and internal regulatory and HR compliance duties.",
+      "metrics": [],
+      "skills": [
+        "Customs documentation",
+        "Import-export logistics",
+        "HR compliance"
+      ],
+      "domains": [
+        "Logistics",
+        "Trade compliance"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#far-east-russian-import-export-logistics-firm"
+    },
+    {
+      "id": "tourism_agency_01",
+      "role_id": "vladivostok_tourism_1999_2000",
+      "fact_type": "responsibility",
+      "claim": "Assisted in tour logistics coordination, travel agency operations, and customer relations management.",
+      "metrics": [],
+      "skills": [
+        "Tour logistics",
+        "Travel operations",
+        "Customer relations"
+      ],
+      "domains": [
+        "Tourism",
+        "Travel services"
+      ],
+      "evidence_status": "candidate_verified",
+      "public_use": true,
+      "source_reference": "my_profile.md#vladivostok-tourism-agency"
+    }
+  ],
+  "education": [
+    {
+      "id": "ntu_data_science_ai_2026",
+      "institution": "Nanyang Technological University (NTU), Singapore",
+      "degree": "Advanced Professional Certificate in Data Science and AI (SkillsFuture Career Transition Programme)",
+      "date_display": "April 2026 - July 2026",
+      "details": "Intensive applied engineering program encompassing Data Engineering (Python, Advanced SQL, Big Data pipelines, Data Warehousing, Orchestration, Web Scraping, and Stream Analytics); Machine Learning (Supervised/Unsupervised Learning, Time Series, Neural Networks, Computer Vision (CV), NLP, and Transformers/GenAI); and Deployment (API Architecture, Cloud Deployment, and Agentic Application workflows). Successfully architected, developed, and launched multiple AI pilot/capstone projects tackling real-world challenges. Included prep for AWS Certified AI Practitioner."
+    },
+    {
+      "id": "smu_msc_wealth_management_2016_2017",
+      "institution": "Singapore Management University (SMU)",
+      "degree": "Master of Science (MSc) in Wealth Management",
+      "date_display": "2016 - 2017",
+      "details": "Focused on Investments, Securities, Portfolio Construction, and Asset Management."
+    },
+    {
+      "id": "wst_financial_analysis_2016",
+      "institution": "Wall Street Training (WST)",
+      "degree": "Advanced Financial Analysis Series & Excel Modeling",
+      "date_display": "2016",
+      "details": "Specialized financial analysis modeling."
+    },
+    {
+      "id": "north_park_mba_2004_2005",
+      "institution": "North Park University",
+      "degree": "MBA (Master of Business Administration)",
+      "date_display": "2004 - 2005",
+      "details": ""
+    },
+    {
+      "id": "apmg_prince2_2010_2012",
+      "institution": "APMG-International",
+      "degree": "PRINCE2 Practitioner (Project Management)",
+      "date_display": "2010 - 2012",
+      "details": ""
+    },
+    {
+      "id": "cfa_program_2014_2015",
+      "institution": "CFA Institute",
+      "degree": "CFA Program (CFA Candidate)",
+      "date_display": "2014 - 2015",
+      "details": ""
+    },
+    {
+      "id": "academic_olympiads_polymath",
+      "institution": "",
+      "degree": "Advanced High School Academic Olympiads Program & Polymath Profile",
+      "date_display": "",
+      "details": "Ranked at the top tier of academic excellence (comparable to the Raffles Institution / Raffles Junior College elite academic stream in Singapore). Polymath 2E profile gifted child. Multiple-time city and regional level winner of competitive academic Olympiads in Biology, Geography, History, and Economics. Strong foundational interest and studies in Chemistry, Physics, and Mathematics."
+    },
+    {
+      "id": "us_state_grad_scholarship",
+      "institution": "USA Department of State",
+      "degree": "Annual Graduate Studies Scholarship",
+      "date_display": "",
+      "details": "Winner of the highly competitive US Department of State Annual Graduate Studies Scholarship (demonstrating early scientific and academic excellence)."
+    }
+  ],
+  "certifications": [
+    "CMFAS Module 3 - Rules & Regulations for Fund Management (Monetary Authority of Singapore / IBF)",
+    "CACS Client Advisory Competency Standards (Paper 1 & Paper 2) (IBF Singapore)",
+    "M5 Rules & Regulations for Financial Advisory Services (IBF Singapore)",
+    "HI Health Insurance Certification (Singapore College of Insurance)"
+  ],
+  "keywords": [
+    "Python",
+    "LangChain",
+    "Supabase",
+    "n8n",
+    "Guardrails AI",
+    "AI Verify (IMDA)",
+    "Model Traceability & Guardrails",
+    "Adversarial Auditing",
+    "Agentic AI",
+    "NeSy AI",
+    "Target Operating Model (TOM) Design",
+    "BlackRock Aladdin",
+    "BNPP Calypso",
+    "Murex MX.3",
+    "Salesforce CRM",
+    "SAP HANA",
+    "SAP ERP",
+    "BNY Mellon LAMP",
+    "Bloomberg",
+    "MAS FEAT Guidelines",
+    "NIST AI RMF",
+    "MAS TRM (Technology Risk Management)",
+    "IFRS 17",
+    "MAS SF(RDC)R",
+    "AML/KYC",
+    "PMO Setup & Governance",
+    "Agile/Scrum",
+    "PRINCE2 Practitioner",
+    "Release Management",
+    "Change Control",
+    "Vendor Management",
+    "Tourism Management",
+    "Translation (Russian/English/Chinese/German/French/Korean)",
+    "Cognitive Linguistics",
+    "Academic Teaching",
+    "Import-Export Logistics",
+    "HR & Administrative Compliance",
+    "English (Native/Bilingual)",
+    "Russian (Native/Bilingual)",
+    "German (Limited)",
+    "Mandarin (Limited)",
+    "French (Elementary)",
+    "Korean (Elementary)"
+  ]
+}

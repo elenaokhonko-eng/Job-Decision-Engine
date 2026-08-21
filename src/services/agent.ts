@@ -6,7 +6,8 @@ import {
   CANDIDATE_PROFILE,
   EVALUATION_WEIGHTS,
   HARD_DISQUALIFIERS,
-  ND_CULTURE_CRITERIA
+  ND_FRIENDLY_DIMENSIONS,
+  POLITICS_STRESS_RISK_DIMENSIONS
 } from "./criteria.ts";
 
 // Helper function to lazily initialize the Gemini SDK and throw "loud-fail" error if API key is missing
@@ -127,27 +128,28 @@ export interface AgentResult {
     job_id?: string;
     job_title: string;
     company: string;
-    assigned_track: "Track A - Finance/AI" | "Track B - Pharma/Research" | "Neither";
-    status: "STRONG MATCH" | "REVIEW REQUIRED" | "REJECTED";
-    total_score: number;
+    careers_portal_url: string;
+    stage1_status: "PASS" | "HARD_FAIL" | "NEEDS_VERIFICATION" | "UNASSIGNED";
+    final_classification: "PRIORITY_APPLY" | "APPLY_AFTER_VERIFICATION" | "HIGH_FIT_HIGH_RISK" | "LOW_STRATEGIC_VALUE" | "REJECTED";
     confidence_level: "High" | "Medium" | "Low";
+    career_horizon_route: "SCIENTIFIC_AI_CONVERGENCE" | "AI_DATA_MASTERY_BRIDGE" | "SCIENCE_DOMAIN_BRIDGE" | "TECHNICAL_ARCHITECTURE_BRIDGE" | "NONTECHNICAL_ADJACENCY" | "STRATEGIC_DEAD_END";
+    career_horizon_score: number;
+    core_fit_score: number;
     score_breakdown: {
+      hands_on_mastery: { score: number; rationale: string };
       technical_autonomy: { score: number; rationale: string };
-      compensation_potential: { score: number; rationale: string };
-      domain_relevance: { score: number; rationale: string };
-      environment_guardrails: { score: number; rationale: string };
-      future_mobility: { score: number; rationale: string };
+      role_purity: { score: number; rationale: string };
+      comp_quality: { score: number; rationale: string };
+      market_durability: { score: number; rationale: string };
     };
     hard_disqualifiers_triggered: string[];
-    // Extended Workplace Culture metrics determined by Gemini
-    nd_friendly_score: number;      // 0 - 100
-    politics_stress_score: number;   // 0 - 100
-    sensory_overload_index: number;  // 0 - 100
+    nd_friendly_score: number;
+    politics_stress_score: number;
+    sensory_overload_index: number;
     biological_and_stress_risk_assessment: string;
     strategic_value: string;
     recommended_cv_version: string;
     next_action: string;
-    careers_portal_url: string;
   }>;
 }
 
@@ -157,10 +159,11 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-1.5-flash",
+        model: options.model || "gemini-1.5-flash",
         contents: options.contents,
         config: {
           responseMimeType: options.responseMimeType as any,
+          responseSchema: options.responseSchema,
           systemInstruction: options.systemInstruction
         }
       });
@@ -185,9 +188,7 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
   return "";
 }
 
-async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
-  const baseUrl = "https://api.openai.com/v1";
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: string, options: any, isKimi: boolean = false): Promise<string> {
   const messages: any[] = [];
   if (options.systemInstruction) {
     messages.push({ role: "system", content: options.systemInstruction });
@@ -200,33 +201,42 @@ async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${openaiKey}`,
+          "Authorization": `Bearer ${apiKey}`,
           "User-Agent": "Claude-Code"
         },
         body: JSON.stringify({
           model,
           messages,
           temperature: 1,
-          response_format: options.responseMimeType === "application/json" ? { type: "json_object" } : undefined
+          response_format: options.responseSchema && !isKimi
+            ? { type: "json_schema", json_schema: { name: "extraction", strict: true, schema: options.responseSchema } }
+            : (options.responseMimeType === "application/json" ? { type: "json_object" } : undefined)
         }),
-        signal: AbortSignal.timeout(60000)
+        signal: AbortSignal.timeout(300000)
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`OpenAI API request failed with status ${response.status}: ${errorText}`);
+        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
       }
 
       const data = await response.json();
       return data.choices?.[0]?.message?.content || "";
     } catch (err: any) {
       if (attempt === 2) throw err;
-      console.warn(`⏳ OpenAI request failed. Retrying in 5s...`);
+      console.warn(`⏳ API request failed (${baseUrl}). Retrying in 5s...`);
       await new Promise((resolve) => setTimeout(resolve, 5000));
     }
   }
   return "";
 }
+
+async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
+  const baseUrl = "https://api.openai.com/v1";
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  return tryOpenAICompatible(openaiKey, baseUrl, model, options, false);
+}
+
 
 export type Provider = "local" | "gemini" | "openai";
 
@@ -262,6 +272,7 @@ export async function callLLM(
           model,
           messages: [{ role: "user", content: prompt }],
           temperature: 1,
+          ...(extra?.schema ? { format: extra.schema } : {}),
           ...(extra?.options ?? {})
         })
       });
@@ -293,13 +304,13 @@ export async function callLLM(
 
 export async function generateContent(options: {
   model: string;
-  contents: string;
+  contents: any;
   responseMimeType?: string;
+  responseSchema?: any;
   systemInstruction?: string;
 }): Promise<string> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
-
   const forceOpenAI = process.env.FORCE_OPENAI === "true";
   const order = forceOpenAI 
     ? ["openai", "gemini"] 
@@ -317,6 +328,7 @@ export async function generateContent(options: {
         console.warn(`⚠️ Gemini request failed (${err.message || err}).`);
       }
     }
+
     if (provider === "openai" && openaiKey && !tried.has("openai")) {
       tried.add("openai");
       try {
@@ -475,116 +487,122 @@ async function runGeminiAgentInternal(
 export async function runAgent(userQuestion: string): Promise<{ result: AgentResult; trace: string[]; toolsUsed: string[] }> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
+  const kimiKey = process.env.KIMI_API_KEY;
 
-  if (!geminiKey && !openaiKey) {
+  if (!geminiKey && !openaiKey && !kimiKey) {
     throw new Error(
-      "CRITICAL API KEY CONFLICT: Neither GEMINI_API_KEY nor OPENAI_API_KEY environment variable is configured."
+      "CRITICAL API KEY CONFLICT: None of GEMINI_API_KEY, OPENAI_API_KEY, or KIMI_API_KEY environment variables are configured."
     );
   }
 
   const trace: string[] = [];
   const toolsUsed: string[] = [];
 
-  // Build a highly dynamic system instruction string using our exported open-source criteria values!
-  const systemInstruction = `You are an expert Executive Career Architect and AI Decision Engine. Your objective is to evaluate job descriptions for a highly specialized executive technologist: a candidate matching the following open-source criteria.
+  const systemInstruction = `You are an expert Executive Career Architect and AI Decision Engine. Your objective is to evaluate job descriptions for a highly specialized executive technologist.
 
 ### CANDIDATE CORE PROFILE:
 - Name: ${CANDIDATE_PROFILE.name}
-- Age: ${CANDIDATE_PROFILE.age}
-- Experience: ${CANDIDATE_PROFILE.experienceYears}+ years in ${CANDIDATE_PROFILE.coreSkills[0]} and ${CANDIDATE_PROFILE.coreSkills[1]}.
+- Experience: ${CANDIDATE_PROFILE.experienceYears}+ years
 - Workplace Preference: ${CANDIDATE_PROFILE.workplacePreference}
+- Target Minimum Base: SGD ${CANDIDATE_PROFILE.minAcceptableBaseSgdMonth}/month
 
-### NON-NEGOTIABLE CRITERIA & GUARDRAILS:
-${CANDIDATE_PROFILE.nonNegotiables.map((item, idx) => `${idx + 1}. ${item}`).join("\n")}
+### EVALUATION WORKFLOW (5 STAGES)
 
----
-
-### EVALUATION WORKFLOW
-
-#### STAGE 1: ABSOLUTE DISQUALIFIERS (Pass/Fail)
-If the job description matches ANY of the following absolute disqualifiers, immediately set status to "REJECTED", assign an overall total_score of 0, set nd_friendly_score to < 30, politics_stress_score to > 75, and list the triggered disqualifiers:
+#### STAGE 1: HARD DISQUALIFIERS (Pass/Fail)
+Check objective evidence against these constraints:
 ${HARD_DISQUALIFIERS.map((dis, idx) => `- ${dis}`).join("\n")}
+If any trigger: stage1_status = "HARD_FAIL", core_fit_score = 0, final_classification = "REJECTED". Else, "PASS".
 
-#### STAGE 2: DUAL-TRACK HORIZON ROUTING
-Identify whether the role serves:
-- **Track A (Finance/AI)**: Private banks, wealth management, supranational fund managers (GIC, Temasek), top 20 global fund managers & banks (especially European banks & insurers), investment management, hedge funds, growth-stage AI startups, and major tech firms. Exclude local banks (DBS, UOB, OCBC), AIA/AIAIM, and agency recruiter posts from Argyll Scott.
-- **Track B (Pharma/Medical/Research)**: Roles in medical firms, pharmaceuticals, bioinformatics, or plant-based medical research. **Assign a higher score weighting boost to Track B if it involves plant-based medical research.**
-- **Neither**
+#### STAGE 2: CAREER CHANGE HORIZON
+Categorize the job into EXACTLY ONE of the following routes and assign a route score within the specified range based on how strongly it fits the description:
+- SCIENTIFIC_AI_CONVERGENCE (90-100)
+- AI_DATA_MASTERY_BRIDGE (75-89)
+- SCIENCE_DOMAIN_BRIDGE (60-74)
+- TECHNICAL_ARCHITECTURE_BRIDGE (45-59)
+- NONTECHNICAL_ADJACENCY (25-44)
+- STRATEGIC_DEAD_END (0-24)
 
-#### STAGE 3: MULTI-POINT SCORING (100-Point Scale)
-Evaluate and assign weights based on these customizable axes:
-1. **Environment & Biological Guardrails**: Max ${EVALUATION_WEIGHTS.environment_guardrails.maxPoints} pts. (${EVALUATION_WEIGHTS.environment_guardrails.description}) -> **CRITICAL**: If the job has non-binary management elements, client coordination, or multi-role context switching, you MUST deduct points heavily from this axis (up to the full 30 points).
-2. **Technical & Creative Autonomy**: Max ${EVALUATION_WEIGHTS.technical_autonomy.maxPoints} pts. (${EVALUATION_WEIGHTS.technical_autonomy.description})
-3. **Domain Relevance**: Max ${EVALUATION_WEIGHTS.domain_relevance.maxPoints} pts. (${EVALUATION_WEIGHTS.domain_relevance.description})
-4. **Compensation & Capital Potential**: Max ${EVALUATION_WEIGHTS.compensation_potential.maxPoints} pts. (${EVALUATION_WEIGHTS.compensation_potential.description})
-5. **Future-Proofing**: Max ${EVALUATION_WEIGHTS.future_mobility.maxPoints} pts. (${EVALUATION_WEIGHTS.future_mobility.description})
+#### STAGE 3: CORE FIT SCORE (100-Point Scale)
+Score the PRESENT-DAY value of the role (independent of ND/Politics risk):
+1. Hands-on AI/Data Mastery (Max ${EVALUATION_WEIGHTS.hands_on_ai_data_mastery.maxPoints})
+2. Technical & Creative Autonomy (Max ${EVALUATION_WEIGHTS.technical_creative_autonomy.maxPoints})
+3. Role Purity & Output Clarity (Max ${EVALUATION_WEIGHTS.role_purity_output_clarity.maxPoints})
+4. Compensation & Employment Quality (Max ${EVALUATION_WEIGHTS.compensation_employment_quality.maxPoints})
+5. Market Durability (Max ${EVALUATION_WEIGHTS.market_durability_learning_signal.maxPoints})
 
-#### STATUS ASSIGNMENT CUT-OFF TARGETS:
-- **STRONG MATCH**: Total Score > 70 (and 0 hard disqualifiers triggered).
-- **REVIEW REQUIRED**: Total Score between 50 and 70.
-- **REJECTED**: Total Score < 50 OR any Hard Disqualifier triggered (force total_score to 0).
+#### STAGE 4: INDEPENDENT RISK METRICS (0-100 each)
+Do NOT subtract these from the core_fit_score. Keep them completely separate!
+- nd_friendly_score (Target >= 70): Evidence of safe focus, async comms. Matches: ${ND_FRIENDLY_DIMENSIONS.highSupportiveFactors.join(", ")}
+- politics_stress_score (Target < 50): Evidence of corporate alignment, fast-paced chaos, matrixed stakeholders. Matches: ${POLITICS_STRESS_RISK_DIMENSIONS.highRiskFactors.join(", ")}
+- sensory_overload_index (Target < 50): Evidence of open offices, constant video, high travel.
 
----
-
-### HIGH-AUTONOMY WORKPLACE & CULTURE ANALYTICS EVALUATION:
-You must strictly grade the following indicators (0 to 100) based on raw job context and high-autonomy workplace safety cues:
-- **nd_friendly_score**: Safe focus blocks, async communication, written specifications, low performance theater, direct logical culture. Target: >= 70. (Matches: ${ND_CULTURE_CRITERIA.highSupportiveFactors.join(", ")})
-- **politics_stress_score**: High meeting overhead, corporate alignment theater, micromanagement, managing stakeholders without authority, influencing non-reportees, or wearing dual hats. Target: < 50. (Matches: ${ND_CULTURE_CRITERIA.highToxicFactors.join(", ")})
-  - **CRITICAL PENALTY**: You MUST aggressively raise the politics_stress_score (by 20-40 points) and lower the nd_friendly_score if you detect corporate buzzwords like "fast-paced", "dynamic environment", "wear many hats", "thrive under pressure", "ambiguity", "work hard play hard", or "highly matrixed". These are code for chaotic, undocumented, and highly stressful environments.
-- **sensory_overload_index**: High office attendance requirement, loud environments, constant video calls, or heavy on-site travel schedules. Raise this score if you see words like "open office", "hot-desking", or "highly collaborative".
-
-*Note: High-politics blacklist threshold is politics_stress_score >= 70 OR nd_friendly_score < 50.*
-
----
-
-### DATABASE & EXTERNAL TOOLS CAPABILITY:
-You have tools to query the local jobs database ('queryDatabaseForJobs') and fetch external market standards ('fetchExternalMarketRates'). Proactively use them if the user's question references existing jobs or market standards.
+#### STAGE 5: FINAL CLASSIFICATION DECISION RULE
+- PRIORITY_APPLY: stage1_status PASS AND core_fit_score >= 80 AND nd_friendly_score >= 70 AND politics_stress_score < 40
+- APPLY_AFTER_VERIFICATION: stage1_status PASS AND core_fit_score >= 70 AND (nd_friendly_score < 70 OR politics_stress_score >= 40)
+- HIGH_FIT_HIGH_RISK: core_fit_score >= 85 BUT politics_stress_score >= 70
+- LOW_STRATEGIC_VALUE: stage1_status PASS BUT core_fit_score < 70
+- REJECTED: stage1_status HARD_FAIL
 
 ### MANDATED TYPED OUTPUT FORMAT:
-You MUST return a JSON object matching this schema. Even if there is no job description, populate the 'evaluated_jobs' array with evaluated jobs from database or parsed input.
-**CRITICAL**: Every job description evaluated MUST use and preserve its exact unique source URL (such as the specific listing link on LinkedIn, MyCareersFuture, or eFinancialCareers) from where it was pulled. Only fallback to a generic company careers landing page (e.g., 'https://www.gic.com.sg/careers') if no unique job board posting URL is present in the source input.
-
-Schema Structure:
+You MUST return a JSON object matching this schema exactly.
 {
-  "evaluation_summary": "Overall synthesis of findings and suggestions",
+  "evaluation_summary": "Overall synthesis",
   "evaluated_jobs": [
     {
-      "job_id": "string (optional id)",
+      "job_id": "string",
       "job_title": "string",
       "company": "string",
-      "careers_portal_url": "string (The exact unique URL of the job advertisement on the source job board, e.g. LinkedIn, MyCareersFuture, eFinancialCareers. Only fallback to a company careers page if no listing URL is in the source)",
-      "assigned_track": "Track A - Finance/AI | Track B - Pharma/Research | Neither",
-      "status": "STRONG MATCH | REVIEW REQUIRED | REJECTED",
-      "total_score": integer (0-100),
+      "careers_portal_url": "string",
+      "stage1_status": "PASS | HARD_FAIL | NEEDS_VERIFICATION",
+      "final_classification": "PRIORITY_APPLY | APPLY_AFTER_VERIFICATION | HIGH_FIT_HIGH_RISK | LOW_STRATEGIC_VALUE | REJECTED",
       "confidence_level": "High | Medium | Low",
+      "career_horizon_route": "SCIENTIFIC_AI_CONVERGENCE | AI_DATA_MASTERY_BRIDGE | SCIENCE_DOMAIN_BRIDGE | TECHNICAL_ARCHITECTURE_BRIDGE | NONTECHNICAL_ADJACENCY | STRATEGIC_DEAD_END",
+      "career_horizon_score": integer (0-100),
+      "core_fit_score": integer (0-100),
       "score_breakdown": {
+        "hands_on_mastery": {"score": integer, "rationale": "string"},
         "technical_autonomy": {"score": integer, "rationale": "string"},
-        "compensation_potential": {"score": integer, "rationale": "string"},
-        "domain_relevance": {"score": integer, "rationale": "string"},
-        "environment_guardrails": {"score": integer, "rationale": "string"},
-        "future_mobility": {"score": integer, "rationale": "string"}
+        "role_purity": {"score": integer, "rationale": "string"},
+        "comp_quality": {"score": integer, "rationale": "string"},
+        "market_durability": {"score": integer, "rationale": "string"}
       },
       "nd_friendly_score": integer (0-100),
       "politics_stress_score": integer (0-100),
       "sensory_overload_index": integer (0-100),
       "hard_disqualifiers_triggered": ["string"],
-      "biological_and_stress_risk_assessment": "Detailed evaluation of workload intensity, political overhead, and focus-time protection.",
-      "strategic_value": "Why this role helps her $1M 3-year goal OR her Netherlands pharma/biobotanical PhD pivot.",
-      "recommended_cv_version": "AI/RegTech Architect CV | Institutional Finance CV | Data Research/Bio-Tech CV",
-      "next_action": "Apply Immediately with Technical Portfolio | Send Direct Message to Hiring Manager | Skip / Delete"
+      "biological_and_stress_risk_assessment": "string",
+      "strategic_value": "string",
+      "recommended_cv_version": "string",
+      "next_action": "string"
     }
   ]
 }`;
 
   const forceOpenAI = process.env.FORCE_OPENAI === "true";
   const order = forceOpenAI 
-    ? ["openai", "gemini"] 
-    : ["gemini", "openai"];
+    ? ["openai", "gemini", "kimi"] 
+    : ["gemini", "openai", "kimi"];
 
   const tried = new Set<string>();
   let parsedResult: AgentResult | null = null;
 
   for (const provider of order) {
+    if (provider === "kimi" && kimiKey && !tried.has("kimi")) {
+      tried.add("kimi");
+      try {
+        trace.push(`Step ${trace.length + 1}: Running evaluation agent with Kimi API...`);
+        const text = await tryKimi(kimiKey, {
+          contents: userQuestion,
+          responseMimeType: "application/json",
+          systemInstruction
+        });
+        parsedResult = parseResultJson(text, trace);
+        if (parsedResult) break;
+      } catch (err: any) {
+        console.warn(`⚠️ Kimi agent run failed: ${err.message || err}`);
+        trace.push(`Step ${trace.length + 1}: Kimi agent run failed: ${err.message || err}`);
+      }
+    }
     if (provider === "openai" && openaiKey && !tried.has("openai")) {
       tried.add("openai");
       try {
@@ -632,15 +650,17 @@ Schema Structure:
       
       if (matchedJob) {
         await db.updateJobEvaluation(matchedJob.id, {
-          status: job.status,
-          assigned_track: job.assigned_track,
+          stage1_status: job.stage1_status,
+          final_classification: job.final_classification,
           confidence_level: job.confidence_level,
-          total_score: job.total_score,
+          career_horizon_route: job.career_horizon_route as any,
+          career_horizon_score: job.career_horizon_score,
+          core_fit_score: job.core_fit_score,
+          score_hands_on_mastery: job.score_breakdown?.hands_on_mastery?.score || 0,
           score_technical_autonomy: job.score_breakdown?.technical_autonomy?.score || 0,
-          score_compensation_potential: job.score_breakdown?.compensation_potential?.score || 0,
-          score_domain_relevance: job.score_breakdown?.domain_relevance?.score || 0,
-          score_environment_guardrails: job.score_breakdown?.environment_guardrails?.score || 0,
-          score_future_mobility: job.score_breakdown?.future_mobility?.score || 0,
+          score_role_purity: job.score_breakdown?.role_purity?.score || 0,
+          score_comp_quality: job.score_breakdown?.comp_quality?.score || 0,
+          score_market_durability: job.score_breakdown?.market_durability?.score || 0,
           nd_friendly_score: job.nd_friendly_score || 50,
           politics_stress_score: job.politics_stress_score || 50,
           sensory_overload_index: job.sensory_overload_index || 50,

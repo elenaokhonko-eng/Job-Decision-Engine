@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobAnalysis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "job_id",
+    "mandatory_requirements",
+    "preferred_requirements",
+    "expected_outcomes",
+    "leadership_mandate",
+    "technical_capabilities",
+    "scale_and_seniority_signals",
+    "industry_knowledge",
+    "important_keywords",
+    "explicit_vs_inferred_requirements",
+    "potential_contradictions",
+    "culture_and_work_pattern_indicators"
+  ],
+  "properties": {
+    "job_id": { "type": "string" },
+    "mandatory_requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["req_id", "description"],
+        "properties": {
+          "req_id": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "preferred_requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["req_id", "description"],
+        "properties": {
+          "req_id": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "expected_outcomes": { "type": "array", "items": { "type": "string" } },
+    "leadership_mandate": { "type": "string" },
+    "technical_capabilities": { "type": "array", "items": { "type": "string" } },
+    "scale_and_seniority_signals": { "type": "array", "items": { "type": "string" } },
+    "industry_knowledge": { "type": "array", "items": { "type": "string" } },
+    "important_keywords": { "type": "array", "items": { "type": "string" } },
+    "explicit_vs_inferred_requirements": { "type": "array", "items": { "type": "string" } },
+    "potential_contradictions": { "type": "array", "items": { "type": "string" } },
+    "culture_and_work_pattern_indicators": { "type": "array", "items": { "type": "string" } }
+  }
+}

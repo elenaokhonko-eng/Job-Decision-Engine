@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvidenceMap",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "requirement_matches"],
+  "properties": {
+    "job_id": { "type": "string" },
+    "requirement_matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "req_id",
+          "match_status",
+          "profile_fact_ids"
+        ],
+        "properties": {
+          "req_id": { "type": "string" },
+          "match_status": {
+            "enum": ["direct_match", "transferable_match", "partial_match", "gap", "not_relevant"]
+          },
+          "profile_fact_ids": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "rationale": { "type": "string" }
+        }
+      }
+    }
+  }
+}

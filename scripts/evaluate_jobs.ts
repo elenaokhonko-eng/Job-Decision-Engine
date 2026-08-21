@@ -6,6 +6,41 @@ import { db, verifyUrlLive } from "../src/db/db.ts";
 import { runDeduplication } from "./deduplicate.ts";
 import puppeteer from "puppeteer";
 
+const jobsExtractSchema = {
+  type: "object",
+  properties: {
+    jobs: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          company: { type: "string" },
+          source: { type: "string", description: "LinkedIn | MyCareersFuture | eFinancialCareers | Gmail" },
+          salaryRange: { type: "string", description: "Optional, e.g. SGD 15,000 - SGD 20,000, or empty string" },
+          location: { type: "string", description: "Optional, e.g. Singapore (Remote), or empty string" },
+          careers_portal_url: { type: "string", description: "Mandatory. Choose the exact matching URL from the verified URLs list above" },
+          description: {
+            type: "object",
+            properties: {
+              job_description: { type: "string", description: "High-level overview of the role and team context." },
+              key_responsibilities: { type: "array", items: { type: "string" } },
+              technical_skills: { type: "array", items: { type: "string" } },
+              qualifications_education: { type: "array", items: { type: "string" } },
+              nice_to_haves: { type: "array", items: { type: "string" } }
+            },
+            required: ["job_description", "key_responsibilities", "technical_skills", "qualifications_education", "nice_to_haves"],
+            additionalProperties: false
+          }
+        },
+        required: ["title", "company", "source", "salaryRange", "location", "careers_portal_url", "description"],
+        additionalProperties: false
+      }
+    }
+  },
+  required: ["jobs"],
+  additionalProperties: false
+};
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -346,33 +381,10 @@ Email Body:
 ${alert.body}
 
 Verified URLs list (you must ONLY use URLs from this list):
-${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}
-
-Format the output as a valid JSON object matching this schema. Make sure you extract all jobs.
-Schema:
-{
-  "jobs": [
-    {
-      "title": "string",
-      "company": "string",
-      "source": "LinkedIn | MyCareersFuture | eFinancialCareers | Gmail",
-      "salaryRange": "string (optional, e.g. SGD 15,000 - SGD 20,000)",
-      "location": "string (optional, e.g. Singapore (Remote))",
-      "careers_portal_url": "string (Mandatory. Choose the exact matching URL from the verified URLs list above)",
-      "description": {
-        "job_description": "High-level overview of the role and team context.",
-        "key_responsibilities": ["string (duties and expectations)"],
-        "technical_skills": ["string (languages, tools, cloud, etc.)"],
-        "qualifications_education": ["string (degrees, certifications)"],
-        "nice_to_haves": ["string (preferred attributes)"]
-      }
-    }
-  ]
-}
-Return nothing other than the JSON block.`;
+${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
 
         try {
-          let rawText = await extractWithFallback(parsePrompt);
+          let rawText = await extractWithFallback(parsePrompt, jobsExtractSchema);
           if (rawText.startsWith("```json")) {
             rawText = rawText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
           } else if (rawText.startsWith("```")) {
@@ -523,8 +535,9 @@ Return nothing other than the JSON block.`;
               location: rawJob.location || undefined,
               careers_portal_url: rawJob.careers_portal_url,
               postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-              status: "REJECTED",
-              assigned_track: "Neither",
+              stage1_status: "HARD_FAIL",
+              final_classification: "REJECTED",
+              career_horizon_route: "STRATEGIC_DEAD_END",
               confidence_level: "Low",
               total_score: 0,
               score_technical_autonomy: 0,
@@ -577,8 +590,9 @@ Return nothing other than the JSON block.`;
               location: rawJob.location || undefined,
               careers_portal_url: rawJob.careers_portal_url,
               postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-              status: "REJECTED",
-              assigned_track: "Neither",
+              stage1_status: "HARD_FAIL",
+              final_classification: "REJECTED",
+              career_horizon_route: "STRATEGIC_DEAD_END",
               confidence_level: "Low",
               total_score: 0,
               score_technical_autonomy: 0,
@@ -620,21 +634,25 @@ Return nothing other than the JSON block.`;
             const { result } = await runAgent(evalQuery);
             const evalResult = result.evaluated_jobs?.[0];
             if (evalResult) {
-              console.log(`  -> Complete: Score = ${evalResult.total_score}/100, Status = ${evalResult.status}, Track = ${evalResult.assigned_track}`);
+              const totalScore = evalResult.core_fit_score ?? evalResult.total_score ?? 0;
+              const status = evalResult.final_classification ?? evalResult.status ?? "REJECTED";
+              const track = evalResult.career_horizon_route ?? evalResult.assigned_track ?? "Neither";
+
+              console.log(`  -> Complete: Score = ${totalScore}/100, Status = ${status}, Track = ${track}`);
               
               const techScore = (evalResult as any).score_technical_autonomy ?? evalResult.score_breakdown?.technical_autonomy?.score ?? 0;
-              const compScore = (evalResult as any).score_compensation_potential ?? evalResult.score_breakdown?.compensation_potential?.score ?? 0;
-              const domainScore = (evalResult as any).score_domain_relevance ?? evalResult.score_breakdown?.domain_relevance?.score ?? 0;
-              const envScore = (evalResult as any).score_environment_guardrails ?? evalResult.score_breakdown?.environment_guardrails?.score ?? 0;
-              const mobilityScore = (evalResult as any).score_future_mobility ?? evalResult.score_breakdown?.future_mobility?.score ?? 0;
+              const compScore = (evalResult as any).score_compensation_potential ?? evalResult.score_breakdown?.comp_quality?.score ?? evalResult.score_breakdown?.compensation_potential?.score ?? 0;
+              const domainScore = (evalResult as any).score_domain_relevance ?? evalResult.score_breakdown?.hands_on_mastery?.score ?? evalResult.score_breakdown?.domain_relevance?.score ?? 0;
+              const envScore = (evalResult as any).score_environment_guardrails ?? evalResult.score_breakdown?.role_purity?.score ?? evalResult.score_breakdown?.environment_guardrails?.score ?? 0;
+              const mobilityScore = (evalResult as any).score_future_mobility ?? evalResult.score_breakdown?.market_durability?.score ?? evalResult.score_breakdown?.future_mobility?.score ?? 0;
               const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || null;
 
-              let finalStatus = evalResult.status;
-              if (evalResult.total_score > 70 && finalStatus !== "REJECTED") {
+              let finalStatus = status;
+              if (totalScore > 70 && finalStatus !== "REJECTED") {
                 finalStatus = "STRONG MATCH";
-              } else if (evalResult.total_score >= 50 && finalStatus !== "REJECTED") {
+              } else if (totalScore >= 50 && finalStatus !== "REJECTED") {
                 finalStatus = "REVIEW REQUIRED";
-              } else {
+              } else if (finalStatus === "LOW_STRATEGIC_VALUE") {
                 finalStatus = "REJECTED";
               }
 
@@ -648,22 +666,23 @@ Return nothing other than the JSON block.`;
                 location: rawJob.location || undefined,
                 careers_portal_url: rawJob.careers_portal_url,
                 postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-                status: finalStatus,
-                assigned_track: evalResult.assigned_track,
-                confidence_level: evalResult.confidence_level,
-                total_score: evalResult.total_score,
+                stage1_status: evalResult.stage1_status || "PASS",
+                final_classification: finalStatus,
+                career_horizon_route: track,
+                confidence_level: evalResult.confidence_level || "Medium",
+                total_score: totalScore,
                 score_technical_autonomy: techScore,
                 score_compensation_potential: compScore,
                 score_domain_relevance: domainScore,
                 score_environment_guardrails: envScore,
                 score_future_mobility: mobilityScore,
-                nd_friendly_score: evalResult.nd_friendly_score,
-                politics_stress_score: evalResult.politics_stress_score,
-                sensory_overload_index: evalResult.sensory_overload_index,
+                nd_friendly_score: evalResult.nd_friendly_score || 0,
+                politics_stress_score: evalResult.politics_stress_score || 0,
+                sensory_overload_index: evalResult.sensory_overload_index || 0,
                 biological_stress_risk: bioRisk,
-                strategic_value: evalResult.strategic_value,
-                recommended_cv_version: evalResult.recommended_cv_version,
-                next_action: evalResult.next_action,
+                strategic_value: evalResult.strategic_value || "None",
+                recommended_cv_version: evalResult.recommended_cv_version || "None",
+                next_action: evalResult.next_action || "None",
                 is_top_ten: false
               }, true); // bypass live check since it was validated at extraction
               

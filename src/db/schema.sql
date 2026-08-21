@@ -13,6 +13,14 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Table: companies
 -- Stores consolidated company-level ratings compiled from job evaluations.
 -- This enables aggregate analytics on ND culture.
+DROP TABLE IF EXISTS interactions_log CASCADE;
+DROP TABLE IF EXISTS agent_tool_logs CASCADE;
+DROP TABLE IF EXISTS raw_email_alerts CASCADE;
+DROP TABLE IF EXISTS jobs CASCADE;
+DROP TABLE IF EXISTS raw_jobs CASCADE;
+DROP TABLE IF EXISTS companies CASCADE;
+DROP TABLE IF EXISTS raw_companies CASCADE;
+
 CREATE TABLE IF NOT EXISTS companies (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT UNIQUE NOT NULL,
@@ -49,22 +57,26 @@ CREATE TABLE IF NOT EXISTS jobs (
     careers_portal_url TEXT NOT NULL, -- Direct URL to company's career page to verify real job
     
     -- Status in evaluation pipeline
-    status VARCHAR(50) DEFAULT 'UNASSIGNED', -- 'STRONG MATCH', 'REVIEW REQUIRED', 'REJECTED'
-    assigned_track VARCHAR(100), -- 'Track A - Finance/AI', 'Track B - Pharma/Research', 'Neither'
+    stage1_status VARCHAR(50) DEFAULT 'UNASSIGNED', -- 'PASS', 'HARD_FAIL', 'NEEDS_VERIFICATION'
+    final_classification VARCHAR(50), -- 'PRIORITY_APPLY', 'APPLY_AFTER_VERIFICATION', 'HIGH_FIT_HIGH_RISK', 'LOW_STRATEGIC_VALUE', 'REJECTED'
     confidence_level VARCHAR(20), -- 'High', 'Medium', 'Low'
-    total_score INTEGER DEFAULT 0, -- Overall 100-point score
     
-    -- Specific scoring breakdown values
-    score_technical_autonomy INTEGER DEFAULT 0,  -- Out of 30
-    score_compensation_potential INTEGER DEFAULT 0, -- Out of 25
-    score_domain_relevance INTEGER DEFAULT 0, -- Out of 20
-    score_environment_guardrails INTEGER DEFAULT 0, -- Out of 15
-    score_future_mobility INTEGER DEFAULT 0, -- Out of 10
+    -- Stage 2: Career Horizon
+    career_horizon_route VARCHAR(100),
+    career_horizon_score INTEGER DEFAULT 0,
+    
+    -- Stage 3: Core Fit
+    core_fit_score INTEGER DEFAULT 0, -- Overall 100-point score
+    score_hands_on_mastery INTEGER DEFAULT 0,  -- Out of 30
+    score_technical_autonomy INTEGER DEFAULT 0, -- Out of 25
+    score_role_purity INTEGER DEFAULT 0, -- Out of 15
+    score_comp_quality INTEGER DEFAULT 0, -- Out of 20
+    score_market_durability INTEGER DEFAULT 0, -- Out of 10
     
     -- Specific ND & stress assessment metrics (from evaluation)
-    nd_friendly_score INTEGER DEFAULT 0,     -- 0 to 100
-    politics_stress_score INTEGER DEFAULT 0,  -- 0 to 100 (High politics, micromanagement, C-suite presentation)
-    sensory_overload_index INTEGER DEFAULT 0, -- 0 to 100
+    nd_friendly_score INTEGER DEFAULT NULL,     -- 0 to 100
+    politics_stress_score INTEGER DEFAULT NULL,  -- 0 to 100
+    sensory_overload_index INTEGER DEFAULT 0, -- 0 to 100 (Keep for legacy support or future use)
     biological_stress_risk TEXT,
     strategic_value TEXT,
     recommended_cv_version TEXT,
@@ -184,6 +196,6 @@ ORDER BY politics_stress_avg_score DESC;
 -- INDEXES FOR HIGH-PERFORMANCE ANALYTICS
 -- ====================================================================
 CREATE INDEX IF NOT EXISTS idx_jobs_company_name ON jobs(company_name);
-CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(stage1_status);
 CREATE INDEX IF NOT EXISTS idx_jobs_nd_scores ON jobs(nd_friendly_score, politics_stress_score);
 CREATE INDEX IF NOT EXISTS idx_companies_scores ON companies(nd_friendly_avg_score, politics_stress_avg_score);

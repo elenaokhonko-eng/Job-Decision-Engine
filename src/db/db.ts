@@ -82,17 +82,21 @@ export interface Job {
   careers_portal_url: string; // Mandatory direct URL to company's careers portal to verify it's a real job
   
   // Scoring & ND Analytical fields populated after evaluation
-  status?: "UNASSIGNED" | "STRONG MATCH" | "REVIEW REQUIRED" | "REJECTED";
-  assigned_track?: "Track A - Finance/AI" | "Track B - Pharma/Research" | "Neither";
+  stage1_status?: "PASS" | "HARD_FAIL" | "NEEDS_VERIFICATION" | "UNASSIGNED";
+  final_classification?: "PRIORITY_APPLY" | "APPLY_AFTER_VERIFICATION" | "HIGH_FIT_HIGH_RISK" | "LOW_STRATEGIC_VALUE" | "REJECTED";
   confidence_level?: "High" | "Medium" | "Low";
-  total_score?: number;
   
-  // Specific score components
+  // Stage 2: Career Horizon
+  career_horizon_route?: "SCIENTIFIC_AI_CONVERGENCE" | "AI_DATA_MASTERY_BRIDGE" | "SCIENCE_DOMAIN_BRIDGE" | "TECHNICAL_ARCHITECTURE_BRIDGE" | "NONTECHNICAL_ADJACENCY" | "STRATEGIC_DEAD_END";
+  career_horizon_score?: number;
+  
+  // Stage 3: Core Fit
+  core_fit_score?: number;
+  score_hands_on_mastery?: number;
   score_technical_autonomy?: number;
-  score_compensation_potential?: number;
-  score_domain_relevance?: number;
-  score_environment_guardrails?: number;
-  score_future_mobility?: number;
+  score_role_purity?: number;
+  score_comp_quality?: number;
+  score_market_durability?: number;
 
   // Neurotype Compatibility Indicators
   nd_friendly_score?: number;      // 0 - 100 (high = safe/supportive)
@@ -144,15 +148,17 @@ const DEFAULT_JOBS: Omit<Job, "id">[] = [
     location: "Singapore (Hybrid, 1 day/week office)",
     careers_portal_url: "https://www.efinancialcareers.sg/jobs/lead-ai-regtech-platform-architect-apex-wealth-management-100231",
     description: "We are seeking a senior Hands-on Platform Architect with 15+ years of experience to design and build our next-generation AI compliance and risk governance platform. This role involves direct system design, Python engineering, agentic RAG system pipelines, and implementing strict LLM guardrails for $50B+ portfolio governance. You will enjoy complete technical autonomy, with no direct reports or stakeholder meetings. Work is highly asynchronous with dedicated focus hours. No travel required.",
-    status: "STRONG MATCH",
-    assigned_track: "Track A - Finance/AI",
+    stage1_status: "PASS",
+    final_classification: "PRIORITY_APPLY",
+    career_horizon_route: "AI_DATA_MASTERY_BRIDGE",
+    career_horizon_score: 85,
     confidence_level: "High",
-    total_score: 92,
-    score_technical_autonomy: 29,
-    score_compensation_potential: 24,
-    score_domain_relevance: 19,
-    score_environment_guardrails: 13,
-    score_future_mobility: 7,
+    core_fit_score: 92,
+    score_hands_on_mastery: 28,
+    score_technical_autonomy: 25,
+    score_role_purity: 15,
+    score_comp_quality: 16,
+    score_market_durability: 8,
     nd_friendly_score: 88,
     politics_stress_score: 18,
     sensory_overload_index: 22,
@@ -170,15 +176,17 @@ const DEFAULT_JOBS: Omit<Job, "id">[] = [
     location: "Singapore (Remote)",
     careers_portal_url: "https://www.mycareersfuture.gov.sg/job/senior-bioinformatics-data-researcher-biobotanic-research-481902",
     description: "BioBotanic is looking for a senior scientific data developer to build pipelines for botanical and plant-based drug data collection. You will write clean Python code to analyze genomic and biochemical pathways, supporting a collaborative bridge with our clinical research labs in Amsterdam, Netherlands. Ideal for an experienced systems engineer transitioning into scientific data pipelines. Highly predictable schedule, direct culture, 0% travel.",
-    status: "STRONG MATCH",
-    assigned_track: "Track B - Pharma/Research",
+    stage1_status: "PASS",
+    final_classification: "PRIORITY_APPLY",
+    career_horizon_route: "SCIENTIFIC_AI_CONVERGENCE",
+    career_horizon_score: 95,
     confidence_level: "High",
-    total_score: 86,
-    score_technical_autonomy: 27,
-    score_compensation_potential: 14,
-    score_domain_relevance: 20,
-    score_environment_guardrails: 15,
-    score_future_mobility: 10,
+    core_fit_score: 86,
+    score_hands_on_mastery: 27,
+    score_technical_autonomy: 22,
+    score_role_purity: 15,
+    score_comp_quality: 14,
+    score_market_durability: 8,
     nd_friendly_score: 95,
     politics_stress_score: 10,
     sensory_overload_index: 10,
@@ -196,10 +204,17 @@ const DEFAULT_JOBS: Omit<Job, "id">[] = [
     location: "Singapore (On-site, 5 days/week)",
     careers_portal_url: "https://www.linkedin.com/jobs/view/global-program-manager-megacorp-39281203",
     description: "Looking for a seasoned Scrum Master & Program Manager to coordinate cross-border stakeholders across 12 countries. You will run daily stand-ups, manage high political overhead, wrangle cross-departmental alignment, and build beautiful PowerPoint presentations for C-suite steering committees. Must have excellent client relationship skills and be willing to travel up to 35% of the time to APAC offices.",
-    status: "REJECTED",
-    assigned_track: "Neither",
+    stage1_status: "HARD_FAIL",
+    final_classification: "REJECTED",
+    career_horizon_route: "STRATEGIC_DEAD_END",
+    career_horizon_score: 10,
     confidence_level: "High",
-    total_score: 0,
+    core_fit_score: 10,
+    score_hands_on_mastery: 0,
+    score_technical_autonomy: 0,
+    score_role_purity: 0,
+    score_comp_quality: 10,
+    score_market_durability: 0,
     nd_friendly_score: 12,
     politics_stress_score: 95,
     sensory_overload_index: 85,
@@ -217,15 +232,17 @@ const DEFAULT_JOBS: Omit<Job, "id">[] = [
     location: "Singapore (Hybrid, 2 days/week office)",
     careers_portal_url: "https://www.efinancialcareers.sg/jobs/principal-quantitative-risk-engineer-quantum-capital-102930",
     description: "Join us as a Principal Quantitative Risk Engineer. You will have full technical design control over institutional asset governance algorithms. The role is purely hands-on technical architecture and Python coding, implementing MAS FEAT regulatory guidelines via automated guardrails. No client-facing work, zero travel, fully asynchronous team communication.",
-    status: "STRONG MATCH",
-    assigned_track: "Track A - Finance/AI",
+    stage1_status: "PASS",
+    final_classification: "PRIORITY_APPLY",
+    career_horizon_route: "AI_DATA_MASTERY_BRIDGE",
+    career_horizon_score: 80,
     confidence_level: "High",
-    total_score: 95,
-    score_technical_autonomy: 30,
-    score_compensation_potential: 25,
-    score_domain_relevance: 18,
-    score_environment_guardrails: 14,
-    score_future_mobility: 8,
+    core_fit_score: 95,
+    score_hands_on_mastery: 30,
+    score_technical_autonomy: 25,
+    score_role_purity: 15,
+    score_comp_quality: 17,
+    score_market_durability: 8,
     nd_friendly_score: 91,
     politics_stress_score: 15,
     sensory_overload_index: 30,
@@ -243,10 +260,17 @@ const DEFAULT_JOBS: Omit<Job, "id">[] = [
     location: "Singapore (On-site, 4 days/week)",
     careers_portal_url: "https://www.linkedin.com/jobs/view/director-digital-advisory-presales-futuretech-382903",
     description: "We are hiring a Client Relationship Director to carry an annual software sales quota. You will lead presales client advisory workshops, present technical architectures to external customers, and manage a team of 15 consultants. Expect high political overhead, intense client-facing meetings, and heavy presentation workloads.",
-    status: "REJECTED",
-    assigned_track: "Neither",
+    stage1_status: "HARD_FAIL",
+    final_classification: "REJECTED",
+    career_horizon_route: "STRATEGIC_DEAD_END",
+    career_horizon_score: 5,
     confidence_level: "High",
-    total_score: 0,
+    core_fit_score: 20,
+    score_hands_on_mastery: 0,
+    score_technical_autonomy: 5,
+    score_role_purity: 0,
+    score_comp_quality: 15,
+    score_market_durability: 0,
     nd_friendly_score: 22,
     politics_stress_score: 88,
     sensory_overload_index: 78,
@@ -268,15 +292,17 @@ function mapRowToJob(row: any): Job {
     postedDate: row.posted_date ? new Date(row.posted_date).toISOString().split('T')[0] : undefined,
     location: row.location || undefined,
     careers_portal_url: row.careers_portal_url,
-    status: row.status || undefined,
-    assigned_track: row.assigned_track || undefined,
+    stage1_status: row.stage1_status || undefined,
+    final_classification: row.final_classification || undefined,
     confidence_level: row.confidence_level || undefined,
-    total_score: row.total_score !== null ? parseInt(row.total_score) : undefined,
+    career_horizon_route: row.career_horizon_route || undefined,
+    career_horizon_score: row.career_horizon_score !== null ? parseInt(row.career_horizon_score) : undefined,
+    core_fit_score: row.core_fit_score !== null ? parseInt(row.core_fit_score) : undefined,
+    score_hands_on_mastery: row.score_hands_on_mastery !== null ? parseInt(row.score_hands_on_mastery) : undefined,
     score_technical_autonomy: row.score_technical_autonomy !== null ? parseInt(row.score_technical_autonomy) : undefined,
-    score_compensation_potential: row.score_compensation_potential !== null ? parseInt(row.score_compensation_potential) : undefined,
-    score_domain_relevance: row.score_domain_relevance !== null ? parseInt(row.score_domain_relevance) : undefined,
-    score_environment_guardrails: row.score_environment_guardrails !== null ? parseInt(row.score_environment_guardrails) : undefined,
-    score_future_mobility: row.score_future_mobility !== null ? parseInt(row.score_future_mobility) : undefined,
+    score_role_purity: row.score_role_purity !== null ? parseInt(row.score_role_purity) : undefined,
+    score_comp_quality: row.score_comp_quality !== null ? parseInt(row.score_comp_quality) : undefined,
+    score_market_durability: row.score_market_durability !== null ? parseInt(row.score_market_durability) : undefined,
     nd_friendly_score: row.nd_friendly_score !== null ? parseInt(row.nd_friendly_score) : undefined,
     politics_stress_score: row.politics_stress_score !== null ? parseInt(row.politics_stress_score) : undefined,
     sensory_overload_index: row.sensory_overload_index !== null ? parseInt(row.sensory_overload_index) : undefined,
@@ -295,9 +321,9 @@ async function updateCompanyRatings(companyId: string) {
        AVG(nd_friendly_score) as avg_nd,
        AVG(politics_stress_score) as avg_pol,
        AVG(sensory_overload_index) as avg_sens,
-       AVG(score_environment_guardrails) as avg_focus
+       0 as avg_focus
      FROM jobs 
-     WHERE company_id = $1 AND status != 'UNASSIGNED'`,
+     WHERE company_id = $1 AND stage1_status != 'UNASSIGNED'`,
     [companyId]
   );
 
@@ -306,7 +332,7 @@ async function updateCompanyRatings(companyId: string) {
     const avgND = r.avg_nd ? parseFloat(r.avg_nd) : 0.00;
     const avgPol = r.avg_pol ? parseFloat(r.avg_pol) : 0.00;
     const avgSens = r.avg_sens ? parseFloat(r.avg_sens) : 0.00;
-    const avgFocus = r.avg_focus ? parseFloat(r.avg_focus) : 0.00;
+    const avgFocus = 0.00;
 
     const isApproved = avgND >= 70 && avgPol < 50;
     const isToxic = avgPol >= 70 || avgND < 50;
@@ -344,7 +370,7 @@ class PostgresDatabase {
   }
 
   public async addJob(job: Omit<Job, "id">, bypassLiveCheck = false): Promise<Job> {
-    if (!job.status || job.status === "UNASSIGNED") {
+    if (!job.stage1_status || job.stage1_status === "UNASSIGNED") {
       throw new Error("Cannot insert unevaluated jobs into the final jobs table.");
     }
     if (!job.confidence_level) {
@@ -401,19 +427,20 @@ class PostgresDatabase {
 
     const insertJob = await pool.query(
       `INSERT INTO jobs (
-        company_name, company_id, title, source, raw_description, salary_range, location, posted_date, careers_portal_url, status, assigned_track,
-        confidence_level, total_score, score_technical_autonomy, score_compensation_potential, score_domain_relevance, score_environment_guardrails, score_future_mobility,
+        company_name, company_id, title, source, raw_description, salary_range, location, posted_date, careers_portal_url,
+        stage1_status, final_classification, confidence_level,
+        career_horizon_route, career_horizon_score,
+        core_fit_score, score_hands_on_mastery, score_technical_autonomy, score_role_purity, score_comp_quality, score_market_durability,
         nd_friendly_score, politics_stress_score, sensory_overload_index, biological_stress_risk, strategic_value, recommended_cv_version, next_action, is_top_ten
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26) RETURNING *`,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28) RETURNING *`,
       [
         job.company, companyId, job.title, job.source, finalDesc,
         job.salaryRange || null, job.location || null, job.postedDate || new Date().toISOString().split("T")[0],
-        job.careers_portal_url, job.status, job.assigned_track || "Neither",
-        job.confidence_level || null, job.total_score || 0,
-        job.score_technical_autonomy || 0, job.score_compensation_potential || 0,
-        job.score_domain_relevance || 0, job.score_environment_guardrails || 0,
-        job.score_future_mobility || 0, job.nd_friendly_score || 0,
-        job.politics_stress_score || 0, job.sensory_overload_index || 0,
+        job.careers_portal_url, job.stage1_status || "UNASSIGNED", job.final_classification || null,
+        job.confidence_level || null, job.career_horizon_route || null, job.career_horizon_score || 0,
+        job.core_fit_score || 0, job.score_hands_on_mastery || 0, job.score_technical_autonomy || 0,
+        job.score_role_purity || 0, job.score_comp_quality || 0, job.score_market_durability || 0,
+        job.nd_friendly_score || null, job.politics_stress_score || null, job.sensory_overload_index || 0,
         job.biological_stress_risk || null, job.strategic_value || null,
         job.recommended_cv_version || null, job.next_action || null,
         job.is_top_ten || false
@@ -431,37 +458,41 @@ class PostgresDatabase {
   public async updateJobEvaluation(id: string, evaluation: Partial<Job>): Promise<boolean> {
     const query = `
       UPDATE jobs SET
-        status = COALESCE($2, status),
-        assigned_track = COALESCE($3, assigned_track),
+        stage1_status = COALESCE($2, stage1_status),
+        final_classification = COALESCE($3, final_classification),
         confidence_level = COALESCE($4, confidence_level),
-        total_score = COALESCE($5, total_score),
-        score_technical_autonomy = COALESCE($6, score_technical_autonomy),
-        score_compensation_potential = COALESCE($7, score_compensation_potential),
-        score_domain_relevance = COALESCE($8, score_domain_relevance),
-        score_environment_guardrails = COALESCE($9, score_environment_guardrails),
-        score_future_mobility = COALESCE($10, score_future_mobility),
-        nd_friendly_score = COALESCE($11, nd_friendly_score),
-        politics_stress_score = COALESCE($12, politics_stress_score),
-        sensory_overload_index = COALESCE($13, sensory_overload_index),
-        biological_stress_risk = COALESCE($14, biological_stress_risk),
-        strategic_value = COALESCE($15, strategic_value),
-        recommended_cv_version = COALESCE($16, recommended_cv_version),
-        next_action = COALESCE($17, next_action),
-        careers_portal_url = COALESCE($18, careers_portal_url),
+        career_horizon_route = COALESCE($5, career_horizon_route),
+        career_horizon_score = COALESCE($6, career_horizon_score),
+        core_fit_score = COALESCE($7, core_fit_score),
+        score_hands_on_mastery = COALESCE($8, score_hands_on_mastery),
+        score_technical_autonomy = COALESCE($9, score_technical_autonomy),
+        score_role_purity = COALESCE($10, score_role_purity),
+        score_comp_quality = COALESCE($11, score_comp_quality),
+        score_market_durability = COALESCE($12, score_market_durability),
+        nd_friendly_score = COALESCE($13, nd_friendly_score),
+        politics_stress_score = COALESCE($14, politics_stress_score),
+        sensory_overload_index = COALESCE($15, sensory_overload_index),
+        biological_stress_risk = COALESCE($16, biological_stress_risk),
+        strategic_value = COALESCE($17, strategic_value),
+        recommended_cv_version = COALESCE($18, recommended_cv_version),
+        next_action = COALESCE($19, next_action),
+        careers_portal_url = COALESCE($20, careers_portal_url),
         updated_at = NOW()
       WHERE id = $1
     `;
     const res = await pool.query(query, [
       id,
-      evaluation.status,
-      evaluation.assigned_track,
+      evaluation.stage1_status,
+      evaluation.final_classification,
       evaluation.confidence_level,
-      evaluation.total_score,
+      evaluation.career_horizon_route,
+      evaluation.career_horizon_score,
+      evaluation.core_fit_score,
+      evaluation.score_hands_on_mastery,
       evaluation.score_technical_autonomy,
-      evaluation.score_compensation_potential,
-      evaluation.score_domain_relevance,
-      evaluation.score_environment_guardrails,
-      evaluation.score_future_mobility,
+      evaluation.score_role_purity,
+      evaluation.score_comp_quality,
+      evaluation.score_market_durability,
       evaluation.nd_friendly_score,
       evaluation.politics_stress_score,
       evaluation.sensory_overload_index,

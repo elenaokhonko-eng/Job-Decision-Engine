@@ -83,27 +83,53 @@ async function syncLinkedInSavedJobs() {
     console.log("Scrolling page to load all saved jobs list items...");
     let prevHeight = 0;
     let scrollAttempts = 0;
-    const maxScrollAttempts = 30;
+    const maxScrollAttempts = 60; // Increased attempts
 
     await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for initial items to load
 
     while (scrollAttempts < maxScrollAttempts) {
       await page.evaluate(() => {
-        window.scrollTo(0, document.body.scrollHeight);
+        // Slow incremental scroll instead of jumping to the bottom
+        window.scrollBy(0, 800);
+        
         // Also scroll internal list containers if any
         const scrollContainer = document.querySelector('.scaffold-layout__list') || document.querySelector('.reusable-search__result-container')?.closest('div');
         if (scrollContainer) {
-          scrollContainer.scrollTop = scrollContainer.scrollHeight;
+          scrollContainer.scrollBy(0, 800);
         }
       });
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      const newHeight = await page.evaluate(() => document.body.scrollHeight);
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const newHeight = await page.evaluate(() => {
+        const scrollContainer = document.querySelector('.scaffold-layout__list') || document.querySelector('.reusable-search__result-container')?.closest('div');
+        return scrollContainer ? scrollContainer.scrollHeight : document.body.scrollHeight;
+      });
       
       const count = await page.evaluate(() => document.querySelectorAll('a[href*="/jobs/view/"]').length);
       console.log(`- Scroll progress: loaded ${count} job link elements...`);
 
-      if (newHeight === prevHeight && scrollAttempts > 5) {
-        break;
+      // check if we've hit the bottom of the container
+      const isAtBottom = await page.evaluate(() => {
+        const scrollContainer = document.querySelector('.scaffold-layout__list') || document.querySelector('.reusable-search__result-container')?.closest('div');
+        if (scrollContainer) {
+          return Math.abs(scrollContainer.scrollHeight - scrollContainer.clientHeight - scrollContainer.scrollTop) < 10;
+        }
+        return Math.abs(document.body.scrollHeight - window.innerHeight - window.scrollY) < 10;
+      });
+
+      if (isAtBottom && newHeight === prevHeight && scrollAttempts > 10) {
+        // Check for a "Show more" button
+        const showMoreClicked = await page.evaluate(() => {
+          const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.toLowerCase().includes('show more'));
+          if (btn) {
+            btn.click();
+            return true;
+          }
+          return false;
+        });
+        
+        if (!showMoreClicked) {
+           break; // Truly at bottom and no more to load
+        }
       }
       prevHeight = newHeight;
       scrollAttempts++;
@@ -244,15 +270,51 @@ async function syncLinkedInSavedJobs() {
 }
 
 async function unsaveCurrentJob(page: puppeteer.Page): Promise<boolean> {
-  return await page.evaluate(() => {
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const savedBtn = buttons.find(btn => btn.innerText.trim().toLowerCase() === 'saved');
+  // Wait for the button to appear in the DOM
+  try {
+    await page.waitForFunction(() => {
+      const btn1 = document.querySelector('.jobs-save-button');
+      if (btn1) return true;
+      const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+      return buttons.some(btn => {
+        const text = (btn as HTMLElement).innerText.trim().toLowerCase();
+        const aria = btn.getAttribute('aria-label')?.toLowerCase() || '';
+        return text === 'saved' || text.includes('saved') || aria.includes('unsave') || aria === 'saved';
+      });
+    }, { timeout: 5000 });
+  } catch (e) {
+    // Timeout, button not found
+    return false;
+  }
+
+  const clicked = await page.evaluate(() => {
+    // 1. Try to find the button by standard class names used by LinkedIn
+    let savedBtn = document.querySelector('.jobs-save-button') as HTMLButtonElement;
+    
+    // 2. Fallback to searching all buttons for the text "Saved" or aria-label
+    if (!savedBtn) {
+      const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+      savedBtn = buttons.find(btn => {
+        const text = (btn as HTMLElement).innerText.trim().toLowerCase();
+        const aria = btn.getAttribute('aria-label')?.toLowerCase() || '';
+        return text === 'saved' || text.includes('saved') || aria.includes('unsave') || aria === 'saved';
+      }) as HTMLButtonElement;
+    }
+
     if (savedBtn) {
-      (savedBtn as HTMLButtonElement).click();
+      savedBtn.click();
       return true;
     }
+    
     return false;
   });
+
+  if (clicked) {
+    // Wait for LinkedIn API to process the unsave action
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    return true;
+  }
+  return false;
 }
 
 syncLinkedInSavedJobs();

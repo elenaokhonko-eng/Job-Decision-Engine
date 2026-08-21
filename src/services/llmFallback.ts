@@ -2,16 +2,28 @@ import { callLLM, generateContent } from "./agent.js";
 import { OpenAI } from "openai";
 
 /** Helper to call OpenAI as the final fallback */
-async function callOpenAI(raw: string): Promise<string> {
+async function callOpenAI(raw: string, schema?: any): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY not set – cannot use OpenAI fallback.");
   const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
   const client = new OpenAI({ apiKey });
-  const response = await client.chat.completions.create({
+  
+  const payload: any = {
     model,
     messages: [{ role: "user", content: raw }],
     temperature: 0,
-  });
+  };
+
+  if (schema) {
+    payload.response_format = {
+      type: "json_schema",
+      json_schema: { name: "extraction", strict: true, schema }
+    };
+  } else {
+    payload.response_format = { type: "json_object" };
+  }
+
+  const response = await client.chat.completions.create(payload);
   return response.choices[0].message?.content ?? "";
 }
 
@@ -19,30 +31,50 @@ async function callOpenAI(raw: string): Promise<string> {
  * Try Ollama → Gemini → OpenAI for extraction.
  * Returns the extracted JSON string (or throws if all providers fail).
  */
-export async function extractWithFallback(raw: string): Promise<string> {
+export async function extractWithFallback(raw: string, schema?: any): Promise<string> {
   // 1️⃣ Ollama (local)
   try {
-    const ollamaRes = await callLLM("extract", raw);
+    let ollamaRes = await callLLM("extract", raw, { schema });
+    if (ollamaRes.startsWith("```json")) {
+      ollamaRes = ollamaRes.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+    } else if (ollamaRes.startsWith("```")) {
+      ollamaRes = ollamaRes.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    JSON.parse(ollamaRes); // Validate
     return ollamaRes;
   } catch (e) {
-    console.warn("Ollama extraction failed, falling back to Gemini:", e);
+    console.warn("Ollama extraction failed or returned invalid JSON, falling back to Gemini:", e);
   }
 
   // 2️⃣ Gemini (requires GEMINI_API_KEY)
   try {
-    const geminiRes = await generateContent({
-      model: "gemini-3.6-flash",
+    let geminiRes = await generateContent({
+      model: "gemini-1.5-flash",
       contents: raw,
-      responseMimeType: "application/json"
+      responseMimeType: "application/json",
+      responseSchema: schema
     });
+    if (geminiRes.startsWith("```json")) {
+      geminiRes = geminiRes.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+    } else if (geminiRes.startsWith("```")) {
+      geminiRes = geminiRes.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    JSON.parse(geminiRes); // Validate
     return geminiRes;
   } catch (e) {
-    console.warn("Gemini extraction failed, falling back to OpenAI:", e);
+    console.warn("Gemini extraction failed or returned invalid JSON, falling back to OpenAI:", e);
   }
 
   // 3️⃣ OpenAI (requires OPENAI_API_KEY)
   try {
-    return await callOpenAI(raw);
+    let openAIRes = await callOpenAI(raw, schema);
+    if (openAIRes.startsWith("```json")) {
+      openAIRes = openAIRes.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+    } else if (openAIRes.startsWith("```")) {
+      openAIRes = openAIRes.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    JSON.parse(openAIRes); // Validate
+    return openAIRes;
   } catch (e) {
     console.error("All extraction providers failed:", e);
     throw new Error("Extraction failed on all providers");
