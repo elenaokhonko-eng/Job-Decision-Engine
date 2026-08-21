@@ -1,0 +1,681 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TailoredExecutiveCV",
+  "type": "object",
+  "metadata": {
+    "schema_version": "1.0",
+    "job_id": "quantum_capital_partners_principal_quantitative_risk_engineer",
+    "target_title": "Principal Quantitative Risk Engineer",
+    "target_company": "Quantum Capital Partners",
+    "profile_version": "master_profile",
+    "document_variant": "ats_application",
+    "page_target": 3,
+    "output_basename": "Elena_Okhonko_Principal_Quantitative_Risk_Engineer_Quantum_Capital_Partners"
+  },
+  "strategy": {
+    "positioning_statement": "Quantitative technology engineer with direct financial-markets systems experience across derivatives, collateral, fixed income, OMS, suitability and audit-oriented workflows. Position as a hands-on principal-level individual contributor who can rapidly translate trading and risk-adjacent requirements into robust applications, APIs and quantitative-system components. For Quantum Capital Partners, lead with evidence of market-domain fluency and production engineering delivery; do not imply formal quantitative-risk model ownership unless separately evidenced.",
+    "leadership_themes": [
+      "Principal-level technical ownership through architecture, engineering judgement and end-to-end delivery rather than unsubstantiated people-management claims.",
+      "Rapid conversion of ambiguous front-office, trading or risk-adjacent needs into usable prototypes, APIs and production-ready technology.",
+      "Financial-markets systems credibility spanning derivatives, collateral, fixed income and order-management contexts.",
+      "Control-conscious engineering, using suitability and audit-related experience to reinforce reliability, traceability and governance in quantitative technology."
+    ],
+    "signature_fact_ids": [
+      "aiaim_derivatives_01",
+      "aiaim_collateral_02",
+      "aiaim_fixed_income_03",
+      "farringdon_oms_02",
+      "guidebuoy_api_03"
+    ],
+    "keyword_plan": [
+      {
+        "term": "Trading technology",
+        "profile_fact_ids": [
+          "aiaim_derivatives_01",
+          "aiaim_collateral_02",
+          "aiaim_fixed_income_03",
+          "farringdon_oms_02"
+        ]
+      },
+      {
+        "term": "Quantitative systems",
+        "profile_fact_ids": [
+          "aiaim_derivatives_01",
+          "aiaim_fixed_income_03",
+          "guidebuoy_nesy_01",
+          "smu_architecture_01"
+        ]
+      },
+      {
+        "term": "Derivatives",
+        "profile_fact_ids": [
+          "aiaim_derivatives_01"
+        ]
+      },
+      {
+        "term": "Collateral",
+        "profile_fact_ids": [
+          "aiaim_collateral_02"
+        ]
+      },
+      {
+        "term": "Fixed income",
+        "profile_fact_ids": [
+          "aiaim_fixed_income_03"
+        ]
+      },
+      {
+        "term": "Order management systems (OMS)",
+        "profile_fact_ids": [
+          "farringdon_oms_02"
+        ]
+      },
+      {
+        "term": "Rapid application development",
+        "profile_fact_ids": [
+          "bcg_prototyping_03",
+          "guidebuoy_api_03",
+          "smu_architecture_01"
+        ]
+      },
+      {
+        "term": "API development",
+        "profile_fact_ids": [
+          "guidebuoy_api_03"
+        ]
+      },
+      {
+        "term": "Software architecture",
+        "profile_fact_ids": [
+          "smu_architecture_01"
+        ]
+      },
+      {
+        "term": "Risk controls / suitability / audit",
+        "profile_fact_ids": [
+          "farringdon_suitability_01",
+          "synpulse_audits_01",
+          "synpulse_ranking_02"
+        ]
+      }
+    ],
+    "prohibited_claims": [
+      "Do not claim ownership, calibration, validation or regulatory approval of quantitative risk models, including VaR, expected shortfall, PFE, XVA, market risk, credit risk or liquidity-risk models, unless supported by additional evidence.",
+      "Do not describe the candidate as a formal risk manager, model-risk manager, chief risk officer, or regulatory reporting owner.",
+      "Do not claim people leadership, budget ownership, programme leadership or direct reports; the supplied job analysis contains no leadership mandate and the cited facts do not establish these responsibilities.",
+      "Do not claim low-latency trading-platform, execution-algorithm, pricing-engine or real-time market-data expertise unless independently evidenced.",
+      "Do not claim expertise in specific languages, cloud platforms, databases, DevOps tooling, asset classes or risk regulations when those details are absent from the supplied facts.",
+      "Do not state Singapore work authorization or permanent-employment availability without candidate confirmation.",
+      "Do not present the Alan Partners RAD Developer job analysis as evidence that Quantum Capital Partners requires a Principal Quantitative Risk Engineer profile; use it only as an adjacent benchmark for quantitative and trading-technology positioning."
+    ]
+  },
+  "cv": {
+    "contact": {
+      "full_name": "Elena Okhonko",
+      "location": "Singapore",
+      "email": "elena.okhonko@gmail.com",
+      "phone": "+65 9072 7915",
+      "linkedin": "linkedin.com/in/elenaokhonko"
+    },
+    "headline": "Quantitative Technology & Financial Markets Systems Architect | Derivatives, Fixed Income, OMS and Control Automation",
+    "executive_summary": "Technical program and solution architecture professional with 20+ years across enterprise technology and financial services. Brings direct experience designing target operating models and integration architecture for a $25B derivatives portfolio, directing transformation of a $54B fixed income portfolio, centralizing collateral and margining workflows, and integrating OMS controls across custodians. Hands-on AI and API architecture experience complements financial-markets systems knowledge, including deterministic validation, policy-as-code, cloud-native API orchestration and control-conscious workflow automation.",
+    "core_expertise": [
+      "Financial Markets Systems Architecture",
+      "Derivatives Target Operating Model Design",
+      "Fixed Income Transformation",
+      "Collateral and Margining Workflows",
+      "Order Management Systems (OMS)",
+      "Integration Architecture",
+      "Quantitative Systems",
+      "API Architecture",
+      "Python and Policy-as-Code",
+      "Suitability and Compliance Automation",
+      "Architecture Audits",
+      "Rapid Prototyping",
+      "Cross-Functional Delivery",
+      "AI Governance and Deterministic Validation"
+    ],
+    "role_alignment_snapshot": {
+      "heading": "Role Alignment Snapshot",
+      "target_role": "Principal Quantitative Risk Engineer",
+      "target_company": "Quantum Capital Partners",
+      "items": [
+        {
+          "requirement_id": "R3",
+          "requirement_label": "Ability to support trading-technology use cases",
+          "display_match_label": "Direct evidence",
+          "evidence_statement": "Designed derivatives integration architecture, centralized collateral and margining workflows, directed fixed income portfolio transformation, and integrated OMS controls across three custodians, providing direct experience in trading- and investment-technology operating environments.",
+          "profile_fact_ids": [
+            "aiaim_derivatives_01",
+            "aiaim_collateral_02",
+            "aiaim_fixed_income_03",
+            "farringdon_oms_02"
+          ],
+          "keywords_used": [
+            "Trading technology",
+            "Derivatives",
+            "Collateral",
+            "Fixed income",
+            "OMS"
+          ]
+        },
+        {
+          "requirement_id": "R2",
+          "requirement_label": "Software development capability for quantitative technology systems",
+          "display_match_label": "Direct evidence",
+          "evidence_statement": "Architected executable Python compliance rules, cloud-native API orchestrations, a deterministic neuro-symbolic validation layer, and front-to-back product architecture, demonstrating hands-on engineering of controlled, high-volume technology workflows.",
+          "profile_fact_ids": [
+            "guidebuoy_consumer_guardian_02",
+            "guidebuoy_api_03",
+            "guidebuoy_nesy_01",
+            "smu_architecture_01"
+          ],
+          "keywords_used": [
+            "Python",
+            "API development",
+            "Quantitative systems",
+            "Software architecture",
+            "Deterministic validation"
+          ]
+        },
+        {
+          "requirement_id": "R1",
+          "requirement_label": "Rapid application development (RAD) engineering capability",
+          "display_match_label": "Transferable evidence",
+          "evidence_statement": "Facilitated solution design and beta MVP release within eight weeks, led GuideBuoy AI to first beta launch in six months, and built API orchestrations handling 1,000 daily transactions.",
+          "profile_fact_ids": [
+            "bcg_prototyping_03",
+            "smu_architecture_01",
+            "guidebuoy_api_03"
+          ],
+          "keywords_used": [
+            "Rapid application development",
+            "Rapid prototyping",
+            "MVP delivery",
+            "API development"
+          ]
+        },
+        {
+          "requirement_id": "R4",
+          "requirement_label": "Quantitative-finance or quantitative-systems domain familiarity",
+          "display_match_label": "Direct evidence",
+          "evidence_statement": "Worked across derivatives and fixed income architecture, audited investment risk models and execution logic for 20+ robo-advisors, evaluated suitability algorithms, and implemented deterministic suitability logic for investment products.",
+          "profile_fact_ids": [
+            "aiaim_derivatives_01",
+            "aiaim_fixed_income_03",
+            "synpulse_audits_01",
+            "synpulse_ranking_02",
+            "farringdon_suitability_01"
+          ],
+          "keywords_used": [
+            "Quantitative systems",
+            "Derivatives",
+            "Fixed income",
+            "Investment risk models",
+            "Suitability algorithms"
+          ]
+        }
+      ]
+    },
+    "experience": [
+      {
+        "role_id": "guidebuoy_ai_2025_present",
+        "employer": "GuideBuoy AI SG Pte Ltd",
+        "title": "Founder & Principal AI Architect (Agentic AI, NeSy AI, and Fiduciary Automation)",
+        "location": "Singapore",
+        "date_display": "August 2025 - Present",
+        "scope_statement": "Architecting agentic AI, neuro-symbolic AI and fiduciary automation workflows for financial-services compliance use cases.",
+        "achievements": [
+          {
+            "text": "Architected a deterministic neuro-symbolic validation layer processing 1,000 concurrent requests with 99% accuracy to autonomously audit regulatory compliance across scam- and fraud-related financial-institution workflows.",
+            "profile_fact_ids": [
+              "guidebuoy_nesy_01"
+            ],
+            "requirement_ids": [
+              "R2",
+              "R4"
+            ],
+            "keywords_used": [
+              "Quantitative systems",
+              "Neuro-Symbolic AI",
+              "Deterministic validation",
+              "Regulatory compliance"
+            ]
+          },
+          {
+            "text": "Built cloud-native API orchestrations handling 1,000 transactions daily, integrating LangChain and Guardrails AI to achieve 100% compliance with MAS FEAT and SRF guidelines and NIST AI RMF.",
+            "profile_fact_ids": [
+              "guidebuoy_api_03"
+            ],
+            "requirement_ids": [
+              "R1",
+              "R2"
+            ],
+            "keywords_used": [
+              "API development",
+              "Cloud-native APIs",
+              "Rapid application development",
+              "Guardrails AI"
+            ]
+          },
+          {
+            "text": "Engineered the Consumer Guardian Engine, translating six abstract MAS Fair Dealing mandates into executable Python logic rules and reducing manual compliance review time by 100%.",
+            "profile_fact_ids": [
+              "guidebuoy_consumer_guardian_02"
+            ],
+            "requirement_ids": [
+              "R2"
+            ],
+            "keywords_used": [
+              "Python",
+              "Policy-as-code",
+              "Compliance automation"
+            ]
+          }
+        ]
+      },
+      {
+        "role_id": "aiaim_2023_2025",
+        "employer": "AIA Singapore / AIA Investment Management (AIAIM)",
+        "title": "Enterprise Solution Architect & Program Lead (Front Office & Regulatory Transformation)",
+        "location": "Singapore, Singapore",
+        "date_display": "April 2023 - April 2025",
+        "scope_statement": "Delivered front-office architecture and regulatory transformation across derivatives, fixed income, liquidity and investment-operations workflows.",
+        "achievements": [
+          {
+            "text": "Designed the target operating model and modular integration architecture for a $25B derivatives portfolio, enabling interoperability between BlackRock Aladdin and BNPP Calypso.",
+            "profile_fact_ids": [
+              "aiaim_derivatives_01"
+            ],
+            "requirement_ids": [
+              "R3",
+              "R4"
+            ],
+            "keywords_used": [
+              "Derivatives",
+              "Trading technology",
+              "Target Operating Model",
+              "Integration architecture",
+              "BlackRock Aladdin",
+              "BNPP Calypso"
+            ]
+          },
+          {
+            "text": "Centralized collateral custody and outsourced critical margining workflows to BNP Paribas, replacing manual Excel-based processes with an automated system.",
+            "profile_fact_ids": [
+              "aiaim_collateral_02"
+            ],
+            "requirement_ids": [
+              "R3"
+            ],
+            "keywords_used": [
+              "Collateral",
+              "Margining",
+              "Workflow automation"
+            ]
+          },
+          {
+            "text": "Directed the conversion of a $54B fixed income portfolio from Buy-and-Hold to Total Return, centralizing liquidity data infrastructure with BNY Mellon.",
+            "profile_fact_ids": [
+              "aiaim_fixed_income_03"
+            ],
+            "requirement_ids": [
+              "R3",
+              "R4"
+            ],
+            "keywords_used": [
+              "Fixed income",
+              "Quantitative systems",
+              "Liquidity data infrastructure"
+            ]
+          },
+          {
+            "text": "Centralized liquidity management across 10 APAC entities and reduced SOFR payment differentials by approximately 300 bps.",
+            "profile_fact_ids": [
+              "aiaim_liquidity_04"
+            ],
+            "requirement_ids": [
+              "R3"
+            ],
+            "keywords_used": [
+              "Liquidity management",
+              "SOFR",
+              "Operating model transformation"
+            ]
+          }
+        ]
+      },
+      {
+        "role_id": "farringdon_2019_2022",
+        "employer": "Farringdon Asset Management",
+        "title": "Associate Director (Multi-Asset Portfolios, DPM & Digital Wealth Architecture)",
+        "location": "Singapore",
+        "date_display": "July 2019 - December 2022",
+        "scope_statement": "Worked across multi-asset portfolios, discretionary portfolio management and digital wealth architecture.",
+        "achievements": [
+          {
+            "text": "Integrated OMS across three major custodians, automating 10+ transaction-level suitability checks daily and reducing operational errors by 90%.",
+            "profile_fact_ids": [
+              "farringdon_oms_02"
+            ],
+            "requirement_ids": [
+              "R3"
+            ],
+            "keywords_used": [
+              "Order management systems (OMS)",
+              "Suitability checks",
+              "Automation"
+            ]
+          },
+          {
+            "text": "Architected deterministic suitability logic across five investment products, eliminating manual advisory bias and reducing compliance audit time by 70%.",
+            "profile_fact_ids": [
+              "farringdon_suitability_01"
+            ],
+            "requirement_ids": [
+              "R4"
+            ],
+            "keywords_used": [
+              "Suitability logic",
+              "Risk controls",
+              "Audit",
+              "Compliance automation"
+            ]
+          },
+          {
+            "text": "Grew AUM by USD $25M in six months and secured a permanent seat on the Investment & Product Management Committee.",
+            "profile_fact_ids": [
+              "farringdon_aum_03"
+            ],
+            "requirement_ids": [],
+            "keywords_used": [
+              "Asset management",
+              "Investment management",
+              "Product management"
+            ]
+          }
+        ]
+      },
+      {
+        "role_id": "synpulse_2017_2018",
+        "employer": "Synpulse Management Consulting",
+        "title": "Lead Researcher (Algorithmic Wealth Architectures & Asset Allocation)",
+        "location": "Singapore",
+        "date_display": "August 2017 - January 2018",
+        "scope_statement": "Conducted research and architectural analysis across digital wealth, robo-advisory and private-banking algorithmic workflows.",
+        "achievements": [
+          {
+            "text": "Conducted architectural audits of investment risk models and execution logic across 20+ digital wealth robo-advisors in Singapore and Hong Kong.",
+            "profile_fact_ids": [
+              "synpulse_audits_01"
+            ],
+            "requirement_ids": [
+              "R4"
+            ],
+            "keywords_used": [
+              "Architecture audit",
+              "Investment risk models",
+              "Execution logic",
+              "Digital wealth"
+            ]
+          },
+          {
+            "text": "Developed a proprietary ranking system using six core data points to evaluate performance and suitability algorithms across 10+ tier-1 banks in APAC.",
+            "profile_fact_ids": [
+              "synpulse_ranking_02"
+            ],
+            "requirement_ids": [
+              "R4"
+            ],
+            "keywords_used": [
+              "Quantitative systems",
+              "Data analysis",
+              "Suitability algorithms",
+              "Private banking"
+            ]
+          }
+        ]
+      },
+      {
+        "role_id": "mondelez_2012_2017",
+        "employer": "Mondelēz International",
+        "title": "Regional CRM & Sales Force Automation (SFA) Architect",
+        "location": "Singapore",
+        "date_display": "February 2012 - September 2017",
+        "scope_statement": "Architected regional CRM, sales-force automation and enterprise data-integration capabilities across APAC.",
+        "achievements": [
+          {
+            "text": "Codified standardized retail workflows into Salesforce architecture for 1,300+ users across 16 APAC markets, supporting the $140M Winning In Store Execution program.",
+            "profile_fact_ids": [
+              "mondelez_sfa_crm_01"
+            ],
+            "requirement_ids": [
+              "R1"
+            ],
+            "keywords_used": [
+              "Software architecture",
+              "Salesforce CRM",
+              "Enterprise architecture"
+            ]
+          },
+          {
+            "text": "Architected a CMDM data integration layer connecting Salesforce, SAP ERP, SAP BI HANA and distributor databases.",
+            "profile_fact_ids": [
+              "mondelez_mdm_02"
+            ],
+            "requirement_ids": [
+              "R2"
+            ],
+            "keywords_used": [
+              "Data integration",
+              "Master Data Governance",
+              "SAP ERP",
+              "SAP BI HANA"
+            ]
+          },
+          {
+            "text": "Managed external technology vendors to deliver implementations on schedule, realizing 61% IRR and $102M NPV.",
+            "profile_fact_ids": [
+              "mondelez_program_03"
+            ],
+            "requirement_ids": [],
+            "keywords_used": [
+              "Vendor management",
+              "Implementation delivery",
+              "Program management"
+            ]
+          }
+        ]
+      }
+    ],
+    "earlier_career": [
+      {
+        "employer": "Financial Alliance Pte Ltd",
+        "title": "Senior Consultant",
+        "date_display": "July 2017 - July 2019",
+        "relevance_line": "Translated manual advisory compliance rules into structured system logic, reducing client onboarding time by 70%."
+      },
+      {
+        "employer": "The POP Company",
+        "title": "Lead of PMO Governance & SFA Delivery Architecture",
+        "date_display": "October 2009 - January 2012",
+        "relevance_line": "Set up PMO governance and delivered SFA and BI solutions for FMCG clients across China and Southeast Asia."
+      },
+      {
+        "employer": "Chinasoft International",
+        "title": "Agile Delivery Architect & Scrum Master (Microsoft MSN BEET Team)",
+        "date_display": "May 2008 - October 2009",
+        "relevance_line": "Governed Agile delivery pipelines and established configuration-management and change-control standards."
+      },
+      {
+        "employer": "Dextrys",
+        "title": "Technical Delivery Lead & Systems Analyst (Localization Department PM)",
+        "date_display": "March 2007 - April 2008",
+        "relevance_line": "Built a Delphi Expert Assessment project-estimation tool to improve QA and development scheduling accuracy for C++ projects."
+      }
+    ],
+    "selected_ventures_and_research": [
+      {
+        "role_id": "smu_big_2026_present",
+        "employer": "SMU Institute of Innovation & Entrepreneurship",
+        "title": "Founder in Residence @ SMU BIG",
+        "location": "Singapore",
+        "date_display": "January 2026 - Present",
+        "achievements": [
+          {
+            "text": "Directed front-to-back architecture and engineering for GuideBuoy AI, managing a cross-functional team of three engineers and researchers to launch the first beta digital product in six months.",
+            "profile_fact_ids": [
+              "smu_architecture_01"
+            ],
+            "requirement_ids": [
+              "R1",
+              "R2"
+            ],
+            "keywords_used": [
+              "Software architecture",
+              "Engineering delivery",
+              "Beta product launch"
+            ]
+          },
+          {
+            "text": "Designed governance workflows for the GuideBuoy AI go-to-market program, accelerating time-to-market by 30% while ensuring 100% adherence to MAS risk and compliance policies.",
+            "profile_fact_ids": [
+              "smu_governance_03"
+            ],
+            "requirement_ids": [],
+            "keywords_used": [
+              "AI governance",
+              "Compliance workflows",
+              "MAS"
+            ]
+          }
+        ]
+      },
+      {
+        "role_id": "insead_ai_venture_lab_2025",
+        "employer": "INSEAD AI Venture Lab",
+        "title": "Founder in Residence (AI Governance & Architecture)",
+        "location": "Singapore",
+        "date_display": "August 2025 - December 2025",
+        "achievements": [
+          {
+            "text": "Engineered the target operating model for an agentic-AI-enabled dispute-resolution platform, reducing projected self-represented claimant costs by 95% across scam and fraud use cases.",
+            "profile_fact_ids": [
+              "insead_tom_01"
+            ],
+            "requirement_ids": [
+              "R1"
+            ],
+            "keywords_used": [
+              "Target Operating Model",
+              "Agentic AI",
+              "Platform architecture"
+            ]
+          },
+          {
+            "text": "Translated MAS FEAT and SRF guidelines into executable algorithmic validation rules, eliminating hallucination liability during financial-triage stress tests.",
+            "profile_fact_ids": [
+              "insead_validation_02"
+            ],
+            "requirement_ids": [
+              "R2"
+            ],
+            "keywords_used": [
+              "Algorithmic validation",
+              "Policy-as-code",
+              "AI governance"
+            ]
+          }
+        ]
+      },
+      {
+        "role_id": "bcg_2025",
+        "employer": "Boston Consulting Group (BCG)",
+        "title": "BCG RISE 2.0 DTCM Certification Sprint (Digital Transformation & Change Management)",
+        "location": "Singapore",
+        "date_display": "July 2025 - August 2025",
+        "achievements": [
+          {
+            "text": "Facilitated rapid prototyping and GuideBuoy AI startup building, driving solution design and beta MVP release within eight weeks.",
+            "profile_fact_ids": [
+              "bcg_prototyping_03"
+            ],
+            "requirement_ids": [
+              "R1"
+            ],
+            "keywords_used": [
+              "Rapid application development",
+              "Rapid prototyping",
+              "MVP delivery"
+            ]
+          },
+          {
+            "text": "Applied Human-Centered Design to develop an AI-supported workflow and product-design model, accelerating the product development lifecycle to four weeks.",
+            "profile_fact_ids": [
+              "bcg_hcd_01"
+            ],
+            "requirement_ids": [
+              "R1"
+            ],
+            "keywords_used": [
+              "Human-Centered Design",
+              "Workflow design",
+              "Product design"
+            ]
+          }
+        ]
+      }
+    ],
+    "education": [
+      "Advanced Professional Certificate in Data Science and AI, Nanyang Technological University (NTU), Singapore | April 2026 - July 2026",
+      "Master of Science (MSc) in Wealth Management, Singapore Management University (SMU) | 2016 - 2017",
+      "Advanced Financial Analysis Series & Excel Modeling, Wall Street Training (WST) | 2016",
+      "MBA (Master of Business Administration), North Park University | 2004 - 2005"
+    ],
+    "certifications": [
+      "CMFAS Module 3 - Rules & Regulations for Fund Management (Monetary Authority of Singapore / IBF)",
+      "CACS Client Advisory Competency Standards (Paper 1 & Paper 2) (IBF Singapore)",
+      "M5 Rules & Regulations for Financial Advisory Services (IBF Singapore)",
+      "HI Health Insurance Certification (Singapore College of Insurance)",
+      "PRINCE2 Practitioner (Project Management), APMG-International | 2010 - 2012"
+    ],
+    "languages": [
+      "English (Native/Bilingual)",
+      "Russian (Native/Bilingual)",
+      "German (Limited)",
+      "Mandarin (Limited)",
+      "French (Elementary)",
+      "Korean (Elementary)"
+    ]
+  },
+  "validation": {
+    "unsupported_claims": [],
+    "grounding_coverage_percentage": 100,
+    "chronology_issues": [
+      "Financial Alliance Pte Ltd (July 2017 - July 2019) overlaps with Synpulse Management Consulting (August 2017 - January 2018); both roles are retained as supplied in the master profile."
+    ],
+    "requirement_coverage": [
+      {
+        "requirement_id": "R1",
+        "status": "covered"
+      },
+      {
+        "requirement_id": "R2",
+        "status": "covered"
+      },
+      {
+        "requirement_id": "R3",
+        "status": "covered"
+      },
+      {
+        "requirement_id": "R4",
+        "status": "covered"
+      }
+    ],
+    "human_review_questions": [
+      "Please confirm work authorization and availability for employment in Singapore, if these details are required for the application.",
+      "Please confirm whether the overlapping Financial Alliance and Synpulse roles were concurrent and how you would like this represented.",
+      "Please confirm whether any additional evidence supports quantitative risk-model development, calibration, validation, pricing, market-data or low-latency trading-platform work before adding such claims."
+    ]
+  }
+}

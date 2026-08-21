@@ -18,7 +18,15 @@ export async function generatePdf(cvData: any, outputPath: string) {
     </div>
   `).join("");
 
-  const impactHtml = (c.selected_impact || []).map((imp: any) => `<li>${imp.text}</li>`).join("");
+  const snapHtml = c.role_alignment_snapshot ? `
+    <h2>${c.role_alignment_snapshot.heading || "Role Alignment Snapshot"}</h2>
+    ${c.role_alignment_snapshot.items.map((item: any) => `
+      <div style="margin-bottom: 15px;">
+        <div style="font-weight: bold; text-transform: uppercase; font-size: 11pt;">${item.requirement_label} — ${item.display_match_label}</div>
+        <div style="margin-top: 4px;">${item.evidence_statement}</div>
+      </div>
+    `).join("")}
+  ` : "";
   const eduHtml = (c.education || []).map((edu: any) => `<li>${edu}</li>`).join("");
   
   const expertiseHtml = (c.core_expertise || []).map((e: any) => `<span style="display:inline-block; margin-right: 15px; border-right: 1px solid #ccc; padding-right: 15px;">${e}</span>`).join("");
@@ -49,10 +57,7 @@ export async function generatePdf(cvData: any, outputPath: string) {
           <div style="line-height: 1.8;">${expertiseHtml}</div>
         ` : ""}
 
-        ${c.selected_impact ? `
-          <h2>Signature Impact</h2>
-          <ul>${impactHtml}</ul>
-        ` : ""}
+        ${snapHtml}
 
         ${c.experience ? `
           <h2>Professional Experience</h2>

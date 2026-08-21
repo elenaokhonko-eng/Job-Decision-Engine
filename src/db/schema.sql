@@ -15,11 +15,11 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- This enables aggregate analytics on ND culture.
 DROP TABLE IF EXISTS interactions_log CASCADE;
 DROP TABLE IF EXISTS agent_tool_logs CASCADE;
-DROP TABLE IF EXISTS raw_email_alerts CASCADE;
+-- DROP TABLE IF EXISTS raw_email_alerts CASCADE;
 DROP TABLE IF EXISTS jobs CASCADE;
-DROP TABLE IF EXISTS raw_jobs CASCADE;
+-- DROP TABLE IF EXISTS raw_jobs CASCADE;
 DROP TABLE IF EXISTS companies CASCADE;
-DROP TABLE IF EXISTS raw_companies CASCADE;
+-- DROP TABLE IF EXISTS raw_companies CASCADE;
 
 CREATE TABLE IF NOT EXISTS companies (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

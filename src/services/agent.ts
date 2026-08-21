@@ -381,7 +381,7 @@ async function runGeminiAgentInternal(
   let response: any;
   try {
     response = await ai.models.generateContent({
-      model: "gemini-3.6-flash",
+      model: "gemini-1.5-flash",
       contents: userQuestion,
       config: {
         systemInstruction,
@@ -393,7 +393,7 @@ async function runGeminiAgentInternal(
       console.warn("⏳ Gemini rate limit reached. Waiting 60s before retrying...");
       await new Promise((resolve) => setTimeout(resolve, 60000));
       response = await ai.models.generateContent({
-        model: "gemini-3.6-flash",
+        model: "gemini-1.5-flash",
         contents: userQuestion,
         config: {
           systemInstruction,
@@ -449,7 +449,7 @@ async function runGeminiAgentInternal(
     trace.push(`Step ${trace.length + 1}: Sending tool results back to Gemini for final assessment and ranking.`);
     
     response = await ai.models.generateContent({
-      model: "gemini-3.6-flash",
+      model: "gemini-1.5-flash",
       contents: conversationHistory,
       config: {
         systemInstruction,
@@ -471,7 +471,7 @@ async function runGeminiAgentInternal(
   conversationHistory.push({ role: "user", parts: [{ text: formattingPrompt }] });
 
   const finalResponse = await ai.models.generateContent({
-    model: "gemini-3.6-flash",
+    model: "gemini-1.5-flash",
     contents: conversationHistory,
     config: {
       systemInstruction,
@@ -487,11 +487,10 @@ async function runGeminiAgentInternal(
 export async function runAgent(userQuestion: string): Promise<{ result: AgentResult; trace: string[]; toolsUsed: string[] }> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
-  const kimiKey = process.env.KIMI_API_KEY;
 
-  if (!geminiKey && !openaiKey && !kimiKey) {
+  if (!geminiKey && !openaiKey) {
     throw new Error(
-      "CRITICAL API KEY CONFLICT: None of GEMINI_API_KEY, OPENAI_API_KEY, or KIMI_API_KEY environment variables are configured."
+      "CRITICAL API KEY CONFLICT: Neither GEMINI_API_KEY nor OPENAI_API_KEY environment variables are configured."
     );
   }
 
@@ -580,29 +579,14 @@ You MUST return a JSON object matching this schema exactly.
 
   const forceOpenAI = process.env.FORCE_OPENAI === "true";
   const order = forceOpenAI 
-    ? ["openai", "gemini", "kimi"] 
-    : ["gemini", "openai", "kimi"];
+    ? ["openai", "gemini"] 
+    : ["gemini", "openai"];
 
   const tried = new Set<string>();
   let parsedResult: AgentResult | null = null;
 
   for (const provider of order) {
-    if (provider === "kimi" && kimiKey && !tried.has("kimi")) {
-      tried.add("kimi");
-      try {
-        trace.push(`Step ${trace.length + 1}: Running evaluation agent with Kimi API...`);
-        const text = await tryKimi(kimiKey, {
-          contents: userQuestion,
-          responseMimeType: "application/json",
-          systemInstruction
-        });
-        parsedResult = parseResultJson(text, trace);
-        if (parsedResult) break;
-      } catch (err: any) {
-        console.warn(`⚠️ Kimi agent run failed: ${err.message || err}`);
-        trace.push(`Step ${trace.length + 1}: Kimi agent run failed: ${err.message || err}`);
-      }
-    }
+    // Kimi block removed
     if (provider === "openai" && openaiKey && !tried.has("openai")) {
       tried.add("openai");
       try {
@@ -780,7 +764,7 @@ export async function autoSyncExternalSources(enabled: {
 
   try {
     let rawText = await generateContent({
-      model: "gemini-3.6-flash",
+      model: "gemini-1.5-flash",
       contents: syncPrompt,
       responseMimeType: "application/json",
       systemInstruction: "You are a senior job board scraper crawler agent that compiles high-fidelity raw job advertisements from Singapore feeds."
