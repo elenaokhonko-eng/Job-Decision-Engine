@@ -274,46 +274,40 @@ async function unsaveCurrentJob(page: puppeteer.Page): Promise<boolean> {
   try {
     await page.waitForFunction(() => {
       const btn1 = document.querySelector('.jobs-save-button');
-      if (btn1) return true;
+      if (btn1 && btn1.textContent?.toLowerCase().includes('saved')) return true;
       const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
       return buttons.some(btn => {
         const text = (btn as HTMLElement).innerText.trim().toLowerCase();
         const aria = btn.getAttribute('aria-label')?.toLowerCase() || '';
         return text === 'saved' || text.includes('saved') || aria.includes('unsave') || aria === 'saved';
       });
-    }, { timeout: 5000 });
+    }, { timeout: 8000 });
   } catch (e) {
     // Timeout, button not found
     return false;
   }
 
-  const clicked = await page.evaluate(() => {
-    // 1. Try to find the button by standard class names used by LinkedIn
-    let savedBtn = document.querySelector('.jobs-save-button') as HTMLButtonElement;
-    
-    // 2. Fallback to searching all buttons for the text "Saved" or aria-label
-    if (!savedBtn) {
-      const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
-      savedBtn = buttons.find(btn => {
-        const text = (btn as HTMLElement).innerText.trim().toLowerCase();
-        const aria = btn.getAttribute('aria-label')?.toLowerCase() || '';
-        return text === 'saved' || text.includes('saved') || aria.includes('unsave') || aria === 'saved';
-      }) as HTMLButtonElement;
-    }
+  // Find the button and click it natively using Puppeteer
+  const buttons = await page.$$('button, div[role="button"]');
+  for (const btn of buttons) {
+    const isSavedBtn = await page.evaluate((el: HTMLElement) => {
+      const text = el.innerText.trim().toLowerCase();
+      const aria = el.getAttribute('aria-label')?.toLowerCase() || '';
+      const isJobSaveButton = el.classList.contains('jobs-save-button') && text.includes('saved');
+      return isJobSaveButton || text === 'saved' || text.includes('saved') || aria.includes('unsave') || aria === 'saved';
+    }, btn);
 
-    if (savedBtn) {
-      savedBtn.click();
-      return true;
+    if (isSavedBtn) {
+      try {
+        await btn.click({ delay: 50 });
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        return true;
+      } catch (err) {
+        console.warn("- Warning: native click failed on save button");
+      }
     }
-    
-    return false;
-  });
-
-  if (clicked) {
-    // Wait for LinkedIn API to process the unsave action
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    return true;
   }
+
   return false;
 }
 

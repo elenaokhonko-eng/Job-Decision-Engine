@@ -5,52 +5,62 @@
   "additionalProperties": false,
   "required": [
     "job_id",
-    "mandatory_requirements",
-    "preferred_requirements",
+    "requirements",
     "expected_outcomes",
     "leadership_mandate",
-    "technical_capabilities",
-    "scale_and_seniority_signals",
     "industry_knowledge",
-    "important_keywords",
-    "explicit_vs_inferred_requirements",
-    "potential_contradictions",
     "culture_and_work_pattern_indicators"
   ],
   "properties": {
     "job_id": { "type": "string" },
-    "mandatory_requirements": {
+    "requirements": {
       "type": "array",
+      "minItems": 6,
+      "maxItems": 12,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["req_id", "description"],
+        "required": [
+          "requirement_id",
+          "requirement_label",
+          "category",
+          "source_text",
+          "mandatory",
+          "importance_components"
+        ],
         "properties": {
-          "req_id": { "type": "string" },
-          "description": { "type": "string" }
-        }
-      }
-    },
-    "preferred_requirements": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["req_id", "description"],
-        "properties": {
-          "req_id": { "type": "string" },
-          "description": { "type": "string" }
+          "requirement_id": { "type": "string" },
+          "requirement_label": { "type": "string" },
+          "category": { "type": "string" },
+          "source_text": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "mandatory": { "type": "boolean" },
+          "importance_components": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role_mandate",
+              "prominence",
+              "business_outcome",
+              "seniority",
+              "repetition"
+            ],
+            "properties": {
+              "role_mandate": { "type": "number", "minimum": 0, "maximum": 35 },
+              "prominence": { "type": "number", "minimum": 0, "maximum": 20 },
+              "business_outcome": { "type": "number", "minimum": 0, "maximum": 20 },
+              "seniority": { "type": "number", "minimum": 0, "maximum": 15 },
+              "repetition": { "type": "number", "minimum": 0, "maximum": 10 }
+            }
+          }
         }
       }
     },
     "expected_outcomes": { "type": "array", "items": { "type": "string" } },
     "leadership_mandate": { "type": "string" },
-    "technical_capabilities": { "type": "array", "items": { "type": "string" } },
-    "scale_and_seniority_signals": { "type": "array", "items": { "type": "string" } },
     "industry_knowledge": { "type": "array", "items": { "type": "string" } },
-    "important_keywords": { "type": "array", "items": { "type": "string" } },
-    "explicit_vs_inferred_requirements": { "type": "array", "items": { "type": "string" } },
-    "potential_contradictions": { "type": "array", "items": { "type": "string" } },
     "culture_and_work_pattern_indicators": { "type": "array", "items": { "type": "string" } }
   }
 }

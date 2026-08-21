@@ -71,20 +71,27 @@ export async function generateDocx(cvData: any, outputPath: string) {
     children.push(new Paragraph({ spacing: { after: 200 } }));
   }
 
-  // Selected Impact
-  if (cvData.cv?.selected_impact && Array.isArray(cvData.cv.selected_impact)) {
+  // Role Alignment Snapshot
+  if (cvData.cv?.role_alignment_snapshot) {
+    const snap = cvData.cv.role_alignment_snapshot;
     children.push(
       new Paragraph({
         heading: HeadingLevel.HEADING_2,
-        children: [new TextRun({ text: "SIGNATURE IMPACT", font: "Arial", size: 24, bold: true })],
+        children: [new TextRun({ text: (snap.heading || "ROLE ALIGNMENT SNAPSHOT").toUpperCase(), font: "Arial", size: 24, bold: true })],
         spacing: { before: 200, after: 100 },
       })
     );
-    for (const impact of cvData.cv.selected_impact) {
+    for (const item of snap.items) {
       children.push(
         new Paragraph({
-          bullet: { level: 0 },
-          children: [new TextRun({ text: impact.text, size: 21, font: "Arial" })],
+          children: [
+            new TextRun({ text: `${item.requirement_label.toUpperCase()} — ${item.display_match_label.toUpperCase()}`, size: 21, font: "Arial", bold: true }),
+          ],
+          spacing: { after: 50 },
+        }),
+        new Paragraph({
+          children: [new TextRun({ text: item.evidence_statement, size: 21, font: "Arial" })],
+          spacing: { after: 150 },
         })
       );
     }

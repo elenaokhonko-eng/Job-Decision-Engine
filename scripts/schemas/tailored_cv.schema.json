@@ -81,7 +81,7 @@
         "headline",
         "executive_summary",
         "core_expertise",
-        "selected_impact",
+        "role_alignment_snapshot",
         "experience",
         "education"
       ],
@@ -108,11 +108,51 @@
           "uniqueItems": true,
           "items": { "type": "string" }
         },
-        "selected_impact": {
-          "type": "array",
-          "minItems": 3,
-          "maxItems": 5,
-          "items": { "$ref": "#/$defs/groundedBullet" }
+        "role_alignment_snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["heading", "target_role", "items"],
+          "properties": {
+            "heading": { "const": "Role Alignment Snapshot" },
+            "target_role": { "type": "string" },
+            "target_company": { "type": "string" },
+            "items": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "requirement_id",
+                  "requirement_label",
+                  "evidence_statement",
+                  "profile_fact_ids"
+                ],
+                "properties": {
+                  "requirement_id": { "type": "string" },
+                  "requirement_label": { "type": "string" },
+                  "display_match_label": {
+                    "enum": [
+                      "Demonstrated at scale",
+                      "Direct evidence",
+                      "Transferable evidence"
+                    ]
+                  },
+                  "evidence_statement": { "type": "string", "minLength": 40, "maxLength": 280 },
+                  "profile_fact_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string" }
+                  },
+                  "keywords_used": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
         },
         "experience": {
           "type": "array",

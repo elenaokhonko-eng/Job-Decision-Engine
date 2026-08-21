@@ -8,14 +8,14 @@ const pool = new pg.Pool({
   ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false }
 });
 
-async function checkJobs() {
   try {
-    const res = await pool.query("SELECT processed, count(*) FROM raw_email_alerts GROUP BY processed;");
-    console.log("raw_email_alerts processed status counts:");
-    console.table(res.rows);
-
-    const jobsCols = await pool.query("SELECT * FROM jobs LIMIT 1;");
-    console.log("jobs Columns:", Object.keys(jobsCols.rows[0] || {}));
+    await pool.query("UPDATE raw_email_alerts SET processed = FALSE");
+    const rawEmail = await pool.query("SELECT COUNT(*) FROM raw_email_alerts WHERE processed = FALSE");
+    const rawJobs = await pool.query("SELECT COUNT(*) FROM raw_jobs WHERE processed = FALSE");
+    const jobs = await pool.query("SELECT COUNT(*) FROM jobs");
+    console.log("Unprocessed Raw Email Alerts:", rawEmail.rows[0].count);
+    console.log("Unprocessed Raw Jobs:", rawJobs.rows[0].count);
+    console.log("Jobs:", jobs.rows[0].count);
   } catch (err) {
     console.error(err);
   } finally {

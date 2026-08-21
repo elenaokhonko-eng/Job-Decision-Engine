@@ -3,29 +3,43 @@
   "title": "EvidenceMap",
   "type": "object",
   "additionalProperties": false,
-  "required": ["job_id", "requirement_matches"],
+  "required": ["job_id", "role_alignment_analysis"],
   "properties": {
     "job_id": { "type": "string" },
-    "requirement_matches": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "req_id",
-          "match_status",
-          "profile_fact_ids"
-        ],
-        "properties": {
-          "req_id": { "type": "string" },
-          "match_status": {
-            "enum": ["direct_match", "transferable_match", "partial_match", "gap", "not_relevant"]
-          },
-          "profile_fact_ids": {
-            "type": "array",
-            "items": { "type": "string" }
-          },
-          "rationale": { "type": "string" }
+    "role_alignment_analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requirements"],
+      "properties": {
+        "requirements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requirement_id",
+              "candidate_match_components",
+              "differentiator_score",
+              "profile_fact_ids"
+            ],
+            "properties": {
+              "requirement_id": { "type": "string" },
+              "candidate_match_components": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["directness", "outcome", "scale", "proximity", "recency"],
+                "properties": {
+                  "directness": { "type": "number", "minimum": 0, "maximum": 35 },
+                  "outcome": { "type": "number", "minimum": 0, "maximum": 25 },
+                  "scale": { "type": "number", "minimum": 0, "maximum": 15 },
+                  "proximity": { "type": "number", "minimum": 0, "maximum": 15 },
+                  "recency": { "type": "number", "minimum": 0, "maximum": 10 }
+                }
+              },
+              "differentiator_score": { "type": "number", "minimum": 0, "maximum": 100 },
+              "profile_fact_ids": { "type": "array", "items": { "type": "string" } }
+            }
+          }
         }
       }
     }
