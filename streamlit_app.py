@@ -508,7 +508,7 @@ st.sidebar.header("🎯 Navigation & Filters")
 total_jobs = len(jobs_list)
 evaluated_count = sum(1 for j in jobs_list if j.get("status") and j.get("status") != "UNASSIGNED")
 approved_count = sum(1 for j in jobs_list if j.get("status") == "STRONG MATCH")
-toxic_count = sum(1 for j in jobs_list if j.get("politics_stress_score", 0) >= 70 or j.get("nd_friendly_score", 100) < 50)
+toxic_count = sum(1 for j in jobs_list if (j.get("politics_stress_score") or 0) >= 70 or (j.get("nd_friendly_score") or 100) < 50)
 
 st.sidebar.subheader("📊 Engine Statistics")
 st.sidebar.metric("Total Vault Jobs", total_jobs)
@@ -726,7 +726,7 @@ tab_dashboard, tab_add_job, tab_linkedin, tab_analytics, tab_cv = st.tabs(["📁
 with tab_dashboard:
     # Segment out Top Recommended Jobs (STRONG MATCH, sorted by score DESC, limited to 10)
     top_recommended = [j for j in jobs_list if j.get("status") == "STRONG MATCH"]
-    top_recommended = sorted(top_recommended, key=lambda x: x.get("total_score", 0), reverse=True)[:10]
+    top_recommended = sorted(top_recommended, key=lambda x: (x.get("total_score") or 0), reverse=True)[:10]
 
     st.subheader("🏆 Top 10 Recommended Jobs")
     if not top_recommended:
@@ -767,7 +767,7 @@ with tab_dashboard:
         # Sort and split active vs rejected jobs
         def status_sort_key(j):
             status = j.get("status", "UNASSIGNED")
-            score = j.get("total_score", 0)
+            score = (j.get("total_score") or 0)
             if status == "STRONG MATCH":
                 return (0, -score)
             elif status == "REVIEW REQUIRED":
@@ -835,7 +835,7 @@ with tab_dashboard:
                     for idx, job in enumerate(rejected_jobs[:display_limit]):
                         company = job.get("company", "Unknown")
                         title = job.get("title", "Job Title")
-                        score = job.get("total_score", 0)
+                        score = (job.get("total_score") or 0)
                         
                         with st.popover(f"🔴 {title} — {company}"):
                             st.markdown(f"**Source Board:** `{job.get('source')}`")
