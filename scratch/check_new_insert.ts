@@ -14,11 +14,11 @@ const pool = new Pool({
 
 async function run() {
   console.log("Checking if BJAK job exists in processed 'jobs' table...");
-  const resBjakProcessed = await pool.query("SELECT id, title, company_name, status, total_score, created_at FROM jobs WHERE company_name ILIKE '%BJAK%'");
+  const resBjakProcessed = await pool.query("SELECT id, title, company_name, final_classification, total_score, created_at FROM jobs WHERE company_name ILIKE '%BJAK%'");
   if (resBjakProcessed.rows.length > 0) {
     console.log(`✅ YES, BJAK is in the processed 'jobs' table:`);
     resBjakProcessed.rows.forEach(r => {
-      console.log(`  - [${r.created_at.toLocaleString()}] ${r.company_name} | ${r.title} (Status: ${r.status}, Score: ${r.total_score}/100)`);
+      console.log(`  - [${r.created_at.toLocaleString()}] ${r.company_name} | ${r.title} (Status: ${r.final_classification}, Score: ${r.total_score}/100)`);
     });
   } else {
     console.log(`❌ NO, BJAK is NOT in the processed 'jobs' table yet.`);
@@ -32,10 +32,10 @@ async function run() {
 
   console.log("\nChecking total jobs processed or added TODAY (August 2, 2026)...");
   // In jobs table:
-  const resJobsToday = await pool.query("SELECT title, company_name, status, created_at FROM jobs WHERE created_at >= '2026-08-02 00:00:00' ORDER BY created_at DESC");
+  const resJobsToday = await pool.query("SELECT title, company_name, final_classification, created_at FROM jobs WHERE created_at >= '2026-08-02 00:00:00' ORDER BY created_at DESC");
   console.log(`Found ${resJobsToday.rows.length} jobs created/processed in the final 'jobs' table today:`);
   resJobsToday.rows.forEach(r => {
-    console.log(`  - [${r.created_at.toLocaleString()}] ${r.company_name} | ${r.title} (${r.status})`);
+    console.log(`  - [${r.created_at.toLocaleString()}] ${r.company_name} | ${r.title} (${r.final_classification})`);
   });
 
   await pool.end();

@@ -35,11 +35,28 @@ export async function extractWithFallback(raw: string, schema?: any): Promise<st
   // 1️⃣ Ollama (local)
   try {
     let ollamaRes = await callLLM("extract", raw, { schema });
-    if (ollamaRes.startsWith("```json")) {
-      ollamaRes = ollamaRes.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-    } else if (ollamaRes.startsWith("```")) {
-      ollamaRes = ollamaRes.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    
+    // Robust JSON extraction: find the first { or [ and last } or ]
+    const firstBrace = ollamaRes.indexOf('{');
+    const firstBracket = ollamaRes.indexOf('[');
+    const lastBrace = ollamaRes.lastIndexOf('}');
+    const lastBracket = ollamaRes.lastIndexOf(']');
+    
+    let startIndex = -1;
+    let endIndex = -1;
+    
+    if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+      startIndex = firstBrace;
+      endIndex = lastBrace;
+    } else if (firstBracket !== -1) {
+      startIndex = firstBracket;
+      endIndex = lastBracket;
     }
+    
+    if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+      ollamaRes = ollamaRes.substring(startIndex, endIndex + 1);
+    }
+    
     JSON.parse(ollamaRes); // Validate
     return ollamaRes;
   } catch (e) {
@@ -49,7 +66,7 @@ export async function extractWithFallback(raw: string, schema?: any): Promise<st
   // 2️⃣ Gemini (requires GEMINI_API_KEY)
   try {
     let geminiRes = await generateContent({
-      model: "gemini-1.5-flash",
+      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
       contents: raw,
       responseMimeType: "application/json",
       responseSchema: schema
