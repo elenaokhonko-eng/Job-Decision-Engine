@@ -507,7 +507,7 @@ st.sidebar.header("🎯 Navigation & Filters")
 # Metrics
 total_jobs = len(jobs_list)
 evaluated_count = sum(1 for j in jobs_list if j.get("status") and j.get("status") != "UNASSIGNED")
-approved_count = sum(1 for j in jobs_list if j.get("status") == "STRONG MATCH")
+approved_count = sum(1 for j in jobs_list if j.get("status") in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK"))
 toxic_count = sum(1 for j in jobs_list if (j.get("politics_stress_score") or 0) >= 70 or (j.get("nd_friendly_score") or 100) < 50)
 
 st.sidebar.subheader("📊 Engine Statistics")
@@ -725,7 +725,7 @@ tab_dashboard, tab_add_job, tab_linkedin, tab_analytics, tab_cv = st.tabs(["📁
 
 with tab_dashboard:
     # Segment out Top Recommended Jobs (STRONG MATCH, sorted by score DESC, limited to 10)
-    top_recommended = [j for j in jobs_list if j.get("status") == "STRONG MATCH"]
+    top_recommended = [j for j in jobs_list if j.get("status") in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK")]
     top_recommended = sorted(top_recommended, key=lambda x: (x.get("total_score") or 0), reverse=True)[:10]
 
     st.subheader("🏆 Top 10 Recommended Jobs")
@@ -768,9 +768,9 @@ with tab_dashboard:
         def status_sort_key(j):
             status = j.get("status", "UNASSIGNED")
             score = (j.get("total_score") or 0)
-            if status == "STRONG MATCH":
+            if status in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK"):
                 return (0, -score)
-            elif status == "REVIEW REQUIRED":
+            elif status in ("REVIEW REQUIRED", "APPLY_AFTER_VERIFICATION"):
                 return (1, -score)
             elif status == "REJECTED":
                 return (2, -score)
@@ -793,7 +793,7 @@ with tab_dashboard:
                     score = job.get("total_score", 0)
                     company = job.get("company", "Unknown")
                     title = job.get("title", "Job Title")
-                    badge_style = "🟢" if status == "STRONG MATCH" else "🟡"
+                    badge_style = "✅" if status in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK") else "⚠️"
                     
                     with st.expander(f"{badge_style} {title} — {company} ({status})"):
                         st.markdown(f"**Source Board:** `{job.get('source')}`")
@@ -1189,8 +1189,13 @@ with tab_analytics:
         
         # Map safety verdicts
         def get_verdict(row):
+            st = row["Status"]
             if row["Approved"]:
                 return "🟢 HIGH AUTONOMY / OPTIMAL FOCUS"
+            if st in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK"):
+                return "✅ PRIORITY"
+            elif st in ("REVIEW REQUIRED", "APPLY_AFTER_VERIFICATION"):
+                return "⚠️ REVIEW REQUIRED"
             elif row["Toxic"]:
                 return "🔴 HIGH POLITICS / BUREAUCRATIC"
             else:
@@ -1227,7 +1232,7 @@ with tab_cv:
                     st.rerun()
 
         # Select a job to customize against (only showing STRONG MATCH or REVIEW REQUIRED)
-        eligible_jobs = [j for j in jobs_list if j.get("status") in ("STRONG MATCH", "REVIEW REQUIRED")]
+        eligible_jobs = [j for j in jobs_list if j.get("status") in ("STRONG MATCH", "REVIEW REQUIRED", "PRIORITY_APPLY", "APPLY_AFTER_VERIFICATION", "HIGH_FIT_HIGH_RISK")]
         
         if not eligible_jobs:
             st.info("No eligible jobs found for tailoring. Only jobs evaluated as 'STRONG MATCH' or 'REVIEW REQUIRED' can be tailored.")
