@@ -800,8 +800,15 @@ with tab_dashboard:
                         st.markdown(f"**Salary Range:** {job.get('salaryRange') or 'Not specified'}")
                         st.markdown(f"**Location:** {job.get('location') or 'Singapore'}")
                         st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
+                        score = job.get('total_score', 0)
+                        aut = job.get('nd_friendly_score')
+                        pol = job.get('politics_stress_score')
+                        
+                        aut_str = f"🟢 {aut}%" if aut and aut >= 70 else (f"🔴 {aut}%" if aut else "N/A")
+                        pol_str = f"🔴 {pol}%" if pol and pol >= 40 else (f"🟢 {pol}%" if pol else "N/A")
+                        
                         st.markdown(f"**Match Score:** `{score}/100`")
-                        st.markdown(f"**Autonomy Score:** `{job.get('nd_friendly_score') or 'N/A'}%` | **Politics Stress:** `{job.get('politics_stress_score') or 'N/A'}%`")
+                        st.markdown(f"**Autonomy Score:** {aut_str} | **Politics Stress:** {pol_str}")
                         
                         desc_text = job.get("description", "")
                         parsed_desc = None
@@ -883,15 +890,23 @@ with tab_dashboard:
             
             # Show score metrics
             st.markdown("---")
-            st.markdown(f"### Match Score: `{job_to_show.get('total_score', 0)} / 100`")
+            core = job_to_show.get('total_score', 0)
+            core_emoji = "🟢" if core >= 80 else "🔴"
+            st.markdown(f"### Match Score: `{core} / 100` {core_emoji}")
             
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Autonomy Culture Score", f"{job_to_show.get('nd_friendly_score')}%")
+                aut = job_to_show.get('nd_friendly_score')
+                aut_emoji = "🟢" if aut and aut >= 70 else ("🔴" if aut else "")
+                st.metric("Autonomy Culture Score", f"{aut}% {aut_emoji}")
             with col2:
-                st.metric("Politics Stress Score", f"{job_to_show.get('politics_stress_score')}%")
+                pol = job_to_show.get('politics_stress_score')
+                pol_emoji = "🔴" if pol and pol >= 40 else ("🟢" if pol else "")
+                st.metric("Politics Stress Score", f"{pol}% {pol_emoji}")
             with col3:
-                st.metric("Environmental Stress Index", f"{job_to_show.get('sensory_overload_index')}%")
+                env = job_to_show.get('sensory_overload_index')
+                env_emoji = "🔴" if env and env >= 50 else ("🟢" if env else "")
+                st.metric("Environmental Stress Index", f"{env}% {env_emoji}")
 
             st.markdown("#### **Evaluation Axes Breakdown**")
             st.json({
