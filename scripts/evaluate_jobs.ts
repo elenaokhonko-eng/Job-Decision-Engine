@@ -647,14 +647,7 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
               const mobilityScore = (evalResult as any).score_future_mobility ?? evalResult.score_breakdown?.market_durability?.score ?? evalResult.score_breakdown?.future_mobility?.score ?? 0;
               const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || null;
 
-              let finalStatus = status;
-              if (totalScore > 70 && finalStatus !== "REJECTED") {
-                finalStatus = "STRONG MATCH";
-              } else if (totalScore >= 50 && finalStatus !== "REJECTED") {
-                finalStatus = "REVIEW REQUIRED";
-              } else if (finalStatus === "LOW_STRATEGIC_VALUE") {
-                finalStatus = "REJECTED";
-              }
+              const finalStatus = status;
 
               // Insert into the final jobs/companies table
               const finalJob = await db.addJob({
@@ -670,12 +663,12 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
                 final_classification: finalStatus,
                 career_horizon_route: track,
                 confidence_level: evalResult.confidence_level || "Medium",
-                total_score: totalScore,
+                core_fit_score: totalScore,
                 score_technical_autonomy: techScore,
-                score_compensation_potential: compScore,
-                score_domain_relevance: domainScore,
-                score_environment_guardrails: envScore,
-                score_future_mobility: mobilityScore,
+                score_comp_quality: compScore,
+                score_hands_on_mastery: domainScore,
+                score_role_purity: envScore,
+                score_market_durability: mobilityScore,
                 nd_friendly_score: evalResult.nd_friendly_score || 0,
                 politics_stress_score: evalResult.politics_stress_score || 0,
                 sensory_overload_index: evalResult.sensory_overload_index || 0,
