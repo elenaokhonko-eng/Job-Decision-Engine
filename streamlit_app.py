@@ -113,13 +113,20 @@ def fetch_jobs_from_db():
         cursor.execute("""
             SELECT id, title, company_name as company, source, raw_description as description, 
                    salary_range as "salaryRange", posted_date::text as "postedDate", location, 
-                   careers_portal_url, status, assigned_track, confidence_level, total_score,
-                   score_technical_autonomy, score_compensation_potential, score_domain_relevance,
-                   score_environment_guardrails, score_future_mobility,
+                   careers_portal_url, 
+                   final_classification as status, 
+                   career_horizon_route as assigned_track, 
+                   confidence_level, 
+                   core_fit_score as total_score,
+                   score_technical_autonomy, 
+                   score_comp_quality as score_compensation_potential, 
+                   score_role_purity as score_domain_relevance,
+                   nd_friendly_score as score_environment_guardrails, 
+                   score_market_durability as score_future_mobility,
                    nd_friendly_score, politics_stress_score, sensory_overload_index,
                    biological_stress_risk, strategic_value, recommended_cv_version, next_action
             FROM jobs 
-            ORDER BY total_score DESC, created_at DESC
+            ORDER BY core_fit_score DESC, created_at DESC
         """)
         rows = cursor.fetchall()
         cursor.close()
@@ -148,9 +155,9 @@ def delete_job_from_db(job_id):
                   AVG(nd_friendly_score) as avg_nd,
                   AVG(politics_stress_score) as avg_pol,
                   AVG(sensory_overload_index) as avg_sens,
-                  AVG(score_environment_guardrails) as avg_focus
+                  AVG(nd_friendly_score) as avg_focus
                 FROM jobs 
-                WHERE company_id = %s AND status != 'UNASSIGNED'
+                WHERE company_id = %s AND final_classification IS NOT NULL
             """, (company_id,))
             stats = cursor.fetchone()
             if stats and stats[0] is not None:

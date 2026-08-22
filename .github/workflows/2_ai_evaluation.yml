@@ -20,6 +20,9 @@ jobs:
       - name: Install Node.js dependencies
         run: npm ci
 
+      - name: Install Puppeteer OS Dependencies
+        run: sudo apt-get update && sudo apt-get install -y libnss3 libnspr4 libgbm1 libasound2 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2
+
       - name: Run AI Evaluation Pipeline
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

@@ -159,7 +159,7 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await ai.models.generateContent({
-        model: options.model || "gemini-1.5-flash",
+        model: options.model || process.env.GEMINI_MODEL || "gemini-1.5-flash",
         contents: options.contents,
         config: {
           responseMimeType: options.responseMimeType as any,
@@ -381,7 +381,7 @@ async function runGeminiAgentInternal(
   let response: any;
   try {
     response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
       contents: userQuestion,
       config: {
         systemInstruction,
@@ -393,7 +393,7 @@ async function runGeminiAgentInternal(
       console.warn("⏳ Gemini rate limit reached. Waiting 60s before retrying...");
       await new Promise((resolve) => setTimeout(resolve, 60000));
       response = await ai.models.generateContent({
-        model: "gemini-1.5-flash",
+        model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
         contents: userQuestion,
         config: {
           systemInstruction,
@@ -449,7 +449,7 @@ async function runGeminiAgentInternal(
     trace.push(`Step ${trace.length + 1}: Sending tool results back to Gemini for final assessment and ranking.`);
     
     response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
       contents: conversationHistory,
       config: {
         systemInstruction,
@@ -471,7 +471,7 @@ async function runGeminiAgentInternal(
   conversationHistory.push({ role: "user", parts: [{ text: formattingPrompt }] });
 
   const finalResponse = await ai.models.generateContent({
-    model: "gemini-1.5-flash",
+    model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
     contents: conversationHistory,
     config: {
       systemInstruction,
@@ -764,7 +764,7 @@ export async function autoSyncExternalSources(enabled: {
 
   try {
     let rawText = await generateContent({
-      model: "gemini-1.5-flash",
+      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
       contents: syncPrompt,
       responseMimeType: "application/json",
       systemInstruction: "You are a senior job board scraper crawler agent that compiles high-fidelity raw job advertisements from Singapore feeds."
