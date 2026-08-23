@@ -539,12 +539,12 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
               final_classification: "REJECTED",
               career_horizon_route: "STRATEGIC_DEAD_END",
               confidence_level: "Low",
-              total_score: 0,
+              core_fit_score: 0,
               score_technical_autonomy: 0,
-              score_compensation_potential: 0,
-              score_domain_relevance: 0,
-              score_environment_guardrails: 0,
-              score_future_mobility: 0,
+              score_comp_quality: 0,
+              score_hands_on_mastery: 0,
+              score_role_purity: 0,
+              score_market_durability: 0,
               nd_friendly_score: 0,
               politics_stress_score: 0,
               sensory_overload_index: 0,
@@ -594,12 +594,12 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
               final_classification: "REJECTED",
               career_horizon_route: "STRATEGIC_DEAD_END",
               confidence_level: "Low",
-              total_score: 0,
+              core_fit_score: 0,
               score_technical_autonomy: 0,
-              score_compensation_potential: 0,
-              score_domain_relevance: 0,
-              score_environment_guardrails: 0,
-              score_future_mobility: 0,
+              score_comp_quality: 0,
+              score_hands_on_mastery: 0,
+              score_role_purity: 0,
+              score_market_durability: 0,
               nd_friendly_score: 0,
               politics_stress_score: 0,
               sensory_overload_index: 0,
@@ -634,17 +634,17 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
             const { result } = await runAgent(evalQuery);
             const evalResult = result.evaluated_jobs?.[0];
             if (evalResult) {
-              const totalScore = evalResult.core_fit_score ?? evalResult.total_score ?? 0;
-              const status = evalResult.final_classification ?? evalResult.status ?? "REJECTED";
-              const track = evalResult.career_horizon_route ?? evalResult.assigned_track ?? "Neither";
+              const totalScore = evalResult.core_fit_score ?? 0;
+              const status = evalResult.final_classification ?? "REJECTED";
+              const track = evalResult.career_horizon_route ?? "STRATEGIC_DEAD_END";
 
               console.log(`  -> Complete: Score = ${totalScore}/100, Status = ${status}, Track = ${track}`);
               
               const techScore = (evalResult as any).score_technical_autonomy ?? evalResult.score_breakdown?.technical_autonomy?.score ?? 0;
-              const compScore = (evalResult as any).score_compensation_potential ?? evalResult.score_breakdown?.comp_quality?.score ?? evalResult.score_breakdown?.compensation_potential?.score ?? 0;
-              const domainScore = (evalResult as any).score_domain_relevance ?? evalResult.score_breakdown?.hands_on_mastery?.score ?? evalResult.score_breakdown?.domain_relevance?.score ?? 0;
-              const envScore = (evalResult as any).score_environment_guardrails ?? evalResult.score_breakdown?.role_purity?.score ?? evalResult.score_breakdown?.environment_guardrails?.score ?? 0;
-              const mobilityScore = (evalResult as any).score_future_mobility ?? evalResult.score_breakdown?.market_durability?.score ?? evalResult.score_breakdown?.future_mobility?.score ?? 0;
+              const compScore = (evalResult as any).score_comp_quality ?? evalResult.score_breakdown?.comp_quality?.score ?? 0;
+              const domainScore = (evalResult as any).score_hands_on_mastery ?? evalResult.score_breakdown?.hands_on_mastery?.score ?? 0;
+              const envScore = (evalResult as any).score_role_purity ?? evalResult.score_breakdown?.role_purity?.score ?? 0;
+              const mobilityScore = (evalResult as any).score_market_durability ?? evalResult.score_breakdown?.market_durability?.score ?? 0;
               const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || null;
 
               const finalStatus = status;
@@ -707,11 +707,11 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
     // Filter jobs that were evaluated in the current run and are eligible (status in 'STRONG MATCH', 'REVIEW REQUIRED')
     const eligibleJobs = allJobs.filter(j => 
       evaluatedTodayIds.includes(j.id) && 
-      (j.status === "STRONG MATCH" || j.status === "REVIEW REQUIRED")
+      (j.final_classification === "PRIORITY_APPLY" || j.final_classification === "APPLY_AFTER_VERIFICATION")
     );
     
-    // Sort by total_score DESC
-    const sortedEligible = eligibleJobs.sort((a, b) => (b.total_score || 0) - (a.total_score || 0));
+    // Sort by core_fit_score DESC
+    const sortedEligible = eligibleJobs.sort((a, b) => (b.core_fit_score || 0) - (a.core_fit_score || 0));
     
     const topTen = sortedEligible.slice(0, 10);
     for (const job of topTen) {
@@ -733,7 +733,7 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
         console.log("No jobs processed today met the criteria for applying.");
       } else {
         topTen.forEach((j, i) => {
-          console.log(`  [#${i+1}] ${j.title} at ${j.company} (Score: ${j.total_score}/100, Status: ${j.status})`);
+          console.log(`  [#${i+1}] ${j.title} at ${j.company} (Score: ${j.core_fit_score}/100, Status: ${j.final_classification})`);
         });
       }
     }

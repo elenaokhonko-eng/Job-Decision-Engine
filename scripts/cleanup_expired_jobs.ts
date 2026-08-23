@@ -94,7 +94,7 @@ async function run() {
 
   // 1. Fetch active jobs
   const res = await pool.query(
-    "SELECT id, company_name, title, careers_portal_url, status FROM jobs WHERE status IN ('STRONG MATCH', 'REVIEW REQUIRED')"
+    "SELECT id, company_name, title, careers_portal_url, final_classification FROM jobs WHERE final_classification IN ('PRIORITY_APPLY', 'APPLY_AFTER_VERIFICATION', 'HIGH_FIT_HIGH_RISK')"
   );
   console.log(`Found ${res.rows.length} active jobs in the database.`);
 
@@ -166,7 +166,7 @@ async function run() {
       if (isExpired) {
         console.log(`  -> ⚠️ EXPIRED! Marking status as REJECTED and unsetting is_top_ten.`);
         await pool.query(
-          "UPDATE jobs SET status = 'REJECTED', is_top_ten = FALSE, total_score = 0 WHERE id = $1",
+          "UPDATE jobs SET final_classification = 'REJECTED', is_top_ten = FALSE, core_fit_score = 0 WHERE id = $1",
           [job.id]
         );
         expiredCount++;

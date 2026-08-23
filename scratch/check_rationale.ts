@@ -9,7 +9,7 @@ const pool = new pg.Pool({
 });
 
 async function run() {
-  const res = await pool.query("SELECT id, title, company_name, final_classification, core_fit_score, is_top_ten FROM jobs WHERE final_classification IN ('STRONG MATCH', 'PRIORITY_APPLY') OR is_top_ten = TRUE");
+  const res = await pool.query("SELECT id, title, company_name, final_classification, core_fit_score, is_top_ten FROM jobs WHERE evaluation_rationale ILIKE '%Accenture%'");
   console.log("Total matching rows:", res.rows.length);
   for (const row of res.rows) {
     console.log(`- ${row.title} @ ${row.company_name} | Status: ${row.final_classification} | Score: ${row.core_fit_score} | Top 10: ${row.is_top_ten}`);

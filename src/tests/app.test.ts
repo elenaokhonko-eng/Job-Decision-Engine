@@ -38,10 +38,11 @@ describe.sequential("Job Decision Engine Test Suite", () => {
         location: "Singapore (Hybrid)",
         careers_portal_url: "https://www.efinancialcareers.sg/jobs/lead-ai-regtech-platform-architect-apex-wealth-management-100231",
         description: "Hands-on Platform Architect experience building AI compliance platform.",
-        status: "STRONG MATCH",
-        assigned_track: "Track A - Finance/AI",
+        stage1_status: "PASS",
+        final_classification: "PRIORITY_APPLY",
+        career_horizon_route: "SCIENTIFIC_AI_CONVERGENCE",
         confidence_level: "High",
-        total_score: 92
+        core_fit_score: 92
       }, true);
       jobs = await db.queryJobs();
     }
@@ -63,9 +64,10 @@ describe.sequential("Job Decision Engine Test Suite", () => {
       salaryRange: "EUR 6,000 / month",
       location: "Utrecht, Netherlands",
       careers_portal_url: "https://www.florapharma.nl/careers",
-      status: "STRONG MATCH" as const,
+      stage1_status: "PASS" as const,
+      final_classification: "PRIORITY_APPLY" as const,
       confidence_level: "High" as const,
-      total_score: 85
+      core_fit_score: 85
     };
 
     const addedJob = await db.addJob(newJobPayload, true);
@@ -89,9 +91,10 @@ describe.sequential("Job Decision Engine Test Suite", () => {
         source: "LinkedIn",
         description: "Test description",
         careers_portal_url: "https://www.linkedin.com/jobs/view/test-delete",
-        status: "STRONG MATCH",
+        stage1_status: "PASS",
+        final_classification: "PRIORITY_APPLY",
         confidence_level: "High",
-        total_score: 80
+        core_fit_score: 80
       }, true);
       jobsBefore = await db.queryJobs();
     }
