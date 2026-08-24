@@ -1381,11 +1381,11 @@ You MUST output a JSON object conforming exactly to this schema:
 
 ---
 ### TARGET JOB SPECIFICATION:
-- **Title**: {job_data[0]}
-- **Company**: {job_data[1]}
-- **Location**: {job_data[3] or 'Singapore'}
+- **Title**: {selected_job.get('title', '')}
+- **Company**: {selected_job.get('company', '')}
+- **Location**: {selected_job.get('location', 'Singapore')}
 - **Job Description**:
-{job_data[2]}
+{actual_text}
 
 ---
 ### USER MASTER PROFILE:
@@ -1463,8 +1463,8 @@ You MUST output a JSON object conforming exactly to this schema:
 
 ---
 ### TARGET JOB SPECIFICATION:
-- **Title**: {job_data[0]}
-- **Company**: {job_data[1]}
+- **Title**: {selected_job.get('title', '')}
+- **Company**: {selected_job.get('company', '')}
 
 ### STAGE 1 ANALYSIS (For reference):
 {json.dumps(analysis, indent=2)}
