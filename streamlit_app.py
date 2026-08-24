@@ -1379,7 +1379,7 @@ with tab_cv:
                             # Read data ledgers and schemas
                             with open("data/title_ledger.json", "r", encoding="utf-8-sig") as f:
                                 title_ledger = f.read()
-                            with open("data/profile_evidence.json", "r", encoding="utf-8-sig") as f:
+                            with open("my_profile.md", "r", encoding="utf-8") as f:
                                 profile_evidence = f.read()
                             with open("scripts/schemas/jd_analysis.schema.json", "r", encoding="utf-8-sig") as f:
                                 jd_analysis_schema = f.read()
@@ -1465,6 +1465,9 @@ Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decid
 
 ### TITLE LEDGER:
 {title_ledger}
+
+### PROFILE EVIDENCE:
+{profile_evidence}
 
 ### STAGE 1 ANALYSIS:
 {json_text}
