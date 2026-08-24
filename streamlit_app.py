@@ -508,12 +508,14 @@ st.sidebar.header("🎯 Navigation & Filters")
 total_jobs = len(jobs_list)
 evaluated_count = sum(1 for j in jobs_list if j.get("status") and j.get("status") != "UNASSIGNED")
 approved_count = sum(1 for j in jobs_list if j.get("status") in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK"))
+review_count = sum(1 for j in jobs_list if j.get("status") in ("REVIEW REQUIRED", "APPLY_AFTER_VERIFICATION"))
 toxic_count = sum(1 for j in jobs_list if (j.get("politics_stress_score") or 0) >= 70 or (j.get("nd_friendly_score") or 100) < 50)
 
 st.sidebar.subheader("📊 Engine Statistics")
 st.sidebar.metric("Total Vault Jobs", total_jobs)
 st.sidebar.metric("Fully Evaluated", evaluated_count)
 st.sidebar.metric("Top Recommended (Strong)", approved_count)
+st.sidebar.metric("Needs Review", review_count)
 st.sidebar.metric("Toxicity Flags", toxic_count)
 
 st.sidebar.markdown("---")
@@ -990,113 +992,137 @@ with tab_linkedin:
         st.markdown("### 📋 Option B: Manual Export & Upload")
         st.write("If your cookie expires or you prefer manual control, run the browser console script below and upload the exported JSON file.")
         script_code = r"""(async function extractSavedJobs() {
-  console.log("🚀 Starting LinkedIn Saved Jobs pagination walk...");
-  
-  const uniqueJobs = [];
-  const processedUrls = new Set();
-  let pageNum = 1;
-  let hasNextPage = true;
-  
-  while (hasNextPage && pageNum <= 40) {
-    console.log(`📄 Processing Page ${pageNum}...`);
+  if (window._jobScraperRunning) {
+    alert("Job scraper is already running! Please wait for it to finish or refresh the page.");
+    return;
+  }
+  window._jobScraperRunning = true;
+
+  // Create visual overlay for progress
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);color:white;z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:sans-serif;font-size:18px;';
+  const statusText = document.createElement('div');
+  statusText.innerText = "🚀 Starting LinkedIn Saved Jobs extraction...";
+  const progressText = document.createElement('div');
+  progressText.style.marginTop = '10px';
+  progressText.style.fontSize = '24px';
+  progressText.style.fontWeight = 'bold';
+  overlay.appendChild(statusText);
+  overlay.appendChild(progressText);
+  document.body.appendChild(overlay);
+
+  try {
+    const uniqueJobs = [];
+    const processedUrls = new Set();
+    let pageNum = 1;
+    let hasNextPage = true;
     
-    // Scroll to bottom to ensure elements render
-    window.scrollTo(0, document.body.scrollHeight);
-    await new Promise(r => setTimeout(r, 2000));
-    
-    // Find all job links on this page
-    const jobLinks = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
-    let pageCount = 0;
-    
-    for (const a of jobLinks) {
-      const title = (a.innerText || "").trim();
-      if (!title || title.length < 3) continue;
+    while (hasNextPage && pageNum <= 40) {
+      statusText.innerText = `📄 Scanning Page ${pageNum}...`;
       
-      let jobId = '';
-      const match = a.href.match(/\/jobs\/view\/(\d+)/);
-      if (match) jobId = match[1];
+      // Scroll to bottom to ensure elements render
+      window.scrollTo(0, document.body.scrollHeight);
+      await new Promise(r => setTimeout(r, 2000));
       
-      if (jobId) {
-        const standardUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
+      // Find all job links on this page
+      const jobLinks = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
+      let pageCount = 0;
+      
+      for (const a of jobLinks) {
+        const title = (a.innerText || "").trim();
+        if (!title || title.length < 3) continue;
         
-        if (!processedUrls.has(standardUrl)) {
-          processedUrls.add(standardUrl);
+        let jobId = '';
+        const match = a.href.match(/\/jobs\/view\/(\d+)/);
+        if (match) jobId = match[1];
+        
+        if (jobId) {
+          const standardUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
           
-          const container = a.closest('li') || a.closest('.entity-list-item') || a.closest('div');
-          let company = 'Unknown Company';
-          let location = 'Singapore';
-          
-          if (container) {
-            const companyEl = container.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
-            if (companyEl) company = companyEl.innerText.trim();
+          if (!processedUrls.has(standardUrl)) {
+            processedUrls.add(standardUrl);
             
-            const locationEl = container.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
-            if (locationEl) location = locationEl.innerText.trim();
+            const container = a.closest('li') || a.closest('.entity-list-item') || a.closest('div');
+            let company = 'Unknown Company';
+            let location = 'Singapore';
             
-            if (company === 'Unknown Company') {
-              const innerSpans = Array.from(container.querySelectorAll('span, div, p'));
-              for (const span of innerSpans) {
-                const t = span.innerText.trim();
-                if (t.includes('·') && !t.includes('\n')) {
-                  const parts = t.split('·');
-                  company = parts[0].trim();
-                  location = parts[1].trim();
-                  break;
+            if (container) {
+              const companyEl = container.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
+              if (companyEl) company = companyEl.innerText.trim();
+              
+              const locationEl = container.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
+              if (locationEl) location = locationEl.innerText.trim();
+              
+              if (company === 'Unknown Company') {
+                const innerSpans = Array.from(container.querySelectorAll('span, div, p'));
+                for (const span of innerSpans) {
+                  const t = span.innerText.trim();
+                  if (t.includes('·') && !t.includes('\n')) {
+                    const parts = t.split('·');
+                    company = parts[0].trim();
+                    location = parts[1].trim();
+                    break;
+                  }
                 }
               }
             }
+            
+            uniqueJobs.push({ title, company, url: standardUrl, location });
+            pageCount++;
           }
-          
-          uniqueJobs.push({ title, company, url: standardUrl, location, element: container || a });
-          pageCount++;
         }
+      }
+      
+      progressText.innerText = `Found ${uniqueJobs.length} unique jobs so far.`;
+      
+      // Find Next button
+      const nextBtn = document.querySelector('.artdeco-pagination__button--next') || 
+                      Array.from(document.querySelectorAll('button, a')).find(el => {
+                        const text = el.innerText.trim().toLowerCase();
+                        return (text.includes('next') || el.ariaLabel?.toLowerCase().includes('next')) && !el.disabled && !el.classList.contains('disabled');
+                      });
+                      
+      if (nextBtn && !nextBtn.disabled && !nextBtn.classList.contains('artdeco-button--disabled')) {
+        statusText.innerText = `➡️ Moving to Next page...`;
+        nextBtn.click();
+        pageNum++;
+        await new Promise(r => setTimeout(r, 3000));
+      } else {
+        statusText.innerText = `🏁 No more pages found. Ending scan.`;
+        hasNextPage = false;
       }
     }
     
-    console.log(`- Page ${pageNum}: Found ${pageCount} new jobs.`);
-    
-    // Find Next button
-    const nextBtn = document.querySelector('.artdeco-pagination__button--next') || 
-                    Array.from(document.querySelectorAll('button, a')).find(el => {
-                      const text = el.innerText.trim().toLowerCase();
-                      return (text.includes('next') || el.ariaLabel?.toLowerCase().includes('next')) && !el.disabled && !el.classList.contains('disabled');
-                    });
-                    
-    if (nextBtn && !nextBtn.disabled && !nextBtn.classList.contains('artdeco-button--disabled')) {
-      console.log("➡️ Clicking Next page button...");
-      nextBtn.click();
-      pageNum++;
-      await new Promise(r => setTimeout(r, 3000));
-    } else {
-      console.log("🏁 No active Next page button found. Ending walk.");
-      hasNextPage = false;
+    if (uniqueJobs.length === 0) {
+      alert("⚠️ No saved jobs identified. Make sure you are on the 'Saved' tab of your Job Tracker.");
+      window._jobScraperRunning = false;
+      document.body.removeChild(overlay);
+      return;
     }
-  }
-  
-  console.log(`📊 Total unique jobs identified across all pages: ${uniqueJobs.length}`);
-  
-  if (uniqueJobs.length === 0) {
-    console.warn("⚠️ No saved jobs identified. Make sure you are on the 'Saved' tab of your Job Tracker.");
-    return;
-  }
-  
-  console.log("🧠 Fetching job descriptions silently...");
-  const finalizedJobs = [];
-  const batchSize = 5;
-  
-  // Create a clean iframe to bypass broken Chrome extension interceptors on window.fetch
-  const iframe = document.createElement('iframe');
-  iframe.style.display = 'none';
-  document.body.appendChild(iframe);
-  const cleanFetch = iframe.contentWindow.fetch;
-  
-  for (let i = 0; i < uniqueJobs.length; i += batchSize) {
-    const batch = uniqueJobs.slice(i, i + batchSize);
-    console.log(`⏳ Fetching batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(uniqueJobs.length/batchSize)}...`);
-    await Promise.all(batch.map(async (job) => {
+    
+    statusText.innerText = "🧠 Fetching job descriptions...";
+    const finalizedJobs = [];
+    
+    // Robust XHR wrapper to bypass broken extensions intercepting fetch
+    function robustGet(url) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', url);
+        xhr.setRequestHeader('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8');
+        xhr.withCredentials = true;
+        xhr.onload = () => resolve(xhr.responseText);
+        xhr.onerror = () => reject(new Error('XHR Error'));
+        xhr.send();
+      });
+    }
+    
+    // Sequential fetching to avoid rate limits
+    for (let i = 0; i < uniqueJobs.length; i++) {
+      const job = uniqueJobs[i];
+      progressText.innerText = `Fetching description ${i + 1} of ${uniqueJobs.length}...\n${job.title}`;
+      
       try {
-        const res = await cleanFetch(job.url);
-        const html = await res.text();
+        const html = await robustGet(job.url);
         const parser = new DOMParser();
         const doc = parser.parseFromString(html, 'text/html');
         const descEl = doc.querySelector('.jobs-description-content') || 
@@ -1105,6 +1131,7 @@ with tab_linkedin:
                       doc.querySelector('.jobs-box__html-content') ||
                       doc.querySelector('.jobs-description');
         const description = descEl ? descEl.innerText.trim() : '';
+        
         finalizedJobs.push({
           title: job.title,
           company: job.company,
@@ -1112,7 +1139,6 @@ with tab_linkedin:
           location: job.location,
           description: description || "Full description not available. Please visit job link to apply."
         });
-        console.log(`✅ Fetched description for: "${job.title}" at ${job.company}`);
       } catch (err) {
         console.error(`❌ Failed: ${job.title}`, err);
         finalizedJobs.push({
@@ -1123,22 +1149,30 @@ with tab_linkedin:
           description: "Failed to fetch description automatically."
         });
       }
-    }));
-    await new Promise(r => setTimeout(r, 1500));
+      
+      // Delay to avoid LinkedIn 429 rate limit or SDUI oops page
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    
+    statusText.innerText = "🎉 All done! Downloading JSON...";
+    progressText.innerText = "";
+    
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(finalizedJobs, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", "linkedin_saved_jobs.json");
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    
+    await new Promise(r => setTimeout(r, 2000));
+  } catch (err) {
+    console.error("Critical error during extraction:", err);
+    alert("Extraction failed. See console for details.");
+  } finally {
+    window._jobScraperRunning = false;
+    document.body.removeChild(overlay);
   }
-  
-  document.body.removeChild(iframe);
-  
-  const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(finalizedJobs, null, 2));
-  const downloadAnchor = document.createElement('a');
-  downloadAnchor.setAttribute("href", dataStr);
-  downloadAnchor.setAttribute("download", "linkedin_saved_jobs.json");
-  document.body.appendChild(downloadAnchor);
-  downloadAnchor.click();
-  downloadAnchor.remove();
-  console.log("🎉 JSON File Downloaded successfully!");
-  
-  console.log("🎉 ALL DONE SUCCESSFULLY! (Unsave feature temporarily disabled)");
 })();"""
         st.code(script_code, language="javascript")
         
