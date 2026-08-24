@@ -1464,6 +1464,11 @@ Your task is to analyze the target Job Description (JD) and output a JSON object
                             cv_content_prompt = f"""You are the Custom CV Generator Agent.
 Your task is to take the Stage 1 Analysis and the immutable Data Ledgers, and generate the final Tailored CV content.
 
+### TARGET JOB SPECIFICATION:
+- **Title**: {selected_job.get('title', '')}
+- **Company**: {selected_job.get('company', '')}
+- **Location**: {selected_job.get('location', 'Singapore')}
+
 ### THE PRINCIPLE:
 Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decide WHAT is true.
 
@@ -1471,7 +1476,9 @@ Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decid
 1. **LENGTH LIMITS**: The CV MUST be strictly under 3 pages. Drop roles or prune bullets if it gets too long.
 2. **HONESTY GATE (CRITICAL)**: You MUST NOT invent achievements, projects, or employment history outside of the Profile Evidence Store.
 3. **TITLE LEDGER (CRITICAL)**: You MUST use the exact `formalTitle` and `company` names from the Title Ledger. Do not hallucinate or adjust titles.
-4. **ROLE ALIGNMENT**: Provide exactly 4 role alignment summary points.
+4. **ROLE ALIGNMENT**: Provide exactly 4 role alignment summary points tailored specifically to the TARGET JOB.
+5. **TARGET ALIGNMENT**: Ensure `target.role` and `target.company` are exactly as specified in the TARGET JOB. The `target.headline` MUST accurately reflect the role applied for (e.g., if applying for Software Engineer, do not write "Innovative Leader in Responsible AI").
+6. **SKILLS RELEVANCE**: For the `skills` array, ONLY include competencies directly relevant to the TARGET JOB (e.g. AI Agentic coding, architecture, governance). Omit entirely unrelated fields (like Tourism Management or Logistics) unless explicitly aligned.
 
 ### TITLE LEDGER:
 {title_ledger}
