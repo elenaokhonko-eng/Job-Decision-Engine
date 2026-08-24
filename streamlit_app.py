@@ -341,6 +341,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
         models_to_try = [
             os.environ.get("OPENAI_MODEL", "gpt-5.6-sol"),
             "gpt-5.6-terra",
+            "o3-mini",
             "gpt-4o"
         ]
         
