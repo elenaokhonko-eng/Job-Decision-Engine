@@ -1497,7 +1497,7 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                     json_text_2 = json_text_2[:-3]
                                 json_text_2 = json_text_2.strip()
                                 
-                                cv_data_2 = json.loads(json_text_2)
+                                cv_data_2 = normalize_keys(json.loads(json_text_2))
                                 customized_cv = find_customized_cv(cv_data_2)
                                 
                                 def build_cv_markdown(cv):
@@ -1561,7 +1561,12 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                 
                                 cv_text = build_cv_markdown(customized_cv)
 
-                                st.success("✅ Tailored CV generated successfully!")
+                                if not customized_cv:
+                                    st.warning("⚠️ The AI failed to generate the required CV sections. Displaying raw data for debugging:")
+                                    with st.expander("🛠️ Debug: Raw CV JSON Output", expanded=True):
+                                        st.json(cv_data_2)
+                                else:
+                                    st.success("✅ Tailored CV generated successfully!")
                                 
                                 # Show high-level metrics
                                 col1, col2 = st.columns(2)
