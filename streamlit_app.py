@@ -1410,7 +1410,15 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                             json_text = json_text.strip()
 
                             try:
-                                cv_data = json.loads(json_text)
+                                def normalize_keys(obj):
+                                    if isinstance(obj, dict):
+                                        return {k.lower().replace(" ", "_").replace("-", "_"): normalize_keys(v) for k, v in obj.items()}
+                                    elif isinstance(obj, list):
+                                        return [normalize_keys(item) for item in obj]
+                                    return obj
+
+                                raw_data = json.loads(json_text)
+                                cv_data = normalize_keys(raw_data)
                                 
                                 # Robustly find the analysis dictionary regardless of nesting
                                 def find_analysis(data):
@@ -1561,6 +1569,11 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                     st.metric("Overall Fit Score", f"{analysis.get('overall_fit_percentage', 0)}%")
                                 with col2:
                                     st.metric("Core Requirements Match", f"{analysis.get('core_requirements_match_percentage', 0)}%")
+                                    
+                                if not analysis or analysis.get('overall_fit_percentage', 0) == 0:
+                                    with st.expander("🛠️ Debug: Raw LLM Output (0% Score Detected)", expanded=True):
+                                        st.warning("The AI returned a 0% score or missing keys. Here is the raw data it generated:")
+                                        st.json(cv_data)
 
                                 # Show ATS scoring metrics
                                 ats_metrics = analysis.get("ats_scoring_metrics", {})
