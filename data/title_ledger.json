@@ -53,5 +53,29 @@
     "formalTitle": "Lead Researcher",
     "startDate": "2017-08",
     "endDate": "2018-01"
+  },
+  {
+    "company": "Mondelēz International",
+    "formalTitle": "Regional CRM & Sales Force Automation (SFA) Architect",
+    "startDate": "2012-02",
+    "endDate": "2017-09"
+  },
+  {
+    "company": "The POP Company",
+    "formalTitle": "Lead of PMO Governance & SFA Delivery Architecture",
+    "startDate": "2009-10",
+    "endDate": "2012-01"
+  },
+  {
+    "company": "Chinasoft International",
+    "formalTitle": "Agile Delivery Architect & Scrum Master (Microsoft MSN BEET Team)",
+    "startDate": "2008-05",
+    "endDate": "2009-10"
+  },
+  {
+    "company": "Dextrys",
+    "formalTitle": "Technical Delivery Lead & Systems Analyst (Localization Department PM)",
+    "startDate": "2007-03",
+    "endDate": "2008-04"
   }
 ]

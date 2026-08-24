@@ -1479,6 +1479,7 @@ Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decid
 4. **ROLE ALIGNMENT**: Provide exactly 4 role alignment summary points tailored specifically to the TARGET JOB.
 5. **TARGET ALIGNMENT**: Ensure `target.role` and `target.company` are exactly as specified in the TARGET JOB. The `target.headline` MUST accurately reflect the role applied for (e.g., if applying for Software Engineer, do not write "Innovative Leader in Responsible AI").
 6. **SKILLS RELEVANCE**: For the `skills` array, ONLY include competencies directly relevant to the TARGET JOB (e.g. AI Agentic coding, architecture, governance). Omit entirely unrelated fields (like Tourism Management or Logistics) unless explicitly aligned.
+7. **EXPERIENCE DEPTH**: You MUST include at least 10 years of chronological work experience. Do NOT aggressively drop your past roles. Instead of dropping older roles, you MUST intelligently frame and adapt their bullet points to highlight transferable skills relevant to the TARGET JOB (e.g. problem-solving, delivery, architecture).
 
 ### TITLE LEDGER:
 {title_ledger}
