@@ -997,91 +997,95 @@ with tab_linkedin:
   let pageNum = 1;
   let hasNextPage = true;
   
-  while (hasNextPage && pageNum <= 40) {
-    console.log(`📄 Processing Page ${pageNum}...`);
+  // LinkedIn's new Job Tracker uses infinite scrolling instead of pagination buttons.
+  // We will scroll the left panel to the bottom repeatedly until all jobs are loaded.
+  let previousJobCount = 0;
+  let scrollAttempts = 0;
+  
+  while (scrollAttempts < 50) {
+    console.log(`📄 Scrolling down to load more jobs (Attempt ${scrollAttempts + 1})...`);
     
-    // Scroll the left panel list container to ensure elements are fully rendered
+    // Find the scrollable container (usually the left list)
     const scrollables = Array.from(document.querySelectorAll('*')).filter(el => {
       const style = window.getComputedStyle(el);
       return (style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight;
     });
+    
+    // Scroll all scrollable areas to the bottom
     for (const s of scrollables) {
       s.scrollTop = s.scrollHeight;
     }
-    await new Promise(r => setTimeout(r, 2000));
-    // Find all job links on this page
-    const jobLinks = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
-    let pageCount = 0;
+    window.scrollTo(0, document.body.scrollHeight);
     
-    for (const a of jobLinks) {
-      const title = (a.innerText || "").trim();
-      if (!title || title.length < 3) continue; // Skip empty/icon links
+    await new Promise(r => setTimeout(r, 3000)); // Wait for LinkedIn to load new items
+    
+    const currentJobLinks = document.querySelectorAll('a[href*="/jobs/view/"]').length;
+    
+    if (currentJobLinks > previousJobCount) {
+      console.log(`- Loaded more jobs. Total so far: ${currentJobLinks}`);
+      previousJobCount = currentJobLinks;
+      scrollAttempts++;
+    } else {
+      console.log("🏁 Reached the bottom of the list. No new jobs loading.");
+      break;
+    }
+  }
+
+  console.log("🔍 Extracting all loaded jobs...");
+  
+  // Now extract all job links that have been loaded onto the page
+  const jobLinks = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
+  let pageCount = 0;
+  
+  for (const a of jobLinks) {
+    const title = (a.innerText || "").trim();
+    if (!title || title.length < 3) continue; // Skip empty/icon links
+    
+    let jobId = '';
+    const match = a.href.match(/\/jobs\/view\/(\d+)/);
+    if (match) jobId = match[1];
+    
+    if (jobId) {
+      const standardUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
       
-      let jobId = '';
-      const match = a.href.match(/\/jobs\/view\/(\d+)/);
-      if (match) jobId = match[1];
-      
-      if (jobId) {
-        const standardUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
+      if (!processedUrls.has(standardUrl)) {
+        processedUrls.add(standardUrl);
         
-        if (!processedUrls.has(standardUrl)) {
-          processedUrls.add(standardUrl);
+        // Traverse up to find container list item or card
+        const container = a.closest('li') || a.closest('.entity-list-item') || a.closest('div');
+        let company = 'Unknown Company';
+        let location = 'Singapore';
+        
+        if (container) {
+          // Try specific selectors first
+          const companyEl = container.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
+          if (companyEl) company = companyEl.innerText.trim();
           
-          // Traverse up to find container list item or card
-          const container = a.closest('li') || a.closest('.entity-list-item') || a.closest('div');
-          let company = 'Unknown Company';
-          let location = 'Singapore';
+          const locationEl = container.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
+          if (locationEl) location = locationEl.innerText.trim();
           
-          if (container) {
-            // Try specific selectors first
-            const companyEl = container.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
-            if (companyEl) company = companyEl.innerText.trim();
-            
-            const locationEl = container.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
-            if (locationEl) location = locationEl.innerText.trim();
-            
-            // Fallback: if company is still unknown, try parsing the text
-            if (company === 'Unknown Company') {
-              const innerSpans = Array.from(container.querySelectorAll('span, div, p'));
-              for (const span of innerSpans) {
-                const t = span.innerText.trim();
-                if (t.includes('·') && !t.includes('\n')) {
-                  const parts = t.split('·');
-                  company = parts[0].trim();
-                  location = parts[1].trim();
-                  break;
-                }
+          // Fallback parsing
+          if (company === 'Unknown Company') {
+            const innerSpans = Array.from(container.querySelectorAll('span, div, p'));
+            for (const span of innerSpans) {
+              const t = span.innerText.trim();
+              if (t.includes('·') && !t.includes('\n')) {
+                const parts = t.split('·');
+                company = parts[0].trim();
+                location = parts[1].trim();
+                break;
               }
             }
           }
-          
-          uniqueJobs.push({ title, company, url: standardUrl, location, element: container || a });
-          pageCount++;
         }
+        
+        uniqueJobs.push({ title, company, url: standardUrl, location, element: container || a });
+        pageCount++;
       }
-    }
-    
-    console.log(`- Page ${pageNum}: Found ${pageCount} new jobs.`);
-    
-    // Find next page button
-    const nextBtn = document.querySelector('.artdeco-pagination__button--next') || 
-                    Array.from(document.querySelectorAll('button')).find(b => {
-                      const text = b.innerText.trim().toLowerCase();
-                      return text === 'next' || b.ariaLabel?.toLowerCase().includes('next') || text === '>';
-                    });
-                    
-    if (nextBtn && !nextBtn.disabled && !nextBtn.classList.contains('artdeco-button--disabled')) {
-      console.log("➡️ Clicking Next page button...");
-      (nextBtn).click();
-      pageNum++;
-      await new Promise(r => setTimeout(r, 3000));
-    } else {
-      console.log("🏁 No active Next page button found. Ending walk.");
-      hasNextPage = false;
     }
   }
   
-  console.log(`📊 Total unique jobs identified across all pages: ${uniqueJobs.length}`);
+  console.log(`📊 Total unique jobs identified: ${uniqueJobs.length}`);
   
   if (uniqueJobs.length === 0) {
     console.warn("⚠️ No saved jobs identified. Make sure you are on the 'Saved' tab of your Job Tracker.");
