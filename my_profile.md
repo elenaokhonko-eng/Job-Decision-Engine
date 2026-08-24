@@ -21,11 +21,11 @@ Senior Technical Program Director and Target Operating Model (TOM) Lead with a h
 ## 💼 WORK EXPERIENCE
 
 ### auDHD Research Lab (Non-Profit Organisation)
-* **Role**: Principal Researcher
+* **Role**: Principal Researcher & Founder & Agentic AI Solution Architect & Software Engineer
 * **Period**: May 2026 - Present
 * **Location**: Singapore
 * **Key Achievements & Responsibilities**:
-  * Utilising agentic swarms and agents to automate scientific papers review and produce hypothesis and research on auDHD brain neurology and biology (under registration).
+  * Building a cloud-based platform for auDHD research, using agentic swarms and agents to automate scientific papers review and produce hypothesis and research on auDHD brain neurology and biology (under registration).
 
 ### SMU Institute of Innovation & Entrepreneurship
 * **Role**: Founder in Residence @ SMU BIG
