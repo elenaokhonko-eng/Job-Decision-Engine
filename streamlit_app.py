@@ -1136,30 +1136,64 @@ with tab_linkedin:
   downloadAnchor.remove();
   console.log("🎉 JSON File Downloaded successfully!");
   
-  console.log("🧹 Starting automatic unsave cleanup on the CURRENT page...");
-  let unsavedCount = 0;
-  for (const job of uniqueJobs) {
-    try {
-      const threeDotBtn = job.element.querySelector('button[aria-label*="options"], button[aria-label*="Options"], .artdeco-dropdown__trigger');
-      if (threeDotBtn && document.body.contains(threeDotBtn)) {
-        (threeDotBtn).click();
-        await new Promise(r => setTimeout(r, 500));
-        const dropdownItems = Array.from(document.querySelectorAll('.artdeco-dropdown__item, [role="menuitem"]'));
-        const unsaveOption = dropdownItems.find(el => el.innerText.trim().toLowerCase().includes('unsave') || el.innerText.trim().toLowerCase().includes('remove'));
-        if (unsaveOption) {
-          (unsaveOption).click();
-          unsavedCount++;
-          console.log(`- Unsaved job: "${job.title}" at ${job.company}`);
-          await new Promise(r => setTimeout(r, 1000));
-        } else {
-          (threeDotBtn).click();
-        }
-      }
-    } catch (e) {
-      // Squelch DOM removal errors since we are changing pages
+  console.log("🧹 Starting automatic unsave cleanup. Navigating back to Page 1...");
+  
+  // Navigate back to the first page
+  while (true) {
+    const prevBtn = document.querySelector('.artdeco-pagination__button--previous');
+    if (prevBtn && !prevBtn.disabled && !prevBtn.classList.contains('artdeco-button--disabled')) {
+      prevBtn.click();
+      await new Promise(r => setTimeout(r, 2000));
+    } else {
+      break;
     }
   }
-  console.log(`🧹 Cleaned up/unsaved ${unsavedCount} jobs on the current page!`);
+
+  let totalUnsaved = 0;
+  console.log("🧹 Unsaving jobs...");
+  
+  while (true) {
+    // Find all 3-dot menu buttons on the current page
+    const threeDotBtns = Array.from(document.querySelectorAll('button[aria-label*="options"], button[aria-label*="Options"], .artdeco-dropdown__trigger')).filter(b => document.body.contains(b));
+    
+    if (threeDotBtns.length === 0) {
+      // No more jobs on this page. Try clicking next.
+      const nextBtn = document.querySelector('.artdeco-pagination__button--next');
+      if (nextBtn && !nextBtn.disabled && !nextBtn.classList.contains('artdeco-button--disabled')) {
+        console.log("➡️ Moving to next page for cleanup...");
+        nextBtn.click();
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+      break; // No more jobs and no next page. We are done!
+    }
+
+    for (const btn of threeDotBtns) {
+      if (!document.body.contains(btn)) continue;
+      
+      try {
+        btn.click();
+        await new Promise(r => setTimeout(r, 600)); // Wait for dropdown to open
+        
+        const dropdownItems = Array.from(document.querySelectorAll('.artdeco-dropdown__item, [role="menuitem"]'));
+        const unsaveOption = dropdownItems.find(el => el.innerText.trim().toLowerCase().includes('unsave') || el.innerText.trim().toLowerCase().includes('remove'));
+        
+        if (unsaveOption) {
+          unsaveOption.click();
+          totalUnsaved++;
+          await new Promise(r => setTimeout(r, 1000)); // Wait for unsave network request
+        } else {
+          btn.click(); // Close the dropdown if no unsave option
+        }
+      } catch (e) {
+        // Ignore stale element errors
+      }
+    }
+    // Wait for the UI to update and remove the unsaved items
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  
+  console.log(`🧹 Cleaned up/unsaved ${totalUnsaved} jobs across all pages!`);
   console.log("🎉 ALL DONE SUCCESSFULLY!");
 })();"""
         st.code(script_code, language="javascript")
@@ -1204,14 +1238,14 @@ with tab_analytics:
         
         # Map safety verdicts
         def get_verdict(row):
-            st = row["Status"]
-            if row["Approved"]:
+            st = row.get("Status")
+            if row.get("Approved"):
                 return "🟢 HIGH AUTONOMY / OPTIMAL FOCUS"
             if st in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK"):
                 return "✅ PRIORITY"
             elif st in ("REVIEW REQUIRED", "APPLY_AFTER_VERIFICATION"):
                 return "⚠️ REVIEW REQUIRED"
-            elif row["Toxic"]:
+            elif row.get("Toxic"):
                 return "🔴 HIGH POLITICS / BUREAUCRATIC"
             else:
                 return "🟡 REVIEW REQUIRED"
