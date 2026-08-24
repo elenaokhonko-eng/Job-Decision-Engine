@@ -1377,13 +1377,13 @@ with tab_cv:
                             db_job_id = db_row[0]
                             
                             # Read data ledgers and schemas
-                            with open("data/title_ledger.json", "r", encoding="utf-8") as f:
+                            with open("data/title_ledger.json", "r", encoding="utf-8-sig") as f:
                                 title_ledger = f.read()
-                            with open("data/profile_evidence.json", "r", encoding="utf-8") as f:
+                            with open("data/profile_evidence.json", "r", encoding="utf-8-sig") as f:
                                 profile_evidence = f.read()
-                            with open("scripts/schemas/jd_analysis.schema.json", "r", encoding="utf-8") as f:
+                            with open("scripts/schemas/jd_analysis.schema.json", "r", encoding="utf-8-sig") as f:
                                 jd_analysis_schema = f.read()
-                            with open("scripts/schemas/cv_content.schema.json", "r", encoding="utf-8") as f:
+                            with open("scripts/schemas/cv_content.schema.json", "r", encoding="utf-8-sig") as f:
                                 cv_content_schema = f.read()
 
                             # --- STAGE 1: ANALYSIS ---
