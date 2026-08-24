@@ -1095,12 +1095,19 @@ with tab_linkedin:
   console.log("🧠 Fetching job descriptions silently...");
   const finalizedJobs = [];
   const batchSize = 5;
+  
+  // Create a clean iframe to bypass broken Chrome extension interceptors on window.fetch
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  document.body.appendChild(iframe);
+  const cleanFetch = iframe.contentWindow.fetch;
+  
   for (let i = 0; i < uniqueJobs.length; i += batchSize) {
     const batch = uniqueJobs.slice(i, i + batchSize);
     console.log(`⏳ Fetching batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(uniqueJobs.length/batchSize)}...`);
     await Promise.all(batch.map(async (job) => {
       try {
-        const res = await fetch(job.url);
+        const res = await cleanFetch(job.url);
         const html = await res.text();
         const parser = new DOMParser();
         const doc = parser.parseFromString(html, 'text/html');
@@ -1131,6 +1138,8 @@ with tab_linkedin:
     }));
     await new Promise(r => setTimeout(r, 1500));
   }
+  
+  document.body.removeChild(iframe);
   
   const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(finalizedJobs, null, 2));
   const downloadAnchor = document.createElement('a');
