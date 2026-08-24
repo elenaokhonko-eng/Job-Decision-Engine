@@ -1,6 +1,4 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "TailoredCVResponse",
   "type": "object",
   "properties": {
     "analysis": {
@@ -8,14 +6,10 @@
       "properties": {
         "overall_fit_percentage": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 100,
           "description": "Overall fit score based on overlap between profile and JD requirements"
         },
         "core_requirements_match_percentage": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 100,
           "description": "Percentage match of critical core requirements"
         },
         "core_matches": {
@@ -26,7 +20,8 @@
               "requirement": { "type": "string", "description": "Core requirement extracted from the JD" },
               "user_match": { "type": "string", "description": "How the user matches this requirement based on their profile" }
             },
-            "required": ["requirement", "user_match"]
+            "required": ["requirement", "user_match"],
+            "additionalProperties": false
           }
         },
         "key_mismatches": {
@@ -38,7 +33,8 @@
               "parallel_exposure": { "type": "string", "description": "Relevant parallel or related industry/tool exposure the user has" },
               "learning_plan": { "type": "string", "description": "Factual and proactive plan to learn this missing requirement fast" }
             },
-            "required": ["requirement", "parallel_exposure", "learning_plan"]
+            "required": ["requirement", "parallel_exposure", "learning_plan"],
+            "additionalProperties": false
           }
         },
         "key_analysis_points": {
@@ -51,11 +47,12 @@
           "items": {
             "type": "object",
             "properties": {
-              "skill": { "type": "string", "description": "Key skill or quality the hiring manager is looking for (e.g. 'Data Engineering', 'Team Leadership')" },
+              "skill": { "type": "string", "description": "Key skill or quality the hiring manager is looking for" },
               "match_percentage": { "type": "integer", "description": "0 to 100 percentage match against the user's profile" },
               "justification": { "type": "string", "description": "Brief explanation of why the user has this match percentage" }
             },
-            "required": ["skill", "match_percentage", "justification"]
+            "required": ["skill", "match_percentage", "justification"],
+            "additionalProperties": false
           },
           "description": "4-5 key skills or qualities the hiring manager is looking for, and the user's match against them"
         },
@@ -64,27 +61,19 @@
           "properties": {
             "keyword_match_percentage": { 
               "type": "integer", 
-              "minimum": 0, 
-              "maximum": 100,
               "description": "Estimated percentage of JD keywords covered in the resume"
             },
             "formatting_compliance_score": { 
               "type": "integer", 
-              "minimum": 0, 
-              "maximum": 100,
-              "description": "Adherence score to ATS layout rules (single-column, standard headings, no tables)"
+              "description": "Adherence score to ATS layout rules"
             },
             "star_method_coverage_percentage": { 
               "type": "integer", 
-              "minimum": 0, 
-              "maximum": 100,
-              "description": "Percentage of work experience bullets written using STAR (Situation, Task, Action, Result) format"
+              "description": "Percentage of work experience bullets written using STAR format"
             },
             "ats_friendly_score": { 
               "type": "integer", 
-              "minimum": 0, 
-              "maximum": 100,
-              "description": "Overall composite ATS compatibility score based on keyword match, format compliance, and action verbs"
+              "description": "Overall composite ATS compatibility score"
             },
             "formatting_suggestions": {
               "type": "array",
@@ -98,7 +87,8 @@
             "star_method_coverage_percentage", 
             "ats_friendly_score", 
             "formatting_suggestions"
-          ]
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -109,8 +99,10 @@
         "key_analysis_points",
         "key_skills_match",
         "ats_scoring_metrics"
-      ]
+      ],
+      "additionalProperties": false
     }
   },
-  "required": ["analysis"]
+  "required": ["analysis"],
+  "additionalProperties": false
 }

@@ -1,6 +1,4 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "CVContentResponse",
   "type": "object",
   "properties": {
     "customized_cv": {
@@ -33,7 +31,8 @@
                 "description": "Measurable bullet points starting with an action verb."
               }
             },
-            "required": ["title", "company", "period", "location", "key_responsibility", "achievements"]
+            "required": ["title", "company", "period", "location", "key_responsibility", "achievements"],
+            "additionalProperties": false
           }
         },
         "education": {
@@ -52,8 +51,10 @@
           "description": "List of languages."
         }
       },
-      "required": ["summary", "core_competencies", "jd_keywords", "work_experience", "education", "certifications", "languages"]
+      "required": ["summary", "core_competencies", "jd_keywords", "work_experience", "education", "certifications", "languages"],
+      "additionalProperties": false
     }
   },
-  "required": ["customized_cv"]
+  "required": ["customized_cv"],
+  "additionalProperties": false
 }

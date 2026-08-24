@@ -331,7 +331,7 @@ def convert_markdown_to_pdf(md_text):
             
     return bytes(pdf.output())
 
-def python_generate_content(contents, system_instruction=None, response_mime_type=None):
+def python_generate_content(contents, system_instruction=None, response_mime_type=None, response_schema=None):
     # Load keys
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_FLASH_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
@@ -370,7 +370,16 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
                     "messages": messages,
                     "temperature": 1
                 }
-                if response_mime_type == "application/json":
+                if response_schema:
+                    body["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "structured_response",
+                            "schema": response_schema,
+                            "strict": True
+                        }
+                    }
+                elif response_mime_type == "application/json":
                     body["response_format"] = {"type": "json_object"}
                     
                 req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
@@ -396,8 +405,12 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
                 "contents": [{"parts": [{"text": contents}]}],
                 "generationConfig": {}
             }
-            if response_mime_type:
+            if response_schema:
+                body["generationConfig"]["responseSchema"] = response_schema
+                body["generationConfig"]["responseMimeType"] = "application/json"
+            elif response_mime_type:
                 body["generationConfig"]["responseMimeType"] = response_mime_type
+                
             if system_instruction:
                 body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
                 
@@ -1398,7 +1411,8 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                             json_text = python_generate_content(
                                 analysis_prompt,
                                 system_instruction="You are a professional CV analysis system. You analyze profiles and output strictly structured JSON conforming to the requested schema.",
-                                response_mime_type="application/json"
+                                response_mime_type="application/json",
+                                response_schema=json.loads(cv_response_schema)
                             )
                             json_text = json_text.strip()
                             if json_text.startswith("```json"):
@@ -1458,12 +1472,12 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
 Your task is to take the user's master profile, the Job Description, and the Stage 1 Analysis, and generate the final Tailored CV content.
 
 ### STRICT RULES for `customized_cv`:
-1. **INCLUDE ALL EXPERIENCES**: You MUST include ALL jobs and experiences from the master profile. DO NOT cut or drop any roles. The CV can be up to 3 full pages to accommodate 20+ years of experience.
+1. **LENGTH & RELEVANCE LIMITS**: The CV MUST be strictly under 3 pages. You MUST intelligently drop irrelevant or older roles (like old internships, language consultant, etc.) if they do not match the target JD.
 2. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, skills, or accomplishments.
 3. **STRICT METRICS RULE**: DO NOT hallucinate or alter any numbers, team sizes, budgets, or project counts. Only use numbers explicitly written in the Master Profile.
 4. **ROLE TITLE MATCHING**: Adjust past Role Titles to match JD desired titles only if responsibilities align.
 5. **VOCABULARY MIRRORING**: Preserve and re-use JD vocabulary and keywords.
-6. **Work Experience**: Ensure every achievement bullet starts immediately with an action verb (DO NOT use "Result:"). Incorporate measurable achievements containing What, Who, How much, Why, and Impact.
+6. **Work Experience & Achievements Throttling**: Ensure every achievement bullet starts immediately with an action verb (DO NOT use "Result:"). For key roles that EXACTLY match the target JD responsibilities, include EXACTLY 3 achievements. For all other roles, limit them to 1 or 2 achievements. Incorporate measurable achievements containing What, Who, How much, Why, and Impact.
 
 ### JSON RESPONSE SCHEMA:
 You MUST output a JSON object conforming exactly to this schema:
@@ -1486,7 +1500,8 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                 json_text_2 = python_generate_content(
                                     cv_content_prompt,
                                     system_instruction="You generate customized CV content strictly conforming to the requested JSON schema.",
-                                    response_mime_type="application/json"
+                                    response_mime_type="application/json",
+                                    response_schema=json.loads(cv_content_schema)
                                 )
                                 json_text_2 = json_text_2.strip()
                                 if json_text_2.startswith("```json"):
