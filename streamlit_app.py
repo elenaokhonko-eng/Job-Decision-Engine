@@ -1390,6 +1390,8 @@ with tab_cv:
                             analysis_prompt = f"""You are a professional CV analysis agent.
 Your task is to analyze the target Job Description (JD) and output a JSON object containing the requirements and alignment analysis.
 
+**Scoring Rule**: The `score` MUST be an integer between 0 and 100, representing the percentage match (e.g., 100 for full match, 50 for partial, 0 for no evidence).
+
 ### TARGET JOB SPECIFICATION:
 - **Title**: {selected_job.get('title', '')}
 - **Company**: {selected_job.get('company', '')}
@@ -1449,6 +1451,14 @@ Your task is to analyze the target Job Description (JD) and output a JSON object
                                             for gap in gaps:
                                                 st.markdown(f"⚠️ Gap: {gap}")
                                     st.markdown("---")
+
+                                # Check Honesty Gate
+                                critical_failures = [req for req in requirements if req.get("priority") == "critical" and match_dict.get(req.get("id"), {}).get("score", 0) < 50]
+                                if critical_failures:
+                                    st.error("🚨 **HONESTY GATE FAILED**: You do not meet the CRITICAL requirements for this role based on your profile evidence. CV generation halted to prevent hallucination/misrepresentation.")
+                                    for cf in critical_failures:
+                                        st.markdown(f"- Failed: {cf.get('text')}")
+                                    st.stop()
 
                             # --- STAGE 2: CV CONTENT GENERATION ---
                             cv_content_prompt = f"""You are the Custom CV Generator Agent.
