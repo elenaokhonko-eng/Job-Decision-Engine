@@ -497,7 +497,7 @@ def fetch_company_analytics_from_db():
 jobs_list = fetch_jobs_from_db()
 
 # Title
-st.title("💼 Job Decision Engine — Streamlit Console")
+st.title("💼 Job Decision Engine — Streamlit Console (v4.1)")
 st.markdown("### *Multi-Stage Weighted High-Autonomy Technical Architect & Builder Console*")
 st.markdown("---")
 
