@@ -1331,7 +1331,7 @@ with tab_cv:
 
             # Button to trigger CV customization
             st.markdown("---")
-            if st.button("✨ Generate Factual Customised CV"):
+            if st.button("✨ Generate factual Customized CV"):
                 desc_text = selected_job.get("description", "")
                 actual_text = desc_text
                 parsed = None
@@ -1375,24 +1375,20 @@ with tab_cv:
                         else:
                             db_job_id = db_row[0]
                             
-                            # Read master profile and schema
-                            with open("my_profile.md", "r", encoding="utf-8") as pf:
-                                master_profile = pf.read()
-                            # Read schemas
-                            with open("scripts/cv_response_schema.json", "r", encoding="utf-8") as sf:
-                                cv_response_schema = sf.read()
-                            with open("scripts/cv_content_schema.json", "r", encoding="utf-8") as ccf:
-                                cv_content_schema = ccf.read()
+                            # Read data ledgers and schemas
+                            with open("data/title_ledger.json", "r", encoding="utf-8") as f:
+                                title_ledger = f.read()
+                            with open("data/profile_evidence.json", "r", encoding="utf-8") as f:
+                                profile_evidence = f.read()
+                            with open("scripts/schemas/jd_analysis.schema.json", "r", encoding="utf-8") as f:
+                                jd_analysis_schema = f.read()
+                            with open("scripts/schemas/cv_content.schema.json", "r", encoding="utf-8") as f:
+                                cv_content_schema = f.read()
 
                             # --- STAGE 1: ANALYSIS ---
                             analysis_prompt = f"""You are a professional CV analysis agent.
-Your task is to analyze the user's master professional profile against the target Job Description (JD) and output a JSON object containing the alignment analysis metrics.
+Your task is to analyze the target Job Description (JD) and output a JSON object containing the requirements and alignment analysis.
 
-### JSON RESPONSE SCHEMA:
-You MUST output a JSON object conforming exactly to this schema:
-{cv_response_schema}
-
----
 ### TARGET JOB SPECIFICATION:
 - **Title**: {selected_job.get('title', '')}
 - **Company**: {selected_job.get('company', '')}
@@ -1400,288 +1396,133 @@ You MUST output a JSON object conforming exactly to this schema:
 - **Job Description**:
 {actual_text}
 
----
-### USER MASTER PROFILE:
-{master_profile}
+### PROFILE EVIDENCE:
+{profile_evidence}
+"""
 
----
-Ensure the output is clean JSON. Do not prepend or append markdown code blocks around the JSON object."""
-
-                            # Generate Stage 1 response
-                            json_text = python_generate_content(
-                                analysis_prompt,
-                                system_instruction="You are a professional CV analysis system. You analyze profiles and output strictly structured JSON conforming to the requested schema.",
-                                response_mime_type="application/json",
-                                response_schema=json.loads(cv_response_schema)
-                            )
-                            json_text = json_text.strip()
-                            if json_text.startswith("```json"):
-                                json_text = json_text[7:]
-                            if json_text.startswith("```"):
-                                json_text = json_text[3:]
-                            if json_text.endswith("```"):
-                                json_text = json_text[:-3]
-                            json_text = json_text.strip()
-
-                            try:
-                                def normalize_keys(obj):
-                                    if isinstance(obj, dict):
-                                        return {k.lower().replace(" ", "_").replace("-", "_"): normalize_keys(v) for k, v in obj.items()}
-                                    elif isinstance(obj, list):
-                                        return [normalize_keys(item) for item in obj]
-                                    return obj
-
-                                raw_data = json.loads(json_text)
-                                cv_data = normalize_keys(raw_data)
+                            with st.spinner("Step 1/3: Analyzing JD & Matching Evidence..."):
+                                json_text = python_generate_content(
+                                    analysis_prompt,
+                                    system_instruction="You are a professional CV analysis system. Analyze the JD and strictly output JSON conforming to the requested schema.",
+                                    response_mime_type="application/json",
+                                    response_schema=json.loads(jd_analysis_schema)
+                                )
+                                json_text = json_text.strip()
+                                if json_text.startswith("```json"): json_text = json_text[7:]
+                                if json_text.startswith("```"): json_text = json_text[3:]
+                                if json_text.endswith("```"): json_text = json_text[:-3]
+                                json_text = json_text.strip()
                                 
-                                # Robustly find the analysis dictionary regardless of nesting
-                                def find_analysis(data):
-                                    if isinstance(data, dict):
-                                        # If it has our target key, return this dict
-                                        if "overall_fit_percentage" in data:
-                                            return data
-                                        # Otherwise recurse down everything to bypass schema hallucinations
-                                        for v in data.values():
-                                            res = find_analysis(v)
-                                            if res: return res
-                                    elif isinstance(data, list):
-                                        for item in data:
-                                            res = find_analysis(item)
-                                            if res: return res
-                                    return {}
+                                try:
+                                    analysis = json.loads(json_text)
+                                except Exception as e:
+                                    st.error(f"Failed to parse analysis JSON: {e}")
+                                    analysis = {}
+                            
+                            if analysis:
+                                # Show Analysis UI
+                                st.markdown("### **🎯 JD Requirements & Evidence Match**")
+                                requirements = analysis.get("requirements", [])
+                                matches = analysis.get("matches", [])
                                 
-                                def find_customized_cv(data):
-                                    if isinstance(data, dict):
-                                        # If it has our target keys, return this dict
-                                        if "summary" in data and "work_experience" in data:
-                                            return data
-                                        # Otherwise recurse down everything to bypass schema hallucinations
-                                        for v in data.values():
-                                            res = find_customized_cv(v)
-                                            if res: return res
-                                    elif isinstance(data, list):
-                                        for item in data:
-                                            res = find_customized_cv(item)
-                                            if res: return res
-                                    return {}
-
-                                analysis = find_analysis(cv_data)
-
-                                # --- STAGE 2: CV CONTENT GENERATION ---
-                                cv_content_prompt = f"""You are a professional, honest, and high-fidelity CV tailoring agent.
-Your task is to take the user's master profile, the Job Description, and the Stage 1 Analysis, and generate the final Tailored CV content.
-
-### STRICT RULES for `customized_cv`:
-1. **LENGTH & RELEVANCE LIMITS**: The CV MUST be strictly under 3 pages. You MUST intelligently drop irrelevant or older roles (like old internships, language consultant, etc.) if they do not match the target JD.
-2. **ABSOLUTELY NO FABRICATIONS OR LYING**: Do not invent jobs, certifications, projects, skills, or accomplishments.
-3. **STRICT METRICS RULE**: DO NOT hallucinate or alter any numbers, team sizes, budgets, or project counts. Only use numbers explicitly written in the Master Profile.
-4. **ROLE TITLE MATCHING**: Adjust past Role Titles to match JD desired titles only if responsibilities align.
-5. **VOCABULARY MIRRORING**: Preserve and re-use JD vocabulary and keywords.
-6. **Work Experience & Achievements Throttling**: Ensure every achievement bullet starts immediately with an action verb (DO NOT use "Result:"). For key roles that EXACTLY match the target JD responsibilities, include EXACTLY 3 achievements. For all other roles, limit them to 1 or 2 achievements. Incorporate measurable achievements containing What, Who, How much, Why, and Impact.
-
-### JSON RESPONSE SCHEMA:
-You MUST output a JSON object conforming exactly to this schema:
-{cv_content_schema}
-
----
-### TARGET JOB SPECIFICATION:
-- **Title**: {selected_job.get('title', '')}
-- **Company**: {selected_job.get('company', '')}
-
-### STAGE 1 ANALYSIS (For reference):
-{json.dumps(analysis, indent=2)}
-
-### USER MASTER PROFILE:
-{master_profile}
-
----
-Ensure the output is clean JSON. Do not prepend or append markdown code blocks around the JSON object."""
+                                match_dict = {m.get("requirementId"): m for m in matches}
                                 
+                                for req in requirements:
+                                    req_id = req.get("id")
+                                    match = match_dict.get(req_id, {})
+                                    score = match.get("score", 0)
+                                    
+                                    col1, col2 = st.columns([1, 4])
+                                    with col1:
+                                        if score >= 80: st.success(f"Score: {score}%")
+                                        elif score >= 50: st.warning(f"Score: {score}%")
+                                        else: st.error(f"Score: {score}%")
+                                    with col2:
+                                        st.markdown(f"**{req.get('text')}** ({req.get('priority').upper()} - {req.get('category')})")
+                                        st.markdown(f"*Summary:* {match.get('safeSummary', '')}")
+                                        evidence_ids = match.get('evidenceIds', [])
+                                        if evidence_ids:
+                                            st.markdown(f"*Evidence mapped:* `{', '.join(evidence_ids)}`")
+                                        gaps = match.get('gaps', [])
+                                        if gaps:
+                                            for gap in gaps:
+                                                st.markdown(f"⚠️ Gap: {gap}")
+                                    st.markdown("---")
+
+                            # --- STAGE 2: CV CONTENT GENERATION ---
+                            cv_content_prompt = f"""You are the Custom CV Generator Agent.
+Your task is to take the Stage 1 Analysis and the immutable Data Ledgers, and generate the final Tailored CV content.
+
+### THE PRINCIPLE:
+Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decide WHAT is true.
+
+### STRICT RULES:
+1. **LENGTH LIMITS**: The CV MUST be strictly under 3 pages. Drop roles or prune bullets if it gets too long.
+2. **HONESTY GATE (CRITICAL)**: You MUST NOT invent achievements, projects, or employment history outside of the Profile Evidence Store.
+3. **TITLE LEDGER (CRITICAL)**: You MUST use the exact `formalTitle` and `company` names from the Title Ledger. Do not hallucinate or adjust titles.
+4. **ROLE ALIGNMENT**: Provide exactly 4 role alignment summary points.
+
+### TITLE LEDGER:
+{title_ledger}
+
+### STAGE 1 ANALYSIS:
+{json_text}
+"""
+                            with st.spinner("Step 2/3: Architecting CV Payload..."):
                                 json_text_2 = python_generate_content(
                                     cv_content_prompt,
-                                    system_instruction="You generate customized CV content strictly conforming to the requested JSON schema.",
+                                    system_instruction="You generate customized CV content strictly conforming to the requested JSON schema. Do not hallucinate titles or evidence.",
                                     response_mime_type="application/json",
                                     response_schema=json.loads(cv_content_schema)
                                 )
                                 json_text_2 = json_text_2.strip()
-                                if json_text_2.startswith("```json"):
-                                    json_text_2 = json_text_2[7:]
-                                if json_text_2.startswith("```"):
-                                    json_text_2 = json_text_2[3:]
-                                if json_text_2.endswith("```"):
-                                    json_text_2 = json_text_2[:-3]
+                                if json_text_2.startswith("```json"): json_text_2 = json_text_2[7:]
+                                if json_text_2.startswith("```"): json_text_2 = json_text_2[3:]
+                                if json_text_2.endswith("```"): json_text_2 = json_text_2[:-3]
                                 json_text_2 = json_text_2.strip()
-                                
-                                cv_data_2 = normalize_keys(json.loads(json_text_2))
-                                customized_cv = find_customized_cv(cv_data_2)
-                                
-                                def build_cv_markdown(cv):
-                                    md = []
-                                    md.append("# Elena Okhonko")
-                                    md.append("Email: elena.okhonko@example.com | Location: Singapore | LinkedIn: linkedin.com/in/elenaokhonko\n")
-                                    
-                                    if cv.get("summary"):
-                                        md.append("## Summary")
-                                        md.append(cv["summary"] + "\n")
-                                        
-                                    if cv.get("core_competencies"):
-                                        md.append("## Core Competencies & Match")
-                                        for comp in cv["core_competencies"]:
-                                            md.append(comp)
-                                        md.append("")
-                                        
-                                        
-                                    if cv.get("work_experience"):
-                                        md.append("## Work Experience")
-                                        for role in cv["work_experience"]:
-                                            md.append(f"### {role.get('title', '')} | {role.get('company', '')}")
-                                            md.append(f"**{role.get('period', '')} | {role.get('location', '')}**\n")
-                                            md.append(f"**Key Responsibility**: {role.get('key_responsibility', '')}\n")
-                                            md.append("**Key Achievements**:")
-                                            for ach in role.get("achievements", []):
-                                                # Strip any accidental "Result:" prefixes just in case
-                                                ach_clean = ach.replace("Result:", "").replace("Result -", "").strip()
-                                                if ach_clean.startswith("*"):
-                                                    md.append(ach_clean)
-                                                else:
-                                                    md.append(f"* {ach_clean}")
-                                            md.append("")
-                                            
-                                    if cv.get("education"):
-                                        md.append("## Education")
-                                        for edu in cv["education"]:
-                                            if edu.startswith("*"): md.append(edu)
-                                            else: md.append(f"* {edu}")
-                                        md.append("")
-                                        
-                                    if cv.get("certifications"):
-                                        md.append("## Certifications")
-                                        for cert in cv["certifications"]:
-                                            if cert.startswith("*"): md.append(cert)
-                                            else: md.append(f"* {cert}")
-                                        md.append("")
-                                        
-                                    if cv.get("languages"):
-                                        md.append("## Languages")
-                                        for lang in cv["languages"]:
-                                            if lang.startswith("*"): md.append(lang)
-                                            else: md.append(f"* {lang}")
-                                        md.append("")
-                                        
-                                    if cv.get("jd_keywords"):
-                                        md.append("## JD Keywords")
-                                        md.append(", ".join(cv["jd_keywords"]) + "\n")
-                                        
-                                    return "\n".join(md)
-                                
-                                cv_text = build_cv_markdown(customized_cv)
 
-                                if not customized_cv:
-                                    st.warning("⚠️ The AI failed to generate the required CV sections. Displaying raw data for debugging:")
-                                    with st.expander("🛠️ Debug: Raw CV JSON Output", expanded=True):
-                                        st.json(cv_data_2)
-                                else:
-                                    st.success("✅ Tailored CV generated successfully!")
-                                
-                                # Show high-level metrics
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    st.metric("Overall Fit Score", f"{analysis.get('overall_fit_percentage', 0)}%")
-                                with col2:
-                                    st.metric("Core Requirements Match", f"{analysis.get('core_requirements_match_percentage', 0)}%")
-                                    
-                                if not analysis or analysis.get('overall_fit_percentage', 0) == 0:
-                                    with st.expander("🛠️ Debug: Raw LLM Output (0% Score Detected)", expanded=True):
-                                        st.warning("The AI returned a 0% score or missing keys. Here is the raw data it generated:")
-                                        st.json(cv_data)
-
-                                # Show ATS scoring metrics
-                                ats_metrics = analysis.get("ats_scoring_metrics", {})
-                                if ats_metrics:
-                                    st.markdown("### **📊 ATS Audit & Optimization Report**")
-                                    c1, c2, c3, c4 = st.columns(4)
-                                    with c1:
-                                        st.metric("ATS Compatibility Score", f"{ats_metrics.get('ats_friendly_score', 0)}%")
-                                    with c2:
-                                        st.metric("JD Keyword Match", f"{ats_metrics.get('keyword_match_percentage', 0)}%")
-                                    with c3:
-                                        st.metric("ATS Format Compliance", f"{ats_metrics.get('formatting_compliance_score', 0)}%")
-                                    with c4:
-                                        st.metric("STAR Method Coverage", f"{ats_metrics.get('star_method_coverage_percentage', 0)}%")
-                                    
-                                    suggestions = ats_metrics.get("formatting_suggestions", [])
-                                    if suggestions:
-                                        st.markdown("**ATS Parsing Guardrails & Suggestions:**")
-                                        for sug in suggestions:
-                                            st.markdown(f"- 💡 {sug}")
-                                    st.markdown("---")
-
-                                # 1. Key Analysis Takeaways
-                                points = analysis.get("key_analysis_points", [])
-                                if points:
-                                    st.markdown("### **🎯 Key Analysis Takeaways**")
-                                    for pt in points:
-                                        st.markdown(f"- {pt}")
-                                    st.markdown("---")
-
-                                # 2. Core Requirements Matches (Table)
-                                core_matches = analysis.get("core_matches", [])
-                                if core_matches:
-                                    st.markdown("### **✅ Core Requirements Match Details**")
-                                    match_df = pd.DataFrame(core_matches)
-                                    match_df.columns = ["Core Job Requirement", "My Corresponding Match"]
-                                    st.table(match_df)
-                                    st.markdown("---")
-
-                                # 3. Mismatches / Gaps to Fill
-                                gaps = analysis.get("key_mismatches", [])
-                                if gaps:
-                                    st.markdown("### **⚠️ Identified Gaps & Learning Plans**")
-                                    for gap in gaps:
-                                        st.markdown(f"**Missing Requirement**: `{gap.get('requirement')}`")
-                                        st.markdown(f"*Parallel/Transferable Exposure*: {gap.get('parallel_exposure')}")
-                                        st.markdown(f"*Proactive Learning Plan*: {gap.get('learning_plan')}")
-                                        st.markdown("---")
-
-                                # Download files
-                                st.markdown("### **📥 Download Tailored Resume Documents**")
-                                
-                                clean_company = selected_job['company'].replace(' ', '_')
-                                clean_title = selected_job['title'].replace(' ', '_')
-                                
-                                # 1. MD Download
-                                st.download_button(
-                                    label="📄 Download Markdown (.md)",
-                                    data=cv_text,
-                                    file_name=f"CV_Tailored_{clean_company}_{clean_title}.md",
-                                    mime="text/markdown"
-                                )
-
-                                # 2. DOCX Download
-                                docx_bytes = convert_markdown_to_docx(cv_text)
-                                st.download_button(
-                                    label="💼 Download Word Document (.docx)",
-                                    data=docx_bytes,
-                                    file_name=f"CV_Tailored_{clean_company}_{clean_title}.docx",
-                                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                )
-
-                                # 3. PDF Download
+                            with st.spinner("Step 3/3: Rendering DOCX via deterministic pipeline..."):
                                 try:
-                                    pdf_bytes = convert_markdown_to_pdf(cv_text)
+                                    import tempfile
+                                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f_in:
+                                        f_in.write(json_text_2)
+                                        temp_json_path = f_in.name
+                                        
+                                    with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as f_out:
+                                        temp_docx_path = f_out.name
+                                        
+                                    # Run the deterministic renderer
+                                    import sys
+                                    result = subprocess.run([sys.executable, "scripts/render_cv.py", temp_json_path, temp_docx_path], capture_output=True, text=True, check=True)
+                                    
+                                    with open(temp_docx_path, "rb") as f_docx:
+                                        docx_bytes = f_docx.read()
+                                        
+                                    # Cleanup temp files
+                                    try:
+                                        os.remove(temp_json_path)
+                                        os.remove(temp_docx_path)
+                                    except: pass
+                                    
+                                    st.success("✅ Tailored CV flawlessly generated via Custom CV Engine!")
+                                    
+                                    # Download files
+                                    st.markdown("### **📥 Download Tailored Resume Documents**")
+                                    clean_company = selected_job['company'].replace(' ', '_')
+                                    clean_title = selected_job['title'].replace(' ', '_')
+                                    
                                     st.download_button(
-                                        label="📁 Download PDF Document (.pdf)",
-                                        data=pdf_bytes,
-                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.pdf",
-                                        mime="application/pdf"
+                                        label="💼 Download Word Document (.docx)",
+                                        data=docx_bytes,
+                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.docx",
+                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                                     )
-                                except Exception as pdf_err:
-                                    st.error(f"⚠️ Could not generate PDF version: {pdf_err}. The Markdown and Word versions are still available above.")
-
-
-                            except Exception as parse_err:
-                                st.error(f"Failed to parse structured JSON response: {parse_err}")
-                                st.code(json_text)
+                                    
+                                except subprocess.CalledProcessError as sub_err:
+                                    st.error(f"Renderer failed: {sub_err}\n{sub_err.stderr}")
+                                except Exception as e:
+                                    st.error(f"Failed to render DOCX: {e}")
+                                    st.code(json_text_2)
                     except Exception as e:
                         st.error(f"Execution Error: {e}")
 

@@ -1,0 +1,90 @@
+﻿{
+  "type": "object",
+  "properties": {
+    "candidate": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "location": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "linkedin": { "type": "string" }
+      },
+      "required": ["name", "location", "email", "phone", "linkedin"],
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "role": { "type": "string" },
+        "company": { "type": "string" },
+        "headline": { "type": "string" }
+      },
+      "required": ["role", "company", "headline"],
+      "additionalProperties": false
+    },
+    "executiveProfile": { "type": "string" },
+    "roleAlignment": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string" },
+          "summary": { "type": "string" },
+          "evidenceIds": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["label", "summary", "evidenceIds"],
+        "additionalProperties": false
+      }
+    },
+    "experience": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "company": { "type": "string" },
+          "assignmentClient": { "type": [ "string", "null" ] },
+          "formalTitle": { "type": "string" },
+          "functionalScope": { "type": [ "string", "null" ] },
+          "startDate": { "type": "string" },
+          "endDate": { "type": "string" },
+          "location": { "type": "string" },
+          "bullets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": { "type": "string" },
+                "evidenceIds": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
+              "required": ["text", "evidenceIds"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["company", "formalTitle", "startDate", "endDate", "location", "bullets"],
+        "additionalProperties": false
+      }
+    },
+    "education": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "certifications": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "skills": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["candidate", "target", "executiveProfile", "roleAlignment", "experience", "education", "certifications", "skills"],
+  "additionalProperties": false
+}

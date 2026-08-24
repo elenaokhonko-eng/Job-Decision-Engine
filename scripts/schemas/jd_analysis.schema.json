@@ -1,0 +1,49 @@
+﻿{
+  "type": "object",
+  "properties": {
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string" },
+          "category": { 
+            "type": "string",
+            "enum": ["technical", "architecture", "leadership", "domain", "qualification"]
+          },
+          "priority": {
+            "type": "string",
+            "enum": ["critical", "important", "supporting"]
+          },
+          "jdEvidence": { "type": "string" }
+        },
+        "required": ["id", "text", "category", "priority", "jdEvidence"],
+        "additionalProperties": false
+      }
+    },
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "requirementId": { "type": "string" },
+          "score": { "type": "integer" },
+          "evidenceIds": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "safeSummary": { "type": "string" },
+          "gaps": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["requirementId", "score", "evidenceIds", "safeSummary", "gaps"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["requirements", "matches"],
+  "additionalProperties": false
+}
