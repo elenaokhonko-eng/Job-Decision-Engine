@@ -1009,53 +1009,54 @@ with tab_linkedin:
       s.scrollTop = s.scrollHeight;
     }
     await new Promise(r => setTimeout(r, 2000));
-    
-    // Find all job list items/rows on this page
-    const jobElements = Array.from(document.querySelectorAll('li, div')).filter(el => {
-      const hasJobLink = el.querySelector('a[href*="/jobs/"]');
-      const text = el.innerText || '';
-      return hasJobLink && text.includes('·') && !text.includes('Applied') && !text.includes('Interview') && !text.includes('Archived');
-    });
-    
+    // Find all job links on this page
+    const jobLinks = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
     let pageCount = 0;
-    for (const el of jobElements) {
-      const links = Array.from(el.querySelectorAll('a')).filter(a => a.href && a.href.includes('/jobs/'));
-      for (const a of links) {
-        const title = a.innerText.trim();
-        if (!title || title.length < 3 || ['apply', 'easy apply'].includes(title.toLowerCase())) continue;
+    
+    for (const a of jobLinks) {
+      const title = (a.innerText || "").trim();
+      if (!title || title.length < 3) continue; // Skip empty/icon links
+      
+      let jobId = '';
+      const match = a.href.match(/\/jobs\/view\/(\d+)/);
+      if (match) jobId = match[1];
+      
+      if (jobId) {
+        const standardUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
         
-        let jobId = '';
-        if (a.href.includes('/jobs/view/')) {
-          const match = a.href.match(/\/jobs\/view\/(\d+)/);
-          if (match) jobId = match[1];
-        } else if (a.href.includes('jobId=')) {
-          const match = a.href.match(/jobId=(\d+)/);
-          if (match) jobId = match[1];
-        }
-        
-        if (jobId) {
-          const standardUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
+        if (!processedUrls.has(standardUrl)) {
+          processedUrls.add(standardUrl);
           
-          if (!processedUrls.has(standardUrl)) {
-            processedUrls.add(standardUrl);
+          // Traverse up to find container list item or card
+          const container = a.closest('li') || a.closest('.entity-list-item') || a.closest('div');
+          let company = 'Unknown Company';
+          let location = 'Singapore';
+          
+          if (container) {
+            // Try specific selectors first
+            const companyEl = container.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
+            if (companyEl) company = companyEl.innerText.trim();
             
-            // Find company & location line (e.g. Adobe · Singapore)
-            let company = 'Unknown Company';
-            let location = 'Singapore';
-            const innerSpans = Array.from(el.querySelectorAll('span, div, p'));
-            for (const span of innerSpans) {
-              const t = span.innerText.trim();
-              if (t.includes('·') && !t.includes('\n')) {
-                const parts = t.split('·');
-                company = parts[0].trim();
-                location = parts[1].trim();
-                break;
+            const locationEl = container.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
+            if (locationEl) location = locationEl.innerText.trim();
+            
+            // Fallback: if company is still unknown, try parsing the text
+            if (company === 'Unknown Company') {
+              const innerSpans = Array.from(container.querySelectorAll('span, div, p'));
+              for (const span of innerSpans) {
+                const t = span.innerText.trim();
+                if (t.includes('·') && !t.includes('\n')) {
+                  const parts = t.split('·');
+                  company = parts[0].trim();
+                  location = parts[1].trim();
+                  break;
+                }
               }
             }
-            
-            uniqueJobs.push({ title, company, url: standardUrl, location, element: el });
-            pageCount++;
           }
+          
+          uniqueJobs.push({ title, company, url: standardUrl, location, element: container || a });
+          pageCount++;
         }
       }
     }
