@@ -1,4 +1,4 @@
-﻿{
+{
   "type": "object",
   "properties": {
     "candidate": {
@@ -68,7 +68,7 @@
             }
           }
         },
-        "required": ["company", "formalTitle", "startDate", "endDate", "location", "bullets"],
+        "required": ["company", "assignmentClient", "formalTitle", "functionalScope", "startDate", "endDate", "location", "bullets"],
         "additionalProperties": false
       }
     },
