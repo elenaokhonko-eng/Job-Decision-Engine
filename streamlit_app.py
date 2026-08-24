@@ -1423,10 +1423,10 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                 # Robustly find the analysis dictionary regardless of nesting
                                 def find_analysis(data):
                                     if isinstance(data, dict):
+                                        # If it has our target key, return this dict
                                         if "overall_fit_percentage" in data:
                                             return data
-                                        if "analysis" in data and isinstance(data["analysis"], dict):
-                                            return data["analysis"]
+                                        # Otherwise recurse down everything to bypass schema hallucinations
                                         for v in data.values():
                                             res = find_analysis(v)
                                             if res: return res
@@ -1438,10 +1438,10 @@ Ensure the output is clean JSON. Do not prepend or append markdown code blocks a
                                 
                                 def find_customized_cv(data):
                                     if isinstance(data, dict):
+                                        # If it has our target keys, return this dict
                                         if "summary" in data and "work_experience" in data:
                                             return data
-                                        if "customized_cv" in data and isinstance(data["customized_cv"], dict):
-                                            return data["customized_cv"]
+                                        # Otherwise recurse down everything to bypass schema hallucinations
                                         for v in data.values():
                                             res = find_customized_cv(v)
                                             if res: return res
