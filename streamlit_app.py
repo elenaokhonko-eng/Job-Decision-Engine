@@ -1138,65 +1138,7 @@ with tab_linkedin:
   downloadAnchor.remove();
   console.log("🎉 JSON File Downloaded successfully!");
   
-  console.log("🧹 Starting automatic unsave cleanup. Navigating back to Page 1...");
-  
-  // Navigate back to the first page
-  while (true) {
-    const prevBtn = document.querySelector('.artdeco-pagination__button--previous');
-    if (prevBtn && !prevBtn.disabled && !prevBtn.classList.contains('artdeco-button--disabled')) {
-      prevBtn.click();
-      await new Promise(r => setTimeout(r, 2000));
-    } else {
-      break;
-    }
-  }
-
-  let totalUnsaved = 0;
-  console.log("🧹 Unsaving jobs...");
-  
-  while (true) {
-    // Find all 3-dot menu buttons on the current page
-    const threeDotBtns = Array.from(document.querySelectorAll('button[aria-label*="options"], button[aria-label*="Options"], .artdeco-dropdown__trigger')).filter(b => document.body.contains(b));
-    
-    if (threeDotBtns.length === 0) {
-      // No more jobs on this page. Try clicking next.
-      const nextBtn = document.querySelector('.artdeco-pagination__button--next');
-      if (nextBtn && !nextBtn.disabled && !nextBtn.classList.contains('artdeco-button--disabled')) {
-        console.log("➡️ Moving to next page for cleanup...");
-        nextBtn.click();
-        await new Promise(r => setTimeout(r, 2000));
-        continue;
-      }
-      break; // No more jobs and no next page. We are done!
-    }
-
-    for (const btn of threeDotBtns) {
-      if (!document.body.contains(btn)) continue;
-      
-      try {
-        btn.click();
-        await new Promise(r => setTimeout(r, 600)); // Wait for dropdown to open
-        
-        const dropdownItems = Array.from(document.querySelectorAll('.artdeco-dropdown__item, [role="menuitem"]'));
-        const unsaveOption = dropdownItems.find(el => el.innerText.trim().toLowerCase().includes('unsave') || el.innerText.trim().toLowerCase().includes('remove'));
-        
-        if (unsaveOption) {
-          unsaveOption.click();
-          totalUnsaved++;
-          await new Promise(r => setTimeout(r, 1000)); // Wait for unsave network request
-        } else {
-          btn.click(); // Close the dropdown if no unsave option
-        }
-      } catch (e) {
-        // Ignore stale element errors
-      }
-    }
-    // Wait for the UI to update and remove the unsaved items
-    await new Promise(r => setTimeout(r, 2000));
-  }
-  
-  console.log(`🧹 Cleaned up/unsaved ${totalUnsaved} jobs across all pages!`);
-  console.log("🎉 ALL DONE SUCCESSFULLY!");
+  console.log("🎉 ALL DONE SUCCESSFULLY! (Unsave feature temporarily disabled)");
 })();"""
         st.code(script_code, language="javascript")
         
