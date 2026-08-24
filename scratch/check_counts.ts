@@ -1,18 +1,15 @@
-import pg from "pg";
 import dotenv from "dotenv";
-
-dotenv.config({ path: ".env.local" });
-
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
-
+dotenv.config();
+dotenv.config({ path: ".env.local", override: true });
+import { Pool } from 'pg';
+const pool = new Pool({ connectionString: process.env.DATABASE_URL + '?sslmode=require' });
 async function run() {
-  const rawJobsCount = await pool.query("SELECT COUNT(*) FROM raw_jobs");
-  const jobsCount = await pool.query("SELECT COUNT(*) FROM jobs");
-  console.log("Raw jobs (staging) count:", rawJobsCount.rows[0].count);
-  console.log("Evaluated jobs (final) count:", jobsCount.rows[0].count);
+  const { rows } = await pool.query('SELECT final_classification, COUNT(*) FROM jobs GROUP BY final_classification');
+  console.log('Jobs grouping by final_classification:', rows);
+  
+  const { rows: rawRows } = await pool.query('SELECT processed, COUNT(*) FROM raw_jobs GROUP BY processed');
+  console.log('Raw jobs grouping by processed:', rawRows);
+  
   process.exit(0);
 }
 run();
