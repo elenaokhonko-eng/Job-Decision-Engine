@@ -40,37 +40,6 @@
         "additionalProperties": false
       }
     },
-    "experience": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "company": { "type": "string" },
-          "assignmentClient": { "type": [ "string", "null" ] },
-          "formalTitle": { "type": "string" },
-          "startDate": { "type": "string" },
-          "endDate": { "type": "string" },
-          "location": { "type": "string" },
-          "bullets": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "text": { "type": "string" },
-                "evidenceIds": {
-                  "type": "array",
-                  "items": { "type": "string" }
-                }
-              },
-              "required": ["text", "evidenceIds"],
-              "additionalProperties": false
-            }
-          }
-        },
-        "required": ["company", "assignmentClient", "formalTitle", "startDate", "endDate", "location", "bullets"],
-        "additionalProperties": false
-      }
-    },
     "education": {
       "type": "array",
       "items": { "type": "string" }
@@ -84,6 +53,6 @@
       "items": { "type": "string" }
     }
   },
-  "required": ["candidate", "target", "executiveProfile", "roleAlignment", "experience", "education", "certifications", "skills"],
+  "required": ["candidate", "target", "executiveProfile", "roleAlignment", "education", "certifications", "skills"],
   "additionalProperties": false
 }

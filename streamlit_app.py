@@ -1461,9 +1461,14 @@ Your task is to analyze the target Job Description (JD) and output a JSON object
                                         st.markdown(f"- Failed: {cf.get('text')}")
                                     st.stop()
 
-                            # --- STAGE 2: CV CONTENT GENERATION ---
-                            cv_content_prompt = f"""You are the Custom CV Generator Agent.
-Your task is to take the Stage 1 Analysis and the immutable Data Ledgers, and generate the final Tailored CV content.
+                            # --- STAGE 2: ITERATIVE CV CONTENT GENERATION ---
+                            with open("scripts/schemas/cv_base.schema.json", "r", encoding="utf-8-sig") as f:
+                                cv_base_schema = f.read()
+                            with open("scripts/schemas/cv_job.schema.json", "r", encoding="utf-8-sig") as f:
+                                cv_job_schema = f.read()
+
+                            cv_base_prompt = f"""You are the Custom CV Generator Agent.
+Your task is to take the Stage 1 Analysis and the immutable Data Ledgers, and generate the BASE CV content (everything except work experience).
 
 ### TARGET JOB SPECIFICATION:
 - **Title**: {selected_job.get('title', '')}
@@ -1474,18 +1479,11 @@ Your task is to take the Stage 1 Analysis and the immutable Data Ledgers, and ge
 Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decide WHAT is true.
 
 ### STRICT RULES:
-1. **NO TRUNCATION (CRITICAL)**: You MUST process and include EVERY single role listed in the Title Ledger. Do NOT stop early. Do NOT drop any roles to save space. You will not be penalized for length.
-2. **HONESTY GATE (CRITICAL)**: You MUST NOT invent achievements, projects, or employment history outside of the Profile Evidence Store.
-3. **TITLE LEDGER (CRITICAL)**: You MUST use the exact `formalTitle` and `company` names from the Title Ledger. Do not hallucinate or adjust titles.
-4. **ROLE ALIGNMENT**: Provide exactly 4 role alignment summary points tailored specifically to the TARGET JOB.
-5. **TARGET ALIGNMENT**: Ensure `target.role` and `target.company` are exactly as specified in the TARGET JOB. The `target.headline` MUST accurately reflect the role applied for (e.g., if applying for Software Engineer, do not write "Innovative Leader in Responsible AI").
-6. **SKILLS RELEVANCE**: For the `skills` array, ONLY include competencies directly relevant to the TARGET JOB (e.g. AI Agentic coding, architecture, governance). Omit entirely unrelated fields (like Tourism Management or Logistics) unless explicitly aligned.
-7. **EXPERIENCE DEPTH & BULLET DENSITY (CRITICAL)**: You MUST include at least 10 years of chronological work experience. 
-   - For all recent primary roles (from Present down through 'AIA Singapore / AIA Investment Management'), you MUST provide up to 3 key achievements per role by extracting them from the profile evidence. If a role has fewer than 3 achievements in the evidence, output exactly what is there; DO NOT hallucinate extra achievements to reach 3. Do NOT compress multiple distinct achievements into 1 sentence.
-   - For all remaining older jobs (prior to AIAIM), provide exactly 1 key relevant achievement that highlights transferable skills for the target role.
-
-### TITLE LEDGER:
-{title_ledger}
+1. **HONESTY GATE**: You MUST NOT invent achievements, projects, or education outside of the Profile Evidence Store.
+2. **ROLE ALIGNMENT**: Provide exactly 4 role alignment summary points tailored specifically to the TARGET JOB.
+3. **TARGET ALIGNMENT**: Ensure `target.role` and `target.company` are exactly as specified in the TARGET JOB. The `target.headline` MUST accurately reflect the role applied for.
+4. **SKILLS RELEVANCE**: For the `skills` array, ONLY include competencies directly relevant to the TARGET JOB. Omit entirely unrelated fields.
+5. **EDUCATION & CERTS**: Extract 2 to 4 Education items and up to 4 relevant Certifications.
 
 ### PROFILE EVIDENCE:
 {profile_evidence}
@@ -1493,18 +1491,86 @@ Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decid
 ### STAGE 1 ANALYSIS:
 {json_text}
 """
-                            with st.spinner("Step 2/3: Architecting CV Payload..."):
-                                json_text_2 = python_generate_content(
-                                    cv_content_prompt,
-                                    system_instruction="You generate customized CV content strictly conforming to the requested JSON schema. Do not hallucinate titles or evidence.",
+                            with st.spinner("Step 2a: Architecting Base CV Payload..."):
+                                json_base_text = python_generate_content(
+                                    cv_base_prompt,
+                                    system_instruction="You generate customized CV content strictly conforming to the requested JSON schema. Do not hallucinate.",
                                     response_mime_type="application/json",
-                                    response_schema=json.loads(cv_content_schema)
+                                    response_schema=json.loads(cv_base_schema)
                                 )
-                                json_text_2 = json_text_2.strip()
-                                if json_text_2.startswith("```json"): json_text_2 = json_text_2[7:]
-                                if json_text_2.startswith("```"): json_text_2 = json_text_2[3:]
-                                if json_text_2.endswith("```"): json_text_2 = json_text_2[:-3]
-                                json_text_2 = json_text_2.strip()
+                                json_base_text = json_base_text.strip()
+                                if json_base_text.startswith("```json"): json_base_text = json_base_text[7:]
+                                if json_base_text.startswith("```"): json_base_text = json_base_text[3:]
+                                if json_base_text.endswith("```"): json_base_text = json_base_text[:-3]
+                                json_base_text = json_base_text.strip()
+
+                                try:
+                                    cv_payload = json.loads(json_base_text)
+                                except Exception as e:
+                                    st.error(f"Failed to parse base CV JSON: {e}")
+                                    st.stop()
+
+                            cv_payload["experience"] = []
+
+                            try:
+                                jobs_list = json.loads(title_ledger)
+                            except Exception:
+                                jobs_list = []
+
+                            total_jobs = len(jobs_list)
+
+                            for idx, job_entry in enumerate(jobs_list):
+                                company_name = job_entry.get("company", "")
+                                formal_title = job_entry.get("formalTitle", "")
+
+                                with st.spinner(f"Step 2b: Extracting achievements for role {idx+1}/{total_jobs}: {company_name}..."):
+                                    cv_job_prompt = f"""You are the Custom CV Generator Agent.
+Your task is to extract achievements strictly from the Profile Evidence for a SPECIFIC role, tailored for the TARGET JOB.
+
+### TARGET JOB:
+{selected_job.get('title', '')} at {selected_job.get('company', '')}
+
+### CURRENT ROLE TO PROCESS:
+- **Company**: {company_name}
+- **Title**: {formal_title}
+
+### STRICT RULES:
+1. **HONESTY GATE**: Extract ONLY from the provided Profile Evidence. Do not invent.
+2. **BULLET DENSITY**: 
+   - If this role is Recent (AIA Investment Management or newer), extract up to 3 key achievements.
+   - If this role is Older, extract exactly 1 key relevant achievement.
+3. If no evidence exists for this specific company/role, return an empty array for bullets. Do NOT borrow bullets from other roles.
+
+### PROFILE EVIDENCE:
+{profile_evidence}
+"""
+                                    json_job_text = python_generate_content(
+                                        cv_job_prompt,
+                                        system_instruction="Extract bullets for the specified job strictly conforming to the schema.",
+                                        response_mime_type="application/json",
+                                        response_schema=json.loads(cv_job_schema)
+                                    )
+                                    json_job_text = json_job_text.strip()
+                                    if json_job_text.startswith("```json"): json_job_text = json_job_text[7:]
+                                    if json_job_text.startswith("```"): json_job_text = json_job_text[3:]
+                                    if json_job_text.endswith("```"): json_job_text = json_job_text[:-3]
+                                    json_job_text = json_job_text.strip()
+
+                                    try:
+                                        job_payload = json.loads(json_job_text)
+                                        bullets = job_payload.get("bullets", [])
+                                    except Exception:
+                                        bullets = []
+
+                                    job_entry["bullets"] = bullets
+                                    if "location" not in job_entry:
+                                        job_entry["location"] = "Singapore"
+                                    if "assignmentClient" not in job_entry:
+                                        job_entry["assignmentClient"] = None
+
+                                    cv_payload["experience"].append(job_entry)
+
+                            json_text_2 = json.dumps(cv_payload)
 
                             with st.spinner("Step 3/3: Rendering DOCX via deterministic pipeline..."):
                                 try:

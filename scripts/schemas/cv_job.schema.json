@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "bullets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "evidenceIds": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["text", "evidenceIds"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["bullets"],
+  "additionalProperties": false
+}
