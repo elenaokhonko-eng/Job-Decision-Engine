@@ -889,7 +889,7 @@ with tab_dashboard:
         st.subheader("🤖 Scoring & Match Analysis Details")
         st.write("Select an evaluated job to view detailed autonomy & focus match metrics, workplace stress assessments, and strategic CV targeting.")
         
-        evaluated_jobs = [j for j in filtered_jobs if j.get("status") and j.get("status") != "UNASSIGNED"]
+        evaluated_jobs = [j for j in filtered_jobs if j.get("status") and j.get("status") not in ("UNASSIGNED", "REJECTED")]
         selected_job_title = st.selectbox(
             "Select Job to Analyze", 
             [f"{j.get('title')} ({j.get('company')})" for j in evaluated_jobs] if evaluated_jobs else ["No Evaluated Jobs Available"]
