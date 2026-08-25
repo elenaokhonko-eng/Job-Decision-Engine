@@ -1473,13 +1473,15 @@ Your task is to take the Stage 1 Analysis and the immutable Data Ledgers, and ge
 Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decide WHAT is true.
 
 ### STRICT RULES:
-1. **LENGTH LIMITS**: The CV MUST be strictly under 3 pages. Drop roles or prune bullets if it gets too long.
+1. **LENGTH LIMITS**: The CV MUST be strictly under 3 pages. You may compress wording to save space, but you MUST obey the BULLET DENSITY rules below.
 2. **HONESTY GATE (CRITICAL)**: You MUST NOT invent achievements, projects, or employment history outside of the Profile Evidence Store.
 3. **TITLE LEDGER (CRITICAL)**: You MUST use the exact `formalTitle` and `company` names from the Title Ledger. Do not hallucinate or adjust titles.
 4. **ROLE ALIGNMENT**: Provide exactly 4 role alignment summary points tailored specifically to the TARGET JOB.
 5. **TARGET ALIGNMENT**: Ensure `target.role` and `target.company` are exactly as specified in the TARGET JOB. The `target.headline` MUST accurately reflect the role applied for (e.g., if applying for Software Engineer, do not write "Innovative Leader in Responsible AI").
 6. **SKILLS RELEVANCE**: For the `skills` array, ONLY include competencies directly relevant to the TARGET JOB (e.g. AI Agentic coding, architecture, governance). Omit entirely unrelated fields (like Tourism Management or Logistics) unless explicitly aligned.
-7. **EXPERIENCE DEPTH**: You MUST include at least 10 years of chronological work experience. Do NOT aggressively drop your past roles. Instead of dropping older roles, you MUST intelligently frame and adapt their bullet points to highlight transferable skills relevant to the TARGET JOB (e.g. problem-solving, delivery, architecture).
+7. **EXPERIENCE DEPTH & BULLET DENSITY (CRITICAL)**: You MUST include at least 10 years of chronological work experience. 
+   - For all recent primary roles (from Present down through 'AIA Singapore / AIA Investment Management'), you MUST provide exactly 3 key achievements/responsibilities per role by extracting the top 3 achievements from the profile evidence. Do NOT compress these into 1 sentence.
+   - For all remaining older jobs (prior to AIAIM), provide exactly 1 key relevant achievement that highlights transferable skills for the target role.
 
 ### TITLE LEDGER:
 {title_ledger}
