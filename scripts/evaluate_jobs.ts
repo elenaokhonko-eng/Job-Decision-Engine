@@ -635,8 +635,17 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
             const evalResult = result.evaluated_jobs?.[0];
             if (evalResult) {
               const totalScore = evalResult.core_fit_score ?? 0;
-              const status = evalResult.final_classification ?? "REJECTED";
+              let status = evalResult.final_classification ?? "REJECTED";
               const track = evalResult.career_horizon_route ?? "STRATEGIC_DEAD_END";
+
+              // AI Hallucination Math Sanity Check Override
+              if (totalScore < 70 && (status === "PRIORITY_APPLY" || status === "APPLY_AFTER_VERIFICATION" || status === "HIGH_FIT_HIGH_RISK")) {
+                  console.log(`    ⚠️ AI Hallucination detected: Score is ${totalScore} but status was ${status}. Downgrading to LOW_STRATEGIC_VALUE.`);
+                  status = "LOW_STRATEGIC_VALUE";
+              } else if (totalScore >= 70 && totalScore < 80 && status === "PRIORITY_APPLY") {
+                  console.log(`    ⚠️ AI Hallucination detected: Score is ${totalScore} but status was ${status}. Downgrading to APPLY_AFTER_VERIFICATION.`);
+                  status = "APPLY_AFTER_VERIFICATION";
+              }
 
               console.log(`  -> Complete: Score = ${totalScore}/100, Status = ${status}, Track = ${track}`);
               
@@ -707,7 +716,8 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
     // Filter jobs that were evaluated in the current run and are eligible (status in 'STRONG MATCH', 'REVIEW REQUIRED')
     const eligibleJobs = allJobs.filter(j => 
       evaluatedTodayIds.includes(j.id) && 
-      (j.final_classification === "PRIORITY_APPLY" || j.final_classification === "APPLY_AFTER_VERIFICATION")
+      (j.final_classification === "PRIORITY_APPLY" || j.final_classification === "APPLY_AFTER_VERIFICATION") &&
+      (j.core_fit_score !== null && j.core_fit_score >= 70) // Math Sanity Check
     );
     
     // Sort by core_fit_score DESC
