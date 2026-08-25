@@ -1473,7 +1473,7 @@ Your task is to take the Stage 1 Analysis and the immutable Data Ledgers, and ge
 Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decide WHAT is true.
 
 ### STRICT RULES:
-1. **LENGTH LIMITS**: The CV MUST be strictly under 3 pages. You may compress wording to save space, but you MUST obey the BULLET DENSITY rules below.
+1. **NO TRUNCATION (CRITICAL)**: You MUST process and include EVERY single role listed in the Title Ledger. Do NOT stop early. Do NOT drop any roles to save space. You will not be penalized for length.
 2. **HONESTY GATE (CRITICAL)**: You MUST NOT invent achievements, projects, or employment history outside of the Profile Evidence Store.
 3. **TITLE LEDGER (CRITICAL)**: You MUST use the exact `formalTitle` and `company` names from the Title Ledger. Do not hallucinate or adjust titles.
 4. **ROLE ALIGNMENT**: Provide exactly 4 role alignment summary points tailored specifically to the TARGET JOB.
