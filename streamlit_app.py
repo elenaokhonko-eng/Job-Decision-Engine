@@ -1480,7 +1480,7 @@ Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decid
 5. **TARGET ALIGNMENT**: Ensure `target.role` and `target.company` are exactly as specified in the TARGET JOB. The `target.headline` MUST accurately reflect the role applied for (e.g., if applying for Software Engineer, do not write "Innovative Leader in Responsible AI").
 6. **SKILLS RELEVANCE**: For the `skills` array, ONLY include competencies directly relevant to the TARGET JOB (e.g. AI Agentic coding, architecture, governance). Omit entirely unrelated fields (like Tourism Management or Logistics) unless explicitly aligned.
 7. **EXPERIENCE DEPTH & BULLET DENSITY (CRITICAL)**: You MUST include at least 10 years of chronological work experience. 
-   - For all recent primary roles (from Present down through 'AIA Singapore / AIA Investment Management'), you MUST provide exactly 3 key achievements/responsibilities per role by extracting the top 3 achievements from the profile evidence. Do NOT compress these into 1 sentence.
+   - For all recent primary roles (from Present down through 'AIA Singapore / AIA Investment Management'), you MUST provide up to 3 key achievements per role by extracting them from the profile evidence. If a role has fewer than 3 achievements in the evidence, output exactly what is there; DO NOT hallucinate extra achievements to reach 3. Do NOT compress multiple distinct achievements into 1 sentence.
    - For all remaining older jobs (prior to AIAIM), provide exactly 1 key relevant achievement that highlights transferable skills for the target role.
 
 ### TITLE LEDGER:
