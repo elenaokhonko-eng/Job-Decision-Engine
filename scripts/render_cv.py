@@ -179,7 +179,7 @@ def add_role(doc, company, period, title, scope=None, location=None, before=5):
     if location:
         r = p2.add_run(f"  |  {location}")
         set_font(r, 9.2, color=MUTED)
-    if scope:
+    if scope and str(scope).strip().lower() not in ["null", "none", ""]:
         p3 = doc.add_paragraph(style="Resume Scope")
         p3.paragraph_format.space_before = Pt(0)
         p3.paragraph_format.space_after = Pt(2)
