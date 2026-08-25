@@ -44,7 +44,8 @@ export const HARD_DISQUALIFIERS = [
   "Company Type: Job postings sourced from recruitment agencies (e.g., Argyll Scott)",
   "Company Type: Forward Deployed Engineering (FDE)",
   "Company Type: IT outsourcing/staffing (specifically exact matches for Red Hat, or external contracting agencies)",
-  "Company Type: Consulting firms (Accenture, KPMG, BCG, McKinsey, Bain, Deloitte, PwC, EY, Boston Consulting Group, PricewaterhouseCoopers)"
+  "Company Type: Consulting firms (Accenture, KPMG, BCG, McKinsey, Bain, Deloitte, PwC, EY, Boston Consulting Group, PricewaterhouseCoopers)",
+  "Role Focus: Infrastructure Data Center, Datacenter operations, or physical Data Center management (candidate lacks experience in this specific area)"
 ];
 
 // Stage 2: Career Change Horizon Routes
