@@ -717,7 +717,7 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
     const eligibleJobs = allJobs.filter(j => 
       evaluatedTodayIds.includes(j.id) && 
       (j.final_classification === "PRIORITY_APPLY" || j.final_classification === "APPLY_AFTER_VERIFICATION") &&
-      (j.core_fit_score !== null && j.core_fit_score >= 70) // Math Sanity Check
+      ((j.core_fit_score ?? 0) >= 70) // Math Sanity Check
     );
     
     // Sort by core_fit_score DESC
