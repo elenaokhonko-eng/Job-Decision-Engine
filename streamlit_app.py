@@ -1384,8 +1384,7 @@ with tab_cv:
                                 profile_evidence = f.read()
                             with open("scripts/schemas/jd_analysis.schema.json", "r", encoding="utf-8-sig") as f:
                                 jd_analysis_schema = f.read()
-                            with open("scripts/schemas/cv_content.schema.json", "r", encoding="utf-8-sig") as f:
-                                cv_content_schema = f.read()
+
 
                             # --- STAGE 1: ANALYSIS ---
                             analysis_prompt = f"""You are a professional CV analysis agent.
