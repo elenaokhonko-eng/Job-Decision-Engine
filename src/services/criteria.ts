@@ -47,7 +47,8 @@ export const HARD_DISQUALIFIERS = [
   "Company Type: Consulting firms (Accenture, KPMG, BCG, McKinsey, Bain, Deloitte, PwC, EY, Boston Consulting Group, PricewaterhouseCoopers)",
   "Role Focus: Infrastructure Data Center, Datacenter operations, or physical Data Center management (candidate lacks experience in this specific area)",
   "Role Focus: Hardware Engineering, physical device engineering, or hardware design (candidate focuses exclusively on Software Engineering/Architecture)",
-  "Role Focus: Construction, Data Center Construction, or physical site build-out roles"
+  "Role Focus: Construction, Data Center Construction, or physical site build-out roles",
+  "Role Focus: Site Reliability Engineering (SRE) or roles focused on physical site reliability/hardware maintenance"
 ];
 
 // Stage 2: Career Change Horizon Routes
