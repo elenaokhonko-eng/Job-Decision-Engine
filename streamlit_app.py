@@ -146,7 +146,7 @@ def delete_job_from_db(job_id):
         row = cursor.fetchone()
         company_id = row[0] if row else None
         
-        cursor.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+        cursor.execute("UPDATE jobs SET final_classification = 'REJECTED', is_top_ten = FALSE WHERE id = %s", (job_id,))
         
         # If company existed, recalculate metrics
         if company_id:
