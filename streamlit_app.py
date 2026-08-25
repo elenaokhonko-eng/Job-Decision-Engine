@@ -369,7 +369,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
                 body = {
                     "model": model_name,
                     "messages": messages,
-                    "temperature": 1,
+                    "temperature": 0.0,
                     "max_completion_tokens": 16384
                 }
                 if response_schema:

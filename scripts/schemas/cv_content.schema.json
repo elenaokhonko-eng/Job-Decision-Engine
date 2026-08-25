@@ -48,7 +48,6 @@
           "company": { "type": "string" },
           "assignmentClient": { "type": [ "string", "null" ] },
           "formalTitle": { "type": "string" },
-          "functionalScope": { "type": [ "string", "null" ] },
           "startDate": { "type": "string" },
           "endDate": { "type": "string" },
           "location": { "type": "string" },
@@ -68,7 +67,7 @@
             }
           }
         },
-        "required": ["company", "assignmentClient", "formalTitle", "functionalScope", "startDate", "endDate", "location", "bullets"],
+        "required": ["company", "assignmentClient", "formalTitle", "startDate", "endDate", "location", "bullets"],
         "additionalProperties": false
       }
     },

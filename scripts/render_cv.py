@@ -158,7 +158,7 @@ def add_section(doc, title, before=8, after=4):
     set_paragraph_border_bottom(p, color="D6E1EA", size="5", space="2")
     return p
 
-def add_role(doc, company, period, title, scope=None, location=None, before=5):
+def add_role(doc, company, period, title, location=None, before=5):
     p = doc.add_paragraph(style="Resume Role")
     p.paragraph_format.space_before = Pt(before)
     p.paragraph_format.space_after = Pt(0)
@@ -179,15 +179,6 @@ def add_role(doc, company, period, title, scope=None, location=None, before=5):
     if location:
         r = p2.add_run(f"  |  {location}")
         set_font(r, 9.2, color=MUTED)
-    if scope and str(scope).strip().lower() not in ["null", "none", ""]:
-        p3 = doc.add_paragraph(style="Resume Scope")
-        p3.paragraph_format.space_before = Pt(0)
-        p3.paragraph_format.space_after = Pt(2)
-        p3.paragraph_format.keep_with_next = True
-        r = p3.add_run("Functional scope: ")
-        set_font(r, 9.2, bold=True, color=MUTED)
-        r = p3.add_run(scope)
-        set_font(r, 9.2, italic=True, color=MUTED)
 
 def add_label_para(doc, label, text, after=2.5):
     p = doc.add_paragraph(style="Resume Body")
@@ -301,7 +292,7 @@ def render(json_path, out_path):
     add_section(doc, "Professional Experience", before=5, after=3)
     for exp in cv.get('experience', []):
         period = f"{exp.get('startDate', '')} - {exp.get('endDate', '')}"
-        add_role(doc, exp.get('company', ''), period, exp.get('formalTitle', ''), scope=exp.get('functionalScope'), location=exp.get('location'), before=3)
+        add_role(doc, exp.get('company', ''), period, exp.get('formalTitle', ''), location=exp.get('location'), before=3)
         for bullet in exp.get('bullets', []):
             add_bullet(doc, bullet_num_id, bullet.get('text', ''))
 
