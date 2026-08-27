@@ -114,19 +114,15 @@ def fetch_jobs_from_db():
             SELECT id, title, company_name as company, source, raw_description as description, 
                    salary_range as "salaryRange", posted_date::text as "postedDate", location, 
                    careers_portal_url, 
-                   final_classification as status, 
-                   career_horizon_route as assigned_track, 
-                   confidence_level, 
-                   core_fit_score as total_score,
-                   score_technical_autonomy, 
-                   score_comp_quality as score_compensation_potential, 
-                   score_role_purity as score_domain_relevance,
+                   processing_status as status, 
+                   primary_lane as assigned_track, 
+                   lane_confidence as confidence_level, 
+                   nd_friendly_score as total_score,
                    nd_friendly_score as score_environment_guardrails, 
-                   score_market_durability as score_future_mobility,
                    nd_friendly_score, politics_stress_score, sensory_overload_index,
                    biological_stress_risk, strategic_value, recommended_cv_version, next_action
             FROM jobs 
-            ORDER BY core_fit_score DESC, created_at DESC
+            ORDER BY created_at DESC
         """)
         rows = cursor.fetchall()
         cursor.close()
@@ -146,7 +142,7 @@ def delete_job_from_db(job_id):
         row = cursor.fetchone()
         company_id = row[0] if row else None
         
-        cursor.execute("UPDATE jobs SET final_classification = 'REJECTED', is_top_ten = FALSE WHERE id = %s", (job_id,))
+        cursor.execute("UPDATE jobs SET processing_status = 'REJECTED', is_top_ten = FALSE WHERE id = %s", (job_id,))
         
         # If company existed, recalculate metrics
         if company_id:
@@ -157,7 +153,7 @@ def delete_job_from_db(job_id):
                   AVG(sensory_overload_index) as avg_sens,
                   AVG(nd_friendly_score) as avg_focus
                 FROM jobs 
-                WHERE company_id = %s AND final_classification IS NOT NULL
+                WHERE company_id = %s AND processing_status IS NOT NULL
             """, (company_id,))
             stats = cursor.fetchone()
             if stats and stats[0] is not None:
@@ -880,8 +876,17 @@ with tab_dashboard:
                             st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"rej_desc_{idx}")
                             
                             if st.button("🗑️ Delete Listing Permanent", key=f"rej_del_{job.get('id') or idx}"):
-                                if delete_job_from_db(job.get("id")):
+                                try:
+                                    conn = get_db_connection()
+                                    cursor = conn.cursor()
+                                    cursor.execute("DELETE FROM jobs WHERE id = %s", (job.get('id'),))
+                                    conn.commit()
+                                    cursor.close()
+                                    conn.close()
+                                    st.success("Permanently deleted!")
                                     st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to permanently delete: {e}")
                     if len(rejected_jobs) > display_limit:
                         st.caption(f"⚠️ Showing first {display_limit} rejected listings to maintain UI performance. Use the search inputs above to filter down further.")
 
@@ -890,15 +895,19 @@ with tab_dashboard:
         st.write("Select an evaluated job to view detailed autonomy & focus match metrics, workplace stress assessments, and strategic CV targeting.")
         
         evaluated_jobs = [j for j in filtered_jobs if j.get("status") and j.get("status") not in ("UNASSIGNED", "REJECTED")]
+        
+        def format_job_option(j):
+            return f"{j.get('title')} ({j.get('company')}) - {str(j.get('id'))[:8]}"
+            
         selected_job_title = st.selectbox(
             "Select Job to Analyze", 
-            [f"{j.get('title')} ({j.get('company')})" for j in evaluated_jobs] if evaluated_jobs else ["No Evaluated Jobs Available"]
+            [format_job_option(j) for j in evaluated_jobs] if evaluated_jobs else ["No Evaluated Jobs Available"]
         )
         
         # Get actual job object
         job_to_show = None
         if evaluated_jobs and selected_job_title != "No Evaluated Jobs Available":
-            idx_selected = [f"{j.get('title')} ({j.get('company')})" for j in evaluated_jobs].index(selected_job_title)
+            idx_selected = [format_job_option(j) for j in evaluated_jobs].index(selected_job_title)
             job_to_show = evaluated_jobs[idx_selected]
 
         if job_to_show:

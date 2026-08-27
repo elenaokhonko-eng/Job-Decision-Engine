@@ -8,8 +8,10 @@ dotenv.config({ path: ".env.local" });
 
 describe.sequential("Job Decision Engine Test Suite", () => {
   beforeEach(async () => {
-    // Skip if DATABASE_URL is not set
-    if (!process.env.DATABASE_URL) return;
+    // Fail fast if DATABASE_URL is not set instead of silently skipping
+    if (!process.env.DATABASE_URL) {
+      throw new Error("DATABASE_URL must be set to run the test suite. Exiting to prevent silent CI skips.");
+    }
 
     // Protect production database from being wiped during test runs
     if (process.env.DATABASE_URL.includes("neon.tech") && process.env.ALLOW_TEST_DB_WIPE !== "true") {
@@ -23,57 +25,53 @@ describe.sequential("Job Decision Engine Test Suite", () => {
 
   // Test 1: Database Read Happy Path
   it("Test 1: should fetch seeded jobs from database", async () => {
-    if (!process.env.DATABASE_URL) {
-      console.warn("⚠️ DATABASE_URL is not set. Skipping real DB tests.");
-      return;
-    }
+
     let jobs = await db.queryJobs();
     if (jobs.length === 0) {
       await db.addJob({
         title: "Lead AI & RegTech Platform Architect",
-        company: "Apex Wealth Management",
+        company_name: "Apex Wealth Management",
         source: "eFinancialCareers",
-        salaryRange: "SGD 24,000 - SGD 28,000 / month",
-        postedDate: "2026-07-12",
+        salary_range: "SGD 24,000 - SGD 28,000 / month",
+        posted_date: "2026-07-12",
         location: "Singapore (Hybrid)",
         careers_portal_url: "https://www.efinancialcareers.sg/jobs/lead-ai-regtech-platform-architect-apex-wealth-management-100231",
-        description: "Hands-on Platform Architect experience building AI compliance platform.",
-        stage1_status: "PASS",
-        final_classification: "PRIORITY_APPLY",
-        career_horizon_route: "SCIENTIFIC_AI_CONVERGENCE",
-        confidence_level: "High",
-        core_fit_score: 92
+        raw_description: "Hands-on Platform Architect experience building AI compliance platform.",
+        processing_status: "EVALUATED",
+        primary_lane: "CORE_AI_DATA",
+        lane_confidence: "High",
+        nd_friendly_score: 92
       }, true);
       jobs = await db.queryJobs();
     }
     expect(jobs).toBeInstanceOf(Array);
     expect(jobs.length).toBeGreaterThan(0);
     expect(jobs[0]).toHaveProperty("title");
-    expect(jobs[0]).toHaveProperty("company");
-    expect(jobs[0]).toHaveProperty("description");
+    expect(jobs[0]).toHaveProperty("company_name");
+    expect(jobs[0]).toHaveProperty("raw_description");
   });
 
   // Test 2: Database Write Happy Path
   it("Test 2: should add a new job to the database", async () => {
-    if (!process.env.DATABASE_URL) return;
+
     const newJobPayload = {
       title: "Senior Biotech Specialist",
-      company: "Amsterdam FloraPharma",
-      source: "LinkedIn" as const,
-      description: "Hands-on research on medicinal plants for clinical pipelines in Utrecht, Netherlands. No travel.",
-      salaryRange: "EUR 6,000 / month",
+      company_name: "Amsterdam FloraPharma",
+      source: "LinkedIn",
+      raw_description: "Hands-on research on medicinal plants for clinical pipelines in Utrecht, Netherlands. No travel.",
+      salary_range: "EUR 6,000 / month",
       location: "Utrecht, Netherlands",
       careers_portal_url: "https://www.florapharma.nl/careers",
-      stage1_status: "PASS" as const,
-      final_classification: "PRIORITY_APPLY" as const,
-      confidence_level: "High" as const,
-      core_fit_score: 85
+      processing_status: "EVALUATED" as const,
+      primary_lane: "HEALTH_BIO_PHARMA" as const,
+      lane_confidence: "High",
+      nd_friendly_score: 85
     };
 
     const addedJob = await db.addJob(newJobPayload, true);
     expect(addedJob).toHaveProperty("id");
     expect(addedJob.title).toBe(newJobPayload.title);
-    expect(addedJob.company).toBe(newJobPayload.company);
+    expect(addedJob.company_name).toBe(newJobPayload.company_name);
 
     const jobs = await db.queryJobs("FloraPharma");
     expect(jobs.length).toBeGreaterThanOrEqual(1);
@@ -82,19 +80,19 @@ describe.sequential("Job Decision Engine Test Suite", () => {
 
   // Test 3: Database Delete
   it("Test 3: should delete an existing job from the database", async () => {
-    if (!process.env.DATABASE_URL) return;
+
     let jobsBefore = await db.queryJobs();
     if (jobsBefore.length === 0) {
       await db.addJob({
         title: "Test Delete Job",
-        company: "Delete Company",
+        company_name: "Delete Company",
         source: "LinkedIn",
-        description: "Test description",
+        raw_description: "Test description",
         careers_portal_url: "https://www.linkedin.com/jobs/view/test-delete",
-        stage1_status: "PASS",
-        final_classification: "PRIORITY_APPLY",
-        confidence_level: "High",
-        core_fit_score: 80
+        processing_status: "EVALUATED",
+        primary_lane: "CORE_AI_DATA",
+        lane_confidence: "High",
+        nd_friendly_score: 80
       }, true);
       jobsBefore = await db.queryJobs();
     }
@@ -112,7 +110,7 @@ describe.sequential("Job Decision Engine Test Suite", () => {
 
   // Test 4: Database Interaction Logging Happy Path
   it("Test 4: should successfully log agent interactions", async () => {
-    if (!process.env.DATABASE_URL) return;
+
     const question = "Check high paying finance jobs in the database";
     const toolsUsed = ["queryDatabaseForJobs"];
     const answer = { summary: "Top matched jobs found" };
@@ -131,7 +129,7 @@ describe.sequential("Job Decision Engine Test Suite", () => {
 
   // Test 5: Agent Initialization Key Validation Failure Case (Loud Fail)
   it("Test 5: should fail loud if neither GEMINI_API_KEY nor OPENAI_API_KEY is configured", async () => {
-    if (!process.env.DATABASE_URL) return;
+
     // Temporarily save original keys
     const origGemini = process.env.GEMINI_API_KEY;
     const origOpenAI = process.env.OPENAI_API_KEY;

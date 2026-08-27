@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { getGeminiClient, runAgent, generateContent } from "../src/services/agent.ts";
 import { extractWithFallback } from "../src/services/llmFallback.ts";
 import { db, verifyUrlLive } from "../src/db/db.ts";
+import { applyGlobalGates, generateContentHash } from "../src/services/criteria.ts";
 import { runDeduplication } from "./deduplicate.ts";
 import puppeteer from "puppeteer";
 
@@ -171,118 +172,7 @@ async function scrapeJobDescription(url: string, browser: puppeteer.Browser): Pr
   }
 }
 
-function checkDirectRejection(title: string, company: string, description: any): string | null {
-  const t = title.toLowerCase();
-  const c = company.toLowerCase();
-  let d = "";
-
-  if (description) {
-    if (typeof description === "object") {
-      d = (
-        (description.job_description || "") + " " +
-        (description.key_responsibilities || []).join(" ") + " " +
-        (description.technical_skills || []).join(" ") + " " +
-        (description.qualifications_education || []).join(" ") + " " +
-        (description.nice_to_haves || []).join(" ")
-      ).toLowerCase();
-    } else if (typeof description === "string") {
-      if (description.trim().startsWith("{")) {
-        try {
-          const parsed = JSON.parse(description);
-          d = (
-            (parsed.job_description || "") + " " +
-            (parsed.key_responsibilities || []).join(" ") + " " +
-            (parsed.technical_skills || []).join(" ") + " " +
-            (parsed.qualifications_education || []).join(" ") + " " +
-            (parsed.nice_to_haves || []).join(" ")
-          ).toLowerCase();
-        } catch {
-          d = description.toLowerCase();
-        }
-      } else {
-        d = description.toLowerCase();
-      }
-    }
-  }
-
-  // 1. FDE (Forward Deployed Engineering) check
-  if (t.includes("fde") || t.includes("forward deployed") || d.includes("forward deployed") || d.includes("fde ")) {
-    return "Rejected: Role is a Forward Deployed Engineering (FDE) position.";
-  }
-
-  // 2. Consulting Firms check
-  const consultingFirms = [
-    "accenture", "kpmg", "bcg", "mckinsey", "bain", "deloitte", "pwc", 
-    "ernst & young", "pricewaterhousecoopers", "boston consulting group"
-  ];
-  for (const firm of consultingFirms) {
-    if (c.includes(firm)) {
-      return `Rejected: Company "${company}" is a consulting firm.`;
-    }
-  }
-
-  // Exact or word-boundary check for "EY" (Ernst & Young) to avoid matching "Stanley" or "Disney"
-  if (c === "ey" || c === "ey pte ltd" || c.startsWith("ey ") || c.endsWith(" ey") || c.includes(" ey ") || c.includes("ey.com")) {
-    return `Rejected: Company "${company}" is a consulting firm (EY).`;
-  }
-
-  // 3. IT Outsourcing check
-  if (c.includes("red hat") || d.includes("deployed to client") || d.includes("work for our clients") || d.includes("hired resource")) {
-    return `Rejected: Role is in an IT outsourcing or staffing deployment model.`;
-  }
-
-  // 3b. Recruitment Agency Contract check
-  const contractKeywords = ["contract", "contractor", "temp", "temporary", "freelance"];
-  const agencyKeywords = [
-    "recruitment", "recruiting", "staffing", "talent acquisition",
-    "hays", "randstad", "pagegroup", "michael page", "adecco", 
-    "charterhouse", "huxley", "robert half", "robert walters", "kelly services", 
-    "monroe consulting", "recruit"
-  ];
-  const isAgency = agencyKeywords.some(kw => c.includes(kw)) || 
-                   d.includes("on behalf of our client") || 
-                   d.includes("our client is looking for") || 
-                   d.includes("hiring for our client");
-                   
-  if (isAgency) {
-    const isContract = contractKeywords.some(kw => t.includes(kw) || d.includes(kw)) || d.includes("renewable");
-    if (isContract) {
-      return "Rejected: Contract/renewable role posted by recruitment agency.";
-    }
-  }
-
-  // 4. Contract check
-  for (const kw of contractKeywords) {
-    if (t.includes(kw)) {
-      if (t.includes("permanent contract") || d.includes("permanent contract")) {
-        continue;
-      }
-      return `Rejected: Role is a contract or temporary position ("${kw}").`;
-    }
-  }
-
-  // 5. Kitchen-sink / Multi-role (Extreme management/delivery overhead)
-  const managementKeywords = ["manage large teams", "manage client teams", "manage client expectations", "client relationship management"];
-  for (const kw of managementKeywords) {
-    if (d.includes(kw)) {
-      return `Rejected: Role involves heavy management overhead / managing client teams (${kw}).`;
-    }
-  }
-
-  // Kitchen sink indicators (if 4 or more distinct roles are combined)
-  let rolesCount = 0;
-  if (d.includes("project manager") || d.includes("scrum master") || d.includes("project management")) rolesCount++;
-  if (d.includes("people manager") || d.includes("people management") || d.includes("line manager")) rolesCount++;
-  if (d.includes("client manager") || d.includes("delivery manager") || d.includes("account manager")) rolesCount++;
-  if (d.includes("architect") || d.includes("architecture")) rolesCount++;
-  if (d.includes("developer") || d.includes("engineer")) rolesCount++;
-
-  if (rolesCount >= 4) {
-    return "Rejected: Kitchen-sink posting combining too many distinct roles (Architect + PM + People Manager + Client/Delivery Manager).";
-  }
-
-  return null;
-}
+// Removed checkDirectRejection in favor of applyGlobalGates in criteria.ts
 
 async function runPipeline() {
   console.log("====================================================");
@@ -294,8 +184,30 @@ async function runPipeline() {
     process.exit(1);
   }
 
-  const evalSleepMs = parseInt(process.env.EVAL_SLEEP_MS || "10000", 10);
-  const evalJobSleepMs = parseInt(process.env.EVAL_JOB_SLEEP_MS || "13000", 10);
+  const evalSleepMs = parseInt(process.env.EVAL_SLEEP_MS || "15000", 10);
+  const evalJobSleepMs = parseInt(process.env.EVAL_JOB_SLEEP_MS || "25000", 10);
+  let pipelineHealth: string = "HEALTHY";
+
+  console.log("=== Validating Model Configuration ===");
+  if (!process.env.GEMINI_API_KEY) {
+    console.error("❌ ERROR: GEMINI_API_KEY is not set. Cannot run generative evaluation.");
+    process.exit(1);
+  }
+  
+  try {
+    const ai = getGeminiClient();
+    await generateContent({
+      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+      contents: "ping",
+      systemInstruction: "reply pong"
+    });
+    console.log(`✅ Model ${process.env.GEMINI_MODEL || "gemini-1.5-flash"} is accessible.`);
+  } catch (err: any) {
+    console.error(`❌ ERROR: Failed to access model ${process.env.GEMINI_MODEL || "gemini-1.5-flash"}: ${err.message}`);
+    console.error("Failing pipeline to prevent masked provider failure.");
+    pipelineHealth = "FAILED";
+    process.exit(1);
+  }
 
   try {
     // 0. Clean up staging raw_jobs duplicates and already-evaluated items
@@ -405,7 +317,12 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
                 salary_range: rawJob.salaryRange || undefined,
                 location: rawJob.location || "Singapore",
                 posted_date: new Date().toISOString().split("T")[0],
-                careers_portal_url: rawJob.careers_portal_url
+                careers_portal_url: rawJob.careers_portal_url,
+                content_hash: generateContentHash(
+                  rawJob.company,
+                  rawJob.title,
+                  typeof rawJob.description === "object" ? JSON.stringify(rawJob.description) : rawJob.description
+                )
               });
               console.log(`  -> Inserted raw staging job: "${rawDbJob.title}" at ${rawDbJob.company_name}`);
             } catch (insertErr: any) {
@@ -527,24 +444,19 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
             
             // Insert directly to the rejected pile
             const finalJob = await db.addJob({
+              content_hash: rawJob.content_hash || undefined,
               title: rawJob.title,
-              company: rawJob.company_name,
+              company_name: rawJob.company_name,
               source: rawJob.source as any,
-              description: rawJob.raw_description || "No description available.",
-              salaryRange: rawJob.salary_range || undefined,
+              raw_description: rawJob.raw_description || "No description available.",
+              salary_range: rawJob.salary_range || undefined,
               location: rawJob.location || undefined,
               careers_portal_url: rawJob.careers_portal_url,
-              postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-              stage1_status: "HARD_FAIL",
-              final_classification: "REJECTED",
-              career_horizon_route: "STRATEGIC_DEAD_END",
-              confidence_level: "Low",
-              core_fit_score: 0,
-              score_technical_autonomy: 0,
-              score_comp_quality: 0,
-              score_hands_on_mastery: 0,
-              score_role_purity: 0,
-              score_market_durability: 0,
+              posted_date: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
+              processing_status: "REJECTED",
+              rejection_code: "GATE_EXPIRED_OR_UNPARSABLE",
+              primary_lane: null,
+              lane_confidence: "High",
               nd_friendly_score: 0,
               politics_stress_score: 0,
               sensory_overload_index: 0,
@@ -578,32 +490,27 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
           }
           
           // Run direct rejection checks on the raw job title, company, and description
-          const rejectionReason = checkDirectRejection(rawJob.title, rawJob.company_name, rawJob.raw_description);
-          if (rejectionReason) {
-            console.log(`  -> ❌ REJECTED BEFORE EVALUATION (Direct Disqualifier matched): ${rejectionReason}`);
+          const gateResult = applyGlobalGates(rawJob);
+          if (!gateResult.passed) {
+            console.log(`  -> ❌ REJECTED BEFORE EVALUATION (Direct Disqualifier matched): ${gateResult.rejection_code}`);
             await db.addJob({
+              content_hash: rawJob.content_hash || undefined,
               title: rawJob.title,
-              company: rawJob.company_name,
+              company_name: rawJob.company_name,
               source: rawJob.source as any,
-              description: rawJob.raw_description || "No description available.",
-              salaryRange: rawJob.salary_range || undefined,
+              raw_description: rawJob.raw_description || "No description available.",
+              salary_range: rawJob.salary_range || undefined,
               location: rawJob.location || undefined,
               careers_portal_url: rawJob.careers_portal_url,
-              postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-              stage1_status: "HARD_FAIL",
-              final_classification: "REJECTED",
-              career_horizon_route: "STRATEGIC_DEAD_END",
-              confidence_level: "Low",
-              core_fit_score: 0,
-              score_technical_autonomy: 0,
-              score_comp_quality: 0,
-              score_hands_on_mastery: 0,
-              score_role_purity: 0,
-              score_market_durability: 0,
+              posted_date: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
+              processing_status: "REJECTED",
+              rejection_code: gateResult.rejection_code,
+              primary_lane: null,
+              lane_confidence: "High",
               nd_friendly_score: 0,
               politics_stress_score: 0,
               sensory_overload_index: 0,
-              biological_stress_risk: rejectionReason,
+              biological_stress_risk: "Rejected due to direct disqualification rules.",
               strategic_value: "Rejected due to direct disqualification rules.",
               recommended_cv_version: "None",
               next_action: "None",
@@ -634,50 +541,26 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
             const { result } = await runAgent(evalQuery);
             const evalResult = result.evaluated_jobs?.[0];
             if (evalResult) {
-              const totalScore = evalResult.core_fit_score ?? 0;
-              let status = evalResult.final_classification ?? "REJECTED";
-              const track = evalResult.career_horizon_route ?? "STRATEGIC_DEAD_END";
-
-              // AI Hallucination Math Sanity Check Override
-              if (totalScore < 70 && (status === "PRIORITY_APPLY" || status === "APPLY_AFTER_VERIFICATION" || status === "HIGH_FIT_HIGH_RISK")) {
-                  console.log(`    ⚠️ AI Hallucination detected: Score is ${totalScore} but status was ${status}. Downgrading to LOW_STRATEGIC_VALUE.`);
-                  status = "LOW_STRATEGIC_VALUE";
-              } else if (totalScore >= 70 && totalScore < 80 && status === "PRIORITY_APPLY") {
-                  console.log(`    ⚠️ AI Hallucination detected: Score is ${totalScore} but status was ${status}. Downgrading to APPLY_AFTER_VERIFICATION.`);
-                  status = "APPLY_AFTER_VERIFICATION";
-              }
-
-              console.log(`  -> Complete: Score = ${totalScore}/100, Status = ${status}, Track = ${track}`);
-              
-              const techScore = (evalResult as any).score_technical_autonomy ?? evalResult.score_breakdown?.technical_autonomy?.score ?? 0;
-              const compScore = (evalResult as any).score_comp_quality ?? evalResult.score_breakdown?.comp_quality?.score ?? 0;
-              const domainScore = (evalResult as any).score_hands_on_mastery ?? evalResult.score_breakdown?.hands_on_mastery?.score ?? 0;
-              const envScore = (evalResult as any).score_role_purity ?? evalResult.score_breakdown?.role_purity?.score ?? 0;
-              const mobilityScore = (evalResult as any).score_market_durability ?? evalResult.score_breakdown?.market_durability?.score ?? 0;
-              const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || null;
-
-              const finalStatus = status;
+              const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || undefined;
+              console.log(`  -> Complete: Lane = ${evalResult.primary_lane}, Confidence = ${evalResult.lane_confidence}, Next Action = ${evalResult.next_action}`);
 
               // Insert into the final jobs/companies table
               const finalJob = await db.addJob({
+                content_hash: rawJob.content_hash || undefined,
                 title: rawJob.title,
-                company: rawJob.company_name,
+                company_name: rawJob.company_name,
                 source: rawJob.source as any,
-                description: rawJob.raw_description,
-                salaryRange: rawJob.salary_range || undefined,
+                raw_description: rawJob.raw_description,
+                salary_range: rawJob.salary_range || undefined,
                 location: rawJob.location || undefined,
                 careers_portal_url: rawJob.careers_portal_url,
-                postedDate: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-                stage1_status: evalResult.stage1_status || "PASS",
-                final_classification: finalStatus,
-                career_horizon_route: track,
-                confidence_level: evalResult.confidence_level || "Medium",
-                core_fit_score: totalScore,
-                score_technical_autonomy: techScore,
-                score_comp_quality: compScore,
-                score_hands_on_mastery: domainScore,
-                score_role_purity: envScore,
-                score_market_durability: mobilityScore,
+                posted_date: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
+                processing_status: "EVALUATED",
+                primary_lane: evalResult.primary_lane || undefined,
+                secondary_lanes: evalResult.secondary_lanes || undefined,
+                lane_confidence: evalResult.lane_confidence || "Medium",
+                lane_evidence: evalResult.lane_evidence || undefined,
+                source_lane: "LLM",
                 nd_friendly_score: evalResult.nd_friendly_score || 0,
                 politics_stress_score: evalResult.politics_stress_score || 0,
                 sensory_overload_index: evalResult.sensory_overload_index || 0,
@@ -709,27 +592,39 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
       }
     }
 
-    // 3. Daily Top 10 Selection
-    console.log("\nSelecting daily Top 10 recommended jobs...");
+    // 3. Selection: Cap at 3 per lane per run (Quality strictness: High confidence only)
+    console.log("\nSelecting top recommended jobs (Max 3 per lane)...");
     const allJobs = await db.queryJobs();
     
-    // Filter jobs that were evaluated in the current run and are eligible (status in 'STRONG MATCH', 'REVIEW REQUIRED')
+    // Filter jobs that were evaluated in the current run and have a high confidence
     const eligibleJobs = allJobs.filter(j => 
       evaluatedTodayIds.includes(j.id) && 
-      (j.final_classification === "PRIORITY_APPLY" || j.final_classification === "APPLY_AFTER_VERIFICATION") &&
-      ((j.core_fit_score ?? 0) >= 70) // Math Sanity Check
+      (j.processing_status === "EVALUATED") &&
+      (j.primary_lane !== null && j.lane_confidence === "High")
     );
     
-    // Sort by core_fit_score DESC
-    const sortedEligible = eligibleJobs.sort((a, b) => (b.core_fit_score || 0) - (a.core_fit_score || 0));
+    // Group by lane and sort by ND score
+    const jobsByLane: Record<string, typeof eligibleJobs> = {};
+    for (const job of eligibleJobs) {
+      const lane = job.primary_lane as string;
+      if (!jobsByLane[lane]) jobsByLane[lane] = [];
+      jobsByLane[lane].push(job);
+    }
+
+    const selectedJobs: typeof eligibleJobs = [];
+    for (const lane of Object.keys(jobsByLane)) {
+      const laneJobs = jobsByLane[lane];
+      laneJobs.sort((a, b) => (b.nd_friendly_score || 0) - (a.nd_friendly_score || 0));
+      const top3 = laneJobs.slice(0, 3);
+      selectedJobs.push(...top3);
+    }
     
-    const topTen = sortedEligible.slice(0, 10);
-    for (const job of topTen) {
+    for (const job of selectedJobs) {
       await pool.query("UPDATE jobs SET is_top_ten = TRUE WHERE id = $1", [job.id]);
     }
     
     const processedTodayCount = evaluatedTodayIds.length;
-    const topTenCount = topTen.length;
+    const selectedCount = selectedJobs.length;
     
     console.log("====================================================");
     console.log("             DAILY SELECTION SUMMARY                ");
@@ -738,70 +633,28 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
     if (processedTodayCount === 0) {
       console.log("No new jobs were processed today.");
     } else {
-      console.log(`Jobs making it to the Top 10 to apply: ${topTenCount}`);
-      if (topTenCount === 0) {
+      console.log(`Jobs selected to apply (Max 3 per lane): ${selectedCount}`);
+      if (selectedCount === 0) {
         console.log("No jobs processed today met the criteria for applying.");
       } else {
-        topTen.forEach((j, i) => {
-          console.log(`  [#${i+1}] ${j.title} at ${j.company} (Score: ${j.core_fit_score}/100, Status: ${j.final_classification})`);
+        selectedJobs.forEach((j, i) => {
+          console.log(`  [#${i+1}] ${j.title} at ${j.company_name} (Lane: ${j.primary_lane}, Confidence: ${j.lane_confidence}, ND: ${j.nd_friendly_score})`);
         });
       }
     }
     console.log("====================================================");
 
     // 4. Clean up Gmail Jobs-Alerts-Processed folder
-    const gmailUser = process.env.GMAIL_USER;
-    const gmailPassword = process.env.GMAIL_APP_PASSWORD;
-    const gmailFolder = process.env.GMAIL_FOLDER || "Jobs-Alerts";
-    const gmailProcessedFolder = process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
+    // [MODIFIED]: Disabled by Phase 0 Refactor - Emails should not be purged/altered in source
 
-    if (gmailUser && gmailPassword) {
-      console.log(`\nConnecting to Gmail to purge both alert folders...`);
-      const { ImapFlow } = await import("imapflow");
-      const imapClient = new ImapFlow({
-        host: "imap.gmail.com",
-        port: 993,
-        secure: true,
-        auth: {
-          user: gmailUser,
-          pass: gmailPassword
-        },
-        logger: false
-      });
-
-      try {
-        await imapClient.connect();
-
-        // 1. Purge main Jobs-Alerts folder
-        const mainMailbox = await imapClient.mailboxOpen(gmailFolder);
-        if (mainMailbox.exists > 0) {
-          console.log(`Deleting ${mainMailbox.exists} emails from Gmail folder "${gmailFolder}"...`);
-          await imapClient.messageFlagsAdd("1:*", ["\\Deleted"]);
-          console.log(`✅ Cleaned up "${gmailFolder}" folder.`);
-        } else {
-          console.log(`Gmail folder "${gmailFolder}" is already empty.`);
-        }
-        await imapClient.mailboxClose();
-
-        // 2. Purge Jobs-Alerts-Processed folder
-        const processedMailbox = await imapClient.mailboxOpen(gmailProcessedFolder);
-        if (processedMailbox.exists > 0) {
-          console.log(`Deleting ${processedMailbox.exists} processed emails from Gmail folder "${gmailProcessedFolder}"...`);
-          await imapClient.messageFlagsAdd("1:*", ["\\Deleted"]);
-          console.log(`✅ Cleaned up "${gmailProcessedFolder}" folder.`);
-        } else {
-          console.log(`Gmail folder "${gmailProcessedFolder}" is already empty.`);
-        }
-        await imapClient.mailboxClose();
-
-        await imapClient.logout();
-      } catch (gmailErr: any) {
-        console.error(`⚠️ Failed to clean up Gmail folders:`, gmailErr.message || gmailErr);
-      }
+    if (pipelineHealth === "FAILED") {
+      console.error("\n❌ Pipeline finished with FAILED status.");
+      process.exit(1);
+    } else if (pipelineHealth === "DEGRADED") {
+      console.log("\n⚠️ Pipeline completed with DEGRADED status (some providers failed).");
+    } else {
+      console.log("\n✅ Pipeline completed with HEALTHY status!");
     }
-
-    console.log("\n✅ Pipeline completed successfully!");
-
   } catch (err: any) {
     console.error("❌ Fatal pipeline failure:", err.message || err);
     process.exit(1);

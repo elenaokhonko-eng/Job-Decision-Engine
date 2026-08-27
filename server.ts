@@ -3,7 +3,7 @@ import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { db } from "./src/db/db.ts";
-import { runAgent, autoSyncExternalSources } from "./src/services/agent.ts";
+import { runAgent } from "./src/services/agent.ts";
 
 // Load environment variables
 dotenv.config();
@@ -118,24 +118,6 @@ async function startServer() {
     try {
       const analytics = db.getNdCultureAnalytics();
       res.json({ success: true, analytics });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // Trigger automated crawlers/source sync agents
-  app.post("/api/sync-agents", async (req, res) => {
-    try {
-      const { linkedin, mycareersfuture, efinancialcareers, gmail } = req.body;
-      const config = {
-        linkedin: !!linkedin,
-        mycareersfuture: !!mycareersfuture,
-        efinancialcareers: !!efinancialcareers,
-        gmail: !!gmail
-      };
-      
-      const result = await autoSyncExternalSources(config);
-      res.json({ success: true, ...result });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }

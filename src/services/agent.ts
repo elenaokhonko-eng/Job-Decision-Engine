@@ -4,8 +4,7 @@ import { fetchGmailAlerts } from "./gmail.js";
 import { extractWithFallback } from "./llmFallback.js";
 import {
   CANDIDATE_PROFILE,
-  EVALUATION_WEIGHTS,
-  HARD_DISQUALIFIERS,
+  MULTI_LANE_SCORECARDS,
   ND_FRIENDLY_DIMENSIONS,
   POLITICS_STRESS_RISK_DIMENSIONS
 } from "./criteria.ts";
@@ -48,79 +47,12 @@ const queryDatabaseForJobsTool: FunctionDeclaration = {
     },
   },
 };
-
-const fetchExternalMarketRatesTool: FunctionDeclaration = {
-  name: "fetchExternalMarketRates",
-  description: "Fetch external real-time market salary data and benchmark standards for a given job title via an external REST API simulation.",
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      jobTitle: {
-        type: Type.STRING,
-        description: "The title of the job to benchmark (e.g., 'Bioinformatics Scientist', 'AI Architect').",
-      },
-    },
-    required: ["jobTitle"],
-  },
-};
-
 // Tool implementations
 async function executeQueryDatabaseForJobs(args: { searchTerm?: string }): Promise<Job[]> {
   return await db.queryJobs(args.searchTerm);
 }
 
-// Simulated REST API fetch
-async function executeFetchExternalMarketRates(args: { jobTitle: string }): Promise<any> {
-  let restStatus = "offline";
-  let restData: any = null;
 
-  try {
-    const res = await fetch("https://api.coindesk.com/v1/bpi/currentprice.json");
-    if (res.ok) {
-      const data = await res.json();
-      restStatus = "success";
-      restData = {
-        updatedTime: data.time?.updated,
-        disclaimer: data.disclaimer
-      };
-    }
-  } catch (err) {
-    console.error("External REST API call failed", err);
-  }
-
-  const title = args.jobTitle.toLowerCase();
-  let baseLow = 14000;
-  let baseHigh = 18000;
-  let demandLevel = "Medium";
-  let topEmployers = ["A*STAR", "BioTech Asia", "NUHS"];
-
-  if (title.includes("finance") || title.includes("tech") || title.includes("architect") || title.includes("quant") || title.includes("ai")) {
-    baseLow = 22000;
-    baseHigh = 32000;
-    demandLevel = "Extremely High";
-    topEmployers = ["Apex Wealth", "Quantum Capital", "Standard Chartered", "GIC"];
-  } else if (title.includes("bio") || title.includes("pharma") || title.includes("botan") || title.includes("plant") || title.includes("research")) {
-    baseLow = 11000;
-    baseHigh = 16000;
-    demandLevel = "High (Growing EU mobility)";
-    topEmployers = ["BioBotanic Research", "GSK", "AstraZeneca Singapore", "Wageningen Univ partners"];
-  }
-
-  return {
-    jobTitle: args.jobTitle,
-    currency: "SGD",
-    estimatedMonthlyBaseRange: `SGD ${baseLow.toLocaleString()} - SGD ${baseHigh.toLocaleString()}`,
-    targetAnnualSavingsFeasibility: baseLow * 12 >= 200000 ? "Highly Feasible" : "Requires PhD sponsorship or secondary grants",
-    demandLevel,
-    topEmployers,
-    externalApiProof: {
-      endpoint: "https://api.coindesk.com/v1/bpi/currentprice.json",
-      status: restStatus,
-      disclaimer: restData?.disclaimer || "Open source pricing indicators used as baseline",
-      utcTimestamp: restData?.updatedTime || new Date().toISOString()
-    }
-  };
-}
 
 export interface AgentResult {
   evaluation_summary?: string;
@@ -129,20 +61,19 @@ export interface AgentResult {
     job_title: string;
     company: string;
     careers_portal_url: string;
-    stage1_status: "PASS" | "HARD_FAIL" | "NEEDS_VERIFICATION" | "UNASSIGNED";
-    final_classification: "PRIORITY_APPLY" | "APPLY_AFTER_VERIFICATION" | "HIGH_FIT_HIGH_RISK" | "LOW_STRATEGIC_VALUE" | "REJECTED";
-    confidence_level: "High" | "Medium" | "Low";
-    career_horizon_route: "SCIENTIFIC_AI_CONVERGENCE" | "AI_DATA_MASTERY_BRIDGE" | "SCIENCE_DOMAIN_BRIDGE" | "TECHNICAL_ARCHITECTURE_BRIDGE" | "NONTECHNICAL_ADJACENCY" | "STRATEGIC_DEAD_END";
-    career_horizon_score: number;
-    core_fit_score: number;
-    score_breakdown: {
-      hands_on_mastery: { score: number; rationale: string };
-      technical_autonomy: { score: number; rationale: string };
-      role_purity: { score: number; rationale: string };
-      comp_quality: { score: number; rationale: string };
-      market_durability: { score: number; rationale: string };
-    };
-    hard_disqualifiers_triggered: string[];
+    primary_lane: "CORE_AI_DATA" | "LEGAL_REGTECH" | "HEALTH_BIO_PHARMA" | "INVESTMENT_MARKETS_FINTECH" | null;
+    secondary_lanes: string[];
+    lane_confidence: "High" | "Medium" | "Low";
+    lane_evidence: string;
+    nd_gate_status: string;
+    nd_score: number;
+    nd_evidence: string;
+    nd_risk_flags: string[];
+    work_mode_status: string;
+    office_days: number;
+    interaction_load: number;
+    building_research_ratio: number;
+    rejection_codes: string[];
     nd_friendly_score: number;
     politics_stress_score: number;
     sensory_overload_index: number;
@@ -169,16 +100,18 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
       });
       return response.text || "";
     } catch (gErr: any) {
-      const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests");
+      const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests") || gErr.message?.includes("quota");
       const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
       const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
       
-      if (isDailyQuota) {
+      // If we hit any rate limit (429) or quota limit, immediately throw to trigger OpenAI fallback
+      // since Gemini free tier quotas are easily exhausted.
+      if (isDailyQuota || isRateLimit) {
         throw gErr;
       }
       
-      if ((isRateLimit || isTimeout) && attempt < maxRetries) {
-        console.warn(`⏳ Gemini request failed (RateLimit/Timeout). Attempt ${attempt}/${maxRetries}. Retrying in 5s...`);
+      if (isTimeout && attempt < maxRetries) {
+        console.warn(`⏳ Gemini request failed (Timeout). Attempt ${attempt}/${maxRetries}. Retrying in 5s...`);
         await new Promise((resolve) => setTimeout(resolve, 5000));
       } else {
         throw gErr;
@@ -385,7 +318,7 @@ async function runGeminiAgentInternal(
       contents: userQuestion,
       config: {
         systemInstruction,
-        tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
+        tools: [{ functionDeclarations: [queryDatabaseForJobsTool] }],
       },
     });
   } catch (gErr: any) {
@@ -397,7 +330,7 @@ async function runGeminiAgentInternal(
         contents: userQuestion,
         config: {
           systemInstruction,
-          tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
+          tools: [{ functionDeclarations: [queryDatabaseForJobsTool] }],
         },
       });
     } else {
@@ -425,10 +358,6 @@ async function runGeminiAgentInternal(
         const args = (call.args as any) || {};
         resultData = await executeQueryDatabaseForJobs(args);
         trace.push(`Step ${trace.length + 1}: Query database returned ${resultData.length} records.`);
-      } else if (call.name === "fetchExternalMarketRates") {
-        const args = (call.args as any) || { jobTitle: "" };
-        resultData = await executeFetchExternalMarketRates(args);
-        trace.push(`Step ${trace.length + 1}: External REST API response processed: Standard range ${resultData.estimatedMonthlyBaseRange}.`);
       } else {
         resultData = { error: "Unknown tool name" };
       }
@@ -453,7 +382,7 @@ async function runGeminiAgentInternal(
       contents: conversationHistory,
       config: {
         systemInstruction,
-        tools: [{ functionDeclarations: [queryDatabaseForJobsTool, fetchExternalMarketRatesTool] }],
+        tools: [{ functionDeclarations: [queryDatabaseForJobsTool] }],
       },
     });
 
@@ -505,42 +434,27 @@ export async function runAgent(userQuestion: string): Promise<{ result: AgentRes
 - Workplace Preference: ${CANDIDATE_PROFILE.workplacePreference}
 - Target Minimum Base: SGD ${CANDIDATE_PROFILE.minAcceptableBaseSgdMonth}/month
 
-### EVALUATION WORKFLOW (5 STAGES)
+### EVALUATION WORKFLOW (3 STAGES)
 
-#### STAGE 1: HARD DISQUALIFIERS (Pass/Fail)
-Check objective evidence against these constraints:
-${HARD_DISQUALIFIERS.map((dis, idx) => `- ${dis}`).join("\n")}
-If any trigger: stage1_status = "HARD_FAIL", core_fit_score = 0, final_classification = "REJECTED". Else, "PASS".
+#### STAGE 1: MULTI-LANE CLASSIFICATION
+You must categorize the job into one PRIMARY lane and zero or more SECONDARY lanes.
+Lanes:
+- HEALTH_BIO_PHARMA: ${MULTI_LANE_SCORECARDS.HEALTH_BIO_PHARMA.criteria}
+- LEGAL_REGTECH: ${MULTI_LANE_SCORECARDS.LEGAL_REGTECH.criteria}
+- INVESTMENT_MARKETS_FINTECH: ${MULTI_LANE_SCORECARDS.INVESTMENT_MARKETS_FINTECH.criteria}
+- CORE_AI_DATA: ${MULTI_LANE_SCORECARDS.CORE_AI_DATA.criteria}
 
-#### STAGE 2: CAREER CHANGE HORIZON
-Categorize the job into EXACTLY ONE of the following routes and assign a route score within the specified range based on how strongly it fits the description:
-- SCIENTIFIC_AI_CONVERGENCE (90-100)
-- AI_DATA_MASTERY_BRIDGE (75-89)
-- SCIENCE_DOMAIN_BRIDGE (60-74)
-- TECHNICAL_ARCHITECTURE_BRIDGE (45-59)
-- NONTECHNICAL_ADJACENCY (25-44)
-- STRATEGIC_DEAD_END (0-24)
+Assign lane_confidence (High, Medium, Low) based on explicit evidence in the job description. Do NOT rely on exact keyword matching alone; read the semantic context. Output the verbatim quotes as lane_evidence. If no lane matches (e.g., standard SWE without data/ML), set primary_lane to null.
 
-#### STAGE 3: CORE FIT SCORE (100-Point Scale)
-Score the PRESENT-DAY value of the role (independent of ND/Politics risk):
-1. Hands-on AI/Data Mastery (Max ${EVALUATION_WEIGHTS.hands_on_ai_data_mastery.maxPoints})
-2. Technical & Creative Autonomy (Max ${EVALUATION_WEIGHTS.technical_creative_autonomy.maxPoints})
-3. Role Purity & Output Clarity (Max ${EVALUATION_WEIGHTS.role_purity_output_clarity.maxPoints})
-4. Compensation & Employment Quality (Max ${EVALUATION_WEIGHTS.compensation_employment_quality.maxPoints})
-5. Market Durability (Max ${EVALUATION_WEIGHTS.market_durability_learning_signal.maxPoints})
-
-#### STAGE 4: INDEPENDENT RISK METRICS (0-100 each)
-Do NOT subtract these from the core_fit_score. Keep them completely separate!
+#### STAGE 2: INDEPENDENT RISK METRICS (0-100 each)
 - nd_friendly_score (Target >= 70): Evidence of safe focus, async comms. Matches: ${ND_FRIENDLY_DIMENSIONS.highSupportiveFactors.join(", ")}
 - politics_stress_score (Target < 50): Evidence of corporate alignment, fast-paced chaos, matrixed stakeholders. Matches: ${POLITICS_STRESS_RISK_DIMENSIONS.highRiskFactors.join(", ")}
 - sensory_overload_index (Target < 50): Evidence of open offices, constant video, high travel.
 
-#### STAGE 5: FINAL CLASSIFICATION DECISION RULE
-- PRIORITY_APPLY: stage1_status PASS AND core_fit_score >= 80 AND nd_friendly_score >= 70 AND politics_stress_score < 40
-- APPLY_AFTER_VERIFICATION: stage1_status PASS AND core_fit_score >= 70 AND (nd_friendly_score < 70 OR politics_stress_score >= 40)
-- HIGH_FIT_HIGH_RISK: core_fit_score >= 85 BUT politics_stress_score >= 70
-- LOW_STRATEGIC_VALUE: stage1_status PASS BUT core_fit_score < 70
-- REJECTED: stage1_status HARD_FAIL
+#### STAGE 3: ACTION PLAN
+- strategic_value: Summary of the present-day value of the role for the candidate.
+- recommended_cv_version: "HEALTH_BIO_PHARMA", "LEGAL_REGTECH", "INVESTMENT_MARKETS_FINTECH", "CORE_AI_DATA" or "None".
+- next_action: "PRIORITY_APPLY" (High confidence lane, high ND friendly, low politics), "APPLY_AFTER_VERIFICATION", "LOW_STRATEGIC_VALUE", or "REJECTED" (if primary_lane is null).
 
 ### MANDATED TYPED OUTPUT FORMAT:
 You MUST return a JSON object matching this schema exactly.
@@ -552,23 +466,22 @@ You MUST return a JSON object matching this schema exactly.
       "job_title": "string",
       "company": "string",
       "careers_portal_url": "string",
-      "stage1_status": "PASS | HARD_FAIL | NEEDS_VERIFICATION",
-      "final_classification": "PRIORITY_APPLY | APPLY_AFTER_VERIFICATION | HIGH_FIT_HIGH_RISK | LOW_STRATEGIC_VALUE | REJECTED",
-      "confidence_level": "High | Medium | Low",
-      "career_horizon_route": "SCIENTIFIC_AI_CONVERGENCE | AI_DATA_MASTERY_BRIDGE | SCIENCE_DOMAIN_BRIDGE | TECHNICAL_ARCHITECTURE_BRIDGE | NONTECHNICAL_ADJACENCY | STRATEGIC_DEAD_END",
-      "career_horizon_score": integer (0-100),
-      "core_fit_score": integer (0-100),
-      "score_breakdown": {
-        "hands_on_mastery": {"score": integer, "rationale": "string"},
-        "technical_autonomy": {"score": integer, "rationale": "string"},
-        "role_purity": {"score": integer, "rationale": "string"},
-        "comp_quality": {"score": integer, "rationale": "string"},
-        "market_durability": {"score": integer, "rationale": "string"}
-      },
+      "primary_lane": "CORE_AI_DATA | LEGAL_REGTECH | HEALTH_BIO_PHARMA | INVESTMENT_MARKETS_FINTECH | null",
+      "secondary_lanes": ["string"],
+      "lane_confidence": "High | Medium | Low",
+      "lane_evidence": "string",
+      "nd_gate_status": "string",
+      "nd_score": integer (0-100),
+      "nd_evidence": "string",
+      "nd_risk_flags": ["string"],
+      "work_mode_status": "string",
+      "office_days": integer,
+      "interaction_load": integer,
+      "building_research_ratio": integer,
+      "rejection_codes": ["string"],
       "nd_friendly_score": integer (0-100),
       "politics_stress_score": integer (0-100),
       "sensory_overload_index": integer (0-100),
-      "hard_disqualifiers_triggered": ["string"],
       "biological_and_stress_risk_assessment": "string",
       "strategic_value": "string",
       "recommended_cv_version": "string",
@@ -629,28 +542,30 @@ You MUST return a JSON object matching this schema exactly.
     for (const job of parsedResult.evaluated_jobs) {
       // Match by job title & company if ID is not set
       let matchedJob = dbJobs.find(
-        (j) => j.id === job.job_id || (j.title === job.job_title && j.company === job.company)
+        (j) => j.id === job.job_id || (j.title === job.job_title && j.company_name === job.company)
       );
       
       if (matchedJob) {
         await db.updateJobEvaluation(matchedJob.id, {
-          stage1_status: job.stage1_status,
-          final_classification: job.final_classification,
-          confidence_level: job.confidence_level,
-          career_horizon_route: job.career_horizon_route as any,
-          career_horizon_score: job.career_horizon_score,
-          core_fit_score: job.core_fit_score,
-          score_hands_on_mastery: job.score_breakdown?.hands_on_mastery?.score || 0,
-          score_technical_autonomy: job.score_breakdown?.technical_autonomy?.score || 0,
-          score_role_purity: job.score_breakdown?.role_purity?.score || 0,
-          score_comp_quality: job.score_breakdown?.comp_quality?.score || 0,
-          score_market_durability: job.score_breakdown?.market_durability?.score || 0,
+          processing_status: "EVALUATED",
+          primary_lane: job.primary_lane,
+          secondary_lanes: job.secondary_lanes,
+          lane_confidence: job.lane_confidence,
+          lane_evidence: job.lane_evidence,
+          source_lane: "LLM",
+          nd_gate_status: job.nd_gate_status || undefined,
+          nd_score: job.nd_score || undefined,
+          nd_evidence: job.nd_evidence || undefined,
+          nd_risk_flags: job.nd_risk_flags || undefined,
+          work_mode_status: job.work_mode_status || undefined,
+          office_days: job.office_days || undefined,
+          interaction_load: job.interaction_load || undefined,
+          building_research_ratio: job.building_research_ratio || undefined,
+          rejection_codes: job.rejection_codes || undefined,
           nd_friendly_score: job.nd_friendly_score || 50,
           politics_stress_score: job.politics_stress_score || 50,
           sensory_overload_index: job.sensory_overload_index || 50,
-          is_toxic: (job.politics_stress_score || 50) >= 60 || (job.nd_friendly_score || 50) <= 40,
-          is_nd_approved: (job.nd_friendly_score || 50) >= 70 && (job.politics_stress_score || 50) < 40,
-          biological_stress_risk: job.biological_and_stress_risk_assessment,
+          biological_stress_risk: job.biological_and_stress_risk_assessment || undefined,
           strategic_value: job.strategic_value,
           recommended_cv_version: job.recommended_cv_version,
           next_action: job.next_action,
@@ -671,168 +586,4 @@ You MUST return a JSON object matching this schema exactly.
   };
 }
 
-/**
- * AUTOMATED SOURCE INTEGRATION HUB
- * Simulates calling external scrapers (separate agents) for LinkedIn, MyCareersFuture, eFinancialCareers,
- * or monitoring Gmail triggers. Uses Gemini to crawl simulated alert feeds and import raw job postings.
- */
-export async function autoSyncExternalSources(enabled: {
-  linkedin: boolean;
-  mycareersfuture: boolean;
-  efinancialcareers: boolean;
-  gmail: boolean;
-}): Promise<{ importedCount: number; logs: string[]; newJobs: Job[] }> {
-  const logs: string[] = [];
-  const importedJobs: Job[] = [];
-  
-  logs.push("Step 1: Automated Integration Hub triggered.");
-  
-  if (!enabled.linkedin && !enabled.mycareersfuture && !enabled.efinancialcareers && !enabled.gmail) {
-    logs.push("Step 2: Aborted. No automated sources or agents were enabled in settings.");
-    return { importedCount: 0, logs, newJobs: [] };
-  }
 
-  // Build simulation logs representing crawler agents
-  if (enabled.linkedin) {
-    logs.push("Step 2: [LinkedIn Crawler Agent] Crawling alert feed matching: 'IT Architect' OR 'AI Engineer'...");
-  }
-  if (enabled.mycareersfuture) {
-    logs.push("Step 3: [MyCareersFuture Sync Agent] Initiated Government MCF SOAP REST API feed matching: 'hands-on architect'...");
-  }
-  if (enabled.efinancialcareers) {
-    logs.push("Step 4: [eFinancialCareers Agent] Parsing investment banking & quant platform architectures in Singapore...");
-  }
-  if (enabled.gmail) {
-  logs.push("Step 5: [Gmail Inbox Monitor Agent] Scanning incoming Google Workspace email alerts...\n");
-  try {
-    const emails = await fetchGmailAlerts();
-    if (emails.length === 0) {
-      logs.push("Step 6: No new Gmail alerts found.");
-    } else {
-      for (const email of emails) {
-        try {
-          const extracted = await extractWithFallback(email);
-          const jobList = JSON.parse(extracted);
-          if (Array.isArray(jobList)) {
-            for (const cJob of jobList) {
-              const newJob = await db.addRawJob({
-                title: cJob.title,
-                company_name: cJob.company,
-                source: "Gmail",
-                raw_description: cJob.description,
-                salary_range: cJob.salaryRange,
-                location: cJob.location,
-                careers_portal_url: cJob.careers_portal_url,
-                posted_date: new Date().toISOString().split("T")[0],
-              });
-              importedJobs.push(newJob as any);
-              logs.push(`Step ${logs.length + 1}: Gmail‑extracted job "${newJob.title}" stored.`);
-            }
-          }
-        } catch (inner: any) {
-          logs.push(`Step ${logs.length + 1}: Failed to process a Gmail alert - ${inner}`);
-        }
-      }
-    }
-  } catch (gmailErr: any) {
-    logs.push(`Step ${logs.length + 1}: Gmail fetch error – ${gmailErr.message}`);
-  }
-}
-
-  logs.push("Step 6: Executing raw alert text parsing via Gemini.");
-
-  const ai = getGeminiClient();
-  const syncPrompt = `Generate 3 highly realistic, rich raw job descriptions representing Singapore-based roles that have recently been posted. 
-  The sources should ONLY be drawn from the following enabled ones:
-  - LinkedIn: ${enabled.linkedin ? "ENABLED" : "DISABLED"}
-  - MyCareersFuture: ${enabled.mycareersfuture ? "ENABLED" : "DISABLED"}
-  - eFinancialCareers: ${enabled.efinancialcareers ? "ENABLED" : "DISABLED"}
-  - Gmail Alert: ${enabled.gmail ? "ENABLED" : "DISABLED"}
-
-  Format the output as a valid JSON array of objects matching this exact structure:
-  [
-    {
-      "title": "string",
-      "company": "string",
-      "source": "LinkedIn | MyCareersFuture | eFinancialCareers | Gmail",
-      "salaryRange": "string (e.g. SGD 23,000 - SGD 28,000 / month)",
-      "location": "string (e.g. Singapore (Hybrid))",
-      "careers_portal_url": "string (The exact unique URL of the job listing on the source job board, e.g. https://www.mycareersfuture.gov.sg/job/123456789 or https://www.efinancialcareers.sg/jobs/123456789. Ensure this is a realistic direct link to the listing on that board, not a generic company website)",
-      "description": "Comprehensive, multi-paragraph realistic JD detailing technical requirements (e.g., Python, LLM, Cloud) and team structure so that our evaluation model can evaluate it."
-    }
-  ]`;
-
-  try {
-    let rawText = await generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
-      contents: syncPrompt,
-      responseMimeType: "application/json",
-      systemInstruction: "You are a senior job board scraper crawler agent that compiles high-fidelity raw job advertisements from Singapore feeds."
-    });
-    if (rawText.startsWith("```json")) {
-      rawText = rawText.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-    } else if (rawText.startsWith("```")) {
-      rawText = rawText.replace(/^```\s*/, "").replace(/\s*```$/, "");
-    }
-
-    const crawledList = JSON.parse(rawText);
-    
-    if (Array.isArray(crawledList)) {
-      for (const cJob of crawledList) {
-        const source = cJob.source || "LinkedIn";
-        const newJob = await db.addRawJob({
-          title: cJob.title || "Senior Tech Architect",
-          company_name: cJob.company || "Global Bio-Pharma Group",
-          source: source,
-          raw_description: cJob.description || "Python, bioinformatics research and systems architecture. No PM responsibilities.",
-          salary_range: cJob.salaryRange || "SGD 20,000 - SGD 24,000",
-          location: cJob.location || "Singapore (Remote)",
-          careers_portal_url: cJob.careers_portal_url || `https://www.${(cJob.company || "novartis").toLowerCase().replace(/[^a-z0-9]/g, "")}.com/careers`,
-          posted_date: new Date().toISOString().split("T")[0]
-        });
-        importedJobs.push(newJob as any);
-        logs.push(`Step ${logs.length + 1}: Staged raw job for evaluation: "${newJob.title}" from ${newJob.company_name} [Source: ${newJob.source}].`);
-      }
-    }
-  } catch (err: any) {
-    console.error("Auto Sync Engine error:", err);
-    logs.push(`Step ${logs.length + 1}: Parsing failed. Staging high-fidelity fallback raw job records instead.`);
-    
-    // Seed high-fidelity fallback to ensure it ALWAYS works and doesn't crash on invalid JSON
-    const fallbackJobs = [
-      {
-        title: "Principal AI Architect - Quant Solutions",
-        company_name: "Standard Chartered Asset AI",
-        source: enabled.efinancialcareers ? "eFinancialCareers" : "LinkedIn",
-        salary_range: "SGD 25,000 - SGD 30,000 / month",
-        location: "Singapore (Hybrid)",
-        careers_portal_url: "https://www.efinancialcareers.sg/jobs/principal-ai-architect-standard-chartered-100234",
-        raw_description: "Standard Chartered is seeking a hands-on Principal Architect for our Asset AI labs. Direct coding in Python, PyTorch, and managing agentic risk guardrails. No client-facing workshops, no sales quotas. Highly structured, asynchronous workflows, and quiet workspaces.",
-        posted_date: new Date().toISOString().split("T")[0]
-      },
-      {
-        title: "Senior Bioinformatics Research Engineer",
-        company_name: "Novartis Clinical Labs",
-        source: enabled.gmail ? "Gmail" : "MyCareersFuture",
-        salary_range: "SGD 16,000 - SGD 20,000 / month",
-        location: "Singapore (Remote)",
-        careers_portal_url: "https://www.mycareersfuture.gov.sg/job/senior-bioinformatics-novartis-482012",
-        raw_description: "Join Novartis Singapore to support chemical-pathway data research for plant-based drug development. Requires hands-on Python and bio-data pipeline design. Zero travel, 100% remote asynchronous focus hours, direct feedback loop, Dutch relocation options.",
-        posted_date: new Date().toISOString().split("T")[0]
-      }
-    ];
-
-    for (const fJob of fallbackJobs) {
-      const added = await db.addRawJob(fJob);
-      importedJobs.push(added as any);
-      logs.push(`Step ${logs.length + 1}: Fallback Staged in Raw Jobs Vault: "${added.title}" from ${added.company_name}.`);
-    }
-  }
-
-  logs.push(`Step ${logs.length + 1}: Automated Source Sync Engine successfully completed. Sourced ${importedJobs.length} new listings.`);
-  return {
-    importedCount: importedJobs.length,
-    logs,
-    newJobs: importedJobs
-  };
-}

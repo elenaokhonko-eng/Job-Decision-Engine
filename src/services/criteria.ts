@@ -1,3 +1,6 @@
+import crypto from "crypto";
+import { RawJob } from "../db/db.ts";
+
 /**
  * Custom weights and criteria configuration file for the Job Decision Engine.
  * This is designed for easy open-source customization. 
@@ -32,74 +35,210 @@ export const CANDIDATE_PROFILE = {
   ]
 };
 
-// Stage 1: Hard Disqualifiers (Objective evidence only, no vibes)
-export const HARD_DISQUALIFIERS = [
-  "Mandatory travel exceeding 10%",
-  "Primary role is traditional Program/Project Manager, Scrum Master, or Agile Coach",
-  "Primary role is Client Relationship Management, Sales, Presales, or Quota-carrying business development",
-  "Office attendance required > 3 days per week (except for specialized physical lab environments)",
-  "Employment Type: Contract, Contractor, Temporary, or Freelance (must be permanent FTE)",
-  "Company Type: Local Singapore banks (DBS, UOB, OCBC)",
-  "Company Type: Insurance and asset management companies specifically matching 'AIA' or 'AIA Investment Management'",
-  "Company Type: Job postings sourced from recruitment agencies (e.g., Argyll Scott)",
-  "Company Type: Forward Deployed Engineering (FDE)",
-  "Company Type: IT outsourcing/staffing (specifically exact matches for Red Hat, or external contracting agencies)",
-  "Company Type: Consulting firms (Accenture, KPMG, BCG, McKinsey, Bain, Deloitte, PwC, EY, Boston Consulting Group, PricewaterhouseCoopers)",
-  "Role Focus: Infrastructure Data Center, Datacenter operations, or physical Data Center management (candidate lacks experience in this specific area)",
-  "Role Focus: Hardware Engineering, physical device engineering, or hardware design (candidate focuses exclusively on Software Engineering/Architecture)",
-  "Role Focus: Construction, Data Center Construction, or physical site build-out roles",
-  "Role Focus: Site Reliability Engineering (SRE) or roles focused on physical site reliability/hardware maintenance"
-];
+// Legacy Stage 1 Hard Disqualifiers - mostly unused now as we have programmatic gates
+export const HARD_DISQUALIFIERS = [];
 
-// Stage 2: Career Change Horizon Routes
-export const CAREER_HORIZON_ROUTES = {
-  SCIENTIFIC_AI_CONVERGENCE: {
-    scoreRange: "90-100",
-    description: "Ideal pivot. Hands-on AI/data roles directly within medical, pharma, bioinformatics, or plant-based research. Establishes the clear bridge for the PhD path."
-  },
-  AI_DATA_MASTERY_BRIDGE: {
-    scoreRange: "75-89",
-    description: "Excellent fallback. High-autonomy AI/ML architecture or Python data engineering within institutional finance or tech. Strengthens AI credentials but doesn't change the industry domain."
-  },
-  SCIENCE_DOMAIN_BRIDGE: {
-    scoreRange: "60-74",
-    description: "Good domain pivot, lower tech mastery. A role in pharma/research but leaning more toward general IT architecture or systems rather than direct AI/ML/Data work."
-  },
-  TECHNICAL_ARCHITECTURE_BRIDGE: {
-    scoreRange: "45-59",
-    description: "Status quo. Standard IT/Platform architecture in finance/corporate. Pays the bills and provides autonomy, but doesn't advance the AI or scientific pivot."
-  },
-  NONTECHNICAL_ADJACENCY: {
-    scoreRange: "25-44",
-    description: "Strategic risk. Roles leaning heavily into management, governance, or strategy with little to no hands-on technical execution."
-  },
-  STRATEGIC_DEAD_END: {
-    scoreRange: "0-24",
-    description: "Complete regression. Project management, sales, or roles in declining/legacy domains that actively harm the CV trajectory."
+// ====================================================================
+// PROGRAMMATIC DETERMINISTIC GATES
+// ====================================================================
+
+export function generateContentHash(company: string, title: string, rawDesc: string): string {
+  const normalizedCompany = (company || "").toLowerCase().trim();
+  const normalizedTitle = (title || "").toLowerCase().trim();
+  const normalizedDesc = (rawDesc || "").toLowerCase().trim().slice(0, 1000); // use first 1000 chars of desc to avoid minor dynamic differences
+  
+  const payload = `${normalizedCompany}|${normalizedTitle}|${normalizedDesc}`;
+  return crypto.createHash("sha256").update(payload).digest("hex");
+}
+
+export interface GateResult {
+  passed: boolean;
+  rejection_code?: string;
+}
+
+export function applyGlobalGates(job: RawJob): GateResult {
+  const t = (job.title || "").toLowerCase();
+  const c = (job.company_name || "").toLowerCase();
+  let d = "";
+
+  if (job.raw_description) {
+    if (typeof job.raw_description === "object") {
+      const descObj = job.raw_description as any;
+      d = (
+        (descObj.job_description || "") + " " +
+        (descObj.key_responsibilities || []).join(" ") + " " +
+        (descObj.technical_skills || []).join(" ") + " " +
+        (descObj.qualifications_education || []).join(" ") + " " +
+        (descObj.nice_to_haves || []).join(" ")
+      ).toLowerCase();
+    } else if (typeof job.raw_description === "string") {
+      if (job.raw_description.trim().startsWith("{")) {
+        try {
+          const parsed = JSON.parse(job.raw_description);
+          d = (
+            (parsed.job_description || "") + " " +
+            (parsed.key_responsibilities || []).join(" ") + " " +
+            (parsed.technical_skills || []).join(" ") + " " +
+            (parsed.qualifications_education || []).join(" ") + " " +
+            (parsed.nice_to_haves || []).join(" ")
+          ).toLowerCase();
+        } catch {
+          d = job.raw_description.toLowerCase();
+        }
+      } else {
+        d = job.raw_description.toLowerCase();
+      }
+    }
   }
-};
 
-// Stage 3: Present-Day Role Value (100 Points Total)
-export const EVALUATION_WEIGHTS = {
-  hands_on_ai_data_mastery: {
-    maxPoints: 30,
-    description: "Direct involvement in Python, AI, ML, Data pipelines, or agentic RAG. Is the role actively building?"
+  // 1. Fully On-site / 4+ Office Days Rejection
+  if (
+    d.includes("100% onsite") || d.includes("5 days on-site") || d.includes("5 days onsite") || 
+    d.includes("on-site only") || d.includes("onsite only") || d.includes("4 days in office") ||
+    d.includes("4 days a week in the office") || d.includes("4 days on-site") || d.includes("4 days onsite")
+  ) {
+    return { passed: false, rejection_code: "GATE_HIGH_OFFICE_DAYS" };
+  }
+
+  // 1b. Regular on-call, shift work, frequent travel
+  if (d.includes("shift work") || d.includes("on-call rotation") || d.includes("regular on-call") || d.includes("24/7 support") || d.includes("travel extensively") || d.includes("frequent travel") || d.includes("up to 50% travel") || d.includes("up to 25% travel")) {
+    return { passed: false, rejection_code: "GATE_LIFESTYLE_INCOMPATIBLE" };
+  }
+
+  // 1c. Sales / Client-facing / Large-team management / Stakeholder dominance
+  if (
+    d.includes("sales engineering") || d.includes("presales") || d.includes("pre-sales") || 
+    d.includes("client relationship management") || d.includes("manage large teams") || 
+    d.includes("stakeholder coordination") || d.includes("firefighting") || d.includes("escalations manager")
+  ) {
+    return { passed: false, rejection_code: "GATE_HIGH_INTERACTION" };
+  }
+
+  // 2. Not enough experience (<10 years).
+  if (t.includes("junior") || t.includes("entry level") || t.includes("intern") || t.includes("entry-level")) {
+    return { passed: false, rejection_code: "GATE_EXPERIENCE_TOO_LOW" };
+  }
+  const expRegex = /([1-7])\s*(?:-|to)\s*([1-8])\s*years/i;
+  const match = d.match(expRegex);
+  if (match) {
+    const maxExp = parseInt(match[2]);
+    if (maxExp < 10) {
+      return { passed: false, rejection_code: "GATE_EXPERIENCE_TOO_LOW" };
+    }
+  }
+
+  // 3. Construction / Data Center Build / Hardware / SRE Roles
+  const hardwareKw = [
+    "construction", "site reliability", "sre", "hardware engineering", 
+    "hardware", "facility", "infrastructure data center", "data center construction"
+  ];
+  if (hardwareKw.some(kw => t.includes(kw) || d.includes(kw))) {
+    // Hardware keyword exception: "hardware" keyword might appear innocently in SWE job if they mention "hardware teams".
+    // We reject if it's the core focus. "Hardware engineering" is a strict reject.
+    // Infrastructure and Data center are strict rejects as per user instruction.
+    if (d.includes("hardware engineering") || t.includes("hardware") || t.includes("infrastructure data center") || d.includes("infrastructure data center") || t.includes("sre") || d.includes("sre") || t.includes("site reliability") || d.includes("site reliability") || t.includes("construction") || d.includes("data center construction") || d.includes("construction")) {
+        return { passed: false, rejection_code: "GATE_HARDWARE_INFRASTRUCTURE" };
+    }
+  }
+
+  // 4. FDE (Forward Deployed Engineering) check
+  if (t.includes("fde") || t.includes("forward deployed") || d.includes("forward deployed") || d.includes("fde ")) {
+    return { passed: false, rejection_code: "GATE_OUT_OF_SCOPE_DOMAIN" }; // Forward Deployed
+  }
+
+  // 5. Consulting Firms check
+  const consultingFirms = [
+    "accenture", "kpmg", "bcg", "mckinsey", "bain", "deloitte", "pwc", 
+    "ernst & young", "pricewaterhousecoopers", "boston consulting group"
+  ];
+  for (const firm of consultingFirms) {
+    if (c.includes(firm)) {
+      return { passed: false, rejection_code: "GATE_CONSULTING_FIRM" };
+    }
+  }
+  if (c === "ey" || c === "ey pte ltd" || c.startsWith("ey ") || c.endsWith(" ey") || c.includes(" ey ") || c.includes("ey.com")) {
+    return { passed: false, rejection_code: "GATE_CONSULTING_FIRM" };
+  }
+
+  // 6. IT Outsourcing check
+  if (c.includes("red hat") || d.includes("deployed to client") || d.includes("work for our clients") || d.includes("hired resource")) {
+    return { passed: false, rejection_code: "GATE_OUTSOURCING" };
+  }
+
+  // 7. Recruitment Agency / Contract check
+  const contractKeywords = ["contract", "contractor", "temp", "temporary", "freelance"];
+  const agencyKeywords = [
+    "recruitment", "recruiting", "staffing", "talent acquisition",
+    "hays", "randstad", "pagegroup", "michael page", "adecco", 
+    "charterhouse", "huxley", "robert half", "robert walters", "kelly services", 
+    "monroe consulting", "recruit"
+  ];
+  const isAgency = agencyKeywords.some(kw => c.includes(kw)) || 
+                   d.includes("on behalf of our client") || 
+                   d.includes("our client is looking for") || 
+                   d.includes("hiring for our client");
+                   
+  if (isAgency) {
+    const isContract = contractKeywords.some(kw => t.includes(kw) || d.includes(kw)) || d.includes("renewable");
+    if (isContract) {
+      return { passed: false, rejection_code: "GATE_CONTRACT_ROLE" };
+    }
+  }
+
+  for (const kw of contractKeywords) {
+    if (t.includes(kw)) {
+      if (t.includes("permanent contract") || d.includes("permanent contract")) {
+        continue;
+      }
+      return { passed: false, rejection_code: "GATE_CONTRACT_ROLE" };
+    }
+  }
+
+  // 8. Kitchen-sink / Multi-role (Extreme management/delivery overhead)
+  const managementKeywords = ["manage large teams", "manage client teams", "manage client expectations", "client relationship management"];
+  for (const kw of managementKeywords) {
+    if (d.includes(kw)) {
+      return { passed: false, rejection_code: "GATE_HEAVY_MANAGEMENT" };
+    }
+  }
+
+  let rolesCount = 0;
+  if (d.includes("project manager") || d.includes("scrum master") || d.includes("project management")) rolesCount++;
+  if (d.includes("people manager") || d.includes("people management") || d.includes("line manager")) rolesCount++;
+  if (d.includes("client manager") || d.includes("delivery manager") || d.includes("account manager")) rolesCount++;
+  if (d.includes("architect") || d.includes("architecture")) rolesCount++;
+  if (d.includes("developer") || d.includes("engineer")) rolesCount++;
+
+  if (rolesCount >= 4) {
+    return { passed: false, rejection_code: "GATE_KITCHEN_SINK" };
+  }
+
+  // 9. Lane Relevance Threshold (Must have some AI/Data/ML keywords)
+  const aiDataKeywords = ["ai", "artificial intelligence", "ml", "machine learning", "data", "quantitative", "time-series", "time series", "portfolio analytics", "research", "deep learning", "nlp", "llm", "agentic", "data engineering", "architecture", "architect"];
+  const hasRelevance = aiDataKeywords.some(kw => t.includes(kw) || d.includes(kw));
+  if (!hasRelevance) {
+    return { passed: false, rejection_code: "GATE_NOT_AI_DATA" };
+  }
+
+  return { passed: true };
+}
+
+export const MULTI_LANE_SCORECARDS = {
+  HEALTH_BIO_PHARMA: {
+    description: "Life sciences, health and scientific ML",
+    criteria: "Requires evidence of pharma, bioinformatics, biotech, or medical research domain AND a substantive AI/ML/data engineering function."
   },
-  technical_creative_autonomy: {
-    maxPoints: 25,
-    description: "Level of control over architecture and systems. Being an SME expert. Lack of micromanagement or heavy governance layers."
+  LEGAL_REGTECH: {
+    description: "LegalTech, RegTech, fraud and digital trust",
+    criteria: "Requires evidence of compliance, regulatory tech, fraud detection, KYC/AML, or legal domain AND a substantive AI/ML/data engineering function."
   },
-  role_purity_output_clarity: {
-    maxPoints: 15,
-    description: "Is the job clearly defined? A pure technical role vs. a kitchen-sink role (e.g., 'wear many hats', 'manage internal and external clients')."
+  INVESTMENT_MARKETS_FINTECH: {
+    description: "Investment management, asset management, wealth management, public markets, institutional investing, WealthTech, and market infrastructure.",
+    criteria: "Must contain substantive AI, ML, quantitative research, time-series modelling, investment-data engineering, portfolio/risk analytics, research automation, or technical architecture work (sector membership alone is insufficient). Excludes payments, cards, merchant acquiring, remittance, BNPL, consumer lending, corporate finance, treasury, M&A, private equity, investment banking, deal advisory, and unrelated fintech."
   },
-  compensation_employment_quality: {
-    maxPoints: 20,
-    description: "Does it meet or exceed the base SGD 22k/month? Is it permanent FTE?"
-  },
-  market_durability_learning_signal: {
-    maxPoints: 10,
-    description: "Does the tech stack and domain signal growth (AI/ML, pharma) rather than sunsetting legacy systems?"
+  CORE_AI_DATA: {
+    description: "General AI/data platforms and ML architecture",
+    criteria: "General lane. Requires evidence of strong AI/Data platforms, ML architecture, or agentic workflows."
   }
 };
 

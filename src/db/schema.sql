@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS companies (
 -- Tracks individual job postings sourced from job boards or Gmail notifications.
 CREATE TABLE IF NOT EXISTS jobs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    content_hash TEXT UNIQUE,
     company_name TEXT NOT NULL,
     company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
@@ -57,21 +58,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     careers_portal_url TEXT NOT NULL, -- Direct URL to company's career page to verify real job
     
     -- Status in evaluation pipeline
-    stage1_status VARCHAR(50) DEFAULT 'UNASSIGNED', -- 'PASS', 'HARD_FAIL', 'NEEDS_VERIFICATION'
-    final_classification VARCHAR(50), -- 'PRIORITY_APPLY', 'APPLY_AFTER_VERIFICATION', 'HIGH_FIT_HIGH_RISK', 'LOW_STRATEGIC_VALUE', 'REJECTED'
-    confidence_level VARCHAR(20), -- 'High', 'Medium', 'Low'
+    processing_status VARCHAR(50) DEFAULT 'PENDING_GLOBAL_GATE', -- 'PENDING_GLOBAL_GATE', 'PENDING_LANE_CLASSIFICATION', 'PENDING_LLM_EVAL', 'FAILED', 'REJECTED', 'AMBIGUOUS', 'EVALUATED'
+    rejection_code VARCHAR(100),
+    gate_version VARCHAR(20),
     
-    -- Stage 2: Career Horizon
-    career_horizon_route VARCHAR(100),
-    career_horizon_score INTEGER DEFAULT 0,
-    
-    -- Stage 3: Core Fit
-    core_fit_score INTEGER DEFAULT 0, -- Overall 100-point score
-    score_hands_on_mastery INTEGER DEFAULT 0,  -- Out of 30
-    score_technical_autonomy INTEGER DEFAULT 0, -- Out of 25
-    score_role_purity INTEGER DEFAULT 0, -- Out of 15
-    score_comp_quality INTEGER DEFAULT 0, -- Out of 20
-    score_market_durability INTEGER DEFAULT 0, -- Out of 10
+    -- Lane Classification
+    primary_lane VARCHAR(50), -- 'CORE_AI_DATA', 'LEGAL_REGTECH', 'HEALTH_BIO_PHARMA', 'INVESTMENT_MARKETS_FINTECH'
+    secondary_lanes JSONB,
+    lane_confidence VARCHAR(20),
+    lane_evidence TEXT,
+    source_lane VARCHAR(50),
     
     -- Specific ND & stress assessment metrics (from evaluation)
     nd_friendly_score INTEGER DEFAULT NULL,     -- 0 to 100
@@ -82,6 +78,17 @@ CREATE TABLE IF NOT EXISTS jobs (
     recommended_cv_version TEXT,
     next_action TEXT,
     is_top_ten BOOLEAN DEFAULT FALSE,
+
+    -- New ND Work-Fit Fields
+    nd_gate_status VARCHAR(50),
+    nd_score INTEGER,
+    nd_evidence TEXT,
+    nd_risk_flags JSONB,
+    work_mode_status VARCHAR(50),
+    office_days INTEGER,
+    interaction_load INTEGER,
+    building_research_ratio INTEGER,
+    rejection_codes JSONB,
     
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -102,6 +109,7 @@ CREATE TABLE IF NOT EXISTS raw_companies (
 -- Staging table for raw extracted job postings before they are evaluated.
 CREATE TABLE IF NOT EXISTS raw_jobs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    content_hash TEXT UNIQUE,
     company_name TEXT NOT NULL,
     title TEXT NOT NULL,
     source VARCHAR(50) NOT NULL,
@@ -111,12 +119,14 @@ CREATE TABLE IF NOT EXISTS raw_jobs (
     posted_date DATE DEFAULT CURRENT_DATE,
     careers_portal_url TEXT NOT NULL,
     processed BOOLEAN DEFAULT FALSE,
+    processing_status VARCHAR(50) DEFAULT 'PENDING_GLOBAL_GATE',
     processed_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Ensure is_top_ten column is added if table exists
+-- Ensure is_top_ten column is added if table exists (for compatibility if not wiped)
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_top_ten BOOLEAN DEFAULT FALSE;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS content_hash TEXT UNIQUE;
 
 -- Table: agent_tool_logs
 -- Logs the tool calls made during Gemini multi-stage evaluation pipelines.
@@ -196,6 +206,6 @@ ORDER BY politics_stress_avg_score DESC;
 -- INDEXES FOR HIGH-PERFORMANCE ANALYTICS
 -- ====================================================================
 CREATE INDEX IF NOT EXISTS idx_jobs_company_name ON jobs(company_name);
-CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(stage1_status);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(processing_status);
 CREATE INDEX IF NOT EXISTS idx_jobs_nd_scores ON jobs(nd_friendly_score, politics_stress_score);
 CREATE INDEX IF NOT EXISTS idx_companies_scores ON companies(nd_friendly_avg_score, politics_stress_avg_score);

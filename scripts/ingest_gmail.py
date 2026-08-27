@@ -130,13 +130,14 @@ def main():
             # Use Gmail native IMAP label management to cleanly move the message:
             # 1. Add destination label (Jobs-Alerts-Processed)
             # 2. Remove source label (Jobs-Alerts)
-            try:
-                mail.store(mail_id, "+X-GM-LABELS", f'"{gmail_processed_folder}"')
-                mail.store(mail_id, "-X-GM-LABELS", f'"{gmail_folder}"')
-            except Exception as label_err:
-                # Fallback for standard non-Gmail IMAP servers
-                mail.copy(mail_id, gmail_processed_folder)
-                mail.store(mail_id, "+FLAGS", "\\Deleted")
+            # [MODIFIED]: Disabled by Phase 0 Refactor - Emails should not be purged/altered in source
+            # try:
+            #     mail.store(mail_id, "+X-GM-LABELS", f'"{gmail_processed_folder}"')
+            #     mail.store(mail_id, "-X-GM-LABELS", f'"{gmail_folder}"')
+            # except Exception as label_err:
+            #     # Fallback for standard non-Gmail IMAP servers
+            #     mail.copy(mail_id, gmail_processed_folder)
+            #     mail.store(mail_id, "+FLAGS", "\\Deleted")
             
             count += 1
 
@@ -145,12 +146,13 @@ def main():
         conn.close()
 
         # Permanently remove marked messages from current folder
-        try:
-            mail.expunge()
-        except Exception:
-            pass
+        # [MODIFIED]: Disabled by Phase 0 Refactor
+        # try:
+        #     mail.expunge()
+        # except Exception:
+        #     pass
 
-        print(f"✅ Successfully ingested {count} raw email alerts to Postgres and moved to '{gmail_processed_folder}'.")
+        print(f"✅ Successfully ingested {count} raw email alerts to Postgres (left untouched in '{gmail_folder}').")
         
         mail.close()
         mail.logout()

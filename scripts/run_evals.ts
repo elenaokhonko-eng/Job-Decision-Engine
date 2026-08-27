@@ -84,15 +84,15 @@ async function runEvals() {
           }
         } else if (ast.type === "min_score") {
           const targetMin = Number(ast.value);
-          const maxScoreInResponse = Math.max(...(resultObj.evaluated_jobs?.map(j => j.core_fit_score || 0) || [0]));
+          const maxScoreInResponse = Math.max(...(resultObj.evaluated_jobs?.map(j => j.nd_friendly_score || 0) || [0]));
           if (maxScoreInResponse < targetMin) {
-            errors.push(`Assertion failed: Expected at least one job with score >= ${targetMin}, but max was ${maxScoreInResponse}.`);
+            errors.push(`Assertion failed: Expected at least one job with nd_friendly_score >= ${targetMin}, but max was ${maxScoreInResponse}.`);
           }
         } else if (ast.type === "max_score") {
           const targetMax = Number(ast.value);
-          const maxScoreInResponse = Math.max(...(resultObj.evaluated_jobs?.map(j => j.core_fit_score || 0) || [0]));
+          const maxScoreInResponse = Math.max(...(resultObj.evaluated_jobs?.map(j => j.nd_friendly_score || 0) || [0]));
           if (maxScoreInResponse > targetMax) {
-            errors.push(`Assertion failed: Expected all jobs to have score <= ${targetMax}, but max was ${maxScoreInResponse}.`);
+            errors.push(`Assertion failed: Expected all jobs to have nd_friendly_score <= ${targetMax}, but max was ${maxScoreInResponse}.`);
           }
         }
       }

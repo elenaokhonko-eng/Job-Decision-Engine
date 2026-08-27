@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Private and generated files
+private/
+master_profile.json
+my_profile.md
+*.docx
+*.pdf
