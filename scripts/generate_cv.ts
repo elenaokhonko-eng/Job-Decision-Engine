@@ -246,10 +246,11 @@ The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard
     fs.writeFileSync(path.join(exportDir, `${baseFilename}.cv.json`), JSON.stringify(finalCv, null, 2));
     
     // Save DOCX
-    await generateDocx(finalCv, path.join(exportDir, `${baseFilename}.docx`));
+    const docxPath = path.join(exportDir, `${baseFilename}.docx`);
+    await generateDocx(finalCv, docxPath);
     
-    // Save PDF
-    await generatePdf(finalCv, path.join(exportDir, `${baseFilename}.pdf`));
+    // Save PDF using MS Word COM Automation
+    await generatePdf(docxPath, path.join(exportDir, `${baseFilename}.pdf`));
 
     console.log(`✅ CV Generation Complete! Files saved to scripts/exports/:
 - ${baseFilename}.cv.json

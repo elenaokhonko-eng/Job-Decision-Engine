@@ -446,6 +446,12 @@ Lanes:
 
 Assign lane_confidence (High, Medium, Low) based on explicit evidence in the job description. Do NOT rely on exact keyword matching alone; read the semantic context. Output the verbatim quotes as lane_evidence. If no lane matches (e.g., standard SWE without data/ML), set primary_lane to null.
 
+**IMPORTANT CALIBRATION RULE:** "Platform Architect" must not automatically qualify for CORE_AI_DATA. The job must contain substantive evidence of building AI, ML, data platforms or technical systems—not merely governing a vendor platform. If the role is dominated by governance, stakeholder influence, or is an architect role without hands-on building:
+- set primary_lane to null
+- set next_action to "REJECTED"
+- set rejection_codes to include "ROLE_DOMINATED_BY_GOVERNANCE_AND_STAKEHOLDER_INFLUENCE", "PRIMARY_CUSTOMER_ADVISORY", "BUILD_RESEARCH_RATIO_BELOW_70", "LOW_HANDS_ON_AI_ML", or "HIGH_ORGANISATIONAL_POLITICS_EXPOSURE"
+- evaluate interaction_load as high (e.g., > 30) and building_research_ratio as low (e.g., < 70).
+
 #### STAGE 2: INDEPENDENT RISK METRICS (0-100 each)
 - nd_friendly_score (Target >= 70): Evidence of safe focus, async comms. Matches: ${ND_FRIENDLY_DIMENSIONS.highSupportiveFactors.join(", ")}
 - politics_stress_score (Target < 50): Evidence of corporate alignment, fast-paced chaos, matrixed stakeholders. Matches: ${POLITICS_STRESS_RISK_DIMENSIONS.highRiskFactors.join(", ")}

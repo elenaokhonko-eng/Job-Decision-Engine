@@ -592,8 +592,8 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
       }
     }
 
-    // 3. Selection: Cap at 3 per lane per run (Quality strictness: High confidence only)
-    console.log("\nSelecting top recommended jobs (Max 3 per lane)...");
+    // 3. Selection: Evaluate all high confidence jobs in the lane.
+    console.log("\nSelecting top recommended jobs (No capping)...");
     const allJobs = await db.queryJobs();
     
     // Filter jobs that were evaluated in the current run and have a high confidence
@@ -611,12 +611,17 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
       jobsByLane[lane].push(job);
     }
 
-    const selectedJobs: typeof eligibleJobs = [];
+    let selectedJobs: any[] = [];
     for (const lane of Object.keys(jobsByLane)) {
       const laneJobs = jobsByLane[lane];
       laneJobs.sort((a, b) => (b.nd_friendly_score || 0) - (a.nd_friendly_score || 0));
-      const top3 = laneJobs.slice(0, 3);
-      selectedJobs.push(...top3);
+      
+      const selectedCount = laneJobs.length;
+      console.log(`Lane: ${lane}`);
+      console.log(`Jobs found: ${laneJobs.length}`);
+      console.log(`Jobs selected to apply: ${selectedCount}`);
+      
+      selectedJobs.push(...laneJobs);
     }
     
     for (const job of selectedJobs) {

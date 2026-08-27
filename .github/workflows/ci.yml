@@ -9,6 +9,21 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
     - name: Checkout repository
@@ -26,5 +41,12 @@ jobs:
     - name: Run linter checks
       run: npm run lint
 
+    - name: Initialize Database
+      env:
+        DATABASE_URL: postgres://test:password@localhost:5432/testdb
+      run: npm run db:init
+
     - name: Run Vitest Unit Tests
+      env:
+        DATABASE_URL: postgres://test:password@localhost:5432/testdb
       run: npm run test

@@ -127,16 +127,17 @@ export function applyGlobalGates(job: RawJob): GateResult {
     }
   }
 
-  // 3. Construction / Data Center Build / Hardware / SRE Roles
+  // 3. Construction / Data Center Build / Hardware / SRE / GPU Hardware Roles
   const hardwareKw = [
     "construction", "site reliability", "sre", "hardware engineering", 
-    "hardware", "facility", "infrastructure data center", "data center construction"
+    "hardware", "facility", "infrastructure data center", "data center construction",
+    "gpu", "gpu hardware", "gpu architect", "hardware architect"
   ];
   if (hardwareKw.some(kw => t.includes(kw) || d.includes(kw))) {
     // Hardware keyword exception: "hardware" keyword might appear innocently in SWE job if they mention "hardware teams".
     // We reject if it's the core focus. "Hardware engineering" is a strict reject.
-    // Infrastructure and Data center are strict rejects as per user instruction.
-    if (d.includes("hardware engineering") || t.includes("hardware") || t.includes("infrastructure data center") || d.includes("infrastructure data center") || t.includes("sre") || d.includes("sre") || t.includes("site reliability") || d.includes("site reliability") || t.includes("construction") || d.includes("data center construction") || d.includes("construction")) {
+    // Infrastructure, Data center, GPU hardware are strict rejects as per user instruction.
+    if (d.includes("hardware engineering") || t.includes("hardware") || t.includes("hardware architect") || t.includes("gpu hardware") || t.includes("gpu architect") || t.includes("infrastructure data center") || d.includes("infrastructure data center") || t.includes("sre") || d.includes("sre") || t.includes("site reliability") || d.includes("site reliability") || t.includes("construction") || d.includes("data center construction") || d.includes("construction")) {
         return { passed: false, rejection_code: "GATE_HARDWARE_INFRASTRUCTURE" };
     }
   }
