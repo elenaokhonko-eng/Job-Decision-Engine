@@ -84,6 +84,7 @@ async function parseEmails() {
           descriptionRaw: job.descriptionRaw || email.subject,
           sourceLane: "UNKNOWN",
           searchPlanVersion: "1.0",
+          rawPayload: job
         }, job);
       }
 

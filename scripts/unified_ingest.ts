@@ -1,4 +1,4 @@
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 import fs from "fs";
 import { fetchGreenhouseJobs } from "../src/services/adapters/greenhouse.js";
 import { fetchAshbyJobs } from "../src/services/adapters/ashby.js";
@@ -50,9 +50,10 @@ async function runUnifiedIngest() {
           retrievedAt: new Date().toISOString(),
           companyName: job.company_name,
           title: job.title,
-          descriptionRaw: typeof job.raw_description === "object" ? JSON.stringify(job.raw_description) : job.raw_description,
-          sourceLane: "TARGET_COMPANY",
+          descriptionRaw: job.description || "",
+          sourceLane: "UNKNOWN",
           searchPlanVersion: "1.0",
+          rawPayload: job
         }, job);
       }
     }
@@ -76,6 +77,7 @@ async function runUnifiedIngest() {
         descriptionRaw: typeof job.raw_description === "object" ? JSON.stringify(job.raw_description) : job.raw_description,
         sourceLane: "AGGREGATOR",
         searchPlanVersion: "1.0",
+        rawPayload: job
       }, job);
     }
   } catch (e: any) {
@@ -96,6 +98,7 @@ async function runUnifiedIngest() {
         descriptionRaw: typeof job.raw_description === "object" ? JSON.stringify(job.raw_description) : job.raw_description,
         sourceLane: "AGGREGATOR",
         searchPlanVersion: "1.0",
+        rawPayload: job
       }, job);
     }
   } catch (e: any) {
