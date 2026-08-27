@@ -1,0 +1,38 @@
+lane: CORE_AI_DATA
+description: "General AI/data platforms and ML architecture"
+enabled_sources:
+  - greenhouse
+  - ashby
+  - lever
+  - himalayas
+  - startup_jobs
+title_families:
+  - machine learning engineer
+  - applied ai engineer
+  - research engineer
+  - applied scientist
+  - data scientist
+  - ml platform engineer
+  - ai evaluation engineer
+  - agent or rag engineer
+  - data/ai platform architect
+  - model evaluation
+  - training-data
+positive_concepts:
+  - machine learning
+  - deep learning
+  - nlp
+  - llm
+  - agentic
+  - data engineering
+  - architecture
+negative_concepts:
+  - presales
+  - solutions consulting
+  - customer success
+  - fde
+  - technical account management
+  - programme governance
+  - people-management-heavy
+ai_evaluation_limit: 3
+semantic_threshold: 0.68

@@ -276,6 +276,24 @@ export async function generateContent(options: {
   throw new Error("All model API calls failed or no API keys were configured.");
 }
 
+export async function generateEmbedding(text: string): Promise<number[]> {
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  if (!geminiKey) {
+    // Mock if no API key
+    return Array(768).fill(0).map(() => Math.random());
+  }
+  try {
+    const ai = getGeminiClient();
+    const response = await ai.models.embedContent({
+      model: "embedding-001",
+      contents: text,
+    });
+    return response.embeddings?.[0]?.values || Array(768).fill(0);
+  } catch (err: any) {
+    console.warn(`⚠️ Embedding generation failed, returning zeros: ${err.message}`);
+    return Array(768).fill(0);
+  }
+}
 
 // Core execution loop
 function parseResultJson(rawText: string, trace: string[]): AgentResult {

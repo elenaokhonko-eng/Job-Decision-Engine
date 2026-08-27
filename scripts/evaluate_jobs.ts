@@ -1,9 +1,9 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { getGeminiClient, runAgent, generateContent } from "../src/services/agent.ts";
+import { getGeminiClient, runAgent, generateContent, generateEmbedding } from "../src/services/agent.ts";
 import { extractWithFallback } from "../src/services/llmFallback.ts";
 import { db, verifyUrlLive } from "../src/db/db.ts";
-import { applyGlobalGates, generateContentHash } from "../src/services/criteria.ts";
+import { applyGlobalGates, generateContentHash, LANE_VOCABULARIES, MULTI_LANE_SCORECARDS } from "../src/services/criteria.ts";
 import { runDeduplication } from "./deduplicate.ts";
 import puppeteer from "puppeteer";
 
@@ -352,6 +352,32 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
     console.log(`Found ${rawJobs.length} unprocessed raw jobs.`);
     const evaluatedTodayIds: string[] = [];
 
+    // Map lane descriptions for prototype embeddings
+    const lanePrototypes: Record<string, string> = {
+      CORE_AI_DATA: MULTI_LANE_SCORECARDS.CORE_AI_DATA.description + " " + LANE_VOCABULARIES.CORE_AI_DATA.positive.join(" "),
+      LEGAL_REGTECH: MULTI_LANE_SCORECARDS.LEGAL_REGTECH.description + " " + LANE_VOCABULARIES.LEGAL_REGTECH.positive.join(" "),
+      HEALTH_BIO_PHARMA: MULTI_LANE_SCORECARDS.HEALTH_BIO_PHARMA.description + " " + LANE_VOCABULARIES.HEALTH_BIO_PHARMA.positive.join(" "),
+      INVESTMENT_MARKETS_FINTECH: MULTI_LANE_SCORECARDS.INVESTMENT_MARKETS_FINTECH.description + " " + LANE_VOCABULARIES.INVESTMENT_MARKETS_FINTECH.positive.join(" ")
+    };
+    
+    // Generate prototype embeddings
+    console.log("Generating semantic prototypes for 4 lanes...");
+    const laneEmbeddings: Record<string, number[]> = {};
+    for (const lane of Object.keys(lanePrototypes)) {
+      laneEmbeddings[lane] = await generateEmbedding(lanePrototypes[lane]);
+    }
+
+    const cosineSimilarity = (vecA: number[], vecB: number[]) => {
+      let dotProduct = 0, normA = 0, normB = 0;
+      for (let i = 0; i < vecA.length; i++) {
+        dotProduct += vecA[i] * vecB[i];
+        normA += vecA[i] * vecA[i];
+        normB += vecB[i] * vecB[i];
+      }
+      if (normA === 0 || normB === 0) return 0;
+      return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+    };
+
     if (rawJobs.length > 0) {
       console.log("Launching headless browser for job description verification & scraping...");
       let browser = await puppeteer.launch({
@@ -364,6 +390,8 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
         ]
       });
 
+      const survivingJobs: Array<{ rawJob: any, descString: string, primary_lane: string, score: number }> = [];
+
       try {
         for (let i = 0; i < rawJobs.length; i++) {
           const rawJob = rawJobs[i];
@@ -374,220 +402,130 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
             try {
               if (!browser.connected) {
                 console.log("⚠️ Browser disconnected. Re-launching...");
-                browser = await puppeteer.launch({
-                  headless: true,
-                  args: [
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled"
-                  ]
-                });
+                browser = await puppeteer.launch({ headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] });
               }
               scrapeResult = await scrapeJobDescription(rawJob.careers_portal_url, browser);
             } catch (err: any) {
               console.warn(`  -> Browser error checking URL, trying one-time re-launch: ${err.message || err}`);
-              try {
-                await browser.close().catch(() => {});
-                browser = await puppeteer.launch({
-                  headless: true,
-                  args: [
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled"
-                  ]
-                });
-                scrapeResult = await scrapeJobDescription(rawJob.careers_portal_url, browser);
-              } catch (retryErr: any) {
-                console.error(`  -> Persistent browser error on retry: ${retryErr.message}`);
-              }
             }
           }
           
-          // Parse existing description if available
           let hasExistingDesc = false;
-          if (rawJob.raw_description) {
-            let parsed: any = null;
-            if (typeof rawJob.raw_description === "object" && rawJob.raw_description !== null) {
-              parsed = rawJob.raw_description;
-            } else if (typeof rawJob.raw_description === "string") {
-              try {
-                parsed = JSON.parse(rawJob.raw_description);
-              } catch {
-                if (rawJob.raw_description.length >= 100 && !rawJob.raw_description.startsWith("Paste raw details here")) {
-                  hasExistingDesc = true;
-                }
-              }
-            }
-            if (parsed) {
-              const text = parsed.job_description || "";
-              if (text.length >= 100 && !text.startsWith("Paste raw details here")) {
-                hasExistingDesc = true;
-              }
-            }
-          }
-
-          // If scraping returned expired or failed, but we already have a valid description, bypass the expiry check
+          if (rawJob.raw_description && rawJob.raw_description.length > 100) hasExistingDesc = true;
+          
           if (scrapeResult.isExpired && hasExistingDesc) {
-            console.log("  -> Scraper flagged job as expired, but a valid pre-existing description is present. Proceeding with evaluation...");
             scrapeResult.isExpired = false;
-            scrapeResult.description = ""; // Don't overwrite the existing description
+            scrapeResult.description = "";
           }
 
           if (scrapeResult.isExpired || (!scrapeResult.description && !hasExistingDesc)) {
-            const reason = scrapeResult.isExpired 
-              ? "Job posting is expired or no longer active." 
-              : "Could not retrieve or parse the full job description (inactive listing or missing description).";
-            
-            console.log(`  -> ❌ REJECTED BEFORE EVALUATION: ${reason}`);
-            
-            // Insert directly to the rejected pile
-            const finalJob = await db.addJob({
-              content_hash: rawJob.content_hash || undefined,
-              title: rawJob.title,
-              company_name: rawJob.company_name,
-              source: rawJob.source as any,
-              raw_description: rawJob.raw_description || "No description available.",
-              salary_range: rawJob.salary_range || undefined,
-              location: rawJob.location || undefined,
-              careers_portal_url: rawJob.careers_portal_url,
-              posted_date: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-              processing_status: "REJECTED",
-              rejection_code: "GATE_EXPIRED_OR_UNPARSABLE",
-              primary_lane: null,
-              lane_confidence: "High",
-              nd_friendly_score: 0,
-              politics_stress_score: 0,
-              sensory_overload_index: 0,
-              biological_stress_risk: reason,
-              strategic_value: "Rejected due to inactive/expired listing.",
-              recommended_cv_version: "None",
-              next_action: "None",
-              is_top_ten: false
-            }, true);
-            
+            console.log(`  -> ❌ REJECTED BEFORE EVALUATION: Expired or missing description.`);
             await db.markRawJobProcessed(rawJob.id);
             continue;
           }
           
-          // If description was successfully scraped, update it
           if (scrapeResult.description) {
-            console.log(`  -> Full description retrieved (${scrapeResult.description.length} chars). Updating raw job in DB...`);
-            const structuredDesc = {
-              job_description: scrapeResult.description,
-              key_responsibilities: [],
-              technical_skills: [],
-              qualifications_education: [],
-              nice_to_haves: []
-            };
-            const descJson = JSON.stringify(structuredDesc);
-            rawJob.raw_description = descJson;
-            await pool.query(
-              "UPDATE raw_jobs SET raw_description = $1 WHERE id = $2",
-              [descJson, rawJob.id]
-            );
+            rawJob.raw_description = scrapeResult.description;
+            await pool.query("UPDATE raw_jobs SET raw_description = $1 WHERE id = $2", [scrapeResult.description, rawJob.id]);
           }
           
-          // Run direct rejection checks on the raw job title, company, and description
           const gateResult = applyGlobalGates(rawJob);
           if (!gateResult.passed) {
             console.log(`  -> ❌ REJECTED BEFORE EVALUATION (Direct Disqualifier matched): ${gateResult.rejection_code}`);
-            await db.addJob({
-              content_hash: rawJob.content_hash || undefined,
-              title: rawJob.title,
-              company_name: rawJob.company_name,
-              source: rawJob.source as any,
-              raw_description: rawJob.raw_description || "No description available.",
-              salary_range: rawJob.salary_range || undefined,
-              location: rawJob.location || undefined,
-              careers_portal_url: rawJob.careers_portal_url,
-              posted_date: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-              processing_status: "REJECTED",
-              rejection_code: gateResult.rejection_code,
-              primary_lane: null,
-              lane_confidence: "High",
-              nd_friendly_score: 0,
-              politics_stress_score: 0,
-              sensory_overload_index: 0,
-              biological_stress_risk: "Rejected due to direct disqualification rules.",
-              strategic_value: "Rejected due to direct disqualification rules.",
-              recommended_cv_version: "None",
-              next_action: "None",
-              is_top_ten: false
-            }, true);
-
             await db.markRawJobProcessed(rawJob.id);
             continue;
           }
-          
-          if (i > 0 && evalJobSleepMs > 0) {
-            console.log(`Waiting ${evalJobSleepMs / 1000} seconds before the next evaluation to avoid API rate limits...`);
-            await sleep(evalJobSleepMs);
-          }
-          
-          console.log(`Evaluating raw job: "${rawJob.title}" at "${rawJob.company_name}"`);
-          
-          const descString = typeof rawJob.raw_description === "object" 
-            ? JSON.stringify(rawJob.raw_description, null, 2) 
-            : rawJob.raw_description;
-            
-          const evalQuery = `Evaluate job advertisement: "${rawJob.title}" at "${rawJob.company_name}". 
-          Location: ${rawJob.location || "Singapore"}. 
-          Salary Range: ${rawJob.salary_range || "Not specified"}. 
-          Description: ${descString}`;
-          
-          try {
-            const { result } = await runAgent(evalQuery);
-            const evalResult = result.evaluated_jobs?.[0];
-            if (evalResult) {
-              const bioRisk = (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || undefined;
-              console.log(`  -> Complete: Lane = ${evalResult.primary_lane}, Confidence = ${evalResult.lane_confidence}, Next Action = ${evalResult.next_action}`);
 
-              // Insert into the final jobs/companies table
-              const finalJob = await db.addJob({
-                content_hash: rawJob.content_hash || undefined,
-                title: rawJob.title,
-                company_name: rawJob.company_name,
-                source: rawJob.source as any,
-                raw_description: rawJob.raw_description,
-                salary_range: rawJob.salary_range || undefined,
-                location: rawJob.location || undefined,
-                careers_portal_url: rawJob.careers_portal_url,
-                posted_date: rawJob.posted_date ? new Date(rawJob.posted_date).toISOString().split('T')[0] : undefined,
-                processing_status: "EVALUATED",
-                primary_lane: evalResult.primary_lane || undefined,
-                secondary_lanes: evalResult.secondary_lanes || undefined,
-                lane_confidence: evalResult.lane_confidence || "Medium",
-                lane_evidence: evalResult.lane_evidence || undefined,
-                source_lane: "LLM",
-                nd_friendly_score: evalResult.nd_friendly_score || 0,
-                politics_stress_score: evalResult.politics_stress_score || 0,
-                sensory_overload_index: evalResult.sensory_overload_index || 0,
-                biological_stress_risk: bioRisk,
-                strategic_value: evalResult.strategic_value || "None",
-                recommended_cv_version: evalResult.recommended_cv_version || "None",
-                next_action: evalResult.next_action || "None",
-                is_top_ten: false
-              }, true); // bypass live check since it was validated at extraction
-              
-              console.log(`  -> Inserted evaluated job into final table with ID ${finalJob.id}`);
-              
-              // Mark raw job as processed
-              await db.markRawJobProcessed(rawJob.id);
-              evaluatedTodayIds.push(finalJob.id);
-            } else {
-              console.log("  -> Complete (warnings: no evaluation details returned in payload)");
+          console.log(`  -> ✅ Passed deterministic gates. Extracting semantic embedding...`);
+          const descString = typeof rawJob.raw_description === "object" ? JSON.stringify(rawJob.raw_description, null, 2) : rawJob.raw_description;
+          const jobText = `${rawJob.title} ${descString}`;
+          const jobEmbedding = await generateEmbedding(jobText);
+          
+          let bestLane = "CORE_AI_DATA";
+          let bestScore = -1;
+          for (const lane of Object.keys(laneEmbeddings)) {
+            const score = cosineSimilarity(jobEmbedding, laneEmbeddings[lane]);
+            if (score > bestScore) {
+              bestScore = score;
+              bestLane = lane;
             }
-          } catch (err: any) {
-            console.error(`❌ Evaluation failed for raw job ID ${rawJob.id}:`, err.message || err);
           }
+
+          console.log(`  -> Ranked as ${bestLane} (Score: ${bestScore.toFixed(3)})`);
+          survivingJobs.push({ rawJob, descString, primary_lane: bestLane, score: bestScore });
         }
       } finally {
+        try { await browser.close(); } catch (e) {}
+      }
+
+      // Group and cap LLM invocation
+      console.log(`\nRanking ${survivingJobs.length} surviving jobs by semantic similarity to cap LLM evaluation to ~3 per lane...`);
+      const jobsByLane: Record<string, typeof survivingJobs> = {};
+      for (const sj of survivingJobs) {
+        if (!jobsByLane[sj.primary_lane]) jobsByLane[sj.primary_lane] = [];
+        jobsByLane[sj.primary_lane].push(sj);
+      }
+
+      const jobsToEvaluateLLM: typeof survivingJobs = [];
+      for (const lane of Object.keys(jobsByLane)) {
+        jobsByLane[lane].sort((a, b) => b.score - a.score);
+        const top3 = jobsByLane[lane].slice(0, 3);
+        console.log(`- ${lane}: Evaluating top ${top3.length} of ${jobsByLane[lane].length} jobs.`);
+        jobsToEvaluateLLM.push(...top3);
+
+        // Mark the remaining ones as evaluated/rejected due to cap
+        const skipped = jobsByLane[lane].slice(3);
+        for (const sj of skipped) {
+           await db.markRawJobProcessed(sj.rawJob.id);
+           console.log(`  - ⏭️ Skipped (LLM Cap Exceeded): ${sj.rawJob.title} at ${sj.rawJob.company_name}`);
+        }
+      }
+
+      // Process top jobs through AI
+      for (const sj of jobsToEvaluateLLM) {
+        if (evalJobSleepMs > 0) { await sleep(evalJobSleepMs); }
+        console.log(`\nEvaluating raw job: "${sj.rawJob.title}" at "${sj.rawJob.company_name}" [${sj.primary_lane}]`);
+        
+        const evalQuery = `Evaluate job advertisement: "${sj.rawJob.title}" at "${sj.rawJob.company_name}". 
+        Location: ${sj.rawJob.location || "Singapore"}. 
+        Salary Range: ${sj.rawJob.salary_range || "Not specified"}. 
+        Description: ${sj.descString}`;
+        
         try {
-          await browser.close();
+          const { result } = await runAgent(evalQuery);
+          const evalResult = result.evaluated_jobs?.[0];
+          if (evalResult) {
+            console.log(`  -> LLM Complete: Confidence = ${evalResult.lane_confidence}, Next Action = ${evalResult.next_action}`);
+            const finalJob = await db.addJob({
+              content_hash: sj.rawJob.content_hash || undefined,
+              title: sj.rawJob.title,
+              company_name: sj.rawJob.company_name,
+              source: sj.rawJob.source as any,
+              raw_description: sj.rawJob.raw_description,
+              salary_range: sj.rawJob.salary_range || undefined,
+              location: sj.rawJob.location || undefined,
+              careers_portal_url: sj.rawJob.careers_portal_url,
+              posted_date: sj.rawJob.posted_date ? new Date(sj.rawJob.posted_date).toISOString().split('T')[0] : undefined,
+              processing_status: "EVALUATED",
+              primary_lane: evalResult.primary_lane || sj.primary_lane,
+              secondary_lanes: evalResult.secondary_lanes || undefined,
+              lane_confidence: evalResult.lane_confidence || "Medium",
+              lane_evidence: evalResult.lane_evidence || undefined,
+              source_lane: "LLM",
+              nd_friendly_score: evalResult.nd_friendly_score || 0,
+              politics_stress_score: evalResult.politics_stress_score || 0,
+              sensory_overload_index: evalResult.sensory_overload_index || 0,
+              biological_stress_risk: (evalResult as any).biological_stress_risk || evalResult.biological_and_stress_risk_assessment || undefined,
+              strategic_value: evalResult.strategic_value || "None",
+              recommended_cv_version: evalResult.recommended_cv_version || "None",
+              next_action: evalResult.next_action || "None",
+              is_top_ten: false
+            }, true);
+            await db.markRawJobProcessed(sj.rawJob.id);
+            evaluatedTodayIds.push(finalJob.id);
+          }
         } catch (err: any) {
-          console.warn("⚠️ Browser close cleanup warning (non-fatal):", err.message || err);
+          console.error(`❌ Evaluation failed for raw job ID ${sj.rawJob.id}:`, err.message || err);
         }
       }
     }

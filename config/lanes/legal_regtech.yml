@@ -1,0 +1,36 @@
+lane: LEGAL_REGTECH
+description: "LegalTech, RegTech, fraud and digital trust"
+enabled_sources:
+  - greenhouse
+  - ashby
+  - lever
+  - himalayas
+  - startup_jobs
+title_families:
+  - legal ai
+  - legaltech
+  - regulatory technology
+  - claims and disputes technology
+  - legal knowledge engineering
+  - fraud
+  - scams
+  - financial crime
+  - aml
+  - kyc
+  - compliance automation
+  - digital trust
+  - legal nlp
+  - document intelligence
+  - knowledge graphs
+positive_concepts:
+  - compliance
+  - regulatory tech
+  - fraud detection
+  - kyc/aml
+  - legal domain
+  - digital trust
+negative_concepts:
+  - traditional legal
+  - compliance operations
+ai_evaluation_limit: 3
+semantic_threshold: 0.68

@@ -1,0 +1,37 @@
+lane: HEALTH_BIO_PHARMA
+description: "Life sciences, health and scientific ML"
+enabled_sources:
+  - greenhouse
+  - ashby
+  - lever
+  - himalayas
+  - startup_jobs
+title_families:
+  - computational biology
+  - bioinformatics
+  - scientific ml
+  - cheminformatics
+  - clinical nlp
+  - healthcare data science
+  - medical ai
+  - imaging
+  - research software engineering
+  - health-data platforms
+  - pharmaceutical ai
+  - data engineering
+  - healthcare models
+positive_concepts:
+  - pharma
+  - bioinformatics
+  - biotech
+  - medical research domain
+  - machine learning on biological or clinical data
+  - scientific data platforms
+negative_concepts:
+  - laboratory-bound
+  - patient-facing
+  - clinical-operations
+  - medical sales
+  - laboratory-only work
+ai_evaluation_limit: 3
+semantic_threshold: 0.68

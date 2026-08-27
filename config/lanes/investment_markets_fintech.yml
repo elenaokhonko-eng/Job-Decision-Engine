@@ -1,0 +1,49 @@
+lane: INVESTMENT_MARKETS_FINTECH
+description: "Investment management, asset management, wealth management, public markets, institutional investing, WealthTech, and market infrastructure."
+enabled_sources:
+  - greenhouse
+  - ashby
+  - lever
+  - himalayas
+  - startup_jobs
+title_families:
+  - quantitative research
+  - time-series ml
+  - investment-data engineering
+  - portfolio analytics
+  - optimisation
+  - risk modelling
+  - trading technology
+  - market-data platforms
+  - investment-research automation
+  - wealthtech
+  - investtech
+  - asset/fund-management ai
+  - digital-asset analytics
+  - custody
+  - trading infrastructure
+positive_concepts:
+  - time-series modelling
+  - institutional investing
+  - capital markets
+  - securities
+  - robo-advisory
+  - market data
+negative_concepts:
+  - payments
+  - cards
+  - consumer lending
+  - bnpl
+  - corporate finance
+  - treasury
+  - m&a
+  - private equity
+  - investment banking
+  - deal advisory
+  - fundraising
+  - generic commercial banking
+  - retail banking
+  - merchant acquiring
+  - remittance
+ai_evaluation_limit: 3
+semantic_threshold: 0.68

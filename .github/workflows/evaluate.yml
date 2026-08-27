@@ -1,0 +1,33 @@
+name: Job Evaluation Engine
+
+on:
+  workflow_run:
+    workflows: ["Job Pipeline Processor"]
+    types:
+      - completed
+  workflow_dispatch:
+
+jobs:
+  evaluate-jobs:
+    name: 3. Evaluate Queued Jobs via Generative AI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Run Evaluation Queue Consumer
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: npx tsx scripts/evaluate_queue.ts

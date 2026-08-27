@@ -100,6 +100,15 @@ export function applyGlobalGates(job: RawJob): GateResult {
     return { passed: false, rejection_code: "GATE_HIGH_OFFICE_DAYS" };
   }
 
+  // 1a. Structured Remote Exclusions
+  if (
+    d.includes("us only") || d.includes("us-only") || d.includes("united states only") || 
+    d.includes("canada only") || d.includes("eu only") || d.includes("eu-only") || 
+    d.includes("uk only") || d.includes("uk-only") || d.includes("remote - us")
+  ) {
+    return { passed: false, rejection_code: "GATE_LOCATION_RESTRICTED" };
+  }
+
   // 1b. Regular on-call, shift work, frequent travel
   if (d.includes("shift work") || d.includes("on-call rotation") || d.includes("regular on-call") || d.includes("24/7 support") || d.includes("travel extensively") || d.includes("frequent travel") || d.includes("up to 50% travel") || d.includes("up to 25% travel")) {
     return { passed: false, rejection_code: "GATE_LIFESTYLE_INCOMPATIBLE" };
@@ -240,6 +249,25 @@ export const MULTI_LANE_SCORECARDS = {
   CORE_AI_DATA: {
     description: "General AI/data platforms and ML architecture",
     criteria: "General lane. Requires evidence of strong AI/Data platforms, ML architecture, or agentic workflows."
+  }
+};
+
+export const LANE_VOCABULARIES = {
+  CORE_AI_DATA: {
+    positive: ["machine learning engineer", "applied ai engineer", "research engineer", "applied scientist", "data scientist", "ml platform engineer", "ai evaluation engineer", "agent or rag engineer", "data/ai platform architect", "model evaluation", "training-data"],
+    negative: ["presales", "solutions consulting", "customer success", "fde", "technical account management", "programme governance", "people-management-heavy"]
+  },
+  LEGAL_REGTECH: {
+    positive: ["legal ai", "legaltech", "regulatory technology", "claims and disputes technology", "legal knowledge engineering", "fraud", "scams", "financial crime", "aml", "kyc", "compliance automation", "digital trust", "legal nlp", "document intelligence", "knowledge graphs"],
+    negative: ["traditional legal", "compliance operations"]
+  },
+  HEALTH_BIO_PHARMA: {
+    positive: ["computational biology", "bioinformatics", "scientific ml", "cheminformatics", "clinical nlp", "healthcare data science", "medical ai", "imaging", "research software engineering", "health-data platforms", "pharmaceutical ai", "data engineering", "healthcare models"],
+    negative: ["laboratory-bound", "patient-facing", "clinical-operations"]
+  },
+  INVESTMENT_MARKETS_FINTECH: {
+    positive: ["quantitative research", "time-series ml", "investment-data engineering", "portfolio analytics", "optimisation", "risk modelling", "trading technology", "market-data platforms", "investment-research automation", "wealthtech", "investtech", "asset/fund-management ai", "digital-asset analytics", "custody", "trading infrastructure"],
+    negative: ["payments", "cards", "consumer lending", "bnpl", "corporate finance", "treasury", "m&a", "private equity", "investment banking", "deal advisory", "fundraising", "generic commercial banking", "retail banking"]
   }
 };
 

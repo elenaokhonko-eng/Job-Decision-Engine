@@ -1,0 +1,43 @@
+name: Job Discovery Ingestion
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 2:00 AM UTC (10:00 AM SGT)
+  workflow_dispatch:
+
+jobs:
+  ingest-raw-observations:
+    name: 1. Scout and Ingest Raw Observations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Run Native Gmail Alert Ingestion
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: npx tsx scripts/ingest_gmail.ts || true
+
+      - name: Run LLM Email Parser
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
+        run: npx tsx scripts/parse_emails.ts || true
+
+      - name: Run Unified Discovery Broker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          STARTUP_JOBS_API_KEY: ${{ secrets.STARTUP_JOBS_API_KEY }}
+        run: npx tsx scripts/unified_ingest.ts

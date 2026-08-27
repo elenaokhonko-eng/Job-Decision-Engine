@@ -1,0 +1,151 @@
+companies:
+  # CORE_AI_DATA
+  - id: govtech_sg
+    name: GovTech Singapore
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: govtechsingapore # Placeholder to be resolved
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: ai_singapore
+    name: AI Singapore
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: lever
+    board_slug: aisingapore # Placeholder
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: grab_sg
+    name: Grab
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: grab
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  # HEALTH_BIO_PHARMA
+  - id: engine_biosciences
+    name: Engine Biosciences
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: ashby
+    board_slug: enginebiosciences
+    target_lanes: 
+      - HEALTH_BIO_PHARMA
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: holmusk
+    name: Holmusk
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: lever
+    board_slug: holmusk
+    target_lanes: 
+      - HEALTH_BIO_PHARMA
+    remote_policy: unknown
+    enabled: true
+
+  - id: hummingbird_bio
+    name: Hummingbird Bioscience
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: hummingbirdbioscience
+    target_lanes: 
+      - HEALTH_BIO_PHARMA
+    remote_policy: unknown
+    enabled: true
+
+  # LEGAL_REGTECH
+  - id: silent_eight
+    name: Silent Eight
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: lever
+    board_slug: silenteight
+    target_lanes: 
+      - LEGAL_REGTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: tookitaki
+    name: Tookitaki
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: tookitaki
+    target_lanes: 
+      - LEGAL_REGTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: synergis_capital
+    name: Sygnum
+    hq_country: CH
+    singapore_presence: true
+    ats_provider: lever
+    board_slug: sygnum
+    target_lanes: 
+      - LEGAL_REGTECH
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  # INVESTMENT_MARKETS_FINTECH
+  - id: gic
+    name: GIC
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: gic
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: temasek
+    name: Temasek Holdings
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: temasek
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: worldquant_sg
+    name: WorldQuant
+    hq_country: US
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: worldquant
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: qcp_capital
+    name: QCP Capital
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: lever
+    board_slug: qcpcapital
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
