@@ -40,7 +40,10 @@ async function generateTailoredCV() {
 
   try {
     const jobRes = await pool.query(
-      "SELECT title, company_name, raw_description, location FROM jobs WHERE id = $1",
+      `SELECT c.normalized_title as title, c.company_name, v.description_text as raw_description, '' as location 
+       FROM canonical_jobs c 
+       JOIN job_versions v ON v.canonical_job_id = c.id 
+       WHERE c.id = $1 ORDER BY v.observed_at DESC LIMIT 1`,
       [jobId]
     );
 
