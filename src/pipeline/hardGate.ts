@@ -24,35 +24,47 @@ export async function runHardGates() {
   const { rows: stagedJobs } = await pool.query(query);
   console.log(`Found ${stagedJobs.length} canonical jobs to gate.`);
   
-  for (const job of stagedJobs) {
-    // Map canonical job to RawJob interface expected by applyGlobalGates
-    const rawJobAdapter = {
-      id: job.id,
-      title: job.normalized_title,
-      company_name: job.company_name,
-      source: "canonical",
-      raw_description: job.description_text,
-      careers_portal_url: job.canonical_url
-    };
-    
-    const gateResult = applyGlobalGates(rawJobAdapter);
-    
-    let gateDecision = "PASS";
-    let status = "PREQUALIFIED";
-    
-    if (!gateResult.passed) {
-      gateDecision = "FAIL";
-      status = "HARD_REJECTED";
+  const client = await pool.connect();
+  try {
+    for (const job of stagedJobs) {
+      await client.query("BEGIN");
+      try {
+        // Map canonical job to RawJob interface expected by applyGlobalGates
+        const rawJobAdapter = {
+          id: job.id,
+          title: job.normalized_title,
+          company_name: job.company_name,
+          source: "canonical",
+          raw_description: job.description_text,
+          careers_portal_url: job.canonical_url
+        };
+        
+        const gateResult = applyGlobalGates(rawJobAdapter);
+        
+        let gateDecision = "PASS";
+        let status = "PREQUALIFIED";
+        
+        if (!gateResult.passed) {
+          gateDecision = "FAIL";
+          status = "HARD_REJECTED";
+        }
+        
+        await client.query(
+          `UPDATE canonical_jobs 
+           SET gate_decision = $1, processing_status = $2, rejection_reason = $3
+           WHERE id = $4`,
+          [gateDecision, status, gateResult.rejection_code || null, job.id]
+        );
+        
+        await client.query("COMMIT");
+        console.log(`-> ${job.company_name} - ${job.normalized_title} : ${gateDecision} (${gateResult.rejection_code || 'N/A'})`);
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.error(`❌ Failed to gate job ${job.id}:`, err);
+      }
     }
-    
-    await pool.query(
-      `UPDATE canonical_jobs 
-       SET gate_decision = $1, processing_status = $2, rejection_reason = $3
-       WHERE id = $4`,
-      [gateDecision, status, gateResult.rejection_code || null, job.id]
-    );
-    
-    console.log(`-> ${job.company_name} - ${job.normalized_title} : ${gateDecision} (${gateResult.rejection_code || 'N/A'})`);
+  } finally {
+    client.release();
   }
   
   console.log(`Hard Gates complete.`);

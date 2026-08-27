@@ -4,10 +4,12 @@ import pg from 'pg';
 import * as criteria from '../../services/criteria.js';
 
 vi.mock('pg', () => {
-  const mPool = {
+  const mPool: any = {
     query: vi.fn(),
     end: vi.fn(),
+    release: vi.fn(),
   };
+  mPool.connect = vi.fn().mockResolvedValue(mPool);
   return {
     default: {
       Pool: class { constructor() { return mPool; } }
@@ -46,35 +48,32 @@ describe('Pipeline Stage: Hard Gates', () => {
 
     await runHardGates();
 
-    expect(mPool.query).toHaveBeenCalledTimes(2);
+    expect(mPool.query).toHaveBeenCalledTimes(4); // SELECT + BEGIN + UPDATE + COMMIT
     
-    const updateCall = (mPool.query as any).mock.calls[1];
+    const updateCall = (mPool.query as any).mock.calls[2];
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCall[1]).toEqual(['PASS', 'PREQUALIFIED', null, 'canon-1']);
   });
 
   it('should mark HARD_REJECTED on fail with rejection reason', async () => {
+    // 1. Mock jobs
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
-        {
-          id: 'canon-2',
-          company_name: 'Test Corp 2',
-          normalized_title: 'AI Eng',
-          description_text: 'Bad job'
-        }
+        { id: 'canon-2', normalized_title: 'AI Eng', company_name: 'Test Corp 2', description_text: 'Missing remote keywords', canonical_url: 'http://test.com/2' }
       ]
     });
 
-    // Mock criteria fail
-    (criteria.applyGlobalGates as any).mockReturnValueOnce({
+    // 2. Mock criteria to fail
+    vi.spyOn(criteria, 'applyGlobalGates').mockReturnValueOnce({
       passed: false,
-      rejection_code: 'NO_LOCATION_MATCH'
+      rejection_code: 'NO_LOCATION_MATCH',
+      failed_dimensions: ['Location/Workability']
     });
 
     await runHardGates();
 
-    expect(mPool.query).toHaveBeenCalledTimes(2);
-    const updateCall = (mPool.query as any).mock.calls[1];
+    expect(mPool.query).toHaveBeenCalledTimes(4); // SELECT + BEGIN + UPDATE + COMMIT
+    const updateCall = (mPool.query as any).mock.calls[2];
     expect(updateCall[1]).toEqual(['FAIL', 'HARD_REJECTED', 'NO_LOCATION_MATCH', 'canon-2']);
   });
 });

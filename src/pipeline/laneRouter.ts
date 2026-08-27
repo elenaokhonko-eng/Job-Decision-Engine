@@ -49,28 +49,40 @@ export async function runLaneRouting() {
   const { rows: jobs } = await pool.query(query);
   console.log(`Found ${jobs.length} canonical jobs to route.`);
   
-  for (const job of jobs) {
-    const jobText = `${job.normalized_title} ${job.description_text}`;
-    const jobEmbedding = await generateEmbedding(jobText);
-    
-    let bestLane = "CORE_AI_DATA";
-    let bestScore = -1;
-    for (const lane of Object.keys(laneEmbeddings)) {
-      const score = cosineSimilarity(jobEmbedding, laneEmbeddings[lane]);
-      if (score > bestScore) {
-        bestScore = score;
-        bestLane = lane;
+  const client = await pool.connect();
+  try {
+    for (const job of jobs) {
+      await client.query("BEGIN");
+      try {
+        const jobText = `${job.normalized_title} ${job.description_text}`;
+        const jobEmbedding = await generateEmbedding(jobText);
+        
+        let bestLane = "CORE_AI_DATA";
+        let bestScore = -1;
+        for (const lane of Object.keys(laneEmbeddings)) {
+          const score = cosineSimilarity(jobEmbedding, laneEmbeddings[lane]);
+          if (score > bestScore) {
+            bestScore = score;
+            bestLane = lane;
+          }
+        }
+        
+        await client.query(
+          `UPDATE canonical_jobs 
+           SET primary_lane = $1, semantic_score = $2, processing_status = 'SEMANTIC_SHORTLISTED'
+           WHERE id = $3`,
+          [bestLane, bestScore, job.id]
+        );
+        
+        await client.query("COMMIT");
+        console.log(`-> Routed ${job.normalized_title} to ${bestLane} (Score: ${bestScore.toFixed(3)})`);
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.error(`❌ Failed to route job ${job.id}:`, err);
       }
     }
-    
-    await pool.query(
-      `UPDATE canonical_jobs 
-       SET primary_lane = $1, semantic_score = $2, processing_status = 'SEMANTIC_SHORTLISTED'
-       WHERE id = $3`,
-      [bestLane, bestScore, job.id]
-    );
-    
-    console.log(`-> Routed ${job.normalized_title} to ${bestLane} (Score: ${bestScore.toFixed(3)})`);
+  } finally {
+    client.release();
   }
   
   console.log(`Lane Routing complete.`);

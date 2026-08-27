@@ -28,51 +28,59 @@ export async function runNormalization() {
   const { rows: pendingObservations } = await pool.query(query);
   console.log(`Found ${pendingObservations.length} pending observations.`);
   
-  for (const obs of pendingObservations) {
-    // 1. Try to find existing canonical job
-    // Identity Rules: 
-    // - Exact source_name + source_external_id OR
-    // - Employer domain + normalized title
-    
-    let canonicalJobId: string | null = null;
-    
-    // Check if we have seen this external ID before
-    const checkExt = await pool.query(
-      `SELECT canonical_job_id FROM job_versions jv 
-       JOIN raw_job_observations rjo ON jv.content_hash = rjo.raw_payload_hash
-       WHERE rjo.source_name = $1 AND rjo.source_external_id = $2 LIMIT 1`,
-      [obs.source_name, obs.source_external_id]
-    );
-    
-    if (checkExt.rows.length > 0) {
-      canonicalJobId = checkExt.rows[0].canonical_job_id;
-    } else {
-      // Check title + company
-      const checkTitle = await pool.query(
-        `SELECT id FROM canonical_jobs WHERE company_name = $1 AND normalized_title = $2 LIMIT 1`,
-        [obs.company_name, obs.title.toLowerCase()]
-      );
-      if (checkTitle.rows.length > 0) {
-        canonicalJobId = checkTitle.rows[0].id;
+  const client = await pool.connect();
+  try {
+    for (const obs of pendingObservations) {
+      await client.query("BEGIN");
+      try {
+        let canonicalJobId: string | null = null;
+        
+        // Check if we have seen this external ID before
+        const checkExt = await client.query(
+          `SELECT canonical_job_id FROM job_versions jv 
+           JOIN raw_job_observations rjo ON jv.content_hash = rjo.raw_payload_hash
+           WHERE rjo.source_name = $1 AND rjo.source_external_id = $2 LIMIT 1`,
+          [obs.source_name, obs.source_external_id]
+        );
+        
+        if (checkExt.rows.length > 0) {
+          canonicalJobId = checkExt.rows[0].canonical_job_id;
+        } else {
+          // Check title + company
+          const checkTitle = await client.query(
+            `SELECT id FROM canonical_jobs WHERE company_name = $1 AND normalized_title = $2 LIMIT 1`,
+            [obs.company_name, obs.title.toLowerCase()]
+          );
+          if (checkTitle.rows.length > 0) {
+            canonicalJobId = checkTitle.rows[0].id;
+          }
+        }
+        
+        if (!canonicalJobId) {
+          // Create new canonical job
+          const insertCanon = await client.query(
+            `INSERT INTO canonical_jobs (company_name, normalized_title, canonical_url, processing_status) 
+             VALUES ($1, $2, $3, $4) RETURNING id`,
+            [obs.company_name, obs.title.toLowerCase(), obs.source_url, "RAW_STAGED"]
+          );
+          canonicalJobId = insertCanon.rows[0].id;
+        }
+        
+        // Create new job version
+        await client.query(
+          `INSERT INTO job_versions (canonical_job_id, content_hash, description_text) 
+           VALUES ($1, $2, $3)`,
+          [canonicalJobId, obs.raw_payload_hash, obs.description_raw]
+        );
+
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.error(`❌ Failed to normalize observation ${obs.id}:`, err);
       }
     }
-    
-    if (!canonicalJobId) {
-      // Create new canonical job
-      const insertCanon = await pool.query(
-        `INSERT INTO canonical_jobs (company_name, normalized_title, canonical_url, processing_status) 
-         VALUES ($1, $2, $3, $4) RETURNING id`,
-        [obs.company_name, obs.title.toLowerCase(), obs.source_url, "RAW_STAGED"]
-      );
-      canonicalJobId = insertCanon.rows[0].id;
-    }
-    
-    // Create new job version
-    await pool.query(
-      `INSERT INTO job_versions (canonical_job_id, content_hash, description_text) 
-       VALUES ($1, $2, $3)`,
-      [canonicalJobId, obs.raw_payload_hash, obs.description_raw]
-    );
+  } finally {
+    client.release();
   }
   
   console.log(`Normalization complete.`);

@@ -51,7 +51,7 @@ async function parseEmails() {
       
       Email Subject: ${email.subject}
       Email Body:
-      ${email.body}
+      ${email.body.substring(0, 10000)}
     `;
 
     try {

@@ -28,91 +28,104 @@ async function evaluateQueue() {
 
   console.log(`Found ${queueItems.length} items in the evaluation queue.`);
 
-  for (const item of queueItems) {
-    console.log(`\nEvaluating: [${item.lane}] ${item.normalized_title} at ${item.company_name}`);
-    
-    // Mark as evaluating
-    await pool.query(
-      `UPDATE evaluation_queue SET status = 'EVALUATING' WHERE id = $1`,
-      [item.id]
-    );
-
-    const evalReq: EvaluationRequest = {
-      canonicalJobId: item.canonical_job_id,
-      jobVersionId: "v1", // Simplified for Stage 0
-      gateDecisionId: "PASS",
-      gateVersion: "1.0",
-      candidateLanes: [{ lane: item.lane, semanticScore: item.priority_score, evidence: [] }],
-      workabilityFacts: {
-        locationEligibility: "PASS",
-        officeDays: "UNKNOWN",
-        travelPercentage: "UNKNOWN",
-        isContract: false
-      },
-      unknownFields: [],
-      profileVersion: "1.0",
-      evaluationSchemaVersion: "1.0"
-    };
-
-    const evalQuery = `
-      Evaluate the following job according to the structured EvaluationRequest schema.
-      Request Metadata: ${JSON.stringify(evalReq)}
+  const client = await pool.connect();
+  try {
+    for (const item of queueItems) {
+      console.log(`\nEvaluating: [${item.lane}] ${item.normalized_title} at ${item.company_name}`);
       
-      Job Title: ${item.normalized_title}
-      Company: ${item.company_name}
-      URL: ${item.canonical_url}
-      Description:
-      ${item.description_text}
-    `;
-
-    try {
-      const { result } = await runAgent(evalQuery);
-      const evalResult = result.evaluated_jobs?.[0];
-      
-      if (evalResult) {
-        console.log(`  -> AI Evaluation complete: Confidence = ${evalResult.lane_confidence}, Action = ${evalResult.next_action}`);
-        
-        await pool.query(
-          `UPDATE canonical_jobs 
-           SET processing_status = 'AI_EVALUATED'
-           WHERE id = $1`,
-          [item.canonical_job_id]
-        );
-        
-        // Persist full evaluation
-        await pool.query(
-          `INSERT INTO ai_evaluations (
-            canonical_job_id, job_version_id, gate_decision, gate_version,
-            lane_matches, workability_facts, unknown_fields, profile_version, evaluation_schema_version
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [
-            item.canonical_job_id,
-            "v1",
-            "PASS",
-            "1.0",
-            JSON.stringify([{ lane: item.lane, semanticScore: item.priority_score, evidence: evalResult.lane_evidence || [] }]),
-            JSON.stringify(evalReq.workabilityFacts),
-            JSON.stringify([]),
-            "1.0",
-            "1.0"
-          ]
-        );
-
-        await pool.query(
-          `UPDATE evaluation_queue SET status = 'COMPLETED' WHERE id = $1`,
-          [item.id]
-        );
-      } else {
-        throw new Error("Missing evaluated_jobs in AI output");
-      }
-    } catch (err: any) {
-      console.error(`❌ Evaluation failed for queue item ${item.id}:`, err.message);
-      await pool.query(
-        `UPDATE evaluation_queue SET status = 'FAILED' WHERE id = $1`,
+      // Mark as evaluating
+      await client.query(
+        `UPDATE evaluation_queue SET status = 'EVALUATING' WHERE id = $1`,
         [item.id]
       );
-      process.exitCode = 1;
+
+      const evalReq: EvaluationRequest = {
+        canonicalJobId: item.canonical_job_id,
+        jobVersionId: "v1", // Simplified for Stage 0
+        gateDecisionId: "PASS",
+        gateVersion: "1.0",
+        candidateLanes: [{ lane: item.lane, semanticScore: item.priority_score, evidence: [] }],
+        workabilityFacts: {
+          locationEligibility: "PASS",
+          officeDays: "UNKNOWN",
+          travelPercentage: "UNKNOWN",
+          isContract: false
+        },
+        unknownFields: [],
+        profileVersion: "1.0",
+        evaluationSchemaVersion: "1.0"
+      };
+
+      const evalQuery = `
+        Evaluate the following job according to the structured EvaluationRequest schema.
+        Request Metadata: ${JSON.stringify(evalReq)}
+        
+        Job Title: ${item.normalized_title}
+        Company: ${item.company_name}
+        URL: ${item.canonical_url}
+        Description:
+        ${item.description_text}
+      `;
+
+      try {
+        const { result } = await runAgent(evalQuery);
+        const evalResult = result.evaluated_jobs?.[0];
+        
+        if (evalResult) {
+          console.log(`  -> AI Evaluation complete: Confidence = ${evalResult.lane_confidence}, Action = ${evalResult.next_action}`);
+          
+          await client.query("BEGIN");
+          try {
+            await client.query(
+              `UPDATE canonical_jobs 
+               SET processing_status = 'AI_EVALUATED'
+               WHERE id = $1`,
+              [item.canonical_job_id]
+            );
+            
+            // Persist full evaluation
+            await client.query(
+              `INSERT INTO ai_evaluations (
+                canonical_job_id, job_version_id, gate_decision, gate_version,
+                lane_matches, workability_facts, unknown_fields, profile_version, evaluation_schema_version
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+              [
+                item.canonical_job_id,
+                "v1",
+                "PASS",
+                "1.0",
+                JSON.stringify([{ lane: item.lane, semanticScore: item.priority_score, evidence: evalResult.lane_evidence || [] }]),
+                JSON.stringify(evalReq.workabilityFacts),
+                JSON.stringify([]),
+                "1.0",
+                "1.0"
+              ]
+            );
+
+            await client.query(
+              `UPDATE evaluation_queue SET status = 'COMPLETED' WHERE id = $1`,
+              [item.id]
+            );
+            
+            await client.query("COMMIT");
+          } catch (txErr) {
+            await client.query("ROLLBACK");
+            throw txErr; // caught by outer block
+          }
+        } else {
+          throw new Error("Missing evaluated_jobs in AI output");
+        }
+      } catch (err: any) {
+        console.error(`❌ Evaluation failed for queue item ${item.id}:`, err.message);
+        await client.query(
+          `UPDATE evaluation_queue SET status = 'FAILED' WHERE id = $1`,
+          [item.id]
+        );
+        process.exitCode = 1;
+      }
     }
+  } finally {
+    client.release();
   }
 
   console.log(`\n✅ Queue evaluation complete.`);

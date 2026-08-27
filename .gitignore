@@ -1,6 +1,7 @@
 node_modules/
 build/
 dist/
+
 coverage/
 .DS_Store
 *.log
@@ -13,3 +14,4 @@ master_profile.json
 my_profile.md
 *.docx
 *.pdf
+scripts/exports/

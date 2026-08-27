@@ -4,10 +4,12 @@ import pg from 'pg';
 
 // Mock the entire pg module
 vi.mock('pg', () => {
-  const mPool = {
+  const mPool: any = {
     query: vi.fn(),
     end: vi.fn(),
+    release: vi.fn(),
   };
+  mPool.connect = vi.fn().mockResolvedValue(mPool);
   return {
     default: {
       Pool: class { constructor() { return mPool; } }
@@ -39,6 +41,9 @@ describe('Pipeline Stage: Normalization', () => {
       ]
     });
 
+    // 1b. Mock BEGIN
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
+
     // 2. Mock checkExt (no existing job by source/external id)
     (mPool.query as any).mockResolvedValueOnce({ rows: [] });
 
@@ -52,19 +57,30 @@ describe('Pipeline Stage: Normalization', () => {
 
     // 5. Mock insert into job_versions
     (mPool.query as any).mockResolvedValueOnce({ rows: [] });
+    
+    // 6. Mock COMMIT
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
 
     await runNormalization();
 
     // Verify all queries were called in order
-    expect(mPool.query).toHaveBeenCalledTimes(5);
+    // 1 SELECT pending observations
+    // 1 BEGIN
+    // 1 SELECT existing external ID
+    // 1 SELECT existing title
+    // 1 INSERT canonical job
+    // 1 INSERT job version
+    // 1 COMMIT
+    // Total = 7
+    expect(mPool.query).toHaveBeenCalledTimes(7);
     
     // Check canonical job insertion logic
-    const insertCanonCall = (mPool.query as any).mock.calls[3];
+    const insertCanonCall = (mPool.query as any).mock.calls[4];
     expect(insertCanonCall[0]).toContain('INSERT INTO canonical_jobs');
     expect(insertCanonCall[1]).toEqual(['Test Corp', 'ai engineer', 'https://test.com', 'RAW_STAGED']);
     
     // Check job_versions insertion
-    const insertVersionCall = (mPool.query as any).mock.calls[4];
+    const insertVersionCall = (mPool.query as any).mock.calls[5];
     expect(insertVersionCall[0]).toContain('INSERT INTO job_versions');
     expect(insertVersionCall[1]).toEqual(['canon-uuid-1', 'hash123', 'Test description']);
   });

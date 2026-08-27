@@ -3,10 +3,12 @@ import { runEvaluationBudgeter } from '../../pipeline/evaluationBudgeter.js';
 import pg from 'pg';
 
 vi.mock('pg', () => {
-  const mPool = {
+  const mPool: any = {
     query: vi.fn(),
     end: vi.fn(),
+    release: vi.fn(),
   };
+  mPool.connect = vi.fn().mockResolvedValue(mPool);
   return {
     default: {
       Pool: class { constructor() { return mPool; } }
@@ -36,11 +38,12 @@ describe('Pipeline Stage: Evaluation Budgeter', () => {
     await runEvaluationBudgeter();
 
     // 1 initial query
-    // CORE_AI_DATA: 3 enqueued (6 queries: 3 INSERT, 3 UPDATE), 1 rejected (1 UPDATE)
-    // LEGAL_REGTECH: 1 enqueued (2 queries: 1 INSERT, 1 UPDATE)
-    // Total queries expected: 1 + 6 + 1 + 2 = 10 queries
+    // CORE_AI_DATA: 3 enqueued (each has BEGIN, INSERT, UPDATE, COMMIT = 4 queries). 3 * 4 = 12 queries.
+    // CORE_AI_DATA: 1 rejected (BEGIN, UPDATE, COMMIT = 3 queries).
+    // LEGAL_REGTECH: 1 enqueued (BEGIN, INSERT, UPDATE, COMMIT = 4 queries).
+    // Total queries expected: 1 + 12 + 3 + 4 = 20 queries
     
-    expect(mPool.query).toHaveBeenCalledTimes(10);
+    expect(mPool.query).toHaveBeenCalledTimes(20);
     
     // Let's verify canon-4 was rejected
     const calls = (mPool.query as any).mock.calls;

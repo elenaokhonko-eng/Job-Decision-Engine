@@ -4,10 +4,12 @@ import pg from 'pg';
 import * as agent from '../../services/agent.js';
 
 vi.mock('pg', () => {
-  const mPool = {
+  const mPool: any = {
     query: vi.fn(),
     end: vi.fn(),
+    release: vi.fn(),
   };
+  mPool.connect = vi.fn().mockResolvedValue(mPool);
   return {
     default: {
       Pool: class { constructor() { return mPool; } }
@@ -54,9 +56,9 @@ describe('Pipeline Stage: Lane Routing', () => {
     expect(agent.generateEmbedding).toHaveBeenCalledTimes(5);
     
     // DB update
-    expect(mPool.query).toHaveBeenCalledTimes(2);
+    expect(mPool.query).toHaveBeenCalledTimes(4); // SELECT + BEGIN + UPDATE + COMMIT
     
-    const updateCall = (mPool.query as any).mock.calls[1];
+    const updateCall = (mPool.query as any).mock.calls[2];
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCall[1][0]).toEqual('CORE_AI_DATA'); // bestLane
     expect(updateCall[1][1]).toBe(1); // bestScore

@@ -86,7 +86,8 @@ export interface AgentResult {
 
 async function tryGemini(geminiKey: string, options: any): Promise<string> {
   const ai = getGeminiClient();
-  const maxRetries = 2;
+  const maxRetries = 3;
+  
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await ai.models.generateContent({
@@ -104,17 +105,17 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
       const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
       const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
       
-      // If we hit any rate limit (429) or quota limit, immediately throw to trigger OpenAI fallback
-      // since Gemini free tier quotas are easily exhausted.
-      if (isDailyQuota || isRateLimit) {
-        throw gErr;
+      if (isDailyQuota) {
+        throw gErr; // Daily quota exhausted, fallback immediately
       }
       
-      if (isTimeout && attempt < maxRetries) {
-        console.warn(`⏳ Gemini request failed (Timeout). Attempt ${attempt}/${maxRetries}. Retrying in 5s...`);
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+      if ((isRateLimit || isTimeout) && attempt < maxRetries) {
+        // Exponential backoff: 5s, 15s, 45s
+        const backoffMs = Math.pow(3, attempt - 1) * 5000;
+        console.warn(`⏳ Gemini request failed (${isRateLimit ? 'RateLimit' : 'Timeout'}). Attempt ${attempt}/${maxRetries}. Retrying in ${backoffMs/1000}s...`);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
       } else {
-        throw gErr;
+        throw gErr; // Fallback after max retries
       }
     }
   }
@@ -128,7 +129,8 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
   }
   messages.push({ role: "user", content: options.contents });
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
@@ -150,15 +152,31 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
+        const err: any = new Error(`API request failed with status ${response.status}: ${errorText}`);
+        err.status = response.status;
+        
+        // Extract Retry-After header if present
+        const retryAfterStr = response.headers.get("Retry-After");
+        if (retryAfterStr) {
+           const parsed = parseInt(retryAfterStr, 10);
+           if (!isNaN(parsed)) err.retryAfterSecs = parsed;
+        }
+        
+        throw err;
       }
 
       const data = await response.json();
       return data.choices?.[0]?.message?.content || "";
     } catch (err: any) {
-      if (attempt === 2) throw err;
-      console.warn(`⏳ API request failed (${baseUrl}). Retrying in 5s...`);
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      if (attempt === maxRetries) throw err;
+      
+      const isRateLimit = err.status === 429;
+      // Exponential backoff: 5s, 15s or explicitly requested Retry-After
+      const baseBackoff = Math.pow(3, attempt - 1) * 5000;
+      const backoffMs = err.retryAfterSecs ? err.retryAfterSecs * 1000 : baseBackoff;
+      
+      console.warn(`⏳ API request failed (${baseUrl}, Status: ${err.status || 'Timeout'}). Attempt ${attempt}/${maxRetries}. Retrying in ${backoffMs/1000}s...`);
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
     }
   }
   return "";
@@ -285,7 +303,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   try {
     const ai = getGeminiClient();
     const response = await ai.models.embedContent({
-      model: "embedding-001",
+      model: "text-embedding-004",
       contents: text,
     });
     return response.embeddings?.[0]?.values || Array(768).fill(0);

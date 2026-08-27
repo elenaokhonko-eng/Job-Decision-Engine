@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "cover_letter": {
+      "type": "object",
+      "properties": {
+        "recipient_name": { "type": "string", "description": "The hiring manager or recruitment team (e.g., 'Hiring Manager' or 'Talent Acquisition Team')." },
+        "opening_hook": { "type": "string", "description": "A compelling 1-2 sentence opening that names the role, the company, and why the candidate is drawn to it based on the strategic_value." },
+        "body_paragraphs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "2-3 paragraphs weaving the lane_matches and profile_facts to directly address the core challenges of the JD."
+        },
+        "closing_statement": { "type": "string", "description": "A confident closing sentence reiterating enthusiasm and requesting an interview." }
+      },
+      "required": ["recipient_name", "opening_hook", "body_paragraphs", "closing_statement"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["cover_letter"],
+  "additionalProperties": false
+}
