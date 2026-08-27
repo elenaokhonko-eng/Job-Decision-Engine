@@ -50,7 +50,7 @@ async function runUnifiedIngest() {
           retrievedAt: new Date().toISOString(),
           companyName: job.company_name,
           title: job.title,
-          descriptionRaw: job.description || "",
+          descriptionRaw: typeof job.raw_description === "object" ? JSON.stringify(job.raw_description) : (job.raw_description || job.description || ""),
           sourceLane: "UNKNOWN",
           searchPlanVersion: "1.0",
           rawPayload: job

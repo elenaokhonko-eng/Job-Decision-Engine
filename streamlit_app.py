@@ -111,18 +111,34 @@ def fetch_jobs_from_db():
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT id, title, company_name as company, source, raw_description as description, 
-                   salary_range as "salaryRange", posted_date::text as "postedDate", location, 
-                   careers_portal_url, 
-                   processing_status as status, 
-                   primary_lane as assigned_track, 
-                   lane_confidence as confidence_level, 
-                   nd_friendly_score as total_score,
-                   nd_friendly_score as score_environment_guardrails, 
-                   nd_friendly_score, politics_stress_score, sensory_overload_index,
-                   biological_stress_risk, strategic_value, recommended_cv_version, next_action
-            FROM jobs 
-            ORDER BY created_at DESC
+            SELECT 
+                c.id, c.title, c.company_name as company, 'System' as source, jv.description_text as description,
+                o.compensation_raw as "salaryRange", o.retrieved_at::text as "postedDate", o.location_raw as location,
+                c.canonical_url as careers_portal_url,
+                c.processing_status as status,
+                c.primary_lane as assigned_track,
+                c.semantic_score as confidence_level,
+                
+                -- Fallbacks for legacy UI compatibility
+                0 as total_score,
+                0 as score_environment_guardrails,
+                0 as nd_friendly_score,
+                0 as politics_stress_score,
+                0 as sensory_overload_index,
+                0 as biological_stress_risk,
+                0 as strategic_value,
+                'N/A' as recommended_cv_version,
+                'Pending' as next_action
+            FROM canonical_jobs c
+            LEFT JOIN job_versions jv ON c.id = jv.canonical_job_id
+            LEFT JOIN (
+                SELECT source_external_id, compensation_raw, retrieved_at, location_raw, source_name 
+                FROM raw_job_observations 
+                WHERE id IN (
+                    SELECT MIN(id) FROM raw_job_observations GROUP BY source_external_id
+                )
+            ) o ON o.source_external_id = c.canonical_url
+            ORDER BY c.created_at DESC
         """)
         rows = cursor.fetchall()
         cursor.close()
@@ -142,7 +158,7 @@ def delete_job_from_db(job_id):
         row = cursor.fetchone()
         company_id = row[0] if row else None
         
-        cursor.execute("UPDATE jobs SET processing_status = 'REJECTED', is_top_ten = FALSE WHERE id = %s", (job_id,))
+        cursor.execute("UPDATE canonical_jobs SET processing_status = 'HARD_REJECTED' WHERE id = %s", (job_id,))
         
         # If company existed, recalculate metrics
         if company_id:

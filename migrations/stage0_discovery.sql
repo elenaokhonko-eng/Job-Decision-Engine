@@ -21,8 +21,14 @@ CREATE TABLE IF NOT EXISTS raw_job_observations (
     company_name TEXT,
     title TEXT,
     description_raw TEXT,
+    location_raw TEXT,
+    workplace_type_raw VARCHAR(100),
+    employment_type_raw VARCHAR(100),
+    compensation_raw VARCHAR(255),
+    canonical_apply_url TEXT,
     source_lane VARCHAR(50),
     search_plan_version VARCHAR(50),
+    raw_payload JSONB,
     raw_payload_hash VARCHAR(255)
 );
 
@@ -55,5 +61,20 @@ CREATE TABLE IF NOT EXISTS evaluation_queue (
     canonical_job_id UUID REFERENCES canonical_jobs(id),
     lane VARCHAR(50),
     priority_score FLOAT,
-    status VARCHAR(50) -- PENDING, EVALUATING, COMPLETED
+    status VARCHAR(50) -- PENDING, EVALUATING, COMPLETED, FAILED
+);
+
+-- Store full structured AI evaluation results
+CREATE TABLE IF NOT EXISTS ai_evaluations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    canonical_job_id UUID REFERENCES canonical_jobs(id),
+    job_version_id VARCHAR(50),
+    gate_decision VARCHAR(50),
+    gate_version VARCHAR(50),
+    lane_matches JSONB,
+    workability_facts JSONB,
+    unknown_fields JSONB,
+    profile_version VARCHAR(50),
+    evaluation_schema_version VARCHAR(50),
+    evaluated_at TIMESTAMPTZ DEFAULT NOW()
 );

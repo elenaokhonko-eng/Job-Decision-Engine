@@ -192,15 +192,8 @@ async function syncLinkedInSavedJobs() {
       );
 
       if (checkRaw.rows.length > 0 || checkFinal.rows.length > 0) {
-        console.log(`- Job already exists in DB. Attempting to unsave...`);
-        // Go to page to unsave it
-        await page.goto(job.url, { waitUntil: "networkidle2" });
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        
-        const unsaved = await unsaveCurrentJob(page);
-        if (unsaved) {
-          console.log(`- Successfully unsaved duplicate.`);
-        }
+        console.log(`- Job already exists in DB. Skipping duplicate...`);
+        console.log(`- Skipping duplicate unsave action as per safety rules.`);
         skippedCount++;
         continue;
       }
@@ -233,13 +226,8 @@ async function syncLinkedInSavedJobs() {
       );
       console.log(`- Ingested into database.`);
 
-      // 4. Click "Saved" button to Unsave
-      const unsaved = await unsaveCurrentJob(page);
-      if (unsaved) {
-        console.log(`- Unsaved from LinkedIn tracker.`);
-      } else {
-        console.log(`- Could not find Unsave button. Skipping unsave action.`);
-      }
+      // 4. Removed destructive unsave action to preserve tracking
+      console.log(`- Skipping destructive unsave action as per safety rules.`);
 
       successCount++;
       // Sleep to prevent triggering rate limits

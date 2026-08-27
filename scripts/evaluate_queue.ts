@@ -79,12 +79,31 @@ async function evaluateQueue() {
           [item.canonical_job_id]
         );
         
-        // We could store the full JSON result in a new ai_evaluations table.
-        // For Stage 0, we just mark the queue item completed.
+        // Persist full evaluation
+        await pool.query(
+          `INSERT INTO ai_evaluations (
+            canonical_job_id, job_version_id, gate_decision, gate_version,
+            lane_matches, workability_facts, unknown_fields, profile_version, evaluation_schema_version
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            item.canonical_job_id,
+            "v1",
+            "PASS",
+            "1.0",
+            JSON.stringify([{ lane: item.lane, semanticScore: item.priority_score, evidence: evalResult.lane_evidence || [] }]),
+            JSON.stringify(evalReq.workabilityFacts),
+            JSON.stringify([]),
+            "1.0",
+            "1.0"
+          ]
+        );
+
         await pool.query(
           `UPDATE evaluation_queue SET status = 'COMPLETED' WHERE id = $1`,
           [item.id]
         );
+      } else {
+        throw new Error("Missing evaluated_jobs in AI output");
       }
     } catch (err: any) {
       console.error(`❌ Evaluation failed for queue item ${item.id}:`, err.message);
@@ -92,6 +111,7 @@ async function evaluateQueue() {
         `UPDATE evaluation_queue SET status = 'FAILED' WHERE id = $1`,
         [item.id]
       );
+      process.exitCode = 1;
     }
   }
 

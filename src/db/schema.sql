@@ -13,14 +13,6 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Table: companies
 -- Stores consolidated company-level ratings compiled from job evaluations.
 -- This enables aggregate analytics on ND culture.
-DROP TABLE IF EXISTS interactions_log CASCADE;
-DROP TABLE IF EXISTS agent_tool_logs CASCADE;
--- DROP TABLE IF EXISTS raw_email_alerts CASCADE;
-DROP TABLE IF EXISTS jobs CASCADE;
--- DROP TABLE IF EXISTS raw_jobs CASCADE;
-DROP TABLE IF EXISTS companies CASCADE;
--- DROP TABLE IF EXISTS raw_companies CASCADE;
-
 CREATE TABLE IF NOT EXISTS companies (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT UNIQUE NOT NULL,

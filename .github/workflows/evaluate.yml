@@ -11,6 +11,7 @@ jobs:
   evaluate-jobs:
     name: 3. Evaluate Queued Jobs via Generative AI
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v4

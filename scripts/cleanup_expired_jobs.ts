@@ -164,9 +164,11 @@ async function run() {
       }
 
       if (isExpired) {
-        console.log(`  -> ⚠️ EXPIRED! Marking status as REJECTED and unsetting is_top_ten.`);
+        console.log(`  -> ⚠️ EXPIRED! Marking status as EXPIRED and updated_at.`);
         await pool.query(
-          "UPDATE jobs SET final_classification = 'REJECTED', is_top_ten = FALSE, core_fit_score = 0 WHERE id = $1",
+          `UPDATE jobs 
+           SET status = 'EXPIRED', updated_at = NOW() 
+           WHERE id = $1`,
           [job.id]
         );
         expiredCount++;

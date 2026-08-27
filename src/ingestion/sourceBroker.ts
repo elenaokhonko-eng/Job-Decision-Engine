@@ -44,8 +44,10 @@ export class SourceBroker {
         `INSERT INTO raw_job_observations (
           source_run_id, source_name, source_external_id, source_url, 
           retrieved_at, company_name, title, description_raw, 
-          source_lane, search_plan_version, raw_payload_hash
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
+          canonical_apply_url, source_lane, search_plan_version, 
+          raw_payload, raw_payload_hash
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
         [
           this.sourceRunId,
           obs.sourceName,
@@ -55,8 +57,14 @@ export class SourceBroker {
           obs.companyName,
           obs.title,
           obs.descriptionRaw,
+          obs.locationRaw || null,
+          obs.workplaceTypeRaw || null,
+          obs.employmentTypeRaw || null,
+          obs.compensationRaw || null,
+          obs.canonicalApplyUrl || null,
           obs.sourceLane,
           obs.searchPlanVersion,
+          JSON.stringify(rawPayload),
           rawPayloadHash
         ]
       );
