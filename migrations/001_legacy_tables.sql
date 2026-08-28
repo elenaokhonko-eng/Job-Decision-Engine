@@ -53,8 +53,35 @@ CREATE TABLE IF NOT EXISTS jobs (
     strategic_value TEXT,
     recommended_cv_version VARCHAR(50),
     next_action VARCHAR(50),
+    is_top_ten BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS raw_companies (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name TEXT UNIQUE NOT NULL,
+    industry VARCHAR(100),
+    website_url TEXT,
+    careers_page_url TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS raw_jobs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    content_hash TEXT UNIQUE,
+    company_name TEXT NOT NULL,
+    title TEXT NOT NULL,
+    source VARCHAR(50) NOT NULL,
+    raw_description TEXT NOT NULL,
+    salary_range VARCHAR(100),
+    location TEXT,
+    posted_date DATE DEFAULT CURRENT_DATE,
+    careers_portal_url TEXT NOT NULL,
+    processed BOOLEAN DEFAULT FALSE,
+    processing_status VARCHAR(50) DEFAULT 'PENDING_GLOBAL_GATE',
+    processed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS agent_audit_logs (
@@ -65,3 +92,62 @@ CREATE TABLE IF NOT EXISTS agent_audit_logs (
     reasoning_trace JSONB NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS agent_tool_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    interaction_id VARCHAR(100) NOT NULL,
+    tool_name VARCHAR(100) NOT NULL,
+    arguments JSONB,
+    response JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS interactions_log (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_email VARCHAR(255),
+    question TEXT NOT NULL,
+    tools_used VARCHAR(255)[],
+    agent_trace TEXT[],
+    structured_answer JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS raw_email_alerts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    subject VARCHAR(512),
+    body TEXT,
+    received_at TIMESTAMPTZ DEFAULT NOW(),
+    processed BOOLEAN DEFAULT FALSE,
+    processed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE OR REPLACE VIEW nd_approved_companies AS
+SELECT 
+    id,
+    name,
+    industry,
+    website_url,
+    careers_page_url,
+    nd_friendly_avg_score AS nd_score,
+    focus_protection_avg_score AS focus_score,
+    politics_stress_avg_score AS politics_index
+FROM companies
+WHERE nd_friendly_avg_score >= 70 AND politics_stress_avg_score < 40
+  AND EXISTS (SELECT 1 FROM jobs WHERE jobs.company_id = companies.id)
+ORDER BY nd_friendly_avg_score DESC;
+
+CREATE OR REPLACE VIEW nd_blacklisted_companies AS
+SELECT 
+    id,
+    name,
+    industry,
+    website_url,
+    careers_page_url,
+    politics_stress_avg_score AS toxic_politics_score,
+    sensory_overload_avg_index AS sensory_hazard_index,
+    nd_friendly_avg_score AS nd_score
+FROM companies
+WHERE (politics_stress_avg_score >= 70 OR nd_friendly_avg_score <= 30)
+  AND EXISTS (SELECT 1 FROM jobs WHERE jobs.company_id = companies.id)
+ORDER BY politics_stress_avg_score DESC;
