@@ -144,98 +144,96 @@ def fetch_jobs_from_db():
         return []
 
 def delete_job_from_db(job_id):
+    """Soft-delete a canonical job by marking it MANUALLY_REMOVED.
+    HARD_REJECTED is reserved for deterministic gate failures only (AGENTS.md invariant).
+    """
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        # Get company ID before deletion to update ratings
-        cursor.execute("SELECT company_id FROM jobs WHERE id = %s", (job_id,))
-        row = cursor.fetchone()
-        company_id = row[0] if row else None
-        
-        cursor.execute("UPDATE canonical_jobs SET processing_status = 'HARD_REJECTED' WHERE id = %s", (job_id,))
-        
-        # If company existed, recalculate metrics
-        if company_id:
-            cursor.execute("""
-                SELECT 
-                  AVG(nd_friendly_score) as avg_nd,
-                  AVG(politics_stress_score) as avg_pol,
-                  AVG(sensory_overload_index) as avg_sens,
-                  AVG(nd_friendly_score) as avg_focus
-                FROM jobs 
-                WHERE company_id = %s AND processing_status IS NOT NULL
-            """, (company_id,))
-            stats = cursor.fetchone()
-            if stats and stats[0] is not None:
-                avgND = float(stats[0])
-                avgPol = float(stats[1])
-                avgSens = float(stats[2])
-                avgFocus = float(stats[3])
-                isApproved = avgND >= 70 and avgPol < 50
-                isToxic = avgPol >= 70 or avgND < 50
-                
-                cursor.execute("""
-                    UPDATE companies SET
-                       nd_friendly_avg_score = %s,
-                       politics_stress_avg_score = %s,
-                       sensory_overload_avg_index = %s,
-                       focus_protection_avg_score = %s,
-                       is_neurodivergent_approved = %s,
-                       is_toxic_culture_blacklisted = %s,
-                       updated_at = NOW()
-                    WHERE id = %s
-                """, (avgND, avgPol, avgSens, avgFocus, isApproved, isToxic, company_id))
-            else:
-                cursor.execute("DELETE FROM companies WHERE id = %s", (company_id,))
-                
+
+        # Soft-delete: set status to MANUALLY_REMOVED (never hard-delete; preserves audit trail)
+        cursor.execute(
+            """
+            UPDATE canonical_jobs
+            SET processing_status = 'MANUALLY_REMOVED',
+                rejection_reason = 'Manually removed by user via Streamlit UI',
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (job_id,)
+        )
+
         conn.commit()
         cursor.close()
         conn.close()
-        st.success("Listing deleted successfully!")
+        st.success("Listing removed successfully (soft-delete — record preserved for audit).")
         return True
     except Exception as e:
-        st.error(f"Failed to delete job: {e}")
+        st.error(f"Failed to remove job: {e}")
         return False
 
 def save_new_job_to_db(job):
+    """Insert a manually-added job into raw_job_observations so it enters the
+    canonical pipeline (normalize → gate → lane → budget → evaluate).
+    Writing to raw_jobs (legacy) is insufficient — that table is not read by the pipeline.
+    """
+    import hashlib, uuid
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        # Get or create raw company
-        cursor.execute("SELECT id FROM raw_companies WHERE name = %s", (job["company"],))
-        row = cursor.fetchone()
-        if row:
-            company_id = row[0]
-        else:
-            industry = "Life Sciences & Biotech" if "bio" in job["title"].lower() or "pharma" in job["title"].lower() else "Institutional Finance & Asset AI"
-            cursor.execute("INSERT INTO raw_companies (name, industry) VALUES (%s, %s) RETURNING id", (job["company"], industry))
-            company_id = cursor.fetchone()[0]
 
-        # Package description as structured JSON for the JSONB database column
-        structured_desc = {
-            "job_description": job["description"],
-            "key_responsibilities": [],
-            "technical_skills": [],
-            "qualifications_education": [],
-            "nice_to_haves": []
+        description_text = job.get("description", "")
+        payload = {
+            "company_name": job.get("company", "Unknown"),
+            "title": job.get("title", "Unknown"),
+            "description": description_text,
+            "source": job.get("source", "MANUAL_STREAMLIT"),
+            "careers_portal_url": job.get("careers_portal_url", ""),
         }
-        description_json = json.dumps(structured_desc)
+        raw_payload_str = json.dumps(payload)
+        raw_payload_hash = hashlib.sha256(raw_payload_str.encode()).hexdigest()
 
-        cursor.execute("""
-            INSERT INTO raw_jobs (
-                company_name, title, source, raw_description, salary_range, location, careers_portal_url, processed
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
-        """, (
-            job["company"], job["title"], job["source"], description_json,
-            job.get("salaryRange"), job.get("location", "Singapore"), job["careers_portal_url"]
-        ))
-        
+        # Ensure a source_run exists for manual entries
+        cursor.execute(
+            "INSERT INTO source_runs (status) VALUES ('MANUAL_STREAMLIT') RETURNING id"
+        )
+        source_run_id = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            INSERT INTO raw_job_observations (
+                source_run_id, source_name, source_external_id, source_url,
+                retrieved_at, company_name, title, description_raw,
+                location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
+                canonical_apply_url, source_lane, search_plan_version,
+                raw_payload, raw_payload_hash
+            ) VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (raw_payload_hash) DO NOTHING
+            """,
+            (
+                source_run_id,
+                "MANUAL_STREAMLIT",
+                f"manual-{raw_payload_hash[:16]}",
+                job.get("careers_portal_url", ""),
+                job.get("company", "Unknown"),
+                job.get("title", "Unknown"),
+                description_text,
+                job.get("location", "Singapore"),
+                "UNKNOWN",
+                "UNKNOWN",
+                job.get("salaryRange", "UNKNOWN"),
+                job.get("careers_portal_url", ""),
+                "UNKNOWN",
+                "1.0",
+                raw_payload_str,
+                raw_payload_hash,
+            ),
+        )
+
         conn.commit()
         cursor.close()
         conn.close()
-        st.success(f"Successfully added '{job['title']}' to Staging Vault for AI evaluation!")
+        st.success(f"✅ '{job['title']}' added to the ingestion pipeline (raw_job_observations). It will be normalized, gated, and evaluated in the next run.")
         return True
     except Exception as e:
         st.error(f"Failed to save job: {e}")
