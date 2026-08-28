@@ -5,9 +5,13 @@ on:
     - cron: '0 2 * * *' # 2:00 AM UTC (10:00 AM SGT)
   workflow_dispatch:
 
+concurrency:
+  group: job-discovery-pipeline
+  cancel-in-progress: false
+
 jobs:
-  ingest-raw-observations:
-    name: 1. Scout and Ingest Raw Observations
+  ingest-and-process:
+    name: Run Job Decision Pipeline
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository code
@@ -22,22 +26,36 @@ jobs:
       - name: Install Node.js dependencies
         run: npm ci
 
+      - name: Run Database Migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx tsx src/db/migrate.ts
+
       - name: Run Native Gmail Alert Ingestion
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-        run: npx tsx scripts/ingest_gmail.ts || true
+        run: npx tsx scripts/ingest_gmail.ts
 
       - name: Run LLM Email Parser
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
-        run: npx tsx scripts/parse_emails.ts || true
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: npx tsx scripts/parse_emails.ts
 
-      - name: Run Unified Discovery Broker
+      - name: Process Discovery Pipeline (Normalize, Hard Gate, Route, Budget)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          STARTUP_JOBS_API_KEY: ${{ secrets.STARTUP_JOBS_API_KEY }}
-        run: npx tsx scripts/unified_ingest.ts
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: npx tsx scripts/process_pipeline.ts
+
+      - name: Run AI Evaluation Queue Processor
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: npx tsx scripts/evaluate_queue.ts

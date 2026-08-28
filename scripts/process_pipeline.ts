@@ -13,20 +13,25 @@ const pool = new pg.Pool({
   ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
 });
 
-const LOCK_ID = 1001; // Arbitrary ID for pipeline lock
+const LOCK_ID = 1001; // Global lock ID for pipeline processing
 
-async function processPipeline() {
+export async function processPipeline(): Promise<void> {
   console.log("====================================================");
   console.log("         STAGE 0: DISCOVERY (PROCESS PIPELINE)      ");
   console.log("====================================================");
 
   const client = await pool.connect();
+  let lockAcquired = false;
+  let pipelineError: Error | null = null;
+
   try {
     // Attempt to acquire an exclusive session-level advisory lock
     const { rows } = await client.query(`SELECT pg_try_advisory_lock($1) as locked`, [LOCK_ID]);
-    if (!rows[0].locked) {
-      console.log("⚠️ Another instance of the pipeline is currently running. Exiting.");
-      process.exit(0);
+    lockAcquired = !!rows[0]?.locked;
+
+    if (!lockAcquired) {
+      console.warn("⚠️ Another instance of the pipeline is currently running. Exiting cleanly.");
+      return;
     }
     
     await runNormalization();
@@ -36,13 +41,24 @@ async function processPipeline() {
     
     console.log("\n✅ Pipeline execution completed successfully.");
   } catch (err: any) {
-    console.error("❌ Pipeline execution failed:", err.message);
+    pipelineError = err;
+    console.error("❌ Pipeline execution failed:", err.message || err);
   } finally {
-    await client.query(`SELECT pg_advisory_unlock($1)`, [LOCK_ID]);
+    if (lockAcquired) {
+      await client.query(`SELECT pg_advisory_unlock($1)`, [LOCK_ID]).catch(() => {});
+    }
     client.release();
     await pool.end();
   }
-  process.exit(0);
+
+  if (pipelineError) {
+    process.exitCode = 1;
+    throw pipelineError;
+  }
 }
 
-processPipeline();
+if (process.argv[1] && process.argv[1].includes("process_pipeline")) {
+  processPipeline().catch(() => {
+    process.exit(1);
+  });
+}

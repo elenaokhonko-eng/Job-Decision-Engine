@@ -11,19 +11,19 @@ const gmailPassword = process.env.GMAIL_APP_PASSWORD;
 const gmailFolder = process.env.GMAIL_FOLDER || "Jobs-Alerts";
 const gmailProcessedFolder = process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
 
-async function ingestGmail() {
+export async function ingestGmail(): Promise<number> {
   console.log("====================================================");
   console.log("       NATIVE GMAIL JOB ALERT INGESTION (TS)       ");
   console.log("====================================================");
 
   if (!databaseUrl || !gmailUser || !gmailPassword) {
     console.error("❌ ERROR: Missing DATABASE_URL, GMAIL_USER, or GMAIL_APP_PASSWORD.");
-    process.exit(1);
+    throw new Error("Missing required Gmail credentials or DATABASE_URL.");
   }
 
   const pool = new pg.Pool({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false }
+    ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
   });
 
   const client = new ImapFlow({
@@ -37,6 +37,8 @@ async function ingestGmail() {
     logger: false
   });
 
+  let ingestedCount = 0;
+
   try {
     await client.connect();
     console.log(`Connected to Gmail IMAP. Opening mailbox "${gmailFolder}"...`);
@@ -46,7 +48,7 @@ async function ingestGmail() {
     if (mailbox.exists === 0) {
       console.log("No messages to process.");
       await client.logout();
-      return;
+      return 0;
     }
 
     const messages: any[] = [];
@@ -55,38 +57,57 @@ async function ingestGmail() {
     }
 
     console.log(`Found ${messages.length} email alerts in "${gmailFolder}".`);
-    let count = 0;
+
     for (const msg of messages) {
       const subject = msg.envelope?.subject || "No Subject";
       const body = msg.source?.toString("utf-8") || "";
-      console.log(`Processing email #${count + 1}: "${subject}"`);
+      console.log(`Processing email #${ingestedCount + 1}: "${subject}"`);
 
-      // Insert into raw_email_alerts table
-      await pool.query(
-        "INSERT INTO raw_email_alerts (subject, body, processed) VALUES ($1, $2, FALSE)",
-        [subject, body]
-      );
-
-      // Delete the email from Gmail completely after staging it in the database
+      // Transactionally stage email alert before modifying IMAP state
+      const dbClient = await pool.connect();
       try {
-        await client.messageFlagsAdd(msg.uid, ["\\Seen", "\\Deleted"], { uid: true });
-      } catch (err) {
-        console.warn(`Warning: Could not mark email UID ${msg.uid} for deletion`, err);
+        await dbClient.query("BEGIN");
+        await dbClient.query(
+          "INSERT INTO raw_email_alerts (subject, body, processed, created_at) VALUES ($1, $2, FALSE, NOW())",
+          [subject, body]
+        );
+        await dbClient.query("COMMIT");
+      } catch (txErr) {
+        await dbClient.query("ROLLBACK");
+        throw txErr;
+      } finally {
+        dbClient.release();
       }
-      count++;
+
+      // Non-destructive transition: Move email to processed folder (or mark seen), do not permanently delete
+      try {
+        await client.messageMove(msg.uid, gmailProcessedFolder, { uid: true }).catch(async () => {
+          // Fallback if folder move is unsupported: mark as Seen
+          await client.messageFlagsAdd(msg.uid, ["\\Seen"], { uid: true });
+        });
+      } catch (err) {
+        console.warn(`Warning: Could not move email UID ${msg.uid} to ${gmailProcessedFolder}:`, err);
+      }
+      ingestedCount++;
     }
 
-    console.log(`✅ Successfully ingested ${count} raw email alerts to Postgres and permanently deleted them from the inbox.`);
+    console.log(`✅ Successfully staged ${ingestedCount} raw email alerts to Postgres.`);
     try {
       await client.mailboxClose();
     } catch {}
     await client.logout();
   } catch (err: any) {
     console.error("❌ Gmail ingestion error:", err.message || err);
-    process.exit(1);
+    throw err;
   } finally {
     await pool.end();
   }
+
+  return ingestedCount;
 }
 
-ingestGmail();
+if (process.argv[1] && process.argv[1].includes("ingest_gmail")) {
+  ingestGmail()
+    .then(() => process.exit(0))
+    .catch(() => process.exit(1));
+}
