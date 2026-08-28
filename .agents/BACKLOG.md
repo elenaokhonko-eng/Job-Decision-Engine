@@ -6,9 +6,9 @@ Status values: `READY`, `BLOCKED`, `IN_PROGRESS`, `REVIEW`, `DONE`.
 
 | ID | Owner | Assignment | Depends on | Acceptance criteria | Status |
 |---|---|---|---|---|---|
-| P0-01 | data-contract-checker | Define versioned runtime contracts and current field-lineage baseline | — | Gmail-to-Streamlit contract fixtures and schema-drift test fail on known mismatches | READY |
-| P0-02 | test-evals-specialist | Add PostgreSQL CI service and a reproducible anonymized nine-email fixture | P0-01 | CI applies canonical migrations and reproduces exact stage counts; no DB tests skip | READY |
-| P0-03 | database-versioning-engineer | Establish one additive migration chain and canonical identity/version schema | P0-01 | Fresh and upgrade paths pass; no destructive reset; latest job version is unambiguous | BLOCKED |
+| P0-01 | data-contract-checker | Define versioned runtime contracts and current field-lineage baseline | — | Gmail-to-Streamlit contract fixtures and schema-drift test fail on known mismatches | DONE |
+| P0-02 | test-evals-specialist | Add PostgreSQL CI service and a reproducible anonymized nine-email fixture | P0-01 | CI applies canonical migrations and reproduces exact stage counts; no DB tests skip | DONE |
+| P0-03 | database-versioning-engineer | Establish one additive migration chain and canonical identity/version schema | P0-01 | Fresh and upgrade paths pass; no destructive reset; latest job version is unambiguous | READY |
 | P0-04 | pipeline-reliability-engineer | Implement leases, retry/backoff, stale-lease recovery and manual-review terminal state | P0-03 | Crash/timeout tests requeue safely; exhausted retries never become rejection | BLOCKED |
 | P0-05 | pipeline-reliability-engineer | Repair script exit codes and GitHub workflow dispatch/concurrency | P0-04 | Required stage failures make Actions fail; manual dispatch runs; one pipeline run cannot overlap itself | BLOCKED |
 | P0-06 | ai-evaluation-engineer | Validate AI output, identity and full result before atomic persistence | P0-01, P0-03 | Malformed/empty/mismatched output retries another provider and cannot mark success | BLOCKED |
