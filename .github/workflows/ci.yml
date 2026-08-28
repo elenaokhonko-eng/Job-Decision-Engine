@@ -2,7 +2,7 @@ name: Job Decision Engine CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, "feat/**", "fix/**" ]
   pull_request:
     branches: [ main, master ]
 

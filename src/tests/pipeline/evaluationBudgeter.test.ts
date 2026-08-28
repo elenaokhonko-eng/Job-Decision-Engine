@@ -23,7 +23,7 @@ describe('Pipeline Stage: Evaluation Budgeter', () => {
     vi.clearAllMocks();
   });
 
-  it('should take top 3 jobs per lane and reject the rest', async () => {
+  it('should take top 3 jobs per lane and defer the rest as DEFERRED_BUDGET', async () => {
     // 1. Mock DB query to return 4 jobs in CORE_AI_DATA and 1 in LEGAL_REGTECH
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
@@ -37,19 +37,13 @@ describe('Pipeline Stage: Evaluation Budgeter', () => {
 
     await runEvaluationBudgeter();
 
-    // 1 initial query
-    // CORE_AI_DATA: 3 enqueued (each has BEGIN, INSERT, UPDATE, COMMIT = 4 queries). 3 * 4 = 12 queries.
-    // CORE_AI_DATA: 1 rejected (BEGIN, UPDATE, COMMIT = 3 queries).
-    // LEGAL_REGTECH: 1 enqueued (BEGIN, INSERT, UPDATE, COMMIT = 4 queries).
-    // Total queries expected: 1 + 12 + 3 + 4 = 20 queries
-    
     expect(mPool.query).toHaveBeenCalledTimes(20);
     
-    // Let's verify canon-4 was rejected
+    // Let's verify canon-4 was deferred as DEFERRED_BUDGET (never rejected)
     const calls = (mPool.query as any).mock.calls;
-    const rejectCall = calls.find((c: any) => c[0].includes('REJECTED_AFTER_EVALUATION'));
-    expect(rejectCall).toBeDefined();
-    expect(rejectCall[1][0]).toEqual('canon-4');
+    const deferCall = calls.find((c: any) => typeof c[0] === 'string' && c[0].includes("UPDATE canonical_jobs") && c[0].includes("DEFERRED_BUDGET"));
+    expect(deferCall).toBeDefined();
+    expect(deferCall[1][0]).toEqual('canon-4');
 
     // Verify canon-1 was queued
     const insertCall = calls.find((c: any) => c[0].includes('INSERT INTO evaluation_queue') && c[1][0] === 'canon-1');

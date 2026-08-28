@@ -1,8 +1,8 @@
-import { db } from "../src/db/db.js";
 import pg from "pg";
 import dotenv from "dotenv";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
-import { callLLM } from "../src/services/agent.js"; // or getGeminiClient directly
+import { generateContent } from "../src/services/agent.js";
+import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -12,7 +12,7 @@ const pool = new pg.Pool({
   ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
 });
 
-async function parseEmails() {
+export async function parseEmails(): Promise<{ parsedEmails: number; extractedJobs: number; failedEmails: number }> {
   console.log("====================================================");
   console.log("         STAGE 0: EMAIL PARSING SCOUT               ");
   console.log("====================================================");
@@ -23,7 +23,7 @@ async function parseEmails() {
 
   if (emails.length === 0) {
     console.log("No unprocessed email alerts found.");
-    process.exit(0);
+    return { parsedEmails: 0, extractedJobs: 0, failedEmails: 0 };
   }
 
   console.log(`Found ${emails.length} unprocessed email alerts. Parsing via LLM...`);
@@ -31,8 +31,12 @@ async function parseEmails() {
   const broker = new SourceBroker();
   await broker.startRun("EMAIL_PARSER_RUN");
 
+  let parsedEmails = 0;
+  let extractedJobs = 0;
+  let failedEmails = 0;
+
   for (const email of emails) {
-    console.log(`\nParsing email: "${email.subject}"`);
+    console.log(`\nParsing email #${email.id}: "${email.subject}"`);
     
     const prompt = `
       You are an expert recruitment parser. Extract all individual job listings from this job alert email.
@@ -40,10 +44,14 @@ async function parseEmails() {
       {
         "jobs": [
           {
-            "companyName": "Name of the company",
+            "company_name": "Name of the company",
             "title": "Job title",
-            "descriptionRaw": "A brief summary or the raw text snippet provided for the job",
-            "url": "The link to apply or view the job"
+            "location_raw": "Location string if specified or 'Unknown'",
+            "workplace_type_raw": "REMOTE | HYBRID | ONSITE | UNKNOWN",
+            "employment_type_raw": "FULL_TIME | CONTRACT | UNKNOWN",
+            "compensation_raw": "Compensation string if specified or 'UNKNOWN'",
+            "canonical_apply_url": "Direct application or view URL",
+            "description_raw": "Full text snippet or description of the role"
           }
         ]
       }
@@ -51,14 +59,16 @@ async function parseEmails() {
       
       Email Subject: ${email.subject}
       Email Body:
-      ${email.body.substring(0, 10000)}
+      ${email.body.substring(0, 15000)}
     `;
 
     try {
-      // Use callLLM("evaluate") which routes to gemini.
-      const responseText = await callLLM("evaluate", prompt);
+      const responseText = await generateContent({
+        model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+        contents: prompt,
+        responseMimeType: "application/json"
+      });
       
-      // Clean up json formatting if present
       let cleaned = responseText.trim();
       if (cleaned.startsWith("```json")) {
         cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
@@ -67,40 +77,88 @@ async function parseEmails() {
       }
       
       const parsed = JSON.parse(cleaned);
-      const jobs = parsed.jobs || [];
-      
-      console.log(`-> Extracted ${jobs.length} jobs.`);
-      
-      for (const job of jobs) {
-        if (!job.companyName || !job.title) continue;
-        
-        await broker.processObservation({
-          sourceName: "email_alert",
-          sourceExternalId: `email-${email.id}-${job.title}`,
-          sourceUrl: job.url || "",
-          retrievedAt: new Date().toISOString(),
-          companyName: job.companyName,
-          title: job.title,
-          descriptionRaw: job.descriptionRaw || email.subject,
-          sourceLane: "UNKNOWN",
-          searchPlanVersion: "1.0",
-          rawPayload: job
-        }, job);
+      const rawJobs = parsed.jobs || [];
+      console.log(`-> Extracted ${rawJobs.length} raw jobs from email #${email.id}.`);
+
+      const dbClient = await pool.connect();
+      try {
+        await dbClient.query("BEGIN");
+
+        for (const rawJob of rawJobs) {
+          // Validate using runtime contract schema
+          const validated = ExtractedJobSchema.safeParse({
+            schema_version: SCHEMA_VERSION,
+            company_name: rawJob.company_name || rawJob.companyName || "Unknown Company",
+            title: rawJob.title || "Unknown Title",
+            location_raw: rawJob.location_raw || rawJob.locationRaw || "Unknown",
+            workplace_type_raw: rawJob.workplace_type_raw || rawJob.workplaceTypeRaw || "UNKNOWN",
+            employment_type_raw: rawJob.employment_type_raw || rawJob.employmentTypeRaw || "UNKNOWN",
+            compensation_raw: rawJob.compensation_raw || rawJob.compensationRaw || "UNKNOWN",
+            canonical_apply_url: rawJob.canonical_apply_url || rawJob.url || `https://email-alert.internal/${email.id}`,
+            description_raw: rawJob.description_raw || rawJob.descriptionRaw || email.subject
+          });
+
+          if (!validated.success) {
+            console.warn(`⚠️ Skipping invalid extracted job payload:`, validated.error.message);
+            continue;
+          }
+
+          const job = validated.data;
+          await broker.processObservation({
+            sourceName: "GMAIL_ALERT",
+            sourceExternalId: `gmail-${email.id}-${job.title}`,
+            sourceUrl: job.canonical_apply_url,
+            retrievedAt: new Date().toISOString(),
+            companyName: job.company_name,
+            title: job.title,
+            descriptionRaw: job.description_raw,
+            locationRaw: job.location_raw,
+            workplaceTypeRaw: job.workplace_type_raw,
+            employmentTypeRaw: job.employment_type_raw,
+            compensationRaw: job.compensation_raw,
+            canonicalApplyUrl: job.canonical_apply_url,
+            sourceLane: "UNKNOWN",
+            searchPlanVersion: "1.0",
+            rawPayload: job
+          }, job);
+
+          extractedJobs++;
+        }
+
+        await dbClient.query(
+          `UPDATE raw_email_alerts SET processed = TRUE WHERE id = $1`,
+          [email.id]
+        );
+
+        await dbClient.query("COMMIT");
+        parsedEmails++;
+      } catch (txErr) {
+        await dbClient.query("ROLLBACK");
+        throw txErr;
+      } finally {
+        dbClient.release();
       }
-
-      await pool.query(
-        `UPDATE raw_email_alerts SET processed = TRUE WHERE id = $1`,
-        [email.id]
-      );
-
     } catch (err: any) {
-      console.error(`❌ Failed to parse email ${email.id}:`, err.message);
+      failedEmails++;
+      console.error(`❌ Failed to parse email ${email.id}:`, err.message || err);
     }
   }
 
   await broker.endRun();
-  console.log("\n✅ Email parsing complete.");
-  process.exit(0);
+  console.log(`\n✅ Email parsing complete. Parsed: ${parsedEmails}, Jobs: ${extractedJobs}, Failed: ${failedEmails}`);
+  return { parsedEmails, extractedJobs, failedEmails };
 }
 
-parseEmails();
+if (process.argv[1] && process.argv[1].includes("parse_emails")) {
+  parseEmails()
+    .then((res) => {
+      if (res.failedEmails > 0 && res.parsedEmails === 0) {
+        process.exit(1);
+      }
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error("Fatal email parsing error:", err);
+      process.exit(1);
+    });
+}

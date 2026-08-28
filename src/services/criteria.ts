@@ -53,7 +53,10 @@ export function generateContentHash(company: string, title: string, rawDesc: str
 
 export interface GateResult {
   passed: boolean;
+  status?: "PASS" | "NEEDS_VERIFICATION" | "HARD_REJECT";
   rejection_code?: string;
+  rejection_codes?: string[];
+  evidence_quotes?: string[];
 }
 
 export function applyGlobalGates(job: RawJob): GateResult {

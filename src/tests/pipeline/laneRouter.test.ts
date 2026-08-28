@@ -62,6 +62,7 @@ describe('Pipeline Stage: Lane Routing', () => {
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCall[1][0]).toEqual('CORE_AI_DATA'); // bestLane
     expect(updateCall[1][1]).toBe(1); // bestScore
-    expect(updateCall[1][2]).toEqual('canon-1');
+    expect(updateCall[1][2]).toEqual('SEMANTIC_SHORTLISTED');
+    expect(updateCall[1][3]).toEqual('canon-1');
   });
 });

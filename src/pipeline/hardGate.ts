@@ -11,7 +11,7 @@ const pool = new pg.Pool({
   ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
 });
 
-export async function runHardGates() {
+export async function runHardGates(): Promise<{ passed: number; hardRejected: number; needsVerification: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
   
   const query = `
@@ -24,6 +24,10 @@ export async function runHardGates() {
   const { rows: stagedJobs } = await pool.query(query);
   console.log(`Found ${stagedJobs.length} canonical jobs to gate.`);
   
+  let passedCount = 0;
+  let rejectedCount = 0;
+  let needsVerificationCount = 0;
+
   const client = await pool.connect();
   try {
     for (const job of stagedJobs) {
@@ -41,19 +45,27 @@ export async function runHardGates() {
         
         const gateResult = applyGlobalGates(rawJobAdapter);
         
-        let gateDecision = "PASS";
-        let status = "PREQUALIFIED";
+        let gateDecision = gateResult.status || (gateResult.passed ? "PASS" : "HARD_REJECT");
+        let processingStatus = "PREQUALIFIED";
         
-        if (!gateResult.passed) {
-          gateDecision = "FAIL";
-          status = "HARD_REJECTED";
+        if (gateDecision === "HARD_REJECT" || !gateResult.passed) {
+          gateDecision = "HARD_REJECT";
+          processingStatus = "HARD_REJECTED";
+          rejectedCount++;
+        } else if (gateDecision === "NEEDS_VERIFICATION") {
+          processingStatus = "NEEDS_VERIFICATION";
+          needsVerificationCount++;
+        } else {
+          gateDecision = "PASS";
+          processingStatus = "PREQUALIFIED";
+          passedCount++;
         }
         
         await client.query(
           `UPDATE canonical_jobs 
-           SET gate_decision = $1, processing_status = $2, rejection_reason = $3
+           SET gate_decision = $1, processing_status = $2, rejection_reason = $3, updated_at = NOW()
            WHERE id = $4`,
-          [gateDecision, status, gateResult.rejection_code || null, job.id]
+          [gateDecision, processingStatus, gateResult.rejection_code || null, job.id]
         );
         
         await client.query("COMMIT");
@@ -65,7 +77,9 @@ export async function runHardGates() {
     }
   } finally {
     client.release();
+    await pool.end();
   }
   
-  console.log(`Hard Gates complete.`);
+  console.log(`Hard Gates complete. Passed: ${passedCount}, Hard Rejected: ${rejectedCount}, Needs Verification: ${needsVerificationCount}`);
+  return { passed: passedCount, hardRejected: rejectedCount, needsVerification: needsVerificationCount };
 }

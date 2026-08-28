@@ -112,33 +112,28 @@ def fetch_jobs_from_db():
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             SELECT 
-                c.id, c.title, c.company_name as company, 'System' as source, jv.description_text as description,
-                o.compensation_raw as "salaryRange", o.retrieved_at::text as "postedDate", o.location_raw as location,
-                c.canonical_url as careers_portal_url,
-                c.processing_status as status,
-                c.primary_lane as assigned_track,
-                c.semantic_score as confidence_level,
-                
-                -- Fallbacks for legacy UI compatibility
-                0 as total_score,
-                0 as score_environment_guardrails,
-                0 as nd_friendly_score,
-                0 as politics_stress_score,
-                0 as sensory_overload_index,
-                0 as biological_stress_risk,
-                0 as strategic_value,
-                'N/A' as recommended_cv_version,
-                'Pending' as next_action
-            FROM canonical_jobs c
-            LEFT JOIN job_versions jv ON c.id = jv.canonical_job_id
-            LEFT JOIN (
-                SELECT source_external_id, compensation_raw, retrieved_at, location_raw, source_name 
-                FROM raw_job_observations 
-                WHERE id IN (
-                    SELECT MIN(id) FROM raw_job_observations GROUP BY source_external_id
-                )
-            ) o ON o.source_external_id = c.canonical_url
-            ORDER BY c.created_at DESC
+                canonical_job_id AS id,
+                job_version_id,
+                title,
+                company,
+                canonical_url AS careers_portal_url,
+                location,
+                workplace_type,
+                gate_status,
+                primary_lane AS assigned_track,
+                secondary_lanes,
+                lane_confidence,
+                priority_score AS confidence_level,
+                processing_status AS status,
+                nd_friendly_score,
+                politics_stress_score,
+                next_action,
+                strategic_value,
+                recommended_cv_version,
+                observed_at::text AS "postedDate",
+                evaluated_at
+            FROM v_canonical_shortlist
+            ORDER BY observed_at DESC
         """)
         rows = cursor.fetchall()
         cursor.close()

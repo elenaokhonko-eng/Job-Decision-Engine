@@ -1,0 +1,84 @@
+[
+  {
+    "id": "fixture-email-001",
+    "subject": "Job Alert: Principal AI Systems Engineer at Global Cloud Tech",
+    "received_at": "2026-08-28T08:00:00.000Z",
+    "raw_html": "<div><h1>Global Cloud Tech</h1><h2>Principal AI Systems Engineer</h2><p>Location: Singapore / Remote</p><p>We are seeking a hands-on AI systems engineer to architect and build distributed LLM training and inference pipelines. 80% hands-on coding in Python, PyTorch, C++.</p><a href='https://cloudtech.example.com/jobs/ai-sys-101'>Apply Here</a></div>",
+    "expected_lane": "CORE_AI_DATA",
+    "expected_gate": "PASS",
+    "expected_action": "PRIORITY_APPLY"
+  },
+  {
+    "id": "fixture-email-002",
+    "subject": "Job Alert: Associate Director, Legal AI & RegTech at Apex Legal Solutions",
+    "received_at": "2026-08-28T08:05:00.000Z",
+    "raw_html": "<div><h1>Apex Legal Solutions</h1><h2>Associate Director, Legal AI & RegTech</h2><p>Location: Singapore (Hybrid - 1 day/week office)</p><p>Lead legaltech automation, compliance LLM agents, and regulatory contract analytics for Tier 1 international law firms.</p><a href='https://apexlegal.example.com/careers/regtech-202'>Apply Here</a></div>",
+    "expected_lane": "LEGAL_REGTECH",
+    "expected_gate": "PASS",
+    "expected_action": "APPLY_AFTER_VERIFICATION"
+  },
+  {
+    "id": "fixture-email-003",
+    "subject": "Job Alert: Senior Bioinformatics AI Scientist at BioGen Genomics",
+    "received_at": "2026-08-28T08:10:00.000Z",
+    "raw_html": "<div><h1>BioGen Genomics</h1><h2>Senior Bioinformatics AI Scientist</h2><p>Location: Singapore / Remote</p><p>Deploy foundation models for genomic sequence analysis, drug discovery pipelines, and clinical biomarker discovery.</p><a href='https://biogen.example.com/jobs/bio-ai-303'>Apply Here</a></div>",
+    "expected_lane": "HEALTH_BIO_PHARMA",
+    "expected_gate": "PASS",
+    "expected_action": "PRIORITY_APPLY"
+  },
+  {
+    "id": "fixture-email-004",
+    "subject": "Job Alert: Quantitative Systems Architect at Quantum Capital Markets",
+    "received_at": "2026-08-28T08:15:00.000Z",
+    "raw_html": "<div><h1>Quantum Capital Markets</h1><h2>Quantitative Systems Architect</h2><p>Location: Singapore (Hybrid)</p><p>Design low-latency market data feeds, high-frequency execution infrastructure, and algorithmic trading platforms.</p><a href='https://quantumcap.example.com/jobs/quant-404'>Apply Here</a></div>",
+    "expected_lane": "INVESTMENT_MARKETS_FINTECH",
+    "expected_gate": "PASS",
+    "expected_action": "PRIORITY_APPLY"
+  },
+  {
+    "id": "fixture-email-005",
+    "subject": "Job Alert: On-Site Infrastructure Lead at Melbourne Financial",
+    "received_at": "2026-08-28T08:20:00.000Z",
+    "raw_html": "<div><h1>Melbourne Financial</h1><h2>On-Site Infrastructure Lead</h2><p>Location: Melbourne, Australia</p><p>Mandatory 5 days per week on-site in Melbourne CBD. Must have Australian work rights. Oversee legacy datacenter operations.</p><a href='https://melbfin.example.com/jobs/inf-505'>Apply Here</a></div>",
+    "expected_lane": "UNCLASSIFIED",
+    "expected_gate": "HARD_REJECT",
+    "expected_rejection_code": "LOCATION_AND_ONSITE_CONFLICT"
+  },
+  {
+    "id": "fixture-email-006",
+    "subject": "Job Alert: Enterprise Governance & Stakeholder Alignment VP at Matrix Corp",
+    "received_at": "2026-08-28T08:25:00.000Z",
+    "raw_html": "<div><h1>Matrix Corp</h1><h2>Enterprise Governance & Stakeholder Alignment VP</h2><p>Location: Singapore</p><p>Manage multi-layer vendor steering committees, enterprise governance sign-offs, and political change management. Zero hands-on technical work.</p><a href='https://matrixcorp.example.com/jobs/gov-606'>Apply Here</a></div>",
+    "expected_lane": "UNCLASSIFIED",
+    "expected_gate": "HARD_REJECT",
+    "expected_rejection_code": "PURE_GOVERNANCE_ZERO_BUILD"
+  },
+  {
+    "id": "fixture-email-007",
+    "subject": "Job Alert: Solutions Engineer at Stealth AI Labs",
+    "received_at": "2026-08-28T08:30:00.000Z",
+    "raw_html": "<div><h1>Stealth AI Labs</h1><h2>Solutions Engineer</h2><p>Location: Location flexible / TBD</p><p>Workplace arrangement and office expectations to be evaluated during partner discussions.</p><a href='https://stealthai.example.com/jobs/se-707'>Apply Here</a></div>",
+    "expected_lane": "CORE_AI_DATA",
+    "expected_gate": "NEEDS_VERIFICATION",
+    "expected_action": "NEEDS_VERIFICATION"
+  },
+  {
+    "id": "fixture-email-008",
+    "subject": "Job Alert: Fourth Junior Data Engineer at CloudScale Data",
+    "received_at": "2026-08-28T08:35:00.000Z",
+    "raw_html": "<div><h1>CloudScale Data</h1><h2>Junior Data Pipeline Associate</h2><p>Location: Singapore</p><p>Standard SQL ETL maintenance and dashboard data warehouse support.</p><a href='https://cloudscale.example.com/jobs/de-808'>Apply Here</a></div>",
+    "expected_lane": "CORE_AI_DATA",
+    "expected_gate": "PASS",
+    "expected_status": "DEFERRED_BUDGET"
+  },
+  {
+    "id": "fixture-email-009",
+    "subject": "Job Alert: REPOST - Principal AI Systems Engineer at Global Cloud Tech",
+    "received_at": "2026-08-28T08:40:00.000Z",
+    "raw_html": "<div><h1>Global Cloud Tech</h1><h2>Principal AI Systems Engineer</h2><p>Location: Singapore / Remote</p><p>Updated reposted announcement for our distributed LLM systems team.</p><a href='https://cloudtech.example.com/jobs/ai-sys-101'>Apply Here</a></div>",
+    "expected_lane": "CORE_AI_DATA",
+    "expected_gate": "PASS",
+    "expected_duplicate_canonical_id": "fixture-email-001",
+    "expected_version": 2
+  }
+]

@@ -1,0 +1,192 @@
+version: "1.0"
+team_name: "Job Decision Engine Engineering Team"
+
+orchestrator:
+  role: delivery-orchestrator
+  card: .agents/delivery-orchestrator/AGENT.md
+  mandate: >
+    Act as project coordinator and gatekeeper. Manage work package lifecycle across
+    execution waves. Enforce strict handoff contracts, prevent simultaneous conflicting edits,
+    and disallow premature starting of blocked tasks.
+
+roles:
+  - id: delivery-orchestrator
+    title: "Delivery Orchestrator"
+    card: .agents/delivery-orchestrator/AGENT.md
+    focus: "Cross-agent coordination, backlog tracking, dependency enforcement, wave gating"
+
+  - id: data-contract-checker
+    title: "Data Contract Checker"
+    card: .agents/data-contract-checker/AGENT.md
+    focus: "Runtime boundary schemas, schema drift prevention, field lineage, Streamlit read models"
+    owned_paths:
+      - "src/contracts/"
+      - "DATA-FLOW-CONTRACT.md"
+      - "scripts/schemas/"
+
+  - id: test-evals-specialist
+    title: "Test & Evaluations Specialist"
+    card: .agents/test-evals-specialist/AGENT.md
+    focus: "Vitest suites, PostgreSQL integration tests, 9-email E2E fixture, failure injection, calibration suites"
+    owned_paths:
+      - "src/tests/"
+      - "fixtures/"
+      - ".github/workflows/ci.yml"
+
+  - id: database-versioning-engineer
+    title: "Database & Versioning Engineer"
+    card: .agents/database-versioning-engineer/AGENT.md
+    focus: "Additive PostgreSQL migrations, canonical identity & versioning schema, zero-loss state transitions"
+    owned_paths:
+      - "migrations/"
+      - "src/db/"
+
+  - id: pipeline-reliability-engineer
+    title: "Pipeline Reliability Engineer"
+    card: .agents/pipeline-reliability-engineer/AGENT.md
+    focus: "Lease management, advisory locks, retry/backoff, exit codes, GitHub Actions concurrency"
+    owned_paths:
+      - "scripts/process_pipeline.ts"
+      - ".github/workflows/"
+
+  - id: ingestion-source-engineer
+    title: "Ingestion & Source Engineer"
+    card: .agents/ingestion-source-engineer/AGENT.md
+    focus: "Gmail IMAP ingestion, raw observation staging, ATS adapters (Greenhouse, Lever, Ashby, Himalayas), query planners"
+    owned_paths:
+      - "src/ingestion/"
+      - "src/services/gmail.ts"
+      - "scripts/ingest_gmail.ts"
+      - "scripts/parse_emails.ts"
+
+  - id: decision-policy-engineer
+    title: "Decision Policy Engineer"
+    card: .agents/decision-policy-engineer/AGENT.md
+    focus: "Deterministic hard gates, tri-state evaluation (PASS/NEEDS_VERIFICATION/HARD_REJECT), semantic lane routing, budget deferral"
+    owned_paths:
+      - "src/pipeline/hardGate.ts"
+      - "src/pipeline/laneRouter.ts"
+      - "src/pipeline/evaluationBudgeter.ts"
+      - "src/services/criteria.ts"
+      - "lanes.yaml"
+
+  - id: ai-evaluation-engineer
+    title: "AI Evaluation Engineer"
+    card: .agents/ai-evaluation-engineer/AGENT.md
+    focus: "LLM evaluation schemas, strict structured output validation, multi-provider failover (Gemini/OpenAI), audit trail"
+    owned_paths:
+      - "scripts/evaluate_queue.ts"
+      - "src/services/agent.ts"
+      - "src/services/llmFallback.ts"
+
+  - id: documents-evidence-engineer
+    title: "Documents & Evidence Engineer"
+    card: .agents/documents-evidence-engineer/AGENT.md
+    focus: "Factual candidate evidence ledger, customized CV & Cover Letter DOCX/PDF generation, zero-hallucination validation"
+    owned_paths:
+      - "scripts/generate_cv.ts"
+      - "scripts/generate_cover_letter.ts"
+      - "src/services/renderers/"
+      - "scripts/schemas/cover_letter_schema.json"
+      - "my_profile.md"
+
+  - id: release-security-reviewer
+    title: "Release & Security Reviewer"
+    card: .agents/release-security-reviewer/AGENT.md
+    focus: "Independent release sign-off, secret audit, TLS verification, dead code elimination, documentation integrity"
+    owned_paths:
+      - "README.md"
+      - "Instructions.yml"
+
+execution_waves:
+  wave_0:
+    name: "Foundation & Contract Baseline"
+    work_packages:
+      - id: P0-01
+        owner: data-contract-checker
+        status: READY
+      - id: P0-02
+        owner: test-evals-specialist
+        status: READY
+    gate_to_next_wave: >
+      P0-01 runtime contracts frozen and P0-02 failing test baseline established against real PostgreSQL.
+
+  wave_1:
+    name: "Canonical Schema & Migration Integrity"
+    work_packages:
+      - id: P0-03
+        owner: database-versioning-engineer
+        status: BLOCKED
+    gate_to_next_wave: >
+      Additive migrations established; zero destructive reset; job versioning unambiguous.
+
+  wave_2:
+    name: "Pipeline Reliability & Engine Hardening"
+    work_packages:
+      - id: P0-04
+        owner: pipeline-reliability-engineer
+        status: BLOCKED
+      - id: P0-05
+        owner: pipeline-reliability-engineer
+        status: BLOCKED
+      - id: P0-06
+        owner: ai-evaluation-engineer
+        status: BLOCKED
+      - id: P0-07
+        owner: ai-evaluation-engineer
+        status: BLOCKED
+      - id: P0-08
+        owner: ingestion-source-engineer
+        status: BLOCKED
+      - id: P0-09
+        owner: data-contract-checker
+        status: BLOCKED
+      - id: P0-10
+        owner: test-evals-specialist
+        status: BLOCKED
+    gate_to_next_wave: >
+      Reliable state machine; resilient AI evaluation with audit trail; non-destructive Gmail ingestion; Streamlit canonical read model; E2E failure injection tests passing.
+
+  wave_3:
+    name: "Selection Logic & Sourcing Expansion"
+    work_packages:
+      - id: P1-01
+        owner: decision-policy-engineer
+        status: BLOCKED
+      - id: P1-02
+        owner: decision-policy-engineer
+        status: BLOCKED
+      - id: P1-03
+        owner: decision-policy-engineer
+        status: BLOCKED
+      - id: P1-04
+        owner: decision-policy-engineer
+        status: BLOCKED
+      - id: P1-05
+        owner: ingestion-source-engineer
+        status: BLOCKED
+      - id: P1-06
+        owner: ingestion-source-engineer
+        status: BLOCKED
+      - id: P1-07
+        owner: test-evals-specialist
+        status: BLOCKED
+
+  wave_4:
+    name: "Document Generation & Release Sign-Off"
+    work_packages:
+      - id: P2-01
+        owner: documents-evidence-engineer
+        status: BLOCKED
+      - id: P2-02
+        owner: documents-evidence-engineer
+        status: BLOCKED
+      - id: P2-03
+        owner: release-security-reviewer
+        status: BLOCKED
+      - id: P2-04
+        owner: release-security-reviewer
+        status: BLOCKED
+      - id: P2-05
+        owner: release-security-reviewer
+        status: BLOCKED

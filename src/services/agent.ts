@@ -308,6 +308,29 @@ export async function generateEmbedding(text: string): Promise<number[]> {
     });
     return response.embeddings?.[0]?.values || Array(768).fill(0);
   } catch (err: any) {
+    if (process.env.OPENAI_API_KEY) {
+      try {
+        const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+          },
+          body: JSON.stringify({
+            input: text,
+            model: "text-embedding-3-small"
+          })
+        });
+        if (oResponse.ok) {
+          const oData = await oResponse.json();
+          let vals = oData.data?.[0]?.embedding || Array(768).fill(0);
+          if (vals.length > 768) vals = vals.slice(0, 768);
+          return vals;
+        }
+      } catch (oErr: any) {
+        console.warn(`⚠️ OpenAI Embedding fallback failed: ${oErr.message}`);
+      }
+    }
     console.warn(`⚠️ Embedding generation failed, returning zeros: ${err.message}`);
     return Array(768).fill(0);
   }
