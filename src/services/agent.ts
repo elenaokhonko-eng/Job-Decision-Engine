@@ -294,71 +294,87 @@ export async function generateContent(options: {
   throw new Error("All model API calls failed or no API keys were configured.");
 }
 
+/**
+ * Generate a text embedding vector. Provider order:
+ *  1. Gemini text-embedding-004 (if GEMINI_API_KEY present)
+ *  2. OpenAI text-embedding-3-small (if OPENAI_API_KEY present)
+ * THROWS if both fail or neither key is configured — never fabricates random
+ * or zero vectors, which would produce silent mis-classifications in laneRouter.
+ */
 export async function generateEmbedding(text: string): Promise<number[]> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
-  if (!geminiKey) {
-    // Mock if no API key
-    return Array(768).fill(0).map(() => Math.random());
-  }
-  try {
-    const ai = getGeminiClient();
-    const response = await ai.models.embedContent({
-      model: "text-embedding-004",
-      contents: text,
-    });
-    return response.embeddings?.[0]?.values || Array(768).fill(0);
-  } catch (err: any) {
-    if (process.env.OPENAI_API_KEY) {
-      try {
-        const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
-          },
-          body: JSON.stringify({
-            input: text,
-            model: "text-embedding-3-small"
-          })
-        });
-        if (oResponse.ok) {
-          const oData = await oResponse.json();
-          let vals = oData.data?.[0]?.embedding || Array(768).fill(0);
-          if (vals.length > 768) vals = vals.slice(0, 768);
-          return vals;
-        }
-      } catch (oErr: any) {
-        console.warn(`⚠️ OpenAI Embedding fallback failed: ${oErr.message}`);
-      }
+  const openaiKey = process.env.OPENAI_API_KEY;
+
+  // Try Gemini first (if key present)
+  if (geminiKey) {
+    try {
+      const ai = getGeminiClient();
+      const response = await ai.models.embedContent({
+        model: "text-embedding-004",
+        contents: text
+      });
+      const vals = response.embeddings?.[0]?.values;
+      if (vals && vals.length > 0) return vals;
+      throw new Error("Gemini embedding returned empty values");
+    } catch (err: any) {
+      console.warn(`⚠️ Gemini embedding failed: ${err.message}. Trying OpenAI fallback...`);
     }
-    console.warn(`⚠️ Embedding generation failed, returning zeros: ${err.message}`);
-    return Array(768).fill(0);
   }
+
+  // Try OpenAI (if key present)
+  if (openaiKey) {
+    try {
+      const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${openaiKey}`
+        },
+        body: JSON.stringify({ input: text, model: "text-embedding-3-small" }),
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!oResponse.ok) {
+        const errText = await oResponse.text();
+        throw new Error(`OpenAI embedding HTTP ${oResponse.status}: ${errText}`);
+      }
+      const oData = await oResponse.json();
+      const vals: number[] = oData.data?.[0]?.embedding;
+      if (vals && vals.length > 0) return vals;
+      throw new Error("OpenAI embedding returned empty values");
+    } catch (oErr: any) {
+      console.warn(`⚠️ OpenAI embedding failed: ${oErr.message}`);
+    }
+  }
+
+  // Both providers failed — throw, never fabricate vectors
+  throw new Error(
+    "Embedding generation failed: both Gemini and OpenAI providers unavailable or returned no values. " +
+    "Configure at least one of GEMINI_API_KEY or OPENAI_API_KEY."
+  );
 }
 
 // Core execution loop
+/**
+ * Parse agent JSON output. THROWS on failure — callers must catch and route
+ * to RETRY_WAIT so provider failover (Gemini → OpenAI) can occur on the next
+ * attempt. Never return a synthetic empty result that silently halts failover.
+ */
 function parseResultJson(rawText: string, trace: string[]): AgentResult {
-  try {
-    let cleaned = rawText.trim();
-    if (cleaned.startsWith("```json")) {
-      cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-    } else if (cleaned.startsWith("```")) {
-      cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
-    }
-    const startIdx = cleaned.indexOf("{");
-    const endIdx = cleaned.lastIndexOf("}");
-    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-      cleaned = cleaned.substring(startIdx, endIdx + 1);
-    }
-    return JSON.parse(cleaned);
-  } catch (err) {
-    console.error("Failed to parse agent JSON output, returning fallback", err);
-    trace.push(`Step ${trace.length + 1}: Formatting parsing failed. Initiated rule-based recovery fallback.`);
-    return {
-      evaluation_summary: "Parsing failed, raw output returned. Rationale analysis is stored.",
-      evaluated_jobs: []
-    };
+  let cleaned = rawText.trim();
+  if (cleaned.startsWith("```json")) {
+    cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
   }
+  const startIdx = cleaned.indexOf("{");
+  const endIdx = cleaned.lastIndexOf("}");
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    cleaned = cleaned.substring(startIdx, endIdx + 1);
+  }
+  // Throws SyntaxError on bad JSON — evaluate_queue.ts catches → RETRY_WAIT
+  const parsed: AgentResult = JSON.parse(cleaned);
+  trace.push(`Step ${trace.length + 1}: Agent JSON output parsed successfully.`);
+  return parsed;
 }
 
 async function runGeminiAgentInternal(

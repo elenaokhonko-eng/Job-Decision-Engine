@@ -71,7 +71,9 @@ export class SourceBroker {
       this.stats.new++;
     } catch (err: any) {
       this.stats.errors++;
-      console.error(`Failed to stage observation ${obs.title} from ${obs.companyName}: ${err.message}`);
+      // INVARIANT: never swallow observation staging failures.
+      // Callers must handle this error and must not mark the source email/record as processed.
+      throw new Error(`Failed to stage observation "${obs.title}" from ${obs.companyName}: ${err.message}`);
     }
   }
 

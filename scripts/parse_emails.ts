@@ -9,7 +9,11 @@ dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
+  ssl:
+    process.env.DATABASE_URL &&
+    (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1"))
+      ? false
+      : { rejectUnauthorized: true }
 });
 
 export async function parseEmails(): Promise<{ parsedEmails: number; extractedJobs: number; failedEmails: number }> {
@@ -18,7 +22,7 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
   console.log("====================================================");
 
   const { rows: emails } = await pool.query(
-    `SELECT id, subject, body FROM raw_email_alerts WHERE processed = FALSE ORDER BY id ASC LIMIT 20`
+    `SELECT id, gmail_message_id, subject, body FROM raw_email_alerts WHERE processed = FALSE ORDER BY id ASC LIMIT 20`
   );
 
   if (emails.length === 0) {
@@ -36,8 +40,8 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
   let failedEmails = 0;
 
   for (const email of emails) {
-    console.log(`\nParsing email #${email.id}: "${email.subject}"`);
-    
+    console.log(`\nParsing email #${email.id} (${email.gmail_message_id || "no-uid"}): "${email.subject}"`);
+
     const prompt = `
       You are an expert recruitment parser. Extract all individual job listings from this job alert email.
       Return the output strictly as a JSON object matching this schema:
@@ -56,11 +60,16 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
         ]
       }
       If no jobs are found, return {"jobs": []}.
-      
+
       Email Subject: ${email.subject}
       Email Body:
       ${email.body.substring(0, 15000)}
     `;
+
+    const dbClient = await pool.connect();
+    let emailSucceeded = false;
+    let emailJobsStaged = 0;
+    const emailErrors: string[] = [];
 
     try {
       const responseText = await generateContent({
@@ -68,24 +77,22 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
         contents: prompt,
         responseMimeType: "application/json"
       });
-      
+
       let cleaned = responseText.trim();
       if (cleaned.startsWith("```json")) {
         cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
       } else if (cleaned.startsWith("```")) {
         cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
       }
-      
+
       const parsed = JSON.parse(cleaned);
       const rawJobs = parsed.jobs || [];
       console.log(`-> Extracted ${rawJobs.length} raw jobs from email #${email.id}.`);
 
-      const dbClient = await pool.connect();
+      // Stage ALL jobs in a single transaction; roll back if ANY fail
+      await dbClient.query("BEGIN");
       try {
-        await dbClient.query("BEGIN");
-
         for (const rawJob of rawJobs) {
-          // Validate using runtime contract schema
           const validated = ExtractedJobSchema.safeParse({
             schema_version: SCHEMA_VERSION,
             company_name: rawJob.company_name || rawJob.companyName || "Unknown Company",
@@ -99,48 +106,67 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
           });
 
           if (!validated.success) {
-            console.warn(`⚠️ Skipping invalid extracted job payload:`, validated.error.message);
-            continue;
+            // Schema validation failure is a structured error — accumulate it
+            const msg = `Schema validation failed for job "${rawJob.title}": ${validated.error.message}`;
+            console.warn(`⚠️ ${msg}`);
+            emailErrors.push(msg);
+            continue; // Skip invalid job but don't abort the whole email
           }
 
           const job = validated.data;
-          await broker.processObservation({
-            sourceName: "GMAIL_ALERT",
-            sourceExternalId: `gmail-${email.id}-${job.title}`,
-            sourceUrl: job.canonical_apply_url,
-            retrievedAt: new Date().toISOString(),
-            companyName: job.company_name,
-            title: job.title,
-            descriptionRaw: job.description_raw,
-            locationRaw: job.location_raw,
-            workplaceTypeRaw: job.workplace_type_raw,
-            employmentTypeRaw: job.employment_type_raw,
-            compensationRaw: job.compensation_raw,
-            canonicalApplyUrl: job.canonical_apply_url,
-            sourceLane: "UNKNOWN",
-            searchPlanVersion: "1.0",
-            rawPayload: job
-          }, job);
-
-          extractedJobs++;
+          // processObservation now throws on DB failure — caught by outer try/catch → ROLLBACK
+          await broker.processObservation(
+            {
+              sourceName: "GMAIL_ALERT",
+              sourceExternalId: `gmail-${email.gmail_message_id || email.id}-${job.title}`,
+              sourceUrl: job.canonical_apply_url,
+              retrievedAt: new Date().toISOString(),
+              companyName: job.company_name,
+              title: job.title,
+              descriptionRaw: job.description_raw,
+              locationRaw: job.location_raw,
+              workplaceTypeRaw: job.workplace_type_raw,
+              employmentTypeRaw: job.employment_type_raw,
+              compensationRaw: job.compensation_raw,
+              canonicalApplyUrl: job.canonical_apply_url,
+              sourceLane: "UNKNOWN",
+              searchPlanVersion: "1.0",
+              rawPayload: job
+            },
+            job
+          );
+          emailJobsStaged++;
         }
 
+        // Only mark processed = TRUE when all staging succeeded
         await dbClient.query(
-          `UPDATE raw_email_alerts SET processed = TRUE WHERE id = $1`,
+          `UPDATE raw_email_alerts SET processed = TRUE, last_error = NULL WHERE id = $1`,
           [email.id]
         );
 
         await dbClient.query("COMMIT");
+        emailSucceeded = true;
+        extractedJobs += emailJobsStaged;
         parsedEmails++;
-      } catch (txErr) {
+        if (emailErrors.length > 0) {
+          console.warn(`⚠️ Email #${email.id} parsed with ${emailErrors.length} skipped invalid job(s).`);
+        }
+      } catch (stageErr: any) {
         await dbClient.query("ROLLBACK");
-        throw txErr;
-      } finally {
-        dbClient.release();
+        // Mark with error but do NOT set processed = TRUE — email will be retried
+        await dbClient.query(
+          `UPDATE raw_email_alerts SET last_error = $1 WHERE id = $2`,
+          [stageErr.message, email.id]
+        );
+        throw stageErr;
       }
     } catch (err: any) {
-      failedEmails++;
-      console.error(`❌ Failed to parse email ${email.id}:`, err.message || err);
+      if (!emailSucceeded) {
+        failedEmails++;
+        console.error(`❌ Failed to parse or stage email ${email.id}:`, err.message || err);
+      }
+    } finally {
+      dbClient.release();
     }
   }
 

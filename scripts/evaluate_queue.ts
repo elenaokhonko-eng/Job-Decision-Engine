@@ -9,57 +9,75 @@ dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
+  ssl:
+    process.env.DATABASE_URL &&
+    (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1"))
+      ? false
+      : { rejectUnauthorized: true }
 });
+
+/** Exponential backoff: 30s, 60s, 120s, … capped at 30 minutes */
+function nextAvailableAt(attemptCount: number): string {
+  const backoffSeconds = Math.min(30 * Math.pow(2, attemptCount), 1800);
+  return `NOW() + INTERVAL '${backoffSeconds} seconds'`;
+}
 
 export async function evaluateQueue(): Promise<{ processed: number; failed: number; manualReview: number }> {
   console.log("====================================================");
   console.log("         STAGE 0: AI EVALUATION PROCESSOR           ");
   console.log("====================================================");
 
+  const pipelineRunId = crypto.randomUUID();
   const client = await pool.connect();
   let processedCount = 0;
   let failedCount = 0;
   let manualReviewCount = 0;
 
   try {
-    // 1. Fetch pending, retry-wait, or expired lease items in evaluation queue
+    // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
     const { rows: queueItems } = await client.query(
-      `SELECT eq.*, c.normalized_title, c.company_name, c.canonical_url, jv.description_text 
+      `SELECT eq.*, c.normalized_title, c.company_name, c.canonical_url,
+              c.gate_decision, c.workability_facts,
+              jv.description_text, jv.id AS resolved_job_version_id,
+              gd.id AS resolved_gate_decision_id
        FROM evaluation_queue eq
        JOIN canonical_jobs c ON eq.canonical_job_id = c.id
        LEFT JOIN LATERAL (
-         SELECT description_text 
-         FROM job_versions 
-         WHERE canonical_job_id = c.id 
-         ORDER BY observed_at DESC 
+         SELECT id, description_text
+         FROM job_versions
+         WHERE canonical_job_id = c.id
+         ORDER BY observed_at DESC
          LIMIT 1
        ) jv ON TRUE
-       WHERE eq.status IN ('PENDING', 'RETRY_WAIT')
+       LEFT JOIN LATERAL (
+         SELECT id
+         FROM gate_decisions
+         WHERE canonical_job_id = c.id
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) gd ON TRUE
+       WHERE (eq.status = 'PENDING')
+          OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
           OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
        ORDER BY eq.priority_score DESC`
     );
 
-    console.log(`Found ${queueItems.length} items eligible for AI evaluation.`);
+    console.log(`Found ${queueItems.length} items eligible for AI evaluation. Pipeline run: ${pipelineRunId}`);
 
     for (const item of queueItems) {
       console.log(`\nEvaluating: [${item.lane}] ${item.normalized_title} at ${item.company_name}`);
 
-      // Check max attempts limit -> route to NEEDS_MANUAL_REVIEW
+      // Check max attempts → NEEDS_MANUAL_REVIEW
       if (item.attempt_count >= (item.max_attempts || 3)) {
         console.warn(`⚠️ Maximum attempts (${item.max_attempts || 3}) exhausted for job ${item.canonical_job_id}. Moving to NEEDS_MANUAL_REVIEW.`);
         await client.query("BEGIN");
         try {
           await client.query(
-            `UPDATE evaluation_queue 
-             SET status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() 
-             WHERE id = $1`,
+            `UPDATE evaluation_queue SET status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`,
             [item.id]
           );
           await client.query(
-            `UPDATE canonical_jobs 
-             SET processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() 
-             WHERE id = $1`,
+            `UPDATE canonical_jobs SET processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`,
             [item.canonical_job_id]
           );
           await client.query("COMMIT");
@@ -71,15 +89,15 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         continue;
       }
 
-      // Acquire exclusive lease for this worker item
+      // Acquire exclusive 5-minute worker lease
       const { rows: leaseRows } = await client.query(
-        `UPDATE evaluation_queue 
+        `UPDATE evaluation_queue
          SET status = 'EVALUATING',
              lease_id = gen_random_uuid(),
              lease_expires_at = NOW() + INTERVAL '5 minutes',
              attempt_count = attempt_count + 1,
              updated_at = NOW()
-         WHERE id = $1 
+         WHERE id = $1
            AND (status IN ('PENDING', 'RETRY_WAIT') OR (status = 'EVALUATING' AND lease_expires_at < NOW()))
          RETURNING *`,
         [item.id]
@@ -93,14 +111,31 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
       const activeLease = leaseRows[0];
       const attemptNum = activeLease.attempt_count;
 
+      // Resolve actual job_version_id (not hard-coded "v1")
+      const jobVersionId: string = item.resolved_job_version_id || item.job_version_id;
+      if (!jobVersionId) {
+        console.warn(`⚠️ No job_version_id found for canonical job ${item.canonical_job_id}. Skipping.`);
+        failedCount++;
+        await client.query(
+          `UPDATE evaluation_queue SET status = 'RETRY_WAIT', last_error = $1,
+           available_at = ${nextAvailableAt(attemptNum)}, lease_id = NULL, lease_expires_at = NULL, updated_at = NOW()
+           WHERE id = $2`,
+          ["No job_version found", item.id]
+        );
+        continue;
+      }
+
+      // Resolve gate decision ID
+      const gateDecisionId: string | null = item.resolved_gate_decision_id || null;
+
       const evalReq: EvaluationRequest = {
         canonicalJobId: item.canonical_job_id,
-        jobVersionId: item.job_version_id || "v1",
-        gateDecisionId: "PASS",
-        gateVersion: "1.0",
+        jobVersionId,
+        gateDecisionId: gateDecisionId || "LEGACY_NO_GATE_RECORD",
+        gateVersion: "2.0",
         candidateLanes: [{ lane: item.lane, semanticScore: item.priority_score, evidence: [] }],
-        workabilityFacts: {
-          locationEligibility: "PASS",
+        workabilityFacts: item.workability_facts || {
+          locationEligibility: "UNKNOWN",
           officeDays: "UNKNOWN",
           travelPercentage: "UNKNOWN",
           isContract: false
@@ -113,7 +148,7 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
       const evalQuery = `
         Evaluate the following job according to the structured EvaluationRequest schema.
         Request Metadata: ${JSON.stringify(evalReq)}
-        
+
         Job Title: ${item.normalized_title}
         Company: ${item.company_name}
         URL: ${item.canonical_url}
@@ -121,24 +156,40 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         ${item.description_text || "No description provided."}
       `;
 
+      let usedFallback = false;
+      let resolvedProvider = process.env.FORCE_OPENAI === "true" ? "openai" : "gemini";
+      let resolvedModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+
       try {
+        // Attempt primary provider call
         const { result, toolsUsed } = await runAgent(evalQuery);
         const evalResult = result.evaluated_jobs?.[0];
 
         if (!evalResult) {
-          throw new Error("Missing evaluated_jobs in AI output");
+          throw new Error("AI response contained no evaluated_jobs entries");
         }
 
-        // Validate output structure
+        // Identity check: if LLM returned a job_id, verify it matches
+        if (evalResult.job_id && evalResult.job_id !== item.canonical_job_id) {
+          console.warn(`⚠️ LLM returned mismatched job_id ${evalResult.job_id} vs expected ${item.canonical_job_id}. Using canonical IDs.`);
+        }
+
+        // Detect if OpenAI was used as fallback (FORCE_OPENAI or Gemini quota hit)
+        if (process.env.FORCE_OPENAI === "true") {
+          usedFallback = true;
+          resolvedProvider = "openai";
+          resolvedModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
+        }
+
         const validatedResult: EvaluationResult = EvaluationResultSchema.parse({
           schema_version: SCHEMA_VERSION,
           canonical_job_id: item.canonical_job_id,
-          job_version_id: item.job_version_id || "v1",
-          pipeline_run_id: "00000000-0000-0000-0000-000000000000",
-          provider: process.env.FORCE_OPENAI === "true" ? "openai" : "gemini",
-          model: process.env.OPENAI_MODEL || process.env.GEMINI_MODEL || "gemini-1.5-flash",
+          job_version_id: jobVersionId,
+          pipeline_run_id: pipelineRunId,
+          provider: resolvedProvider,
+          model: resolvedModel,
           attempt: attemptNum,
-          is_fallback: false,
+          is_fallback: usedFallback,
           degraded_state: false,
           evaluation_summary: result.evaluation_summary || "Automated multi-lane AI evaluation",
           primary_lane: evalResult.primary_lane,
@@ -158,14 +209,12 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
           evaluated_at: new Date().toISOString()
         });
 
-        console.log(`  -> AI Evaluation complete: Confidence = ${validatedResult.lane_confidence}, Action = ${validatedResult.next_action}`);
+        console.log(`  -> AI Evaluation complete: Confidence = ${validatedResult.lane_confidence}, Action = ${validatedResult.next_action}, Fallback = ${usedFallback}`);
 
         await client.query("BEGIN");
         try {
           await client.query(
-            `UPDATE canonical_jobs 
-             SET processing_status = 'AI_EVALUATED', updated_at = NOW()
-             WHERE id = $1`,
+            `UPDATE canonical_jobs SET processing_status = 'AI_EVALUATED', updated_at = NOW() WHERE id = $1`,
             [item.canonical_job_id]
           );
 
@@ -177,9 +226,9 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())`,
             [
               item.canonical_job_id,
-              item.job_version_id || "v1",
-              "PASS",
-              "1.0",
+              jobVersionId,
+              item.gate_decision || "PASS",
+              "2.0",
               JSON.stringify([{ lane: item.lane, semanticScore: item.priority_score, evidence: validatedResult.lane_evidence }]),
               JSON.stringify(evalReq.workabilityFacts),
               JSON.stringify([]),
@@ -195,8 +244,8 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
           );
 
           await client.query(
-            `UPDATE evaluation_queue 
-             SET status = 'COMPLETED', lease_id = NULL, lease_expires_at = NULL, updated_at = NOW() 
+            `UPDATE evaluation_queue
+             SET status = 'COMPLETED', lease_id = NULL, lease_expires_at = NULL, available_at = NULL, updated_at = NOW()
              WHERE id = $1`,
             [item.id]
           );
@@ -211,10 +260,16 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         console.error(`❌ Evaluation failed for queue item ${item.id}:`, err.message || err);
         failedCount++;
 
-        // Transition to RETRY_WAIT for recoverable failure (never career rejection)
+        // Transition to RETRY_WAIT with exponential backoff (never career-rejects)
+        const availableAtExpr = nextAvailableAt(attemptNum);
         await client.query(
-          `UPDATE evaluation_queue 
-           SET status = 'RETRY_WAIT', last_error = $1, lease_id = NULL, lease_expires_at = NULL, updated_at = NOW() 
+          `UPDATE evaluation_queue
+           SET status = 'RETRY_WAIT',
+               last_error = $1,
+               available_at = ${availableAtExpr},
+               lease_id = NULL,
+               lease_expires_at = NULL,
+               updated_at = NOW()
            WHERE id = $2`,
           [err.message || String(err), item.id]
         );
@@ -225,14 +280,17 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
     await pool.end();
   }
 
-  console.log(`\n✅ Queue evaluation complete. Processed: ${processedCount}, Retrying: ${failedCount}, Manual Review: ${manualReviewCount}`);
+  const summary = `\n✅ Queue evaluation complete. Processed: ${processedCount}, Retrying: ${failedCount}, Manual Review: ${manualReviewCount}`;
+  console.log(summary);
   return { processed: processedCount, failed: failedCount, manualReview: manualReviewCount };
 }
 
 if (process.argv[1] && process.argv[1].includes("evaluate_queue")) {
   evaluateQueue()
     .then((stats) => {
-      if (stats.failed > 0 && stats.processed === 0 && stats.manualReview === 0) {
+      if (stats.failed > 0) {
+        // Invariant 7: exit non-zero when any required stage fails
+        console.error(`❌ ${stats.failed} evaluation(s) failed and were moved to RETRY_WAIT. Exiting non-zero.`);
         process.exit(1);
       }
       process.exit(0);

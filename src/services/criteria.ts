@@ -3,7 +3,7 @@ import { RawJob } from "../db/db.ts";
 
 /**
  * Custom weights and criteria configuration file for the Job Decision Engine.
- * This is designed for easy open-source customization. 
+ * This is designed for easy open-source customization.
  * Forkers can simply edit this file to match their own profile and priorities.
  */
 
@@ -14,7 +14,7 @@ export const CANDIDATE_PROFILE = {
   minAcceptableBaseSgdMonth: 22000,
   maxTravelPercentage: 10,
   idealOfficeDaysPerWeek: 2,
-  maxOfficeDaysPerWeek: 3, // Exceptions allowed for specialized physical laboratory environments
+  maxOfficeDaysPerWeek: 3,
   coreSkills: [
     "IT Architecture",
     "Institutional Finance ($54B+ governance)",
@@ -29,7 +29,7 @@ export const CANDIDATE_PROFILE = {
     "No Forward Deployed Engineering (FDE) or outsourcing/consulting roles",
     "No contract roles (only permanent FTE)",
     "Travel < 10%",
-    "Max 3 days in-office (unless a physical scientific lab)",
+    "Max 3 days in-office (unless a physical scientific laboratory environment)",
     "Low stress / organizational politics",
     "Protected deep-focus time"
   ]
@@ -45,195 +45,276 @@ export const HARD_DISQUALIFIERS = [];
 export function generateContentHash(company: string, title: string, rawDesc: string): string {
   const normalizedCompany = (company || "").toLowerCase().trim();
   const normalizedTitle = (title || "").toLowerCase().trim();
-  const normalizedDesc = (rawDesc || "").toLowerCase().trim().slice(0, 1000); // use first 1000 chars of desc to avoid minor dynamic differences
-  
+  const normalizedDesc = (rawDesc || "").toLowerCase().trim().slice(0, 1000);
   const payload = `${normalizedCompany}|${normalizedTitle}|${normalizedDesc}`;
   return crypto.createHash("sha256").update(payload).digest("hex");
 }
 
 export interface GateResult {
   passed: boolean;
-  status?: "PASS" | "NEEDS_VERIFICATION" | "HARD_REJECT";
+  status: "PASS" | "NEEDS_VERIFICATION" | "HARD_REJECT";
   rejection_code?: string;
-  rejection_codes?: string[];
-  evidence_quotes?: string[];
+  rejection_codes: string[];
+  evidence_quotes: string[];
+  workability_facts: {
+    office_days_min: number | null;
+    office_days_max: number | null;
+    travel_pct_max: number | null;
+    employment_type: "PERMANENT" | "CONTRACT" | "UNKNOWN";
+    location_restriction: string | null;
+  };
 }
+
+function makePass(extraFacts?: Partial<GateResult["workability_facts"]>): GateResult {
+  return {
+    passed: true,
+    status: "PASS",
+    rejection_codes: [],
+    evidence_quotes: [],
+    workability_facts: {
+      office_days_min: null,
+      office_days_max: null,
+      travel_pct_max: null,
+      employment_type: "UNKNOWN",
+      location_restriction: null,
+      ...extraFacts
+    }
+  };
+}
+
+function makeReject(codes: string[], evidence: string[], facts?: Partial<GateResult["workability_facts"]>): GateResult {
+  return {
+    passed: false,
+    status: "HARD_REJECT",
+    rejection_code: codes[0],
+    rejection_codes: codes,
+    evidence_quotes: evidence,
+    workability_facts: {
+      office_days_min: null,
+      office_days_max: null,
+      travel_pct_max: null,
+      employment_type: "UNKNOWN",
+      location_restriction: null,
+      ...facts
+    }
+  };
+}
+
+function makeVerification(codes: string[], evidence: string[], facts?: Partial<GateResult["workability_facts"]>): GateResult {
+  return {
+    passed: false,
+    status: "NEEDS_VERIFICATION",
+    rejection_code: codes[0],
+    rejection_codes: codes,
+    evidence_quotes: evidence,
+    workability_facts: {
+      office_days_min: null,
+      office_days_max: null,
+      travel_pct_max: null,
+      employment_type: "UNKNOWN",
+      location_restriction: null,
+      ...facts
+    }
+  };
+}
+
+/**
+ * Extract a readable text corpus from a raw job (handles string, JSON-string, or object descriptions).
+ */
+function extractDescriptionText(job: RawJob): string {
+  if (!job.raw_description) return "";
+  if (typeof job.raw_description === "object") {
+    const d = job.raw_description as any;
+    return [
+      d.job_description || "",
+      ...(d.key_responsibilities || []),
+      ...(d.technical_skills || []),
+      ...(d.qualifications_education || []),
+      ...(d.nice_to_haves || [])
+    ].join(" ").toLowerCase();
+  }
+  if (typeof job.raw_description === "string") {
+    if (job.raw_description.trim().startsWith("{")) {
+      try {
+        const parsed = JSON.parse(job.raw_description);
+        return [
+          parsed.job_description || "",
+          ...(parsed.key_responsibilities || []),
+          ...(parsed.technical_skills || []),
+          ...(parsed.qualifications_education || []),
+          ...(parsed.nice_to_haves || [])
+        ].join(" ").toLowerCase();
+      } catch {
+        return job.raw_description.toLowerCase();
+      }
+    }
+    return job.raw_description.toLowerCase();
+  }
+  return "";
+}
+
+/** Find the first matching snippet from the description text for an evidence quote. */
+function findEvidence(d: string, keywords: string[]): string[] {
+  const quotes: string[] = [];
+  for (const kw of keywords) {
+    const idx = d.indexOf(kw);
+    if (idx !== -1) {
+      const start = Math.max(0, idx - 20);
+      const end = Math.min(d.length, idx + kw.length + 40);
+      quotes.push(`"…${d.substring(start, end)}…"`);
+    }
+  }
+  return quotes;
+}
+
 
 export function applyGlobalGates(job: RawJob): GateResult {
   const t = (job.title || "").toLowerCase();
   const c = (job.company_name || "").toLowerCase();
-  let d = "";
+  const d = extractDescriptionText(job);
 
-  if (job.raw_description) {
-    if (typeof job.raw_description === "object") {
-      const descObj = job.raw_description as any;
-      d = (
-        (descObj.job_description || "") + " " +
-        (descObj.key_responsibilities || []).join(" ") + " " +
-        (descObj.technical_skills || []).join(" ") + " " +
-        (descObj.qualifications_education || []).join(" ") + " " +
-        (descObj.nice_to_haves || []).join(" ")
-      ).toLowerCase();
-    } else if (typeof job.raw_description === "string") {
-      if (job.raw_description.trim().startsWith("{")) {
-        try {
-          const parsed = JSON.parse(job.raw_description);
-          d = (
-            (parsed.job_description || "") + " " +
-            (parsed.key_responsibilities || []).join(" ") + " " +
-            (parsed.technical_skills || []).join(" ") + " " +
-            (parsed.qualifications_education || []).join(" ") + " " +
-            (parsed.nice_to_haves || []).join(" ")
-          ).toLowerCase();
-        } catch {
-          d = job.raw_description.toLowerCase();
-        }
-      } else {
-        d = job.raw_description.toLowerCase();
+  // ── 1. Title-level junior/intern guard (deterministic, no experience-range regex) ──
+  const juniorTitleKw = ["junior", "entry level", "entry-level", "intern", "internship", "graduate trainee"];
+  for (const kw of juniorTitleKw) {
+    if (t.includes(kw)) {
+      return makeReject(["GATE_EXPERIENCE_TOO_LOW"], [`Title contains: "${kw}"`]);
+    }
+  }
+
+  // ── 2. Office days / on-site detection ──
+  const hardOnsiteKw = [
+    "100% onsite", "100% on-site", "5 days on-site", "5 days onsite", "5 days a week in the office",
+    "on-site only", "onsite only", "4 days in office", "4 days a week in the office",
+    "4 days on-site", "4 days onsite", "fully on-site", "fully onsite"
+  ];
+  for (const kw of hardOnsiteKw) {
+    if (d.includes(kw)) {
+      const isPhysicalLab = t.includes("laboratory") || d.includes("physical laboratory") || d.includes("wet lab");
+      if (!isPhysicalLab) {
+        return makeReject(["GATE_HIGH_OFFICE_DAYS"], findEvidence(d, [kw]), { office_days_min: 4, office_days_max: 5 });
       }
     }
   }
 
-  // 1. Fully On-site / 4+ Office Days Rejection
-  if (
-    d.includes("100% onsite") || d.includes("5 days on-site") || d.includes("5 days onsite") || 
-    d.includes("on-site only") || d.includes("onsite only") || d.includes("4 days in office") ||
-    d.includes("4 days a week in the office") || d.includes("4 days on-site") || d.includes("4 days onsite")
-  ) {
-    return { passed: false, rejection_code: "GATE_HIGH_OFFICE_DAYS" };
+  // Office days NEEDS_VERIFICATION: description mentions office days but count is ambiguous
+  const ambiguousOfficeKw = ["office based", "office-based", "in-office", "in office"];
+  const knowsOfficeDays = hardOnsiteKw.some(k => d.includes(k))
+    || /\b[1-5]\s*(?:day|days)\s*(?:per week|a week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i.test(d)
+    || d.includes("hybrid") || d.includes("remote-first") || d.includes("fully remote") || d.includes("work from home");
+
+  if (!knowsOfficeDays && ambiguousOfficeKw.some(k => d.includes(k))) {
+    return makeVerification(
+      ["NEEDS_VERIFICATION_OFFICE_DAYS"],
+      findEvidence(d, ambiguousOfficeKw.filter(k => d.includes(k))),
+      { office_days_min: null, office_days_max: null }
+    );
   }
 
-  // 1a. Structured Remote Exclusions
-  if (
-    d.includes("us only") || d.includes("us-only") || d.includes("united states only") || 
-    d.includes("canada only") || d.includes("eu only") || d.includes("eu-only") || 
-    d.includes("uk only") || d.includes("uk-only") || d.includes("remote - us")
-  ) {
-    return { passed: false, rejection_code: "GATE_LOCATION_RESTRICTED" };
-  }
-
-  // 1b. Regular on-call, shift work, frequent travel
-  if (d.includes("shift work") || d.includes("on-call rotation") || d.includes("regular on-call") || d.includes("24/7 support") || d.includes("travel extensively") || d.includes("frequent travel") || d.includes("up to 50% travel") || d.includes("up to 25% travel")) {
-    return { passed: false, rejection_code: "GATE_LIFESTYLE_INCOMPATIBLE" };
-  }
-
-  // 1c. Sales / Client-facing / Large-team management / Stakeholder dominance
-  if (
-    d.includes("sales engineering") || d.includes("presales") || d.includes("pre-sales") || 
-    d.includes("client relationship management") || d.includes("manage large teams") || 
-    d.includes("stakeholder coordination") || d.includes("firefighting") || d.includes("escalations manager")
-  ) {
-    return { passed: false, rejection_code: "GATE_HIGH_INTERACTION" };
-  }
-
-  // 2. Not enough experience (<10 years).
-  if (t.includes("junior") || t.includes("entry level") || t.includes("intern") || t.includes("entry-level")) {
-    return { passed: false, rejection_code: "GATE_EXPERIENCE_TOO_LOW" };
-  }
-  const expRegex = /([1-7])\s*(?:-|to)\s*([1-8])\s*years/i;
-  const match = d.match(expRegex);
-  if (match) {
-    const maxExp = parseInt(match[2]);
-    if (maxExp < 10) {
-      return { passed: false, rejection_code: "GATE_EXPERIENCE_TOO_LOW" };
+  // ── 3. Geographic restrictions ──
+  const locationKw = ["us only", "us-only", "united states only", "canada only", "eu only", "eu-only", "uk only", "uk-only", "remote - us"];
+  for (const kw of locationKw) {
+    if (d.includes(kw)) {
+      return makeReject(["GATE_LOCATION_RESTRICTED"], findEvidence(d, [kw]), { location_restriction: kw.toUpperCase() });
     }
   }
 
-  // 3. Construction / Data Center Build / Hardware / SRE / GPU Hardware Roles
-  const hardwareKw = [
-    "construction", "site reliability", "sre", "hardware engineering", 
-    "hardware", "facility", "infrastructure data center", "data center construction",
-    "gpu", "gpu hardware", "gpu architect", "hardware architect"
-  ];
-  if (hardwareKw.some(kw => t.includes(kw) || d.includes(kw))) {
-    // Hardware keyword exception: "hardware" keyword might appear innocently in SWE job if they mention "hardware teams".
-    // We reject if it's the core focus. "Hardware engineering" is a strict reject.
-    // Infrastructure, Data center, GPU hardware are strict rejects as per user instruction.
-    if (d.includes("hardware engineering") || t.includes("hardware") || t.includes("hardware architect") || t.includes("gpu hardware") || t.includes("gpu architect") || t.includes("infrastructure data center") || d.includes("infrastructure data center") || t.includes("sre") || d.includes("sre") || t.includes("site reliability") || d.includes("site reliability") || t.includes("construction") || d.includes("data center construction") || d.includes("construction")) {
-        return { passed: false, rejection_code: "GATE_HARDWARE_INFRASTRUCTURE" };
+  // ── 4. Lifestyle incompatibilities ──
+  const lifestyleKw = ["shift work", "on-call rotation", "regular on-call", "24/7 support", "travel extensively", "frequent travel", "up to 50% travel", "up to 25% travel"];
+  for (const kw of lifestyleKw) {
+    if (d.includes(kw)) {
+      const travelPct = kw.includes("50%") ? 50 : kw.includes("25%") ? 25 : null;
+      return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], findEvidence(d, [kw]), { travel_pct_max: travelPct });
     }
   }
 
-  // 4. FDE (Forward Deployed Engineering) check
-  if (t.includes("fde") || t.includes("forward deployed") || d.includes("forward deployed") || d.includes("fde ")) {
-    return { passed: false, rejection_code: "GATE_OUT_OF_SCOPE_DOMAIN" }; // Forward Deployed
+  // ── 5. Sales / Client-facing ──
+  const highInteractionKw = ["sales engineering", "presales", "pre-sales", "client relationship management", "manage large teams", "escalations manager"];
+  for (const kw of highInteractionKw) {
+    if (d.includes(kw)) {
+      return makeReject(["GATE_HIGH_INTERACTION"], findEvidence(d, [kw]));
+    }
   }
 
-  // 5. Consulting Firms check
-  const consultingFirms = [
-    "accenture", "kpmg", "bcg", "mckinsey", "bain", "deloitte", "pwc", 
-    "ernst & young", "pricewaterhousecoopers", "boston consulting group"
-  ];
+  // ── 6. Hardware / SRE / Construction ──
+  const hardwareStrictTitle = ["hardware", "hardware architect", "gpu hardware", "gpu architect", "infrastructure data center", "sre", "site reliability", "construction"];
+  const hardwareStrictDesc = ["hardware engineering", "infrastructure data center", "data center construction", "construction project"];
+  for (const kw of hardwareStrictTitle) {
+    if (t.includes(kw)) {
+      return makeReject(["GATE_HARDWARE_INFRASTRUCTURE"], [`Title contains: "${kw}"`]);
+    }
+  }
+  for (const kw of hardwareStrictDesc) {
+    if (d.includes(kw)) {
+      return makeReject(["GATE_HARDWARE_INFRASTRUCTURE"], findEvidence(d, [kw]));
+    }
+  }
+
+  // ── 7. FDE (Forward Deployed Engineering) ──
+  const fdeKw = ["forward deployed", "fde "];
+  if (t.includes("fde") || fdeKw.some(k => t.includes(k) || d.includes(k))) {
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], findEvidence(d, fdeKw));
+  }
+
+  // ── 8. Consulting firms ──
+  const consultingFirms = ["accenture", "kpmg", "bcg", "mckinsey", "bain", "deloitte", "pwc", "ernst & young", "pricewaterhousecoopers", "boston consulting group"];
   for (const firm of consultingFirms) {
     if (c.includes(firm)) {
-      return { passed: false, rejection_code: "GATE_CONSULTING_FIRM" };
+      return makeReject(["GATE_CONSULTING_FIRM"], [`Company name: "${firm}"`]);
     }
   }
-  if (c === "ey" || c === "ey pte ltd" || c.startsWith("ey ") || c.endsWith(" ey") || c.includes(" ey ") || c.includes("ey.com")) {
-    return { passed: false, rejection_code: "GATE_CONSULTING_FIRM" };
+  if (c === "ey" || c === "ey pte ltd" || c.startsWith("ey ") || c.endsWith(" ey") || c.includes(" ey ")) {
+    return makeReject(["GATE_CONSULTING_FIRM"], [`Company name matches EY`]);
   }
 
-  // 6. IT Outsourcing check
-  if (c.includes("red hat") || d.includes("deployed to client") || d.includes("work for our clients") || d.includes("hired resource")) {
-    return { passed: false, rejection_code: "GATE_OUTSOURCING" };
+  // ── 9. IT Outsourcing ──
+  const outsourcingKw = ["deployed to client", "work for our clients", "hired resource"];
+  if (c.includes("red hat") || outsourcingKw.some(k => d.includes(k))) {
+    const found = c.includes("red hat") ? [`Company: "red hat"`] : findEvidence(d, outsourcingKw.filter(k => d.includes(k)));
+    return makeReject(["GATE_OUTSOURCING"], found);
   }
 
-  // 7. Recruitment Agency / Contract check
-  const contractKeywords = ["contract", "contractor", "temp", "temporary", "freelance"];
-  const agencyKeywords = [
-    "recruitment", "recruiting", "staffing", "talent acquisition",
-    "hays", "randstad", "pagegroup", "michael page", "adecco", 
-    "charterhouse", "huxley", "robert half", "robert walters", "kelly services", 
-    "monroe consulting", "recruit"
-  ];
-  const isAgency = agencyKeywords.some(kw => c.includes(kw)) || 
-                   d.includes("on behalf of our client") || 
-                   d.includes("our client is looking for") || 
-                   d.includes("hiring for our client");
-                   
+  // ── 10. Contract / Agency ──
+  const contractKw = ["contract", "contractor", "temp", "temporary", "freelance"];
+  const agencyKw = ["recruitment", "recruiting", "staffing", "talent acquisition", "hays", "randstad", "pagegroup", "michael page", "adecco", "charterhouse", "huxley", "robert half", "robert walters", "kelly services", "monroe consulting", "recruit"];
+  const isAgency = agencyKw.some(kw => c.includes(kw)) || d.includes("on behalf of our client") || d.includes("our client is looking for") || d.includes("hiring for our client");
   if (isAgency) {
-    const isContract = contractKeywords.some(kw => t.includes(kw) || d.includes(kw)) || d.includes("renewable");
+    const isContract = contractKw.some(kw => t.includes(kw) || d.includes(kw)) || d.includes("renewable");
     if (isContract) {
-      return { passed: false, rejection_code: "GATE_CONTRACT_ROLE" };
+      return makeReject(["GATE_CONTRACT_ROLE"], [`Agency posting with contract terms`]);
+    }
+  }
+  for (const kw of contractKw) {
+    if (t.includes(kw) && !t.includes("permanent contract") && !d.includes("permanent contract")) {
+      return makeReject(["GATE_CONTRACT_ROLE"], [`Title contains: "${kw}"`]);
     }
   }
 
-  for (const kw of contractKeywords) {
-    if (t.includes(kw)) {
-      if (t.includes("permanent contract") || d.includes("permanent contract")) {
-        continue;
-      }
-      return { passed: false, rejection_code: "GATE_CONTRACT_ROLE" };
-    }
-  }
-
-  // 8. Kitchen-sink / Multi-role (Extreme management/delivery overhead)
-  const managementKeywords = ["manage large teams", "manage client teams", "manage client expectations", "client relationship management"];
-  for (const kw of managementKeywords) {
+  // ── 11. Heavy management / Kitchen-sink ──
+  const mgmtKw = ["manage large teams", "manage client teams", "manage client expectations", "client relationship management"];
+  for (const kw of mgmtKw) {
     if (d.includes(kw)) {
-      return { passed: false, rejection_code: "GATE_HEAVY_MANAGEMENT" };
+      return makeReject(["GATE_HEAVY_MANAGEMENT"], findEvidence(d, [kw]));
     }
   }
-
   let rolesCount = 0;
   if (d.includes("project manager") || d.includes("scrum master") || d.includes("project management")) rolesCount++;
   if (d.includes("people manager") || d.includes("people management") || d.includes("line manager")) rolesCount++;
   if (d.includes("client manager") || d.includes("delivery manager") || d.includes("account manager")) rolesCount++;
   if (d.includes("architect") || d.includes("architecture")) rolesCount++;
   if (d.includes("developer") || d.includes("engineer")) rolesCount++;
-
   if (rolesCount >= 4) {
-    return { passed: false, rejection_code: "GATE_KITCHEN_SINK" };
+    return makeReject(["GATE_KITCHEN_SINK"], [`Role combines ${rolesCount} distinct function types`]);
   }
 
-  // 9. Lane Relevance Threshold (Must have some AI/Data/ML keywords)
-  const aiDataKeywords = ["ai", "artificial intelligence", "ml", "machine learning", "data", "quantitative", "time-series", "time series", "portfolio analytics", "research", "deep learning", "nlp", "llm", "agentic", "data engineering", "architecture", "architect"];
-  const hasRelevance = aiDataKeywords.some(kw => t.includes(kw) || d.includes(kw));
+  // ── 12. Lane relevance (must have AI/Data signal) ──
+  const aiDataKw = ["ai", "artificial intelligence", "ml", "machine learning", "data", "quantitative", "time-series", "time series", "portfolio analytics", "research", "deep learning", "nlp", "llm", "agentic", "data engineering", "architecture", "architect", "regtech", "fintech", "biotech", "pharma", "clinical"];
+  const hasRelevance = aiDataKw.some(kw => t.includes(kw) || d.includes(kw));
   if (!hasRelevance) {
-    return { passed: false, rejection_code: "GATE_NOT_AI_DATA" };
+    return makeReject(["GATE_NOT_AI_DATA"], [`No AI/Data/domain signal found in title or description`]);
   }
 
-  return { passed: true };
+  // ── All deterministic gates passed ──
+  return makePass();
 }
 
 export const MULTI_LANE_SCORECARDS = {
@@ -275,7 +356,6 @@ export const LANE_VOCABULARIES = {
 };
 
 // Independent Axis: Neurodivergent-Friendliness (0-100)
-// Scored based on evidence in the JD, independently of the 100-point core fit.
 export const ND_FRIENDLY_DIMENSIONS = {
   highSupportiveFactors: [
     "Clear, direct, and written communication mentioned",
@@ -293,7 +373,6 @@ export const ND_FRIENDLY_DIMENSIONS = {
 };
 
 // Independent Axis: Politics & Stress Risk (0-100)
-// Scored based on evidence in the JD, independently of the 100-point core fit.
 export const POLITICS_STRESS_RISK_DIMENSIONS = {
   highRiskFactors: [
     "High corporate politics, backchannel alignment, and unwritten rules",
