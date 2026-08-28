@@ -73,6 +73,6 @@ describe('Pipeline Stage: Hard Gates', () => {
 
     expect(mPool.query).toHaveBeenCalledTimes(4); // SELECT + BEGIN + UPDATE + COMMIT
     const updateCall = (mPool.query as any).mock.calls[2];
-    expect(updateCall[1]).toEqual(['FAIL', 'HARD_REJECTED', 'NO_LOCATION_MATCH', 'canon-2']);
+    expect(updateCall[1]).toEqual(['HARD_REJECT', 'HARD_REJECTED', 'NO_LOCATION_MATCH', 'canon-2']);
   });
 });

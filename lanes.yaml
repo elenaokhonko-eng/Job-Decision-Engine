@@ -1,0 +1,66 @@
+version: "1.0"
+description: "Authoritative multi-lane definition and semantic threshold registry"
+
+lanes:
+  CORE_AI_DATA:
+    title: "Core AI & Data Engineering"
+    description: "Hands-on distributed AI systems, LLM infrastructure, data pipelines, MLOps, deep learning research, and technical architecture."
+    threshold: 0.35
+    keywords:
+      - "ai"
+      - "machine learning"
+      - "llm"
+      - "data engineering"
+      - "distributed systems"
+      - "pytorch"
+      - "spark"
+      - "databricks"
+      - "architect"
+    prototype_query: "Hands-on AI systems engineer, machine learning infrastructure, distributed LLM pipelines, PyTorch, Spark, Databricks, technical solutions architect."
+
+  LEGAL_REGTECH:
+    title: "Legal Technology & Regulatory Tech"
+    description: "Legal AI agents, automated contract analytics, regulatory compliance platforms, legal tech transformation, and governance systems."
+    threshold: 0.30
+    keywords:
+      - "legaltech"
+      - "regtech"
+      - "compliance"
+      - "contract analytics"
+      - "regulatory"
+      - "legal ai"
+      - "law firm"
+    prototype_query: "Legal technology automation, regtech compliance systems, AI contract analysis, regulatory engineering, legal intelligence."
+
+  HEALTH_BIO_PHARMA:
+    title: "HealthTech, Biotech & Life Sciences"
+    description: "Computational biology, genomics foundation models, drug discovery AI pipelines, clinical trial analytics, and healthcare data systems."
+    threshold: 0.30
+    keywords:
+      - "bioinformatics"
+      - "genomics"
+      - "biotech"
+      - "pharma"
+      - "healthcare"
+      - "clinical"
+      - "drug discovery"
+    prototype_query: "Bioinformatics AI scientist, genomic foundation models, computational biology, drug discovery ML, healthcare data platforms."
+
+  INVESTMENT_MARKETS_FINTECH:
+    title: "Investment Systems & Financial Technology"
+    description: "Quantitative trading architecture, market data infrastructure, asset management systems, fintech trading platforms, risk analytics."
+    threshold: 0.30
+    keywords:
+      - "fintech"
+      - "quant"
+      - "trading"
+      - "capital markets"
+      - "asset management"
+      - "market data"
+      - "investment"
+    prototype_query: "Quantitative systems architect, low-latency market data, fintech trading execution platform, asset management analytics."
+
+unclassified_policy:
+  label: "UNCLASSIFIED"
+  fallback_behavior: "DEFER_ROUTING"
+  min_similarity_floor: 0.20
