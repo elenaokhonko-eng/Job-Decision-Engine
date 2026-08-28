@@ -66,8 +66,7 @@ describe('Pipeline Stage: Hard Gates', () => {
     // 2. Mock criteria to fail
     vi.spyOn(criteria, 'applyGlobalGates').mockReturnValueOnce({
       passed: false,
-      rejection_code: 'NO_LOCATION_MATCH',
-      failed_dimensions: ['Location/Workability']
+      rejection_code: 'NO_LOCATION_MATCH'
     });
 
     await runHardGates();
