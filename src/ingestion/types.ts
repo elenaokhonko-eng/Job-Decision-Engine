@@ -1,12 +1,17 @@
 export type SourceName = 
   | "greenhouse"
+  | "GREENHOUSE"
   | "ashby"
+  | "ASHBY"
   | "lever"
+  | "LEVER"
   | "himalayas"
+  | "HIMALAYAS"
   | "startup_jobs"
   | "jobicy"
   | "remotive"
-  | "email_alert";
+  | "email_alert"
+  | "GMAIL_ALERT";
 
 export interface RawJobObservation {
   sourceRunId: string;

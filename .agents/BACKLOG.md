@@ -33,11 +33,11 @@ Status values: `READY`, `BLOCKED`, `IN_PROGRESS`, `REVIEW`, `DONE`.
 
 | ID | Owner | Assignment | Depends on | Acceptance criteria | Status |
 |---|---|---|---|---|---|
-| P2-01 | documents-evidence-engineer | Consolidate profile/evidence/title ledgers and both CV paths | P0-07 | One canonical private evidence ledger; every claim has evidence IDs; schema validation is real | READY |
-| P2-02 | documents-evidence-engineer | Finish and wire cover-letter generation | P2-01 | Every substantive paragraph is grounded; deterministic DOCX/PDF; human approval before export | READY |
-| P2-03 | release-security-reviewer | Remove legacy parallel workflows and stale architecture documentation | P0/P1 complete | One supported pipeline; README and `Instructions.yml` match runtime reality | READY |
-| P2-04 | release-security-reviewer | Resolve dependency, TLS, secret and fabricated-fallback risks | P0/P1 complete | No high-severity audit finding without written exception; no `rejectUnauthorized:false`; no fake analytics | READY |
-| P2-05 | release-security-reviewer | Produce production readiness decision | all above | Evidence-based `GO`, `CONDITIONAL GO`, or `NO-GO` report with residual risks | READY |
+| P2-01 | documents-evidence-engineer | Consolidate profile/evidence/title ledgers and both CV paths | P0-07 | One canonical private evidence ledger; every claim has evidence IDs; schema validation is real | DONE |
+| P2-02 | documents-evidence-engineer | Finish and wire cover-letter generation | P2-01 | Every substantive paragraph is grounded; deterministic DOCX/PDF; human approval before export | DONE |
+| P2-03 | release-security-reviewer | Remove legacy parallel workflows and stale architecture documentation | P0/P1 complete | One supported pipeline; README and `Instructions.yml` match runtime reality | DONE |
+| P2-04 | release-security-reviewer | Resolve dependency, TLS, secret and fabricated-fallback risks | P0/P1 complete | No high-severity audit finding without written exception; no `rejectUnauthorized:false`; no fake analytics | DONE |
+| P2-05 | release-security-reviewer | Produce production readiness decision | all above | Evidence-based `GO`, `CONDITIONAL GO`, or `NO-GO` report with residual risks | DONE |
 
 ## Required handoff format
 

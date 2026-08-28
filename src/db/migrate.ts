@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient): Promise<string[]> {
+export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.Client): Promise<string[]> {
   const migrationsDir = path.resolve(__dirname, "../../migrations");
   if (!fs.existsSync(migrationsDir)) {
     throw new Error(`Migrations directory not found: ${migrationsDir}`);
