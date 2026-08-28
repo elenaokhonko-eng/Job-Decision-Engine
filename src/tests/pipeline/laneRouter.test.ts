@@ -54,15 +54,16 @@ describe('Pipeline Stage: Lane Routing', () => {
 
     // 4 prototypes + 1 job = 5 calls
     expect(agent.generateEmbedding).toHaveBeenCalledTimes(5);
-    
-    // DB update
-    expect(mPool.query).toHaveBeenCalledTimes(4); // SELECT + BEGIN + UPDATE + COMMIT
-    
+
+    // DB update: SELECT + BEGIN + UPDATE canonical_jobs + COMMIT
+    expect(mPool.query).toHaveBeenCalledTimes(4);
+
     const updateCall = (mPool.query as any).mock.calls[2];
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
-    expect(updateCall[1][0]).toEqual('CORE_AI_DATA'); // bestLane
-    expect(updateCall[1][1]).toBe(1); // bestScore
-    expect(updateCall[1][2]).toEqual('SEMANTIC_SHORTLISTED');
-    expect(updateCall[1][3]).toEqual('canon-1');
+    expect(updateCall[1][0]).toEqual('CORE_AI_DATA'); // bestLane (arg 1)
+    expect(updateCall[1][1]).toBe(1);                  // bestScore (arg 2)
+    expect(updateCall[1][2]).toEqual('LANE_ROUTED');   // processingStatus (arg 3)
+    // arg 4 = secondary_lanes JSON, arg 5 = lane_evidence, arg 6 = id
+    expect(updateCall[1][5]).toEqual('canon-1');        // job id (arg 6)
   });
 });
