@@ -8,14 +8,14 @@ Status values: `READY`, `BLOCKED`, `IN_PROGRESS`, `REVIEW`, `DONE`.
 |---|---|---|---|---|---|
 | P0-01 | data-contract-checker | Define versioned runtime contracts and current field-lineage baseline | — | Gmail-to-Streamlit contract fixtures and schema-drift test fail on known mismatches | DONE |
 | P0-02 | test-evals-specialist | Add PostgreSQL CI service and a reproducible anonymized nine-email fixture | P0-01 | CI applies canonical migrations and reproduces exact stage counts; no DB tests skip | DONE |
-| P0-03 | database-versioning-engineer | Establish one additive migration chain and canonical identity/version schema | P0-01 | Fresh and upgrade paths pass; no destructive reset; latest job version is unambiguous | READY |
-| P0-04 | pipeline-reliability-engineer | Implement leases, retry/backoff, stale-lease recovery and manual-review terminal state | P0-03 | Crash/timeout tests requeue safely; exhausted retries never become rejection | BLOCKED |
-| P0-05 | pipeline-reliability-engineer | Repair script exit codes and GitHub workflow dispatch/concurrency | P0-04 | Required stage failures make Actions fail; manual dispatch runs; one pipeline run cannot overlap itself | BLOCKED |
-| P0-06 | ai-evaluation-engineer | Validate AI output, identity and full result before atomic persistence | P0-01, P0-03 | Malformed/empty/mismatched output retries another provider and cannot mark success | BLOCKED |
-| P0-07 | ai-evaluation-engineer | Persist provider, model, attempt, fallback, degraded state, cost and full evaluation | P0-03 | A shortlist result is auditable from job version through exact model response | BLOCKED |
-| P0-08 | ingestion-source-engineer | Make Gmail ingestion non-destructive and replace evaluator-shaped email parsing | P0-01, P0-03 | Email is moved/deleted only after valid job observations commit; failed parse is recoverable | BLOCKED |
-| P0-09 | data-contract-checker | Replace Streamlit legacy/mismatched queries with one canonical shortlist read model | P0-03, P0-07 | Streamlit renders real fields for evaluated, deferred, verification and failed states | BLOCKED |
-| P0-10 | test-evals-specialist | Add failure-injection E2E for the complete pipeline | P0-04..P0-09 | Nine-email test proves conservation, idempotency, retry and correct World Bank identity/evidence | BLOCKED |
+| P0-03 | database-versioning-engineer | Establish one additive migration chain and canonical identity/version schema | P0-01 | Fresh and upgrade paths pass; no destructive reset; latest job version is unambiguous | DONE |
+| P0-04 | pipeline-reliability-engineer | Implement leases, retry/backoff, stale-lease recovery and manual-review terminal state | P0-03 | Crash/timeout tests requeue safely; exhausted retries never become rejection | READY |
+| P0-05 | pipeline-reliability-engineer | Repair script exit codes and GitHub workflow dispatch/concurrency | P0-04 | Required stage failures make Actions fail; manual dispatch runs; one pipeline run cannot overlap itself | READY |
+| P0-06 | ai-evaluation-engineer | Validate AI output, identity and full result before atomic persistence | P0-01, P0-03 | Malformed/empty/mismatched output retries another provider and cannot mark success | READY |
+| P0-07 | ai-evaluation-engineer | Persist provider, model, attempt, fallback, degraded state, cost and full evaluation | P0-03 | A shortlist result is auditable from job version through exact model response | READY |
+| P0-08 | ingestion-source-engineer | Make Gmail ingestion non-destructive and replace evaluator-shaped email parsing | P0-01, P0-03 | Email is moved/deleted only after valid job observations commit; failed parse is recoverable | READY |
+| P0-09 | data-contract-checker | Replace Streamlit legacy/mismatched queries with one canonical shortlist read model | P0-03, P0-07 | Streamlit renders real fields for evaluated, deferred, verification and failed states | READY |
+| P0-10 | test-evals-specialist | Add failure-injection E2E for the complete pipeline | P0-04..P0-09 | Nine-email test proves conservation, idempotency, retry and correct World Bank identity/evidence | READY |
 
 ## P1 — correct selection and broad sourcing
 
