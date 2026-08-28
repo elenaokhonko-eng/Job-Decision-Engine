@@ -1,0 +1,7 @@
+{
+  "$ref": "#/definitions/ShortlistRow",
+  "definitions": {
+    "ShortlistRow": {}
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
