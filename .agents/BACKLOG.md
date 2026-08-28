@@ -21,23 +21,23 @@ Status values: `READY`, `BLOCKED`, `IN_PROGRESS`, `REVIEW`, `DONE`.
 
 | ID | Owner | Assignment | Depends on | Acceptance criteria | Status |
 |---|---|---|---|---|---|
-| P1-01 | decision-policy-engineer | Implement `PASS / NEEDS_VERIFICATION / HARD_REJECT` with multiple codes, quotes and confidence | P0-03 | On-site and >3-day rules are deterministic; vague language alone cannot hard reject | READY |
-| P1-02 | decision-policy-engineer | Separate personal workability from domain/career value | P1-01 | Hard workability conflicts are non-compensable; unknown evidence remains visible | READY |
-| P1-03 | decision-policy-engineer | Load lane definitions and thresholds from YAML; support secondary/unclassified lanes | P0-03 | Title-only counterfactuals are stable; zero/random embeddings cannot default to core AI | READY |
-| P1-04 | decision-policy-engineer | Replace budget-cap rejection with durable deferral and fair per-lane selection | P0-04, P1-03 | At most three/lane/run, unused weak quotas stay unused, deferred jobs remain eligible | READY |
-| P1-05 | ingestion-source-engineer | Add observable, paginated Greenhouse/Ashby/Lever/Himalayas adapters | P0-03 | Empty source is distinct from failed source; timeouts, rate limits and schema changes are visible | READY |
-| P1-06 | ingestion-source-engineer | Implement four outbound discovery scouts as query/source planners | P1-05 | Scouts only produce queries/watchlists or ingest verified postings; no fabricated jobs | READY |
-| P1-07 | test-evals-specialist | Build real-job calibration and counterfactual suite | P1-01..P1-06 | False-rejection rate, gate precision, per-lane yield and AI-call budget are reported | READY |
+| P1-01 | decision-policy-engineer | Implement `PASS / NEEDS_VERIFICATION / HARD_REJECT` with multiple codes, quotes and confidence | P0-03 | On-site and >3-day rules are deterministic; vague language alone cannot hard reject | DONE |
+| P1-02 | decision-policy-engineer | Separate personal workability from domain/career value | P1-01 | Hard workability conflicts are non-compensable; unknown evidence remains visible | DONE |
+| P1-03 | decision-policy-engineer | Load lane definitions and thresholds from YAML; support secondary/unclassified lanes | P0-03 | Title-only counterfactuals are stable; zero/random embeddings cannot default to core AI | DONE |
+| P1-04 | decision-policy-engineer | Replace budget-cap rejection with durable deferral and fair per-lane selection | P0-04, P1-03 | At most three/lane/run, unused weak quotas stay unused, deferred jobs remain eligible | DONE |
+| P1-05 | ingestion-source-engineer | Add observable, paginated Greenhouse/Ashby/Lever/Himalayas adapters | P0-03 | Empty source is distinct from failed source; timeouts, rate limits and schema changes are visible | DONE |
+| P1-06 | ingestion-source-engineer | Implement four outbound discovery scouts as query/source planners | P1-05 | Scouts only produce queries/watchlists or ingest verified postings; no fabricated jobs | DONE |
+| P1-07 | test-evals-specialist | Build real-job calibration and counterfactual suite | P1-01..P1-06 | False-rejection rate, gate precision, per-lane yield and AI-call budget are reported | DONE |
 
 ## P2 — grounded applications and production readiness
 
 | ID | Owner | Assignment | Depends on | Acceptance criteria | Status |
 |---|---|---|---|---|---|
-| P2-01 | documents-evidence-engineer | Consolidate profile/evidence/title ledgers and both CV paths | P0-07 | One canonical private evidence ledger; every claim has evidence IDs; schema validation is real | BLOCKED |
-| P2-02 | documents-evidence-engineer | Finish and wire cover-letter generation | P2-01 | Every substantive paragraph is grounded; deterministic DOCX/PDF; human approval before export | BLOCKED |
-| P2-03 | release-security-reviewer | Remove legacy parallel workflows and stale architecture documentation | P0/P1 complete | One supported pipeline; README and `Instructions.yml` match runtime reality | BLOCKED |
-| P2-04 | release-security-reviewer | Resolve dependency, TLS, secret and fabricated-fallback risks | P0/P1 complete | No high-severity audit finding without written exception; no `rejectUnauthorized:false`; no fake analytics | BLOCKED |
-| P2-05 | release-security-reviewer | Produce production readiness decision | all above | Evidence-based `GO`, `CONDITIONAL GO`, or `NO-GO` report with residual risks | BLOCKED |
+| P2-01 | documents-evidence-engineer | Consolidate profile/evidence/title ledgers and both CV paths | P0-07 | One canonical private evidence ledger; every claim has evidence IDs; schema validation is real | READY |
+| P2-02 | documents-evidence-engineer | Finish and wire cover-letter generation | P2-01 | Every substantive paragraph is grounded; deterministic DOCX/PDF; human approval before export | READY |
+| P2-03 | release-security-reviewer | Remove legacy parallel workflows and stale architecture documentation | P0/P1 complete | One supported pipeline; README and `Instructions.yml` match runtime reality | READY |
+| P2-04 | release-security-reviewer | Resolve dependency, TLS, secret and fabricated-fallback risks | P0/P1 complete | No high-severity audit finding without written exception; no `rejectUnauthorized:false`; no fake analytics | READY |
+| P2-05 | release-security-reviewer | Produce production readiness decision | all above | Evidence-based `GO`, `CONDITIONAL GO`, or `NO-GO` report with residual risks | READY |
 
 ## Required handoff format
 
