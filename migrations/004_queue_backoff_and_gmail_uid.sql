@@ -13,10 +13,13 @@ CREATE INDEX IF NOT EXISTS idx_eval_queue_eligible
   ON evaluation_queue (status, available_at, priority_score DESC)
   WHERE status IN ('PENDING', 'RETRY_WAIT');
 
--- 2. Gmail message UID on raw_email_alerts (prevents re-fetch of already-processed messages)
+-- 2. Gmail message UID and audit columns on raw_email_alerts (prevents re-fetch of already-processed messages)
 ALTER TABLE raw_email_alerts
   ADD COLUMN IF NOT EXISTS gmail_message_id TEXT,
-  ADD COLUMN IF NOT EXISTS last_error TEXT;
+  ADD COLUMN IF NOT EXISTS last_error TEXT,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_email_alerts_gmail_uid
   ON raw_email_alerts (gmail_message_id)
