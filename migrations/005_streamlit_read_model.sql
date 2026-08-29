@@ -59,8 +59,8 @@ SELECT
   c.normalized_title                                AS title,
   c.company_name                                    AS company,
   c.canonical_url,
-  c.location_normalized                             AS location,
-  c.workplace_type_normalized                       AS workplace_type,
+  COALESCE(c.location_summary, 'Unknown')           AS location,
+  COALESCE(c.workplace_type, 'UNKNOWN')             AS workplace_type,
 
   -- Gate
   COALESCE(lg.gate_status, 'NOT_GATED')            AS gate_status,
