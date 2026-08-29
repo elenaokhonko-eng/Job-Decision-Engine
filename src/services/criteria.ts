@@ -310,9 +310,25 @@ export function applyGlobalGates(job: RawJob): GateResult {
     return makeReject(["GATE_KITCHEN_SINK"], [`Role combines ${rolesCount} distinct function types`]);
   }
 
-  // ── 12. Lane relevance (must have AI/Data signal) ──
-  const aiDataKw = ["ai", "artificial intelligence", "ml", "machine learning", "data", "quantitative", "time-series", "time series", "portfolio analytics", "research", "deep learning", "nlp", "llm", "agentic", "data engineering", "architecture", "architect", "regtech", "fintech", "biotech", "pharma", "clinical"];
-  const hasRelevance = aiDataKw.some(kw => t.includes(kw) || d.includes(kw));
+  // ── 12. Pure Governance / Zero Technical Work Guard ──
+  const pureGovKw = ["zero hands-on", "zero technical work", "steering committees", "vendor steering", "political change management"];
+  for (const kw of pureGovKw) {
+    if (d.includes(kw) || t.includes(kw)) {
+      return makeReject(["GATE_PURE_GOVERNANCE_ZERO_BUILD"], findEvidence(d, [kw]));
+    }
+  }
+
+  // ── 13. Lane relevance (must have AI/Data signal with word-boundary matching) ──
+  const aiDataShortRegex = /\b(?:ai|ml|nlp|llm)\b/i;
+  const aiDataPhrases = [
+    "artificial intelligence", "machine learning", "data", "quantitative",
+    "time-series", "time series", "portfolio analytics", "research",
+    "deep learning", "agentic", "data engineering", "architecture",
+    "architect", "regtech", "fintech", "biotech", "pharma", "clinical"
+  ];
+  const hasRelevance = aiDataShortRegex.test(t) || aiDataShortRegex.test(d) ||
+    aiDataPhrases.some(kw => t.includes(kw) || d.includes(kw));
+
   if (!hasRelevance) {
     return makeReject(["GATE_NOT_AI_DATA"], [`No AI/Data/domain signal found in title or description`]);
   }
