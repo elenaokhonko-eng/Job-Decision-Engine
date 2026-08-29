@@ -126,7 +126,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     const { rows } = await realPool.query(`
       SELECT column_name
       FROM information_schema.columns
-      WHERE table_name = 'evaluation_queue' AND column_name = 'available_at'
+      WHERE table_name = 'evaluation_queue' AND column_name = 'available_at' AND table_schema = 'public'
     `);
     expect(rows).toHaveLength(1);
   });
@@ -144,7 +144,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     const { rows } = await realPool.query(`
       SELECT column_name
       FROM information_schema.columns
-      WHERE table_name = 'raw_email_alerts' AND column_name = 'gmail_message_id'
+      WHERE table_name = 'raw_email_alerts' AND column_name = 'gmail_message_id' AND table_schema = 'public'
     `);
     expect(rows).toHaveLength(1);
   });

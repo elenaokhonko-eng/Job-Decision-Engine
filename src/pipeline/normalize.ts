@@ -2,12 +2,14 @@ import { db } from "../db/db.js";
 import pg from "pg";
 import dotenv from "dotenv";
 
+import { pgSslConfig } from "../db/pgSsl.js";
+
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
+  ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
 export async function runNormalization() {
