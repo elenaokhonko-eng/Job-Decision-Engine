@@ -21,9 +21,9 @@ ALTER TABLE raw_email_alerts
   ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ DEFAULT NOW(),
   ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
 
+DROP INDEX IF EXISTS idx_raw_email_alerts_gmail_uid;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_email_alerts_gmail_uid
-  ON raw_email_alerts (gmail_message_id)
-  WHERE gmail_message_id IS NOT NULL;
+  ON raw_email_alerts (gmail_message_id);
 
 -- 3. Structured gate evidence on canonical_jobs
 ALTER TABLE canonical_jobs

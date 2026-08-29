@@ -70,7 +70,7 @@ export async function ingestGmail(): Promise<number> {
         await dbClient.query(
           `INSERT INTO raw_email_alerts (subject, body, gmail_message_id, processed)
            VALUES ($1, $2, $3, FALSE)
-           ON CONFLICT (gmail_message_id) DO NOTHING`,
+           ON CONFLICT DO NOTHING`,
           [subject, body, String(msg.uid)]
         );
         await dbClient.query("COMMIT");
