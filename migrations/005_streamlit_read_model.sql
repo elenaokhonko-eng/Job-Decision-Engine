@@ -80,7 +80,7 @@ SELECT
   -- Evaluation
   le.eval_version_id,
   -- Version mismatch: evaluation is for an older version
-  (le.eval_version_id IS NOT NULL AND le.eval_version_id <> lv.version_id) AS version_mismatch,
+  (le.eval_version_id IS NOT NULL AND le.eval_version_id::text <> lv.version_id::text) AS version_mismatch,
   COALESCE(le.nd_friendly_score, le.nd_score_alt, 0) AS nd_friendly_score,
   le.next_action,
   le.strategic_value,
