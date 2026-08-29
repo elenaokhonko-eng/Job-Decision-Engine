@@ -65,8 +65,9 @@ export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.C
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const pool = new pg.Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
+    ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: true }
   });
+
 
   runMigrations(pool)
     .then((applied) => {

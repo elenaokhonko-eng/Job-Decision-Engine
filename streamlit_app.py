@@ -107,31 +107,45 @@ def get_db_connection():
     return psycopg2.connect(database_url)
 
 def fetch_jobs_from_db():
+    """
+    Fetch the canonical shortlist from v_canonical_shortlist (migration 005).
+
+    E3: gate_status is sourced from gate_decisions — never defaults to PASS.
+    E4: version_mismatch=True means the AI evaluation was run against an older
+        job version; the UI should display a staleness warning.
+    """
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT 
-                canonical_job_id AS id,
+            SELECT
+                canonical_job_id        AS id,
                 job_version_id,
                 title,
                 company,
-                canonical_url AS careers_portal_url,
+                canonical_url           AS careers_portal_url,
                 location,
                 workplace_type,
                 gate_status,
-                primary_lane AS assigned_track,
+                rejection_codes,
+                primary_lane            AS assigned_track,
                 secondary_lanes,
                 lane_confidence,
-                priority_score AS confidence_level,
-                processing_status AS status,
+                priority_score          AS confidence_level,
+                processing_status       AS status,
                 nd_friendly_score,
-                politics_stress_score,
                 next_action,
                 strategic_value,
                 recommended_cv_version,
-                observed_at::text AS "postedDate",
-                evaluated_at
+                evaluation_summary,
+                eval_provider,
+                eval_is_fallback,
+                version_mismatch,
+                observed_at::text       AS "postedDate",
+                evaluated_at,
+                lane_matches,
+                workability_facts,
+                queue_status
             FROM v_canonical_shortlist
             ORDER BY observed_at DESC
         """)
