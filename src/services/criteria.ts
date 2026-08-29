@@ -184,11 +184,13 @@ export function applyGlobalGates(job: RawJob): GateResult {
   // ── 2. Office days / on-site detection ──
   const hardOnsiteKw = [
     "100% onsite", "100% on-site", "5 days on-site", "5 days onsite", "5 days a week in the office",
+    "5 days per week on-site", "5 days per week onsite", "5 days a week on-site", "mandatory 5 days",
     "on-site only", "onsite only", "4 days in office", "4 days a week in the office",
     "4 days on-site", "4 days onsite", "fully on-site", "fully onsite"
   ];
+  const hardOnsiteRegex = /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i;
   for (const kw of hardOnsiteKw) {
-    if (d.includes(kw)) {
+    if (d.includes(kw) || hardOnsiteRegex.test(d)) {
       const isPhysicalLab = t.includes("laboratory") || d.includes("physical laboratory") || d.includes("wet lab");
       if (!isPhysicalLab) {
         return makeReject(["GATE_HIGH_OFFICE_DAYS"], findEvidence(d, [kw]), { office_days_min: 4, office_days_max: 5 });
@@ -203,6 +205,7 @@ export function applyGlobalGates(job: RawJob): GateResult {
     "office to be evaluated", "partner discussions"
   ];
   const knowsOfficeDays = hardOnsiteKw.some(k => d.includes(k))
+    || hardOnsiteRegex.test(d)
     || /\b[1-5]\s*(?:day|days)\s*(?:per week|a week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i.test(d)
     || d.includes("hybrid") || d.includes("remote-first") || d.includes("fully remote") || d.includes("work from home");
 
@@ -215,7 +218,10 @@ export function applyGlobalGates(job: RawJob): GateResult {
   }
 
   // ── 3. Geographic restrictions ──
-  const locationKw = ["us only", "us-only", "united states only", "canada only", "eu only", "eu-only", "uk only", "uk-only", "remote - us"];
+  const locationKw = [
+    "us only", "us-only", "united states only", "canada only", "eu only", "eu-only", "uk only", "uk-only", "remote - us",
+    "australia only", "australian work rights", "melbourne", "sydney"
+  ];
   for (const kw of locationKw) {
     if (d.includes(kw)) {
       return makeReject(["GATE_LOCATION_RESTRICTED"], findEvidence(d, [kw]), { location_restriction: kw.toUpperCase() });
