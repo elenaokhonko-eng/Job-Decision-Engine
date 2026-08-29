@@ -174,9 +174,6 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
   // ── Stage 4: Budgeting ─────────────────────────────────────────────────────
 
   it("Stage 4 — budgeter queues top 3/lane and defers overflow", async () => {
-    // Stage pre-conditions: update LANE_ROUTED to SEMANTIC_SHORTLISTED for budgeting
-    await q("UPDATE canonical_jobs SET processing_status = 'SEMANTIC_SHORTLISTED' WHERE processing_status = 'LANE_ROUTED'");
-
     const { runEvaluationBudgeter } = await import("../../pipeline/evaluationBudgeter.js");
     await runEvaluationBudgeter();
 

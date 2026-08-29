@@ -3,21 +3,27 @@ import { RawJobObservation } from "./types.js";
 import pg from "pg";
 import crypto from "crypto";
 import dotenv from "dotenv";
+import { pgSslConfig } from "../db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const pool = new pg.Pool({
+const defaultPool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
+  ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
 export class SourceBroker {
   private sourceRunId: string | null = null;
   private stats = { fetched: 0, new: 0, duplicates: 0, errors: 0 };
+  private executor: pg.Pool | pg.PoolClient;
+
+  constructor(clientOrPool?: pg.Pool | pg.PoolClient) {
+    this.executor = clientOrPool || defaultPool;
+  }
 
   async startRun(status: string = "RUNNING"): Promise<string> {
-    const result = await pool.query(
+    const result = await this.executor.query(
       `INSERT INTO source_runs (status) VALUES ($1) RETURNING id`,
       [status]
     );
@@ -26,7 +32,10 @@ export class SourceBroker {
     return this.sourceRunId as string;
   }
 
-  async processObservation(obs: Omit<RawJobObservation, "sourceRunId" | "rawPayloadHash">, rawPayload: any): Promise<void> {
+  async processObservation(
+    obs: Omit<RawJobObservation, "sourceRunId" | "rawPayloadHash">,
+    rawPayload: any
+  ): Promise<void> {
     if (!this.sourceRunId) {
       throw new Error("Must start a source run before processing observations.");
     }
@@ -37,17 +46,15 @@ export class SourceBroker {
     const rawPayloadHash = crypto.createHash("sha256").update(payloadStr).digest("hex");
 
     try {
-      // Basic exact-duplicate check for this source external ID in this run context (or overall)
-      // Actually, we should just insert to the raw_job_observations table. It's append-only staging.
-      
-      await pool.query(
+      await this.executor.query(
         `INSERT INTO raw_job_observations (
           source_run_id, source_name, source_external_id, source_url, 
           retrieved_at, company_name, title, description_raw, 
           location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
           canonical_apply_url, source_lane, search_plan_version, 
           raw_payload, raw_payload_hash
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        ON CONFLICT (raw_payload_hash) DO NOTHING`,
         [
           this.sourceRunId,
           obs.sourceName,
@@ -80,7 +87,7 @@ export class SourceBroker {
   async endRun(status: string = "COMPLETED"): Promise<void> {
     if (!this.sourceRunId) return;
     
-    await pool.query(
+    await this.executor.query(
       `UPDATE source_runs 
        SET completed_at = NOW(), status = $1, total_fetched = $2, total_new = $3, total_duplicates = $4, total_errors = $5
        WHERE id = $6`,

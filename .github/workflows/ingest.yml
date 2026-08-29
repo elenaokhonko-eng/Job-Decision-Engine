@@ -48,54 +48,14 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: npx tsx scripts/parse_emails.ts
 
-      # ── Source 2: Greenhouse ATS adapter ─────────────────────────────────────
+      # ── Source 2: Unified ATS & Job Board Adapters (Greenhouse, Ashby, Lever, Himalayas) ──
 
-      - name: Run Greenhouse ATS Adapter
+      - name: Run Unified ATS & Job Board Adapters
         continue-on-error: true  # adapter failure never aborts the pipeline (invariant 1)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: npx tsx scripts/ingest_ashbyhq.ts --source greenhouse 2>&1 | head -200
-
-      # ── Source 3: Ashby ATS adapter ───────────────────────────────────────────
-
-      - name: Run Ashby ATS Adapter
-        continue-on-error: true
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: npx tsx scripts/ingest_ashbyhq.ts 2>&1 | head -200
-
-      # ── Source 4: Lever ATS adapter ───────────────────────────────────────────
-
-      - name: Run Lever ATS Adapter
-        continue-on-error: true
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          cat << 'EOF' > /tmp/run_lever.ts
-          import '../../scripts/ingest_65labs.ts';
-          EOF
-          npx tsx scripts/ingest_65labs.ts 2>&1 | head -200
-
-      # ── Source 5: Himalayas job board ─────────────────────────────────────────
-
-      - name: Run Himalayas Discovery Scout
-        continue-on-error: true
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          # Himalayas uses the ingest_65labs flow for now; dedicated adapter wired in next sprint
-          echo "Himalayas scout: placeholder — wired via discovery scouts below"
-
-      # ── Source 6: Discovery Scouts (multi-board) ─────────────────────────────
-
-      - name: Run Discovery Scouts (Himalayas, startup.jobs, etc.)
-        continue-on-error: true
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: npx tsx src/ingestion/scouts/discoveryScouts.ts 2>&1 | head -400
+        run: npx tsx scripts/run_adapters.ts
 
       # ── Pipeline stages ───────────────────────────────────────────────────────
 

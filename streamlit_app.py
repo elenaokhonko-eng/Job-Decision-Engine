@@ -559,179 +559,48 @@ st.sidebar.info("""
 * **Weekly LinkedIn Auto-Sync**: Runs every **Sunday at 10:00 AM SGT** (02:00 UTC) via GitHub Actions.
 """)
 
-st.sidebar.subheader("⚡ Unscheduled Action Controls")
+st.sidebar.subheader("⚡ Pipeline Action Controls")
 
 is_local = os.path.exists(".env.local")
 github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_PAT")
 
-# Button 1: Ingest Gmail Alerts Only
-if st.sidebar.button("📨 1. Ingest Gmail Alerts Only", help="Connects to Gmail, fetches unread alerts from 'Jobs-Alerts', stages them in Postgres, and moves them to 'Jobs-Alerts-Processed'."):
+# Button 1: Ingest & Process Pipeline (GitHub Actions or Local)
+if st.sidebar.button("⚡ Run Job Discovery & Evaluation Pipeline", help="Runs the full pipeline: Ingest Gmail & ATS adapters, Normalize, Hard Gate, Semantic Lane Route, Budget, and AI Evaluate."):
     if not is_local and not github_token:
         st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
     else:
         if github_token:
-            with st.spinner("Triggering GitHub Actions 1_gmail_ingestion workflow..."):
+            with st.spinner("Triggering GitHub Actions ingest.yml workflow..."):
                 try:
                     req = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
+                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/ingest.yml/dispatches",
                         data=json.dumps({"ref": "main"}).encode("utf-8"),
                         headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
                         method="POST"
                     )
                     with urllib.request.urlopen(req) as resp:
                         if resp.status in (204, 200, 201):
-                            st.success("🐙 Triggered GitHub Actions 1_gmail_ingestion workflow!")
-                except Exception as gh_err:
-                    st.error(f"GitHub Trigger Error: {gh_err}")
-        else:
-            with st.spinner("Connecting to Gmail IMAP and ingesting raw email alerts..."):
-                try:
-                    st.info("Fetching new emails from 'Jobs-Alerts' folder...")
-                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    if ingest_proc.returncode == 0:
-                        st.success("✅ Gmail alert ingestion completed successfully!")
-                        st.code(ingest_proc.stdout, language="text")
-                    else:
-                        st.warning(f"Ingestion Output: {ingest_proc.stdout or ingest_proc.stderr}")
-                except Exception as e:
-                    st.error(f"Ingestion Error: {e}")
-        st.rerun()
-
-# Button 1.5: Ingest 65labs Jobs Only
-if st.sidebar.button("🌐 1.5 Ingest 65labs Jobs", help="Connects to 65labs.org/jobs, fetches curated AI roles, stages them in Postgres, and runs deduplication."):
-    if not is_local and not github_token:
-        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
-    else:
-        if github_token:
-            with st.spinner("Triggering GitHub Actions 3_65labs_ingestion workflow..."):
-                try:
-                    req = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/3_65labs_ingestion.yml/dispatches",
-                        data=json.dumps({"ref": "main"}).encode("utf-8"),
-                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(req) as resp:
-                        if resp.status in (204, 200, 201):
-                            st.success("🐙 Triggered GitHub Actions 3_65labs_ingestion workflow!")
-                except Exception as gh_err:
-                    st.error(f"GitHub Trigger Error: {gh_err}")
-        else:
-            with st.spinner("Ingesting 65labs jobs locally..."):
-                try:
-                    st.info("Fetching jobs from 65labs.org/jobs...")
-                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_65labs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    if ingest_proc.returncode == 0:
-                        st.success("✅ 65labs job ingestion completed successfully!")
-                        st.code(ingest_proc.stdout, language="text")
-                    else:
-                        st.warning(f"Ingestion Output: {ingest_proc.stdout or ingest_proc.stderr}")
-                except Exception as e:
-                    st.error(f"Ingestion Error: {e}")
-        st.rerun()
-
-# Button 1.6: Ingest AshbyHQ Jobs Only
-if st.sidebar.button("🌐 1.6 Ingest AshbyHQ (Protege) Jobs", help="Connects to Protege's AshbyHQ board, fetches roles, stages them in Postgres, and runs deduplication."):
-    if not is_local and not github_token:
-        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
-    else:
-        if github_token:
-            with st.spinner("Triggering GitHub Actions 4_ashbyhq_ingestion workflow..."):
-                try:
-                    req = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/4_ashbyhq_ingestion.yml/dispatches",
-                        data=json.dumps({"ref": "main"}).encode("utf-8"),
-                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(req) as resp:
-                        if resp.status in (204, 200, 201):
-                            st.success("🐙 Triggered GitHub Actions 4_ashbyhq_ingestion workflow!")
-                except Exception as gh_err:
-                    st.error(f"GitHub Trigger Error: {gh_err}")
-        else:
-            with st.spinner("Ingesting AshbyHQ jobs locally..."):
-                try:
-                    st.info("Fetching jobs from jobs.ashbyhq.com/protege...")
-                    ingest_proc = subprocess.run(["npx", "tsx", "scripts/ingest_ashbyhq.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    if ingest_proc.returncode == 0:
-                        st.success("✅ AshbyHQ job ingestion completed successfully!")
-                        st.code(ingest_proc.stdout, language="text")
-                    else:
-                        st.warning(f"Ingestion Output: {ingest_proc.stdout or ingest_proc.stderr}")
-                except Exception as e:
-                    st.error(f"Ingestion Error: {e}")
-        st.rerun()
-
-# Button 2: Run LLM Evaluation & Processing Only
-if st.sidebar.button("🧠 2. Run LLM Evaluation & Processing", help="Parses staged email alerts, extracts job URLs, evaluates jobs with LLM (Gemini or OpenAI as failover), updates final Postgres tables, and ranks Top 10."):
-    if not is_local and not github_token:
-        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
-    else:
-        if github_token:
-            with st.spinner("Triggering GitHub Actions evaluation workflow..."):
-                try:
-                    req = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_ai_evaluation.yml/dispatches",
-                        data=json.dumps({"ref": "main"}).encode("utf-8"),
-                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(req) as resp:
-                        if resp.status in (204, 200, 201):
-                            st.success("🐙 Triggered GitHub Actions evaluation workflow!")
+                            st.success("🐙 Triggered GitHub Actions Job Discovery Ingestion (ingest.yml) workflow!")
                             st.balloons()
                 except Exception as gh_err:
                     st.error(f"GitHub Trigger Error: {gh_err}")
         else:
-            with st.spinner("Staging jobs and running LLM evaluation engine..."):
+            with st.spinner("Running full pipeline locally..."):
                 try:
-                    st.info("Executing LLM job description evaluation pipeline...")
-                    eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    if eval_proc.returncode == 0:
-                        st.success("✅ LLM evaluation completed successfully!")
-                        st.code(eval_proc.stdout, language="text")
-                    else:
-                        st.info(f"Evaluation Details:\n{eval_proc.stdout}")
-                except Exception as e:
-                    st.error(f"Evaluation Error: {e}")
-        st.rerun()
-
-# Button 3: Run Full Pipeline
-if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Gmail Ingestion followed by AI Evaluation sequentially."):
-    if not is_local and not github_token:
-        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
-    else:
-        if github_token:
-            with st.spinner("Triggering full pipeline via GitHub Actions workflows..."):
-                try:
-                    req1 = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/1_gmail_ingestion.yml/dispatches",
-                        data=json.dumps({"ref": "main"}).encode("utf-8"),
-                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
-                        method="POST"
-                    )
-                    req2 = urllib.request.Request(
-                        "https://api.github.com/repos/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/2_ai_evaluation.yml/dispatches",
-                        data=json.dumps({"ref": "main"}).encode("utf-8"),
-                        headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github.v3+json", "User-Agent": "StreamlitConsole"},
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(req1) as resp1:
-                        pass
-                    with urllib.request.urlopen(req2) as resp2:
-                        pass
-                    st.success("🐙 Triggered full pipeline workflows on GitHub Actions!")
-                except Exception as gh_err:
-                    st.error(f"GitHub Trigger Error: {gh_err}")
-        else:
-            with st.spinner("Running full pipeline (Ingestion + AI Evaluation) locally..."):
-                try:
-                    st.info("Step 1/2: Fetching emails from Gmail 'Jobs-Alerts'...")
+                    st.info("Step 1/4: Ingesting Gmail alerts...")
                     subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], env=os.environ, shell=True)
                     
-                    st.info("Step 2/2: Running AI evaluation pipeline...")
-                    eval_proc = subprocess.run(["npx", "tsx", "scripts/evaluate_jobs.ts"], capture_output=True, text=True, env=os.environ, shell=True)
+                    st.info("Step 2/4: Polling ATS & Job Board adapters...")
+                    subprocess.run(["npx", "tsx", "scripts/run_adapters.ts"], env=os.environ, shell=True)
+                    
+                    st.info("Step 3/4: Parsing email alerts & staging observations...")
+                    subprocess.run(["npx", "tsx", "scripts/parse_emails.ts"], env=os.environ, shell=True)
+
+                    st.info("Step 4/4: Running Discovery Pipeline (Normalize, Gate, Route, Budget)...")
+                    subprocess.run(["npx", "tsx", "scripts/process_pipeline.ts"], env=os.environ, shell=True)
+
+                    st.info("Step 5/5: Running AI Evaluation Queue Processor...")
+                    subprocess.run(["npx", "tsx", "scripts/evaluate_queue.ts"], env=os.environ, shell=True)
                     st.success("✅ Full pipeline execution finished!")
                     st.balloons()
                 except Exception as e:
@@ -741,11 +610,15 @@ if st.sidebar.button("⚡ Run Full Pipeline (Both)", help="Runs Gmail Ingestion 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔍 Filter Listings")
 search_query = st.sidebar.text_input("Keyword Search", "")
-board_filter = st.sidebar.selectbox("Filter Board Source", ["All Sources", "LinkedIn", "MyCareersFuture", "eFinancialCareers", "Gmail"])
-track_filter = st.sidebar.selectbox("Filter Engine Track", ["All Tracks", "Track A - Finance/AI", "Track B - Pharma/Research", "Neither", "Unassigned"])
+lane_filter = st.sidebar.selectbox("Filter Target Lane", ["All Lanes", "CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", "UNCLASSIFIED"])
+status_filter = st.sidebar.selectbox("Filter Pipeline Status", ["All Statuses", "AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION", "DEFERRED_BUDGET", "ROUTING_DEFERRED"])
 
 # Apply filters
 filtered_jobs = jobs_list
+if lane_filter and lane_filter != "All Lanes":
+    filtered_jobs = [j for j in filtered_jobs if j.get("assigned_track") == lane_filter]
+if status_filter and status_filter != "All Statuses":
+    filtered_jobs = [j for j in filtered_jobs if j.get("status") == status_filter]
 if search_query:
     filtered_jobs = [j for j in filtered_jobs if search_query.lower() in (j.get("title") or "").lower() or search_query.lower() in (j.get("company") or "").lower() or search_query.lower() in (j.get("description") or "").lower()]
 if board_filter != "All Sources":

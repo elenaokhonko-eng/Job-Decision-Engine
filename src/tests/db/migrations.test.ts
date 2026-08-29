@@ -88,7 +88,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     await realPool.end();
   });
 
-  it("all four migration files are recorded in schema_migrations", async () => {
+  it("all migration files are recorded in schema_migrations", async () => {
     const { rows } = await realPool.query(
       `SELECT version FROM schema_migrations ORDER BY version ASC`
     );
@@ -97,6 +97,8 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("002_stage0_discovery.sql");
     expect(versions).toContain("003_canonical_schema_hardening.sql");
     expect(versions).toContain("004_queue_backoff_and_gmail_uid.sql");
+    expect(versions).toContain("005_streamlit_read_model.sql");
+    expect(versions).toContain("006_schema_hardening_v2.sql");
   });
 
   it("canonical_jobs table has all required columns from migrations 001–004", async () => {

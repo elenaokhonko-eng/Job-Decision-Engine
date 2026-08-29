@@ -191,25 +191,23 @@ export function applyGlobalGates(job: RawJob): GateResult {
   const hardOnsiteRegex = /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i;
   for (const kw of hardOnsiteKw) {
     if (d.includes(kw) || hardOnsiteRegex.test(d)) {
-      const isPhysicalLab = t.includes("laboratory") || d.includes("physical laboratory") || d.includes("wet lab");
-      if (!isPhysicalLab) {
-        return makeReject(["GATE_HIGH_OFFICE_DAYS"], findEvidence(d, [kw]), { office_days_min: 4, office_days_max: 5 });
-      }
+      return makeReject(["GATE_HIGH_OFFICE_DAYS"], findEvidence(d, [kw]), { office_days_min: 4, office_days_max: 5 });
     }
   }
 
-  // Office days NEEDS_VERIFICATION: description mentions office days but count is ambiguous
+  // Office days NEEDS_VERIFICATION: description mentions office days or workplace expectations without explicit day counts
   const ambiguousOfficeKw = [
     "office based", "office-based", "in-office", "in office",
     "office expectations", "workplace arrangement", "workplace expectations",
-    "office to be evaluated", "partner discussions"
+    "office to be evaluated", "partner discussions", "location flexible", "location tbd"
   ];
-  const knowsOfficeDays = hardOnsiteKw.some(k => d.includes(k))
+  const hasExplicitDays = hardOnsiteKw.some(k => d.includes(k))
     || hardOnsiteRegex.test(d)
     || /\b[1-5]\s*(?:day|days)\s*(?:per week|a week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i.test(d)
-    || d.includes("hybrid") || d.includes("remote-first") || d.includes("fully remote") || d.includes("work from home");
+    || d.includes("1 day/week") || d.includes("2 days/week") || d.includes("3 days/week")
+    || d.includes("remote-first") || d.includes("fully remote") || d.includes("work from home");
 
-  if (!knowsOfficeDays && ambiguousOfficeKw.some(k => d.includes(k))) {
+  if (!hasExplicitDays && ambiguousOfficeKw.some(k => d.includes(k))) {
     return makeVerification(
       ["NEEDS_VERIFICATION_OFFICE_DAYS"],
       findEvidence(d, ambiguousOfficeKw.filter(k => d.includes(k))),

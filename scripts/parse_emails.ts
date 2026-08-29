@@ -91,6 +91,9 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
 
       // Stage ALL jobs in a single transaction; roll back if ANY fail
       await dbClient.query("BEGIN");
+      const emailBroker = new SourceBroker(dbClient);
+      (emailBroker as any).sourceRunId = (broker as any).sourceRunId;
+
       try {
         for (const rawJob of rawJobs) {
           const validated = ExtractedJobSchema.safeParse({
@@ -114,8 +117,8 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
           }
 
           const job = validated.data;
-          // processObservation now throws on DB failure — caught by outer try/catch → ROLLBACK
-          await broker.processObservation(
+          // processObservation now executes on dbClient — rolled back if transaction fails
+          await emailBroker.processObservation(
             {
               sourceName: "GMAIL_ALERT",
               sourceExternalId: `gmail-${email.gmail_message_id || email.id}-${job.title}`,

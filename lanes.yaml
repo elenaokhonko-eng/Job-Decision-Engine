@@ -6,7 +6,7 @@ lanes:
     title: "Core AI & Data Engineering"
     description: "Hands-on distributed AI systems, LLM infrastructure, data pipelines, MLOps, deep learning research, and technical architecture."
     threshold: 0.35
-    semantic_threshold: 0.68
+    semantic_threshold: 0.38
     ai_evaluation_limit: 3
     enabled_sources:
       - greenhouse
@@ -58,7 +58,7 @@ lanes:
     title: "Legal Technology & Regulatory Tech"
     description: "Legal AI agents, automated contract analytics, regulatory compliance platforms, legal tech transformation, and governance systems."
     threshold: 0.30
-    semantic_threshold: 0.68
+    semantic_threshold: 0.35
     ai_evaluation_limit: 3
     enabled_sources:
       - greenhouse
@@ -106,7 +106,7 @@ lanes:
     title: "HealthTech, Biotech & Life Sciences"
     description: "Computational biology, genomics foundation models, drug discovery AI pipelines, clinical trial analytics, and healthcare data systems."
     threshold: 0.30
-    semantic_threshold: 0.68
+    semantic_threshold: 0.35
     ai_evaluation_limit: 3
     enabled_sources:
       - greenhouse
@@ -155,7 +155,7 @@ lanes:
     title: "Investment Systems & Financial Technology"
     description: "Quantitative trading architecture, market data infrastructure, asset management systems, fintech trading platforms, risk analytics."
     threshold: 0.30
-    semantic_threshold: 0.68
+    semantic_threshold: 0.35
     ai_evaluation_limit: 3
     enabled_sources:
       - greenhouse
@@ -215,4 +215,4 @@ lanes:
 unclassified_policy:
   label: "UNCLASSIFIED"
   fallback_behavior: "DEFER_ROUTING"
-  min_similarity_floor: 0.20
+  min_similarity_floor: 0.25

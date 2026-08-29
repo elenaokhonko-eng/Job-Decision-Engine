@@ -224,13 +224,22 @@ ${coverLetterSchema}`;
       process.exit(1);
     }
 
-    // Validate required top-level fields per the schema
-    const required = ["opening_paragraph", "body_paragraphs", "closing_paragraph"];
+    // Validate required fields per cover_letter_schema.json
+    if (!finalCl.cover_letter) {
+      console.error("❌ ERROR: Cover letter JSON missing top-level 'cover_letter' object.");
+      process.exit(1);
+    }
+    const cl = finalCl.cover_letter;
+    const required = ["recipient_name", "opening_hook", "body_paragraphs", "closing_statement"];
     for (const field of required) {
-      if (!finalCl[field]) {
+      if (!cl[field]) {
         console.error(`❌ ERROR: Cover letter JSON missing required field: '${field}'`);
         process.exit(1);
       }
+    }
+    if (!Array.isArray(cl.body_paragraphs) || cl.body_paragraphs.length === 0) {
+      console.error("❌ ERROR: 'body_paragraphs' must be a non-empty array of strings.");
+      process.exit(1);
     }
 
     console.log("✅ Cover letter draft validated.");

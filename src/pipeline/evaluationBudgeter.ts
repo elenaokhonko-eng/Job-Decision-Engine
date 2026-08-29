@@ -16,10 +16,10 @@ const MAX_PER_LANE = 3;
 export async function runEvaluationBudgeter(): Promise<{ queued: number; deferred: number }> {
   console.log("Starting Evaluation Budgeter...");
 
-  // Select jobs that are either newly shortlisted or were deferred in prior runs
+  // Select jobs that are either newly lane-routed or were deferred in prior runs
   const query = `
     SELECT * FROM canonical_jobs 
-    WHERE processing_status IN ('SEMANTIC_SHORTLISTED', 'DEFERRED_BUDGET')
+    WHERE processing_status IN ('LANE_ROUTED', 'SEMANTIC_SHORTLISTED', 'DEFERRED_BUDGET')
       AND primary_lane IS NOT NULL
       AND primary_lane != 'UNCLASSIFIED'
   `;
