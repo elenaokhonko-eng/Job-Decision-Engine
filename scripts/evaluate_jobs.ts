@@ -5,7 +5,7 @@ import { extractWithFallback } from "../src/services/llmFallback.ts";
 import { db, verifyUrlLive } from "../src/db/db.ts";
 import { applyGlobalGates, generateContentHash, LANE_VOCABULARIES, MULTI_LANE_SCORECARDS } from "../src/services/criteria.ts";
 import { runDeduplication } from "./deduplicate.ts";
-import puppeteer from "puppeteer";
+import puppeteer, { Browser } from "puppeteer";
 
 const jobsExtractSchema = {
   type: "object",
@@ -59,7 +59,7 @@ pool.on("error", (err) => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function scrapeJobDescription(url: string, browser: puppeteer.Browser): Promise<{ description: string; isExpired: boolean }> {
+async function scrapeJobDescription(url: string, browser: Browser): Promise<{ description: string; isExpired: boolean }> {
   const page = await browser.newPage();
   try {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");

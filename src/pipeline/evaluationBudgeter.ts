@@ -1,12 +1,14 @@
 import pg from "pg";
 import dotenv from "dotenv";
 
+import { pgSslConfig } from "../db/pgSsl.js";
+
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
+  ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
 const MAX_PER_LANE = 3;
@@ -92,3 +94,5 @@ export async function runEvaluationBudgeter(): Promise<{ queued: number; deferre
   console.log(`Evaluation Budgeter complete. Queued: ${queuedCount}, Deferred: ${deferredCount}`);
   return { queued: queuedCount, deferred: deferredCount };
 }
+
+export const runBudgeter = runEvaluationBudgeter;

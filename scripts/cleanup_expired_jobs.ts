@@ -1,6 +1,7 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
-import puppeteer from 'puppeteer';
+import puppeteer, { Browser } from 'puppeteer';
+import { pgSslConfig } from '../src/db/pgSsl.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -15,10 +16,10 @@ if (!databaseUrl) {
 
 const pool = new Pool({
   connectionString: databaseUrl,
-  ssl: { rejectUnauthorized: false }
+  ssl: pgSslConfig(databaseUrl)
 });
 
-async function checkExpiry(url: string, browser: puppeteer.Browser): Promise<boolean> {
+async function checkExpiry(url: string, browser: Browser): Promise<boolean> {
   const page = await browser.newPage();
   try {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");

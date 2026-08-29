@@ -1,14 +1,33 @@
 -- Migration 003: Canonical Schema Hardening, Indexes, Constraints, and Read Model View
 
 -- 1. Ensure all columns exist on canonical_jobs (additive)
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS company_name TEXT;
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS normalized_title TEXT;
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS canonical_url TEXT;
 ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS location_summary TEXT DEFAULT 'Unknown';
 ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS workplace_type VARCHAR(50) DEFAULT 'UNKNOWN';
 ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS employment_type VARCHAR(50) DEFAULT 'UNKNOWN';
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS processing_status VARCHAR(50) DEFAULT 'RAW_STAGED';
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS gate_decision VARCHAR(50);
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS primary_lane VARCHAR(50);
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS secondary_lanes JSONB;
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS lane_confidence VARCHAR(50);
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS lane_evidence TEXT;
+ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS semantic_score FLOAT DEFAULT 0.0;
 ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS version_count INT DEFAULT 1;
 ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS latest_job_version_id UUID;
 ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
--- 2. Ensure all columns exist on evaluation_queue
+-- 2. Ensure all columns exist on raw_job_observations (additive)
+ALTER TABLE raw_job_observations ADD COLUMN IF NOT EXISTS processing_status VARCHAR(50) DEFAULT 'PENDING';
+ALTER TABLE raw_job_observations ADD COLUMN IF NOT EXISTS raw_payload_hash VARCHAR(255);
+ALTER TABLE raw_job_observations ADD COLUMN IF NOT EXISTS raw_payload JSONB;
+ALTER TABLE raw_job_observations ADD COLUMN IF NOT EXISTS error_history JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE raw_job_observations ADD COLUMN IF NOT EXISTS source_lane VARCHAR(50);
+ALTER TABLE raw_job_observations ADD COLUMN IF NOT EXISTS search_plan_version VARCHAR(50) DEFAULT '1.0';
+
+-- 3. Ensure all columns exist on evaluation_queue
 ALTER TABLE evaluation_queue ADD COLUMN IF NOT EXISTS job_version_id VARCHAR(50) DEFAULT 'v1';
 ALTER TABLE evaluation_queue ADD COLUMN IF NOT EXISTS lease_id UUID;
 ALTER TABLE evaluation_queue ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
@@ -18,7 +37,7 @@ ALTER TABLE evaluation_queue ADD COLUMN IF NOT EXISTS last_error TEXT;
 ALTER TABLE evaluation_queue ADD COLUMN IF NOT EXISTS enqueued_at TIMESTAMPTZ DEFAULT NOW();
 ALTER TABLE evaluation_queue ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
--- 3. Ensure all columns exist on ai_evaluations
+-- 4. Ensure all columns exist on ai_evaluations
 ALTER TABLE ai_evaluations ADD COLUMN IF NOT EXISTS provider VARCHAR(50) DEFAULT 'gemini';
 ALTER TABLE ai_evaluations ADD COLUMN IF NOT EXISTS model VARCHAR(100) DEFAULT 'gemini-1.5-flash';
 ALTER TABLE ai_evaluations ADD COLUMN IF NOT EXISTS attempt INT DEFAULT 1;
@@ -27,7 +46,7 @@ ALTER TABLE ai_evaluations ADD COLUMN IF NOT EXISTS degraded_state BOOLEAN DEFAU
 ALTER TABLE ai_evaluations ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(10, 6) DEFAULT 0.000000;
 ALTER TABLE ai_evaluations ADD COLUMN IF NOT EXISTS full_evaluation_payload JSONB;
 
--- 4. Create performant indexes
+-- 5. Create performant indexes
 CREATE INDEX IF NOT EXISTS idx_canonical_jobs_status ON canonical_jobs(processing_status);
 CREATE INDEX IF NOT EXISTS idx_canonical_jobs_company_title ON canonical_jobs(company_name, normalized_title);
 CREATE INDEX IF NOT EXISTS idx_eval_queue_status_lane ON evaluation_queue(status, lane, priority_score DESC);

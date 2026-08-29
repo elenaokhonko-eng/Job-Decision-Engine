@@ -1,4 +1,4 @@
-import puppeteer from "puppeteer";
+import puppeteer, { Page } from "puppeteer";
 import pg from "pg";
 import dotenv from "dotenv";
 import { runDeduplication } from "./deduplicate.ts";
@@ -257,7 +257,7 @@ async function syncLinkedInSavedJobs() {
   }
 }
 
-async function unsaveCurrentJob(page: puppeteer.Page): Promise<boolean> {
+async function unsaveCurrentJob(page: Page): Promise<boolean> {
   // Wait for the button to appear in the DOM
   try {
     await page.waitForFunction(() => {

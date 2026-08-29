@@ -56,7 +56,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     await q(`SET search_path TO ${SCHEMA}`);
 
     // Apply all migrations into this schema
-    await runMigrations(DB_URL);
+    await runMigrations(pool);
   });
 
   afterAll(async () => {

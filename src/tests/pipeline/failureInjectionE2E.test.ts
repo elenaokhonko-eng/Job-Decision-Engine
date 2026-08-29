@@ -50,7 +50,7 @@ async function insertQueueItem(id: string, canonicalJobId: string, status: strin
 describe.skipIf(skipReal)("P0-10: Real Failure-Injection E2E (PostgreSQL)", () => {
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DB_URL });
-    await runMigrations(DB_URL);
+    await runMigrations(pool);
   });
 
   afterAll(async () => {
