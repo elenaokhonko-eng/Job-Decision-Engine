@@ -2,7 +2,7 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TABLE IF NOT EXISTS companies (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT UNIQUE NOT NULL,
     industry VARCHAR(100),
     website_url TEXT,
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS companies (
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     content_hash TEXT UNIQUE,
     company_name TEXT NOT NULL,
     company_id UUID REFERENCES companies(id) ON DELETE SET NULL,
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 
 CREATE TABLE IF NOT EXISTS raw_companies (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT UNIQUE NOT NULL,
     industry VARCHAR(100),
     website_url TEXT,
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS raw_companies (
 );
 
 CREATE TABLE IF NOT EXISTS raw_jobs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     content_hash TEXT UNIQUE,
     company_name TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS raw_jobs (
 );
 
 CREATE TABLE IF NOT EXISTS agent_audit_logs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_prompt TEXT NOT NULL,
     tools_used JSONB NOT NULL,
     agent_response JSONB NOT NULL,
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS agent_audit_logs (
 );
 
 CREATE TABLE IF NOT EXISTS agent_tool_logs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     interaction_id VARCHAR(100) NOT NULL,
     tool_name VARCHAR(100) NOT NULL,
     arguments JSONB,
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS agent_tool_logs (
 );
 
 CREATE TABLE IF NOT EXISTS interactions_log (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_email VARCHAR(255),
     question TEXT NOT NULL,
     tools_used VARCHAR(255)[],
@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS interactions_log (
 );
 
 CREATE TABLE IF NOT EXISTS raw_email_alerts (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     subject VARCHAR(512),
     body TEXT,
     received_at TIMESTAMPTZ DEFAULT NOW(),

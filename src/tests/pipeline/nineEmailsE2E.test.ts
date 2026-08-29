@@ -53,7 +53,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     // Create isolated schema
     await q(`CREATE SCHEMA IF NOT EXISTS ${SCHEMA}`);
-    await q(`SET search_path TO ${SCHEMA}`);
+    await q(`SET search_path TO ${SCHEMA}, public`);
 
     // Apply all migrations into this schema
     await runMigrations(pool);

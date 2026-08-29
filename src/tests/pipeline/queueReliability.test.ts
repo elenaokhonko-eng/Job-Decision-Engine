@@ -75,17 +75,20 @@ async function count(table: string, where: string): Promise<number> {
 }
 
 describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => {
-  const JOB_ID  = "rl-job-001";
-  const JOB_ID2 = "rl-job-002";
-  const JOB_ID3 = "rl-job-003";
+  const JOB_ID  = "30000000-0000-0000-0000-000000000001";
+  const JOB_ID2 = "30000000-0000-0000-0000-000000000002";
+  const JOB_ID3 = "30000000-0000-0000-0000-000000000003";
+  const Q_ID_1  = "40000000-0000-0000-0000-000000000001";
+  const Q_ID_2  = "40000000-0000-0000-0000-000000000002";
+  const Q_ID_3  = "40000000-0000-0000-0000-000000000003";
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DB_URL });
     await runMigrations(pool);
 
     // Clean up any prior test data
-    await q(`DELETE FROM evaluation_queue WHERE id IN ('rl-q-001','rl-q-002','rl-q-003')`);
-    await q(`DELETE FROM canonical_jobs WHERE id IN ($1,$2,$3)`, [JOB_ID, JOB_ID2, JOB_ID3]);
+    await q(`DELETE FROM evaluation_queue WHERE id IN ($1, $2, $3)`, [Q_ID_1, Q_ID_2, Q_ID_3]);
+    await q(`DELETE FROM canonical_jobs WHERE id IN ($1, $2, $3)`, [JOB_ID, JOB_ID2, JOB_ID3]);
 
     // Seed canonical jobs for queue tests
     for (const [id, title] of [[JOB_ID,"AI Policy Lead"],[JOB_ID2,"ML Research Sci"],[JOB_ID3,"Data Strategy Lead"]]) {
@@ -99,17 +102,17 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
   });
 
   afterAll(async () => {
-    await q(`DELETE FROM evaluation_queue WHERE id IN ('rl-q-001','rl-q-002','rl-q-003')`);
-    await q(`DELETE FROM canonical_jobs WHERE id IN ($1,$2,$3)`, [JOB_ID, JOB_ID2, JOB_ID3]);
+    await q(`DELETE FROM evaluation_queue WHERE id IN ($1, $2, $3)`, [Q_ID_1, Q_ID_2, Q_ID_3]);
+    await q(`DELETE FROM canonical_jobs WHERE id IN ($1, $2, $3)`, [JOB_ID, JOB_ID2, JOB_ID3]);
     await pool.end();
   });
 
   it("PENDING item is picked up and leased correctly", async () => {
     await q(
       `INSERT INTO evaluation_queue (id, canonical_job_id, lane, status, attempt_count, max_attempts, priority_score, available_at)
-       VALUES ('rl-q-001', $1, 'CORE_AI_DATA', 'PENDING', 0, 3, 0.8, NOW())
+       VALUES ($1, $2, 'CORE_AI_DATA', 'PENDING', 0, 3, 0.8, NOW())
        ON CONFLICT DO NOTHING`,
-      [JOB_ID]
+      [Q_ID_1, JOB_ID]
     );
 
     // Simulate the worker lease acquisition query from evaluate_queue.ts
@@ -119,11 +122,11 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
           lease_expires_at = NOW() + INTERVAL '5 minutes',
           attempt_count = attempt_count + 1,
           updated_at = NOW()
-      WHERE id = 'rl-q-001'
+      WHERE id = $1
         AND status IN ('PENDING', 'RETRY_WAIT')
         AND available_at <= NOW()
       RETURNING id, status, attempt_count
-    `);
+    `, [Q_ID_1]);
 
     expect(leaseRes.rowCount).toBe(1);
     expect(leaseRes.rows[0].status).toBe("EVALUATING");
@@ -133,30 +136,30 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
   it("EVALUATING item with expired lease is reclaimable by next worker run", async () => {
     await q(
       `INSERT INTO evaluation_queue (id, canonical_job_id, lane, status, attempt_count, max_attempts, priority_score, available_at, lease_expires_at)
-       VALUES ('rl-q-002', $1, 'CORE_AI_DATA', 'EVALUATING', 1, 3, 0.7, NOW(), NOW() - INTERVAL '10 minutes')
+       VALUES ($1, $2, 'CORE_AI_DATA', 'EVALUATING', 1, 3, 0.7, NOW(), NOW() - INTERVAL '10 minutes')
        ON CONFLICT DO NOTHING`,
-      [JOB_ID2]
+      [Q_ID_2, JOB_ID2]
     );
 
     // Stale lease query: item should be eligible for re-claim
     const eligibleCount = await count("evaluation_queue",
-      "id = 'rl-q-002' AND status = 'EVALUATING' AND lease_expires_at < NOW()");
+      `id = '${Q_ID_2}' AND status = 'EVALUATING' AND lease_expires_at < NOW()`);
     expect(eligibleCount).toBe(1);
   });
 
   it("exhausted RETRY_WAIT → NEEDS_MANUAL_REVIEW in DB, canonical job updated", async () => {
     await q(
       `INSERT INTO evaluation_queue (id, canonical_job_id, lane, status, attempt_count, max_attempts, priority_score, available_at)
-       VALUES ('rl-q-003', $1, 'CORE_AI_DATA', 'RETRY_WAIT', 3, 3, 0.6, NOW())
+       VALUES ($1, $2, 'CORE_AI_DATA', 'RETRY_WAIT', 3, 3, 0.6, NOW())
        ON CONFLICT DO NOTHING`,
-      [JOB_ID3]
+      [Q_ID_3, JOB_ID3]
     );
 
     // Simulate exhausted transition
-    await q(`UPDATE evaluation_queue SET status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = 'rl-q-003'`);
+    await q(`UPDATE evaluation_queue SET status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`, [Q_ID_3]);
     await q(`UPDATE canonical_jobs SET processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`, [JOB_ID3]);
 
-    const queueStatus = (await q(`SELECT status FROM evaluation_queue WHERE id = 'rl-q-003'`)).rows[0].status;
+    const queueStatus = (await q(`SELECT status FROM evaluation_queue WHERE id = $1`, [Q_ID_3])).rows[0].status;
     const canonStatus = (await q(`SELECT processing_status FROM canonical_jobs WHERE id = $1`, [JOB_ID3])).rows[0].processing_status;
 
     expect(queueStatus).toBe("NEEDS_MANUAL_REVIEW");
@@ -166,11 +169,11 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
 
   it("available_at backoff prevents immediate re-pickup of RETRY_WAIT item", async () => {
     // Set available_at 60 seconds in the future (backoff)
-    await q(`UPDATE evaluation_queue SET status = 'RETRY_WAIT', available_at = NOW() + INTERVAL '60 seconds', updated_at = NOW() WHERE id = 'rl-q-001'`);
+    await q(`UPDATE evaluation_queue SET status = 'RETRY_WAIT', available_at = NOW() + INTERVAL '60 seconds', updated_at = NOW() WHERE id = $1`, [Q_ID_1]);
 
     // Worker query must NOT pick up items with available_at > NOW()
     const pickupCount = await count("evaluation_queue",
-      "id = 'rl-q-001' AND status = 'RETRY_WAIT' AND available_at <= NOW()");
+      `id = '${Q_ID_1}' AND status = 'RETRY_WAIT' AND available_at <= NOW()`);
     expect(pickupCount).toBe(0);
   });
 });

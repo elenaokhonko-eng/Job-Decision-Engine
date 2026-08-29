@@ -1,6 +1,6 @@
 -- Migration 002: Stage 0 Discovery Tables
 CREATE TABLE IF NOT EXISTS source_runs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     started_at TIMESTAMPTZ DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
     status VARCHAR(50) DEFAULT 'RUNNING',
@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS source_runs (
 );
 
 CREATE TABLE IF NOT EXISTS raw_job_observations (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     source_run_id UUID REFERENCES source_runs(id),
     source_name VARCHAR(50) NOT NULL,
     source_external_id VARCHAR(255),
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS raw_job_observations (
 );
 
 CREATE TABLE IF NOT EXISTS canonical_jobs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     company_name TEXT NOT NULL,
     normalized_title TEXT NOT NULL,
     canonical_url TEXT NOT NULL,
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS canonical_jobs (
 );
 
 CREATE TABLE IF NOT EXISTS job_versions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     canonical_job_id UUID REFERENCES canonical_jobs(id) ON DELETE CASCADE,
     version_number INT DEFAULT 1,
     content_hash VARCHAR(255) NOT NULL,
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS job_versions (
 );
 
 CREATE TABLE IF NOT EXISTS evaluation_queue (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     canonical_job_id UUID REFERENCES canonical_jobs(id) ON DELETE CASCADE,
     job_version_id VARCHAR(50) DEFAULT 'v1',
     lane VARCHAR(50) NOT NULL,
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS evaluation_queue (
 );
 
 CREATE TABLE IF NOT EXISTS ai_evaluations (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     canonical_job_id UUID REFERENCES canonical_jobs(id) ON DELETE CASCADE,
     job_version_id VARCHAR(50) DEFAULT 'v1',
     gate_decision VARCHAR(50) DEFAULT 'PASS',
