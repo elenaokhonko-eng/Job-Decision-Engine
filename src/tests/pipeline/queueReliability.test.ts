@@ -11,7 +11,7 @@
  *    Insert actual queue rows, assert DB state transitions by calling
  *    the real SQL logic used in evaluate_queue.ts.
  */
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import { describe, it, expect, afterAll, beforeAll, beforeEach } from "vitest";
 import pg from "pg";
 import { runMigrations } from "../../db/migrate.js";
 
@@ -82,23 +82,25 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
   const Q_ID_2  = "40000000-0000-0000-0000-000000000002";
   const Q_ID_3  = "40000000-0000-0000-0000-000000000003";
 
-  beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DB_URL });
-    await runMigrations(pool);
-
-    // Clean up any prior test data
-    await q(`DELETE FROM evaluation_queue WHERE id IN ($1, $2, $3)`, [Q_ID_1, Q_ID_2, Q_ID_3]);
-    await q(`DELETE FROM canonical_jobs WHERE id IN ($1, $2, $3)`, [JOB_ID, JOB_ID2, JOB_ID3]);
-
-    // Seed canonical jobs for queue tests
+  const ensureSeeded = async () => {
     for (const [id, title] of [[JOB_ID,"AI Policy Lead"],[JOB_ID2,"ML Research Sci"],[JOB_ID3,"Data Strategy Lead"]]) {
       await q(
         `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane)
          VALUES ($1, 'ReliabilityTestCo', $2, 'https://test.rl', 'LANE_ROUTED', 'CORE_AI_DATA')
-         ON CONFLICT DO NOTHING`,
+         ON CONFLICT (id) DO UPDATE SET processing_status = 'LANE_ROUTED'`,
         [id, title]
       );
     }
+  };
+
+  beforeEach(async () => {
+    await ensureSeeded();
+  });
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: DB_URL });
+    await runMigrations(pool);
+    await ensureSeeded();
   });
 
   afterAll(async () => {

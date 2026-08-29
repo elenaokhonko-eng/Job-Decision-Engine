@@ -51,13 +51,14 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     // Clean tables before running E2E
     await runMigrations(pool);
-    await q("DELETE FROM evaluation_queue");
-    await q("DELETE FROM ai_evaluations");
-    await q("DELETE FROM gate_decisions");
-    await q("DELETE FROM job_versions");
-    await q("DELETE FROM canonical_jobs");
-    await q("DELETE FROM raw_job_observations");
-    await q("DELETE FROM raw_email_alerts");
+    const fixtureCompanies = [
+      "Global Cloud Tech", "Apex Legal Solutions", "BioGen Genomics",
+      "Quantum Capital Markets", "Melbourne Financial", "Matrix Corp",
+      "Stealth AI Labs", "CloudScale Data"
+    ];
+    await q("DELETE FROM canonical_jobs WHERE company_name = ANY($1)", [fixtureCompanies]);
+    await q("DELETE FROM raw_job_observations WHERE source_name = 'gmail'");
+    await q("DELETE FROM raw_email_alerts WHERE gmail_message_id LIKE 'fixture-email-%'");
 
     // Mock generateEmbedding to return deterministic vectors for offline CI runs
     vi.spyOn(agent, "generateEmbedding").mockImplementation(async (text: string) => {
