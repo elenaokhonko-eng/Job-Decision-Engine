@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
 import { generateContent } from "../src/services/agent.js";
+import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 
@@ -35,7 +36,7 @@ async function generateTailoredCV() {
 
   const pool = new pg.Pool({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
+    ssl: pgSslConfig(databaseUrl)
   });
 
   try {
@@ -71,7 +72,9 @@ async function generateTailoredCV() {
     }
     const masterProfile = JSON.parse(fs.readFileSync(profilePath, "utf8"));
 
-    const model = process.env.KIMI_API_KEY ? (process.env.KIMI_MODEL || "moonshot-v1-8k") : (process.env.GEMINI_MODEL || "gemini-3.6-flash");
+    // Model is resolved by generateContent() which tries Gemini then OpenAI automatically.
+    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+
 
     // --- STAGE 1: JOB ANALYSIS ---
     console.log("STAGE 1: Analyzing Job Description...");

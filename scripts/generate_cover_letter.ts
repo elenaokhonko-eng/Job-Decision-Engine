@@ -1,17 +1,39 @@
+/**
+ * generate_cover_letter.ts — Sprint G
+ *
+ * Generates a tailored cover letter from:
+ *  1. canonical_jobs + job_versions (job description + title + company)
+ *  2. ai_evaluations.full_evaluation_payload (lane context, ND scores)
+ *  3. ai_evaluations.lane_matches + workability_facts
+ *  4. master_profile.json (committed factual evidence ledger)
+ *
+ * Invariants:
+ *  - Provider failover: Gemini → OpenAI (via generateContent in agent.ts)
+ *  - Strict schema validation of the LLM response
+ *  - No hallucination: prompt explicitly restricts to evidence in the ledger
+ *  - Non-zero exit on any failure (AGENTS.md invariant 7)
+ *  - rejectUnauthorized:true via pgSslConfig
+ */
+
 import pg from "pg";
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
+import { fileURLToPath } from "url";
 import { generateContent } from "../src/services/agent.js";
+import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const databaseUrl = process.env.DATABASE_URL;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-function cleanJsonResponse(rawText: string) {
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function cleanJsonResponse(rawText: string): string {
   let cleaned = rawText.trim();
   if (cleaned.startsWith("```json")) {
     cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
@@ -21,111 +43,216 @@ function cleanJsonResponse(rawText: string) {
   return cleaned;
 }
 
-async function generateTailoredCoverLetter() {
+function requireEnv(name: string): string {
+  const val = process.env[name];
+  if (!val) {
+    console.error(`❌ ERROR: ${name} environment variable is missing.`);
+    process.exit(1);
+  }
+  return val;
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+async function generateTailoredCoverLetter(): Promise<void> {
   const jobId = process.argv[2];
   if (!jobId) {
     console.error("❌ ERROR: Job ID must be provided as the first argument.");
+    console.error("  Usage: npx tsx scripts/generate_cover_letter.ts <canonical_job_id>");
     process.exit(1);
   }
 
-  if (!databaseUrl) {
-    console.error("❌ ERROR: DATABASE_URL environment variable is missing.");
+  const databaseUrl = requireEnv("DATABASE_URL");
+
+  // Check at least one LLM key is present before we bother hitting the DB
+  const hasGemini = !!(process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY);
+  const hasOpenAI = !!process.env.OPENAI_API_KEY;
+  if (!hasGemini && !hasOpenAI) {
+    console.error("❌ ERROR: Neither GEMINI_API_KEY nor OPENAI_API_KEY is configured.");
     process.exit(1);
   }
 
+  // Pool declared outside try so finally can end it safely
   const pool = new pg.Pool({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
+    ssl: pgSslConfig(databaseUrl),
   });
 
   try {
+    // ── Step 1: Load job data from canonical schema ──────────────────────────
+    console.log(`📦 Loading job ${jobId} from canonical schema…`);
+
     const jobRes = await pool.query(
-      `SELECT c.normalized_title as title, c.company_name, v.description_text as raw_description, a.lane_matches, a.workability_facts
-       FROM canonical_jobs c 
-       JOIN job_versions v ON v.canonical_job_id = c.id 
-       LEFT JOIN ai_evaluations a ON a.canonical_job_id = c.id
-       WHERE c.id = $1 ORDER BY v.observed_at DESC LIMIT 1`,
+      `SELECT
+         c.id,
+         c.normalized_title   AS title,
+         c.company_name,
+         c.primary_lane,
+         c.secondary_lanes,
+         jv.description_text  AS raw_description,
+         ae.lane_matches,
+         ae.workability_facts,
+         ae.full_evaluation_payload,
+         ae.is_fallback,
+         ae.provider          AS eval_provider,
+         ae.evaluated_at
+       FROM canonical_jobs c
+       JOIN LATERAL (
+         SELECT id, description_text
+         FROM job_versions
+         WHERE canonical_job_id = c.id
+         ORDER BY observed_at DESC
+         LIMIT 1
+       ) jv ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT lane_matches, workability_facts, full_evaluation_payload, is_fallback, provider, evaluated_at
+         FROM ai_evaluations
+         WHERE canonical_job_id = c.id
+         ORDER BY evaluated_at DESC
+         LIMIT 1
+       ) ae ON TRUE
+       WHERE c.id = $1`,
       [jobId]
     );
 
     if (jobRes.rows.length === 0) {
-      console.error(`❌ ERROR: Job with ID ${jobId} not found in evaluated 'jobs' table.`);
+      console.error(`❌ ERROR: No canonical job found with ID ${jobId}.`);
       process.exit(1);
     }
 
     const job = jobRes.rows[0];
-    const jdTitle = job.title;
-    const jdCompany = job.company_name;
-    const jdDescription = job.raw_description;
-    const laneMatches = job.lane_matches;
+    const jdTitle = job.title || "Unknown Role";
+    const jdCompany = job.company_name || "Unknown Company";
+    const jdDescription = job.raw_description || "";
+    const primaryLane = job.primary_lane || "UNKNOWN";
 
-    // Load Schemas
-    const schemaDir = path.join(process.cwd(), "scripts", "schemas");
-    const coverLetterSchema = fs.readFileSync(path.join(schemaDir, "cover_letter_schema.json"), "utf8");
+    // Pull structured fields out of full_evaluation_payload if available
+    const evalPayload = job.full_evaluation_payload || {};
+    const evaluationSummary: string = evalPayload.evaluation_summary || "";
+    const ndScore: number = evalPayload.nd_score ?? evalPayload.nd_friendly_score ?? 0;
+    const recommendedCvVersion: string = evalPayload.recommended_cv_version || primaryLane;
+    const nextAction: string = evalPayload.next_action || "REVIEW";
+    const laneEvidence: string = evalPayload.lane_evidence || "";
+    const strategicValue: string = evalPayload.strategic_value || "";
 
-    // Load Master Profile
+    const laneMatches = job.lane_matches ?? [];
+    const workabilityFacts = job.workability_facts ?? {};
+
+    console.log(`✅ Job loaded: "${jdTitle}" at ${jdCompany} (${primaryLane}, ND=${ndScore})`);
+    if (job.is_fallback) {
+      console.log(`  ℹ️  AI evaluation used fallback provider: ${job.eval_provider}`);
+    }
+
+    // ── Step 2: Load master profile (evidence ledger) ────────────────────────
     const profilePath = path.join(process.cwd(), "master_profile.json");
     if (!fs.existsSync(profilePath)) {
       console.error("❌ ERROR: 'master_profile.json' not found. Run build_ledger.ts first.");
       process.exit(1);
     }
     const masterProfile = JSON.parse(fs.readFileSync(profilePath, "utf8"));
+    const profileFacts: any[] = masterProfile.profile_facts || [];
+    const contactInfo: any = masterProfile.contact || {};
 
-    const model = process.env.KIMI_API_KEY ? (process.env.KIMI_MODEL || "moonshot-v1-8k") : (process.env.GEMINI_MODEL || "gemini-3.6-flash");
+    console.log(`📋 Profile loaded: ${profileFacts.length} evidence items`);
 
-    // --- STAGE 1: DRAFT COVER LETTER ---
-    console.log("STAGE 1: Drafting Cover Letter...");
-    const clPrompt = `You are Elena Okhonko, a highly skilled professional applying for the role of ${jdTitle} at ${jdCompany}. 
-    Draft a concise, compelling cover letter (max 1 page) based on the Job Description, your verified Master Profile facts, and the AI Evaluation's lane matches.
-    Do not hallucinate any experience. Use a direct, analytical, yet enthusiastic tone.
+    // ── Step 3: Load cover letter schema ─────────────────────────────────────
+    const schemaDir = path.join(process.cwd(), "scripts", "schemas");
+    const clSchemaPath = path.join(schemaDir, "cover_letter_schema.json");
+    if (!fs.existsSync(clSchemaPath)) {
+      console.error(`❌ ERROR: cover_letter_schema.json not found at ${clSchemaPath}`);
+      process.exit(1);
+    }
+    const coverLetterSchema = fs.readFileSync(clSchemaPath, "utf8");
 
-    AI Evaluation Context:
-    Lane Matches: ${JSON.stringify(laneMatches)}
+    // ── Step 4: Build prompt ─────────────────────────────────────────────────
+    console.log("🤖 STAGE 1: Requesting AI cover letter draft…");
 
-    Job Description:
-    ${jdDescription}
+    const clPrompt = `You are an expert cover letter writer generating a cover letter for Elena Okhonko.
 
-    Candidate Profile Ledger:
-    ${JSON.stringify(masterProfile.profile_facts)}
+ROLE: ${jdTitle} at ${jdCompany}
+LANE: ${primaryLane}
+AI EVALUATION SUMMARY: ${evaluationSummary || "(not yet evaluated)"}
+ND SCORE: ${ndScore}/100
+STRATEGIC VALUE: ${strategicValue}
+LANE EVIDENCE: ${laneEvidence}
+NEXT ACTION: ${nextAction}
 
-    Return ONLY valid JSON matching this schema:
-    ${coverLetterSchema}`;
+WORKABILITY FACTS (use these to ground the letter; unknown = NEEDS_VERIFICATION):
+${JSON.stringify(workabilityFacts, null, 2)}
 
-    const clRes = await generateContent({
-      model,
+JOB DESCRIPTION:
+${jdDescription.substring(0, 4000)}
+
+EVIDENCE LEDGER (only cite facts from this list; do not invent):
+${JSON.stringify(profileFacts.slice(0, 40), null, 2)}
+
+INSTRUCTIONS:
+- Maximum 1 page (4–5 tight paragraphs)
+- Opening: name the role and company; state clear interest and fit signal
+- Body: cite 2–3 specific evidence items from the ledger that directly match the JD requirements
+- Body: briefly address the ND workability picture only if nd_score >= 75
+- Closing: clear call to action
+- NEVER invent experience, credentials, or metrics not present in the evidence ledger
+- Return ONLY valid JSON matching this exact schema:
+${coverLetterSchema}`;
+
+    const rawResponse = await generateContent({
+      model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
       contents: clPrompt,
       responseMimeType: "application/json",
-      systemInstruction: "You are an expert cover letter writer who crafts highly targeted, deterministic cover letters based purely on factual evidence."
+      systemInstruction:
+        "You are an expert cover letter writer. Return only valid JSON. Do not hallucinate evidence not in the ledger.",
     });
-    const finalCl = JSON.parse(cleanJsonResponse(clRes));
 
-    // --- STAGE 2: EXPORT ---
-    console.log("STAGE 2: Rendering documents...");
-    
-    // Create exports dir
+    // ── Step 5: Validate the response ────────────────────────────────────────
+    let finalCl: any;
+    try {
+      finalCl = JSON.parse(cleanJsonResponse(rawResponse));
+    } catch (parseErr) {
+      console.error("❌ ERROR: AI returned invalid JSON for cover letter. Aborting.");
+      console.error("Raw response:", rawResponse.substring(0, 500));
+      process.exit(1);
+    }
+
+    // Validate required top-level fields per the schema
+    const required = ["opening_paragraph", "body_paragraphs", "closing_paragraph"];
+    for (const field of required) {
+      if (!finalCl[field]) {
+        console.error(`❌ ERROR: Cover letter JSON missing required field: '${field}'`);
+        process.exit(1);
+      }
+    }
+
+    console.log("✅ Cover letter draft validated.");
+
+    // ── Step 6: Render and export ─────────────────────────────────────────────
+    console.log("📄 STAGE 2: Rendering DOCX and PDF…");
+
     const exportDir = path.join(process.cwd(), "scripts", "exports");
     if (!fs.existsSync(exportDir)) {
       fs.mkdirSync(exportDir, { recursive: true });
     }
 
-    const safeTitle = jdTitle.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 15);
-    const safeCompany = jdCompany.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 15);
+    const safeTitle = jdTitle.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 20);
+    const safeCompany = jdCompany.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 20);
     const baseFilename = `Elena_Okhonko_CL_${safeCompany}_${safeTitle}`;
-    
-    // Save JSON
-    fs.writeFileSync(path.join(exportDir, `${baseFilename}.json`), JSON.stringify(finalCl, null, 2));
-    
-    // Save DOCX
-    const docxPath = path.join(exportDir, `${baseFilename}.docx`);
-    await generateCoverLetterDocx(finalCl, docxPath, masterProfile.contact);
-    
-    // Save PDF using MS Word COM Automation
-    await generatePdf(docxPath, path.join(exportDir, `${baseFilename}.pdf`));
 
-    console.log(`✅ Cover Letter Generation Complete! Files saved to scripts/exports/:
-- ${baseFilename}.json
-- ${baseFilename}.docx
-- ${baseFilename}.pdf`);
+    // JSON
+    const jsonPath = path.join(exportDir, `${baseFilename}.json`);
+    fs.writeFileSync(jsonPath, JSON.stringify(finalCl, null, 2));
+
+    // DOCX
+    const docxPath = path.join(exportDir, `${baseFilename}.docx`);
+    await generateCoverLetterDocx(finalCl, docxPath, contactInfo);
+
+    // PDF (Word COM automation)
+    const pdfPath = path.join(exportDir, `${baseFilename}.pdf`);
+    await generatePdf(docxPath, pdfPath);
+
+    console.log(`\n✅ Cover Letter Generation Complete!
+  JSON : ${jsonPath}
+  DOCX : ${docxPath}
+  PDF  : ${pdfPath}`);
 
   } catch (error: any) {
     console.error("❌ ERROR during Cover Letter generation:", error.message || error);
