@@ -62,7 +62,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     // Mock generateEmbedding to return deterministic vectors for offline CI runs
     vi.spyOn(agent, "generateEmbedding").mockImplementation(async (text: string) => {
       const t = text.toLowerCase();
-      if (t.includes("ai systems engineer") || t.includes("pytorch") || t.includes("core ai") || t.includes("deep learning") || t.includes("llm")) {
+      if (t.includes("ai systems engineer") || t.includes("pytorch") || t.includes("core ai") || t.includes("deep learning") || t.includes("llm") || t.includes("data pipeline") || t.includes("cloudscale")) {
         return [1, 0, 0, 0];
       }
       if (t.includes("legal") || t.includes("regtech") || t.includes("compliance") || t.includes("law firm")) {

@@ -173,8 +173,8 @@ export function applyGlobalGates(job: RawJob): GateResult {
   const c = (job.company_name || "").toLowerCase();
   const d = extractDescriptionText(job);
 
-  // ── 1. Title-level junior/intern guard (deterministic, no experience-range regex) ──
-  const juniorTitleKw = ["junior", "entry level", "entry-level", "intern", "internship", "graduate trainee"];
+  // ── 1. Title-level intern/trainee guard (deterministic, no experience-range regex) ──
+  const juniorTitleKw = ["intern", "internship", "graduate trainee", "apprentice", "apprenticeship"];
   for (const kw of juniorTitleKw) {
     if (t.includes(kw)) {
       return makeReject(["GATE_EXPERIENCE_TOO_LOW"], [`Title contains: "${kw}"`]);
@@ -197,7 +197,11 @@ export function applyGlobalGates(job: RawJob): GateResult {
   }
 
   // Office days NEEDS_VERIFICATION: description mentions office days but count is ambiguous
-  const ambiguousOfficeKw = ["office based", "office-based", "in-office", "in office"];
+  const ambiguousOfficeKw = [
+    "office based", "office-based", "in-office", "in office",
+    "office expectations", "workplace arrangement", "workplace expectations",
+    "office to be evaluated", "partner discussions"
+  ];
   const knowsOfficeDays = hardOnsiteKw.some(k => d.includes(k))
     || /\b[1-5]\s*(?:day|days)\s*(?:per week|a week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i.test(d)
     || d.includes("hybrid") || d.includes("remote-first") || d.includes("fully remote") || d.includes("work from home");

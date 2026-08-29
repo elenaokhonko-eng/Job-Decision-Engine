@@ -232,7 +232,6 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
     }
   } finally {
     client.release();
-    await pool.end();
   }
 
   console.log(`Lane Routing complete. Routed: ${routedCount}, Deferred: ${deferredCount}`);
