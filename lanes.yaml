@@ -6,6 +6,26 @@ lanes:
     title: "Core AI & Data Engineering"
     description: "Hands-on distributed AI systems, LLM infrastructure, data pipelines, MLOps, deep learning research, and technical architecture."
     threshold: 0.35
+    semantic_threshold: 0.68
+    ai_evaluation_limit: 3
+    enabled_sources:
+      - greenhouse
+      - ashby
+      - lever
+      - himalayas
+      - startup_jobs
+    title_families:
+      - machine learning engineer
+      - applied ai engineer
+      - research engineer
+      - applied scientist
+      - data scientist
+      - ml platform engineer
+      - ai evaluation engineer
+      - agent or rag engineer
+      - data/ai platform architect
+      - model evaluation
+      - training-data
     keywords:
       - "ai"
       - "machine learning"
@@ -16,12 +36,52 @@ lanes:
       - "spark"
       - "databricks"
       - "architect"
+    positive_concepts:
+      - machine learning
+      - deep learning
+      - nlp
+      - llm
+      - agentic
+      - data engineering
+      - architecture
+    negative_concepts:
+      - presales
+      - solutions consulting
+      - customer success
+      - fde
+      - technical account management
+      - programme governance
+      - people-management-heavy
     prototype_query: "Hands-on AI systems engineer, machine learning infrastructure, distributed LLM pipelines, PyTorch, Spark, Databricks, technical solutions architect."
 
   LEGAL_REGTECH:
     title: "Legal Technology & Regulatory Tech"
     description: "Legal AI agents, automated contract analytics, regulatory compliance platforms, legal tech transformation, and governance systems."
     threshold: 0.30
+    semantic_threshold: 0.68
+    ai_evaluation_limit: 3
+    enabled_sources:
+      - greenhouse
+      - ashby
+      - lever
+      - himalayas
+      - startup_jobs
+    title_families:
+      - legal ai
+      - legaltech
+      - regulatory technology
+      - claims and disputes technology
+      - legal knowledge engineering
+      - fraud
+      - scams
+      - financial crime
+      - aml
+      - kyc
+      - compliance automation
+      - digital trust
+      - legal nlp
+      - document intelligence
+      - knowledge graphs
     keywords:
       - "legaltech"
       - "regtech"
@@ -30,12 +90,44 @@ lanes:
       - "regulatory"
       - "legal ai"
       - "law firm"
+    positive_concepts:
+      - compliance
+      - regulatory tech
+      - fraud detection
+      - kyc/aml
+      - legal domain
+      - digital trust
+    negative_concepts:
+      - traditional legal
+      - compliance operations
     prototype_query: "Legal technology automation, regtech compliance systems, AI contract analysis, regulatory engineering, legal intelligence."
 
   HEALTH_BIO_PHARMA:
     title: "HealthTech, Biotech & Life Sciences"
     description: "Computational biology, genomics foundation models, drug discovery AI pipelines, clinical trial analytics, and healthcare data systems."
     threshold: 0.30
+    semantic_threshold: 0.68
+    ai_evaluation_limit: 3
+    enabled_sources:
+      - greenhouse
+      - ashby
+      - lever
+      - himalayas
+      - startup_jobs
+    title_families:
+      - computational biology
+      - bioinformatics
+      - scientific ml
+      - cheminformatics
+      - clinical nlp
+      - healthcare data science
+      - medical ai
+      - imaging
+      - research software engineering
+      - health-data platforms
+      - pharmaceutical ai
+      - data engineering
+      - healthcare models
     keywords:
       - "bioinformatics"
       - "genomics"
@@ -44,12 +136,49 @@ lanes:
       - "healthcare"
       - "clinical"
       - "drug discovery"
+    positive_concepts:
+      - pharma
+      - bioinformatics
+      - biotech
+      - medical research domain
+      - machine learning on biological or clinical data
+      - scientific data platforms
+    negative_concepts:
+      - laboratory-bound
+      - patient-facing
+      - clinical-operations
+      - medical sales
+      - laboratory-only work
     prototype_query: "Bioinformatics AI scientist, genomic foundation models, computational biology, drug discovery ML, healthcare data platforms."
 
   INVESTMENT_MARKETS_FINTECH:
     title: "Investment Systems & Financial Technology"
     description: "Quantitative trading architecture, market data infrastructure, asset management systems, fintech trading platforms, risk analytics."
     threshold: 0.30
+    semantic_threshold: 0.68
+    ai_evaluation_limit: 3
+    enabled_sources:
+      - greenhouse
+      - ashby
+      - lever
+      - himalayas
+      - startup_jobs
+    title_families:
+      - quantitative research
+      - time-series ml
+      - investment-data engineering
+      - portfolio analytics
+      - optimisation
+      - risk modelling
+      - trading technology
+      - market-data platforms
+      - investment-research automation
+      - wealthtech
+      - investtech
+      - asset/fund-management ai
+      - digital-asset analytics
+      - custody
+      - trading infrastructure
     keywords:
       - "fintech"
       - "quant"
@@ -58,6 +187,29 @@ lanes:
       - "asset management"
       - "market data"
       - "investment"
+    positive_concepts:
+      - time-series modelling
+      - institutional investing
+      - capital markets
+      - securities
+      - robo-advisory
+      - market data
+    negative_concepts:
+      - payments
+      - cards
+      - consumer lending
+      - bnpl
+      - corporate finance
+      - treasury
+      - m&a
+      - private equity
+      - investment banking
+      - deal advisory
+      - fundraising
+      - generic commercial banking
+      - retail banking
+      - merchant acquiring
+      - remittance
     prototype_query: "Quantitative systems architect, low-latency market data, fintech trading execution platform, asset management analytics."
 
 unclassified_policy:

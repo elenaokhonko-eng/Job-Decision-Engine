@@ -20,23 +20,24 @@ const pool = new pg.Pool({
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface LaneConfig {
-  lane: string;
+export interface LaneDefinition {
+  title: string;
   description: string;
-  positive_concepts: string[];
-  negative_concepts: string[];
-  semantic_threshold: number;
-  prototype_query?: string;
+  threshold: number;
+  semantic_threshold?: number;
+  ai_evaluation_limit?: number;
+  enabled_sources?: string[];
+  title_families?: string[];
+  keywords: string[];
+  positive_concepts?: string[];
+  negative_concepts?: string[];
+  prototype_query: string;
 }
 
-interface GlobalLanesConfig {
-  lanes: Record<string, {
-    title: string;
-    description: string;
-    threshold: number;
-    keywords: string[];
-    prototype_query: string;
-  }>;
+export interface GlobalLanesConfig {
+  version?: string;
+  description?: string;
+  lanes: Record<string, LaneDefinition>;
   unclassified_policy: {
     label: string;
     fallback_behavior: string;
@@ -57,8 +58,12 @@ const cosineSimilarity = (vecA: number[], vecB: number[]): number => {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 };
 
-// ── Config loaders ────────────────────────────────────────────────────────────
+// ── Config loader ────────────────────────────────────────────────────────────
 
+/**
+ * Load authoritative consolidated lane definitions from lanes.yaml.
+ * Single read, all 4 lanes evaluated together on every run.
+ */
 export function loadGlobalLanesConfig(): GlobalLanesConfig {
   const lanesPath = path.resolve(__dirname, "../../lanes.yaml");
   if (!fs.existsSync(lanesPath)) {
@@ -68,41 +73,15 @@ export function loadGlobalLanesConfig(): GlobalLanesConfig {
   return loadFn(fs.readFileSync(lanesPath, "utf-8")) as GlobalLanesConfig;
 }
 
-/**
- * Load per-lane YAML configs from config/lanes/.
- * Each file contains positive_concepts, negative_concepts, and a semantic_threshold.
- * Falls back to empty lists if directory does not exist.
- */
-export function loadPerLaneConfigs(): Map<string, LaneConfig> {
-  const laneConfigDir = path.resolve(__dirname, "../../config/lanes");
-  const configs = new Map<string, LaneConfig>();
-
-  if (!fs.existsSync(laneConfigDir)) {
-    console.warn(`⚠️ config/lanes/ directory not found at ${laneConfigDir}. Per-lane exclusions not applied.`);
-    return configs;
-  }
-
-  for (const file of fs.readdirSync(laneConfigDir)) {
-    if (!file.endsWith(".yml") && !file.endsWith(".yaml")) continue;
-    const raw = fs.readFileSync(path.join(laneConfigDir, file), "utf-8");
-    const loadFn = (yaml as any).load || (yaml as any).default?.load || yaml;
-    const parsed = loadFn(raw) as LaneConfig;
-    if (parsed?.lane) {
-      configs.set(parsed.lane, parsed);
-    }
-  }
-
-  return configs;
-}
+export const loadLanesConfig = loadGlobalLanesConfig;
 
 // ── Keyword negative-concept exclusion ────────────────────────────────────────
 
-function applyNegativeExclusion(description: string, laneKey: string, perLaneConfigs: Map<string, LaneConfig>): boolean {
-  const laneConfig = perLaneConfigs.get(laneKey);
-  if (!laneConfig?.negative_concepts?.length) return false;
+function applyNegativeExclusion(description: string, laneDef: LaneDefinition): boolean {
+  if (!laneDef.negative_concepts?.length) return false;
 
   const d = description.toLowerCase();
-  for (const nc of laneConfig.negative_concepts) {
+  for (const nc of laneDef.negative_concepts) {
     if (d.includes(nc.toLowerCase())) {
       return true; // excluded
     }
@@ -118,9 +97,8 @@ export async function runLaneRouting(): Promise<{ routed: number; deferred: numb
 }
 
 export async function runLaneRouter(): Promise<{ routed: number; deferred: number }> {
-  console.log("Starting Semantic Lane Routing from lanes.yaml + config/lanes/...");
+  console.log("Starting Semantic Lane Routing from authoritative lanes.yaml...");
   const config = loadGlobalLanesConfig();
-  const perLaneConfigs = loadPerLaneConfigs();
 
   // Generate prototype embeddings for each lane
   const laneEmbeddings: Record<string, number[]> = {};
@@ -155,7 +133,7 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
         const jobText = `${job.normalized_title} ${job.description_text || ""}`;
         const jobEmbedding = await generateEmbedding(jobText);
 
-        // Strict zero-vector check — embedding failure must not produce a CORE_AI_DATA default
+        // Strict zero-vector check — embedding failure must not produce a default lane
         const isZeroVector = jobEmbedding.every((v) => v === 0);
         if (isZeroVector) {
           console.warn(`⚠️ Zero embedding for job ${job.id}. Deferring (never default lane).`);
@@ -184,7 +162,7 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
 
         // Per-lane negative exclusion on best lane (only demotes if excluded in target lane)
         const descText = (job.description_text || "").toLowerCase();
-        if (bestLane && applyNegativeExclusion(descText, bestLane, perLaneConfigs)) {
+        if (bestLane && config.lanes[bestLane] && applyNegativeExclusion(descText, config.lanes[bestLane])) {
           console.warn(`⚠️ Job ${job.id} excluded from ${bestLane} by negative_concepts. Re-scoring remaining lanes.`);
           scoreMap[bestLane] = -1;
           bestScore = -1;
@@ -197,9 +175,9 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
           }
         }
 
-        // Per-lane threshold check: must meet the lane's own semantic_threshold
-        const laneCfg = perLaneConfigs.get(bestLane || "");
-        const perLaneThreshold = laneCfg?.semantic_threshold ?? (config.unclassified_policy.min_similarity_floor || 0.20);
+        // Per-lane threshold check: must meet the lane's own semantic_threshold or min_similarity_floor
+        const bestLaneDef = bestLane ? config.lanes[bestLane] : null;
+        const perLaneThreshold = bestLaneDef?.semantic_threshold ?? bestLaneDef?.threshold ?? (config.unclassified_policy.min_similarity_floor || 0.20);
         if (bestScore < perLaneThreshold || !bestLane) {
           bestLane = "UNCLASSIFIED";
         }
@@ -208,13 +186,12 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
         const secondaryLanes: string[] = [];
         for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
           if (laneKey === bestLane) continue;
-          const lc = perLaneConfigs.get(laneKey);
-          const threshold = lc?.semantic_threshold ?? laneDef.threshold;
-          if ((scoreMap[laneKey] || 0) >= threshold && !applyNegativeExclusion(descText, laneKey, perLaneConfigs)) {
+          const threshold = laneDef.semantic_threshold ?? laneDef.threshold;
+          if ((scoreMap[laneKey] || 0) >= threshold && !applyNegativeExclusion(descText, laneDef)) {
             secondaryLanes.push(laneKey);
             // Collect lane evidence from positive concepts
-            if (lc?.positive_concepts) {
-              for (const pc of lc.positive_concepts) {
+            if (laneDef.positive_concepts) {
+              for (const pc of laneDef.positive_concepts) {
                 if (descText.includes(pc.toLowerCase())) {
                   laneEvidence.push(`${laneKey}: "${pc}"`);
                   break; // one evidence per secondary lane
@@ -261,6 +238,3 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
   console.log(`Lane Routing complete. Routed: ${routedCount}, Deferred: ${deferredCount}`);
   return { routed: routedCount, deferred: deferredCount };
 }
-
-// Backward-compat alias used by calibration.test.ts and other callers
-export const loadLanesConfig = loadGlobalLanesConfig;

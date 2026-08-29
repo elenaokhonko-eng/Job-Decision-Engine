@@ -65,12 +65,22 @@ async function generateTailoredCV() {
     const tailoredCvSchema = fs.readFileSync(path.join(schemaDir, "tailored_cv.schema.json"), "utf8");
 
     // Load Master Profile
-    const profilePath = path.join(process.cwd(), "master_profile.json");
-    if (!fs.existsSync(profilePath)) {
-      console.error("❌ ERROR: 'master_profile.json' not found. Run build_ledger.ts first.");
-      process.exit(1);
+    let masterProfile: any;
+    if (process.env.MASTER_PROFILE_JSON) {
+      try {
+        masterProfile = JSON.parse(process.env.MASTER_PROFILE_JSON);
+      } catch (err: any) {
+        console.error("❌ ERROR: Failed to parse MASTER_PROFILE_JSON environment variable:", err.message);
+        process.exit(1);
+      }
+    } else {
+      const profilePath = path.join(process.cwd(), "master_profile.json");
+      if (!fs.existsSync(profilePath)) {
+        console.error("❌ ERROR: Neither MASTER_PROFILE_JSON env secret nor local 'master_profile.json' found.");
+        process.exit(1);
+      }
+      masterProfile = JSON.parse(fs.readFileSync(profilePath, "utf8"));
     }
-    const masterProfile = JSON.parse(fs.readFileSync(profilePath, "utf8"));
 
     // Model is resolved by generateContent() which tries Gemini then OpenAI automatically.
     const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
