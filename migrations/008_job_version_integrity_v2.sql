@@ -37,18 +37,15 @@ SET status = 'NEEDS_MANUAL_REVIEW',
     last_error = COALESCE(last_error, 'Missing job_version_id backfill — quarantined for manual review')
 WHERE job_version_id IS NULL;
 
--- For any unlinked rows, create a synthetic fallback version from canonical_jobs so NOT NULL constraint succeeds safely
-INSERT INTO job_versions (id, canonical_job_id, content_hash, title, company_name, description_text, observed_at)
+-- For any unlinked rows, create a synthetic fallback version so NOT NULL constraint succeeds safely
+INSERT INTO job_versions (id, canonical_job_id, content_hash, description_text, observed_at)
 SELECT 
   gen_random_uuid(),
   eq.canonical_job_id,
   'unlinked_version_hash_' || eq.id::text,
-  COALESCE(c.normalized_title, 'Unknown Title'),
-  COALESCE(c.company_name, 'Unknown Company'),
   'Quarantined record description recovered during migration 008.',
   NOW()
 FROM evaluation_queue eq
-JOIN canonical_jobs c ON c.id = eq.canonical_job_id
 WHERE eq.job_version_id IS NULL
 ON CONFLICT (canonical_job_id, content_hash) DO NOTHING;
 
@@ -78,17 +75,16 @@ END $$;
 -- Step 5: Enforce Foreign Key on ai_evaluations.job_version_id
 DO $$
 BEGIN
-  -- Convert text job_version_id to UUID if needed
+  -- Convert text/varchar job_version_id to UUID if needed
   IF EXISTS (
     SELECT 1 FROM information_schema.columns 
-    WHERE table_name = 'ai_evaluations' AND column_name = 'job_version_id' AND data_type = 'text'
+    WHERE table_name = 'ai_evaluations' AND column_name = 'job_version_id' AND data_type IN ('text', 'character varying')
   ) THEN
-    -- First attempt cast or clean up invalid text entries
     ALTER TABLE ai_evaluations 
       ALTER COLUMN job_version_id TYPE UUID USING (
         CASE 
-          WHEN job_version_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' 
-          THEN job_version_id::uuid 
+          WHEN job_version_id::text ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' 
+          THEN job_version_id::text::uuid 
           ELSE NULL 
         END
       );
@@ -121,8 +117,6 @@ WITH latest_versions AS (
   SELECT DISTINCT ON (canonical_job_id)
     id AS version_id,
     canonical_job_id,
-    title,
-    company_name,
     description_text,
     observed_at
   FROM job_versions
@@ -134,10 +128,10 @@ latest_gates AS (
     decision AS gate_status,
     rejection_codes,
     evidence_quotes,
-    gate_rule_version,
-    evaluated_at AS gate_evaluated_at
+    gate_version,
+    created_at AS gate_evaluated_at
   FROM gate_decisions
-  ORDER BY canonical_job_id, evaluated_at DESC
+  ORDER BY canonical_job_id, created_at DESC
 ),
 latest_evaluations AS (
   SELECT DISTINCT ON (canonical_job_id, job_version_id)
@@ -171,8 +165,8 @@ latest_queue AS (
 SELECT
   c.id                                                        AS canonical_job_id,
   lv.version_id                                               AS job_version_id,
-  COALESCE(lv.title, c.normalized_title, 'Unknown Title')     AS title,
-  COALESCE(lv.company_name, c.company_name, 'Unknown Company') AS company,
+  COALESCE(c.normalized_title, 'Unknown Title')               AS title,
+  COALESCE(c.company_name, 'Unknown Company')                 AS company,
   c.canonical_url,
   COALESCE(c.location, c.location_summary, 'Unknown')         AS location,
   COALESCE(c.workplace_type, 'UNKNOWN')                       AS workplace_type,
@@ -211,5 +205,3 @@ WHERE c.processing_status NOT IN ('HARD_REJECTED', 'MANUALLY_REMOVED');
 -- Create alias view for backward compatibility
 CREATE OR REPLACE VIEW shortlist_view AS
 SELECT * FROM v_canonical_shortlist;
-
--- End of Migration 008

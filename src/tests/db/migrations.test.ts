@@ -99,6 +99,8 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("004_queue_backoff_and_gmail_uid.sql");
     expect(versions).toContain("005_streamlit_read_model.sql");
     expect(versions).toContain("006_schema_hardening_v2.sql");
+    expect(versions).toContain("007_job_version_integrity.sql");
+    expect(versions).toContain("008_job_version_integrity_v2.sql");
   });
 
   it("canonical_jobs table has all required columns from migrations 001–004", async () => {
