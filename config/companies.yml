@@ -1,132 +1,89 @@
 companies:
-  # CORE_AI_DATA
-  - id: govtech_sg
-    name: GovTech Singapore
-    hq_country: SG
+  # ── CORE_AI_DATA ──────────────────────────────────────────────────────────
+  - id: anthropic
+    name: Anthropic
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: anthropic
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: hybrid_allowed
+    enabled: true
+
+  - id: openai
+    name: OpenAI
+    hq_country: US
     singapore_presence: true
     ats_provider: greenhouse
-    board_slug: govtechsingapore # Disabled: Careers portal uses Careers@Gov / Workday rather than public Greenhouse board
+    board_slug: openai
     target_lanes: 
       - CORE_AI_DATA
-    remote_policy: unknown
-    enabled: false
+    remote_policy: hybrid_allowed
+    enabled: true
 
-  - id: ai_singapore
-    name: AI Singapore
-    hq_country: SG
-    singapore_presence: true
-    ats_provider: lever
-    board_slug: aisingapore # Disabled: AISG postings route through NUS / Workday
-    target_lanes: 
-      - CORE_AI_DATA
-    remote_policy: unknown
-    enabled: false
-
-  - id: grab_sg
-    name: Grab
-    hq_country: SG
-    singapore_presence: true
-    ats_provider: greenhouse
-    board_slug: grab # Disabled: Uses Workday / internal ATS API
-    target_lanes: 
-      - CORE_AI_DATA
-    remote_policy: unknown
-    enabled: false
-
-  # HEALTH_BIO_PHARMA
-  - id: engine_biosciences
-    name: Engine Biosciences
-    hq_country: SG
-    singapore_presence: true
+  - id: cohere
+    name: Cohere
+    hq_country: CA
+    singapore_presence: false
     ats_provider: ashby
-    board_slug: enginebiosciences # Disabled: Ashby board slug unverified
+    board_slug: cohere
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  # ── HEALTH_BIO_PHARMA ─────────────────────────────────────────────────────
+  - id: insitro
+    name: insitro
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: insitro
     target_lanes: 
       - HEALTH_BIO_PHARMA
       - CORE_AI_DATA
-    remote_policy: unknown
-    enabled: false
+    remote_policy: hybrid_allowed
+    enabled: true
 
-  - id: holmusk
-    name: Holmusk
-    hq_country: SG
-    singapore_presence: true
-    ats_provider: lever
-    board_slug: holmusk # Disabled: Lever board slug unverified
+  - id: isomorphic_labs
+    name: Isomorphic Labs
+    hq_country: GB
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: isomorphiclabs
     target_lanes: 
       - HEALTH_BIO_PHARMA
-    remote_policy: unknown
-    enabled: false
+      - CORE_AI_DATA
+    remote_policy: hybrid_allowed
+    enabled: true
 
-  - id: hummingbird_bio
-    name: Hummingbird Bioscience
-    hq_country: SG
-    singapore_presence: true
+  # ── LEGAL_REGTECH ─────────────────────────────────────────────────────────
+  - id: ironclad
+    name: Ironclad
+    hq_country: US
+    singapore_presence: false
     ats_provider: greenhouse
-    board_slug: hummingbirdbioscience # Disabled: Greenhouse board slug unverified
-    target_lanes: 
-      - HEALTH_BIO_PHARMA
-    remote_policy: unknown
-    enabled: false
-
-  # LEGAL_REGTECH
-  - id: silent_eight
-    name: Silent Eight
-    hq_country: SG
-    singapore_presence: true
-    ats_provider: lever
-    board_slug: silenteight # Disabled: Lever board slug unverified
-    target_lanes: 
-      - LEGAL_REGTECH
-    remote_policy: unknown
-    enabled: false
-
-  - id: tookitaki
-    name: Tookitaki
-    hq_country: SG
-    singapore_presence: true
-    ats_provider: greenhouse
-    board_slug: tookitaki # Disabled: Greenhouse board slug unverified
+    board_slug: ironclad
     target_lanes: 
       - LEGAL_REGTECH
       - CORE_AI_DATA
-    remote_policy: unknown
-    enabled: false
+    remote_policy: remote_preferred
+    enabled: true
 
-  - id: synergis_capital
-    name: Sygnum
-    hq_country: CH
-    singapore_presence: true
-    ats_provider: lever
-    board_slug: sygnum # Disabled: Lever board slug unverified
+  - id: harvey
+    name: Harvey
+    hq_country: US
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: harvey
     target_lanes: 
       - LEGAL_REGTECH
-      - INVESTMENT_MARKETS_FINTECH
-    remote_policy: unknown
-    enabled: false
+      - CORE_AI_DATA
+    remote_policy: hybrid_allowed
+    enabled: true
 
-  # INVESTMENT_MARKETS_FINTECH
-  - id: gic
-    name: GIC
-    hq_country: SG
-    singapore_presence: true
-    ats_provider: greenhouse
-    board_slug: gic # Disabled: Uses Workday / SuccessFactors
-    target_lanes: 
-      - INVESTMENT_MARKETS_FINTECH
-    remote_policy: unknown
-    enabled: false
-
-  - id: temasek
-    name: Temasek Holdings
-    hq_country: SG
-    singapore_presence: true
-    ats_provider: greenhouse
-    board_slug: temasek # Disabled: Uses SuccessFactors
-    target_lanes: 
-      - INVESTMENT_MARKETS_FINTECH
-    remote_policy: unknown
-    enabled: false
-
+  # ── INVESTMENT_MARKETS_FINTECH ───────────────────────────────────────────
   - id: worldquant_sg
     name: WorldQuant
     hq_country: US
@@ -138,19 +95,63 @@ companies:
     remote_policy: unknown
     enabled: true
 
-  - id: qcp_capital
-    name: QCP Capital
-    hq_country: SG
-    singapore_presence: true
-    ats_provider: lever
-    board_slug: qcpcapital # Disabled: Lever board slug unverified
+  - id: two_sigma
+    name: Two Sigma
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: twosigma
     target_lanes: 
       - INVESTMENT_MARKETS_FINTECH
+    remote_policy: hybrid_allowed
+    enabled: true
+
+  # ── Disabled Unverified Local Stubs (Preserved for manual portal routing) ──
+  - id: govtech_sg
+    name: GovTech Singapore
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: govtechsingapore # Careers portal uses Careers@Gov
+    target_lanes: 
       - CORE_AI_DATA
     remote_policy: unknown
     enabled: false
 
-  # CORE_AI_DATA - Remote Global
+  - id: ai_singapore
+    name: AI Singapore
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: lever
+    board_slug: aisingapore # NUS / Workday
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: false
+
+  - id: gic
+    name: GIC
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: gic # Workday / SuccessFactors
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: false
+
+  - id: temasek
+    name: Temasek Holdings
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: temasek # SuccessFactors
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: false
+
+  # ── Public Remote Job Boards ─────────────────────────────────────────────
   - id: himalayas
     name: Himalayas
     hq_country: US
@@ -159,6 +160,9 @@ companies:
     board_slug: null
     target_lanes: 
       - CORE_AI_DATA
+      - INVESTMENT_MARKETS_FINTECH
+      - LEGAL_REGTECH
+      - HEALTH_BIO_PHARMA
     remote_policy: remote_preferred
     enabled: true
     location_filters:

@@ -36,22 +36,31 @@ async function countWhere(table: string, condition: string): Promise<number> {
   return res.rows[0].n;
 }
 
-async function insertCanonicalJob(id: string, title: string): Promise<void> {
+async function insertCanonicalJob(id: string, title: string): Promise<string> {
   await q(
     `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane)
      VALUES ($1, 'Test Failure Corp', $2, 'https://fail.test', 'LANE_ROUTED', 'CORE_AI_DATA')
      ON CONFLICT DO NOTHING`,
     [id, title]
   );
+  const versionId = `v-${id}`;
+  await q(
+    `INSERT INTO job_versions (id, canonical_job_id, description_text, observed_at)
+     VALUES ($1, $2, 'Test job description', NOW())
+     ON CONFLICT DO NOTHING`,
+    [versionId, id]
+  );
+  return versionId;
 }
 
 async function insertQueueItem(id: string, canonicalJobId: string, status: string, attempts: number, maxAttempts: number, leasedAt?: Date): Promise<void> {
   const leaseExpires = leasedAt ? new Date(leasedAt.getTime() - 60000).toISOString() : null;
+  const versionId = `v-${canonicalJobId}`;
   await q(
-    `INSERT INTO evaluation_queue (id, canonical_job_id, lane, status, attempt_count, max_attempts, lease_expires_at, priority_score, available_at)
-     VALUES ($1, $2, 'CORE_AI_DATA', $3, $4, $5, $6, 0.5, NOW())
+    `INSERT INTO evaluation_queue (id, canonical_job_id, job_version_id, lane, status, attempt_count, max_attempts, lease_expires_at, priority_score, available_at)
+     VALUES ($1, $2, $3, 'CORE_AI_DATA', $4, $5, $6, $7, 0.5, NOW())
      ON CONFLICT DO NOTHING`,
-    [id, canonicalJobId, status, attempts, maxAttempts, leaseExpires]
+    [id, canonicalJobId, versionId, status, attempts, maxAttempts, leaseExpires]
   );
 }
 

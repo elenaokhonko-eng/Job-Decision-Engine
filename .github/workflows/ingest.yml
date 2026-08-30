@@ -51,7 +51,6 @@ jobs:
       # ── Source 2: Unified ATS & Job Board Adapters (Greenhouse, Ashby, Lever, Himalayas) ──
 
       - name: Run Unified ATS & Job Board Adapters
-        continue-on-error: true  # adapter failure never aborts the pipeline (invariant 1)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

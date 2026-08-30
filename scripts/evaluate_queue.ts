@@ -3,17 +3,14 @@ import dotenv from "dotenv";
 import { runAgent } from "../src/services/agent.js";
 import { EvaluationRequest } from "../src/pipeline/types.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION } from "../src/contracts/index.js";
+import { pgSslConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl:
-    process.env.DATABASE_URL &&
-    (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1"))
-      ? false
-      : { rejectUnauthorized: true }
+  ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
 /** Exponential backoff: 30s, 60s, 120s, … capped at 30 minutes */
@@ -35,27 +32,16 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
 
   try {
     // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
+    // Join strictly to evaluation_queue.job_version_id and gate_decisions for the same job_version_id (invariant: never substitute latest version during retry)
     const { rows: queueItems } = await client.query(
       `SELECT eq.*, c.normalized_title, c.company_name, c.canonical_url,
               c.gate_decision, c.workability_facts,
-              jv.description_text, jv.id AS resolved_job_version_id,
+              jv.description_text, eq.job_version_id AS resolved_job_version_id,
               gd.id AS resolved_gate_decision_id
        FROM evaluation_queue eq
        JOIN canonical_jobs c ON eq.canonical_job_id = c.id
-       LEFT JOIN LATERAL (
-         SELECT id, description_text
-         FROM job_versions
-         WHERE canonical_job_id = c.id
-         ORDER BY observed_at DESC
-         LIMIT 1
-       ) jv ON TRUE
-       LEFT JOIN LATERAL (
-         SELECT id
-         FROM gate_decisions
-         WHERE canonical_job_id = c.id
-         ORDER BY created_at DESC
-         LIMIT 1
-       ) gd ON TRUE
+       JOIN job_versions jv ON eq.job_version_id = jv.id
+       LEFT JOIN gate_decisions gd ON (gd.canonical_job_id = eq.canonical_job_id AND gd.job_version_id = eq.job_version_id)
        WHERE (eq.status = 'PENDING')
           OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
           OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
@@ -111,10 +97,10 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
       const activeLease = leaseRows[0];
       const attemptNum = activeLease.attempt_count;
 
-      // Resolve actual job_version_id (not hard-coded "v1")
-      const jobVersionId: string = item.resolved_job_version_id || item.job_version_id;
+      // Strictly bound to the queue item's job_version_id
+      const jobVersionId: string = item.job_version_id;
       if (!jobVersionId) {
-        console.warn(`⚠️ No job_version_id found for canonical job ${item.canonical_job_id}. Skipping.`);
+        console.warn(`⚠️ No job_version_id found for canonical job ${item.canonical_job_id}. Moving to RETRY_WAIT.`);
         failedCount++;
         await client.query(
           `UPDATE evaluation_queue SET status = 'RETRY_WAIT', last_error = $1,
@@ -125,7 +111,7 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         continue;
       }
 
-      // Resolve gate decision ID
+      // Resolve gate decision ID for the same job version
       const gateDecisionId: string | null = item.resolved_gate_decision_id || null;
 
       const evalReq: EvaluationRequest = {

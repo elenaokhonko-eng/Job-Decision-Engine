@@ -13,7 +13,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const pool = new pg.Pool({
+const defaultPool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: pgSslConfig(process.env.DATABASE_URL)
 });
@@ -101,13 +101,14 @@ function extractCoreJobText(title: string, description: string): string {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 // Export under old name for backward-compat with tests
-export async function runLaneRouting(): Promise<{ routed: number; deferred: number }> {
-  return runLaneRouter();
+export async function runLaneRouting(clientOrPool?: pg.Pool | pg.PoolClient): Promise<{ routed: number; deferred: number }> {
+  return runLaneRouter(clientOrPool);
 }
 
-export async function runLaneRouter(): Promise<{ routed: number; deferred: number }> {
+export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Promise<{ routed: number; deferred: number }> {
   console.log("Starting Semantic Lane Routing from authoritative lanes.yaml...");
   const config = loadGlobalLanesConfig();
+  const pool = clientOrPool || defaultPool;
 
   // Generate prototype embeddings for each lane
   const laneEmbeddings: Record<string, number[]> = {};
@@ -134,7 +135,7 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
   let routedCount = 0;
   let deferredCount = 0;
 
-  const client = await pool.connect();
+  const client = 'connect' in pool ? await pool.connect() : pool;
   try {
     for (const job of jobs) {
       await client.query("BEGIN");
@@ -235,8 +236,9 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
       }
     }
   } finally {
-    client.release();
-    await pool.end();
+    if ('release' in client && typeof client.release === 'function') {
+      client.release();
+    }
   }
 
   console.log(`Semantic Lane Routing complete. Routed: ${routedCount}, Deferred: ${deferredCount}`);
@@ -301,7 +303,7 @@ export function routeToLane(title: string, description: string): { primaryLane: 
     .sort((a, b) => b[1] - a[1]);
 
   if (sorted.length === 0) {
-    return { primaryLane: 'CORE_AI_DATA', secondaryLanes: [] }; // Default fallback lane
+    return { primaryLane: null, secondaryLanes: [] }; // No matched lane (never default)
   }
 
   const primaryLane = sorted[0][0];

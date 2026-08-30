@@ -6,13 +6,27 @@ import { pgSslConfig } from "../db/pgSsl.js";
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const pool = new pg.Pool({
+const defaultPool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
-export async function runNormalization() {
+export interface NormalizationSummary {
+  totalDiscovered: number;
+  totalProcessed: number;
+  totalErrors: number;
+  details: Array<{
+    observationId: string;
+    canonicalJobId?: string;
+    versionId?: string;
+    isNewJob: boolean;
+    error?: string;
+  }>;
+}
+
+export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): Promise<NormalizationSummary> {
   console.log("Starting normalization of raw_job_observations...");
+  const pool = clientOrPool || defaultPool;
   
   // Find observations that have not been canonicalized yet
   const query = `
@@ -26,7 +40,14 @@ export async function runNormalization() {
   const { rows: pendingObservations } = await pool.query(query);
   console.log(`Found ${pendingObservations.length} pending observations.`);
   
-  const client = await pool.connect();
+  const summary: NormalizationSummary = {
+    totalDiscovered: pendingObservations.length,
+    totalProcessed: 0,
+    totalErrors: 0,
+    details: []
+  };
+
+  const client = 'connect' in pool ? await pool.connect() : pool;
   try {
     for (const obs of pendingObservations) {
       await client.query("BEGIN");
@@ -62,15 +83,15 @@ export async function runNormalization() {
           const insertCanon = await client.query(
             `INSERT INTO canonical_jobs (
                company_name, normalized_title, canonical_url, location, 
-               workplace_type, employment_type, processing_status
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+               workplace_type, employment_type, processing_status, version_count
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1) RETURNING id`,
             [
               obs.company_name,
               obs.title.toLowerCase(),
               obs.source_url,
-              obs.location_raw || "Singapore",
+              obs.location_raw || "Unknown",
               obs.workplace_type_raw || "UNKNOWN",
-              obs.employment_type_raw || "PERMANENT",
+              obs.employment_type_raw || "UNKNOWN",
               "RAW_STAGED"
             ]
           );
@@ -89,31 +110,56 @@ export async function runNormalization() {
         await client.query(
           `UPDATE canonical_jobs 
            SET latest_job_version_id = $1,
-               version_count = COALESCE(version_count, 0) + 1,
-               location = COALESCE($2, location),
-               workplace_type = COALESCE($3, workplace_type),
-               employment_type = COALESCE($4, employment_type),
+               version_count = CASE WHEN $2::boolean THEN COALESCE(version_count, 0) + 1 ELSE COALESCE(version_count, 1) END,
+               location = COALESCE($3, location),
+               workplace_type = COALESCE($4, workplace_type),
+               employment_type = COALESCE($5, employment_type),
                processing_status = 'RAW_STAGED',
                updated_at = NOW()
-           WHERE id = $5`,
+           WHERE id = $6`,
           [
             newVersionId,
-            obs.location_raw || "Singapore",
+            isExistingJob,
+            obs.location_raw || "Unknown",
             obs.workplace_type_raw || "UNKNOWN",
-            obs.employment_type_raw || "PERMANENT",
+            obs.employment_type_raw || "UNKNOWN",
             canonicalJobId
           ]
         );
 
+        // Mark observation as PROCESSED
+        if (obs.id) {
+          await client.query(
+            `UPDATE raw_job_observations SET processing_status = 'PROCESSED' WHERE id = $1`,
+            [obs.id]
+          );
+        }
+
         await client.query("COMMIT");
-      } catch (err) {
+        summary.totalProcessed++;
+        summary.details.push({
+          observationId: obs.id,
+          canonicalJobId: canonicalJobId || undefined,
+          versionId: newVersionId || undefined,
+          isNewJob: !isExistingJob
+        });
+      } catch (err: any) {
         await client.query("ROLLBACK");
         console.error(`❌ Failed to normalize observation ${obs.id}:`, err);
+        summary.totalErrors++;
+        summary.details.push({
+          observationId: obs.id,
+          isNewJob: false,
+          error: err.message || String(err)
+        });
       }
     }
   } finally {
-    client.release();
+    if ('release' in client && typeof client.release === 'function') {
+      client.release();
+    }
   }
   
-  console.log(`Normalization complete.`);
+  console.log(`Normalization complete. Processed: ${summary.totalProcessed}, Errors: ${summary.totalErrors}`);
+  return summary;
 }

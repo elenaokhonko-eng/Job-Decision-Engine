@@ -17,7 +17,6 @@ vi.mock('pg', () => {
   };
 });
 
-// Since the pool is instantiated in the file scope, we get a reference to the mocked query function
 const mPool = new pg.Pool();
 
 describe('Pipeline Stage: Normalization', () => {
@@ -25,19 +24,20 @@ describe('Pipeline Stage: Normalization', () => {
     vi.clearAllMocks();
   });
 
-  it('should process pending observations and create new canonical jobs', async () => {
-    // 1. Mock finding pending observations
+  it('should process pending observations and create new canonical jobs with Unknown defaults', async () => {
+    // 1. Mock finding pending observations with missing location & employment type
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
+          id: 'obs-uuid-1',
           source_name: 'test-source',
           source_external_id: '123',
           company_name: 'Test Corp',
           title: 'AI Engineer',
           source_url: 'https://test.com',
-          location_raw: 'Singapore',
-          workplace_type_raw: 'HYBRID',
-          employment_type_raw: 'FULL_TIME',
+          location_raw: null,
+          workplace_type_raw: null,
+          employment_type_raw: null,
           raw_payload_hash: 'hash123',
           description_raw: 'Test description'
         }
@@ -66,24 +66,28 @@ describe('Pipeline Stage: Normalization', () => {
     // 6. Mock UPDATE canonical_jobs with latest version pointer
     (mPool.query as any).mockResolvedValueOnce({ rows: [] });
 
-    // 7. Mock COMMIT
+    // 7. Mock UPDATE raw_job_observations SET processing_status = 'PROCESSED'
     (mPool.query as any).mockResolvedValueOnce({ rows: [] });
 
-    await runNormalization();
+    // 8. Mock COMMIT
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
 
-    // Verify all queries were called in order: Total = 8
-    expect(mPool.query).toHaveBeenCalledTimes(8);
-    
-    // Check canonical job insertion logic
+    const summary = await runNormalization();
+
+    expect(summary.totalDiscovered).toBe(1);
+    expect(summary.totalProcessed).toBe(1);
+    expect(summary.totalErrors).toBe(0);
+
+    // Check canonical job insertion logic used 'Unknown' and 'UNKNOWN'
     const insertCanonCall = (mPool.query as any).mock.calls[4];
     expect(insertCanonCall[0]).toContain('INSERT INTO canonical_jobs');
     expect(insertCanonCall[1]).toEqual([
       'Test Corp',
       'ai engineer',
       'https://test.com',
-      'Singapore',
-      'HYBRID',
-      'FULL_TIME',
+      'Unknown',
+      'UNKNOWN',
+      'UNKNOWN',
       'RAW_STAGED'
     ]);
     
@@ -96,5 +100,10 @@ describe('Pipeline Stage: Normalization', () => {
     const updateCanonCall = (mPool.query as any).mock.calls[6];
     expect(updateCanonCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCanonCall[1][0]).toEqual('ver-uuid-1');
+
+    // Check observation marked as PROCESSED
+    const updateObsCall = (mPool.query as any).mock.calls[7];
+    expect(updateObsCall[0]).toContain("UPDATE raw_job_observations SET processing_status = 'PROCESSED'");
+    expect(updateObsCall[1][0]).toEqual('obs-uuid-1');
   });
 });

@@ -83,61 +83,24 @@ export function evaluateWorkability(location: string, workplaceType: string, des
 }
 
 export function evaluateHardGates(title: string, description: string, location: string, workplaceType: string): GateEvaluationResult {
-  // Check Global Title Exclusions
-  for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
-    if (pattern.test(title)) {
-      return {
-        passed: false,
-        needsVerification: false,
-        rejectionReason: `Matched non-target title exclusion: ${pattern.source}`,
-        reasonCode: 'NON_TARGET_ROLE_FAMILY',
-        axis1FunctionPassed: false,
-        axis2DomainPassed: false
-      };
-    }
-  }
+  const job = {
+    id: "eval-gate",
+    title,
+    raw_description: description,
+    location,
+    workplace_type: workplaceType,
+    company_name: "Generic"
+  };
 
-  // Evaluate Workability
-  const workability = evaluateWorkability(location, workplaceType, description);
-  if (!workability.workable) {
-    return {
-      passed: false,
-      needsVerification: false,
-      rejectionReason: workability.reason,
-      reasonCode: 'UNWORKABLE_LOCATION_MODEL',
-      axis1FunctionPassed: false,
-      axis2DomainPassed: false
-    };
-  }
-
-  // Axis 1: Technical Function Validation
-  const hasFunctionSignal = TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(title) || p.test(description));
-  if (!hasFunctionSignal) {
-    return {
-      passed: false,
-      needsVerification: false,
-      rejectionReason: 'Role lacks evidence of technical, building, or engineering function',
-      reasonCode: 'NON_TECHNICAL_FUNCTION',
-      axis1FunctionPassed: false,
-      axis2DomainPassed: false
-    };
-  }
-
-  if (workability.needsVerify) {
-    return {
-      passed: false,
-      needsVerification: true,
-      reasonCode: 'NEEDS_VERIFICATION',
-      axis1FunctionPassed: true,
-      axis2DomainPassed: true
-    };
-  }
+  const gateResult = applyGlobalGates(job as any);
 
   return {
-    passed: true,
-    needsVerification: false,
-    axis1FunctionPassed: true,
-    axis2DomainPassed: true
+    passed: gateResult.status === "PASS",
+    needsVerification: gateResult.status === "NEEDS_VERIFICATION",
+    rejectionReason: gateResult.evidence_quotes?.[0] || gateResult.rejection_codes?.[0] || undefined,
+    reasonCode: gateResult.rejection_codes?.[0] || (gateResult.status === "NEEDS_VERIFICATION" ? "NEEDS_VERIFICATION" : undefined),
+    axis1FunctionPassed: gateResult.status === "PASS" || gateResult.status === "NEEDS_VERIFICATION",
+    axis2DomainPassed: gateResult.status === "PASS" || gateResult.status === "NEEDS_VERIFICATION"
   };
 }
 
@@ -270,13 +233,38 @@ function findEvidence(d: string, keywords: string[]): string[] {
   return quotes;
 }
 
-export function applyGlobalGates(job: RawJob): GateResult {
+export function applyGlobalGates(job: RawJob & { location?: string; workplace_type?: string; employment_type?: string }): GateResult {
   const t = (job.title || "").toLowerCase();
   const c = (job.company_name || "").toLowerCase();
   const d = extractDescriptionText(job);
+  const loc = (job.location || "").toLowerCase();
+  const wp = (job.workplace_type || "").toLowerCase();
+
+  // ── 0. Global Title Exclusions ──
+  for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
+    if (pattern.test(job.title || "")) {
+      return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title exclusion: "${job.title}"`]);
+    }
+  }
+
+  // ── 0b. Workability Check (location / workplace) ──
+  const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d);
+  if (!workability.workable) {
+    return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], [workability.reason || "Unworkable location/workplace model"]);
+  }
+
+  // ── 0c. Technical Function Check ──
+  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician)\b/i.test(t);
+  const hasTechnicalFunctionSignal = isTechnicalTitle || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(d));
+  if (!hasTechnicalFunctionSignal) {
+    return makeReject(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"], ["Axis 1 Failed: Role lacks evidence of technical, building, or engineering function"]);
+  }
+
+  if (workability.needsVerify) {
+    return makeVerification(["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"], [workability.reason || "Workplace model unspecified; needs manual verification"]);
+  }
 
   // ── 1. Deterministic Non-Technical Title-Family Exclusions ──
-  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician)\b/i.test(t);
 
   // A. Human Resources / Recruiting / People Ops
   const hrTitleRegex = /\b(human resources|hr manager|hr generalist|hr business partner|hrbp|talent acquisition|recruiter|recruitment|people ops|people operations|people partner)\b/i;
@@ -492,8 +480,9 @@ export function applyGlobalGates(job: RawJob): GateResult {
   const aiDataShortRegex = /\b(?:ai|ml|nlp|llm|rag)\b/i;
   const targetDomainPhrases = [
     "artificial intelligence", "machine learning", "data engineering", "data pipeline",
-    "data warehouse", "etl", "sql", "quantitative research", "time-series",
-    "time series", "portfolio analytics", "computational biology", "bioinformatics",
+    "data warehouse", "etl", "sql", "quantitative", "quantitative research", "time-series",
+    "time series", "portfolio analytics", "algorithmic trading", "market microstructure",
+    "trading systems", "fintech", "order book", "computational biology", "bioinformatics",
     "cheminformatics", "genomics", "drug discovery", "clinical trial", "regtech",
     "legaltech", "fraud detection", "kyc", "aml", "compliance automation",
     "contract analytics", "digital trust", "deep learning", "agentic", "market data",

@@ -59,10 +59,11 @@ export async function generateCoverLetterDocx(clData: any, outputPath: string, c
 
   // Body Paragraphs
   for (const para of cl.body_paragraphs) {
+    const textContent = typeof para === "string" ? para : (para.text || "");
     children.push(
       new Paragraph({
         children: [
-          new TextRun({ text: para, size: 24, font: "Arial" }),
+          new TextRun({ text: textContent, size: 24, font: "Arial" }),
         ],
         spacing: { after: 200 },
       })

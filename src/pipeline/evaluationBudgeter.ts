@@ -5,22 +5,27 @@ import { pgSslConfig } from "../db/pgSsl.js";
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const pool = new pg.Pool({
+const defaultPool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
 const MAX_PER_LANE = 3;
 
-export async function runEvaluationBudgeter(): Promise<{ queued: number; deferred: number }> {
+export async function runEvaluationBudgeter(clientOrPool?: pg.Pool | pg.PoolClient): Promise<{ queued: number; deferred: number }> {
   console.log("Starting Evaluation Budgeter...");
+  const pool = clientOrPool || defaultPool;
 
   // Select jobs that are either newly lane-routed or were deferred in prior runs
   const query = `
-    SELECT * FROM canonical_jobs 
-    WHERE processing_status IN ('LANE_ROUTED', 'SEMANTIC_SHORTLISTED', 'DEFERRED_BUDGET')
-      AND primary_lane IS NOT NULL
-      AND primary_lane != 'UNCLASSIFIED'
+    SELECT c.*, COALESCE(c.latest_job_version_id, jv.id) AS resolved_job_version_id
+    FROM canonical_jobs c
+    LEFT JOIN LATERAL (
+      SELECT id FROM job_versions WHERE canonical_job_id = c.id ORDER BY observed_at DESC LIMIT 1
+    ) jv ON TRUE
+    WHERE c.processing_status IN ('LANE_ROUTED', 'SEMANTIC_SHORTLISTED', 'DEFERRED_BUDGET')
+      AND c.primary_lane IS NOT NULL
+      AND c.primary_lane != 'UNCLASSIFIED'
   `;
   
   const { rows: jobs } = await pool.query(query);
@@ -35,11 +40,11 @@ export async function runEvaluationBudgeter(): Promise<{ queued: number; deferre
   let queuedCount = 0;
   let deferredCount = 0;
 
-  const client = await pool.connect();
+  const client = 'connect' in pool ? await pool.connect() : pool;
   try {
     for (const lane of Object.keys(jobsByLane)) {
       // Sort by semantic score descending
-      jobsByLane[lane].sort((a, b) => b.semantic_score - a.semantic_score);
+      jobsByLane[lane].sort((a, b) => (b.semantic_score || 0) - (a.semantic_score || 0));
       
       const eligible = jobsByLane[lane].slice(0, MAX_PER_LANE);
       const overflow = jobsByLane[lane].slice(MAX_PER_LANE);
@@ -49,10 +54,15 @@ export async function runEvaluationBudgeter(): Promise<{ queued: number; deferre
       for (const job of eligible) {
         await client.query("BEGIN");
         try {
+          const versionId = job.resolved_job_version_id || job.latest_job_version_id || job.job_version_id;
+          if (!versionId) {
+            throw new Error(`Cannot enqueue canonical job ${job.id} without a valid job_version_id`);
+          }
+
           await client.query(
             `INSERT INTO evaluation_queue (canonical_job_id, job_version_id, lane, priority_score, status, enqueued_at, updated_at) 
              VALUES ($1, $2, $3, $4, 'PENDING', NOW(), NOW())`,
-            [job.id, job.latest_job_version_id || null, lane, job.semantic_score]
+            [job.id, versionId, lane, job.semantic_score]
           );
           
           await client.query(
@@ -86,8 +96,9 @@ export async function runEvaluationBudgeter(): Promise<{ queued: number; deferre
       }
     }
   } finally {
-    client.release();
-    await pool.end();
+    if ('release' in client && typeof client.release === 'function') {
+      client.release();
+    }
   }
 
   console.log(`Evaluation Budgeter complete. Queued: ${queuedCount}, Deferred: ${deferredCount}`);

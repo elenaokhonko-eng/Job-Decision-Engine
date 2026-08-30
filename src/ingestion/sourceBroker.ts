@@ -46,7 +46,7 @@ export class SourceBroker {
     const rawPayloadHash = crypto.createHash("sha256").update(payloadStr).digest("hex");
 
     try {
-      await this.executor.query(
+      const result = await this.executor.query(
         `INSERT INTO raw_job_observations (
           source_run_id, source_name, source_external_id, source_url, 
           retrieved_at, company_name, title, description_raw, 
@@ -75,7 +75,11 @@ export class SourceBroker {
           rawPayloadHash
         ]
       );
-      this.stats.new++;
+      if (result.rowCount && result.rowCount > 0) {
+        this.stats.new++;
+      } else {
+        this.stats.duplicates++;
+      }
     } catch (err: any) {
       this.stats.errors++;
       // INVARIANT: never swallow observation staging failures.

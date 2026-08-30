@@ -1,21 +1,19 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { applyGlobalGates } from "../services/criteria.js";
+import { pgSslConfig } from "../db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const pool = new pg.Pool({
+const defaultPool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl:
-    process.env.DATABASE_URL &&
-    (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1"))
-      ? false
-      : { rejectUnauthorized: true }
+  ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
-export async function runHardGates(): Promise<{ passed: number; hardRejected: number; needsVerification: number }> {
+export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Promise<{ passed: number; hardRejected: number; needsVerification: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
+  const pool = clientOrPool || defaultPool;
 
   const { rows: stagedJobs } = await pool.query(`
     SELECT c.*, jv.description_text, jv.id AS job_version_id
@@ -36,7 +34,7 @@ export async function runHardGates(): Promise<{ passed: number; hardRejected: nu
   let rejectedCount = 0;
   let needsVerificationCount = 0;
 
-  const client = await pool.connect();
+  const client = 'connect' in pool ? await pool.connect() : pool;
   try {
     for (const job of stagedJobs) {
       await client.query("BEGIN");
@@ -47,10 +45,13 @@ export async function runHardGates(): Promise<{ passed: number; hardRejected: nu
           company_name: job.company_name,
           source: "canonical",
           raw_description: job.description_text,
-          careers_portal_url: job.canonical_url
+          careers_portal_url: job.canonical_url,
+          location: job.location,
+          workplace_type: job.workplace_type,
+          employment_type: job.employment_type
         };
 
-        const gateResult = applyGlobalGates(rawJobAdapter);
+        const gateResult = applyGlobalGates(rawJobAdapter as any);
 
         let processingStatus: string;
         switch (gateResult.status) {
@@ -114,8 +115,9 @@ export async function runHardGates(): Promise<{ passed: number; hardRejected: nu
       }
     }
   } finally {
-    client.release();
-    await pool.end();
+    if ('release' in client && typeof client.release === 'function') {
+      client.release();
+    }
   }
 
   console.log(
