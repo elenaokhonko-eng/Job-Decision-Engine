@@ -149,3 +149,20 @@ companies:
       - CORE_AI_DATA
     remote_policy: unknown
     enabled: false
+
+  # CORE_AI_DATA - Remote Global
+  - id: himalayas
+    name: Himalayas
+    hq_country: US
+    singapore_presence: false
+    ats_provider: himalayas_api
+    board_slug: null
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+    location_filters:
+      - Remote
+      - Worldwide
+      - APAC
+      - Singapore

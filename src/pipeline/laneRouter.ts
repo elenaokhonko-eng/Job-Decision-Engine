@@ -242,3 +242,70 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
   console.log(`Semantic Lane Routing complete. Routed: ${routedCount}, Deferred: ${deferredCount}`);
   return { routed: routedCount, deferred: deferredCount };
 }
+
+// ====================================================================
+// NEW: INDEPENDENT DOMAIN SCORING (Eliminates disproportionate clustering)
+// ====================================================================
+
+export type TargetLane = 'CORE_AI_DATA' | 'LEGAL_REGTECH' | 'HEALTH_BIO_PHARMA' | 'INVESTMENT_MARKETS_FINTECH';
+
+const DOMAIN_PATTERNS: Record<TargetLane, { positive: RegExp[]; negative: RegExp[] }> = {
+  CORE_AI_DATA: {
+    positive: [/\b(llm|generative ai|nlp|agentic|vector db|rag|search|data platform|pipeline|etl)\b/i],
+    negative: [/\b(wealth advisory|legal practice|clinical medicine)\b/i]
+  },
+  LEGAL_REGTECH: {
+    positive: [/\b(regtech|compliance tech|regulatory intelligence|contract analysis|legaltech|aml|kyc)\b/i],
+    negative: [/\b(m&a attorney|paralegal|courtroom|legal counsel)\b/i]
+  },
+  HEALTH_BIO_PHARMA: {
+    positive: [/\b(computational biology|bioinformatics|health data|biotech software|genomics|clinical data)\b/i],
+    negative: [/\b(wet lab|pipetting|nurse|clinical trial coordinator)\b/i]
+  },
+  INVESTMENT_MARKETS_FINTECH: {
+    positive: [/\b(quantitative|algorithmic trading|market microstructure|order book|risk engine|fintech|settlement|derivatives engine)\b/i],
+    negative: [/\b(wealth management advisor|private banking sales|financial advisor|hr manager)\b/i]
+  }
+};
+
+export function routeToLane(title: string, description: string): { primaryLane: TargetLane | null; secondaryLanes: TargetLane[] } {
+  const scores: Record<TargetLane, number> = {
+    CORE_AI_DATA: 0,
+    LEGAL_REGTECH: 0,
+    HEALTH_BIO_PHARMA: 0,
+    INVESTMENT_MARKETS_FINTECH: 0
+  };
+
+  const text = `${title} ${description}`;
+
+  for (const lane of Object.keys(DOMAIN_PATTERNS) as TargetLane[]) {
+    const { positive, negative } = DOMAIN_PATTERNS[lane];
+    
+    // Check negatives first
+    const hasNegative = negative.some(p => p.test(text));
+    if (hasNegative) {
+      scores[lane] = -100;
+      continue;
+    }
+
+    for (const pos of positive) {
+      const matches = text.match(new RegExp(pos, 'gi'));
+      if (matches) {
+        scores[lane] += matches.length;
+      }
+    }
+  }
+
+  const sorted = (Object.entries(scores) as [TargetLane, number][])
+    .filter(([_, score]) => score > 0)
+    .sort((a, b) => b[1] - a[1]);
+
+  if (sorted.length === 0) {
+    return { primaryLane: 'CORE_AI_DATA', secondaryLanes: [] }; // Default fallback lane
+  }
+
+  const primaryLane = sorted[0][0];
+  const secondaryLanes = sorted.slice(1).map(s => s[0]);
+
+  return { primaryLane, secondaryLanes };
+}

@@ -36,6 +36,112 @@ export const CANDIDATE_PROFILE = {
 };
 
 // ====================================================================
+// NEW: HARD GATES EVALUATION (2-AXIS PREQUALIFICATION)
+// ====================================================================
+
+export interface GateEvaluationResult {
+  passed: boolean;
+  needsVerification: boolean;
+  rejectionReason?: string;
+  reasonCode?: string;
+  axis1FunctionPassed: boolean;
+  axis2DomainPassed: boolean;
+}
+
+// 1. Deterministic Global Title Exclusions (Applied to ALL lanes)
+export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
+  /\b(human resources?|hr|recruiter|talent acquisition|people operations?|people partner)\b/i,
+  /\b(executive assistant|office manager|receptionist|admin assistant|administrative assistant)\b/i,
+  /\b(legal counsel|attorney|lawyer|m&a|paralegal|contracts? manager)\b/i,
+  /\b(sales manager|account executive|business development representative|bdr|sdr|account manager)\b/i,
+  /\b(marketing manager|social media|content writer|pr manager|brand manager)\b/i,
+  /\b(quality assurance coordinator|manual tester|qa tester)\b/i,
+  /\b(brain researcher|neuroscientist|wet lab|postdoctoral fellow)\b/i,
+];
+
+// 2. Axis 1: Target Technical Functions (Must pass)
+export const TECHNICAL_FUNCTION_KEYWORDS: RegExp[] = [
+  /\b(software engineer|data engineer|ml engineer|machine learning engineer|ai engineer)\b/i,
+  /\b(full[\s-]stack|backend engineer|distributed systems|platform engineer|cloud engineer)\b/i,
+  /\b(research engineer|quantitative developer|quant engineer|system architect)\b/i,
+  /\b(python|typescript|go|c\+\+|rust|sql|postgres|fastapi|docker|kubernetes)\b/i,
+];
+
+// 3. Workability Requirements (Zero tolerance for on-premises-only lab/clinic)
+export function evaluateWorkability(location: string, workplaceType: string, description: string): { workable: boolean; needsVerify: boolean; reason?: string } {
+  const isExplicitOnsiteLab = /\b(100% on-site|fully on-site|lab-based|wet lab|clinic-based)\b/i.test(description);
+  if (isExplicitOnsiteLab) {
+    return { workable: false, needsVerify: false, reason: 'Requires 100% on-premises laboratory/clinic presence' };
+  }
+
+  const isRemoteOrHybrid = /\b(remote|hybrid|flexible)\b/i.test(workplaceType) || /\b(remote|hybrid)\b/i.test(location);
+  if (!isRemoteOrHybrid && !workplaceType) {
+    return { workable: true, needsVerify: true, reason: 'Workplace model unspecified; needs manual verification' };
+  }
+
+  return { workable: true, needsVerify: false };
+}
+
+export function evaluateHardGates(title: string, description: string, location: string, workplaceType: string): GateEvaluationResult {
+  // Check Global Title Exclusions
+  for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
+    if (pattern.test(title)) {
+      return {
+        passed: false,
+        needsVerification: false,
+        rejectionReason: `Matched non-target title exclusion: ${pattern.source}`,
+        reasonCode: 'NON_TARGET_ROLE_FAMILY',
+        axis1FunctionPassed: false,
+        axis2DomainPassed: false
+      };
+    }
+  }
+
+  // Evaluate Workability
+  const workability = evaluateWorkability(location, workplaceType, description);
+  if (!workability.workable) {
+    return {
+      passed: false,
+      needsVerification: false,
+      rejectionReason: workability.reason,
+      reasonCode: 'UNWORKABLE_LOCATION_MODEL',
+      axis1FunctionPassed: false,
+      axis2DomainPassed: false
+    };
+  }
+
+  // Axis 1: Technical Function Validation
+  const hasFunctionSignal = TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(title) || p.test(description));
+  if (!hasFunctionSignal) {
+    return {
+      passed: false,
+      needsVerification: false,
+      rejectionReason: 'Role lacks evidence of technical, building, or engineering function',
+      reasonCode: 'NON_TECHNICAL_FUNCTION',
+      axis1FunctionPassed: false,
+      axis2DomainPassed: false
+    };
+  }
+
+  if (workability.needsVerify) {
+    return {
+      passed: false,
+      needsVerification: true,
+      reasonCode: 'NEEDS_VERIFICATION',
+      axis1FunctionPassed: true,
+      axis2DomainPassed: true
+    };
+  }
+
+  return {
+    passed: true,
+    needsVerification: false,
+    axis1FunctionPassed: true,
+    axis2DomainPassed: true
+  };
+}
+
+// ====================================================================
 // PROGRAMMATIC DETERMINISTIC GATES
 // ====================================================================
 

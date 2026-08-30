@@ -84,6 +84,97 @@ export interface AgentResult {
   }>;
 }
 
+// NEW: Unified agent execution result with fallback tracking
+export interface AgentWithFallbackResult<T> {
+  payload: T;
+  provider: 'gemini' | 'openai';
+  model: string;
+  fallbackUsed: boolean;
+  attempts: number;
+  errors: Array<{ provider: string; model: string; error: string }>;
+  degraded: boolean;
+}
+
+/**
+ * Execute an agent prompt with fallback from Gemini to OpenAI.
+ * Persists accurate provider audit trail for model selection verification.
+ */
+export async function runAgentWithFallback<T>(
+  prompt: string,
+  schema: any,
+  systemInstruction?: string
+): Promise<AgentWithFallbackResult<T>> {
+  const errors: Array<{ provider: string; model: string; error: string }> = [];
+  let attempts = 0;
+
+  const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+  const FALLBACK_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+  // 1. Attempt Primary: Gemini
+  const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  if (geminiApiKey) {
+    try {
+      attempts++;
+      const text = await tryGemini(geminiApiKey, {
+        model: PRIMARY_MODEL,
+        contents: prompt,
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+        systemInstruction
+      });
+
+      const parsed = JSON.parse(text || '{}') as T;
+      return {
+        payload: parsed,
+        provider: 'gemini',
+        model: PRIMARY_MODEL,
+        fallbackUsed: false,
+        attempts,
+        errors: [],
+        degraded: false
+      };
+    } catch (err: any) {
+      console.warn(`[Gemini Error] Primary model failed: ${err.message}. Triggering fallback...`);
+      errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error: err.message });
+    }
+  } else {
+    errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error: 'GEMINI_API_KEY not configured' });
+  }
+
+  // 2. Attempt Fallback: OpenAI
+  const openaiApiKey = process.env.OPENAI_API_KEY;
+  if (openaiApiKey) {
+    try {
+      attempts++;
+      const text = await tryOpenAI(openaiApiKey, {
+        model: FALLBACK_MODEL,
+        contents: prompt,
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+        systemInstruction
+      });
+
+      const parsed = JSON.parse(text || '{}') as T;
+      return {
+        payload: parsed,
+        provider: 'openai',
+        model: FALLBACK_MODEL,
+        fallbackUsed: true,
+        attempts,
+        errors,
+        degraded: true
+      };
+    } catch (err: any) {
+      console.error(`[OpenAI Error] Fallback model failed: ${err.message}`);
+      errors.push({ provider: 'openai', model: FALLBACK_MODEL, error: err.message });
+    }
+  } else {
+    errors.push({ provider: 'openai', model: FALLBACK_MODEL, error: 'OPENAI_API_KEY not configured' });
+  }
+
+  throw new Error(`All model providers failed: ${JSON.stringify(errors)}`);
+}
+
 async function tryGemini(geminiKey: string, options: any): Promise<string> {
   const ai = getGeminiClient();
   const maxRetries = 3;
