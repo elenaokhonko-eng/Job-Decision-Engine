@@ -12,11 +12,32 @@
 -- Step 1: Ensure job_version_id column exists on evaluation_queue and ai_evaluations
 DO $$
 BEGIN
+  -- Drop any legacy default ('v1') on evaluation_queue.job_version_id before type casting
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name = 'evaluation_queue' AND column_name = 'job_version_id'
+  ) THEN
+    ALTER TABLE evaluation_queue ALTER COLUMN job_version_id DROP DEFAULT;
+  END IF;
+
+  -- Ensure job_version_id exists and is UUID on evaluation_queue
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.columns 
     WHERE table_name = 'evaluation_queue' AND column_name = 'job_version_id'
   ) THEN
     ALTER TABLE evaluation_queue ADD COLUMN job_version_id UUID;
+  ELSIF EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name = 'evaluation_queue' AND column_name = 'job_version_id' AND data_type IN ('text', 'character varying')
+  ) THEN
+    ALTER TABLE evaluation_queue 
+      ALTER COLUMN job_version_id TYPE UUID USING (
+        CASE 
+          WHEN job_version_id::text ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' 
+          THEN job_version_id::text::uuid 
+          ELSE NULL 
+        END
+      );
   END IF;
 END $$;
 
@@ -75,6 +96,14 @@ END $$;
 -- Step 5: Enforce Foreign Key on ai_evaluations.job_version_id
 DO $$
 BEGIN
+  -- Drop any legacy default ('v1') on ai_evaluations.job_version_id before altering column type
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name = 'ai_evaluations' AND column_name = 'job_version_id'
+  ) THEN
+    ALTER TABLE ai_evaluations ALTER COLUMN job_version_id DROP DEFAULT;
+  END IF;
+
   -- Convert text/varchar job_version_id to UUID if needed
   IF EXISTS (
     SELECT 1 FROM information_schema.columns 
