@@ -479,7 +479,9 @@ export function applyGlobalGates(job: RawJob): GateResult {
   const technicalFunctionPhrases = [
     "engineer", "developer", "architect", "data scientist", "machine learning",
     "software", "programming", "pipeline", "distributed systems", "modelling",
-    "modeling", "algorithms", "quantitative", "pytorch", "python", "spark"
+    "modeling", "algorithms", "quantitative", "pytorch", "python", "spark",
+    "sql", "etl", "data warehouse", "data pipeline", "contract analytics",
+    "legaltech", "regtech", "compliance", "ai", "llm", "ml", "analytics"
   ];
   const hasTechnicalFunction = isTechnicalTitle || technicalFunctionPhrases.some(kw => t.includes(kw) || d.includes(kw));
   if (!hasTechnicalFunction) {
@@ -489,11 +491,13 @@ export function applyGlobalGates(job: RawJob): GateResult {
   // Axis 2: Target Domain Validation
   const aiDataShortRegex = /\b(?:ai|ml|nlp|llm|rag)\b/i;
   const targetDomainPhrases = [
-    "artificial intelligence", "machine learning", "data engineering", "quantitative research",
-    "time-series", "time series", "portfolio analytics", "computational biology",
-    "bioinformatics", "cheminformatics", "genomics", "drug discovery", "clinical trial",
-    "regtech", "legaltech", "fraud detection", "kyc", "aml", "compliance automation",
-    "digital trust", "deep learning", "agentic", "market data", "trading infrastructure"
+    "artificial intelligence", "machine learning", "data engineering", "data pipeline",
+    "data warehouse", "etl", "sql", "quantitative research", "time-series",
+    "time series", "portfolio analytics", "computational biology", "bioinformatics",
+    "cheminformatics", "genomics", "drug discovery", "clinical trial", "regtech",
+    "legaltech", "fraud detection", "kyc", "aml", "compliance automation",
+    "contract analytics", "digital trust", "deep learning", "agentic", "market data",
+    "trading infrastructure"
   ];
   const hasDomainRelevance = aiDataShortRegex.test(t) || aiDataShortRegex.test(d) ||
     targetDomainPhrases.some(kw => t.includes(kw) || d.includes(kw));
