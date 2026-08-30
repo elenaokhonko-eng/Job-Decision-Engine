@@ -27,11 +27,19 @@ SET
 FROM ranked_versions rv
 WHERE c.id = rv.canonical_job_id AND rv.rn = 1 AND (c.latest_job_version_id IS NULL OR c.version_count IS NULL);
 
--- 4. Backfill evaluation_queue.job_version_id if null
+-- 4. Backfill evaluation_queue.job_version_id if null and valid reference exists
 UPDATE evaluation_queue eq
 SET job_version_id = c.latest_job_version_id
 FROM canonical_jobs c
 WHERE eq.canonical_job_id = c.id AND eq.job_version_id IS NULL AND c.latest_job_version_id IS NOT NULL;
+
+-- 4b. Clean up orphaned evaluation_queue rows that still have NULL job_version_id
+-- These are records whose canonical_job has no job_versions (data integrity issue)
+DELETE FROM evaluation_queue
+WHERE job_version_id IS NULL AND canonical_job_id IN (
+  SELECT c.id FROM canonical_jobs c
+  WHERE c.latest_job_version_id IS NULL
+);
 
 -- 5. Add foreign key constraints safely
 DO $$
@@ -53,7 +61,7 @@ BEGIN
     ALTER TABLE evaluation_queue
     ADD CONSTRAINT fk_evaluation_queue_job_version
     FOREIGN KEY (job_version_id) REFERENCES job_versions(id)
-    ON DELETE SET NULL;
+    ON DELETE CASCADE;
   END IF;
 END $$;
 
