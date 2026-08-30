@@ -41,9 +41,32 @@ WHERE job_version_id IS NULL AND canonical_job_id IN (
   WHERE c.latest_job_version_id IS NULL
 );
 
--- 5. Add foreign key constraints safely
+-- 4c. Delete rows with job_version_id that don't exist in job_versions table (orphaned FKs)
+DELETE FROM evaluation_queue
+WHERE job_version_id IS NOT NULL AND job_version_id NOT IN (
+  SELECT DISTINCT id FROM job_versions
+);
+
+-- 5. Drop the constraint if it already exists (idempotent approach)
 DO $$
 BEGIN
+  BEGIN
+    ALTER TABLE evaluation_queue DROP CONSTRAINT IF EXISTS fk_evaluation_queue_job_version;
+  EXCEPTION WHEN others THEN
+    NULL; -- Ignore errors if constraint doesn't exist
+  END;
+  
+  BEGIN
+    ALTER TABLE canonical_jobs DROP CONSTRAINT IF EXISTS fk_canonical_jobs_latest_version;
+  EXCEPTION WHEN others THEN
+    NULL;
+  END;
+END $$;
+
+-- 6. Add foreign key constraints with proper data validation
+DO $$
+BEGIN
+  -- Add canonical_jobs constraint (safer because we control latest_job_version_id backfill)
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints 
     WHERE constraint_name = 'fk_canonical_jobs_latest_version'
@@ -54,6 +77,7 @@ BEGIN
     ON DELETE SET NULL;
   END IF;
 
+  -- Add evaluation_queue constraint (allow NULL, enforce references for non-NULL)
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints 
     WHERE constraint_name = 'fk_evaluation_queue_job_version'
@@ -65,7 +89,7 @@ BEGIN
   END IF;
 END $$;
 
--- 6. Updated v_canonical_shortlist read model
+-- 7. Updated v_canonical_shortlist read model
 DROP VIEW IF EXISTS v_canonical_shortlist;
 
 CREATE OR REPLACE VIEW v_canonical_shortlist AS
