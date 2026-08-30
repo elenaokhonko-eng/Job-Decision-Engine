@@ -9,6 +9,10 @@
 -- 5. Gate status defaults to 'NEEDS_VERIFICATION' (never 'NOT_GATED').
 -- 6. Location defaults to 'Unknown', workplace_type and employment_type to 'UNKNOWN'.
 
+-- Step 0: Drop dependent views before modifying table column types
+DROP VIEW IF EXISTS shortlist_view CASCADE;
+DROP VIEW IF EXISTS v_canonical_shortlist CASCADE;
+
 -- Step 1: Ensure job_version_id column exists on evaluation_queue and ai_evaluations
 DO $$
 BEGIN
@@ -138,9 +142,6 @@ BEGIN
 END $$;
 
 -- Step 6: Recreate the canonical shortlist view with strict version matching
-DROP VIEW IF EXISTS shortlist_view CASCADE;
-DROP VIEW IF EXISTS v_canonical_shortlist CASCADE;
-
 CREATE OR REPLACE VIEW v_canonical_shortlist AS
 WITH latest_versions AS (
   SELECT DISTINCT ON (canonical_job_id)
