@@ -29,14 +29,11 @@ export const CANDIDATE_PROFILE = {
     "No Forward Deployed Engineering (FDE) or outsourcing/consulting roles",
     "No contract roles (only permanent FTE)",
     "Travel < 10%",
-    "Max 3 days in-office (unless a physical scientific laboratory environment)",
+    "Max 3 days in-office (100% on-premises is unacceptable)",
     "Low stress / organizational politics",
     "Protected deep-focus time"
   ]
 };
-
-// Legacy Stage 1 Hard Disqualifiers - mostly unused now as we have programmatic gates
-export const HARD_DISQUALIFIERS = [];
 
 // ====================================================================
 // PROGRAMMATIC DETERMINISTIC GATES
@@ -121,7 +118,7 @@ function makeVerification(codes: string[], evidence: string[], facts?: Partial<G
 /**
  * Extract a readable text corpus from a raw job (handles string, JSON-string, or object descriptions).
  */
-function extractDescriptionText(job: RawJob): string {
+export function extractDescriptionText(job: RawJob): string {
   if (!job.raw_description) return "";
   if (typeof job.raw_description === "object") {
     const d = job.raw_description as any;
@@ -167,13 +164,51 @@ function findEvidence(d: string, keywords: string[]): string[] {
   return quotes;
 }
 
-
 export function applyGlobalGates(job: RawJob): GateResult {
   const t = (job.title || "").toLowerCase();
   const c = (job.company_name || "").toLowerCase();
   const d = extractDescriptionText(job);
 
-  // ── 1. Title-level intern/trainee guard (deterministic, no experience-range regex) ──
+  // ── 1. Deterministic Non-Technical Title-Family Exclusions ──
+  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician)\b/i.test(t);
+
+  // A. Human Resources / Recruiting / People Ops
+  const hrTitleRegex = /\b(human resources|hr manager|hr generalist|hr business partner|hrbp|talent acquisition|recruiter|recruitment|people ops|people operations|people partner)\b/i;
+  if (hrTitleRegex.test(t)) {
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: HR / Talent role "${job.title}"`]);
+  }
+
+  // B. Executive Assistant / Administrative / Office Management
+  const adminTitleRegex = /\b(executive assistant|personal assistant|office manager|administrative assistant|admin assistant|receptionist|workplace coordinator|workplace manager|facilities manager)\b/i;
+  if (adminTitleRegex.test(t)) {
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Administrative / Office Management "${job.title}"`]);
+  }
+
+  // C. Legal Practice (Attorneys / Legal Counsel / Paralegals)
+  const legalPracticeRegex = /\b(attorney|associate attorney|m&a attorney|counsel|corporate counsel|legal counsel|general counsel|lawyer|paralegal|legal assistant)\b/i;
+  if (legalPracticeRegex.test(t) && !isTechnicalTitle) {
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Legal Practice / Counsel "${job.title}"`]);
+  }
+
+  // D. Sales / Marketing / BD
+  const salesTitleRegex = /\b(account executive|sales manager|sales director|business development manager|business development executive|bdr|sdr|marketing manager|marketing director|product marketing manager|growth marketing|event coordinator)\b/i;
+  if (salesTitleRegex.test(t) && !isTechnicalTitle) {
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Sales / Marketing "${job.title}"`]);
+  }
+
+  // E. Non-technical QA Coordination / Operations Management
+  const coordTitleRegex = /\b(quality assurance coordinator|qa coordinator|compliance coordinator|operations coordinator|administrative coordinator|logistics coordinator)\b/i;
+  if (coordTitleRegex.test(t) && !isTechnicalTitle) {
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Non-technical Coordinator "${job.title}"`]);
+  }
+
+  // F. Qualitative Finance / Banking
+  const financeQualRegex = /\b(private equity associate|private equity analyst|investment banking analyst|investment banking associate|m&a analyst|m&a associate|deal advisory|commercial banker|loan officer|credit underwriter)\b/i;
+  if (financeQualRegex.test(t) && !isTechnicalTitle) {
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Traditional Finance / Banking "${job.title}"`]);
+  }
+
+  // ── 2. Title-level intern/trainee guard ──
   const juniorTitleKw = ["intern", "internship", "graduate trainee", "apprentice", "apprenticeship"];
   for (const kw of juniorTitleKw) {
     if (t.includes(kw)) {
@@ -181,12 +216,12 @@ export function applyGlobalGates(job: RawJob): GateResult {
     }
   }
 
-  // ── 2. Office days / on-site detection ──
+  // ── 3. Office days / on-site detection (100% on-premises strictly rejected) ──
   const hardOnsiteKw = [
     "100% onsite", "100% on-site", "5 days on-site", "5 days onsite", "5 days a week in the office",
     "5 days per week on-site", "5 days per week onsite", "5 days a week on-site", "mandatory 5 days",
     "on-site only", "onsite only", "4 days in office", "4 days a week in the office",
-    "4 days on-site", "4 days onsite", "fully on-site", "fully onsite"
+    "4 days on-site", "4 days onsite", "fully on-site", "fully onsite", "on-premises only"
   ];
   const hardOnsiteRegex = /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i;
   for (const kw of hardOnsiteKw) {
@@ -195,7 +230,7 @@ export function applyGlobalGates(job: RawJob): GateResult {
     }
   }
 
-  // Office days NEEDS_VERIFICATION: description mentions office days or workplace expectations without explicit day counts
+  // Ambiguous office expectations produce NEEDS_VERIFICATION
   const ambiguousOfficeKw = [
     "office based", "office-based", "in-office", "in office",
     "office expectations", "workplace arrangement", "workplace expectations",
@@ -215,7 +250,7 @@ export function applyGlobalGates(job: RawJob): GateResult {
     );
   }
 
-  // ── 3. Geographic restrictions ──
+  // ── 4. Geographic restrictions ──
   const locationKw = [
     "us only", "us-only", "united states only", "canada only", "eu only", "eu-only", "uk only", "uk-only", "remote - us",
     "australia only", "australian work rights", "melbourne", "sydney"
@@ -226,7 +261,7 @@ export function applyGlobalGates(job: RawJob): GateResult {
     }
   }
 
-  // ── 4. Lifestyle incompatibilities ──
+  // ── 5. Lifestyle incompatibilities ──
   const lifestyleKw = ["shift work", "on-call rotation", "regular on-call", "24/7 support", "travel extensively", "frequent travel", "up to 50% travel", "up to 25% travel"];
   for (const kw of lifestyleKw) {
     if (d.includes(kw)) {
@@ -235,7 +270,7 @@ export function applyGlobalGates(job: RawJob): GateResult {
     }
   }
 
-  // ── 5. Sales / Client-facing ──
+  // ── 6. Sales / Client-facing ──
   const highInteractionKw = ["sales engineering", "presales", "pre-sales", "client relationship management", "manage large teams", "escalations manager"];
   for (const kw of highInteractionKw) {
     if (d.includes(kw)) {
@@ -243,7 +278,7 @@ export function applyGlobalGates(job: RawJob): GateResult {
     }
   }
 
-  // ── 6. Hardware / SRE / Construction ──
+  // ── 7. Hardware / SRE / Construction ──
   const hardwareStrictTitle = ["hardware", "hardware architect", "gpu hardware", "gpu architect", "infrastructure data center", "sre", "site reliability", "construction"];
   const hardwareStrictDesc = ["hardware engineering", "infrastructure data center", "data center construction", "construction project"];
   for (const kw of hardwareStrictTitle) {
@@ -257,13 +292,13 @@ export function applyGlobalGates(job: RawJob): GateResult {
     }
   }
 
-  // ── 7. FDE (Forward Deployed Engineering) ──
+  // ── 8. FDE (Forward Deployed Engineering) ──
   const fdeKw = ["forward deployed", "fde "];
   if (t.includes("fde") || fdeKw.some(k => t.includes(k) || d.includes(k))) {
     return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], findEvidence(d, fdeKw));
   }
 
-  // ── 8. Consulting firms ──
+  // ── 9. Consulting firms ──
   const consultingFirms = ["accenture", "kpmg", "bcg", "mckinsey", "bain", "deloitte", "pwc", "ernst & young", "pricewaterhousecoopers", "boston consulting group"];
   for (const firm of consultingFirms) {
     if (c.includes(firm)) {
@@ -274,14 +309,14 @@ export function applyGlobalGates(job: RawJob): GateResult {
     return makeReject(["GATE_CONSULTING_FIRM"], [`Company name matches EY`]);
   }
 
-  // ── 9. IT Outsourcing ──
+  // ── 10. IT Outsourcing ──
   const outsourcingKw = ["deployed to client", "work for our clients", "hired resource"];
   if (c.includes("red hat") || outsourcingKw.some(k => d.includes(k))) {
     const found = c.includes("red hat") ? [`Company: "red hat"`] : findEvidence(d, outsourcingKw.filter(k => d.includes(k)));
     return makeReject(["GATE_OUTSOURCING"], found);
   }
 
-  // ── 10. Contract / Agency ──
+  // ── 11. Contract / Agency ──
   const contractKw = ["contract", "contractor", "temp", "temporary", "freelance"];
   const agencyKw = ["recruitment", "recruiting", "staffing", "talent acquisition", "hays", "randstad", "pagegroup", "michael page", "adecco", "charterhouse", "huxley", "robert half", "robert walters", "kelly services", "monroe consulting", "recruit"];
   const isAgency = agencyKw.some(kw => c.includes(kw)) || d.includes("on behalf of our client") || d.includes("our client is looking for") || d.includes("hiring for our client");
@@ -297,7 +332,7 @@ export function applyGlobalGates(job: RawJob): GateResult {
     }
   }
 
-  // ── 11. Heavy management / Kitchen-sink ──
+  // ── 12. Heavy management / Kitchen-sink ──
   const mgmtKw = ["manage large teams", "manage client teams", "manage client expectations", "client relationship management"];
   for (const kw of mgmtKw) {
     if (d.includes(kw)) {
@@ -314,7 +349,7 @@ export function applyGlobalGates(job: RawJob): GateResult {
     return makeReject(["GATE_KITCHEN_SINK"], [`Role combines ${rolesCount} distinct function types`]);
   }
 
-  // ── 12. Pure Governance / Zero Technical Work Guard ──
+  // ── 13. Pure Governance / Zero Technical Work Guard ──
   const pureGovKw = ["zero hands-on", "zero technical work", "steering committees", "vendor steering", "political change management"];
   for (const kw of pureGovKw) {
     if (d.includes(kw) || t.includes(kw)) {
@@ -322,19 +357,43 @@ export function applyGlobalGates(job: RawJob): GateResult {
     }
   }
 
-  // ── 13. Lane relevance (must have AI/Data signal with word-boundary matching) ──
-  const aiDataShortRegex = /\b(?:ai|ml|nlp|llm)\b/i;
-  const aiDataPhrases = [
-    "artificial intelligence", "machine learning", "data", "quantitative",
-    "time-series", "time series", "portfolio analytics", "research",
-    "deep learning", "agentic", "data engineering", "architecture",
-    "architect", "regtech", "fintech", "biotech", "pharma", "clinical"
+  // ── 14. Universal Negative Domain Exclusions ──
+  const universalNegativeKw = [
+    "payments", "merchant acquiring", "remittance", "bnpl", "buy now pay later",
+    "consumer lending", "card issuing", "credit card", "pos terminals"
   ];
-  const hasRelevance = aiDataShortRegex.test(t) || aiDataShortRegex.test(d) ||
-    aiDataPhrases.some(kw => t.includes(kw) || d.includes(kw));
+  for (const kw of universalNegativeKw) {
+    if (t.includes(kw)) {
+      return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Universal negative domain in title: "${kw}"`]);
+    }
+  }
 
-  if (!hasRelevance) {
-    return makeReject(["GATE_NOT_AI_DATA"], [`No AI/Data/domain signal found in title or description`]);
+  // ── 15. TWO-AXIS PREQUALIFICATION ──
+  // Axis 1: Technical Function Validation (must be builder/modeller/architect/scientist)
+  const technicalFunctionPhrases = [
+    "engineer", "developer", "architect", "data scientist", "machine learning",
+    "software", "programming", "pipeline", "distributed systems", "modelling",
+    "modeling", "algorithms", "quantitative", "pytorch", "python", "spark"
+  ];
+  const hasTechnicalFunction = isTechnicalTitle || technicalFunctionPhrases.some(kw => t.includes(kw) || d.includes(kw));
+  if (!hasTechnicalFunction) {
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], ["Axis 1 Failed: Role lacks hands-on engineering, modeling, or architecture function"]);
+  }
+
+  // Axis 2: Target Domain Validation
+  const aiDataShortRegex = /\b(?:ai|ml|nlp|llm|rag)\b/i;
+  const targetDomainPhrases = [
+    "artificial intelligence", "machine learning", "data engineering", "quantitative research",
+    "time-series", "time series", "portfolio analytics", "computational biology",
+    "bioinformatics", "cheminformatics", "genomics", "drug discovery", "clinical trial",
+    "regtech", "legaltech", "fraud detection", "kyc", "aml", "compliance automation",
+    "digital trust", "deep learning", "agentic", "market data", "trading infrastructure"
+  ];
+  const hasDomainRelevance = aiDataShortRegex.test(t) || aiDataShortRegex.test(d) ||
+    targetDomainPhrases.some(kw => t.includes(kw) || d.includes(kw));
+
+  if (!hasDomainRelevance) {
+    return makeReject(["GATE_NOT_AI_DATA"], ["Axis 2 Failed: No signal found for target domains (AI/Data, RegTech, Bio/Pharma, Quant/FinTech)"]);
   }
 
   // ── All deterministic gates passed ──
@@ -367,11 +426,11 @@ export const LANE_VOCABULARIES = {
   },
   LEGAL_REGTECH: {
     positive: ["legal ai", "legaltech", "regulatory technology", "claims and disputes technology", "legal knowledge engineering", "fraud", "scams", "financial crime", "aml", "kyc", "compliance automation", "digital trust", "legal nlp", "document intelligence", "knowledge graphs"],
-    negative: ["traditional legal", "compliance operations"]
+    negative: ["traditional legal", "compliance operations", "attorney", "paralegal"]
   },
   HEALTH_BIO_PHARMA: {
     positive: ["computational biology", "bioinformatics", "scientific ml", "cheminformatics", "clinical nlp", "healthcare data science", "medical ai", "imaging", "research software engineering", "health-data platforms", "pharmaceutical ai", "data engineering", "healthcare models"],
-    negative: ["laboratory-bound", "patient-facing", "clinical-operations"]
+    negative: ["laboratory-bound", "patient-facing", "clinical-operations", "wet lab"]
   },
   INVESTMENT_MARKETS_FINTECH: {
     positive: ["quantitative research", "time-series ml", "investment-data engineering", "portfolio analytics", "optimisation", "risk modelling", "trading technology", "market-data platforms", "investment-research automation", "wealthtech", "investtech", "asset/fund-management ai", "digital-asset analytics", "custody", "trading infrastructure"],
@@ -408,5 +467,12 @@ export const POLITICS_STRESS_RISK_DIMENSIONS = {
     "Buzzword: 'Wear many hats' or 'Roll up your sleeves' (High context-switching)",
     "Buzzword: 'Work hard, play hard' (Boundary bleed)",
     "Over-emphasis on Agile/Scrum ceremonies, daily standups, and constant collaboration"
+  ],
+  protectiveFactors: [
+    "Clear KPIs, deliverables, and role boundaries",
+    "High technical autonomy with SME authority",
+    "Low cross-departmental coordination overhead",
+    "Stable product roadmap (not constant pivot fire drills)",
+    "Technical-first leadership (engineers managing engineers)"
   ]
 };

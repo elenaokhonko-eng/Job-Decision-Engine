@@ -1,7 +1,6 @@
 import { db } from "../db/db.js";
 import pg from "pg";
 import dotenv from "dotenv";
-
 import { pgSslConfig } from "../db/pgSsl.js";
 
 dotenv.config();
@@ -16,9 +15,6 @@ export async function runNormalization() {
   console.log("Starting normalization of raw_job_observations...");
   
   // Find observations that have not been canonicalized yet
-  // For simplicity in Stage 0, we'll assume any observation without a matching payload hash in job_versions is new.
-  // In a real system, we'd add a processed flag to raw_job_observations. We will add a processed flag to the query via NOT EXISTS.
-  
   const query = `
     SELECT obs.* 
     FROM raw_job_observations obs
@@ -36,6 +32,7 @@ export async function runNormalization() {
       await client.query("BEGIN");
       try {
         let canonicalJobId: string | null = null;
+        let isExistingJob = false;
         
         // Check if we have seen this external ID before
         const checkExt = await client.query(
@@ -47,6 +44,7 @@ export async function runNormalization() {
         
         if (checkExt.rows.length > 0) {
           canonicalJobId = checkExt.rows[0].canonical_job_id;
+          isExistingJob = true;
         } else {
           // Check title + company
           const checkTitle = await client.query(
@@ -55,24 +53,56 @@ export async function runNormalization() {
           );
           if (checkTitle.rows.length > 0) {
             canonicalJobId = checkTitle.rows[0].id;
+            isExistingJob = true;
           }
         }
         
         if (!canonicalJobId) {
           // Create new canonical job
           const insertCanon = await client.query(
-            `INSERT INTO canonical_jobs (company_name, normalized_title, canonical_url, processing_status) 
-             VALUES ($1, $2, $3, $4) RETURNING id`,
-            [obs.company_name, obs.title.toLowerCase(), obs.source_url, "RAW_STAGED"]
+            `INSERT INTO canonical_jobs (
+               company_name, normalized_title, canonical_url, location, 
+               workplace_type, employment_type, processing_status
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+            [
+              obs.company_name,
+              obs.title.toLowerCase(),
+              obs.source_url,
+              obs.location_raw || "Singapore",
+              obs.workplace_type_raw || "UNKNOWN",
+              obs.employment_type_raw || "PERMANENT",
+              "RAW_STAGED"
+            ]
           );
           canonicalJobId = insertCanon.rows[0].id;
         }
         
         // Create new job version
-        await client.query(
-          `INSERT INTO job_versions (canonical_job_id, content_hash, description_text) 
-           VALUES ($1, $2, $3)`,
+        const verInsert = await client.query(
+          `INSERT INTO job_versions (canonical_job_id, content_hash, description_text, observed_at) 
+           VALUES ($1, $2, $3, NOW()) RETURNING id`,
           [canonicalJobId, obs.raw_payload_hash, obs.description_raw]
+        );
+        const newVersionId = verInsert.rows[0].id;
+
+        // Transactionally update canonical job with latest version pointer and reset status for reevaluation
+        await client.query(
+          `UPDATE canonical_jobs 
+           SET latest_job_version_id = $1,
+               version_count = COALESCE(version_count, 0) + 1,
+               location = COALESCE($2, location),
+               workplace_type = COALESCE($3, workplace_type),
+               employment_type = COALESCE($4, employment_type),
+               processing_status = 'RAW_STAGED',
+               updated_at = NOW()
+           WHERE id = $5`,
+          [
+            newVersionId,
+            obs.location_raw || "Singapore",
+            obs.workplace_type_raw || "UNKNOWN",
+            obs.employment_type_raw || "PERMANENT",
+            canonicalJobId
+          ]
         );
 
         await client.query("COMMIT");

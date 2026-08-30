@@ -1,43 +1,44 @@
 # Assigned remediation backlog
 
 Status values: `READY`, `BLOCKED`, `IN_PROGRESS`, `REVIEW`, `DONE`.
+Current Operational Verdict: `CONDITIONAL GO` (Supervised testing & active calibration). `NO-GO` for fully autonomous recommendation/application execution.
 
 ## P0 — trustworthy pipeline
 
-| ID | Owner | Assignment | Depends on | Acceptance criteria | Status |
-|---|---|---|---|---|---|
-| P0-01 | data-contract-checker | Define versioned runtime contracts and current field-lineage baseline | — | Gmail-to-Streamlit contract fixtures and schema-drift test fail on known mismatches | DONE |
-| P0-02 | test-evals-specialist | Add PostgreSQL CI service and a reproducible anonymized nine-email fixture | P0-01 | CI applies canonical migrations and reproduces exact stage counts; no DB tests skip | DONE |
-| P0-03 | database-versioning-engineer | Establish one additive migration chain and canonical identity/version schema | P0-01 | Fresh and upgrade paths pass; no destructive reset; latest job version is unambiguous | DONE |
-| P0-04 | pipeline-reliability-engineer | Implement leases, retry/backoff, stale-lease recovery and manual-review terminal state | P0-03 | Crash/timeout tests requeue safely; exhausted retries never become rejection | DONE |
-| P0-05 | pipeline-reliability-engineer | Repair script exit codes and GitHub workflow dispatch/concurrency | P0-04 | Required stage failures make Actions fail; manual dispatch runs; one pipeline run cannot overlap itself | DONE |
-| P0-06 | ai-evaluation-engineer | Validate AI output, identity and full result before atomic persistence | P0-01, P0-03 | Malformed/empty/mismatched output retries another provider and cannot mark success | DONE |
-| P0-07 | ai-evaluation-engineer | Persist provider, model, attempt, fallback, degraded state, cost and full evaluation | P0-03 | A shortlist result is auditable from job version through exact model response | DONE |
-| P0-08 | ingestion-source-engineer | Make Gmail ingestion non-destructive and replace evaluator-shaped email parsing | P0-01, P0-03 | Email is moved/deleted only after valid job observations commit; failed parse is recoverable | DONE |
-| P0-09 | data-contract-checker | Replace Streamlit legacy/mismatched queries with one canonical shortlist read model | P0-03, P0-07 | Streamlit renders real fields for evaluated, deferred, verification and failed states | DONE |
-| P0-10 | test-evals-specialist | Add failure-injection E2E for the complete pipeline | P0-04..P0-09 | Nine-email test proves conservation, idempotency, retry and correct World Bank identity/evidence | DONE |
+| ID | Owner | Assignment | Depends on | Acceptance criteria | Status | Notes |
+|---|---|---|---|---|---|---|
+| P0-01 | data-contract-checker | Define versioned runtime contracts and current field-lineage baseline | — | Gmail-to-Streamlit contract fixtures and schema-drift test fail on known mismatches | DONE | Contracts validated against Zod schemas |
+| P0-02 | test-evals-specialist | Add PostgreSQL CI service and a reproducible anonymized nine-email fixture | P0-01 | CI applies canonical migrations and reproduces exact stage counts; no DB tests skip | DONE | CI uses Neon Postgres / Postgres container |
+| P0-03 | database-versioning-engineer | Establish one additive migration chain and canonical identity/version schema | P0-01 | Fresh and upgrade paths pass; no destructive reset; latest job version is unambiguous | DONE | Migrations 001–007 implemented |
+| P0-04 | pipeline-reliability-engineer | Implement leases, retry/backoff, stale-lease recovery and manual-review terminal state | P0-03 | Crash/timeout tests requeue safely; exhausted retries never become rejection | DONE | Leases and exponential backoff verified |
+| P0-05 | pipeline-reliability-engineer | Repair script exit codes and GitHub workflow dispatch/concurrency | P0-04 | Required stage failures make Actions fail; manual dispatch runs; one pipeline run cannot overlap itself | DONE | Non-zero exit on adapter/eval failure |
+| P0-06 | ai-evaluation-engineer | Validate AI output, identity and full result before atomic persistence | P0-01, P0-03 | Malformed/empty/mismatched output retries another provider and cannot mark success | DONE | Schema validation and identity checks active |
+| P0-07 | ai-evaluation-engineer | Persist provider, model, attempt, fallback, degraded state, cost and full evaluation | P0-03 | A shortlist result is auditable from job version through exact model response | REVIEW | Envelope with true provider/fallback/model returned |
+| P0-08 | ingestion-source-engineer | Make Gmail ingestion non-destructive and replace evaluator-shaped email parsing | P0-01, P0-03 | Email is moved/deleted only after valid job observations commit; failed parse is recoverable | DONE | Atomic single-transaction staging |
+| P0-09 | data-contract-checker | Replace Streamlit legacy/mismatched queries with one canonical shortlist read model | P0-03, P0-07 | Streamlit renders real fields for evaluated, deferred, verification and failed states | REVIEW | Updated to Migration 007 read model |
+| P0-10 | test-evals-specialist | Add failure-injection E2E for the complete pipeline | P0-04..P0-09 | End-to-end test proves conservation, idempotency, retry and exact stage transitions | IN_PROGRESS | Calibrating end-to-end failure injection test |
 
 ## P1 — correct selection and broad sourcing
 
-| ID | Owner | Assignment | Depends on | Acceptance criteria | Status |
-|---|---|---|---|---|---|
-| P1-01 | decision-policy-engineer | Implement `PASS / NEEDS_VERIFICATION / HARD_REJECT` with multiple codes, quotes and confidence | P0-03 | On-site and >3-day rules are deterministic; vague language alone cannot hard reject | DONE |
-| P1-02 | decision-policy-engineer | Separate personal workability from domain/career value | P1-01 | Hard workability conflicts are non-compensable; unknown evidence remains visible | DONE |
-| P1-03 | decision-policy-engineer | Load lane definitions and thresholds from YAML; support secondary/unclassified lanes | P0-03 | Title-only counterfactuals are stable; zero/random embeddings cannot default to core AI | DONE |
-| P1-04 | decision-policy-engineer | Replace budget-cap rejection with durable deferral and fair per-lane selection | P0-04, P1-03 | At most three/lane/run, unused weak quotas stay unused, deferred jobs remain eligible | DONE |
-| P1-05 | ingestion-source-engineer | Add observable, paginated Greenhouse/Ashby/Lever/Himalayas adapters | P0-03 | Empty source is distinct from failed source; timeouts, rate limits and schema changes are visible | DONE |
-| P1-06 | ingestion-source-engineer | Implement four outbound discovery scouts as query/source planners | P1-05 | Scouts only produce queries/watchlists or ingest verified postings; no fabricated jobs | DONE |
-| P1-07 | test-evals-specialist | Build real-job calibration and counterfactual suite | P1-01..P1-06 | False-rejection rate, gate precision, per-lane yield and AI-call budget are reported | DONE |
+| ID | Owner | Assignment | Depends on | Acceptance criteria | Status | Notes |
+|---|---|---|---|---|---|---|
+| P1-01 | decision-policy-engineer | Implement `PASS / NEEDS_VERIFICATION / HARD_REJECT` with multiple codes, quotes and confidence | P0-03 | On-site and >3-day rules are deterministic; vague language alone cannot hard reject | REVIEW | Two-axis prequalification active |
+| P1-02 | decision-policy-engineer | Separate personal workability from domain/career value | P1-01 | Hard workability conflicts are non-compensable; unknown evidence remains visible | DONE | Workability facts separated from lane scoring |
+| P1-03 | decision-policy-engineer | Load lane definitions and thresholds from YAML; support secondary/unclassified lanes | P0-03 | Title-only counterfactuals are stable; zero/random embeddings cannot default to core AI | REVIEW | lanes.yaml thresholds calibrated (0.35–0.38) |
+| P1-04 | decision-policy-engineer | Replace budget-cap rejection with durable deferral and fair per-lane selection | P0-04, P1-03 | At most three/lane/run, unused weak quotas stay unused, deferred jobs remain eligible | DONE | evaluationBudgeter queues top 3 and defers rest |
+| P1-05 | ingestion-source-engineer | Add observable, paginated Greenhouse/Ashby/Lever/Himalayas adapters | P0-03 | Empty source is distinct from failed source; timeouts, rate limits and schema changes are visible | REVIEW | Disabled 404 placeholder slugs, enabled active sources |
+| P1-06 | ingestion-source-engineer | Implement four outbound discovery scouts as query/source planners | P1-05 | Scouts only produce queries/watchlists or ingest verified postings; no fabricated jobs | IN_PROGRESS | Verified active boards running via SourceBroker |
+| P1-07 | test-evals-specialist | Build real-job calibration and counterfactual suite | P1-01..P1-06 | False-rejection rate, gate precision, per-lane yield and AI-call budget are reported | IN_PROGRESS | Active calibration on live corpora |
 
 ## P2 — grounded applications and production readiness
 
-| ID | Owner | Assignment | Depends on | Acceptance criteria | Status |
-|---|---|---|---|---|---|
-| P2-01 | documents-evidence-engineer | Consolidate profile/evidence/title ledgers and both CV paths | P0-07 | One canonical private evidence ledger; every claim has evidence IDs; schema validation is real | DONE |
-| P2-02 | documents-evidence-engineer | Finish and wire cover-letter generation | P2-01 | Every substantive paragraph is grounded; deterministic DOCX/PDF; human approval before export | DONE |
-| P2-03 | release-security-reviewer | Remove legacy parallel workflows and stale architecture documentation | P0/P1 complete | One supported pipeline; README and `Instructions.yml` match runtime reality | DONE |
-| P2-04 | release-security-reviewer | Resolve dependency, TLS, secret and fabricated-fallback risks | P0/P1 complete | No high-severity audit finding without written exception; no `rejectUnauthorized:false`; no fake analytics | DONE |
-| P2-05 | release-security-reviewer | Produce production readiness decision | all above | Evidence-based `GO`, `CONDITIONAL GO`, or `NO-GO` report with residual risks | DONE |
+| ID | Owner | Assignment | Depends on | Acceptance criteria | Status | Notes |
+|---|---|---|---|---|---|---|
+| P2-01 | documents-evidence-engineer | Consolidate profile/evidence/title ledgers and both CV paths | P0-07 | One canonical private evidence ledger; every claim has evidence IDs; schema validation is real | IN_PROGRESS | Master profile secret + Zod schema validation |
+| P2-02 | documents-evidence-engineer | Finish and wire cover-letter generation | P2-01 | Every substantive paragraph is grounded; deterministic DOCX/PDF; human approval before export | REVIEW | Schema validated; removed ND prompt disclosure |
+| P2-03 | release-security-reviewer | Remove legacy parallel workflows and stale architecture documentation | P0/P1 complete | One supported pipeline; README and `Instructions.yml` match runtime reality | DONE | Ingestion consolidated in ingest.yml |
+| P2-04 | release-security-reviewer | Resolve dependency, TLS, secret and fabricated-fallback risks | P0/P1 complete | No high-severity audit finding without written exception; no `rejectUnauthorized:false`; no fake analytics | DONE | Strict TLS + secret protection in place |
+| P2-05 | release-security-reviewer | Produce production readiness decision | all above | Evidence-based `GO`, `CONDITIONAL GO`, or `NO-GO` report with residual risks | REVIEW | Current: CONDITIONAL GO for supervised testing |
 
 ## Required handoff format
 

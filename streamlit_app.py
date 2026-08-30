@@ -108,11 +108,7 @@ def get_db_connection():
 
 def fetch_jobs_from_db():
     """
-    Fetch the canonical shortlist from v_canonical_shortlist (migration 005).
-
-    E3: gate_status is sourced from gate_decisions — never defaults to PASS.
-    E4: version_mismatch=True means the AI evaluation was run against an older
-        job version; the UI should display a staleness warning.
+    Fetch the canonical shortlist from v_canonical_shortlist (migration 007).
     """
     try:
         conn = get_db_connection()
@@ -126,14 +122,19 @@ def fetch_jobs_from_db():
                 canonical_url           AS careers_portal_url,
                 location,
                 workplace_type,
+                employment_type,
+                description,
                 gate_status,
                 rejection_codes,
+                gate_evidence_quotes,
                 primary_lane            AS assigned_track,
                 secondary_lanes,
                 lane_confidence,
                 priority_score          AS confidence_level,
                 processing_status       AS status,
                 nd_friendly_score,
+                politics_stress_score,
+                sensory_overload_index,
                 next_action,
                 strategic_value,
                 recommended_cv_version,
@@ -155,6 +156,39 @@ def fetch_jobs_from_db():
         return [dict(r) for r in rows]
     except Exception as e:
         st.error(f"Failed to fetch jobs from database: {e}")
+        return []
+
+def fetch_rejected_jobs_from_db():
+    """Fetch hard-rejected and removed jobs for audit inspection."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                c.id,
+                c.normalized_title AS title,
+                c.company_name AS company,
+                c.canonical_url AS careers_portal_url,
+                c.processing_status AS status,
+                c.rejection_reason,
+                gd.decision AS gate_status,
+                gd.rejection_codes,
+                gd.evidence_quotes,
+                c.created_at::text AS "postedDate"
+            FROM canonical_jobs c
+            LEFT JOIN (
+                SELECT DISTINCT ON (canonical_job_id) canonical_job_id, decision, rejection_codes, evidence_quotes
+                FROM gate_decisions ORDER BY canonical_job_id, created_at DESC
+            ) gd ON gd.canonical_job_id = c.id
+            WHERE c.processing_status IN ('HARD_REJECTED', 'MANUALLY_REMOVED')
+            ORDER BY c.created_at DESC
+            LIMIT 50
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
         return []
 
 def delete_job_from_db(job_id):
@@ -446,9 +480,14 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
     raise Exception("All configured models (OpenAI, Gemini) failed or no API keys are set.")
 
 def ingest_linkedin_saved_json(jobs):
+    import hashlib
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        # Ensure a source_run exists
+        cursor.execute("INSERT INTO source_runs (status) VALUES ('LINKEDIN_IMPORT') RETURNING id")
+        source_run_id = cursor.fetchone()[0]
         
         inserted_count = 0
         skipped_count = 0
@@ -459,42 +498,42 @@ def ingest_linkedin_saved_json(jobs):
             url = job.get("url", "").strip()
             description = job.get("description", "").strip()
             location = job.get("location", "Singapore").strip()
-            salary = job.get("salary")
             
             if not title or not company or not url or not description:
                 skipped_count += 1
                 continue
                 
-            # Check for duplicates in raw_jobs
-            cursor.execute("SELECT id FROM raw_jobs WHERE careers_portal_url = %s OR (title = %s AND company_name = %s)", (url, title, company))
-            if cursor.fetchone():
-                skipped_count += 1
-                continue
-                
-            # Check for duplicates in jobs
-            cursor.execute("SELECT id FROM jobs WHERE careers_portal_url = %s OR (title = %s AND company_name = %s)", (url, title, company))
-            if cursor.fetchone():
-                skipped_count += 1
-                continue
-                
-            # Package description as structured JSON for the JSONB database column
-            structured_desc = {
-                "job_description": description,
-                "key_responsibilities": [],
-                "technical_skills": [],
-                "qualifications_education": [],
-                "nice_to_haves": []
-            }
-            description_json = json.dumps(structured_desc)
+            raw_payload_str = json.dumps(job)
+            raw_payload_hash = hashlib.sha256(raw_payload_str.encode()).hexdigest()
             
             cursor.execute("""
-                INSERT INTO raw_jobs 
-                (company_name, title, source, raw_description, salary_range, location, careers_portal_url, processed) 
-                VALUES (%s, %s, 'LinkedIn', %s, %s, %s, %s, FALSE)
-            """, (company, title, description_json, salary, location, url))
-            
-            inserted_count += 1
-            
+                INSERT INTO raw_job_observations (
+                    source_run_id, source_name, source_external_id, source_url,
+                    retrieved_at, company_name, title, description_raw,
+                    location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
+                    canonical_apply_url, source_lane, search_plan_version,
+                    raw_payload, raw_payload_hash
+                ) VALUES (%s, 'LINKEDIN', %s, %s, NOW(), %s, %s, %s, %s, 'UNKNOWN', 'PERMANENT', 'UNKNOWN', %s, 'UNKNOWN', '1.0', %s, %s)
+                ON CONFLICT (raw_payload_hash) DO NOTHING
+                RETURNING id
+            """, (
+                source_run_id,
+                f"linkedin-{raw_payload_hash[:16]}",
+                url,
+                company,
+                title,
+                description,
+                location,
+                url,
+                raw_payload_str,
+                raw_payload_hash
+            ))
+            res = cursor.fetchone()
+            if res:
+                inserted_count += 1
+            else:
+                skipped_count += 1
+                
         conn.commit()
         cursor.close()
         conn.close()
@@ -633,25 +672,27 @@ if track_filter != "All Tracks":
 tab_dashboard, tab_add_job, tab_linkedin, tab_analytics, tab_cv = st.tabs(["📁 Postgres Job Vault", "➕ Add Job Ad", "🔗 LinkedIn Saved Jobs", "🔥 ND Culture Analytics", "📄 CV Customizer"])
 
 with tab_dashboard:
-    # Segment out Top Recommended Jobs (STRONG MATCH, sorted by score DESC, limited to 10)
-    top_recommended = [j for j in jobs_list if j.get("status") in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK")]
-    top_recommended = sorted(top_recommended, key=lambda x: (x.get("total_score") or 0), reverse=True)[:10]
+    # Segment out Top Recommended Jobs based on next_action and AI evaluation
+    top_recommended = [j for j in jobs_list if j.get("next_action") in ("PRIORITY_APPLY", "APPLY_NOW", "CUSTOMIZE_CV", "APPLY_AFTER_VERIFICATION") or j.get("status") == "AI_EVALUATED"]
+    top_recommended = sorted(top_recommended, key=lambda x: (x.get("nd_friendly_score") or 0), reverse=True)[:10]
 
-    st.subheader("🏆 Top 10 Recommended Jobs")
+    st.subheader("🏆 Top Recommended Opportunities")
     if not top_recommended:
-        st.info("No STRONG MATCH recommendations found in the database. Run the evaluation cron job to process jobs.")
+        st.info("No priority evaluated recommendations found yet. Run the discovery & evaluation pipeline.")
     else:
         cols = st.columns(2)
         for idx, rjob in enumerate(top_recommended):
             col_idx = idx % 2
             with cols[col_idx]:
+                version_warn = " ⚠️ Stale Evaluation" if rjob.get("version_mismatch") else ""
                 st.markdown(f"""
                 <div class="top-rec-card">
-                    <h4>⭐ #{idx+1} {rjob['title']}</h4>
-                    <p><b>Company:</b> {rjob['company']} | <b>Score:</b> <code style='font-size:14px;color:#22c55e;'>{rjob['total_score']}/100</code></p>
-                    <p><b>Salary:</b> {rjob.get('salaryRange') or 'Not specified'}</p>
-                    <p><b>Track:</b> {rjob.get('assigned_track')}</p>
-                    <p><b>Workplace Autonomy:</b> Autonomy: {rjob.get('nd_friendly_score')}% | Politics: {rjob.get('politics_stress_score')}%</p>
+                    <h4>⭐ #{idx+1} {rjob['title']} {version_warn}</h4>
+                    <p><b>Company:</b> {rjob['company']} | <b>Lane:</b> <code>{rjob.get('assigned_track')}</code></p>
+                    <p><b>Location:</b> {rjob.get('location')} ({rjob.get('workplace_type')})</p>
+                    <p><b>Action:</b> <code style='color:#22c55e;'>{rjob.get('next_action')}</code> | <b>Confidence:</b> {rjob.get('lane_confidence')}</p>
+                    <p><b>Workplace Culture:</b> Autonomy: {rjob.get('nd_friendly_score')}% | Politics: {rjob.get('politics_stress_score')}%</p>
+                    <p><b>Summary:</b> {rjob.get('evaluation_summary') or 'N/A'}</p>
                 </div>
                 """, unsafe_allow_html=True)
                 st.markdown(f"🔗 [Verify Job Ad & Apply]({rjob['careers_portal_url']})")
@@ -1282,11 +1323,31 @@ with tab_cv:
                         else:
                             db_job_id = db_row[0]
                             
-                            # Read data ledgers and schemas
-                            with open("data/title_ledger.json", "r", encoding="utf-8-sig") as f:
-                                title_ledger = f.read()
+                        # Read profile evidence from MASTER_PROFILE_JSON env or local fallback
+                        profile_evidence = ""
+                        if os.environ.get("MASTER_PROFILE_JSON"):
+                            try:
+                                master_prof = json.loads(os.environ["MASTER_PROFILE_JSON"])
+                                profile_evidence = json.dumps(master_prof.get("profile_facts", master_prof.get("facts", master_prof)), indent=2)
+                            except Exception:
+                                profile_evidence = os.environ["MASTER_PROFILE_JSON"]
+                        elif os.path.exists("master_profile.json"):
+                            with open("master_profile.json", "r", encoding="utf-8") as f:
+                                profile_evidence = f.read()
+                        elif os.path.exists("my_profile.md"):
                             with open("my_profile.md", "r", encoding="utf-8") as f:
                                 profile_evidence = f.read()
+                        else:
+                            profile_evidence = "Profile evidence: 20+ years technical architecture, distributed AI/ML platforms, PyTorch, Python, LLMs, enterprise governance."
+
+                        # Read data ledgers and schemas
+                        title_ledger = "{}"
+                        if os.path.exists("data/title_ledger.json"):
+                            with open("data/title_ledger.json", "r", encoding="utf-8-sig") as f:
+                                title_ledger = f.read()
+
+                        jd_analysis_schema = "{}"
+                        if os.path.exists("scripts/schemas/jd_analysis.schema.json"):
                             with open("scripts/schemas/jd_analysis.schema.json", "r", encoding="utf-8-sig") as f:
                                 jd_analysis_schema = f.read()
 

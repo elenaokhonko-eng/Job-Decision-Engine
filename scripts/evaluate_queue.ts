@@ -156,13 +156,9 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         ${item.description_text || "No description provided."}
       `;
 
-      let usedFallback = false;
-      let resolvedProvider = process.env.FORCE_OPENAI === "true" ? "openai" : "gemini";
-      let resolvedModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
-
       try {
         // Attempt primary provider call
-        const { result, toolsUsed } = await runAgent(evalQuery);
+        const { result, provider, model, fallbackUsed, degraded, toolsUsed } = await runAgent(evalQuery);
         const evalResult = result.evaluated_jobs?.[0];
 
         if (!evalResult) {
@@ -174,23 +170,16 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
           console.warn(`⚠️ LLM returned mismatched job_id ${evalResult.job_id} vs expected ${item.canonical_job_id}. Using canonical IDs.`);
         }
 
-        // Detect if OpenAI was used as fallback (FORCE_OPENAI or Gemini quota hit)
-        if (process.env.FORCE_OPENAI === "true") {
-          usedFallback = true;
-          resolvedProvider = "openai";
-          resolvedModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
-        }
-
         const validatedResult: EvaluationResult = EvaluationResultSchema.parse({
           schema_version: SCHEMA_VERSION,
           canonical_job_id: item.canonical_job_id,
           job_version_id: jobVersionId,
           pipeline_run_id: pipelineRunId,
-          provider: resolvedProvider,
-          model: resolvedModel,
+          provider: provider,
+          model: model,
           attempt: attemptNum,
-          is_fallback: usedFallback,
-          degraded_state: false,
+          is_fallback: fallbackUsed,
+          degraded_state: degraded,
           evaluation_summary: result.evaluation_summary || "Automated multi-lane AI evaluation",
           primary_lane: evalResult.primary_lane,
           secondary_lanes: evalResult.secondary_lanes || [],
@@ -209,7 +198,7 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
           evaluated_at: new Date().toISOString()
         });
 
-        console.log(`  -> AI Evaluation complete: Confidence = ${validatedResult.lane_confidence}, Action = ${validatedResult.next_action}, Fallback = ${usedFallback}`);
+        console.log(`  -> AI Evaluation complete: Provider = ${provider} (${model}), Confidence = ${validatedResult.lane_confidence}, Action = ${validatedResult.next_action}, Fallback = ${fallbackUsed}`);
 
         await client.query("BEGIN");
         try {

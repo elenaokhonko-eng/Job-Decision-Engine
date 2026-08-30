@@ -66,7 +66,7 @@ export async function extractWithFallback(raw: string, schema?: any): Promise<st
   // 2️⃣ Gemini (requires GEMINI_API_KEY)
   try {
     let geminiRes = await generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+      model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
       contents: raw,
       responseMimeType: "application/json",
       responseSchema: schema

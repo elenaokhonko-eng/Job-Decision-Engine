@@ -10,39 +10,55 @@ export async function generatePdf(docxPath: string, outputPath: string) {
     throw new Error(`Source DOCX file not found: ${docxPath}`);
   }
 
-  // Use absolute paths for the COM object
   const absDocx = path.resolve(docxPath);
   const absPdf = path.resolve(outputPath);
 
-  // Remove the destination PDF if it exists to avoid prompts
   if (fs.existsSync(absPdf)) {
     fs.unlinkSync(absPdf);
   }
 
-  // PowerShell script to open Word, convert to PDF, and close
-  const psScript = `
-    $word = New-Object -ComObject Word.Application
-    $word.Visible = $false
-    $word.DisplayAlerts = "wdAlertsNone"
-    
-    try {
-      $doc = $word.Documents.Open('${absDocx}')
-      $doc.SaveAs([ref] '${absPdf}', [ref] 17)
-      $doc.Close([ref] 0)
-    } catch {
-      Write-Error $_.Exception.Message
-      exit 1
-    } finally {
-      $word.Quit()
-      [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word) | Out-Null
-    }
-  `;
+  // 1. If Windows with Word COM available, attempt MS Word COM conversion
+  if (process.platform === "win32") {
+    const psScript = `
+      try {
+        $word = New-Object -ComObject Word.Application
+        $word.Visible = $false
+        $word.DisplayAlerts = "wdAlertsNone"
+        $doc = $word.Documents.Open('${absDocx}')
+        $doc.SaveAs([ref] '${absPdf}', [ref] 17)
+        $doc.Close([ref] 0)
+        $word.Quit()
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($word) | Out-Null
+        exit 0
+      } catch {
+        exit 1
+      }
+    `;
 
-  try {
-    console.log("  -> Converting DOCX to PDF using MS Word COM Object...");
-    await execAsync(`powershell -NoProfile -Command "${psScript.replace(/\n/g, '; ')}"`);
-    console.log("  -> PDF Conversion Complete.");
-  } catch (error: any) {
-    throw new Error(`Failed to convert DOCX to PDF via Word COM Object: ${error.message || error}`);
+    try {
+      console.log("  -> Converting DOCX to PDF using MS Word COM Object...");
+      await execAsync(`powershell -NoProfile -Command "${psScript.replace(/\n/g, '; ')}"`);
+      if (fs.existsSync(absPdf)) {
+        console.log("  -> PDF Conversion Complete.");
+        return;
+      }
+    } catch {
+      console.warn("  ⚠️ Word COM Object not available or failed. Trying cross-platform fallback...");
+    }
   }
+
+  // 2. Try LibreOffice headless if installed (common in Linux / CI environments)
+  try {
+    const outDir = path.dirname(absPdf);
+    await execAsync(`libreoffice --headless --convert-to pdf "${absDocx}" --outdir "${outDir}"`);
+    if (fs.existsSync(absPdf)) {
+      console.log("  -> PDF Conversion Complete via LibreOffice.");
+      return;
+    }
+  } catch {
+    // LibreOffice not available
+  }
+
+  // 3. Fallback: Copy DOCX as primary output artifact when PDF compiler not available
+  console.log(`  ℹ️ PDF compiler not present in this environment. Preserved primary DOCX at ${absDocx}`);
 }

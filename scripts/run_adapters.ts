@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import * as yaml from "js-yaml";
 import dotenv from "dotenv";
 import { GreenhouseAdapter } from "../src/ingestion/adapters/greenhouseAdapter.js";
@@ -11,7 +12,7 @@ import { SourceBroker } from "../src/ingestion/sourceBroker.js";
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-export async function runAdapters(): Promise<{ totalDiscovered: number; totalStaged: number; errors: number }> {
+export async function runAdapters(): Promise<{ totalDiscovered: number; totalStaged: number; errors: number; status: "HEALTHY" | "DEGRADED" | "FAILED" }> {
   console.log("====================================================");
   console.log("       STAGE 0: UNIFIED SOURCE ADAPTER RUNNER       ");
   console.log("====================================================");
@@ -22,6 +23,9 @@ export async function runAdapters(): Promise<{ totalDiscovered: number; totalSta
   let totalDiscovered = 0;
   let totalStaged = 0;
   let errorCount = 0;
+  let enabledSourceCount = 0;
+  const failedSources: string[] = [];
+  const successfulSources: string[] = [];
 
   // 1. Process Companies from config/companies.yml
   const companiesPath = path.resolve(process.cwd(), "config/companies.yml");
@@ -33,7 +37,11 @@ export async function runAdapters(): Promise<{ totalDiscovered: number; totalSta
       const companies = doc.companies || [];
 
       for (const company of companies) {
-        if (!company.enabled) continue;
+        if (!company.enabled) {
+          console.log(`  ⏸️ Skipping disabled source: ${company.name} (${company.board_slug || "no slug"})`);
+          continue;
+        }
+        enabledSourceCount++;
         console.log(`\n📡 Polling ATS for ${company.name} (${company.ats_provider || "unknown"})...`);
 
         try {
@@ -52,15 +60,20 @@ export async function runAdapters(): Promise<{ totalDiscovered: number; totalSta
             continue;
           }
 
-          if (adapterResult.success && adapterResult.jobs.length > 0) {
+          if (adapterResult.success) {
+            successfulSources.push(company.name);
             console.log(`  -> Discovered ${adapterResult.jobs.length} jobs for ${company.name}`);
             totalDiscovered += adapterResult.jobs.length;
 
             for (const job of adapterResult.jobs) {
+              const stableExternalId = (job as any).id 
+                ? String((job as any).id)
+                : `${company.id || company.name}-${crypto.createHash("sha256").update(job.canonical_apply_url || job.title).digest("hex").substring(0, 16)}`;
+
               await broker.processObservation(
                 {
                   sourceName: adapterResult.sourceName as any,
-                  sourceExternalId: `${company.id || company.name}-${job.title}`,
+                  sourceExternalId: stableExternalId,
                   sourceUrl: job.canonical_apply_url,
                   retrievedAt: new Date().toISOString(),
                   companyName: job.company_name || company.name,
@@ -79,33 +92,43 @@ export async function runAdapters(): Promise<{ totalDiscovered: number; totalSta
               );
               totalStaged++;
             }
-          } else if (!adapterResult.success) {
+          } else {
             console.warn(`  ⚠️ Adapter warning for ${company.name}: ${adapterResult.error}`);
+            failedSources.push(company.name);
+            errorCount++;
           }
         } catch (err: any) {
           console.error(`  ❌ Error polling ${company.name}:`, err.message || err);
+          failedSources.push(company.name);
           errorCount++;
         }
       }
     } catch (cfgErr: any) {
       console.error("❌ Failed to parse config/companies.yml:", cfgErr.message || cfgErr);
+      errorCount++;
     }
   }
 
   // 2. Poll Public Job Boards (Himalayas)
   console.log("\n🏔️ Polling Himalayas Job Board...");
+  enabledSourceCount++;
   try {
     const himalayasAdapter = new HimalayasAdapter();
     const himalayasResult = await himalayasAdapter.fetchJobs({ limit: 30 });
-    if (himalayasResult.success && himalayasResult.jobs.length > 0) {
+    if (himalayasResult.success) {
+      successfulSources.push("Himalayas");
       console.log(`  -> Discovered ${himalayasResult.jobs.length} jobs from Himalayas`);
       totalDiscovered += himalayasResult.jobs.length;
 
       for (const job of himalayasResult.jobs) {
+        const stableExternalId = (job as any).id 
+          ? String((job as any).id)
+          : `himalayas-${crypto.createHash("sha256").update(job.canonical_apply_url || (job.title + job.company_name)).digest("hex").substring(0, 16)}`;
+
         await broker.processObservation(
           {
             sourceName: himalayasResult.sourceName as any,
-            sourceExternalId: `himalayas-${job.title}-${job.company_name}`,
+            sourceExternalId: stableExternalId,
             sourceUrl: job.canonical_apply_url,
             retrievedAt: new Date().toISOString(),
             companyName: job.company_name,
@@ -124,22 +147,47 @@ export async function runAdapters(): Promise<{ totalDiscovered: number; totalSta
         );
         totalStaged++;
       }
-    } else if (!himalayasResult.success) {
+    } else {
       console.warn(`  ⚠️ Himalayas warning: ${himalayasResult.error}`);
+      failedSources.push("Himalayas");
+      errorCount++;
     }
   } catch (himErr: any) {
     console.error("  ❌ Error polling Himalayas:", himErr.message || himErr);
+    failedSources.push("Himalayas");
     errorCount++;
   }
 
-  await broker.endRun("COMPLETED");
-  console.log(`\n✅ Source Adapters Complete: ${totalDiscovered} discovered, ${totalStaged} staged, ${errorCount} errors.`);
-  return { totalDiscovered, totalStaged, errors: errorCount };
+  const finalStatus: "HEALTHY" | "DEGRADED" | "FAILED" = 
+    failedSources.length === 0 
+      ? "HEALTHY" 
+      : successfulSources.length > 0 
+        ? "DEGRADED" 
+        : "FAILED";
+
+  await broker.endRun(finalStatus === "FAILED" ? "FAILED" : finalStatus === "DEGRADED" ? "DEGRADED" : "COMPLETED");
+  console.log(`\n====================================================`);
+  console.log(`Source Adapter Summary:`);
+  console.log(`  Status: ${finalStatus}`);
+  console.log(`  Discovered: ${totalDiscovered}, Staged: ${totalStaged}`);
+  console.log(`  Successful Sources (${successfulSources.length}): ${successfulSources.join(", ") || "None"}`);
+  console.log(`  Failed Sources (${failedSources.length}): ${failedSources.join(", ") || "None"}`);
+  console.log(`  Total Errors: ${errorCount}`);
+  console.log(`====================================================\n`);
+
+  if (finalStatus === "FAILED" && enabledSourceCount > 0) {
+    throw new Error(`All ${enabledSourceCount} enabled source adapters failed during ingestion.`);
+  }
+
+  return { totalDiscovered, totalStaged, errors: errorCount, status: finalStatus };
 }
 
 if (process.argv[1] && process.argv[1].includes("run_adapters")) {
   runAdapters()
-    .then(() => process.exit(0))
+    .then((res) => {
+      if (res.status === "FAILED") process.exit(1);
+      process.exit(0);
+    })
     .catch((err) => {
       console.error("Fatal adapter execution error:", err);
       process.exit(1);

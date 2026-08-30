@@ -1,6 +1,5 @@
 import pg from "pg";
 import dotenv from "dotenv";
-
 import { pgSslConfig } from "../db/pgSsl.js";
 
 dotenv.config();
@@ -51,9 +50,9 @@ export async function runEvaluationBudgeter(): Promise<{ queued: number; deferre
         await client.query("BEGIN");
         try {
           await client.query(
-            `INSERT INTO evaluation_queue (canonical_job_id, lane, priority_score, status, enqueued_at, updated_at) 
-             VALUES ($1, $2, $3, 'PENDING', NOW(), NOW())`,
-            [job.id, lane, job.semantic_score]
+            `INSERT INTO evaluation_queue (canonical_job_id, job_version_id, lane, priority_score, status, enqueued_at, updated_at) 
+             VALUES ($1, $2, $3, $4, 'PENDING', NOW(), NOW())`,
+            [job.id, job.latest_job_version_id || null, lane, job.semantic_score]
           );
           
           await client.query(

@@ -177,12 +177,11 @@ async function generateTailoredCoverLetter(): Promise<void> {
     // ── Step 4: Build prompt ─────────────────────────────────────────────────
     console.log("🤖 STAGE 1: Requesting AI cover letter draft…");
 
-    const clPrompt = `You are an expert cover letter writer generating a cover letter for Elena Okhonko.
+    const clPrompt = `You are an expert cover letter writer generating a professional cover letter for Elena Okhonko.
 
 ROLE: ${jdTitle} at ${jdCompany}
 LANE: ${primaryLane}
 AI EVALUATION SUMMARY: ${evaluationSummary || "(not yet evaluated)"}
-ND SCORE: ${ndScore}/100
 STRATEGIC VALUE: ${strategicValue}
 LANE EVIDENCE: ${laneEvidence}
 NEXT ACTION: ${nextAction}
@@ -193,16 +192,16 @@ ${JSON.stringify(workabilityFacts, null, 2)}
 JOB DESCRIPTION:
 ${jdDescription.substring(0, 4000)}
 
-EVIDENCE LEDGER (only cite facts from this list; do not invent):
+EVIDENCE LEDGER (only cite professional facts from this list; do not invent):
 ${JSON.stringify(profileFacts.slice(0, 40), null, 2)}
 
 INSTRUCTIONS:
-- Maximum 1 page (4–5 tight paragraphs)
+- Maximum 1 page (3–4 tight, professional paragraphs)
 - Opening: name the role and company; state clear interest and fit signal
-- Body: cite 2–3 specific evidence items from the ledger that directly match the JD requirements
-- Body: briefly address the ND workability picture only if nd_score >= 75
-- Closing: clear call to action
-- NEVER invent experience, credentials, or metrics not present in the evidence ledger
+- Body: cite 2–3 specific technical evidence items and achievements from the ledger that directly address the JD requirements
+- Closing: clear, confident call to action
+- NEVER invent experience, credentials, companies, degrees, or metrics not present in the evidence ledger
+- DO NOT disclose or discuss neurodivergence or personal health accommodations in the letter
 - Return ONLY valid JSON matching this exact schema:
 ${coverLetterSchema}`;
 
@@ -211,7 +210,7 @@ ${coverLetterSchema}`;
       contents: clPrompt,
       responseMimeType: "application/json",
       systemInstruction:
-        "You are an expert cover letter writer. Return only valid JSON. Do not hallucinate evidence not in the ledger.",
+        "You are an expert cover letter writer. Return only valid JSON conforming strictly to the schema. Do not hallucinate evidence not in the ledger.",
     });
 
     // ── Step 5: Validate the response ────────────────────────────────────────
@@ -224,25 +223,25 @@ ${coverLetterSchema}`;
       process.exit(1);
     }
 
-    // Validate required fields per cover_letter_schema.json
-    if (!finalCl.cover_letter) {
+    // Strict schema validation
+    if (!finalCl || typeof finalCl !== "object" || !finalCl.cover_letter) {
       console.error("❌ ERROR: Cover letter JSON missing top-level 'cover_letter' object.");
       process.exit(1);
     }
     const cl = finalCl.cover_letter;
     const required = ["recipient_name", "opening_hook", "body_paragraphs", "closing_statement"];
     for (const field of required) {
-      if (!cl[field]) {
-        console.error(`❌ ERROR: Cover letter JSON missing required field: '${field}'`);
+      if (!cl[field] || typeof cl[field] !== (field === "body_paragraphs" ? "object" : "string")) {
+        console.error(`❌ ERROR: Cover letter JSON missing or invalid required field: '${field}'`);
         process.exit(1);
       }
     }
-    if (!Array.isArray(cl.body_paragraphs) || cl.body_paragraphs.length === 0) {
-      console.error("❌ ERROR: 'body_paragraphs' must be a non-empty array of strings.");
+    if (!Array.isArray(cl.body_paragraphs) || cl.body_paragraphs.length < 2) {
+      console.error("❌ ERROR: 'body_paragraphs' must be an array of at least 2 paragraphs.");
       process.exit(1);
     }
 
-    console.log("✅ Cover letter draft validated.");
+    console.log("✅ Cover letter draft validated with strict schema enforcement.");
 
     // ── Step 6: Render and export ─────────────────────────────────────────────
     console.log("📄 STAGE 2: Rendering DOCX and PDF…");

@@ -89,6 +89,15 @@ function applyNegativeExclusion(description: string, laneDef: LaneDefinition): b
   return false;
 }
 
+function extractCoreJobText(title: string, description: string): string {
+  const cleanedDesc = (description || "")
+    .replace(/equal opportunity employer[\s\S]*/i, "")
+    .replace(/benefits & perks[\s\S]*/i, "")
+    .replace(/about us[\s\S]*/i, "")
+    .slice(0, 2000);
+  return `${title}. ${cleanedDesc}`.trim();
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 // Export under old name for backward-compat with tests
@@ -130,8 +139,8 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
     for (const job of jobs) {
       await client.query("BEGIN");
       try {
-        const jobText = `${job.normalized_title} ${job.description_text || ""}`;
-        const jobEmbedding = await generateEmbedding(jobText);
+        const coreText = extractCoreJobText(job.normalized_title, job.description_text || "");
+        const jobEmbedding = await generateEmbedding(coreText);
 
         // Strict zero-vector check — embedding failure must not produce a default lane
         const isZeroVector = jobEmbedding.every((v) => v === 0);
@@ -150,8 +159,14 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
         let bestScore = -1;
         const scoreMap: Record<string, number> = {};
         const laneEvidence: string[] = [];
+        const descText = (job.description_text || "").toLowerCase();
 
         for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
+          // If excluded by lane's negative concepts, skip
+          if (applyNegativeExclusion(descText, laneDef)) {
+            scoreMap[laneKey] = -1;
+            continue;
+          }
           const score = cosineSimilarity(jobEmbedding, laneEmbeddings[laneKey]);
           scoreMap[laneKey] = score;
           if (score > bestScore) {
@@ -160,41 +175,30 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
           }
         }
 
-        // Per-lane negative exclusion on best lane (only demotes if excluded in target lane)
-        const descText = (job.description_text || "").toLowerCase();
-        if (bestLane && config.lanes[bestLane] && applyNegativeExclusion(descText, config.lanes[bestLane])) {
-          console.warn(`⚠️ Job ${job.id} excluded from ${bestLane} by negative_concepts. Re-scoring remaining lanes.`);
-          scoreMap[bestLane] = -1;
-          bestScore = -1;
-          bestLane = null;
-          for (const [laneKey, score] of Object.entries(scoreMap)) {
-            if (score > bestScore) {
-              bestScore = score;
-              bestLane = laneKey;
-            }
-          }
-        }
-
         // Per-lane threshold check: must meet the lane's own semantic_threshold or min_similarity_floor
         const bestLaneDef = bestLane ? config.lanes[bestLane] : null;
-        const perLaneThreshold = bestLaneDef?.semantic_threshold ?? bestLaneDef?.threshold ?? (config.unclassified_policy.min_similarity_floor || 0.20);
+        const perLaneThreshold = bestLaneDef?.semantic_threshold ?? bestLaneDef?.threshold ?? (config.unclassified_policy.min_similarity_floor || 0.25);
         if (bestScore < perLaneThreshold || !bestLane) {
           bestLane = "UNCLASSIFIED";
         }
 
-        // Secondary lanes: meet per-lane threshold, not negative-excluded, not the primary
+        // Secondary lanes: must meet per-lane threshold, have positive concept evidence, and not be excluded
         const secondaryLanes: string[] = [];
         for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
           if (laneKey === bestLane) continue;
           const threshold = laneDef.semantic_threshold ?? laneDef.threshold;
-          if ((scoreMap[laneKey] || 0) >= threshold && !applyNegativeExclusion(descText, laneDef)) {
-            secondaryLanes.push(laneKey);
-            // Collect lane evidence from positive concepts
-            if (laneDef.positive_concepts) {
-              for (const pc of laneDef.positive_concepts) {
-                if (descText.includes(pc.toLowerCase())) {
-                  laneEvidence.push(`${laneKey}: "${pc}"`);
-                  break; // one evidence per secondary lane
+          const score = scoreMap[laneKey] || 0;
+          if (score >= threshold && !applyNegativeExclusion(descText, laneDef)) {
+            // Require at least one positive concept match for secondary lane qualification
+            const hasPositiveEvidence = laneDef.positive_concepts?.some(pc => descText.includes(pc.toLowerCase()));
+            if (hasPositiveEvidence) {
+              secondaryLanes.push(laneKey);
+              if (laneDef.positive_concepts) {
+                for (const pc of laneDef.positive_concepts) {
+                  if (descText.includes(pc.toLowerCase())) {
+                    laneEvidence.push(`${laneKey}: "${pc}"`);
+                    break;
+                  }
                 }
               }
             }
@@ -218,22 +222,23 @@ export async function runLaneRouter(): Promise<{ routed: number; deferred: numbe
             bestScore,
             processingStatus,
             JSON.stringify(secondaryLanes),
-            laneEvidence.join("; "),
-            job.id
+            JSON.stringify(laneEvidence),
+            job.id,
           ]
         );
 
         await client.query("COMMIT");
-        console.log(`-> Routed ${job.normalized_title} to ${bestLane} (Score: ${bestScore.toFixed(3)}, Secondary: [${secondaryLanes.join(", ")}])`);
-      } catch (err) {
+        console.log(`  -> Job ${job.id} ("${job.normalized_title}"): ${bestLane} (Score: ${bestScore.toFixed(3)}, Status: ${processingStatus})`);
+      } catch (jobErr) {
         await client.query("ROLLBACK");
-        console.error(`❌ Failed to route job ${job.id}:`, err);
+        console.error(`❌ Failed to route job ${job.id}:`, jobErr);
       }
     }
   } finally {
     client.release();
+    await pool.end();
   }
 
-  console.log(`Lane Routing complete. Routed: ${routedCount}, Deferred: ${deferredCount}`);
+  console.log(`Semantic Lane Routing complete. Routed: ${routedCount}, Deferred: ${deferredCount}`);
   return { routed: routedCount, deferred: deferredCount };
 }

@@ -91,7 +91,7 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await ai.models.generateContent({
-        model: options.model || process.env.GEMINI_MODEL || "gemini-1.5-flash",
+        model: options.model || process.env.GEMINI_MODEL || "gemini-2.0-flash",
         contents: options.contents,
         config: {
           responseMimeType: options.responseMimeType as any,
@@ -453,7 +453,7 @@ async function runGeminiAgentInternal(
     trace.push(`Step ${trace.length + 1}: Sending tool results back to Gemini for final assessment and ranking.`);
     
     response = await ai.models.generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+      model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
       contents: conversationHistory,
       config: {
         systemInstruction,
@@ -475,7 +475,7 @@ async function runGeminiAgentInternal(
   conversationHistory.push({ role: "user", parts: [{ text: formattingPrompt }] });
 
   const finalResponse = await ai.models.generateContent({
-    model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+    model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
     contents: conversationHistory,
     config: {
       systemInstruction,
@@ -487,8 +487,20 @@ async function runGeminiAgentInternal(
   return parseResultJson(rawText, trace);
 }
 
+export interface AgentExecutionResult {
+  result: AgentResult;
+  provider: "gemini" | "openai" | "ollama";
+  model: string;
+  fallbackUsed: boolean;
+  attempts: number;
+  errors: string[];
+  degraded: boolean;
+  trace: string[];
+  toolsUsed: string[];
+}
+
 // Core execution loop
-export async function runAgent(userQuestion: string): Promise<{ result: AgentResult; trace: string[]; toolsUsed: string[] }> {
+export async function runAgent(userQuestion: string): Promise<AgentExecutionResult> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
@@ -578,50 +590,67 @@ You MUST return a JSON object matching this schema exactly.
 
   const tried = new Set<string>();
   let parsedResult: AgentResult | null = null;
+  let successProvider: "gemini" | "openai" | "ollama" = "gemini";
+  let successModel = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  let fallbackUsed = false;
+  let attempts = 0;
+  const errors: string[] = [];
 
   for (const provider of order) {
-    // Kimi block removed
+    if (provider === "gemini" && geminiKey && !tried.has("gemini")) {
+      tried.add("gemini");
+      attempts++;
+      try {
+        trace.push(`Step ${trace.length + 1}: Running evaluation agent with Gemini API...`);
+        const result = await runGeminiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
+        parsedResult = result;
+        successProvider = "gemini";
+        successModel = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+        fallbackUsed = false;
+        if (parsedResult) break;
+      } catch (geminiErr: any) {
+        const msg = geminiErr.message || String(geminiErr);
+        console.warn(`⚠️ Gemini agent run failed: ${msg}.`);
+        trace.push(`Step ${trace.length + 1}: Gemini agent run failed: ${msg}`);
+        errors.push(`Gemini: ${msg}`);
+      }
+    }
     if (provider === "openai" && openaiKey && !tried.has("openai")) {
       tried.add("openai");
+      attempts++;
       try {
         trace.push(`Step ${trace.length + 1}: Running evaluation agent with OpenAI API...`);
+        const modelToUse = process.env.OPENAI_MODEL || "gpt-4o-mini";
         const text = await tryOpenAI(openaiKey, {
+          model: modelToUse,
           contents: userQuestion,
           responseMimeType: "application/json",
           systemInstruction
         });
         parsedResult = parseResultJson(text, trace);
+        successProvider = "openai";
+        successModel = modelToUse;
+        fallbackUsed = tried.has("gemini") || forceOpenAI;
         if (parsedResult) break;
       } catch (err: any) {
-        console.warn(`⚠️ OpenAI agent run failed: ${err.message || err}`);
-        trace.push(`Step ${trace.length + 1}: OpenAI agent run failed: ${err.message || err}`);
-      }
-    }
-    if (provider === "gemini" && geminiKey && !tried.has("gemini")) {
-      tried.add("gemini");
-      try {
-        trace.push(`Step ${trace.length + 1}: Running evaluation agent with Gemini API...`);
-        const result = await runGeminiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
-        parsedResult = result;
-        if (parsedResult) break;
-      } catch (geminiErr: any) {
-        console.warn(`⚠️ Gemini agent run failed: ${geminiErr.message || geminiErr}.`);
-        trace.push(`Step ${trace.length + 1}: Gemini agent run failed: ${geminiErr.message || geminiErr}`);
+        const msg = err.message || String(err);
+        console.warn(`⚠️ OpenAI agent run failed: ${msg}`);
+        trace.push(`Step ${trace.length + 1}: OpenAI agent run failed: ${msg}`);
+        errors.push(`OpenAI: ${msg}`);
       }
     }
   }
 
   if (!parsedResult) {
-    throw new Error("All model API calls failed during agent execution.");
+    throw new Error(`All model API calls failed during agent execution. Attempts: ${attempts}, Errors: ${errors.join("; ")}`);
   }
 
-  trace.push(`Step ${trace.length + 1}: Multi-stage decision engine completed successfully.`);
+  trace.push(`Step ${trace.length + 1}: Multi-stage decision engine completed successfully via ${successProvider} (${successModel}).`);
 
   // Write evaluation results BACK to the persistent database
   if (parsedResult.evaluated_jobs && parsedResult.evaluated_jobs.length > 0) {
     const dbJobs = await db.queryJobs();
     for (const job of parsedResult.evaluated_jobs) {
-      // Match by job title & company if ID is not set
       let matchedJob = dbJobs.find(
         (j) => j.id === job.job_id || (j.title === job.job_title && j.company_name === job.company)
       );
@@ -657,11 +686,16 @@ You MUST return a JSON object matching this schema exactly.
     }
   }
 
-  // Log interaction to persistent simulated Postgres DB
   await db.logInteraction(userQuestion, toolsUsed, parsedResult, trace);
 
   return {
     result: parsedResult,
+    provider: successProvider,
+    model: successModel,
+    fallbackUsed,
+    attempts,
+    errors,
+    degraded: fallbackUsed,
     trace,
     toolsUsed
   };

@@ -5,33 +5,33 @@ companies:
     hq_country: SG
     singapore_presence: true
     ats_provider: greenhouse
-    board_slug: govtechsingapore # Placeholder to be resolved
+    board_slug: govtechsingapore # Disabled: Careers portal uses Careers@Gov / Workday rather than public Greenhouse board
     target_lanes: 
       - CORE_AI_DATA
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   - id: ai_singapore
     name: AI Singapore
     hq_country: SG
     singapore_presence: true
     ats_provider: lever
-    board_slug: aisingapore # Placeholder
+    board_slug: aisingapore # Disabled: AISG postings route through NUS / Workday
     target_lanes: 
       - CORE_AI_DATA
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   - id: grab_sg
     name: Grab
     hq_country: SG
     singapore_presence: true
     ats_provider: greenhouse
-    board_slug: grab
+    board_slug: grab # Disabled: Uses Workday / internal ATS API
     target_lanes: 
       - CORE_AI_DATA
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   # HEALTH_BIO_PHARMA
   - id: engine_biosciences
@@ -39,34 +39,34 @@ companies:
     hq_country: SG
     singapore_presence: true
     ats_provider: ashby
-    board_slug: enginebiosciences
+    board_slug: enginebiosciences # Disabled: Ashby board slug unverified
     target_lanes: 
       - HEALTH_BIO_PHARMA
       - CORE_AI_DATA
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   - id: holmusk
     name: Holmusk
     hq_country: SG
     singapore_presence: true
     ats_provider: lever
-    board_slug: holmusk
+    board_slug: holmusk # Disabled: Lever board slug unverified
     target_lanes: 
       - HEALTH_BIO_PHARMA
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   - id: hummingbird_bio
     name: Hummingbird Bioscience
     hq_country: SG
     singapore_presence: true
     ats_provider: greenhouse
-    board_slug: hummingbirdbioscience
+    board_slug: hummingbirdbioscience # Disabled: Greenhouse board slug unverified
     target_lanes: 
       - HEALTH_BIO_PHARMA
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   # LEGAL_REGTECH
   - id: silent_eight
@@ -74,35 +74,35 @@ companies:
     hq_country: SG
     singapore_presence: true
     ats_provider: lever
-    board_slug: silenteight
+    board_slug: silenteight # Disabled: Lever board slug unverified
     target_lanes: 
       - LEGAL_REGTECH
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   - id: tookitaki
     name: Tookitaki
     hq_country: SG
     singapore_presence: true
     ats_provider: greenhouse
-    board_slug: tookitaki
+    board_slug: tookitaki # Disabled: Greenhouse board slug unverified
     target_lanes: 
       - LEGAL_REGTECH
       - CORE_AI_DATA
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   - id: synergis_capital
     name: Sygnum
     hq_country: CH
     singapore_presence: true
     ats_provider: lever
-    board_slug: sygnum
+    board_slug: sygnum # Disabled: Lever board slug unverified
     target_lanes: 
       - LEGAL_REGTECH
       - INVESTMENT_MARKETS_FINTECH
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   # INVESTMENT_MARKETS_FINTECH
   - id: gic
@@ -110,22 +110,22 @@ companies:
     hq_country: SG
     singapore_presence: true
     ats_provider: greenhouse
-    board_slug: gic
+    board_slug: gic # Disabled: Uses Workday / SuccessFactors
     target_lanes: 
       - INVESTMENT_MARKETS_FINTECH
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   - id: temasek
     name: Temasek Holdings
     hq_country: SG
     singapore_presence: true
     ats_provider: greenhouse
-    board_slug: temasek
+    board_slug: temasek # Disabled: Uses SuccessFactors
     target_lanes: 
       - INVESTMENT_MARKETS_FINTECH
     remote_policy: unknown
-    enabled: true
+    enabled: false
 
   - id: worldquant_sg
     name: WorldQuant
@@ -143,9 +143,9 @@ companies:
     hq_country: SG
     singapore_presence: true
     ats_provider: lever
-    board_slug: qcpcapital
+    board_slug: qcpcapital # Disabled: Lever board slug unverified
     target_lanes: 
       - INVESTMENT_MARKETS_FINTECH
       - CORE_AI_DATA
     remote_policy: unknown
-    enabled: true
+    enabled: false
