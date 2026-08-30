@@ -11,6 +11,26 @@ ALTER TABLE canonical_jobs ADD COLUMN IF NOT EXISTS employment_type VARCHAR(100)
 -- 2. Ensure job_version_id exists on evaluation_queue
 ALTER TABLE evaluation_queue ADD COLUMN IF NOT EXISTS job_version_id UUID;
 
+-- 2b. If job_version_id exists as VARCHAR, convert it to UUID (handle schema evolution)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'evaluation_queue' AND column_name = 'job_version_id'
+      AND data_type = 'character varying'
+  ) THEN
+    -- Create a temporary UUID column, copy data safely, drop old, rename
+    ALTER TABLE evaluation_queue ADD COLUMN job_version_id_uuid UUID;
+    UPDATE evaluation_queue SET job_version_id_uuid = 
+      CASE WHEN job_version_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      THEN job_version_id::UUID ELSE NULL END;
+    ALTER TABLE evaluation_queue DROP COLUMN job_version_id;
+    ALTER TABLE evaluation_queue RENAME COLUMN job_version_id_uuid TO job_version_id;
+  END IF;
+EXCEPTION WHEN others THEN
+  NULL; -- Column already UUID or other issue, skip
+END $$;
+
 -- 3. Backfill latest_job_version_id and version_count on canonical_jobs if missing
 WITH ranked_versions AS (
   SELECT 
@@ -31,20 +51,21 @@ WHERE c.id = rv.canonical_job_id AND rv.rn = 1 AND (c.latest_job_version_id IS N
 UPDATE evaluation_queue eq
 SET job_version_id = c.latest_job_version_id
 FROM canonical_jobs c
-WHERE eq.canonical_job_id = c.id AND eq.job_version_id IS NULL AND c.latest_job_version_id IS NOT NULL;
+WHERE eq.canonical_job_id::text = c.id::text AND eq.job_version_id IS NULL AND c.latest_job_version_id IS NOT NULL;
 
 -- 4b. Clean up orphaned evaluation_queue rows that still have NULL job_version_id
 -- These are records whose canonical_job has no job_versions (data integrity issue)
 DELETE FROM evaluation_queue
-WHERE job_version_id IS NULL AND canonical_job_id IN (
-  SELECT c.id FROM canonical_jobs c
+WHERE job_version_id IS NULL AND canonical_job_id::text IN (
+  SELECT c.id::text FROM canonical_jobs c
   WHERE c.latest_job_version_id IS NULL
 );
 
 -- 4c. Delete rows with job_version_id that don't exist in job_versions table (orphaned FKs)
+-- Cast both sides to text to handle potential UUID/text mismatches
 DELETE FROM evaluation_queue
-WHERE job_version_id IS NOT NULL AND job_version_id NOT IN (
-  SELECT DISTINCT id FROM job_versions
+WHERE job_version_id IS NOT NULL AND job_version_id::text NOT IN (
+  SELECT id::text FROM job_versions
 );
 
 -- 5. Drop the constraint if it already exists (idempotent approach)
