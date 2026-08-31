@@ -65,6 +65,8 @@ export const TECHNICAL_FUNCTION_KEYWORDS: RegExp[] = [
   /\b(full[\s-]stack|backend engineer|distributed systems|platform engineer|cloud engineer)\b/i,
   /\b(research engineer|quantitative developer|quant engineer|system architect)\b/i,
   /\b(python|typescript|go|c\+\+|rust|sql|postgres|fastapi|docker|kubernetes)\b/i,
+  /\b(scientist|bioinformatics|computational biolog(y|ist)|genomics?|biotech|drug discovery)\b/i,
+  /\b(regtech|legaltech|compliance automation|contract analytics|llm|agents?|rag|nlp|foundation models?|data pipeline)\b/i,
 ];
 
 // 3. Workability Requirements (Zero tolerance for on-premises-only lab/clinic)
@@ -254,7 +256,7 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   }
 
   // ── 0c. Technical Function Check ──
-  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician)\b/i.test(t);
+  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician|scientist|bioinformatician|bioinformatics|regtech|legaltech)\b/i.test(t);
   const hasTechnicalFunctionSignal = isTechnicalTitle || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(d));
   if (!hasTechnicalFunctionSignal) {
     return makeReject(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"], ["Axis 1 Failed: Role lacks evidence of technical, building, or engineering function"]);

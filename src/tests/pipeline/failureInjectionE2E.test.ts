@@ -37,17 +37,17 @@ async function countWhere(table: string, condition: string): Promise<number> {
 }
 
 async function insertCanonicalJob(id: string, title: string): Promise<string> {
+  const versionId = id.replace(/^0/, "5");
   await q(
-    `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane)
-     VALUES ($1, 'Test Failure Corp', $2, 'https://fail.test', 'LANE_ROUTED', 'CORE_AI_DATA')
-     ON CONFLICT DO NOTHING`,
-    [id, title]
+    `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane, latest_job_version_id)
+     VALUES ($1, 'Test Failure Corp', $2, 'https://fail.test', 'LANE_ROUTED', 'CORE_AI_DATA', $3)
+     ON CONFLICT (id) DO UPDATE SET processing_status = 'LANE_ROUTED', latest_job_version_id = $3`,
+    [id, title, versionId]
   );
-  const versionId = `v-${id}`;
   await q(
     `INSERT INTO job_versions (id, canonical_job_id, description_text, observed_at)
      VALUES ($1, $2, 'Test job description', NOW())
-     ON CONFLICT DO NOTHING`,
+     ON CONFLICT (id) DO NOTHING`,
     [versionId, id]
   );
   return versionId;
@@ -55,7 +55,7 @@ async function insertCanonicalJob(id: string, title: string): Promise<string> {
 
 async function insertQueueItem(id: string, canonicalJobId: string, status: string, attempts: number, maxAttempts: number, leasedAt?: Date): Promise<void> {
   const leaseExpires = leasedAt ? new Date(leasedAt.getTime() - 60000).toISOString() : null;
-  const versionId = `v-${canonicalJobId}`;
+  const versionId = canonicalJobId.replace(/^0/, "5");
   await q(
     `INSERT INTO evaluation_queue (id, canonical_job_id, job_version_id, lane, status, attempt_count, max_attempts, lease_expires_at, priority_score, available_at)
      VALUES ($1, $2, $3, 'CORE_AI_DATA', $4, $5, $6, $7, 0.5, NOW())
@@ -74,6 +74,7 @@ describe.skipIf(skipReal)("P0-10: Real Failure-Injection E2E (PostgreSQL)", () =
     // Clean up test rows
     await q(`DELETE FROM evaluation_queue WHERE id IN ($1, $2, $3)`, [ITEM_ID_1, ITEM_ID_2, ITEM_ID_3]);
     await q(`DELETE FROM ai_evaluations WHERE id = $1`, [EVAL_ID_1]);
+    await q(`DELETE FROM job_versions WHERE canonical_job_id IN ($1, $2, $3)`, [JOB_ID_1, JOB_ID_2, JOB_ID_3]);
     await q(`DELETE FROM canonical_jobs WHERE id IN ($1, $2, $3)`, [JOB_ID_1, JOB_ID_2, JOB_ID_3]);
     await pool.end();
   });
@@ -106,12 +107,13 @@ describe.skipIf(skipReal)("P0-10: Real Failure-Injection E2E (PostgreSQL)", () =
 
   it("F2 — stale EVALUATING lease (expired) is reclaimable by next worker run", async () => {
     await insertCanonicalJob(JOB_ID_2, "ML Research Scientist");
+    const vId2 = JOB_ID_2.replace(/^0/, "5");
     // Insert as EVALUATING with an already-expired lease
     await q(
-      `INSERT INTO evaluation_queue (id, canonical_job_id, lane, status, attempt_count, max_attempts, lease_expires_at, priority_score, available_at)
-       VALUES ($1, $2, 'CORE_AI_DATA', 'EVALUATING', 1, 3, NOW() - INTERVAL '10 minutes', 0.5, NOW())
+      `INSERT INTO evaluation_queue (id, canonical_job_id, job_version_id, lane, status, attempt_count, max_attempts, lease_expires_at, priority_score, available_at)
+       VALUES ($1, $2, $3, 'CORE_AI_DATA', 'EVALUATING', 1, 3, NOW() - INTERVAL '10 minutes', 0.5, NOW())
        ON CONFLICT DO NOTHING`,
-      [ITEM_ID_2, JOB_ID_2]
+      [ITEM_ID_2, JOB_ID_2, vId2]
     );
 
     // The eligibility query in evaluate_queue.ts should pick this up
@@ -143,6 +145,7 @@ describe.skipIf(skipReal)("P0-10: Real Failure-Injection E2E (PostgreSQL)", () =
   });
 
   it("F4 — ai_evaluations row records is_fallback correctly when OpenAI was used", async () => {
+    const vId1 = JOB_ID_1.replace(/^0/, "5");
     await q(
       `INSERT INTO ai_evaluations (
          id, canonical_job_id, job_version_id, gate_decision, gate_version,
@@ -150,12 +153,12 @@ describe.skipIf(skipReal)("P0-10: Real Failure-Injection E2E (PostgreSQL)", () =
          evaluation_schema_version, provider, model, attempt, is_fallback,
          degraded_state, full_evaluation_payload, evaluated_at
        ) VALUES (
-         $1::uuid, $2, gen_random_uuid()::text, 'PASS', '2.0',
+         $1::uuid, $2, $3::uuid, 'PASS', '2.0',
          '[]'::jsonb, '{}'::jsonb, '[]'::jsonb, '1.0',
          '2024-01-01', 'openai', 'gpt-4o-mini', 2, TRUE, FALSE,
          '{"evaluation_summary":"fallback test"}'::jsonb, NOW()
        ) ON CONFLICT DO NOTHING`,
-      [EVAL_ID_1, JOB_ID_1]
+      [EVAL_ID_1, JOB_ID_1, vId1]
     );
 
     const fallbackRows = await countWhere("ai_evaluations",

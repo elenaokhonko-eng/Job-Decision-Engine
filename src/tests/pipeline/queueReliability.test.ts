@@ -82,13 +82,27 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
   const Q_ID_2  = "40000000-0000-0000-0000-000000000002";
   const Q_ID_3  = "40000000-0000-0000-0000-000000000003";
 
+  const V_ID_1 = "60000000-0000-0000-0000-000000000001";
+  const V_ID_2 = "60000000-0000-0000-0000-000000000002";
+  const V_ID_3 = "60000000-0000-0000-0000-000000000003";
+
   const ensureSeeded = async () => {
-    for (const [id, title] of [[JOB_ID,"AI Policy Lead"],[JOB_ID2,"ML Research Sci"],[JOB_ID3,"Data Strategy Lead"]]) {
+    for (const [id, title, vId] of [
+      [JOB_ID, "AI Policy Lead", V_ID_1],
+      [JOB_ID2, "ML Research Sci", V_ID_2],
+      [JOB_ID3, "Data Strategy Lead", V_ID_3]
+    ]) {
       await q(
-        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane)
-         VALUES ($1, 'ReliabilityTestCo', $2, 'https://test.rl', 'LANE_ROUTED', 'CORE_AI_DATA')
-         ON CONFLICT (id) DO UPDATE SET processing_status = 'LANE_ROUTED'`,
-        [id, title]
+        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane, latest_job_version_id)
+         VALUES ($1, 'ReliabilityTestCo', $2, 'https://test.rl', 'LANE_ROUTED', 'CORE_AI_DATA', $3)
+         ON CONFLICT (id) DO UPDATE SET processing_status = 'LANE_ROUTED', latest_job_version_id = $3`,
+        [id, title, vId]
+      );
+      await q(
+        `INSERT INTO job_versions (id, canonical_job_id, description_text, observed_at)
+         VALUES ($1, $2, 'Test job description', NOW())
+         ON CONFLICT (id) DO NOTHING`,
+        [vId, id]
       );
     }
   };
@@ -105,16 +119,17 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
 
   afterAll(async () => {
     await q(`DELETE FROM evaluation_queue WHERE id IN ($1, $2, $3)`, [Q_ID_1, Q_ID_2, Q_ID_3]);
+    await q(`DELETE FROM job_versions WHERE canonical_job_id IN ($1, $2, $3)`, [JOB_ID, JOB_ID2, JOB_ID3]);
     await q(`DELETE FROM canonical_jobs WHERE id IN ($1, $2, $3)`, [JOB_ID, JOB_ID2, JOB_ID3]);
     await pool.end();
   });
 
   it("PENDING item is picked up and leased correctly", async () => {
     await q(
-      `INSERT INTO evaluation_queue (id, canonical_job_id, lane, status, attempt_count, max_attempts, priority_score, available_at)
-       VALUES ($1, $2, 'CORE_AI_DATA', 'PENDING', 0, 3, 0.8, NOW())
+      `INSERT INTO evaluation_queue (id, canonical_job_id, job_version_id, lane, status, attempt_count, max_attempts, priority_score, available_at)
+       VALUES ($1, $2, $3, 'CORE_AI_DATA', 'PENDING', 0, 3, 0.8, NOW())
        ON CONFLICT DO NOTHING`,
-      [Q_ID_1, JOB_ID]
+      [Q_ID_1, JOB_ID, V_ID_1]
     );
 
     // Simulate the worker lease acquisition query from evaluate_queue.ts
@@ -137,10 +152,10 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
 
   it("EVALUATING item with expired lease is reclaimable by next worker run", async () => {
     await q(
-      `INSERT INTO evaluation_queue (id, canonical_job_id, lane, status, attempt_count, max_attempts, priority_score, available_at, lease_expires_at)
-       VALUES ($1, $2, 'CORE_AI_DATA', 'EVALUATING', 1, 3, 0.7, NOW(), NOW() - INTERVAL '10 minutes')
+      `INSERT INTO evaluation_queue (id, canonical_job_id, job_version_id, lane, status, attempt_count, max_attempts, priority_score, available_at, lease_expires_at)
+       VALUES ($1, $2, $3, 'CORE_AI_DATA', 'EVALUATING', 1, 3, 0.7, NOW(), NOW() - INTERVAL '10 minutes')
        ON CONFLICT DO NOTHING`,
-      [Q_ID_2, JOB_ID2]
+      [Q_ID_2, JOB_ID2, V_ID_2]
     );
 
     // Stale lease query: item should be eligible for re-claim
@@ -151,10 +166,10 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
 
   it("exhausted RETRY_WAIT → NEEDS_MANUAL_REVIEW in DB, canonical job updated", async () => {
     await q(
-      `INSERT INTO evaluation_queue (id, canonical_job_id, lane, status, attempt_count, max_attempts, priority_score, available_at)
-       VALUES ($1, $2, 'CORE_AI_DATA', 'RETRY_WAIT', 3, 3, 0.6, NOW())
+      `INSERT INTO evaluation_queue (id, canonical_job_id, job_version_id, lane, status, attempt_count, max_attempts, priority_score, available_at)
+       VALUES ($1, $2, $3, 'CORE_AI_DATA', 'RETRY_WAIT', 3, 3, 0.6, NOW())
        ON CONFLICT DO NOTHING`,
-      [Q_ID_3, JOB_ID3]
+      [Q_ID_3, JOB_ID3, V_ID_3]
     );
 
     // Simulate exhausted transition
