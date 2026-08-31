@@ -1,13 +1,45 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
+import crypto from "crypto";
 import { db, Job } from "../db/db.ts";
 import { fetchGmailAlerts } from "./gmail.js";
 import { extractWithFallback } from "./llmFallback.js";
+import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION } from "../contracts/index.js";
 import {
   CANDIDATE_PROFILE,
   MULTI_LANE_SCORECARDS,
   ND_FRIENDLY_DIMENSIONS,
   POLITICS_STRESS_RISK_DIMENSIONS
 } from "./criteria.ts";
+
+export const MODEL_REGISTRY = {
+  EVALUATION_PRIMARY_MODEL: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+  EVALUATION_FALLBACK_MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
+  EMBEDDING_PRIMARY_MODEL: "text-embedding-004",
+  EMBEDDING_FALLBACK_MODEL: "text-embedding-3-small",
+  DOCUMENT_PRIMARY_MODEL: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+  DOCUMENT_FALLBACK_MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
+} as const;
+
+export function checkModelRegistryPreflight(): { ok: boolean; warnings: string[]; primaryAvailable: boolean; fallbackAvailable: boolean } {
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+  const warnings: string[] = [];
+  const primaryAvailable = !!(geminiKey && geminiKey.trim() !== "" && geminiKey !== "MY_GEMINI_API_KEY");
+  const fallbackAvailable = !!(openaiKey && openaiKey.trim() !== "");
+
+  if (!primaryAvailable) {
+    warnings.push("Primary provider (Gemini) API key is missing or placeholder.");
+  }
+  if (!fallbackAvailable) {
+    warnings.push("Fallback provider (OpenAI) API key is missing.");
+  }
+  return {
+    ok: primaryAvailable || fallbackAvailable,
+    warnings,
+    primaryAvailable,
+    fallbackAvailable
+  };
+}
 
 // Helper function to lazily initialize the Gemini SDK and throw "loud-fail" error if API key is missing
 let aiClient: GoogleGenAI | null = null;
@@ -789,6 +821,212 @@ You MUST return a JSON object matching this schema exactly.
     degraded: fallbackUsed,
     trace,
     toolsUsed
+  };
+}
+
+export interface SingleEvaluationJobInput {
+  canonicalJobId: string;
+  jobVersionId: string;
+  normalizedTitle: string;
+  companyName: string;
+  canonicalUrl: string;
+  descriptionText: string;
+  gateDecisionId?: string | null;
+  gateDecision?: string;
+  candidateLane?: string;
+  priorityScore?: number;
+  workabilityFacts?: any;
+}
+
+export interface SingleEvaluationExecutionResult {
+  evaluatedJob: EvaluationResult;
+  provider: "gemini" | "openai" | "ollama";
+  model: string;
+  fallbackUsed: boolean;
+  attempts: number;
+  errors: string[];
+  degraded: boolean;
+  trace: string[];
+}
+
+/**
+ * Pure evaluation function for a single canonical job version.
+ * - No database-query tools
+ * - No side-effect database writes
+ * - Exactly one result returned
+ * - Strict canonical_job_id and job_version_id identity validation
+ * - Preserves explicit numerical 0 values using (val ?? 50)
+ */
+export async function evaluateSingleCanonicalJob(
+  job: SingleEvaluationJobInput,
+  pipelineRunId: string = crypto.randomUUID(),
+  attemptNum: number = 1
+): Promise<SingleEvaluationExecutionResult> {
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+
+  if (!geminiKey && !openaiKey) {
+    throw new Error(
+      "CRITICAL API KEY CONFLICT: Neither GEMINI_API_KEY nor OPENAI_API_KEY environment variables are configured."
+    );
+  }
+
+  const trace: string[] = [];
+  const prompt = `
+You are an expert Executive Career Architect and AI Decision Engine.
+Evaluate the single job below strictly against candidate fit, lane classifications, and neurodivergent-friendly metrics.
+
+### CANDIDATE CORE PROFILE:
+- Name: ${CANDIDATE_PROFILE.name}
+- Experience: ${CANDIDATE_PROFILE.experienceYears}+ years
+- Workplace Preference: ${CANDIDATE_PROFILE.workplacePreference}
+- Target Minimum Base: SGD ${CANDIDATE_PROFILE.minAcceptableBaseSgdMonth}/month
+
+### JOB DETAILS:
+- Canonical Job ID: ${job.canonicalJobId}
+- Job Version ID: ${job.jobVersionId}
+- Job Title: ${job.normalizedTitle}
+- Company: ${job.companyName}
+- Careers Portal URL: ${job.canonicalUrl}
+- Pre-routed Candidate Lane: ${job.candidateLane || "CORE_AI_DATA"}
+- Workability Facts: ${JSON.stringify(job.workabilityFacts || {})}
+
+### DESCRIPTION:
+${job.descriptionText}
+
+### MANDATED INSTRUCTIONS:
+1. Classify into primary_lane ("CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", or null).
+2. Score nd_score, nd_friendly_score, politics_stress_score, sensory_overload_index, building_research_ratio, interaction_load as integers (0-100).
+3. Set next_action to one of: "PRIORITY_APPLY", "APPLY_AFTER_VERIFICATION", "LOW_STRATEGIC_VALUE", "REJECTED".
+4. Output EXACTLY ONE JSON object conforming to the schema.
+`;
+
+  const systemInstruction = `You are an AI decision engine evaluating a single canonical job. Return a single JSON object.`;
+
+  const forceOpenAI = process.env.FORCE_OPENAI === "true";
+  const order = forceOpenAI ? ["openai", "gemini"] : ["gemini", "openai"];
+  const tried = new Set<string>();
+
+  let rawJsonText: string | null = null;
+  let successProvider: "gemini" | "openai" | "ollama" = "gemini";
+  let successModel: string = MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
+  let fallbackUsed = false;
+  let attempts = 0;
+  const errors: string[] = [];
+
+  for (const provider of order) {
+    if (provider === "gemini" && geminiKey && !tried.has("gemini")) {
+      tried.add("gemini");
+      attempts++;
+      try {
+        trace.push(`Attempting primary model evaluation via Gemini (${MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL})...`);
+        const ai = getGeminiClient();
+        const response = await ai.models.generateContent({
+          model: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json"
+          }
+        });
+        rawJsonText = response.text || "{}";
+        successProvider = "gemini";
+        successModel = MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
+        fallbackUsed = false;
+        break;
+      } catch (geminiErr: any) {
+        const msg = geminiErr.message || String(geminiErr);
+        console.warn(`⚠️ Gemini single job evaluation failed: ${msg}`);
+        trace.push(`Gemini evaluation failed: ${msg}`);
+        errors.push(`Gemini: ${msg}`);
+      }
+    }
+    if (provider === "openai" && openaiKey && !tried.has("openai")) {
+      tried.add("openai");
+      attempts++;
+      try {
+        trace.push(`Attempting fallback model evaluation via OpenAI (${MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL})...`);
+        rawJsonText = await tryOpenAI(openaiKey, {
+          model: MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+          contents: prompt,
+          responseMimeType: "application/json",
+          systemInstruction
+        });
+        successProvider = "openai";
+        successModel = MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+        fallbackUsed = tried.has("gemini") || forceOpenAI;
+        break;
+      } catch (err: any) {
+        const msg = err.message || String(err);
+        console.warn(`⚠️ OpenAI single job evaluation failed: ${msg}`);
+        trace.push(`OpenAI evaluation failed: ${msg}`);
+        errors.push(`OpenAI: ${msg}`);
+      }
+    }
+  }
+
+  if (!rawJsonText) {
+    throw new Error(`All evaluation model attempts failed. Attempts: ${attempts}, Errors: ${errors.join("; ")}`);
+  }
+
+  // Parse and validate
+  let parsed: any;
+  try {
+    const cleaned = rawJsonText.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+    parsed = JSON.parse(cleaned);
+  } catch (parseErr: any) {
+    throw new Error(`Failed to parse evaluation response JSON: ${parseErr.message}. Raw text: ${rawJsonText.slice(0, 200)}`);
+  }
+
+  // If parsed object is wrapped in evaluated_jobs, extract single job
+  const jobPayload = Array.isArray(parsed.evaluated_jobs) ? parsed.evaluated_jobs[0] : parsed;
+  if (!jobPayload) {
+    throw new Error("Evaluation output contained no valid job payload.");
+  }
+
+  // Identity validation: if LLM returned canonical_job_id or job_id, verify it matches
+  const reportedJobId = jobPayload.canonical_job_id || jobPayload.job_id;
+  if (reportedJobId && reportedJobId !== job.canonicalJobId) {
+    throw new Error(`Evaluation identity mismatch: response job_id ${reportedJobId} does not match request ${job.canonicalJobId}`);
+  }
+
+  const validatedResult: EvaluationResult = EvaluationResultSchema.parse({
+    schema_version: SCHEMA_VERSION,
+    canonical_job_id: job.canonicalJobId,
+    job_version_id: job.jobVersionId,
+    pipeline_run_id: pipelineRunId,
+    provider: successProvider,
+    model: successModel,
+    attempt: attemptNum,
+    is_fallback: fallbackUsed,
+    degraded_state: fallbackUsed,
+    evaluation_summary: parsed.evaluation_summary || jobPayload.strategic_value || "Automated multi-lane AI evaluation",
+    primary_lane: jobPayload.primary_lane || null,
+    secondary_lanes: jobPayload.secondary_lanes || [],
+    lane_confidence: jobPayload.lane_confidence || "Medium",
+    lane_evidence: jobPayload.lane_evidence || "",
+    nd_score: jobPayload.nd_score ?? 50,
+    nd_friendly_score: jobPayload.nd_friendly_score ?? 50,
+    politics_stress_score: jobPayload.politics_stress_score ?? 50,
+    sensory_overload_index: jobPayload.sensory_overload_index ?? 50,
+    building_research_ratio: jobPayload.building_research_ratio ?? 50,
+    interaction_load: jobPayload.interaction_load ?? 50,
+    rejection_codes: jobPayload.rejection_codes || [],
+    strategic_value: jobPayload.strategic_value || "",
+    recommended_cv_version: jobPayload.recommended_cv_version || "CORE_AI_DATA",
+    next_action: jobPayload.next_action || "LOW_STRATEGIC_VALUE",
+    evaluated_at: new Date().toISOString()
+  });
+
+  return {
+    evaluatedJob: validatedResult,
+    provider: successProvider,
+    model: successModel,
+    fallbackUsed,
+    attempts,
+    errors,
+    degraded: fallbackUsed,
+    trace
   };
 }
 

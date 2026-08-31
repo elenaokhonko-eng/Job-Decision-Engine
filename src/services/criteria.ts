@@ -63,22 +63,135 @@ export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
 export const TECHNICAL_FUNCTION_KEYWORDS: RegExp[] = [
   /\b(software engineer|data engineer|ml engineer|machine learning engineer|ai engineer)\b/i,
   /\b(full[\s-]stack|backend engineer|distributed systems|platform engineer|cloud engineer)\b/i,
-  /\b(research engineer|quantitative developer|quant engineer|system architect)\b/i,
+  /\b(research engineer|quantitative developer|quant engineer|system architect|ai architect)\b/i,
   /\b(python|typescript|go|c\+\+|rust|sql|postgres|fastapi|docker|kubernetes)\b/i,
-  /\b(scientist|bioinformatics|computational biolog(y|ist)|genomics?|biotech|drug discovery)\b/i,
-  /\b(regtech|legaltech|compliance automation|contract analytics|llm|agents?|rag|nlp|foundation models?|data pipeline)\b/i,
+  /\b(applied scientist|research scientist|bioinformatics|computational biolog(y|ist)|genomics?|biotech|drug discovery)\b/i,
+  /\b(regtech|legaltech|compliance automation|contract analytics|knowledge engineer(ing)?|llm|agents?|rag|nlp|foundation models?|data pipeline)\b/i,
 ];
 
+/**
+ * Unified Technical Role Recognition (Axis 1)
+ */
+export function isTechnicalRole(title: string, description: string): { isTechnical: boolean; hasBuildingEvidence: boolean; reason?: string } {
+  const t = (title || "").toLowerCase();
+  const d = (description || "").toLowerCase();
+
+  // Lane-aware technical title families
+  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|quant developer|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?)\b/i.test(t);
+
+  // Technical building / engineering / data / modeling keywords
+  const buildingKeywords = [
+    "python", "typescript", "javascript", "go", "golang", "c++", "rust", "sql", "postgres",
+    "pytorch", "tensorflow", "scikit-learn", "keras", "jax", "pandas", "numpy", "spark",
+    "fastapi", "docker", "kubernetes", "aws", "gcp", "azure", "distributed systems",
+    "data pipeline", "etl", "data warehouse", "data lake", "lakehouse",
+    "model training", "fine-tuning", "rag", "agents", "agentic", "llm", "nlp", "prompt engineering",
+    "bioinformatics", "genomics", "cheminformatics", "computational biology", "drug discovery",
+    "regtech", "legaltech", "compliance automation", "contract analytics", "document intelligence",
+    "knowledge graphs", "time-series", "portfolio analytics", "algorithmic trading", "market microstructure",
+    "architecture", "software engineering", "mlops", "ci/cd"
+  ];
+
+  const hasBuildingEvidence = buildingKeywords.some(kw => t.includes(kw) || d.includes(kw)) || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(d));
+  const isTechnical = isTechnicalTitle || hasBuildingEvidence;
+
+  return {
+    isTechnical,
+    hasBuildingEvidence,
+    reason: isTechnical ? undefined : "Axis 1 Failed: Role lacks evidence of technical, building, or engineering function"
+  };
+}
+
 // 3. Workability Requirements (Zero tolerance for on-premises-only lab/clinic)
-export function evaluateWorkability(location: string, workplaceType: string, description: string): { workable: boolean; needsVerify: boolean; reason?: string } {
-  const isExplicitOnsiteLab = /\b(100% on-site|fully on-site|lab-based|wet lab|clinic-based)\b/i.test(description);
-  if (isExplicitOnsiteLab) {
-    return { workable: false, needsVerify: false, reason: 'Requires 100% on-premises laboratory/clinic presence' };
+export function evaluateWorkability(
+  location: string,
+  workplaceType: string,
+  description: string
+): { workable: boolean; needsVerify: boolean; reason?: string; facts?: Partial<GateResult["workability_facts"]> } {
+  const wp = (workplaceType || "").toUpperCase().trim();
+  const loc = (location || "").toLowerCase().trim();
+  const d = (description || "").toLowerCase().trim();
+
+  // 1. Explicit ONSITE structured field or 100% onsite in text -> HARD REJECT
+  const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|mandatory\s*5\s*days|5\s*days\s*(a\s*week|per\s*week)?\s*in\s*the\s*office|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
+    || /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i.test(d);
+
+  if (wp === "ONSITE" || wp === "ON_SITE" || isExplicitOnsiteText) {
+    return {
+      workable: false,
+      needsVerify: false,
+      reason: "Requires 100% on-premises / on-site presence (ONSITE mode not workable)",
+      facts: { office_days_min: 4, office_days_max: 5 }
+    };
   }
 
-  const isRemoteOrHybrid = /\b(remote|hybrid|flexible)\b/i.test(workplaceType) || /\b(remote|hybrid)\b/i.test(location);
-  if (!isRemoteOrHybrid && !workplaceType) {
-    return { workable: true, needsVerify: true, reason: 'Workplace model unspecified; needs manual verification' };
+  // 2. Geographic restrictions
+  const locationKw = [
+    "us only", "us-only", "united states only", "canada only", "eu only", "eu-only", "uk only", "uk-only", "remote - us",
+    "australia only", "australian work rights", "melbourne", "sydney"
+  ];
+  for (const kw of locationKw) {
+    if (loc.includes(kw) || d.includes(kw)) {
+      return {
+        workable: false,
+        needsVerify: false,
+        reason: `Geographic restriction detected: ${kw.toUpperCase()}`,
+        facts: { location_restriction: kw.toUpperCase() }
+      };
+    }
+  }
+
+  // 3. Ambiguous location / office expectations in text -> NEEDS_VERIFICATION
+  const ambiguousClues = [
+    "office based", "office-based", "in-office", "in office",
+    "office expectations", "workplace arrangement", "workplace expectations",
+    "office to be evaluated", "partner discussions", "location flexible", "location tbd"
+  ];
+  if (ambiguousClues.some(c => d.includes(c) || loc.includes(c))) {
+    return {
+      workable: true,
+      needsVerify: true,
+      reason: "Workplace model ambiguous/unspecified; needs manual verification",
+      facts: { office_days_min: null, office_days_max: null }
+    };
+  }
+
+  // 4. REMOTE structured field or remote in location / description -> PASS
+  if (wp === "REMOTE" || /\bremote\b/i.test(loc) || /\b(remote-first|fully remote|work from home)\b/i.test(d)) {
+    return {
+      workable: true,
+      needsVerify: false,
+      facts: { office_days_min: 0, office_days_max: 0 }
+    };
+  }
+
+  // 5. HYBRID checks
+  if (wp === "HYBRID" || /\bhybrid\b/i.test(d) || /\bhybrid\b/i.test(loc)) {
+    if (/\b[45]\s*days?\b/i.test(d)) {
+      return {
+        workable: false,
+        needsVerify: false,
+        reason: "Hybrid arrangement requires 4-5 days in-office",
+        facts: { office_days_min: 4, office_days_max: 5 }
+      };
+    }
+    const daysMatch = d.match(/\b([1-3])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i);
+    const days = daysMatch ? parseInt(daysMatch[1], 10) : (d.includes("1 day/week") ? 1 : d.includes("2 days/week") ? 2 : 3);
+    return {
+      workable: true,
+      needsVerify: false,
+      facts: { office_days_min: days, office_days_max: days }
+    };
+  }
+
+  // 6. Unspecified workplace_type and no remote clues -> NEEDS_VERIFICATION
+  if (!wp || wp === "UNKNOWN") {
+    return {
+      workable: true,
+      needsVerify: true,
+      reason: "Workplace model unspecified; needs manual verification",
+      facts: { office_days_min: null, office_days_max: null }
+    };
   }
 
   return { workable: true, needsVerify: false };
@@ -241,6 +354,7 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   const d = extractDescriptionText(job);
   const loc = (job.location || "").toLowerCase();
   const wp = (job.workplace_type || "").toLowerCase();
+  const emp = (job.employment_type || "").toUpperCase();
 
   // ── 0. Global Title Exclusions ──
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
@@ -249,21 +363,25 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
     }
   }
 
+  // ── 0a. Structured Contract Check ──
+  if (emp === "CONTRACT") {
+    return makeReject(["GATE_CONTRACT_ROLE"], ["Structured employment_type is CONTRACT"], { employment_type: "CONTRACT" });
+  }
+
   // ── 0b. Workability Check (location / workplace) ──
   const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d);
   if (!workability.workable) {
-    return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], [workability.reason || "Unworkable location/workplace model"]);
+    return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], [workability.reason || "Unworkable location/workplace model"], workability.facts);
   }
 
-  // ── 0c. Technical Function Check ──
-  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician|scientist|bioinformatician|bioinformatics|regtech|legaltech)\b/i.test(t);
-  const hasTechnicalFunctionSignal = isTechnicalTitle || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(d));
-  if (!hasTechnicalFunctionSignal) {
-    return makeReject(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"], ["Axis 1 Failed: Role lacks evidence of technical, building, or engineering function"]);
+  // ── 0c. Unified Technical Function Check (Axis 1) ──
+  const techCheck = isTechnicalRole(job.title || "", d);
+  if (!techCheck.isTechnical) {
+    return makeReject(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"], [techCheck.reason || "Axis 1 Failed: Role lacks evidence of technical function"]);
   }
 
   if (workability.needsVerify) {
-    return makeVerification(["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"], [workability.reason || "Workplace model unspecified; needs manual verification"]);
+    return makeVerification(["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"], [workability.reason || "Workplace model unspecified; needs manual verification"], workability.facts);
   }
 
   // ── 1. Deterministic Non-Technical Title-Family Exclusions ──
@@ -282,25 +400,25 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
 
   // C. Legal Practice (Attorneys / Legal Counsel / Paralegals)
   const legalPracticeRegex = /\b(attorney|associate attorney|m&a attorney|counsel|corporate counsel|legal counsel|general counsel|lawyer|paralegal|legal assistant)\b/i;
-  if (legalPracticeRegex.test(t) && !isTechnicalTitle) {
+  if (legalPracticeRegex.test(t) && !techCheck.isTechnical) {
     return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Legal Practice / Counsel "${job.title}"`]);
   }
 
   // D. Sales / Marketing / BD
   const salesTitleRegex = /\b(account executive|sales manager|sales director|business development manager|business development executive|bdr|sdr|marketing manager|marketing director|product marketing manager|growth marketing|event coordinator)\b/i;
-  if (salesTitleRegex.test(t) && !isTechnicalTitle) {
+  if (salesTitleRegex.test(t) && !techCheck.isTechnical) {
     return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Sales / Marketing "${job.title}"`]);
   }
 
   // E. Non-technical QA Coordination / Operations Management
   const coordTitleRegex = /\b(quality assurance coordinator|qa coordinator|compliance coordinator|operations coordinator|administrative coordinator|logistics coordinator)\b/i;
-  if (coordTitleRegex.test(t) && !isTechnicalTitle) {
+  if (coordTitleRegex.test(t) && !techCheck.isTechnical) {
     return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Non-technical Coordinator "${job.title}"`]);
   }
 
   // F. Qualitative Finance / Banking
   const financeQualRegex = /\b(private equity associate|private equity analyst|investment banking analyst|investment banking associate|m&a analyst|m&a associate|deal advisory|commercial banker|loan officer|credit underwriter)\b/i;
-  if (financeQualRegex.test(t) && !isTechnicalTitle) {
+  if (financeQualRegex.test(t) && !techCheck.isTechnical) {
     return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Traditional Finance / Banking "${job.title}"`]);
   }
 
@@ -465,16 +583,8 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   }
 
   // ── 15. TWO-AXIS PREQUALIFICATION ──
-  // Axis 1: Technical Function Validation (must be builder/modeller/architect/scientist)
-  const technicalFunctionPhrases = [
-    "engineer", "developer", "architect", "data scientist", "machine learning",
-    "software", "programming", "pipeline", "distributed systems", "modelling",
-    "modeling", "algorithms", "quantitative", "pytorch", "python", "spark",
-    "sql", "etl", "data warehouse", "data pipeline", "contract analytics",
-    "legaltech", "regtech", "compliance", "ai", "llm", "ml", "analytics"
-  ];
-  const hasTechnicalFunction = isTechnicalTitle || technicalFunctionPhrases.some(kw => t.includes(kw) || d.includes(kw));
-  if (!hasTechnicalFunction) {
+  // Axis 1: Technical Function Validation (unified check)
+  if (!techCheck.isTechnical) {
     return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], ["Axis 1 Failed: Role lacks hands-on engineering, modeling, or architecture function"]);
   }
 
