@@ -26,7 +26,6 @@ export function checkModelRegistryPreflight(): { ok: boolean; warnings: string[]
   const warnings: string[] = [];
   const primaryAvailable = !!(geminiKey && geminiKey.trim() !== "" && geminiKey !== "MY_GEMINI_API_KEY");
   const fallbackAvailable = !!(openaiKey && openaiKey.trim() !== "");
-
   if (!primaryAvailable) {
     warnings.push("Primary provider (Gemini) API key is missing or placeholder.");
   }
@@ -214,7 +213,7 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await ai.models.generateContent({
-        model: options.model || process.env.GEMINI_MODEL || "gemini-2.0-flash",
+        model: options.model || MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
         contents: options.contents,
         config: {
           responseMimeType: options.responseMimeType as any,
@@ -307,7 +306,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
 
 async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
   const baseUrl = "https://api.openai.com/v1";
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const model = options.model || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
   return tryOpenAICompatible(openaiKey, baseUrl, model, options, false);
 }
 
@@ -366,7 +365,7 @@ export async function callLLM(
       const openaiKey = process.env.OPENAI_API_KEY || "";
       return await tryOpenAI(openaiKey, {
         contents: prompt,
-        model: process.env.OPENAI_MODEL,
+        model: MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
         responseMimeType: "application/json"
       });
     }
@@ -559,7 +558,7 @@ async function runGeminiAgentInternal(
   let response: any;
   try {
     response = await ai.models.generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+      model: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
       contents: userQuestion,
       config: {
         systemInstruction,
@@ -571,7 +570,7 @@ async function runGeminiAgentInternal(
       console.warn("⏳ Gemini rate limit reached. Waiting 60s before retrying...");
       await new Promise((resolve) => setTimeout(resolve, 60000));
       response = await ai.models.generateContent({
-        model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+        model: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
         contents: userQuestion,
         config: {
           systemInstruction,
@@ -623,7 +622,7 @@ async function runGeminiAgentInternal(
     trace.push(`Step ${trace.length + 1}: Sending tool results back to Gemini for final assessment and ranking.`);
     
     response = await ai.models.generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+      model: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
       contents: conversationHistory,
       config: {
         systemInstruction,
@@ -645,7 +644,7 @@ async function runGeminiAgentInternal(
   conversationHistory.push({ role: "user", parts: [{ text: formattingPrompt }] });
 
   const finalResponse = await ai.models.generateContent({
-    model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+    model: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
     contents: conversationHistory,
     config: {
       systemInstruction,
@@ -761,7 +760,7 @@ You MUST return a JSON object matching this schema exactly.
   const tried = new Set<string>();
   let parsedResult: AgentResult | null = null;
   let successProvider: "gemini" | "openai" | "ollama" = "gemini";
-  let successModel = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  let successModel = MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
   let fallbackUsed = false;
   let attempts = 0;
   const errors: string[] = [];
@@ -775,7 +774,7 @@ You MUST return a JSON object matching this schema exactly.
         const result = await runGeminiAgentInternal(userQuestion, systemInstruction, trace, toolsUsed);
         parsedResult = result;
         successProvider = "gemini";
-        successModel = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+        successModel = MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
         fallbackUsed = false;
         if (parsedResult) break;
       } catch (geminiErr: any) {
@@ -790,7 +789,7 @@ You MUST return a JSON object matching this schema exactly.
       attempts++;
       try {
         trace.push(`Step ${trace.length + 1}: Running evaluation agent with OpenAI API...`);
-        const modelToUse = process.env.OPENAI_MODEL || "gpt-4o-mini";
+        const modelToUse = MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
         const text = await tryOpenAI(openaiKey, {
           model: modelToUse,
           contents: userQuestion,

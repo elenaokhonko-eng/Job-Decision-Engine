@@ -1,6 +1,7 @@
 import { ImapFlow } from "imapflow";
 import pg from "pg";
 import dotenv from "dotenv";
+import { pgSslConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -23,7 +24,7 @@ export async function ingestGmail(): Promise<number> {
 
   const pool = new pg.Pool({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
+    ssl: pgSslConfig(databaseUrl)
   });
 
   const client = new ImapFlow({

@@ -72,7 +72,12 @@ SELECT
   NOW()
 FROM evaluation_queue eq
 WHERE eq.job_version_id IS NULL
-ON CONFLICT (canonical_job_id, content_hash) DO NOTHING;
+  AND NOT EXISTS (
+    SELECT 1
+    FROM job_versions jv
+    WHERE jv.canonical_job_id = eq.canonical_job_id
+      AND jv.content_hash = 'unlinked_version_hash_' || eq.id::text
+  );
 
 UPDATE evaluation_queue eq
 SET job_version_id = jv.id

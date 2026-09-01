@@ -10,6 +10,9 @@
  */
 import { describe, it, expect, vi, afterAll, beforeAll } from "vitest";
 import pg from "pg";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { runMigrations } from "../../db/migrate.js";
 
 // ── CI detection ──────────────────────────────────────────────────────────────
@@ -17,6 +20,25 @@ import { runMigrations } from "../../db/migrate.js";
 const DB_URL = process.env.DATABASE_URL || "";
 const isCI = DB_URL.includes("localhost") || DB_URL.includes("127.0.0.1");
 const skipReal = !DB_URL || !isCI;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const MIGRATIONS_DIR = path.resolve(__dirname, "../../../migrations");
+
+async function applyMigrationFile(client: pg.PoolClient, file: string): Promise<void> {
+  const sqlContent = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8").replace(/^\uFEFF/, "");
+  await client.query("BEGIN");
+  try {
+    await client.query(sqlContent);
+    await client.query(
+      `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, NOW()) ON CONFLICT (version) DO NOTHING`,
+      [file]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  }
+}
 
 // ── Tier 1: Mock tests (always run) ──────────────────────────────────────────
 
@@ -158,5 +180,71 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     await runMigrations(realPool); // second run — should apply nothing
     const after = (await realPool.query(`SELECT COUNT(*)::int AS n FROM schema_migrations`)).rows[0].n;
     expect(after).toBe(before);
+  });
+
+  it("migration 008 succeeds on legacy upgrade path without uq_canonical_job_content_hash", async () => {
+    const client = await realPool.connect();
+    const schemaName = `legacy_upgrade_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
+    try {
+      await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+      await client.query(`SET search_path TO ${schemaName}`);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version VARCHAR(255) PRIMARY KEY,
+          applied_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+
+      const allFiles = fs
+        .readdirSync(MIGRATIONS_DIR)
+        .filter((f) => f.endsWith(".sql") && !f.startsWith("."))
+        .sort();
+      const baselineFiles = allFiles.filter((f) => f <= "007_job_version_integrity.sql");
+      for (const file of baselineFiles) {
+        await applyMigrationFile(client, file);
+      }
+
+      // Simulate legacy DB drift where this unique constraint is missing.
+      await client.query(`ALTER TABLE job_versions DROP CONSTRAINT IF EXISTS uq_canonical_job_content_hash`);
+
+      const canonicalJobId = (
+        await client.query(
+          `INSERT INTO canonical_jobs (company_name, normalized_title, canonical_url, processing_status)
+           VALUES ('Legacy Upgrade Co', 'Data Engineer', 'https://example.com/legacy-upgrade', 'LANE_ROUTED')
+           RETURNING id`
+        )
+      ).rows[0].id as string;
+
+      await client.query(
+        `INSERT INTO evaluation_queue (canonical_job_id, lane, status, job_version_id)
+         VALUES ($1, 'CORE_AI_DATA', 'PENDING', NULL)`,
+        [canonicalJobId]
+      );
+
+      const before = await client.query(
+        `SELECT 1 FROM schema_migrations WHERE version = '008_job_version_integrity_v2.sql'`
+      );
+      expect(before.rows).toHaveLength(0);
+
+      await runMigrations(client);
+
+      const after = await client.query(
+        `SELECT 1 FROM schema_migrations WHERE version = '008_job_version_integrity_v2.sql'`
+      );
+      expect(after.rows).toHaveLength(1);
+
+      const queueRows = await client.query(
+        `SELECT status, job_version_id FROM evaluation_queue WHERE canonical_job_id = $1`,
+        [canonicalJobId]
+      );
+      expect(queueRows.rows).toHaveLength(1);
+      expect(queueRows.rows[0].status).toBe("NEEDS_MANUAL_REVIEW");
+      expect(queueRows.rows[0].job_version_id).toBeTruthy();
+    } finally {
+      await client.query(`RESET search_path`).catch(() => undefined);
+      await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+    }
   });
 });
