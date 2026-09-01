@@ -17,9 +17,17 @@ const databaseUrl = process.env.DATABASE_URL;
 const Ajv2020 = (Ajv2020Import as any).default || Ajv2020Import;
 const addFormats = (addFormatsImport as any).default || addFormatsImport;
 const ajv = new Ajv2020({ allErrors: true, strict: false });
+const normalizingAjv = new Ajv2020({ allErrors: true, strict: false, removeAdditional: "all" });
 addFormats(ajv);
+addFormats(normalizingAjv);
 
 function validateAgainstSchema(payload: unknown, schema: any, schemaName: string): void {
+  const before = JSON.stringify(payload);
+  const normalize = normalizingAjv.compile(schema);
+  normalize(payload);
+  if (JSON.stringify(payload) !== before) {
+    console.warn(`${schemaName}: removed fields not declared by the strict schema.`);
+  }
   const validate = ajv.compile(schema);
   const ok = validate(payload);
   if (!ok) {
@@ -74,6 +82,22 @@ function cleanJsonResponse(rawText: string) {
     cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
   }
   return cleaned;
+}
+
+function normalizeTailoredCvRoot(payload: any): any {
+  const unwrapped = payload?.tailored_cv && typeof payload.tailored_cv === "object"
+    ? payload.tailored_cv
+    : payload;
+  if (!unwrapped || typeof unwrapped !== "object" || Array.isArray(unwrapped)) {
+    return unwrapped;
+  }
+
+  const allowedKeys = new Set(["metadata", "strategy", "cv", "validation"]);
+  const extraKeys = Object.keys(unwrapped).filter((key) => !allowedKeys.has(key));
+  if (extraKeys.length > 0) {
+    console.warn(`Ignoring non-schema top-level CV keys: ${extraKeys.join(", ")}`);
+  }
+  return Object.fromEntries(Object.entries(unwrapped).filter(([key]) => allowedKeys.has(key)));
 }
 
 async function generateTailoredCV() {
@@ -186,7 +210,8 @@ ${jdDescription}`;
       responseMimeType: "application/json",
       systemInstruction: "You are an analytical engine extracting objective requirements from a job description."
     });
-    const jobAnalysis = JSON.parse(cleanJsonResponse(analysisRes));
+    const jobAnalysisPayload = JSON.parse(cleanJsonResponse(analysisRes));
+    const jobAnalysis = jobAnalysisPayload.job_analysis ?? jobAnalysisPayload.analysis ?? jobAnalysisPayload;
     validateAgainstSchema(jobAnalysis, jobAnalysisSchema, "job_analysis.schema.json");
 
     // --- STAGE 2: REQUIREMENT-TO-EVIDENCE MATCHING ---
@@ -208,7 +233,8 @@ ${JSON.stringify(evidenceMapSchema)}`;
       responseMimeType: "application/json",
       systemInstruction: "You strictly map job requirements to verifiable fact IDs in the master profile and assess objective candidate match strengths."
     });
-    const evidenceMap = JSON.parse(cleanJsonResponse(matchRes));
+    const evidenceMapPayload = JSON.parse(cleanJsonResponse(matchRes));
+    const evidenceMap = evidenceMapPayload.evidence_map ?? evidenceMapPayload;
     validateAgainstSchema(evidenceMap, evidenceMapSchema, "evidence_map.schema.json");
     for (const [idx, req] of (evidenceMap?.role_alignment_analysis?.requirements || []).entries()) {
       for (const factId of req?.profile_fact_ids || []) {
@@ -312,7 +338,7 @@ The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard
       responseMimeType: "application/json",
       systemInstruction: "You generate the final tailored JSON CV. DO NOT invent facts. Only use data from the master profile."
     });
-    let finalCv = JSON.parse(cleanJsonResponse(cvRes));
+    let finalCv = normalizeTailoredCvRoot(JSON.parse(cleanJsonResponse(cvRes)));
 
      // Grounded snapshot text is required when the deterministic selection says it is eligible.
     if (snapshotEligible && !finalCv.cv.role_alignment_snapshot) {
