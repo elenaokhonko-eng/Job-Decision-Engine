@@ -1,11 +1,10 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
-import { generateContent, MODEL_REGISTRY } from "../src/services/agent.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
 
 dotenv.config();
-dotenv.config({ path: ".env.local" });
+dotenv.config({ path: ".env.local", override: true });
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -20,6 +19,8 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
   console.log("====================================================");
   console.log("         STAGE 0: EMAIL PARSING SCOUT               ");
   console.log("====================================================");
+
+  const { generateContent, MODEL_REGISTRY } = await import("../src/services/agent.js");
 
   const { rows: emails } = await pool.query(
     `SELECT id, gmail_message_id, subject, body FROM raw_email_alerts WHERE processed = FALSE ORDER BY id ASC LIMIT 20`

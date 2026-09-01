@@ -1,12 +1,11 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { evaluateSingleCanonicalJob, checkModelRegistryPreflight } from "../src/services/agent.js";
 import { EvaluationRequest } from "../src/pipeline/types.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationWorkabilityFacts } from "../src/contracts/index.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
-dotenv.config({ path: ".env.local" });
+dotenv.config({ path: ".env.local", override: true });
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -23,6 +22,8 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
   console.log("====================================================");
   console.log("         STAGE 0: AI EVALUATION PROCESSOR           ");
   console.log("====================================================");
+
+  const { evaluateSingleCanonicalJob, checkModelRegistryPreflight } = await import("../src/services/agent.js");
 
   const pipelineRunId = crypto.randomUUID();
   const client = await pool.connect();

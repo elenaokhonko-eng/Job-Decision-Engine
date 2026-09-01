@@ -1,10 +1,10 @@
 import dotenv from "dotenv";
-import { preflightModelRoutes } from "../src/services/agent.js";
 
 dotenv.config();
-dotenv.config({ path: ".env.local" });
+dotenv.config({ path: ".env.local", override: true });
 
 async function main(): Promise<void> {
+  const { preflightModelRoutes } = await import("../src/services/agent.js");
   const result = await preflightModelRoutes();
   console.log("Model preflight:", JSON.stringify(result, null, 2));
   if (!result.evaluation || !result.embedding) {
