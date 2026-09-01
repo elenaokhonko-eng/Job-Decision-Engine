@@ -22,7 +22,7 @@ import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import { generateContent } from "../src/services/agent.js";
+import { generateContent, MODEL_REGISTRY } from "../src/services/agent.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
@@ -236,7 +236,7 @@ INSTRUCTIONS:
 ${JSON.stringify(coverLetterSchema)}`;
 
     const rawResponse = await generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+      model: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
       contents: clPrompt,
       responseMimeType: "application/json",
       systemInstruction:
@@ -293,8 +293,11 @@ ${JSON.stringify(coverLetterSchema)}`;
     // DOCX
     const docxPath = path.join(exportDir, `${baseFilename}.docx`);
     await generateCoverLetterDocx(finalCl, docxPath, contactInfo);
+    if (!fs.existsSync(docxPath)) {
+      throw new Error("Cover letter renderer completed without creating the required DOCX artifact.");
+    }
 
-    // PDF (Word COM automation)
+    // PDF is optional when no local converter exists.
     const pdfPath = path.join(exportDir, `${baseFilename}.pdf`);
     await generatePdf(docxPath, pdfPath);
 

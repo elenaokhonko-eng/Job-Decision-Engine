@@ -2,6 +2,7 @@ import { db } from "../db/db.js";
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../db/pgSsl.js";
+import { generateContentHash } from "../services/criteria.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -28,13 +29,12 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
   console.log("Starting normalization of raw_job_observations...");
   const pool = clientOrPool || defaultPool;
   
-  // Find observations that have not been canonicalized yet
+  // Explicit linkage is authoritative; hash-only inference strands duplicate observations.
   const query = `
     SELECT obs.* 
     FROM raw_job_observations obs
-    WHERE NOT EXISTS (
-      SELECT 1 FROM job_versions jv WHERE jv.content_hash = obs.raw_payload_hash
-    )
+    WHERE obs.job_version_id IS NULL
+      AND COALESCE(obs.processing_status, 'PENDING') = 'PENDING'
   `;
   
   const { rows: pendingObservations } = await pool.query(query);
@@ -52,29 +52,56 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
     for (const obs of pendingObservations) {
       await client.query("BEGIN");
       try {
+        // Raw payload hashes preserve source fidelity; normalized content hashes define JD versions.
+        const normalizedContentHash = generateContentHash(
+          obs.company_name,
+          obs.title,
+          obs.description_raw
+        );
         let canonicalJobId: string | null = null;
         let isExistingJob = false;
         
-        // Check if we have seen this external ID before
+        // Identity precedence: source/requisition ID, canonical URL, company+title+location,
+        // then company+title only as a deliberately low-confidence fallback.
         const checkExt = await client.query(
-          `SELECT canonical_job_id FROM job_versions jv 
-           JOIN raw_job_observations rjo ON jv.content_hash = rjo.raw_payload_hash
-           WHERE rjo.source_name = $1 AND rjo.source_external_id = $2 LIMIT 1`,
+          `SELECT jv.canonical_job_id, jv.id AS job_version_id
+           FROM raw_job_observations rjo
+           JOIN job_versions jv ON jv.id = rjo.job_version_id
+           WHERE rjo.source_name = $1
+             AND rjo.source_external_id = $2
+           ORDER BY rjo.retrieved_at DESC
+           LIMIT 1`,
           [obs.source_name, obs.source_external_id]
         );
+
+        let existingVersionId: string | null = null;
         
         if (checkExt.rows.length > 0) {
           canonicalJobId = checkExt.rows[0].canonical_job_id;
           isExistingJob = true;
         } else {
-          // Check title + company
-          const checkTitle = await client.query(
-            `SELECT id FROM canonical_jobs WHERE company_name = $1 AND normalized_title = $2 LIMIT 1`,
-            [obs.company_name, obs.title.toLowerCase()]
+          const checkUrl = await client.query(
+            `SELECT id FROM canonical_jobs
+             WHERE canonical_url = $1
+             LIMIT 1`,
+            [obs.canonical_apply_url || obs.source_url]
           );
-          if (checkTitle.rows.length > 0) {
-            canonicalJobId = checkTitle.rows[0].id;
+          if (checkUrl.rows.length > 0) {
+            canonicalJobId = checkUrl.rows[0].id;
             isExistingJob = true;
+          } else {
+            const checkTitleLocation = await client.query(
+              `SELECT id FROM canonical_jobs
+               WHERE company_name = $1
+                 AND normalized_title = $2
+                 AND COALESCE(location, location_summary, 'Unknown') = $3
+               LIMIT 1`,
+              [obs.company_name, obs.title.toLowerCase(), obs.location_raw || "Unknown"]
+            );
+            if (checkTitleLocation.rows.length > 0) {
+              canonicalJobId = checkTitleLocation.rows[0].id;
+              isExistingJob = true;
+            }
           }
         }
         
@@ -98,40 +125,56 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
           canonicalJobId = insertCanon.rows[0].id;
         }
         
-        // Create new job version
-        const verInsert = await client.query(
-          `INSERT INTO job_versions (canonical_job_id, content_hash, description_text, observed_at) 
-           VALUES ($1, $2, $3, NOW()) RETURNING id`,
-          [canonicalJobId, obs.raw_payload_hash, obs.description_raw]
-        );
-        const newVersionId = verInsert.rows[0].id;
+        // A content hash duplicate is a new source observation, not a new version.
+        if (!existingVersionId) {
+          const existingVersion = await client.query(
+            `SELECT id
+             FROM job_versions
+             WHERE canonical_job_id = $1 AND content_hash = $2
+             LIMIT 1`,
+            [canonicalJobId, normalizedContentHash]
+          );
+          existingVersionId = existingVersion.rows[0]?.id || null;
+        }
 
-        // Transactionally update canonical job with latest version pointer and reset status for reevaluation
-        await client.query(
-          `UPDATE canonical_jobs 
-           SET latest_job_version_id = $1,
-               version_count = CASE WHEN $2::boolean THEN COALESCE(version_count, 0) + 1 ELSE COALESCE(version_count, 1) END,
-               location = COALESCE($3, location),
-               workplace_type = COALESCE($4, workplace_type),
-               employment_type = COALESCE($5, employment_type),
-               processing_status = 'RAW_STAGED',
-               updated_at = NOW()
-           WHERE id = $6`,
-          [
-            newVersionId,
-            isExistingJob,
-            obs.location_raw || "Unknown",
-            obs.workplace_type_raw || "UNKNOWN",
-            obs.employment_type_raw || "UNKNOWN",
-            canonicalJobId
-          ]
-        );
+        let resolvedVersionId = existingVersionId;
+        let createdNewVersion = false;
+        if (!resolvedVersionId) {
+          const verInsert = await client.query(
+            `INSERT INTO job_versions (canonical_job_id, content_hash, description_text, observed_at)
+             VALUES ($1, $2, $3, NOW()) RETURNING id`,
+            [canonicalJobId, normalizedContentHash, obs.description_raw]
+          );
+          resolvedVersionId = verInsert.rows[0].id;
+          createdNewVersion = true;
+        }
 
-        // Mark observation as PROCESSED
+        if (createdNewVersion) {
+          // Preserve established facts when later source data is explicitly Unknown.
+          await client.query(
+            `UPDATE canonical_jobs
+             SET latest_job_version_id = $1,
+                 version_count = CASE
+                   WHEN $2::boolean THEN COALESCE(version_count, 0) + 1
+                   ELSE GREATEST(COALESCE(version_count, 0), 1)
+                 END,
+                 location = CASE WHEN NULLIF($3, 'Unknown') IS NULL THEN location ELSE $3 END,
+                 workplace_type = CASE WHEN NULLIF($4, 'UNKNOWN') IS NULL THEN workplace_type ELSE $4 END,
+                 employment_type = CASE WHEN NULLIF($5, 'UNKNOWN') IS NULL THEN employment_type ELSE $5 END,
+                 processing_status = 'RAW_STAGED',
+                 updated_at = NOW()
+             WHERE id = $6`,
+            [resolvedVersionId, isExistingJob, obs.location_raw || "Unknown", obs.workplace_type_raw || "UNKNOWN", obs.employment_type_raw || "UNKNOWN", canonicalJobId]
+          );
+        }
+
+        // Every observation, including a duplicate, receives a durable version mapping.
         if (obs.id) {
           await client.query(
-            `UPDATE raw_job_observations SET processing_status = 'PROCESSED' WHERE id = $1`,
-            [obs.id]
+            `UPDATE raw_job_observations
+             SET job_version_id = $1, processing_status = 'PROCESSED'
+             WHERE id = $2`,
+            [resolvedVersionId, obs.id]
           );
         }
 
@@ -140,7 +183,7 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
         summary.details.push({
           observationId: obs.id,
           canonicalJobId: canonicalJobId || undefined,
-          versionId: newVersionId || undefined,
+          versionId: resolvedVersionId || undefined,
           isNewJob: !isExistingJob
         });
       } catch (err: any) {

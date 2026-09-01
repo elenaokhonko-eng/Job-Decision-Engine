@@ -34,6 +34,19 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx src/db/migrate.ts
 
+      - name: Verify configured model routes
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EVALUATION_PRIMARY_MODEL: ${{ vars.EVALUATION_PRIMARY_MODEL }}
+          EVALUATION_FALLBACK_MODEL: ${{ vars.EVALUATION_FALLBACK_MODEL }}
+          EMBEDDING_PRIMARY_MODEL: ${{ vars.EMBEDDING_PRIMARY_MODEL }}
+          EMBEDDING_FALLBACK_MODEL: ${{ vars.EMBEDDING_FALLBACK_MODEL }}
+          DOCUMENT_PRIMARY_MODEL: ${{ vars.DOCUMENT_PRIMARY_MODEL }}
+          DOCUMENT_FALLBACK_MODEL: ${{ vars.DOCUMENT_FALLBACK_MODEL }}
+        run: npx tsx scripts/preflight_models.ts
+
       # ── Source 1: Gmail alert ingestion ──────────────────────────────────────
 
       - name: Run Native Gmail Alert Ingestion

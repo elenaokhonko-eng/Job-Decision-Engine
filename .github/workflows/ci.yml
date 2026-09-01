@@ -41,6 +41,25 @@ jobs:
     - name: Install dependencies
       run: npm ci
 
+    - name: Reject UTF-8 BOM in executable and migration sources
+      shell: bash
+      run: |
+        set +e
+        matches=$(grep -rIl --include='*.sql' --include='*.yml' --include='*.yaml' --include='*.ts' --include='*.py' "$(printf '\357\273\277')" .)
+        grep_status=$?
+        set -e
+        if [ "$grep_status" -gt 1 ]; then
+          exit "$grep_status"
+        fi
+        if [ -n "$matches" ]; then
+          echo "UTF-8 BOM found in files that are parsed by runtime tooling:"
+          echo "$matches"
+          exit 1
+        fi
+
+    - name: Validate GitHub Actions workflows
+      run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+
     - name: Run linter checks
       run: npm run lint
 

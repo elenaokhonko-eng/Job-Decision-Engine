@@ -67,10 +67,11 @@ export const sampleHardRejectGate: GateDecision = {
   rejection_codes: ["ON_SITE_EXCEEDS_MAX", "LOCATION_MISMATCH"],
   evidence_quotes: ["Requires 5 days mandatory in-office in Melbourne, Australia"],
   workability_facts: {
-    location_eligibility: "FAIL",
-    office_days: 5,
-    travel_percentage: 20,
-    is_contract: false
+    office_days_min: 5,
+    office_days_max: 5,
+    travel_pct_max: 20,
+    employment_type: "PERMANENT",
+    location_restriction: "MELBOURNE, AUSTRALIA"
   },
   evaluated_at: "2026-08-28T12:15:00.000Z"
 };
@@ -85,10 +86,11 @@ export const sampleNeedsVerificationGate: GateDecision = {
   rejection_codes: [],
   evidence_quotes: ["Work arrangement discussed during interview"],
   workability_facts: {
-    location_eligibility: "UNKNOWN",
-    office_days: "UNKNOWN",
-    travel_percentage: "UNKNOWN",
-    is_contract: false
+    office_days_min: null,
+    office_days_max: null,
+    travel_pct_max: null,
+    employment_type: "UNKNOWN",
+    location_restriction: null
   },
   evaluated_at: "2026-08-28T12:16:00.000Z"
 };

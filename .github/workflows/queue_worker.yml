@@ -1,44 +1,44 @@
 name: Evaluation Queue Worker
 
 on:
-	schedule:
-		- cron: '15 * * * *' # every hour at :15 UTC
-	workflow_dispatch:
+  schedule:
+    - cron: '15 * * * *'
+  workflow_dispatch:
 
 concurrency:
-	group: evaluation-queue-worker
-	cancel-in-progress: false
+  group: evaluation-queue-worker
+  cancel-in-progress: false
 
 env:
-	FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-	drain-queue:
-		name: Drain evaluation retries
-		runs-on: ubuntu-latest
-		steps:
-			- name: Checkout repository code
-				uses: actions/checkout@v4
+  drain-queue:
+    name: Drain evaluation retries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
 
-			- name: Set up Node.js
-				uses: actions/setup-node@v4
-				with:
-					node-version: 22
-					cache: 'npm'
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
 
-			- name: Install Node.js dependencies
-				run: npm ci
+      - name: Install Node.js dependencies
+        run: npm ci
 
-			- name: Run Database Migrations
-				env:
-					DATABASE_URL: ${{ secrets.DATABASE_URL }}
-				run: npx tsx src/db/migrate.ts
+      - name: Run Database Migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx tsx src/db/migrate.ts
 
-			- name: Run Evaluation Queue Worker
-				env:
-					DATABASE_URL: ${{ secrets.DATABASE_URL }}
-					GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-					GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
-					OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-					EVALUATION_EXIT_ON_RETRY_WAIT: "false"
-				run: npx tsx scripts/evaluate_queue.ts
+      - name: Run Evaluation Queue Worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EVALUATION_EXIT_ON_RETRY_WAIT: "false"
+        run: npx tsx scripts/evaluate_queue.ts

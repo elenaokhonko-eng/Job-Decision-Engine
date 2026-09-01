@@ -4,7 +4,7 @@ import path from "path";
 import dotenv from "dotenv";
 import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import { generateContent } from "../src/services/agent.js";
+import { generateContent, MODEL_REGISTRY } from "../src/services/agent.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
@@ -157,7 +157,7 @@ async function generateTailoredCV() {
     }
 
     // Model is resolved by generateContent() which tries Gemini then OpenAI automatically.
-    const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+    const model = MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL;
     const knownFactIds = extractProfileFactIds(masterProfile);
     if (knownFactIds.size === 0) {
       throw new Error("MASTER_PROFILE contains no facts/profile_facts ids; cannot ground CV evidence.");
@@ -314,22 +314,9 @@ The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard
     });
     let finalCv = JSON.parse(cleanJsonResponse(cvRes));
 
-    // Fallback if the LLM didn't populate role_alignment_snapshot but was supposed to
+     // Grounded snapshot text is required when the deterministic selection says it is eligible.
     if (snapshotEligible && !finalCv.cv.role_alignment_snapshot) {
-       console.log("WARNING: LLM omitted role_alignment_snapshot. Injecting basic structure...");
-       finalCv.cv.role_alignment_snapshot = {
-          heading: "Role Alignment Snapshot",
-          target_role: jdTitle,
-          target_company: jdCompany,
-          items: selectedRequirements.map(r => ({
-             requirement_id: r.requirement_id,
-             requirement_label: r.requirement_label,
-             display_match_label: r.match_level,
-             evidence_statement: "Evidence mapping generated for this requirement.",
-             profile_fact_ids: r.profile_fact_ids,
-             keywords_used: []
-          }))
-       };
+      throw new Error("CV generation omitted required grounded role_alignment_snapshot; refusing placeholder application prose.");
     }
 
     validateAgainstSchema(finalCv, tailoredCvSchema, "tailored_cv.schema.json");
@@ -362,14 +349,19 @@ The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard
     // Save DOCX
     const docxPath = path.join(exportDir, `${baseFilename}.docx`);
     await generateDocx(finalCv, docxPath);
+    if (!fs.existsSync(docxPath)) {
+      throw new Error("CV DOCX renderer completed without creating the required DOCX artifact.");
+    }
     
-    // Save PDF using MS Word COM Automation
-    await generatePdf(docxPath, path.join(exportDir, `${baseFilename}.pdf`));
+    // PDF is an optional convenience artifact when a local converter is available.
+    const pdfPath = path.join(exportDir, `${baseFilename}.pdf`);
+    await generatePdf(docxPath, pdfPath);
+    const pdfCreated = fs.existsSync(pdfPath);
 
     console.log(`✅ CV Generation Complete! Files saved to scripts/exports/:
 - ${baseFilename}.cv.json
 - ${baseFilename}.docx
-- ${baseFilename}.pdf`);
+- ${pdfCreated ? `${baseFilename}.pdf` : "PDF not created (Word/LibreOffice unavailable)"}`);
 
   } catch (err: any) {
     console.error("❌ Error generating tailored CV:", err.message || err);

@@ -12,12 +12,12 @@ import {
 } from "./criteria.ts";
 
 export const MODEL_REGISTRY = {
-  EVALUATION_PRIMARY_MODEL: process.env.GEMINI_MODEL || "gemini-2.0-flash",
-  EVALUATION_FALLBACK_MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
-  EMBEDDING_PRIMARY_MODEL: "text-embedding-004",
-  EMBEDDING_FALLBACK_MODEL: "text-embedding-3-small",
-  DOCUMENT_PRIMARY_MODEL: process.env.GEMINI_MODEL || "gemini-2.0-flash",
-  DOCUMENT_FALLBACK_MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
+  EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash",
+  EVALUATION_FALLBACK_MODEL: process.env.EVALUATION_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
+  EMBEDDING_PRIMARY_MODEL: process.env.EMBEDDING_PRIMARY_MODEL || "text-embedding-004",
+  EMBEDDING_FALLBACK_MODEL: process.env.EMBEDDING_FALLBACK_MODEL || "text-embedding-3-small",
+  DOCUMENT_PRIMARY_MODEL: process.env.DOCUMENT_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash",
+  DOCUMENT_FALLBACK_MODEL: process.env.DOCUMENT_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
 } as const;
 
 export function checkModelRegistryPreflight(): { ok: boolean; warnings: string[]; primaryAvailable: boolean; fallbackAvailable: boolean } {
@@ -433,7 +433,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
     try {
       const ai = getGeminiClient();
       const response = await ai.models.embedContent({
-        model: "text-embedding-004",
+        model: MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL,
         contents: text
       });
       const vals = response.embeddings?.[0]?.values;
@@ -453,7 +453,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${openaiKey}`
         },
-        body: JSON.stringify({ input: text, model: "text-embedding-3-small" }),
+        body: JSON.stringify({ input: text, model: MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL }),
         signal: AbortSignal.timeout(30000)
       });
       if (!oResponse.ok) {
@@ -474,6 +474,53 @@ export async function generateEmbedding(text: string): Promise<number[]> {
     "Embedding generation failed: both Gemini and OpenAI providers unavailable or returned no values. " +
     "Configure at least one of GEMINI_API_KEY or OPENAI_API_KEY."
   );
+}
+
+export interface ModelRoutePreflight {
+  evaluation: boolean;
+  embedding: boolean;
+  document: boolean;
+  errors: string[];
+}
+
+/** Perform minimal live calls so invalid configured model IDs fail before ingestion. */
+export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+  const errors: string[] = [];
+
+  const checkTextRoute = async (label: string, geminiModel: string, openaiModel: string): Promise<boolean> => {
+    if (geminiKey) {
+      try {
+        await tryGemini(geminiKey, { model: geminiModel, contents: "Reply with OK.", responseMimeType: "text/plain" });
+        return true;
+      } catch (err: any) {
+        errors.push(`${label} Gemini (${geminiModel}): ${err.message || err}`);
+      }
+    }
+    if (openaiKey) {
+      try {
+        await tryOpenAI(openaiKey, { model: openaiModel, contents: "Reply with OK.", responseMimeType: "text/plain" });
+        return true;
+      } catch (err: any) {
+        errors.push(`${label} OpenAI (${openaiModel}): ${err.message || err}`);
+      }
+    }
+    if (!geminiKey && !openaiKey) errors.push(`${label}: no Gemini or OpenAI API key configured`);
+    return false;
+  };
+
+  const evaluation = await checkTextRoute("evaluation", MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL, MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL);
+  const document = await checkTextRoute("document", MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL, MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL);
+  let embedding = false;
+  try {
+    await generateEmbedding("preflight");
+    embedding = true;
+  } catch (err: any) {
+    errors.push(`embedding: ${err.message || err}`);
+  }
+
+  return { evaluation, embedding, document, errors };
 }
 
 // Core execution loop

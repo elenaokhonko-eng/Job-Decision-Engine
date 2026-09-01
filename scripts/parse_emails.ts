@@ -1,7 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
-import { generateContent } from "../src/services/agent.js";
+import { generateContent, MODEL_REGISTRY } from "../src/services/agent.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
 
 dotenv.config();
@@ -73,7 +73,7 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
 
     try {
       const responseText = await generateContent({
-        model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
+        model: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
         contents: prompt,
         responseMimeType: "application/json"
       });
@@ -111,6 +111,7 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
             const msg = `Schema validation failed for job "${rawJob.title}": ${validated.error.message}`;
             console.warn(`⚠️ ${msg}`);
             emailErrors.push(msg);
+            broker.recordError(msg);
             continue;
           }
 
@@ -166,14 +167,18 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
     } catch (err: any) {
       if (!emailSucceeded) {
         failedEmails++;
-        console.error(`❌ Failed to parse or stage email ${email.id}:`, err.message || err);
+        const message = err.message || String(err);
+        broker.recordError(`Email ${email.id}: ${message}`);
+        console.error(`❌ Failed to parse or stage email ${email.id}:`, message);
       }
     } finally {
       dbClient.release();
     }
   }
 
-  await broker.endRun();
+  await broker.endRun(
+    failedEmails === 0 ? "COMPLETED" : parsedEmails > 0 ? "DEGRADED" : "FAILED"
+  );
   console.log(`\n✅ Email parsing complete. Parsed: ${parsedEmails}, Jobs: ${extractedJobs}, Failed: ${failedEmails}`);
   return { parsedEmails, extractedJobs, failedEmails };
 }

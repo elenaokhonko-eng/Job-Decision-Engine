@@ -1,11 +1,33 @@
-﻿-- Migration 009: Canonical Read Model, Quarantine Table & Evaluation Attempts
+-- Migration 009: Canonical Read Model, Quarantine Table & Evaluation Attempts
 --
 -- Invariants:
 -- 1. Unresolvable/orphaned queue records are archived into quarantined_queue_records preserving original data.
 -- 2. evaluation_attempts records detailed retry and telemetry history per version.
 -- 3. v_canonical_shortlist joins latest_job_version_id directly, incorporates source board, and detects version mismatches.
 
--- 1. Quarantine table for unresolved queue records
+-- 1. Explicit observation-to-version linkage used by normalization and the read model.
+ALTER TABLE raw_job_observations
+  ADD COLUMN IF NOT EXISTS job_version_id UUID;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.table_constraints
+    WHERE table_name = 'raw_job_observations'
+      AND constraint_name = 'fk_raw_observation_job_version'
+  ) THEN
+    ALTER TABLE raw_job_observations
+      ADD CONSTRAINT fk_raw_observation_job_version
+      FOREIGN KEY (job_version_id) REFERENCES job_versions(id)
+      ON DELETE SET NULL;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_raw_observations_job_version
+  ON raw_job_observations(job_version_id);
+
+-- 2. Quarantine table for unresolved queue records
 CREATE TABLE IF NOT EXISTS quarantined_queue_records (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     original_queue_id UUID,
@@ -16,7 +38,7 @@ CREATE TABLE IF NOT EXISTS quarantined_queue_records (
     quarantined_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 2. Evaluation attempts tracking table
+-- 3. Evaluation attempts tracking table
 CREATE TABLE IF NOT EXISTS evaluation_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     canonical_job_id UUID NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
@@ -32,7 +54,7 @@ CREATE TABLE IF NOT EXISTS evaluation_attempts (
 
 CREATE INDEX IF NOT EXISTS idx_eval_attempts_job_ver ON evaluation_attempts(canonical_job_id, job_version_id);
 
--- 3. Rebuild v_canonical_shortlist and shortlist_view
+-- 4. Rebuild v_canonical_shortlist and shortlist_view
 DROP VIEW IF EXISTS shortlist_view CASCADE;
 DROP VIEW IF EXISTS v_canonical_shortlist CASCADE;
 

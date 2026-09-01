@@ -39,7 +39,8 @@ export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.C
 
     console.log(`Applying migration: ${file}...`);
     const filePath = path.join(migrationsDir, file);
-    const sqlContent = fs.readFileSync(filePath, "utf-8");
+    // PostgreSQL treats a UTF-8 BOM as SQL input, so remove it defensively.
+    const sqlContent = fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "");
 
     // Execute in transaction
     await clientOrPool.query("BEGIN");

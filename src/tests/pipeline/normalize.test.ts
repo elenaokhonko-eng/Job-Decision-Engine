@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runNormalization } from '../../pipeline/normalize.js';
+import { generateContentHash } from '../../services/criteria.js';
 import pg from 'pg';
 
 // Mock the entire pg module
@@ -44,33 +45,11 @@ describe('Pipeline Stage: Normalization', () => {
       ]
     });
 
-    // 1b. Mock BEGIN
-    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
-
-    // 2. Mock checkExt (no existing job by source/external id)
-    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
-
-    // 3. Mock checkTitle (no existing job by title/company)
-    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
-
-    // 4. Mock insert into canonical_jobs
-    (mPool.query as any).mockResolvedValueOnce({
-      rows: [{ id: 'canon-uuid-1' }]
+    (mPool.query as any).mockImplementation((sql: string) => {
+      if (sql.includes('INSERT INTO canonical_jobs')) return { rows: [{ id: 'canon-uuid-1' }] };
+      if (sql.includes('INSERT INTO job_versions')) return { rows: [{ id: 'ver-uuid-1' }] };
+      return { rows: [] };
     });
-
-    // 5. Mock insert into job_versions returning id
-    (mPool.query as any).mockResolvedValueOnce({
-      rows: [{ id: 'ver-uuid-1' }]
-    });
-    
-    // 6. Mock UPDATE canonical_jobs with latest version pointer
-    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
-
-    // 7. Mock UPDATE raw_job_observations SET processing_status = 'PROCESSED'
-    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
-
-    // 8. Mock COMMIT
-    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
 
     const summary = await runNormalization();
 
@@ -79,7 +58,8 @@ describe('Pipeline Stage: Normalization', () => {
     expect(summary.totalErrors).toBe(0);
 
     // Check canonical job insertion logic used 'Unknown' and 'UNKNOWN'
-    const insertCanonCall = (mPool.query as any).mock.calls[4];
+    const calls = (mPool.query as any).mock.calls;
+    const insertCanonCall = calls.find((call: any[]) => call[0].includes('INSERT INTO canonical_jobs'));
     expect(insertCanonCall[0]).toContain('INSERT INTO canonical_jobs');
     expect(insertCanonCall[1]).toEqual([
       'Test Corp',
@@ -92,18 +72,56 @@ describe('Pipeline Stage: Normalization', () => {
     ]);
     
     // Check job_versions insertion
-    const insertVersionCall = (mPool.query as any).mock.calls[5];
+    const insertVersionCall = calls.find((call: any[]) => call[0].includes('INSERT INTO job_versions'));
     expect(insertVersionCall[0]).toContain('INSERT INTO job_versions');
-    expect(insertVersionCall[1]).toEqual(['canon-uuid-1', 'hash123', 'Test description']);
+    expect(insertVersionCall[1]).toEqual([
+      'canon-uuid-1',
+      generateContentHash('Test Corp', 'AI Engineer', 'Test description'),
+      'Test description'
+    ]);
 
     // Check latest_job_version_id update on canonical job
-    const updateCanonCall = (mPool.query as any).mock.calls[6];
+    const updateCanonCall = calls.find((call: any[]) => call[0].includes('UPDATE canonical_jobs'));
     expect(updateCanonCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCanonCall[1][0]).toEqual('ver-uuid-1');
 
     // Check observation marked as PROCESSED
-    const updateObsCall = (mPool.query as any).mock.calls[7];
-    expect(updateObsCall[0]).toContain("UPDATE raw_job_observations SET processing_status = 'PROCESSED'");
-    expect(updateObsCall[1][0]).toEqual('obs-uuid-1');
+    const updateObsCall = calls.find((call: any[]) => call[0].includes('UPDATE raw_job_observations'));
+    expect(updateObsCall[0]).toContain("job_version_id = $1, processing_status = 'PROCESSED'");
+    expect(updateObsCall[1]).toEqual(['ver-uuid-1', 'obs-uuid-1']);
+  });
+
+  it('links a duplicate observation to its existing version without creating another version', async () => {
+    (mPool.query as any).mockResolvedValueOnce({
+      rows: [{
+        id: 'obs-uuid-2',
+        source_name: 'test-source',
+        source_external_id: '456',
+        company_name: 'Test Corp',
+        title: 'AI Engineer',
+        source_url: 'https://test.com/jobs/456',
+        canonical_apply_url: 'https://test.com/jobs/456',
+        location_raw: 'Singapore',
+        workplace_type_raw: 'HYBRID',
+        employment_type_raw: 'PERMANENT',
+        raw_payload_hash: 'existing-hash',
+        description_raw: 'Duplicate description'
+      }]
+    });
+
+    (mPool.query as any)
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ canonical_job_id: 'canon-uuid-2' }] }) // source/external-id lookup
+      .mockResolvedValueOnce({ rows: [{ id: 'existing-version-uuid' }] }) // content hash lookup
+      .mockResolvedValueOnce({ rows: [] }) // observation mapping update
+      .mockResolvedValueOnce({ rows: [] }); // COMMIT
+
+    const summary = await runNormalization();
+    const calls = (mPool.query as any).mock.calls;
+
+    expect(summary.totalProcessed).toBe(1);
+    expect(calls.some((call: any[]) => call[0].includes('INSERT INTO job_versions'))).toBe(false);
+    const updateObsCall = calls.find((call: any[]) => call[0].includes('UPDATE raw_job_observations'));
+    expect(updateObsCall[1]).toEqual(['existing-version-uuid', 'obs-uuid-2']);
   });
 });

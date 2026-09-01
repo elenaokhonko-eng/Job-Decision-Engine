@@ -2,7 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { evaluateSingleCanonicalJob, checkModelRegistryPreflight } from "../src/services/agent.js";
 import { EvaluationRequest } from "../src/pipeline/types.js";
-import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION } from "../src/contracts/index.js";
+import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationWorkabilityFacts } from "../src/contracts/index.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
@@ -125,12 +125,13 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         gateDecisionId: gateDecisionId || "LEGACY_NO_GATE_RECORD",
         gateVersion: "2.0",
         candidateLanes: [{ lane: item.lane, semanticScore: item.priority_score, evidence: [] }],
-        workabilityFacts: item.workability_facts || {
-          locationEligibility: "UNKNOWN",
-          officeDays: "UNKNOWN",
-          travelPercentage: "UNKNOWN",
-          isContract: false
-        },
+        workabilityFacts: toEvaluationWorkabilityFacts(item.workability_facts || {
+          office_days_min: null,
+          office_days_max: null,
+          travel_pct_max: null,
+          employment_type: "UNKNOWN",
+          location_restriction: null
+        }),
         unknownFields: [],
         profileVersion: "1.0",
         evaluationSchemaVersion: SCHEMA_VERSION

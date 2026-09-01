@@ -74,7 +74,7 @@ export async function processPipeline(): Promise<void> {
     }
 
     if (normSummary.totalErrors > 0) {
-      console.warn(`⚠️ Warning: ${normSummary.totalErrors} observations encountered errors during normalization.`);
+      throw new Error(`Normalization failed for ${normSummary.totalErrors} observation(s); records remain pending for retry.`);
     }
 
     console.log("\n✅ Pipeline execution and funnel conservation verified successfully.");

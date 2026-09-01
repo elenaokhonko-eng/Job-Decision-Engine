@@ -3,6 +3,8 @@ import sys
 import subprocess
 import urllib.request
 import json
+import glob
+import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import datetime
@@ -121,6 +123,28 @@ def run_checked_command(command_args, step_label):
     if result.stderr:
         st.warning(f"{step_label} stderr:\n{result.stderr}")
     return result
+
+def show_generated_document_downloads(started_at, key_prefix):
+    """Offer files created by the just-completed local document command."""
+    export_paths = sorted(
+        glob.glob(os.path.join("scripts", "exports", "*")),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    generated = [p for p in export_paths if os.path.isfile(p) and os.path.getmtime(p) >= started_at]
+    if not generated:
+        st.info("No local artifacts were created. In hosted mode, retrieve workflow artifacts from GitHub Actions.")
+        return
+
+    st.markdown("### Download generated artifacts")
+    for index, artifact_path in enumerate(generated):
+        with open(artifact_path, "rb") as artifact:
+            st.download_button(
+                label=f"Download {os.path.basename(artifact_path)}",
+                data=artifact.read(),
+                file_name=os.path.basename(artifact_path),
+                key=f"{key_prefix}_{index}",
+            )
 
 def fetch_jobs_from_db():
     """
@@ -1270,6 +1294,7 @@ with tab_cv:
             if st.button("Generate customized CV", use_container_width=True):
                 with st.spinner("Generating CV from canonical job/version..."):
                     try:
+                        started_at = time.time()
                         run_checked_command(
                             [
                                 "npx",
@@ -1281,6 +1306,7 @@ with tab_cv:
                             "generate_cv"
                         )
                         st.success("CV generation completed. See scripts/exports for artifacts.")
+                        show_generated_document_downloads(started_at, "cv_download")
                     except subprocess.CalledProcessError as e:
                         st.error(f"CV generation failed with exit code {e.returncode}.")
                         if e.stdout:
@@ -1292,6 +1318,7 @@ with tab_cv:
             if st.button("Generate cover letter", use_container_width=True):
                 with st.spinner("Generating cover letter from canonical job/version..."):
                     try:
+                        started_at = time.time()
                         run_checked_command(
                             [
                                 "npx",
@@ -1303,6 +1330,7 @@ with tab_cv:
                             "generate_cover_letter"
                         )
                         st.success("Cover letter generation completed. See scripts/exports for artifacts.")
+                        show_generated_document_downloads(started_at, "cover_letter_download")
                     except subprocess.CalledProcessError as e:
                         st.error(f"Cover letter generation failed with exit code {e.returncode}.")
                         if e.stdout:

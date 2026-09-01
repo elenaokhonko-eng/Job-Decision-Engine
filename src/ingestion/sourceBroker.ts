@@ -16,6 +16,7 @@ const defaultPool = new pg.Pool({
 export class SourceBroker {
   private sourceRunId: string | null = null;
   private stats = { fetched: 0, new: 0, duplicates: 0, errors: 0 };
+  private errors: string[] = [];
   private executor: pg.Pool | pg.PoolClient;
 
   constructor(clientOrPool?: pg.Pool | pg.PoolClient) {
@@ -29,7 +30,13 @@ export class SourceBroker {
     );
     this.sourceRunId = result.rows[0].id;
     this.stats = { fetched: 0, new: 0, duplicates: 0, errors: 0 };
+    this.errors = [];
     return this.sourceRunId as string;
+  }
+
+  recordError(message: string): void {
+    this.stats.errors++;
+    this.errors.push(message);
   }
 
   async processObservation(
@@ -83,7 +90,7 @@ export class SourceBroker {
         this.stats.duplicates++;
       }
     } catch (err: any) {
-      this.stats.errors++;
+      this.recordError(`Failed to stage observation "${obs.title}" from ${obs.companyName}: ${err.message}`);
       // INVARIANT: never swallow observation staging failures.
       // Callers must handle this error and must not mark the source email/record as processed.
       throw new Error(`Failed to stage observation "${obs.title}" from ${obs.companyName}: ${err.message}`);
@@ -96,13 +103,15 @@ export class SourceBroker {
     await this.executor.query(
       `UPDATE source_runs 
        SET completed_at = NOW(), status = $1, total_fetched = $2, total_new = $3, total_duplicates = $4, total_errors = $5
-       WHERE id = $6`,
+           , error_log = $6::jsonb
+         WHERE id = $7`,
       [
         status,
         this.stats.fetched,
         this.stats.new,
         this.stats.duplicates,
         this.stats.errors,
+        JSON.stringify(this.errors),
         this.sourceRunId
       ]
     );

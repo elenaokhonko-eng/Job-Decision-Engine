@@ -53,3 +53,12 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           MASTER_PROFILE_JSON: ${{ secrets.MASTER_PROFILE_JSON }}
         run: npx tsx scripts/generate_cover_letter.ts ${{ inputs.canonical_job_id }} ${{ inputs.job_version_id }}
+
+      - name: Upload generated documents
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-documents-${{ inputs.canonical_job_id }}
+          path: scripts/exports/
+          if-no-files-found: error
+          retention-days: 3

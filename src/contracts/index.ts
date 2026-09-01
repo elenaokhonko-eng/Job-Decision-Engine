@@ -93,7 +93,30 @@ export const CanonicalJobVersionSchema = z.object({
 export type CanonicalJobVersion = z.infer<typeof CanonicalJobVersionSchema>;
 
 /**
- * 5. Gate Decision
+ * 5. Workability Facts
+ * Persisted deterministic workability evidence shared by gate, queue, and UI.
+ */
+export const WorkabilityFactsSchema = z.object({
+  office_days_min: z.number().int().min(0).max(7).nullable(),
+  office_days_max: z.number().int().min(0).max(7).nullable(),
+  travel_pct_max: z.number().min(0).max(100).nullable(),
+  employment_type: z.enum(["PERMANENT", "CONTRACT", "UNKNOWN"]),
+  location_restriction: z.string().nullable(),
+});
+export type WorkabilityFacts = z.infer<typeof WorkabilityFactsSchema>;
+
+export function toEvaluationWorkabilityFacts(facts: unknown) {
+  const parsed = WorkabilityFactsSchema.parse(facts);
+  return {
+    locationEligibility: parsed.location_restriction ? "FAIL" as const : "PASS" as const,
+    officeDays: parsed.office_days_max ?? ("UNKNOWN" as const),
+    travelPercentage: parsed.travel_pct_max ?? ("UNKNOWN" as const),
+    isContract: parsed.employment_type === "CONTRACT",
+  };
+}
+
+/**
+ * 6. Gate Decision
  * Deterministic global workability gate outcome.
  */
 export const GateDecisionSchema = z.object({
@@ -105,12 +128,7 @@ export const GateDecisionSchema = z.object({
   status: z.enum(["PASS", "NEEDS_VERIFICATION", "HARD_REJECT"]),
   rejection_codes: z.array(z.string()).default([]),
   evidence_quotes: z.array(z.string()).default([]),
-  workability_facts: z.object({
-    location_eligibility: z.enum(["PASS", "FAIL", "UNKNOWN"]),
-    office_days: z.union([z.number(), z.literal("UNKNOWN")]),
-    travel_percentage: z.union([z.number(), z.literal("UNKNOWN")]),
-    is_contract: z.boolean(),
-  }),
+  workability_facts: WorkabilityFactsSchema,
   evaluated_at: z.string().datetime(),
 });
 export type GateDecision = z.infer<typeof GateDecisionSchema>;
