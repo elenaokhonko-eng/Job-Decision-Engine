@@ -1,5 +1,5 @@
 psycopg2-binary>=2.9.9
-streamlit>=1.35.0
+streamlit>=1.62.0
 pandas>=2.0.0
 python-docx>=1.1.0
 fpdf2>=2.7.9
