@@ -26,7 +26,7 @@ describe('End-to-End Funnel & Gate Verification Suite', () => {
   it('should pass Quantitative Engineer and route to INVESTMENT_MARKETS_FINTECH', () => {
     const quantResult = evaluateHardGates(
       'Senior Quantitative Developer',
-      'Develop low-latency C++ and Python algorithmic trading systems for market microstructure.',
+      'Develop low-latency C++ and Python algorithmic trading systems for market microstructure. Hybrid with 2 days per week in office.',
       'Singapore',
       'Hybrid'
     );

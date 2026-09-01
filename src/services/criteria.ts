@@ -77,7 +77,7 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
   const d = (description || "").toLowerCase();
 
   // Lane-aware technical title families
-  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|quant developer|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?)\b/i.test(t);
+  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|quant developer|quantitative developer|quantitative engineer|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?)\b/i.test(t);
 
   // Technical building / engineering / data / modeling keywords
   const buildingKeywords = [
@@ -92,7 +92,16 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
     "architecture", "software engineering", "mlops", "ci/cd"
   ];
 
-  const hasBuildingEvidence = buildingKeywords.some(kw => t.includes(kw) || d.includes(kw)) || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(d));
+  const shortToken = /^[a-z0-9]{1,3}$/;
+  const hasKeyword = (text: string, kw: string): boolean => {
+    if (shortToken.test(kw)) {
+      const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+    }
+    return text.includes(kw);
+  };
+
+  const hasBuildingEvidence = buildingKeywords.some(kw => hasKeyword(t, kw) || hasKeyword(d, kw)) || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(d));
   const isTechnical = isTechnicalTitle || hasBuildingEvidence;
 
   return {
@@ -106,11 +115,24 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
 export function evaluateWorkability(
   location: string,
   workplaceType: string,
-  description: string
-): { workable: boolean; needsVerify: boolean; reason?: string; facts?: Partial<GateResult["workability_facts"]> } {
+  description: string,
+  employmentType?: string
+): { workable: boolean; needsVerify: boolean; reason?: string; reasonCode?: string; facts?: Partial<GateResult["workability_facts"]> } {
   const wp = (workplaceType || "").toUpperCase().trim();
   const loc = (location || "").toLowerCase().trim();
   const d = (description || "").toLowerCase().trim();
+  const emp = (employmentType || "").toUpperCase().trim();
+
+  // Structured employment type is deterministic.
+  if (emp === "CONTRACT") {
+    return {
+      workable: false,
+      needsVerify: false,
+      reason: "Structured employment_type is CONTRACT",
+      reasonCode: "GATE_CONTRACT_ROLE",
+      facts: { employment_type: "CONTRACT" }
+    };
+  }
 
   // 1. Explicit ONSITE structured field or 100% onsite in text -> HARD REJECT
   const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|mandatory\s*5\s*days|5\s*days\s*(a\s*week|per\s*week)?\s*in\s*the\s*office|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
@@ -121,6 +143,7 @@ export function evaluateWorkability(
       workable: false,
       needsVerify: false,
       reason: "Requires 100% on-premises / on-site presence (ONSITE mode not workable)",
+      reasonCode: "GATE_HIGH_OFFICE_DAYS",
       facts: { office_days_min: 4, office_days_max: 5 }
     };
   }
@@ -136,12 +159,56 @@ export function evaluateWorkability(
         workable: false,
         needsVerify: false,
         reason: `Geographic restriction detected: ${kw.toUpperCase()}`,
+        reasonCode: "GATE_LOCATION_RESTRICTED",
         facts: { location_restriction: kw.toUpperCase() }
       };
     }
   }
 
-  // 3. Ambiguous location / office expectations in text -> NEEDS_VERIFICATION
+  // 3. REMOTE structured field or remote in location / description -> PASS
+  if (wp === "REMOTE" || /\bremote\b/i.test(loc) || /\b(remote-first|fully remote|work from home)\b/i.test(d)) {
+    return {
+      workable: true,
+      needsVerify: false,
+      facts: { office_days_min: 0, office_days_max: 0 }
+    };
+  }
+
+  // 4. HYBRID checks
+  if (wp === "HYBRID" || /\bhybrid\b/i.test(d) || /\bhybrid\b/i.test(loc)) {
+    if (/\b[45]\s*days?\b/i.test(d)) {
+      return {
+        workable: false,
+        needsVerify: false,
+        reason: "Hybrid arrangement requires 4-5 days in-office",
+        reasonCode: "GATE_HIGH_OFFICE_DAYS",
+        facts: { office_days_min: 4, office_days_max: 5 }
+      };
+    }
+    const daysMatch = d.match(/\b([1-3])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i);
+    if (!daysMatch && !d.includes("1 day/week") && !d.includes("2 days/week") && !d.includes("3 days/week")) {
+      return {
+        workable: true,
+        needsVerify: true,
+        reason: "Hybrid arrangement listed without explicit office-day count",
+        facts: { office_days_min: null, office_days_max: null }
+      };
+    }
+    const days = daysMatch
+      ? parseInt(daysMatch[1], 10)
+      : d.includes("1 day/week")
+        ? 1
+        : d.includes("2 days/week")
+          ? 2
+          : 3;
+    return {
+      workable: true,
+      needsVerify: false,
+      facts: { office_days_min: days, office_days_max: days }
+    };
+  }
+
+  // 5. Ambiguous location / office expectations in text -> NEEDS_VERIFICATION
   const ambiguousClues = [
     "office based", "office-based", "in-office", "in office",
     "office expectations", "workplace arrangement", "workplace expectations",
@@ -156,35 +223,7 @@ export function evaluateWorkability(
     };
   }
 
-  // 4. REMOTE structured field or remote in location / description -> PASS
-  if (wp === "REMOTE" || /\bremote\b/i.test(loc) || /\b(remote-first|fully remote|work from home)\b/i.test(d)) {
-    return {
-      workable: true,
-      needsVerify: false,
-      facts: { office_days_min: 0, office_days_max: 0 }
-    };
-  }
-
-  // 5. HYBRID checks
-  if (wp === "HYBRID" || /\bhybrid\b/i.test(d) || /\bhybrid\b/i.test(loc)) {
-    if (/\b[45]\s*days?\b/i.test(d)) {
-      return {
-        workable: false,
-        needsVerify: false,
-        reason: "Hybrid arrangement requires 4-5 days in-office",
-        facts: { office_days_min: 4, office_days_max: 5 }
-      };
-    }
-    const daysMatch = d.match(/\b([1-3])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i);
-    const days = daysMatch ? parseInt(daysMatch[1], 10) : (d.includes("1 day/week") ? 1 : d.includes("2 days/week") ? 2 : 3);
-    return {
-      workable: true,
-      needsVerify: false,
-      facts: { office_days_min: days, office_days_max: days }
-    };
-  }
-
-  // 6. Unspecified workplace_type and no remote clues -> NEEDS_VERIFICATION
+  // 6. Unspecified workplace_type and no remote/hybrid clues -> NEEDS_VERIFICATION
   if (!wp || wp === "UNKNOWN") {
     return {
       workable: true,
@@ -363,14 +402,15 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
     }
   }
 
-  // ── 0a. Structured Contract Check ──
-  if (emp === "CONTRACT") {
-    return makeReject(["GATE_CONTRACT_ROLE"], ["Structured employment_type is CONTRACT"], { employment_type: "CONTRACT" });
-  }
-
-  // ── 0b. Workability Check (location / workplace) ──
-  const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d);
+  // ── 0a. Workability Check (location / workplace / employment type) ──
+  const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d, job.employment_type || "");
   if (!workability.workable) {
+    if (workability.reasonCode === "GATE_CONTRACT_ROLE") {
+      return makeReject(["GATE_CONTRACT_ROLE"], [workability.reason || "Contract role is not eligible"], workability.facts);
+    }
+    if (workability.reasonCode === "GATE_LOCATION_RESTRICTED") {
+      return makeReject(["GATE_LOCATION_RESTRICTED"], [workability.reason || "Geographic restriction detected"], workability.facts);
+    }
     return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], [workability.reason || "Unworkable location/workplace model"], workability.facts);
   }
 
@@ -583,11 +623,6 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   }
 
   // ── 15. TWO-AXIS PREQUALIFICATION ──
-  // Axis 1: Technical Function Validation (unified check)
-  if (!techCheck.isTechnical) {
-    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], ["Axis 1 Failed: Role lacks hands-on engineering, modeling, or architecture function"]);
-  }
-
   // Axis 2: Target Domain Validation
   const aiDataShortRegex = /\b(?:ai|ml|nlp|llm|rag)\b/i;
   const targetDomainPhrases = [

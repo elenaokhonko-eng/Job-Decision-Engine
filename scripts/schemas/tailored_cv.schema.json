@@ -20,6 +20,7 @@
       "properties": {
         "schema_version": { "type": "string" },
         "job_id": { "type": "string" },
+        "job_version_id": { "type": "string" },
         "target_title": { "type": "string" },
         "target_company": { "type": "string" },
         "profile_version": { "type": "string" },

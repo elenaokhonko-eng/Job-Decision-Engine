@@ -8,8 +8,22 @@
         "opening_hook": { "type": "string", "description": "A compelling 1-2 sentence opening that names the role, the company, and why the candidate is drawn to it based on the strategic_value." },
         "body_paragraphs": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "2-3 paragraphs weaving the lane_matches and profile_facts to directly address the core challenges of the JD."
+          "minItems": 2,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "text": { "type": "string", "minLength": 30 },
+              "evidence_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string" }
+              }
+            },
+            "required": ["text", "evidence_ids"]
+          },
+          "description": "2-4 grounded paragraphs. Each paragraph must include text plus evidence IDs from the master profile ledger."
         },
         "closing_statement": { "type": "string", "description": "A confident closing sentence reiterating enthusiasm and requesting an interview." }
       },

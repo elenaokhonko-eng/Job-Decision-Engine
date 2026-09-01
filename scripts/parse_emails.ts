@@ -91,8 +91,6 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
 
       // Stage ALL jobs in a single transaction; roll back if ANY fail
       await dbClient.query("BEGIN");
-      const emailBroker = new SourceBroker(dbClient);
-      (emailBroker as any).sourceRunId = (broker as any).sourceRunId;
 
       try {
         for (const rawJob of rawJobs) {
@@ -113,12 +111,12 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
             const msg = `Schema validation failed for job "${rawJob.title}": ${validated.error.message}`;
             console.warn(`⚠️ ${msg}`);
             emailErrors.push(msg);
-            continue; // Skip invalid job but don't abort the whole email
+            continue;
           }
 
           const job = validated.data;
           // processObservation now executes on dbClient — rolled back if transaction fails
-          await emailBroker.processObservation(
+          await broker.processObservation(
             {
               sourceName: "GMAIL_ALERT",
               sourceExternalId: `gmail-${email.gmail_message_id || email.id}-${job.title}`,
@@ -136,9 +134,14 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
               searchPlanVersion: "1.0",
               rawPayload: job
             },
-            job
+            job,
+            dbClient
           );
           emailJobsStaged++;
+        }
+
+        if (emailErrors.length > 0) {
+          throw new Error(`Schema validation failed for ${emailErrors.length} extracted job(s).`);
         }
 
         // Only mark processed = TRUE when all staging succeeded
@@ -151,9 +154,6 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
         emailSucceeded = true;
         extractedJobs += emailJobsStaged;
         parsedEmails++;
-        if (emailErrors.length > 0) {
-          console.warn(`⚠️ Email #${email.id} parsed with ${emailErrors.length} skipped invalid job(s).`);
-        }
       } catch (stageErr: any) {
         await dbClient.query("ROLLBACK");
         // Mark with error but do NOT set processed = TRUE — email will be retried
@@ -181,7 +181,7 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
 if (process.argv[1] && process.argv[1].includes("parse_emails")) {
   parseEmails()
     .then((res) => {
-      if (res.failedEmails > 0 && res.parsedEmails === 0) {
+      if (res.failedEmails > 0) {
         process.exit(1);
       }
       process.exit(0);

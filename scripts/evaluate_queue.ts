@@ -1,6 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { runAgent } from "../src/services/agent.js";
+import { evaluateSingleCanonicalJob, checkModelRegistryPreflight } from "../src/services/agent.js";
 import { EvaluationRequest } from "../src/pipeline/types.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION } from "../src/contracts/index.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
@@ -31,6 +31,11 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
   let manualReviewCount = 0;
 
   try {
+    const preflight = checkModelRegistryPreflight();
+    if (!preflight.ok) {
+      throw new Error(`Model registry preflight failed: ${preflight.warnings.join(" | ")}`);
+    }
+
     // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
     // Join strictly to evaluation_queue.job_version_id and gate_decisions for the same job_version_id (invariant: never substitute latest version during retry)
     const { rows: queueItems } = await client.query(
@@ -131,60 +136,28 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         evaluationSchemaVersion: SCHEMA_VERSION
       };
 
-      const evalQuery = `
-        Evaluate the following job according to the structured EvaluationRequest schema.
-        Request Metadata: ${JSON.stringify(evalReq)}
-
-        Job Title: ${item.normalized_title}
-        Company: ${item.company_name}
-        URL: ${item.canonical_url}
-        Description:
-        ${item.description_text || "No description provided."}
-      `;
-
       try {
-        // Attempt primary provider call
-        const { result, provider, model, fallbackUsed, degraded, toolsUsed } = await runAgent(evalQuery);
-        const evalResult = result.evaluated_jobs?.[0];
+        const evalExecution = await evaluateSingleCanonicalJob(
+          {
+            canonicalJobId: item.canonical_job_id,
+            jobVersionId,
+            normalizedTitle: item.normalized_title,
+            companyName: item.company_name,
+            canonicalUrl: item.canonical_url,
+            descriptionText: item.description_text || "No description provided.",
+            gateDecisionId,
+            gateDecision: item.gate_decision || "PASS",
+            candidateLane: item.lane,
+            priorityScore: item.priority_score,
+            workabilityFacts: evalReq.workabilityFacts
+          },
+          pipelineRunId,
+          attemptNum
+        );
 
-        if (!evalResult) {
-          throw new Error("AI response contained no evaluated_jobs entries");
-        }
+        const validatedResult: EvaluationResult = EvaluationResultSchema.parse(evalExecution.evaluatedJob);
 
-        // Identity check: if LLM returned a job_id, verify it matches
-        if (evalResult.job_id && evalResult.job_id !== item.canonical_job_id) {
-          console.warn(`⚠️ LLM returned mismatched job_id ${evalResult.job_id} vs expected ${item.canonical_job_id}. Using canonical IDs.`);
-        }
-
-        const validatedResult: EvaluationResult = EvaluationResultSchema.parse({
-          schema_version: SCHEMA_VERSION,
-          canonical_job_id: item.canonical_job_id,
-          job_version_id: jobVersionId,
-          pipeline_run_id: pipelineRunId,
-          provider: provider,
-          model: model,
-          attempt: attemptNum,
-          is_fallback: fallbackUsed,
-          degraded_state: degraded,
-          evaluation_summary: result.evaluation_summary || "Automated multi-lane AI evaluation",
-          primary_lane: evalResult.primary_lane,
-          secondary_lanes: evalResult.secondary_lanes || [],
-          lane_confidence: evalResult.lane_confidence || "Medium",
-          lane_evidence: evalResult.lane_evidence || "",
-          nd_score: evalResult.nd_score || 50,
-          nd_friendly_score: evalResult.nd_friendly_score || 50,
-          politics_stress_score: evalResult.politics_stress_score || 50,
-          sensory_overload_index: evalResult.sensory_overload_index || 50,
-          building_research_ratio: evalResult.building_research_ratio || 50,
-          interaction_load: evalResult.interaction_load || 50,
-          rejection_codes: evalResult.rejection_codes || [],
-          strategic_value: evalResult.strategic_value || "",
-          recommended_cv_version: evalResult.recommended_cv_version || "CORE_AI_DATA",
-          next_action: evalResult.next_action as any,
-          evaluated_at: new Date().toISOString()
-        });
-
-        console.log(`  -> AI Evaluation complete: Provider = ${provider} (${model}), Confidence = ${validatedResult.lane_confidence}, Action = ${validatedResult.next_action}, Fallback = ${fallbackUsed}`);
+        console.log(`  -> AI Evaluation complete: Provider = ${validatedResult.provider} (${validatedResult.model}), Confidence = ${validatedResult.lane_confidence}, Action = ${validatedResult.next_action}, Fallback = ${validatedResult.is_fallback}`);
 
         await client.query("BEGIN");
         try {
@@ -219,6 +192,19 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
           );
 
           await client.query(
+            `INSERT INTO evaluation_attempts (
+               canonical_job_id, job_version_id, attempt_number, provider, model, status, error_message, latency_ms
+             ) VALUES ($1, $2, $3, $4, $5, 'COMPLETED', NULL, NULL)`,
+            [
+              item.canonical_job_id,
+              jobVersionId,
+              attemptNum,
+              validatedResult.provider,
+              validatedResult.model
+            ]
+          );
+
+          await client.query(
             `UPDATE evaluation_queue
              SET status = 'COMPLETED', lease_id = NULL, lease_expires_at = NULL, available_at = NULL, updated_at = NOW()
              WHERE id = $1`,
@@ -234,6 +220,20 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
       } catch (err: any) {
         console.error(`❌ Evaluation failed for queue item ${item.id}:`, err.message || err);
         failedCount++;
+
+        await client.query(
+          `INSERT INTO evaluation_attempts (
+             canonical_job_id, job_version_id, attempt_number, provider, model, status, error_message, latency_ms
+           ) VALUES ($1, $2, $3, $4, $5, 'FAILED', $6, NULL)`,
+          [
+            item.canonical_job_id,
+            jobVersionId,
+            attemptNum,
+            item.attempt_count > 0 ? "fallback-chain" : "primary-chain",
+            "unknown",
+            err.message || String(err)
+          ]
+        );
 
         // Transition to RETRY_WAIT with exponential backoff (never career-rejects)
         const availableAtExpr = nextAvailableAt(attemptNum);
@@ -263,10 +263,14 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
 if (process.argv[1] && process.argv[1].includes("evaluate_queue")) {
   evaluateQueue()
     .then((stats) => {
-      if (stats.failed > 0) {
+      const strictExitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
+      if (stats.failed > 0 && strictExitOnRetryWait) {
         // Invariant 7: exit non-zero when any required stage fails
         console.error(`❌ ${stats.failed} evaluation(s) failed and were moved to RETRY_WAIT. Exiting non-zero.`);
         process.exit(1);
+      }
+      if (stats.failed > 0 && !strictExitOnRetryWait) {
+        console.warn(`⚠️ ${stats.failed} evaluation(s) moved to RETRY_WAIT; exiting zero for retry-drain worker mode.`);
       }
       process.exit(0);
     })

@@ -34,7 +34,8 @@ export class SourceBroker {
 
   async processObservation(
     obs: Omit<RawJobObservation, "sourceRunId" | "rawPayloadHash">,
-    rawPayload: any
+    rawPayload: any,
+    executorOverride?: pg.Pool | pg.PoolClient
   ): Promise<void> {
     if (!this.sourceRunId) {
       throw new Error("Must start a source run before processing observations.");
@@ -46,7 +47,8 @@ export class SourceBroker {
     const rawPayloadHash = crypto.createHash("sha256").update(payloadStr).digest("hex");
 
     try {
-      const result = await this.executor.query(
+      const executor = executorOverride || this.executor;
+      const result = await executor.query(
         `INSERT INTO raw_job_observations (
           source_run_id, source_name, source_external_id, source_url, 
           retrieved_at, company_name, title, description_raw, 

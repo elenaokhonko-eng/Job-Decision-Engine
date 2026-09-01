@@ -20,6 +20,8 @@ import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
+import Ajv2020Import from "ajv/dist/2020.js";
+import addFormatsImport from "ajv-formats";
 import { generateContent } from "../src/services/agent.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
@@ -30,6 +32,10 @@ dotenv.config({ path: ".env.local" });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const Ajv2020 = (Ajv2020Import as any).default || Ajv2020Import;
+const addFormats = (addFormatsImport as any).default || addFormatsImport;
+const ajv = new Ajv2020({ allErrors: true, strict: false });
+addFormats(ajv);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,13 +58,28 @@ function requireEnv(name: string): string {
   return val;
 }
 
+function validateAgainstSchema(payload: unknown, schema: any, schemaName: string): void {
+  const validate = ajv.compile(schema);
+  const ok = validate(payload);
+  if (!ok) {
+    const details = (validate.errors || []).map((e: any) => `${e.instancePath || "/"} ${e.message}`).join("; ");
+    throw new Error(`${schemaName} validation failed: ${details}`);
+  }
+}
+
+function profileFactIds(masterProfile: any): Set<string> {
+  const facts: any[] = masterProfile.profile_facts || masterProfile.facts || [];
+  return new Set(facts.map((f) => f?.id).filter((id: any) => typeof id === "string" && id.trim().length > 0));
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function generateTailoredCoverLetter(): Promise<void> {
   const jobId = process.argv[2];
+  const requestedJobVersionId = process.argv[3];
   if (!jobId) {
     console.error("❌ ERROR: Job ID must be provided as the first argument.");
-    console.error("  Usage: npx tsx scripts/generate_cover_letter.ts <canonical_job_id>");
+    console.error("  Usage: npx tsx scripts/generate_cover_letter.ts <canonical_job_id> [job_version_id]");
     process.exit(1);
   }
 
@@ -89,6 +110,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
          c.company_name,
          c.primary_lane,
          c.secondary_lanes,
+         jv.id                AS job_version_id,
          jv.description_text  AS raw_description,
          ae.lane_matches,
          ae.workability_facts,
@@ -97,22 +119,28 @@ async function generateTailoredCoverLetter(): Promise<void> {
          ae.provider          AS eval_provider,
          ae.evaluated_at
        FROM canonical_jobs c
-       JOIN LATERAL (
-         SELECT id, description_text
-         FROM job_versions
-         WHERE canonical_job_id = c.id
-         ORDER BY observed_at DESC
-         LIMIT 1
-       ) jv ON TRUE
+       JOIN job_versions jv ON jv.id = COALESCE(
+         $2::uuid,
+         c.latest_job_version_id,
+         (
+           SELECT jv2.id
+           FROM job_versions jv2
+           WHERE jv2.canonical_job_id = c.id
+           ORDER BY jv2.observed_at DESC
+           LIMIT 1
+         )
+       )
        LEFT JOIN LATERAL (
          SELECT lane_matches, workability_facts, full_evaluation_payload, is_fallback, provider, evaluated_at
          FROM ai_evaluations
          WHERE canonical_job_id = c.id
+           AND job_version_id = jv.id
          ORDER BY evaluated_at DESC
          LIMIT 1
        ) ae ON TRUE
-       WHERE c.id = $1`,
-      [jobId]
+       WHERE c.id = $1
+         AND jv.canonical_job_id = c.id`,
+      [jobId, requestedJobVersionId || null]
     );
 
     if (jobRes.rows.length === 0) {
@@ -125,6 +153,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const jdCompany = job.company_name || "Unknown Company";
     const jdDescription = job.raw_description || "";
     const primaryLane = job.primary_lane || "UNKNOWN";
+    const resolvedJobVersionId = job.job_version_id;
 
     // Pull structured fields out of full_evaluation_payload if available
     const evalPayload = job.full_evaluation_payload || {};
@@ -161,6 +190,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
       masterProfile = JSON.parse(fs.readFileSync(profilePath, "utf8"));
     }
     const profileFacts: any[] = masterProfile.profile_facts || masterProfile.facts || [];
+    const knownFactIds = profileFactIds(masterProfile);
     const contactInfo: any = masterProfile.contact || {};
 
     console.log(`📋 Profile loaded: ${profileFacts.length} evidence items`);
@@ -172,7 +202,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
       console.error(`❌ ERROR: cover_letter_schema.json not found at ${clSchemaPath}`);
       process.exit(1);
     }
-    const coverLetterSchema = fs.readFileSync(clSchemaPath, "utf8");
+    const coverLetterSchema = JSON.parse(fs.readFileSync(clSchemaPath, "utf8"));
 
     // ── Step 4: Build prompt ─────────────────────────────────────────────────
     console.log("🤖 STAGE 1: Requesting AI cover letter draft…");
@@ -203,7 +233,7 @@ INSTRUCTIONS:
 - NEVER invent experience, credentials, companies, degrees, or metrics not present in the evidence ledger
 - DO NOT disclose or discuss neurodivergence or personal health accommodations in the letter
 - Return ONLY valid JSON matching this exact schema:
-${coverLetterSchema}`;
+${JSON.stringify(coverLetterSchema)}`;
 
     const rawResponse = await generateContent({
       model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
@@ -223,22 +253,19 @@ ${coverLetterSchema}`;
       process.exit(1);
     }
 
-    // Strict schema validation
-    if (!finalCl || typeof finalCl !== "object" || !finalCl.cover_letter) {
-      console.error("❌ ERROR: Cover letter JSON missing top-level 'cover_letter' object.");
-      process.exit(1);
-    }
+    validateAgainstSchema(finalCl, coverLetterSchema, "cover_letter_schema.json");
+
     const cl = finalCl.cover_letter;
-    const required = ["recipient_name", "opening_hook", "body_paragraphs", "closing_statement"];
-    for (const field of required) {
-      if (!cl[field] || typeof cl[field] !== (field === "body_paragraphs" ? "object" : "string")) {
-        console.error(`❌ ERROR: Cover letter JSON missing or invalid required field: '${field}'`);
-        process.exit(1);
+    const unknownEvidence: string[] = [];
+    for (const [idx, para] of cl.body_paragraphs.entries()) {
+      for (const evId of para.evidence_ids || []) {
+        if (!knownFactIds.has(evId)) {
+          unknownEvidence.push(`body_paragraphs[${idx}].evidence_ids contains unknown id '${evId}'`);
+        }
       }
     }
-    if (!Array.isArray(cl.body_paragraphs) || cl.body_paragraphs.length < 2) {
-      console.error("❌ ERROR: 'body_paragraphs' must be an array of at least 2 paragraphs.");
-      process.exit(1);
+    if (unknownEvidence.length > 0) {
+      throw new Error(`Cover letter evidence grounding failed: ${unknownEvidence.join(" | ")}`);
     }
 
     console.log("✅ Cover letter draft validated with strict schema enforcement.");
@@ -254,6 +281,10 @@ ${coverLetterSchema}`;
     const safeTitle = jdTitle.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 20);
     const safeCompany = jdCompany.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 20);
     const baseFilename = `Elena_Okhonko_CL_${safeCompany}_${safeTitle}`;
+    finalCl.metadata = {
+      canonical_job_id: jobId,
+      job_version_id: resolvedJobVersionId
+    };
 
     // JSON
     const jsonPath = path.join(exportDir, `${baseFilename}.json`);
@@ -267,10 +298,12 @@ ${coverLetterSchema}`;
     const pdfPath = path.join(exportDir, `${baseFilename}.pdf`);
     await generatePdf(docxPath, pdfPath);
 
+    const pdfCreated = fs.existsSync(pdfPath);
+
     console.log(`\n✅ Cover Letter Generation Complete!
   JSON : ${jsonPath}
   DOCX : ${docxPath}
-  PDF  : ${pdfPath}`);
+  PDF  : ${pdfCreated ? pdfPath : "NOT CREATED (no Word/LibreOffice in environment)"}`);
 
   } catch (error: any) {
     console.error("❌ ERROR during Cover Letter generation:", error.message || error);

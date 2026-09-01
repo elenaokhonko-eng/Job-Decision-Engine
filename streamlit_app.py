@@ -106,6 +106,22 @@ def get_db_connection():
             
     return psycopg2.connect(database_url)
 
+def run_checked_command(command_args, step_label):
+    """Run a local command safely and surface stdout/stderr to the UI."""
+    result = subprocess.run(
+        command_args,
+        capture_output=True,
+        text=True,
+        check=True,
+        shell=False,
+        env=os.environ,
+    )
+    if result.stdout:
+        st.code(result.stdout, language="text")
+    if result.stderr:
+        st.warning(f"{step_label} stderr:\n{result.stderr}")
+    return result
+
 def fetch_jobs_from_db():
     """
     Fetch the canonical shortlist from v_canonical_shortlist (migration 007).
@@ -627,21 +643,27 @@ if st.sidebar.button("⚡ Run Job Discovery & Evaluation Pipeline", help="Runs t
             with st.spinner("Running full pipeline locally..."):
                 try:
                     st.info("Step 1/4: Ingesting Gmail alerts...")
-                    subprocess.run(["npx", "tsx", "scripts/ingest_gmail.ts"], env=os.environ, shell=True)
+                    run_checked_command(["npx", "tsx", "scripts/ingest_gmail.ts"], "ingest_gmail")
                     
                     st.info("Step 2/4: Polling ATS & Job Board adapters...")
-                    subprocess.run(["npx", "tsx", "scripts/run_adapters.ts"], env=os.environ, shell=True)
+                    run_checked_command(["npx", "tsx", "scripts/run_adapters.ts"], "run_adapters")
                     
                     st.info("Step 3/4: Parsing email alerts & staging observations...")
-                    subprocess.run(["npx", "tsx", "scripts/parse_emails.ts"], env=os.environ, shell=True)
+                    run_checked_command(["npx", "tsx", "scripts/parse_emails.ts"], "parse_emails")
 
                     st.info("Step 4/4: Running Discovery Pipeline (Normalize, Gate, Route, Budget)...")
-                    subprocess.run(["npx", "tsx", "scripts/process_pipeline.ts"], env=os.environ, shell=True)
+                    run_checked_command(["npx", "tsx", "scripts/process_pipeline.ts"], "process_pipeline")
 
                     st.info("Step 5/5: Running AI Evaluation Queue Processor...")
-                    subprocess.run(["npx", "tsx", "scripts/evaluate_queue.ts"], env=os.environ, shell=True)
+                    run_checked_command(["npx", "tsx", "scripts/evaluate_queue.ts"], "evaluate_queue")
                     st.success("✅ Full pipeline execution finished!")
                     st.balloons()
+                except subprocess.CalledProcessError as cpe:
+                    st.error(f"Execution failed at step with exit code {cpe.returncode}.")
+                    if cpe.stdout:
+                        st.code(cpe.stdout, language="text")
+                    if cpe.stderr:
+                        st.error(cpe.stderr)
                 except Exception as e:
                     st.error(f"Execution Error: {e}")
         st.rerun()
@@ -651,6 +673,10 @@ st.sidebar.subheader("🔍 Filter Listings")
 search_query = st.sidebar.text_input("Keyword Search", "")
 lane_filter = st.sidebar.selectbox("Filter Target Lane", ["All Lanes", "CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", "UNCLASSIFIED"])
 status_filter = st.sidebar.selectbox("Filter Pipeline Status", ["All Statuses", "AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION", "DEFERRED_BUDGET", "ROUTING_DEFERRED"])
+source_values = sorted({(j.get("source") or "UNKNOWN") for j in jobs_list})
+board_filter = st.sidebar.selectbox("Filter Source", ["All Sources", *source_values])
+track_values = sorted({(j.get("assigned_track") or "UNASSIGNED") for j in jobs_list})
+track_filter = st.sidebar.selectbox("Filter Track", ["All Tracks", "Unassigned", *track_values])
 
 # Apply filters
 filtered_jobs = jobs_list
@@ -661,10 +687,10 @@ if status_filter and status_filter != "All Statuses":
 if search_query:
     filtered_jobs = [j for j in filtered_jobs if search_query.lower() in (j.get("title") or "").lower() or search_query.lower() in (j.get("company") or "").lower() or search_query.lower() in (j.get("description") or "").lower()]
 if board_filter != "All Sources":
-    filtered_jobs = [j for j in filtered_jobs if j.get("source") == board_filter]
+    filtered_jobs = [j for j in filtered_jobs if (j.get("source") or "UNKNOWN") == board_filter]
 if track_filter != "All Tracks":
     if track_filter == "Unassigned":
-        filtered_jobs = [j for j in filtered_jobs if not j.get("status") or j.get("status") == "UNASSIGNED"]
+        filtered_jobs = [j for j in filtered_jobs if not j.get("assigned_track") or j.get("assigned_track") == "UNASSIGNED"]
     else:
         filtered_jobs = [j for j in filtered_jobs if j.get("assigned_track") == track_filter]
 
@@ -924,30 +950,14 @@ with tab_add_job:
 
 with tab_linkedin:
     st.subheader("🔗 Import Saved LinkedIn Jobs")
-    st.write("Sync your saved LinkedIn jobs, stage them in your Postgres database for evaluation, and automatically unsave them from LinkedIn.")
+    st.write("Sync your saved LinkedIn jobs and stage them in your Postgres database for evaluation. Auto-unsave is disabled to keep ingestion read-only.")
     
     col_auto, col_manual = st.columns(2)
     
     with col_auto:
         st.markdown("### 🤖 Option A: Headless Auto-Sync")
-        st.write("Instantly log in to LinkedIn in a headless browser, pull all saved jobs, stage them in Neon Postgres, and click 'Saved' to unsave them automatically.")
-        
-        has_li_cookie = os.environ.get("LINKEDIN_LI_AT") is not None
-        if not has_li_cookie:
-            st.warning("⚠️ `LINKEDIN_LI_AT` cookie is not set in `.env.local`. Please configure it to enable 1-Click Sync.")
-            
-        if st.button("🚀 Start 1-Click Sync & Unsave", disabled=not has_li_cookie):
-            with st.spinner("Launching Puppeteer, connecting to LinkedIn, and processing saved jobs..."):
-                try:
-                    sync_proc = subprocess.run(["npx", "tsx", "scripts/sync_linkedin_saved.ts"], capture_output=True, text=True, env=os.environ, shell=True)
-                    if sync_proc.returncode == 0:
-                        st.success("✅ Sync & Unsave completed successfully!")
-                        st.code(sync_proc.stdout, language="text")
-                    else:
-                        st.error(f"Sync failed with output:\n{sync_proc.stdout or sync_proc.stderr}")
-                except Exception as e:
-                    st.error(f"Execution Error: {e}")
-                st.rerun()
+        st.warning("Auto-sync/unsave is disabled by policy to keep source ingestion non-destructive.")
+        st.caption("Use Option B (manual export and upload) for read-only ingestion.")
 
     with col_manual:
         st.markdown("### 📋 Option B: Manual Export & Upload")
@@ -1200,387 +1210,105 @@ with tab_analytics:
         st.info("No compiled analytics are available. Please run the evaluation engine pipeline to score listings.")
 
 with tab_cv:
-    st.subheader("📄 AI CV Customizer & Tailoring Engine")
-    st.write("Align and customize your master professional profile against any evaluated job advertisement honestly and factually.")
+    st.subheader("📄 Canonical Documents")
+    st.write("Generate CV and cover letter from canonical job/version records and the single master_profile evidence ledger.")
 
-    # Check if my_profile.md exists
-    if not os.path.exists("my_profile.md"):
-        st.error("⚠️ `my_profile.md` not found in workspace root. Please create this file first to store your credentials and work history.")
+    profile_source = None
+    profile_data = None
+    if os.environ.get("MASTER_PROFILE_JSON"):
+        try:
+            profile_data = json.loads(os.environ["MASTER_PROFILE_JSON"])
+            profile_source = "MASTER_PROFILE_JSON"
+        except Exception as e:
+            st.error(f"Invalid MASTER_PROFILE_JSON: {e}")
+    elif os.path.exists("master_profile.json"):
+        try:
+            with open("master_profile.json", "r", encoding="utf-8") as f:
+                profile_data = json.load(f)
+            profile_source = "master_profile.json"
+        except Exception as e:
+            st.error(f"Failed to parse master_profile.json: {e}")
     else:
-        # Show master profile editor button / status
-        with st.expander("📝 View / Edit Master Profile (my_profile.md)"):
-            with open("my_profile.md", "r", encoding="utf-8") as pf:
-                profile_content = pf.read()
-            edited_profile = st.text_area("Master Profile Markdown", profile_content, height=300)
-            if edited_profile != profile_content:
-                if st.button("💾 Save Profile Changes"):
-                    with open("my_profile.md", "w", encoding="utf-8") as pf:
-                        pf.write(edited_profile)
-                    st.success("✅ Master profile saved successfully!")
-                    st.rerun()
+        st.error("master_profile evidence ledger is missing. Provide MASTER_PROFILE_JSON or master_profile.json.")
 
-        # Select a job to customize against (only showing STRONG MATCH or REVIEW REQUIRED)
-        eligible_jobs = [j for j in jobs_list if j.get("status") in ("STRONG MATCH", "REVIEW REQUIRED", "PRIORITY_APPLY", "APPLY_AFTER_VERIFICATION", "HIGH_FIT_HIGH_RISK")]
-        
-        if not eligible_jobs:
-            st.info("No eligible jobs found for tailoring. Only jobs evaluated as 'STRONG MATCH' or 'REVIEW REQUIRED' can be tailored.")
-        else:
-            job_options = {f"{j['company']} - {j['title']} ({j.get('status')})": j for j in eligible_jobs}
-            selected_job_name = st.selectbox("Select Target Job Ad", list(job_options.keys()))
-            selected_job = job_options[selected_job_name]
+    if profile_data:
+        facts = profile_data.get("profile_facts") or profile_data.get("facts") or []
+        fact_ids = [f.get("id") for f in facts if isinstance(f, dict) and f.get("id")]
+        st.caption(f"Evidence source: {profile_source} | facts loaded: {len(fact_ids)}")
+        if len(fact_ids) == 0:
+            st.error("No profile fact IDs found in the master profile ledger. Document generation is disabled.")
 
-            # Render selected job details
-            st.markdown(f"### **Target Role Details**")
-            st.markdown(f"**Company**: {selected_job['company']} | **Title**: {selected_job['title']} | **Location**: {selected_job.get('location', 'Singapore')}")
-            
-            if selected_job.get("careers_portal_url"):
-                st.markdown(f"🔗 **Job Posting URL**: [{selected_job['careers_portal_url']}]({selected_job['careers_portal_url']})")
-                
-            with st.expander("🔍 View Target Job Description"):
-                desc = selected_job.get("description", "")
-                desc_stripped = desc.strip() if isinstance(desc, str) else desc
-                if not desc_stripped or desc_stripped == "No description available.":
-                    st.warning("⚠️ No full job description is stored in the database. Please verify the link above or update this job record.")
-                else:
-                    parsed_desc = None
-                    if isinstance(desc, dict):
-                        parsed_desc = desc
-                    elif isinstance(desc, str) and desc.strip().startswith("{"):
-                        try:
-                            parsed_desc = json.loads(desc)
-                        except Exception:
-                            pass
-                    
-                    if parsed_desc is not None:
-                        st.markdown("### 📝 **Overview**")
-                        st.write(parsed_desc.get("job_description", ""))
-                        
-                        if parsed_desc.get("key_responsibilities"):
-                            st.markdown("### 📋 **Key Responsibilities**")
-                            for r in parsed_desc["key_responsibilities"]:
-                                st.markdown(f"- {r}")
-                                
-                        if parsed_desc.get("technical_skills"):
-                            st.markdown("### 🛠️ **Technical Skills**")
-                            for s in parsed_desc["technical_skills"]:
-                                st.markdown(f"- {s}")
-                                
-                        if parsed_desc.get("qualifications_education"):
-                            st.markdown("### 🎓 **Qualifications & Education**")
-                            for q in parsed_desc["qualifications_education"]:
-                                st.markdown(f"- {q}")
-                                
-                        if parsed_desc.get("nice_to_haves"):
-                            st.markdown("### 🌟 **Nice-to-Haves**")
-                            for n in parsed_desc["nice_to_haves"]:
-                                st.markdown(f"- {n}")
-                    else:
-                        st.write(desc)
+    eligible_jobs = [j for j in jobs_list if j.get("id") and j.get("job_version_id") and j.get("status") in ("AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION")]
 
-            # Button to trigger CV customization
-            st.markdown("---")
-            if st.button("✨ Generate factual Customized CV"):
-                desc_text = selected_job.get("description", "")
-                actual_text = desc_text
-                parsed = None
-                if isinstance(desc_text, dict):
-                    parsed = desc_text
-                elif isinstance(desc_text, str) and desc_text.strip().startswith("{"):
+    if not eligible_jobs:
+        st.info("No canonical shortlist jobs with version IDs are currently available.")
+    elif not profile_data or len((profile_data.get("profile_facts") or profile_data.get("facts") or [])) == 0:
+        st.info("Fix the master profile ledger first, then generate documents.")
+    else:
+        def _job_label(j):
+            return f"{j.get('company')} - {j.get('title')} [{j.get('status')}] ({str(j.get('job_version_id'))[:8]})"
+
+        options = {_job_label(j): j for j in eligible_jobs}
+        selected_label = st.selectbox("Select canonical job/version", list(options.keys()))
+        selected_job = options[selected_label]
+
+        st.markdown(f"**Canonical Job ID:** {selected_job.get('id')}")
+        st.markdown(f"**Job Version ID:** {selected_job.get('job_version_id')}")
+        st.markdown(f"**Company:** {selected_job.get('company')} | **Role:** {selected_job.get('title')}")
+        if selected_job.get("careers_portal_url"):
+            st.markdown(f"🔗 [View Posting]({selected_job.get('careers_portal_url')})")
+
+        with st.expander("Preview job description"):
+            description = selected_job.get("description") or ""
+            if isinstance(description, dict):
+                st.json(description)
+            else:
+                st.text_area("Description", str(description), height=220, disabled=True)
+
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            if st.button("Generate customized CV", use_container_width=True):
+                with st.spinner("Generating CV from canonical job/version..."):
                     try:
-                        parsed = json.loads(desc_text)
-                    except Exception:
-                        pass
-                
-                if parsed is not None:
-                    actual_text = (
-                        (parsed.get("job_description") or "") + " " +
-                        " ".join(parsed.get("key_responsibilities") or []) + " " +
-                        " ".join(parsed.get("technical_skills") or []) + " " +
-                        " ".join(parsed.get("qualifications_education") or []) + " " +
-                        " ".join(parsed.get("nice_to_haves") or [])
-                    ).strip()
-                elif isinstance(desc_text, str):
-                    actual_text = desc_text.strip()
-                else:
-                    actual_text = ""
-                
-                if not actual_text or actual_text == "No description available." or len(actual_text) < 150:
-                    st.error("❌ Cannot generate CV: The target job description is missing, empty, or too short in the database. Please make sure the job details are scraped or populated before customizing.")
-                    st.stop()
-                    
-                with st.spinner("AI is analyzing alignment, calling out experience gaps, and tailoring your CV..."):
+                        run_checked_command(
+                            [
+                                "npx",
+                                "tsx",
+                                "scripts/generate_cv.ts",
+                                str(selected_job.get("id")),
+                                str(selected_job.get("job_version_id"))
+                            ],
+                            "generate_cv"
+                        )
+                        st.success("CV generation completed. See scripts/exports for artifacts.")
+                    except subprocess.CalledProcessError as e:
+                        st.error(f"CV generation failed with exit code {e.returncode}.")
+                        if e.stdout:
+                            st.code(e.stdout, language="text")
+                        if e.stderr:
+                            st.error(e.stderr)
+
+        with btn_col2:
+            if st.button("Generate cover letter", use_container_width=True):
+                with st.spinner("Generating cover letter from canonical job/version..."):
                     try:
-                        # We execute our scripts/generate_cv.ts with the selected job's ID
-                        # Let's get the job's database ID from the select query
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT id FROM jobs WHERE title = %s AND company_name = %s LIMIT 1", (selected_job['title'], selected_job['company']))
-                        db_row = cursor.fetchone()
-                        conn.close()
-
-                        if not db_row:
-                            st.error("Job record not found in database.")
-                        else:
-                            db_job_id = db_row[0]
-                            
-                        # Read profile evidence from MASTER_PROFILE_JSON env or local fallback
-                        profile_evidence = ""
-                        if os.environ.get("MASTER_PROFILE_JSON"):
-                            try:
-                                master_prof = json.loads(os.environ["MASTER_PROFILE_JSON"])
-                                profile_evidence = json.dumps(master_prof.get("profile_facts", master_prof.get("facts", master_prof)), indent=2)
-                            except Exception:
-                                profile_evidence = os.environ["MASTER_PROFILE_JSON"]
-                        elif os.path.exists("master_profile.json"):
-                            with open("master_profile.json", "r", encoding="utf-8") as f:
-                                profile_evidence = f.read()
-                        elif os.path.exists("my_profile.md"):
-                            with open("my_profile.md", "r", encoding="utf-8") as f:
-                                profile_evidence = f.read()
-                        else:
-                            profile_evidence = "Profile evidence: 20+ years technical architecture, distributed AI/ML platforms, PyTorch, Python, LLMs, enterprise governance."
-
-                        # Read data ledgers and schemas
-                        title_ledger = "{}"
-                        if os.path.exists("data/title_ledger.json"):
-                            with open("data/title_ledger.json", "r", encoding="utf-8-sig") as f:
-                                title_ledger = f.read()
-
-                        jd_analysis_schema = "{}"
-                        if os.path.exists("scripts/schemas/jd_analysis.schema.json"):
-                            with open("scripts/schemas/jd_analysis.schema.json", "r", encoding="utf-8-sig") as f:
-                                jd_analysis_schema = f.read()
-
-
-                            # --- STAGE 1: ANALYSIS ---
-                            analysis_prompt = f"""You are a professional CV analysis agent.
-Your task is to analyze the target Job Description (JD) and output a JSON object containing the requirements and alignment analysis.
-
-**Scoring Rule**: The `score` MUST be an integer between 0 and 100, representing the percentage match (e.g., 100 for full match, 50 for partial, 0 for no evidence).
-
-### TARGET JOB SPECIFICATION:
-- **Title**: {selected_job.get('title', '')}
-- **Company**: {selected_job.get('company', '')}
-- **Location**: {selected_job.get('location', 'Singapore')}
-- **Job Description**:
-{actual_text}
-
-### PROFILE EVIDENCE:
-{profile_evidence}
-"""
-
-                            with st.spinner("Step 1/3: Analyzing JD & Matching Evidence..."):
-                                json_text = python_generate_content(
-                                    analysis_prompt,
-                                    system_instruction="You are a professional CV analysis system. Analyze the JD and strictly output JSON conforming to the requested schema.",
-                                    response_mime_type="application/json",
-                                    response_schema=json.loads(jd_analysis_schema)
-                                )
-                                json_text = json_text.strip()
-                                if json_text.startswith("```json"): json_text = json_text[7:]
-                                if json_text.startswith("```"): json_text = json_text[3:]
-                                if json_text.endswith("```"): json_text = json_text[:-3]
-                                json_text = json_text.strip()
-                                
-                                try:
-                                    analysis = json.loads(json_text)
-                                except Exception as e:
-                                    st.error(f"Failed to parse analysis JSON: {e}")
-                                    analysis = {}
-                            
-                            if analysis:
-                                # Show Analysis UI
-                                st.markdown("### **🎯 JD Requirements & Evidence Match**")
-                                requirements = analysis.get("requirements", [])
-                                matches = analysis.get("matches", [])
-                                
-                                match_dict = {m.get("requirementId"): m for m in matches}
-                                
-                                for req in requirements:
-                                    req_id = req.get("id")
-                                    match = match_dict.get(req_id, {})
-                                    score = match.get("score", 0)
-                                    
-                                    col1, col2 = st.columns([1, 4])
-                                    with col1:
-                                        if score >= 80: st.success(f"Score: {score}%")
-                                        elif score >= 50: st.warning(f"Score: {score}%")
-                                        else: st.error(f"Score: {score}%")
-                                    with col2:
-                                        st.markdown(f"**{req.get('text')}** ({req.get('priority').upper()} - {req.get('category')})")
-                                        st.markdown(f"*Summary:* {match.get('safeSummary', '')}")
-                                        evidence_ids = match.get('evidenceIds', [])
-                                        if evidence_ids:
-                                            st.markdown(f"*Evidence mapped:* `{', '.join(evidence_ids)}`")
-                                        gaps = match.get('gaps', [])
-                                        if gaps:
-                                            for gap in gaps:
-                                                st.markdown(f"⚠️ Gap: {gap}")
-                                    st.markdown("---")
-
-                                # Check Honesty Gate
-                                critical_failures = [req for req in requirements if req.get("priority") == "critical" and match_dict.get(req.get("id"), {}).get("score", 0) < 50]
-                                if critical_failures:
-                                    st.error("🚨 **HONESTY GATE FAILED**: You do not meet the CRITICAL requirements for this role based on your profile evidence. CV generation halted to prevent hallucination/misrepresentation.")
-                                    for cf in critical_failures:
-                                        st.markdown(f"- Failed: {cf.get('text')}")
-                                    st.stop()
-
-                            # --- STAGE 2: ITERATIVE CV CONTENT GENERATION ---
-                            with open("scripts/schemas/cv_base.schema.json", "r", encoding="utf-8-sig") as f:
-                                cv_base_schema = f.read()
-                            with open("scripts/schemas/cv_job.schema.json", "r", encoding="utf-8-sig") as f:
-                                cv_job_schema = f.read()
-
-                            cv_base_prompt = f"""You are the Custom CV Generator Agent.
-Your task is to take the Stage 1 Analysis and the immutable Data Ledgers, and generate the BASE CV content (everything except work experience).
-
-### TARGET JOB SPECIFICATION:
-- **Title**: {selected_job.get('title', '')}
-- **Company**: {selected_job.get('company', '')}
-- **Location**: {selected_job.get('location', 'Singapore')}
-
-### THE PRINCIPLE:
-Let the LLM decide WHAT evidence is relevant and HOW to express it. Do NOT decide WHAT is true.
-
-### STRICT RULES:
-1. **HONESTY GATE**: You MUST NOT invent achievements, projects, or education outside of the Profile Evidence Store.
-2. **ROLE ALIGNMENT**: Provide exactly 4 role alignment summary points tailored specifically to the TARGET JOB.
-3. **TARGET ALIGNMENT**: Ensure `target.role` and `target.company` are exactly as specified in the TARGET JOB. The `target.headline` MUST accurately reflect the role applied for.
-4. **SKILLS RELEVANCE**: For the `skills` array, ONLY include competencies directly relevant to the TARGET JOB. Omit entirely unrelated fields.
-5. **EDUCATION & CERTS**: Extract 2 to 4 Education items and up to 4 relevant Certifications.
-
-### PROFILE EVIDENCE:
-{profile_evidence}
-
-### STAGE 1 ANALYSIS:
-{json_text}
-"""
-                            with st.spinner("Step 2a: Architecting Base CV Payload..."):
-                                json_base_text = python_generate_content(
-                                    cv_base_prompt,
-                                    system_instruction="You generate customized CV content strictly conforming to the requested JSON schema. Do not hallucinate.",
-                                    response_mime_type="application/json",
-                                    response_schema=json.loads(cv_base_schema)
-                                )
-                                json_base_text = json_base_text.strip()
-                                if json_base_text.startswith("```json"): json_base_text = json_base_text[7:]
-                                if json_base_text.startswith("```"): json_base_text = json_base_text[3:]
-                                if json_base_text.endswith("```"): json_base_text = json_base_text[:-3]
-                                json_base_text = json_base_text.strip()
-
-                                try:
-                                    cv_payload = json.loads(json_base_text)
-                                except Exception as e:
-                                    st.error(f"Failed to parse base CV JSON: {e}")
-                                    st.stop()
-
-                            cv_payload["experience"] = []
-
-                            try:
-                                jobs_list = json.loads(title_ledger)
-                            except Exception:
-                                jobs_list = []
-
-                            total_jobs = len(jobs_list)
-
-                            for idx, job_entry in enumerate(jobs_list):
-                                company_name = job_entry.get("company", "")
-                                formal_title = job_entry.get("formalTitle", "")
-
-                                with st.spinner(f"Step 2b: Extracting achievements for role {idx+1}/{total_jobs}: {company_name}..."):
-                                    cv_job_prompt = f"""You are the Custom CV Generator Agent.
-Your task is to extract achievements strictly from the Profile Evidence for a SPECIFIC role, tailored for the TARGET JOB.
-
-### TARGET JOB:
-{selected_job.get('title', '')} at {selected_job.get('company', '')}
-
-### CURRENT ROLE TO PROCESS:
-- **Company**: {company_name}
-- **Title**: {formal_title}
-
-### STRICT RULES:
-1. **HONESTY GATE**: Extract ONLY from the provided Profile Evidence. Do not invent.
-2. **BULLET DENSITY**: 
-   - If this role is Recent (AIA Investment Management or newer), extract up to 3 key achievements.
-   - If this role is Older, extract exactly 1 key relevant achievement.
-3. If no evidence exists for this specific company/role, return an empty array for bullets. Do NOT borrow bullets from other roles.
-
-### PROFILE EVIDENCE:
-{profile_evidence}
-"""
-                                    json_job_text = python_generate_content(
-                                        cv_job_prompt,
-                                        system_instruction="Extract bullets for the specified job strictly conforming to the schema.",
-                                        response_mime_type="application/json",
-                                        response_schema=json.loads(cv_job_schema)
-                                    )
-                                    json_job_text = json_job_text.strip()
-                                    if json_job_text.startswith("```json"): json_job_text = json_job_text[7:]
-                                    if json_job_text.startswith("```"): json_job_text = json_job_text[3:]
-                                    if json_job_text.endswith("```"): json_job_text = json_job_text[:-3]
-                                    json_job_text = json_job_text.strip()
-
-                                    try:
-                                        job_payload = json.loads(json_job_text)
-                                        bullets = job_payload.get("bullets", [])
-                                    except Exception:
-                                        bullets = []
-
-                                    job_entry["bullets"] = bullets
-                                    if "location" not in job_entry:
-                                        job_entry["location"] = "Singapore"
-                                    if "assignmentClient" not in job_entry:
-                                        job_entry["assignmentClient"] = None
-
-                                    cv_payload["experience"].append(job_entry)
-
-                            json_text_2 = json.dumps(cv_payload)
-
-                            with st.spinner("Step 3/3: Rendering DOCX via deterministic pipeline..."):
-                                try:
-                                    import tempfile
-                                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f_in:
-                                        f_in.write(json_text_2)
-                                        temp_json_path = f_in.name
-                                        
-                                    with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as f_out:
-                                        temp_docx_path = f_out.name
-                                        
-                                    # Run the deterministic renderer
-                                    import sys
-                                    result = subprocess.run([sys.executable, "scripts/render_cv.py", temp_json_path, temp_docx_path], capture_output=True, text=True, check=True)
-                                    
-                                    with open(temp_docx_path, "rb") as f_docx:
-                                        docx_bytes = f_docx.read()
-                                        
-                                    # Cleanup temp files
-                                    try:
-                                        os.remove(temp_json_path)
-                                        os.remove(temp_docx_path)
-                                    except: pass
-                                    
-                                    st.success("✅ Tailored CV flawlessly generated via Custom CV Engine!")
-                                    
-                                    # Download files
-                                    st.markdown("### **📥 Download Tailored Resume Documents**")
-                                    clean_company = selected_job['company'].replace(' ', '_')
-                                    clean_title = selected_job['title'].replace(' ', '_')
-                                    
-                                    st.download_button(
-                                        label="💼 Download Word Document (.docx)",
-                                        data=docx_bytes,
-                                        file_name=f"CV_Tailored_{clean_company}_{clean_title}.docx",
-                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                    )
-                                    
-                                except subprocess.CalledProcessError as sub_err:
-                                    st.error(f"Renderer failed: {sub_err}\n{sub_err.stderr}")
-                                except Exception as e:
-                                    st.error(f"Failed to render DOCX: {e}")
-                                    st.code(json_text_2)
-                    except Exception as e:
-                        st.error(f"Execution Error: {e}")
+                        run_checked_command(
+                            [
+                                "npx",
+                                "tsx",
+                                "scripts/generate_cover_letter.ts",
+                                str(selected_job.get("id")),
+                                str(selected_job.get("job_version_id"))
+                            ],
+                            "generate_cover_letter"
+                        )
+                        st.success("Cover letter generation completed. See scripts/exports for artifacts.")
+                    except subprocess.CalledProcessError as e:
+                        st.error(f"Cover letter generation failed with exit code {e.returncode}.")
+                        if e.stdout:
+                            st.code(e.stdout, language="text")
+                        if e.stderr:
+                            st.error(e.stderr)
 
 # Footer section
 st.markdown("---")

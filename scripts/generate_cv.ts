@@ -2,6 +2,8 @@ import pg from "pg";
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
+import Ajv2020Import from "ajv/dist/2020.js";
+import addFormatsImport from "ajv-formats";
 import { generateContent } from "../src/services/agent.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
@@ -11,6 +13,58 @@ dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const databaseUrl = process.env.DATABASE_URL;
+
+const Ajv2020 = (Ajv2020Import as any).default || Ajv2020Import;
+const addFormats = (addFormatsImport as any).default || addFormatsImport;
+const ajv = new Ajv2020({ allErrors: true, strict: false });
+addFormats(ajv);
+
+function validateAgainstSchema(payload: unknown, schema: any, schemaName: string): void {
+  const validate = ajv.compile(schema);
+  const ok = validate(payload);
+  if (!ok) {
+    const details = (validate.errors || []).map((e: any) => `${e.instancePath || "/"} ${e.message}`).join("; ");
+    throw new Error(`${schemaName} validation failed: ${details}`);
+  }
+}
+
+function extractProfileFactIds(masterProfile: any): Set<string> {
+  const facts: any[] = masterProfile.profile_facts || masterProfile.facts || [];
+  return new Set(
+    facts
+      .map((f) => (f && typeof f.id === "string" ? f.id.trim() : ""))
+      .filter((id) => id.length > 0)
+  );
+}
+
+function ensureKnownEvidenceIds(finalCv: any, knownFactIds: Set<string>): void {
+  const unknown: string[] = [];
+  const collect = (ids: any, where: string) => {
+    if (!Array.isArray(ids)) return;
+    for (const id of ids) {
+      if (typeof id !== "string" || !knownFactIds.has(id)) {
+        unknown.push(`${where}: ${String(id)}`);
+      }
+    }
+  };
+
+  collect(finalCv?.strategy?.signature_fact_ids, "strategy.signature_fact_ids");
+  for (const [idx, kw] of (finalCv?.strategy?.keyword_plan || []).entries()) {
+    collect(kw?.profile_fact_ids, `strategy.keyword_plan[${idx}].profile_fact_ids`);
+  }
+  for (const [idx, item] of (finalCv?.cv?.role_alignment_snapshot?.items || []).entries()) {
+    collect(item?.profile_fact_ids, `cv.role_alignment_snapshot.items[${idx}].profile_fact_ids`);
+  }
+  for (const [expIdx, exp] of (finalCv?.cv?.experience || []).entries()) {
+    for (const [achIdx, ach] of (exp?.achievements || []).entries()) {
+      collect(ach?.profile_fact_ids, `cv.experience[${expIdx}].achievements[${achIdx}].profile_fact_ids`);
+    }
+  }
+
+  if (unknown.length > 0) {
+    throw new Error(`Unknown profile_fact_ids in CV payload: ${unknown.join(" | ")}`);
+  }
+}
 
 function cleanJsonResponse(rawText: string) {
   let cleaned = rawText.trim();
@@ -24,8 +78,10 @@ function cleanJsonResponse(rawText: string) {
 
 async function generateTailoredCV() {
   const jobId = process.argv[2];
+  const requestedJobVersionId = process.argv[3];
   if (!jobId) {
     console.error("❌ ERROR: Job ID must be provided as the first argument.");
+    console.error("  Usage: npx tsx scripts/generate_cv.ts <canonical_job_id> [job_version_id]");
     process.exit(1);
   }
 
@@ -41,15 +97,32 @@ async function generateTailoredCV() {
 
   try {
     const jobRes = await pool.query(
-      `SELECT c.normalized_title as title, c.company_name, v.description_text as raw_description, '' as location 
-       FROM canonical_jobs c 
-       JOIN job_versions v ON v.canonical_job_id = c.id 
-       WHERE c.id = $1 ORDER BY v.observed_at DESC LIMIT 1`,
-      [jobId]
+      `SELECT
+         c.id AS canonical_job_id,
+         c.normalized_title as title,
+         c.company_name,
+         v.id AS job_version_id,
+         v.description_text as raw_description,
+         COALESCE(c.location, c.location_summary, '') as location
+       FROM canonical_jobs c
+       JOIN job_versions v ON v.id = COALESCE(
+         $2::uuid,
+         c.latest_job_version_id,
+         (
+           SELECT jv2.id
+           FROM job_versions jv2
+           WHERE jv2.canonical_job_id = c.id
+           ORDER BY jv2.observed_at DESC
+           LIMIT 1
+         )
+       )
+       WHERE c.id = $1 AND v.canonical_job_id = c.id
+       LIMIT 1`,
+      [jobId, requestedJobVersionId || null]
     );
 
     if (jobRes.rows.length === 0) {
-      console.error(`❌ ERROR: Job with ID ${jobId} not found in evaluated 'jobs' table.`);
+      console.error(`❌ ERROR: Canonical job/version not found for job ${jobId}${requestedJobVersionId ? ` and version ${requestedJobVersionId}` : ""}.`);
       process.exit(1);
     }
 
@@ -57,12 +130,13 @@ async function generateTailoredCV() {
     const jdTitle = job.title;
     const jdCompany = job.company_name;
     const jdDescription = job.raw_description;
+    const resolvedJobVersionId = job.job_version_id;
 
     // Load Schemas
     const schemaDir = path.join(process.cwd(), "scripts", "schemas");
-    const jobAnalysisSchema = fs.readFileSync(path.join(schemaDir, "job_analysis.schema.json"), "utf8");
-    const evidenceMapSchema = fs.readFileSync(path.join(schemaDir, "evidence_map.schema.json"), "utf8");
-    const tailoredCvSchema = fs.readFileSync(path.join(schemaDir, "tailored_cv.schema.json"), "utf8");
+    const jobAnalysisSchema = JSON.parse(fs.readFileSync(path.join(schemaDir, "job_analysis.schema.json"), "utf8"));
+    const evidenceMapSchema = JSON.parse(fs.readFileSync(path.join(schemaDir, "evidence_map.schema.json"), "utf8"));
+    const tailoredCvSchema = JSON.parse(fs.readFileSync(path.join(schemaDir, "tailored_cv.schema.json"), "utf8"));
 
     // Load Master Profile
     let masterProfile: any;
@@ -84,6 +158,10 @@ async function generateTailoredCV() {
 
     // Model is resolved by generateContent() which tries Gemini then OpenAI automatically.
     const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+    const knownFactIds = extractProfileFactIds(masterProfile);
+    if (knownFactIds.size === 0) {
+      throw new Error("MASTER_PROFILE contains no facts/profile_facts ids; cannot ground CV evidence.");
+    }
 
 
     // --- STAGE 1: JOB ANALYSIS ---
@@ -97,7 +175,7 @@ async function generateTailoredCV() {
 6. Do not write CV content.
 
 Return ONLY valid JSON matching this schema:
-${jobAnalysisSchema}
+${JSON.stringify(jobAnalysisSchema)}
 
 Job Description:
 ${jdDescription}`;
@@ -109,6 +187,7 @@ ${jdDescription}`;
       systemInstruction: "You are an analytical engine extracting objective requirements from a job description."
     });
     const jobAnalysis = JSON.parse(cleanJsonResponse(analysisRes));
+    validateAgainstSchema(jobAnalysis, jobAnalysisSchema, "job_analysis.schema.json");
 
     // --- STAGE 2: REQUIREMENT-TO-EVIDENCE MATCHING ---
     console.log("STAGE 2: Matching Requirements to Evidence...");
@@ -121,7 +200,7 @@ Master Profile: ${JSON.stringify(masterProfile)}
 For each requirement, provide a candidate match assessment with components: directness (max 35), outcome (max 25), scale (max 15), proximity (max 15), recency (max 10). Provide a differentiator score (0-100). Identify verifiable profile_fact_ids.
 
 Return ONLY valid JSON matching this schema:
-${evidenceMapSchema}`;
+${JSON.stringify(evidenceMapSchema)}`;
     
     const matchRes = await generateContent({
       model,
@@ -130,6 +209,14 @@ ${evidenceMapSchema}`;
       systemInstruction: "You strictly map job requirements to verifiable fact IDs in the master profile and assess objective candidate match strengths."
     });
     const evidenceMap = JSON.parse(cleanJsonResponse(matchRes));
+    validateAgainstSchema(evidenceMap, evidenceMapSchema, "evidence_map.schema.json");
+    for (const [idx, req] of (evidenceMap?.role_alignment_analysis?.requirements || []).entries()) {
+      for (const factId of req?.profile_fact_ids || []) {
+        if (!knownFactIds.has(factId)) {
+          throw new Error(`Unknown profile_fact_id in evidence_map requirement index ${idx}: ${factId}`);
+        }
+      }
+    }
 
     // --- STAGE 3: DETERMINISTIC SCORING & SELECTION ---
     console.log("STAGE 3: Deterministic Scoring & Selection...");
@@ -205,7 +292,7 @@ Return a JSON object with: positioning_statement, leadership_themes (array of st
     console.log("STAGE 5: Generating Semantic CV JSON...");
     const cvPrompt = `Generate the final structured CV JSON based on the Executive Strategy, the Master Profile, and the Job Analysis.
 You MUST output JSON matching this EXACT schema:
-${tailoredCvSchema}
+${JSON.stringify(tailoredCvSchema)}
 
 Master Profile: ${JSON.stringify(masterProfile)}
 Strategy: ${JSON.stringify(strategy)}
@@ -244,6 +331,17 @@ The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard
           }))
        };
     }
+
+    validateAgainstSchema(finalCv, tailoredCvSchema, "tailored_cv.schema.json");
+    ensureKnownEvidenceIds(finalCv, knownFactIds);
+
+    finalCv.metadata = {
+      ...(finalCv.metadata || {}),
+      job_id: jobId,
+      job_version_id: resolvedJobVersionId,
+      target_title: jdTitle,
+      target_company: jdCompany
+    };
 
     // --- STAGE 5: EXPORT ---
     console.log("STAGE 5: Rendering documents...");
