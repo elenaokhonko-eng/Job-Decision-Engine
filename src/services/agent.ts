@@ -20,17 +20,33 @@ export const MODEL_REGISTRY = {
   DOCUMENT_FALLBACK_MODEL: process.env.DOCUMENT_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
 } as const;
 
+type TextProvider = "gemini" | "openai";
+
+function resolveProviderOrder(primaryProviderRaw: string | undefined): TextProvider[] {
+  const normalized = (primaryProviderRaw || "").trim().toLowerCase();
+  if (normalized === "openai") return ["openai", "gemini"];
+  if (normalized === "gemini") return ["gemini", "openai"];
+  // Backward compatibility with existing env behavior.
+  if (process.env.FORCE_OPENAI === "true") return ["openai", "gemini"];
+  return ["gemini", "openai"];
+}
+
 export function checkModelRegistryPreflight(): { ok: boolean; warnings: string[]; primaryAvailable: boolean; fallbackAvailable: boolean } {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
+  const evalOrder = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
+  const primaryProvider = evalOrder[0];
+  const fallbackProvider = evalOrder[1];
   const warnings: string[] = [];
-  const primaryAvailable = !!(geminiKey && geminiKey.trim() !== "" && geminiKey !== "MY_GEMINI_API_KEY");
-  const fallbackAvailable = !!(openaiKey && openaiKey.trim() !== "");
+  const hasGemini = !!(geminiKey && geminiKey.trim() !== "" && geminiKey !== "MY_GEMINI_API_KEY");
+  const hasOpenAI = !!(openaiKey && openaiKey.trim() !== "");
+  const primaryAvailable = primaryProvider === "openai" ? hasOpenAI : hasGemini;
+  const fallbackAvailable = fallbackProvider === "openai" ? hasOpenAI : hasGemini;
   if (!primaryAvailable) {
-    warnings.push("Primary provider (Gemini) API key is missing or placeholder.");
+    warnings.push(`Primary provider (${primaryProvider}) credentials are missing or placeholder.`);
   }
   if (!fallbackAvailable) {
-    warnings.push("Fallback provider (OpenAI) API key is missing.");
+    warnings.push(`Fallback provider (${fallbackProvider}) credentials are missing or placeholder.`);
   }
   return {
     ok: primaryAvailable || fallbackAvailable,
@@ -138,12 +154,20 @@ export async function runAgentWithFallback<T>(
   const errors: Array<{ provider: string; model: string; error: string }> = [];
   let attempts = 0;
 
-  const PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-  const FALLBACK_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const order = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
+  const openaiEvalModel = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+  const geminiEvalModel = MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
+  const PRIMARY_MODEL = order[0] === "openai"
+    ? openaiEvalModel
+    : geminiEvalModel;
+  const FALLBACK_MODEL = order[0] === "openai"
+    ? geminiEvalModel
+    : openaiEvalModel;
 
-  // 1. Attempt Primary: Gemini
+  // 1. Attempt Primary
   const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
-  if (geminiApiKey) {
+  const openaiApiKey = process.env.OPENAI_API_KEY;
+  if (order[0] === "gemini" && geminiApiKey) {
     try {
       attempts++;
       const text = await tryGemini(geminiApiKey, {
@@ -168,13 +192,39 @@ export async function runAgentWithFallback<T>(
       console.warn(`[Gemini Error] Primary model failed: ${err.message}. Triggering fallback...`);
       errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error: err.message });
     }
-  } else {
+  } else if (order[0] === "openai" && openaiApiKey) {
+    try {
+      attempts++;
+      const text = await tryOpenAI(openaiApiKey, {
+        model: PRIMARY_MODEL,
+        contents: prompt,
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+        systemInstruction
+      });
+
+      const parsed = JSON.parse(text || '{}') as T;
+      return {
+        payload: parsed,
+        provider: 'openai',
+        model: PRIMARY_MODEL,
+        fallbackUsed: false,
+        attempts,
+        errors: [],
+        degraded: false
+      };
+    } catch (err: any) {
+      console.warn(`[OpenAI Error] Primary model failed: ${err.message}. Triggering fallback...`);
+      errors.push({ provider: 'openai', model: PRIMARY_MODEL, error: err.message });
+    }
+  } else if (order[0] === "gemini") {
     errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error: 'GEMINI_API_KEY not configured' });
+  } else {
+    errors.push({ provider: 'openai', model: PRIMARY_MODEL, error: 'OPENAI_API_KEY not configured' });
   }
 
-  // 2. Attempt Fallback: OpenAI
-  const openaiApiKey = process.env.OPENAI_API_KEY;
-  if (openaiApiKey) {
+  // 2. Attempt Fallback
+  if (order[0] === "gemini" && openaiApiKey) {
     try {
       attempts++;
       const text = await tryOpenAI(openaiApiKey, {
@@ -199,8 +249,35 @@ export async function runAgentWithFallback<T>(
       console.error(`[OpenAI Error] Fallback model failed: ${err.message}`);
       errors.push({ provider: 'openai', model: FALLBACK_MODEL, error: err.message });
     }
-  } else {
+  } else if (order[0] === "openai" && geminiApiKey) {
+    try {
+      attempts++;
+      const text = await tryGemini(geminiApiKey, {
+        model: FALLBACK_MODEL,
+        contents: prompt,
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+        systemInstruction
+      });
+
+      const parsed = JSON.parse(text || '{}') as T;
+      return {
+        payload: parsed,
+        provider: 'gemini',
+        model: FALLBACK_MODEL,
+        fallbackUsed: true,
+        attempts,
+        errors,
+        degraded: true
+      };
+    } catch (err: any) {
+      console.error(`[Gemini Error] Fallback model failed: ${err.message}`);
+      errors.push({ provider: 'gemini', model: FALLBACK_MODEL, error: err.message });
+    }
+  } else if (order[0] === "gemini") {
     errors.push({ provider: 'openai', model: FALLBACK_MODEL, error: 'OPENAI_API_KEY not configured' });
+  } else {
+    errors.push({ provider: 'gemini', model: FALLBACK_MODEL, error: 'GEMINI_API_KEY not configured' });
   }
 
   throw new Error(`All model providers failed: ${JSON.stringify(errors)}`);
@@ -306,7 +383,10 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
 
 async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
   const baseUrl = "https://api.openai.com/v1";
-  const model = options.model || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+  const requestedModel = typeof options.model === "string" ? options.model : "";
+  const model = requestedModel && !requestedModel.toLowerCase().startsWith("gemini")
+    ? requestedModel
+    : (process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL);
   return tryOpenAICompatible(openaiKey, baseUrl, model, options, false);
 }
 
@@ -384,10 +464,13 @@ export async function generateContent(options: {
 }): Promise<string> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
-  const forceOpenAI = process.env.FORCE_OPENAI === "true";
-  const order = forceOpenAI 
-    ? ["openai", "gemini"] 
-    : ["gemini", "openai"];
+  const isDocumentRoute =
+    options.model === MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL ||
+    options.model === MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL;
+  const primaryProvider = isDocumentRoute
+    ? (process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER)
+    : process.env.EVALUATION_PRIMARY_PROVIDER;
+  const order = resolveProviderOrder(primaryProvider);
 
   const tried = new Set<string>();
 
@@ -488,29 +571,59 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
   const openaiKey = process.env.OPENAI_API_KEY;
   const errors: string[] = [];
 
-  const checkTextRoute = async (label: string, geminiModel: string, openaiModel: string): Promise<boolean> => {
-    if (geminiKey) {
-      try {
-        await tryGemini(geminiKey, { model: geminiModel, contents: "Reply with OK.", responseMimeType: "text/plain" });
-        return true;
-      } catch (err: any) {
-        errors.push(`${label} Gemini (${geminiModel}): ${err.message || err}`);
+  const checkTextRoute = async (
+    label: string,
+    geminiModel: string,
+    openaiModel: string,
+    primaryProviderRaw: string | undefined
+  ): Promise<boolean> => {
+    const order = resolveProviderOrder(primaryProviderRaw);
+    for (const provider of order) {
+      if (provider === "gemini") {
+        if (!geminiKey) {
+          errors.push(`${label} Gemini (${geminiModel}): GEMINI_API_KEY not configured`);
+          continue;
+        }
+        try {
+          await tryGemini(geminiKey, { model: geminiModel, contents: "Reply with OK.", responseMimeType: "text/plain" });
+          return true;
+        } catch (err: any) {
+          errors.push(`${label} Gemini (${geminiModel}): ${err.message || err}`);
+        }
+      }
+
+      if (provider === "openai") {
+        if (!openaiKey) {
+          errors.push(`${label} OpenAI (${openaiModel}): OPENAI_API_KEY not configured`);
+          continue;
+        }
+        try {
+          await tryOpenAI(openaiKey, { model: openaiModel, contents: "Reply with OK.", responseMimeType: "text/plain" });
+          return true;
+        } catch (err: any) {
+          errors.push(`${label} OpenAI (${openaiModel}): ${err.message || err}`);
+        }
       }
     }
-    if (openaiKey) {
-      try {
-        await tryOpenAI(openaiKey, { model: openaiModel, contents: "Reply with OK.", responseMimeType: "text/plain" });
-        return true;
-      } catch (err: any) {
-        errors.push(`${label} OpenAI (${openaiModel}): ${err.message || err}`);
-      }
+
+    if (!geminiKey && !openaiKey) {
+      errors.push(`${label}: no Gemini or OpenAI API key configured`);
     }
-    if (!geminiKey && !openaiKey) errors.push(`${label}: no Gemini or OpenAI API key configured`);
     return false;
   };
 
-  const evaluation = await checkTextRoute("evaluation", MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL, MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL);
-  const document = await checkTextRoute("document", MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL, MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL);
+  const evaluation = await checkTextRoute(
+    "evaluation",
+    MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
+    process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+    process.env.EVALUATION_PRIMARY_PROVIDER
+  );
+  const document = await checkTextRoute(
+    "document",
+    MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
+    process.env.OPENAI_MODEL || MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
+    process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER
+  );
   let embedding = false;
   try {
     await generateEmbedding("preflight");
@@ -752,10 +865,8 @@ You MUST return a JSON object matching this schema exactly.
   ]
 }`;
 
-  const forceOpenAI = process.env.FORCE_OPENAI === "true";
-  const order = forceOpenAI 
-    ? ["openai", "gemini"] 
-    : ["gemini", "openai"];
+  const order = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
+  const openaiEvalModel = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
 
   const tried = new Set<string>();
   let parsedResult: AgentResult | null = null;
@@ -789,7 +900,7 @@ You MUST return a JSON object matching this schema exactly.
       attempts++;
       try {
         trace.push(`Step ${trace.length + 1}: Running evaluation agent with OpenAI API...`);
-        const modelToUse = MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+        const modelToUse = openaiEvalModel;
         const text = await tryOpenAI(openaiKey, {
           model: modelToUse,
           contents: userQuestion,
@@ -799,7 +910,7 @@ You MUST return a JSON object matching this schema exactly.
         parsedResult = parseResultJson(text, trace);
         successProvider = "openai";
         successModel = modelToUse;
-        fallbackUsed = tried.has("gemini") || forceOpenAI;
+        fallbackUsed = tried.has("gemini");
         if (parsedResult) break;
       } catch (err: any) {
         const msg = err.message || String(err);
@@ -949,8 +1060,8 @@ ${job.descriptionText}
 
   const systemInstruction = `You are an AI decision engine evaluating a single canonical job. Return a single JSON object.`;
 
-  const forceOpenAI = process.env.FORCE_OPENAI === "true";
-  const order = forceOpenAI ? ["openai", "gemini"] : ["gemini", "openai"];
+  const order = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
+  const openaiEvalModel = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
   const tried = new Set<string>();
 
   let rawJsonText: string | null = null;
@@ -991,16 +1102,16 @@ ${job.descriptionText}
       tried.add("openai");
       attempts++;
       try {
-        trace.push(`Attempting fallback model evaluation via OpenAI (${MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL})...`);
+        trace.push(`Attempting evaluation via OpenAI (${openaiEvalModel})...`);
         rawJsonText = await tryOpenAI(openaiKey, {
-          model: MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+          model: openaiEvalModel,
           contents: prompt,
           responseMimeType: "application/json",
           systemInstruction
         });
         successProvider = "openai";
-        successModel = MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
-        fallbackUsed = tried.has("gemini") || forceOpenAI;
+        successModel = openaiEvalModel;
+        fallbackUsed = tried.has("gemini");
         break;
       } catch (err: any) {
         const msg = err.message || String(err);

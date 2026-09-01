@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
-dotenv.config({ path: ".env.local" });
+dotenv.config({ path: ".env.local", override: true });
 
 const databaseUrl = process.env.DATABASE_URL;
 const gmailUser = process.env.GMAIL_USER;
