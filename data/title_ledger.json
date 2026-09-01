@@ -1,81 +1,20 @@
 [
   {
-    "company": "auDHD Research Lab",
-    "formalTitle": "Principal Researcher & Founder & Agentic AI Solution Architect & Software Engineer",
-    "startDate": "2026-05",
+    "company": "Example Applied AI Lab",
+    "formalTitle": "Principal AI Architect",
+    "startDate": "2024-01",
     "endDate": "Present"
   },
   {
-    "company": "SMU Institute of Innovation & Entrepreneurship",
-    "formalTitle": "Founder in Residence @ SMU BIG",
-    "startDate": "2026-01",
-    "endDate": "Present"
+    "company": "Example Financial Technology Company",
+    "formalTitle": "Enterprise Solution Architect",
+    "startDate": "2020-01",
+    "endDate": "2023-12"
   },
   {
-    "company": "GuideBuoy AI SG Pte Ltd",
-    "formalTitle": "Founder & Principal AI Architect",
-    "startDate": "2025-08",
-    "endDate": "Present"
-  },
-  {
-    "company": "INSEAD AI Venture Lab",
-    "formalTitle": "Founder in Residence",
-    "startDate": "2025-08",
-    "endDate": "2025-12"
-  },
-  {
-    "company": "Boston Consulting Group (BCG)",
-    "formalTitle": "BCG RISE 2.0 DTCM Certification Sprint",
-    "startDate": "2025-07",
-    "endDate": "2025-08"
-  },
-  {
-    "company": "AIA Singapore / AIA Investment Management (AIAIM)",
-    "assignmentClient": "AIA Investment Management",
-    "formalTitle": "Enterprise Solution Architect & Program Lead",
-    "startDate": "2023-04",
-    "endDate": "2025-04"
-  },
-  {
-    "company": "Farringdon Asset Management",
-    "formalTitle": "Associate Director",
-    "startDate": "2019-07",
-    "endDate": "2022-12"
-  },
-  {
-    "company": "Financial Alliance Pte Ltd",
-    "formalTitle": "Senior Consultant",
-    "startDate": "2017-07",
-    "endDate": "2019-07"
-  },
-  {
-    "company": "Synpulse Management Consulting",
-    "formalTitle": "Lead Researcher",
-    "startDate": "2017-08",
-    "endDate": "2018-01"
-  },
-  {
-    "company": "Mondelēz International",
-    "formalTitle": "Regional CRM & Sales Force Automation (SFA) Architect",
-    "startDate": "2012-02",
-    "endDate": "2017-09"
-  },
-  {
-    "company": "The POP Company",
-    "formalTitle": "Lead of PMO Governance & SFA Delivery Architecture",
-    "startDate": "2009-10",
-    "endDate": "2012-01"
-  },
-  {
-    "company": "Chinasoft International",
-    "formalTitle": "Agile Delivery Architect & Scrum Master (Microsoft MSN BEET Team)",
-    "startDate": "2008-05",
-    "endDate": "2009-10"
-  },
-  {
-    "company": "Dextrys",
-    "formalTitle": "Technical Delivery Lead & Systems Analyst (Localization Department PM)",
-    "startDate": "2007-03",
-    "endDate": "2008-04"
+    "company": "Example Consulting Firm",
+    "formalTitle": "Technical Delivery Lead",
+    "startDate": "2016-01",
+    "endDate": "2019-12"
   }
 ]

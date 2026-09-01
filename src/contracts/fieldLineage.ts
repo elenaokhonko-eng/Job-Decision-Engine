@@ -54,6 +54,14 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     nullable: false
   },
   {
+    field: "source",
+    sourceTable: "raw_job_observations",
+    sourceColumn: "source_name",
+    producerStage: "sourceBroker.ts",
+    transformation: "Latest observation for the displayed job version",
+    nullable: false
+  },
+  {
     field: "location",
     sourceTable: "canonical_jobs",
     sourceColumn: "location_summary",
@@ -70,12 +78,44 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     nullable: false
   },
   {
+    field: "employment_type",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "employment_type",
+    producerStage: "normalize.ts",
+    transformation: "Normalized employment classification",
+    nullable: false
+  },
+  {
+    field: "description",
+    sourceTable: "job_versions",
+    sourceColumn: "description_text",
+    producerStage: "normalize.ts",
+    transformation: "Description for the displayed job version",
+    nullable: true
+  },
+  {
     field: "gate_status",
     sourceTable: "canonical_jobs",
     sourceColumn: "gate_decision",
     producerStage: "hardGate.ts",
     transformation: "PASS / NEEDS_VERIFICATION / HARD_REJECT",
     nullable: false
+  },
+  {
+    field: "rejection_codes",
+    sourceTable: "gate_decisions",
+    sourceColumn: "rejection_codes",
+    producerStage: "hardGate.ts",
+    transformation: "Stored deterministic gate reason codes",
+    nullable: true
+  },
+  {
+    field: "gate_evidence_quotes",
+    sourceTable: "gate_decisions",
+    sourceColumn: "evidence_quotes",
+    producerStage: "hardGate.ts",
+    transformation: "Stored gate evidence quotes",
+    nullable: true
   },
   {
     field: "primary_lane",
@@ -134,6 +174,14 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     nullable: true
   },
   {
+    field: "sensory_overload_index",
+    sourceTable: "ai_evaluations",
+    sourceColumn: "full_evaluation_payload",
+    producerStage: "evaluate_queue.ts",
+    transformation: "JSON payload sensory_overload_index",
+    nullable: true
+  },
+  {
     field: "next_action",
     sourceTable: "ai_evaluations",
     sourceColumn: "next_action",
@@ -158,6 +206,38 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     nullable: true
   },
   {
+    field: "evaluation_summary",
+    sourceTable: "ai_evaluations",
+    sourceColumn: "full_evaluation_payload",
+    producerStage: "evaluate_queue.ts",
+    transformation: "JSON payload evaluation_summary",
+    nullable: true
+  },
+  {
+    field: "eval_provider",
+    sourceTable: "ai_evaluations",
+    sourceColumn: "provider",
+    producerStage: "evaluate_queue.ts",
+    transformation: "Provider used for latest version evaluation",
+    nullable: true
+  },
+  {
+    field: "eval_is_fallback",
+    sourceTable: "ai_evaluations",
+    sourceColumn: "is_fallback",
+    producerStage: "evaluate_queue.ts",
+    transformation: "Whether provider fallback was used",
+    nullable: true
+  },
+  {
+    field: "version_mismatch",
+    sourceTable: "ai_evaluations",
+    sourceColumn: "job_version_id",
+    producerStage: "v_canonical_shortlist",
+    transformation: "True when evaluated canonical status has no evaluation for displayed version",
+    nullable: false
+  },
+  {
     field: "observed_at",
     sourceTable: "canonical_jobs",
     sourceColumn: "created_at",
@@ -171,6 +251,30 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     sourceColumn: "evaluated_at",
     producerStage: "evaluate_queue.ts",
     transformation: "ISO timestamp of completed LLM evaluation",
+    nullable: true
+  },
+  {
+    field: "lane_matches",
+    sourceTable: "ai_evaluations",
+    sourceColumn: "lane_matches",
+    producerStage: "evaluate_queue.ts",
+    transformation: "Persisted lane match evidence",
+    nullable: true
+  },
+  {
+    field: "workability_facts",
+    sourceTable: "ai_evaluations",
+    sourceColumn: "workability_facts",
+    producerStage: "hardGate.ts -> evaluate_queue.ts",
+    transformation: "Version-pinned workability facts",
+    nullable: true
+  },
+  {
+    field: "queue_status",
+    sourceTable: "evaluation_queue",
+    sourceColumn: "status",
+    producerStage: "evaluationBudgeter.ts",
+    transformation: "Latest queue state for displayed version",
     nullable: true
   }
 ];

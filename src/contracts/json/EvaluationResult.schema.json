@@ -1,7 +1,171 @@
 {
   "$ref": "#/definitions/EvaluationResult",
   "definitions": {
-    "EvaluationResult": {}
+    "EvaluationResult": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1.0.0",
+          "default": "1.0.0"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pipeline_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "gemini",
+            "openai",
+            "local",
+            "mock"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "is_fallback": {
+          "type": "boolean",
+          "default": false
+        },
+        "degraded_state": {
+          "type": "boolean",
+          "default": false
+        },
+        "evaluation_summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "primary_lane": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "CORE_AI_DATA",
+                "LEGAL_REGTECH",
+                "HEALTH_BIO_PHARMA",
+                "INVESTMENT_MARKETS_FINTECH",
+                "UNCLASSIFIED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secondary_lanes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EvaluationResult/properties/primary_lane/anyOf/0"
+          },
+          "default": []
+        },
+        "lane_confidence": {
+          "type": "string",
+          "enum": [
+            "High",
+            "Medium",
+            "Low"
+          ]
+        },
+        "lane_evidence": {
+          "type": "string",
+          "default": ""
+        },
+        "nd_score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "nd_friendly_score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "politics_stress_score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "sensory_overload_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "building_research_ratio": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "interaction_load": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "rejection_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "strategic_value": {
+          "type": "string",
+          "default": ""
+        },
+        "recommended_cv_version": {
+          "type": "string",
+          "default": "None"
+        },
+        "next_action": {
+          "type": "string",
+          "enum": [
+            "PRIORITY_APPLY",
+            "APPLY_AFTER_VERIFICATION",
+            "LOW_STRATEGIC_VALUE",
+            "REJECTED"
+          ]
+        },
+        "evaluated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "canonical_job_id",
+        "job_version_id",
+        "pipeline_run_id",
+        "provider",
+        "model",
+        "evaluation_summary",
+        "primary_lane",
+        "lane_confidence",
+        "nd_score",
+        "nd_friendly_score",
+        "politics_stress_score",
+        "sensory_overload_index",
+        "building_research_ratio",
+        "interaction_load",
+        "next_action",
+        "evaluated_at"
+      ],
+      "additionalProperties": false
+    }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"
 }

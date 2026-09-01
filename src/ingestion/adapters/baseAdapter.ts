@@ -8,10 +8,10 @@
  *    invalid records are quarantined with an error log, never silently
  *    passed downstream (AGENTS.md invariant 2)
  */
-import { ExtractedJob, ExtractedJobSchema } from "../../contracts/index.js";
+import { ExtractedJob, ExtractedJobSchema, SourceName } from "../../contracts/index.js";
 
 export interface AdapterResult {
-  sourceName: string;
+  sourceName: SourceName;
   success: boolean;
   jobs: ExtractedJob[];
   totalFetched: number;
@@ -21,7 +21,7 @@ export interface AdapterResult {
 }
 
 export abstract class BaseSourceAdapter {
-  abstract sourceName: string;
+  abstract sourceName: SourceName;
 
   /** Default per-request timeout: 15 seconds */
   protected timeoutMs: number = 15_000;
@@ -69,5 +69,20 @@ export abstract class BaseSourceAdapter {
       error,
       isRateLimited: opts?.isRateLimited ?? false,
     };
+  }
+
+  protected sanitizeHtml(value: unknown): string {
+    return String(value ?? "")
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 }

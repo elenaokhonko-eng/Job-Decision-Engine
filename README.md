@@ -18,6 +18,8 @@ Target lanes:
 3. HEALTH_BIO_PHARMA
 4. INVESTMENT_MARKETS_FINTECH
 
+Supported shared collectors include Gmail, Greenhouse, Ashby, Lever, Himalayas, Jobicy, Remotive, and attributed We Work Remotely RSS. All sources enter the same validated observation pipeline; lane logic never scrapes sources directly.
+
 ## Core Behavior Guarantees
 
 1. Operational failures are not career rejections.
@@ -98,8 +100,17 @@ npm run docs:cover-letter
 ## Notes For Open-Source Usage
 
 1. Keep personal profile data and private preference policies outside public defaults.
-2. Treat data in `scratch/` as development utilities, not production entry points.
+2. Public ledgers and fixtures are anonymized examples; place real overrides under ignored private paths.
 3. Prefer canonical scripts in `scripts/` and contracts in `src/contracts/`.
+
+## Documentation
+
+1. [Architecture](docs/architecture.md)
+2. [Source adapters](docs/source-adapters.md)
+3. [Data contracts](docs/data-contracts.md)
+4. [Release runbook](docs/release-runbook.md)
+5. [Contributing](CONTRIBUTING.md)
+6. [Security](SECURITY.md)
 
 ## License
 

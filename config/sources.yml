@@ -1,0 +1,46 @@
+version: "1.0"
+sources:
+  - id: JOBICY
+    type: json_api
+    enabled: true
+    endpoint: https://jobicy.com/api/v2/remote-jobs
+    polling_interval_minutes: 60
+    lane_filters: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH]
+    query_filters: [ai, data, legal technology, biotech, fintech]
+    attribution: Jobicy
+    rate_limit_per_run: 50
+    timeout_ms: 15000
+    retry_attempts: 2
+  - id: REMOTIVE
+    type: json_api
+    enabled: true
+    endpoint: https://remotive.com/api/remote-jobs
+    polling_interval_minutes: 1440
+    lane_filters: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH]
+    query_filters: [ai, data, software, product]
+    attribution: Remotive - link back required; feed may be delayed by 24 hours
+    rate_limit_per_run: 50
+    timeout_ms: 15000
+    retry_attempts: 2
+  - id: WE_WORK_REMOTELY
+    type: rss
+    enabled: true
+    endpoint: https://weworkremotely.com/remote-jobs.rss
+    polling_interval_minutes: 60
+    lane_filters: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH]
+    query_filters: [programming, management, finance]
+    attribution: We Work Remotely - canonical source link required
+    rate_limit_per_run: 50
+    timeout_ms: 15000
+    retry_attempts: 2
+  - id: HIMALAYAS
+    type: json_api
+    enabled: true
+    endpoint: https://himalayas.app/jobs/api
+    polling_interval_minutes: 60
+    lane_filters: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH]
+    query_filters: [ai, data, software]
+    attribution: Himalayas
+    rate_limit_per_run: 30
+    timeout_ms: 15000
+    retry_attempts: 2

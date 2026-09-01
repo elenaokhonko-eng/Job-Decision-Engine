@@ -68,7 +68,7 @@ async function runUnifiedIngest() {
     console.log(`-> Discovered ${himalayasJobs.length} jobs from Himalayas.`);
     for (const job of himalayasJobs) {
       await broker.processObservation({
-        sourceName: "himalayas",
+        sourceName: "HIMALAYAS",
         sourceExternalId: job.content_hash || `himalayas-${job.title}`,
         sourceUrl: job.careers_portal_url,
         retrievedAt: new Date().toISOString(),
@@ -89,7 +89,7 @@ async function runUnifiedIngest() {
     console.log(`-> Discovered ${startupJobs.length} jobs from StartupJobs.`);
     for (const job of startupJobs) {
       await broker.processObservation({
-        sourceName: "startup_jobs",
+        sourceName: "STARTUP_JOBS",
         sourceExternalId: job.content_hash || `startupjobs-${job.title}`,
         sourceUrl: job.careers_portal_url,
         retrievedAt: new Date().toISOString(),

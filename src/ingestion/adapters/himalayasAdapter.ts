@@ -2,7 +2,7 @@ import { BaseSourceAdapter, AdapterResult } from "./baseAdapter.js";
 import { ExtractedJob, SCHEMA_VERSION } from "../../contracts/index.js";
 
 export class HimalayasAdapter extends BaseSourceAdapter {
-  sourceName = "HIMALAYAS";
+  sourceName = "HIMALAYAS" as const;
 
   constructor() {
     super();

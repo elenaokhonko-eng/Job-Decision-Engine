@@ -1,7 +1,108 @@
 {
   "$ref": "#/definitions/EvaluationQueueItem",
   "definitions": {
-    "EvaluationQueueItem": {}
+    "EvaluationQueueItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lane": {
+          "type": "string",
+          "enum": [
+            "CORE_AI_DATA",
+            "LEGAL_REGTECH",
+            "HEALTH_BIO_PHARMA",
+            "INVESTMENT_MARKETS_FINTECH",
+            "UNCLASSIFIED"
+          ]
+        },
+        "priority_score": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "PENDING",
+            "EVALUATING",
+            "COMPLETED",
+            "RETRY_WAIT",
+            "FAILED",
+            "DEFERRED_BUDGET",
+            "NEEDS_MANUAL_REVIEW"
+          ],
+          "default": "PENDING"
+        },
+        "lease_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lease_expires_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "attempt_count": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 3
+        },
+        "last_error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "enqueued_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "canonical_job_id",
+        "job_version_id",
+        "lane",
+        "priority_score",
+        "enqueued_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"
 }

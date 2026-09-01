@@ -1,7 +1,131 @@
 {
   "$ref": "#/definitions/GateDecision",
   "definitions": {
-    "GateDecision": {}
+    "GateDecision": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1.0.0",
+          "default": "1.0.0"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pipeline_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "gate_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "NEEDS_VERIFICATION",
+            "HARD_REJECT"
+          ]
+        },
+        "rejection_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "evidence_quotes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "workability_facts": {
+          "type": "object",
+          "properties": {
+            "office_days_min": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 7
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "office_days_max": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 7
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "travel_pct_max": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "employment_type": {
+              "type": "string",
+              "enum": [
+                "PERMANENT",
+                "CONTRACT",
+                "UNKNOWN"
+              ]
+            },
+            "location_restriction": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "office_days_min",
+            "office_days_max",
+            "travel_pct_max",
+            "employment_type",
+            "location_restriction"
+          ],
+          "additionalProperties": false
+        },
+        "evaluated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "canonical_job_id",
+        "job_version_id",
+        "pipeline_run_id",
+        "gate_version",
+        "status",
+        "workability_facts",
+        "evaluated_at"
+      ],
+      "additionalProperties": false
+    }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"
 }

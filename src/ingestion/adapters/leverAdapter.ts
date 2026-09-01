@@ -2,7 +2,7 @@ import { BaseSourceAdapter, AdapterResult } from "./baseAdapter.js";
 import { ExtractedJob, SCHEMA_VERSION } from "../../contracts/index.js";
 
 export class LeverAdapter extends BaseSourceAdapter {
-  sourceName = "LEVER";
+  sourceName = "LEVER" as const;
   private siteToken: string;
 
   constructor(siteToken: string = "spotify") {

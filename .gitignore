@@ -10,6 +10,11 @@ coverage/
 
 # Private and generated files
 private/
+data/private/
+config/private/
+config/policies.local.yml
+data/title_ledger.private.json
+data/profile_evidence.private.json
 master_profile.json
 my_profile.md
 *.docx

@@ -209,17 +209,33 @@ def fetch_rejected_jobs_from_db():
                 c.normalized_title AS title,
                 c.company_name AS company,
                 c.canonical_url AS careers_portal_url,
+                COALESCE(ro.source_name, 'UNKNOWN') AS source,
                 c.processing_status AS status,
                 c.rejection_reason,
                 gd.decision AS gate_status,
                 gd.rejection_codes,
-                gd.evidence_quotes,
+                gd.evidence_quotes AS gate_evidence_quotes,
+                jv.description_text AS description,
+                (ae.full_evaluation_payload->>'nd_friendly_score')::numeric AS nd_friendly_score,
+                (ae.full_evaluation_payload->>'politics_stress_score')::numeric AS politics_stress_score,
+                (ae.full_evaluation_payload->>'sensory_overload_index')::numeric AS sensory_overload_index,
                 c.created_at::text AS "postedDate"
             FROM canonical_jobs c
-            LEFT JOIN (
-                SELECT DISTINCT ON (canonical_job_id) canonical_job_id, decision, rejection_codes, evidence_quotes
-                FROM gate_decisions ORDER BY canonical_job_id, created_at DESC
-            ) gd ON gd.canonical_job_id = c.id
+            LEFT JOIN job_versions jv ON jv.id = c.latest_job_version_id
+            LEFT JOIN LATERAL (
+                SELECT source_name FROM raw_job_observations
+                WHERE job_version_id = jv.id ORDER BY retrieved_at DESC LIMIT 1
+            ) ro ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT decision, rejection_codes, evidence_quotes FROM gate_decisions
+                WHERE canonical_job_id = c.id AND job_version_id = jv.id
+                ORDER BY created_at DESC LIMIT 1
+            ) gd ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT full_evaluation_payload FROM ai_evaluations
+                WHERE canonical_job_id = c.id AND job_version_id = jv.id
+                ORDER BY evaluated_at DESC LIMIT 1
+            ) ae ON TRUE
             WHERE c.processing_status IN ('HARD_REJECTED', 'MANUALLY_REMOVED')
             ORDER BY c.created_at DESC
             LIMIT 50
@@ -608,6 +624,7 @@ def fetch_company_analytics_from_db():
 
 # Fetch data
 jobs_list = fetch_jobs_from_db()
+rejected_jobs_audit = fetch_rejected_jobs_from_db()
 
 # Title
 st.title("💼 Job Decision Engine — Streamlit Console (v4.1)")
@@ -779,7 +796,7 @@ with tab_dashboard:
 
         sorted_filtered_jobs = sorted(filtered_jobs, key=status_sort_key)
         active_jobs = [j for j in sorted_filtered_jobs if j.get("status") != "REJECTED"]
-        rejected_jobs = [j for j in sorted_filtered_jobs if j.get("status") == "REJECTED"]
+        rejected_jobs = rejected_jobs_audit
 
         st.subheader("📋 Available Listings Vault")
         if not active_jobs and not rejected_jobs:
@@ -847,7 +864,14 @@ with tab_dashboard:
                         with st.popover(f"🔴 {title} — {company}"):
                             st.markdown(f"**Source Board:** `{job.get('source')}`")
                             st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
-                            st.markdown(f"**Rejected Score:** `{score}/100`")
+                            st.markdown(f"**Status:** `{job.get('status')}` | **Gate:** `{job.get('gate_status') or 'N/A'}`")
+                            st.markdown(f"**Reason Codes:** {', '.join(job.get('rejection_codes') or []) or 'N/A'}")
+                            st.markdown(f"**Evidence:** {'; '.join(job.get('gate_evidence_quotes') or []) or job.get('rejection_reason') or 'N/A'}")
+                            st.markdown(
+                                f"**Autonomy:** {job.get('nd_friendly_score') or 'N/A'} | "
+                                f"**Politics:** {job.get('politics_stress_score') or 'N/A'} | "
+                                f"**Sensory:** {job.get('sensory_overload_index') or 'N/A'}"
+                            )
                             
                             desc_text = job.get("description", "")
                             parsed_desc = None
@@ -862,18 +886,9 @@ with tab_dashboard:
                                     pass
                             st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"rej_desc_{idx}")
                             
-                            if st.button("🗑️ Delete Listing Permanent", key=f"rej_del_{job.get('id') or idx}"):
-                                try:
-                                    conn = get_db_connection()
-                                    cursor = conn.cursor()
-                                    cursor.execute("DELETE FROM jobs WHERE id = %s", (job.get('id'),))
-                                    conn.commit()
-                                    cursor.close()
-                                    conn.close()
-                                    st.success("Permanently deleted!")
+                            if job.get("status") != "MANUALLY_REMOVED" and st.button("🗑️ Remove Listing", key=f"rej_del_{job.get('id') or idx}"):
+                                if delete_job_from_db(job.get("id")):
                                     st.rerun()
-                                except Exception as e:
-                                    st.error(f"Failed to permanently delete: {e}")
                     if len(rejected_jobs) > display_limit:
                         st.caption(f"⚠️ Showing first {display_limit} rejected listings to maintain UI performance. Use the search inputs above to filter down further.")
 

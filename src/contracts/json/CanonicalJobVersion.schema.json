@@ -1,7 +1,94 @@
 {
   "$ref": "#/definitions/CanonicalJobVersion",
   "definitions": {
-    "CanonicalJobVersion": {}
+    "CanonicalJobVersion": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1.0.0",
+          "default": "1.0.0"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "normalized_title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "location_summary": {
+          "type": "string",
+          "default": "Unknown"
+        },
+        "workplace_type": {
+          "type": "string",
+          "enum": [
+            "REMOTE",
+            "HYBRID",
+            "ONSITE",
+            "UNKNOWN"
+          ],
+          "default": "UNKNOWN"
+        },
+        "employment_type": {
+          "type": "string",
+          "default": "UNKNOWN"
+        },
+        "description_text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version_number": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "default": 1
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "processing_status": {
+          "type": "string",
+          "enum": [
+            "RAW_STAGED",
+            "HARD_REJECTED",
+            "NEEDS_VERIFICATION",
+            "PREQUALIFIED",
+            "SEMANTIC_SHORTLISTED",
+            "QUEUED_FOR_AI",
+            "DEFERRED_BUDGET",
+            "EVALUATING",
+            "AI_EVALUATED",
+            "RETRY_WAIT",
+            "NEEDS_MANUAL_REVIEW"
+          ],
+          "default": "RAW_STAGED"
+        }
+      },
+      "required": [
+        "canonical_job_id",
+        "job_version_id",
+        "company_name",
+        "normalized_title",
+        "canonical_url",
+        "description_text",
+        "observed_at"
+      ],
+      "additionalProperties": false
+    }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"
 }

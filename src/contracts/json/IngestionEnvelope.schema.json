@@ -1,7 +1,67 @@
 {
   "$ref": "#/definitions/IngestionEnvelope",
   "definitions": {
-    "IngestionEnvelope": {}
+    "IngestionEnvelope": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1.0.0",
+          "default": "1.0.0"
+        },
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "GMAIL_ALERT",
+            "GREENHOUSE",
+            "LEVER",
+            "ASHBY",
+            "HIMALAYAS",
+            "JOBICY",
+            "REMOTIVE",
+            "WE_WORK_REMOTELY",
+            "STARTUP_JOBS",
+            "MANUAL_IMPORT",
+            "MANUAL_STREAMLIT",
+            "LINKEDIN"
+          ]
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "raw_payload_hash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "raw_payload": {
+          "type": "string",
+          "minLength": 1
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {},
+          "default": {}
+        }
+      },
+      "required": [
+        "source_type",
+        "source_id",
+        "source_run_id",
+        "observed_at",
+        "raw_payload_hash",
+        "raw_payload"
+      ],
+      "additionalProperties": false
+    }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"
 }

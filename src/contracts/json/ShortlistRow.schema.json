@@ -1,7 +1,289 @@
 {
   "$ref": "#/definitions/ShortlistRow",
   "definitions": {
-    "ShortlistRow": {}
+    "ShortlistRow": {
+      "type": "object",
+      "properties": {
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "GMAIL_ALERT",
+            "GREENHOUSE",
+            "LEVER",
+            "ASHBY",
+            "HIMALAYAS",
+            "JOBICY",
+            "REMOTIVE",
+            "WE_WORK_REMOTELY",
+            "STARTUP_JOBS",
+            "MANUAL_IMPORT",
+            "MANUAL_STREAMLIT",
+            "LINKEDIN"
+          ],
+          "default": "GMAIL_ALERT"
+        },
+        "location": {
+          "type": "string",
+          "default": "Unknown"
+        },
+        "workplace_type": {
+          "type": "string",
+          "default": "UNKNOWN"
+        },
+        "employment_type": {
+          "type": "string",
+          "default": "UNKNOWN"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "gate_status": {
+          "type": "string",
+          "enum": [
+            "PASS",
+            "NEEDS_VERIFICATION",
+            "HARD_REJECT"
+          ]
+        },
+        "rejection_codes": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gate_evidence_quotes": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "primary_lane": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "CORE_AI_DATA",
+                "LEGAL_REGTECH",
+                "HEALTH_BIO_PHARMA",
+                "INVESTMENT_MARKETS_FINTECH",
+                "UNCLASSIFIED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secondary_lanes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ShortlistRow/properties/primary_lane/anyOf/0"
+          },
+          "default": []
+        },
+        "lane_confidence": {
+          "type": "string",
+          "enum": [
+            "High",
+            "Medium",
+            "Low",
+            "None"
+          ],
+          "default": "None"
+        },
+        "priority_score": {
+          "type": "number",
+          "default": 0
+        },
+        "processing_status": {
+          "type": "string"
+        },
+        "nd_friendly_score": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "politics_stress_score": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sensory_overload_index": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "next_action": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "strategic_value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "recommended_cv_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "evaluation_summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "eval_provider": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "eval_is_fallback": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "version_mismatch": {
+          "type": "boolean",
+          "default": false
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "evaluated_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lane_matches": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {}
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "workability_facts": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {}
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "queue_status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "canonical_job_id",
+        "job_version_id",
+        "title",
+        "company",
+        "canonical_url",
+        "gate_status",
+        "primary_lane",
+        "processing_status",
+        "observed_at"
+      ],
+      "additionalProperties": false
+    }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"
 }

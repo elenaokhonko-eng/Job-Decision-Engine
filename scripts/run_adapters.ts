@@ -7,10 +7,44 @@ import { GreenhouseAdapter } from "../src/ingestion/adapters/greenhouseAdapter.j
 import { AshbyAdapter } from "../src/ingestion/adapters/ashbyAdapter.js";
 import { LeverAdapter } from "../src/ingestion/adapters/leverAdapter.js";
 import { HimalayasAdapter } from "../src/ingestion/adapters/himalayasAdapter.js";
+import { JobicyAdapter } from "../src/ingestion/adapters/jobicyAdapter.js";
+import { RemotiveAdapter } from "../src/ingestion/adapters/remotiveAdapter.js";
+import { createWeWorkRemotelyAdapter } from "../src/ingestion/adapters/attributedRssAdapter.js";
+import { AdapterResult, BaseSourceAdapter } from "../src/ingestion/adapters/baseAdapter.js";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
+
+async function stageAdapterJobs(broker: SourceBroker, result: AdapterResult): Promise<number> {
+  let staged = 0;
+  for (const job of result.jobs) {
+    const stableExternalId = job.source_external_id ||
+      `${result.sourceName.toLowerCase()}-${crypto.createHash("sha256").update(job.canonical_apply_url || `${job.title}${job.company_name}`).digest("hex").substring(0, 16)}`;
+    await broker.processObservation(
+      {
+        sourceName: result.sourceName,
+        sourceExternalId: stableExternalId,
+        sourceUrl: job.canonical_apply_url,
+        retrievedAt: new Date().toISOString(),
+        companyName: job.company_name,
+        title: job.title,
+        descriptionRaw: job.description_raw,
+        locationRaw: job.location_raw,
+        workplaceTypeRaw: job.workplace_type_raw,
+        employmentTypeRaw: job.employment_type_raw,
+        compensationRaw: job.compensation_raw,
+        canonicalApplyUrl: job.canonical_apply_url,
+        sourceLane: "UNKNOWN",
+        searchPlanVersion: "1.0",
+        rawPayload: job.raw_payload ?? job
+      },
+      job.raw_payload ?? job
+    );
+    staged++;
+  }
+  return staged;
+}
 
 export async function runAdapters(): Promise<{ totalDiscovered: number; totalStaged: number; errors: number; status: "HEALTHY" | "DEGRADED" | "FAILED" }> {
   console.log("====================================================");
@@ -156,6 +190,51 @@ export async function runAdapters(): Promise<{ totalDiscovered: number; totalSta
     console.error("  ❌ Error polling Himalayas:", himErr.message || himErr);
     failedSources.push("Himalayas");
     errorCount++;
+  }
+
+  // 3. Poll configured public API/RSS sources.
+  const sourcesPath = path.resolve(process.cwd(), "config/sources.yml");
+  if (fs.existsSync(sourcesPath)) {
+    const sourceDoc = yaml.load(fs.readFileSync(sourcesPath, "utf8")) as any;
+    for (const source of sourceDoc?.sources ?? []) {
+      if (!source.enabled || source.id === "HIMALAYAS") continue;
+      enabledSourceCount++;
+
+      let adapter: BaseSourceAdapter | null = null;
+      if (source.id === "JOBICY") adapter = new JobicyAdapter(source.endpoint);
+      if (source.id === "REMOTIVE") adapter = new RemotiveAdapter(source.endpoint);
+      if (source.id === "WE_WORK_REMOTELY") adapter = createWeWorkRemotelyAdapter(source.endpoint);
+      if (!adapter) {
+        broker.recordError(`Unsupported configured source: ${source.id}`);
+        failedSources.push(source.id);
+        errorCount++;
+        continue;
+      }
+
+      console.log(`\n📡 Polling ${source.id} (${source.type})...`);
+      try {
+        const result = await adapter.fetchJobs({ limit: source.rate_limit_per_run ?? 50 });
+        if (!result.success) {
+          const detail = `${result.error || "unknown failure"}${result.isRateLimited ? " [rate-limited]" : ""}`;
+          broker.recordError(`${source.id}: ${detail}`);
+          failedSources.push(source.id);
+          errorCount++;
+          console.warn(`  ⚠️ ${source.id} failed: ${detail}`);
+          continue;
+        }
+
+        const staged = await stageAdapterJobs(broker, result);
+        totalDiscovered += result.totalFetched;
+        totalStaged += staged;
+        successfulSources.push(source.id);
+        console.log(`  -> Fetched ${result.totalFetched}; valid ${result.jobs.length}; quarantined ${result.quarantined ?? 0}; staged ${staged}`);
+      } catch (err: any) {
+        broker.recordError(`${source.id}: ${err.message || err}`);
+        failedSources.push(source.id);
+        errorCount++;
+        console.error(`  ❌ ${source.id} failed: ${err.message || err}`);
+      }
+    }
   }
 
   const finalStatus: "HEALTHY" | "DEGRADED" | "FAILED" = 

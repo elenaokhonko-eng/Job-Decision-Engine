@@ -9,6 +9,8 @@
     "eval:run": "tsx scripts/evaluate_jobs.ts",
     "docs:cv": "tsx scripts/generate_cv.ts",
     "docs:cover-letter": "tsx scripts/generate_cover_letter.ts",
+    "contracts:export": "tsx scripts/export_contracts.ts",
+    "contracts:check": "npm run contracts:export && git diff --exit-code -- src/contracts/json",
     "test": "vitest run",
     "eval:golden": "tsx scripts/run_evals.ts",
     "lint": "tsc --noEmit"
@@ -24,6 +26,7 @@
     "docx": "^9.7.1",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
+    "fast-xml-parser": "^5.11.1",
     "imapflow": "^1.4.7",
     "openai": "^4.30.0",
     "pdf-parse": "^2.4.5",
@@ -32,7 +35,7 @@
     "puppeteer": "^25.9.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "zod": "^3.23.8",
+    "zod": "^3.25.76",
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {

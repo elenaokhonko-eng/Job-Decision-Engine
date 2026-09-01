@@ -1,17 +1,6 @@
-export type SourceName = 
-  | "greenhouse"
-  | "GREENHOUSE"
-  | "ashby"
-  | "ASHBY"
-  | "lever"
-  | "LEVER"
-  | "himalayas"
-  | "HIMALAYAS"
-  | "startup_jobs"
-  | "jobicy"
-  | "remotive"
-  | "email_alert"
-  | "GMAIL_ALERT";
+import type { SourceName } from "../contracts/index.js";
+
+export type { SourceName };
 
 export interface RawJobObservation {
   sourceRunId: string;

@@ -63,6 +63,9 @@ jobs:
     - name: Run linter checks
       run: npm run lint
 
+    - name: Verify generated contract schemas
+      run: npm run contracts:check
+
     - name: Initialize Database
       env:
         DATABASE_URL: postgres://test:password@localhost:5432/testdb

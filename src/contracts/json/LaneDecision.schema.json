@@ -1,7 +1,108 @@
 {
   "$ref": "#/definitions/LaneDecision",
   "definitions": {
-    "LaneDecision": {}
+    "LaneDecision": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1.0.0",
+          "default": "1.0.0"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pipeline_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "model_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "primary_lane": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "CORE_AI_DATA",
+                "LEGAL_REGTECH",
+                "HEALTH_BIO_PHARMA",
+                "INVESTMENT_MARKETS_FINTECH",
+                "UNCLASSIFIED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secondary_lanes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LaneDecision/properties/primary_lane/anyOf/0"
+          },
+          "default": []
+        },
+        "lane_confidence": {
+          "type": "string",
+          "enum": [
+            "High",
+            "Medium",
+            "Low",
+            "None"
+          ]
+        },
+        "semantic_scores": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number"
+          },
+          "propertyNames": {
+            "enum": [
+              "CORE_AI_DATA",
+              "LEGAL_REGTECH",
+              "HEALTH_BIO_PHARMA",
+              "INVESTMENT_MARKETS_FINTECH",
+              "UNCLASSIFIED"
+            ]
+          },
+          "default": {
+            "CORE_AI_DATA": 0,
+            "LEGAL_REGTECH": 0,
+            "HEALTH_BIO_PHARMA": 0,
+            "INVESTMENT_MARKETS_FINTECH": 0,
+            "UNCLASSIFIED": 0
+          }
+        },
+        "lane_evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "evaluated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "canonical_job_id",
+        "job_version_id",
+        "pipeline_run_id",
+        "model_version",
+        "primary_lane",
+        "lane_confidence",
+        "evaluated_at"
+      ],
+      "additionalProperties": false
+    }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"
 }

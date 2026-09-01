@@ -1,0 +1,25 @@
+{
+  "fixture_notice": "Synthetic data only. Companies, jobs, compensation, and descriptions are fictional.",
+  "jobs": [
+    {
+      "id": "synthetic-job-1",
+      "title": "Principal AI Platform Architect",
+      "company": "Example Systems Pte Ltd",
+      "source": "MANUAL_IMPORT",
+      "salaryRange": "SGD 20,000 - 24,000 / month",
+      "postedDate": "2026-01-15",
+      "location": "Singapore (Hybrid)",
+      "description": "Design and build versioned AI platform services with deterministic policy gates and auditable model evaluation."
+    },
+    {
+      "id": "synthetic-job-2",
+      "title": "Senior Bioinformatics Data Engineer",
+      "company": "Example Bio Research Ltd",
+      "source": "MANUAL_IMPORT",
+      "salaryRange": "SGD 14,000 - 18,000 / month",
+      "postedDate": "2026-01-16",
+      "location": "Remote",
+      "description": "Build reproducible scientific data pipelines for non-clinical research datasets."
+    }
+  ]
+}

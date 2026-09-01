@@ -2,13 +2,29 @@ import { z } from "zod";
 
 export const SCHEMA_VERSION = "1.0.0";
 
+export const SourceNameSchema = z.enum([
+  "GMAIL_ALERT",
+  "GREENHOUSE",
+  "LEVER",
+  "ASHBY",
+  "HIMALAYAS",
+  "JOBICY",
+  "REMOTIVE",
+  "WE_WORK_REMOTELY",
+  "STARTUP_JOBS",
+  "MANUAL_IMPORT",
+  "MANUAL_STREAMLIT",
+  "LINKEDIN"
+]);
+export type SourceName = z.infer<typeof SourceNameSchema>;
+
 /**
  * 1. Ingestion Envelope
  * Preserves raw input payload, source identity, and cryptographic hash before extraction.
  */
 export const IngestionEnvelopeSchema = z.object({
   schema_version: z.literal(SCHEMA_VERSION).default(SCHEMA_VERSION),
-  source_type: z.enum(["GMAIL_ALERT", "GREENHOUSE", "LEVER", "ASHBY", "HIMALAYAS", "STARTUP_JOBS", "MANUAL_IMPORT"]),
+  source_type: SourceNameSchema,
   source_id: z.string().min(1),
   source_run_id: z.string().uuid(),
   observed_at: z.string().datetime(),
@@ -24,6 +40,7 @@ export type IngestionEnvelope = z.infer<typeof IngestionEnvelopeSchema>;
  */
 export const ExtractedJobSchema = z.object({
   schema_version: z.literal(SCHEMA_VERSION).default(SCHEMA_VERSION),
+  source_external_id: z.string().min(1).optional(),
   company_name: z.string().min(1),
   title: z.string().min(1),
   location_raw: z.string().default("Unknown"),
@@ -32,6 +49,10 @@ export const ExtractedJobSchema = z.object({
   compensation_raw: z.string().default("UNKNOWN"),
   canonical_apply_url: z.string().url().or(z.string().min(1)),
   description_raw: z.string().min(1),
+  published_at: z.string().datetime().optional(),
+  feed_delay_hours: z.number().nonnegative().optional(),
+  source_attribution: z.string().min(1).optional(),
+  raw_payload: z.unknown().optional(),
 });
 export type ExtractedJob = z.infer<typeof ExtractedJobSchema>;
 
@@ -41,7 +62,7 @@ export type ExtractedJob = z.infer<typeof ExtractedJobSchema>;
  */
 export const JobObservationSchema = z.object({
   id: z.string().uuid(),
-  source_type: z.string().min(1),
+  source_type: SourceNameSchema,
   source_id: z.string().min(1),
   source_run_id: z.string().uuid(),
   observed_at: z.string().datetime(),
@@ -177,7 +198,7 @@ export const EvaluationQueueItemSchema = z.object({
   job_version_id: z.string().min(1),
   lane: LaneEnum,
   priority_score: z.number(),
-  status: z.enum(["PENDING", "EVALUATING", "COMPLETED", "RETRY_WAIT", "FAILED", "DEFERRED_BUDGET"]).default("PENDING"),
+  status: z.enum(["PENDING", "EVALUATING", "COMPLETED", "RETRY_WAIT", "FAILED", "DEFERRED_BUDGET", "NEEDS_MANUAL_REVIEW"]).default("PENDING"),
   lease_id: z.string().uuid().nullable().default(null),
   lease_expires_at: z.string().datetime().nullable().default(null),
   attempt_count: z.number().int().nonnegative().default(0),
@@ -231,9 +252,14 @@ export const ShortlistRowSchema = z.object({
   title: z.string().min(1),
   company: z.string().min(1),
   canonical_url: z.string().min(1),
+  source: SourceNameSchema.default("GMAIL_ALERT"),
   location: z.string().default("Unknown"),
   workplace_type: z.string().default("UNKNOWN"),
+  employment_type: z.string().default("UNKNOWN"),
+  description: z.string().nullable().default(null),
   gate_status: z.enum(["PASS", "NEEDS_VERIFICATION", "HARD_REJECT"]),
+  rejection_codes: z.array(z.string()).nullable().default(null),
+  gate_evidence_quotes: z.array(z.string()).nullable().default(null),
   primary_lane: LaneEnum.nullable(),
   secondary_lanes: z.array(LaneEnum).default([]),
   lane_confidence: z.enum(["High", "Medium", "Low", "None"]).default("None"),
@@ -241,10 +267,18 @@ export const ShortlistRowSchema = z.object({
   processing_status: z.string(),
   nd_friendly_score: z.number().int().min(0).max(100).nullable().default(null),
   politics_stress_score: z.number().int().min(0).max(100).nullable().default(null),
+  sensory_overload_index: z.number().int().min(0).max(100).nullable().default(null),
   next_action: z.string().nullable().default(null),
   strategic_value: z.string().nullable().default(null),
   recommended_cv_version: z.string().nullable().default(null),
+  evaluation_summary: z.string().nullable().default(null),
+  eval_provider: z.string().nullable().default(null),
+  eval_is_fallback: z.boolean().nullable().default(null),
+  version_mismatch: z.boolean().default(false),
   observed_at: z.string().datetime(),
   evaluated_at: z.string().datetime().nullable().default(null),
+  lane_matches: z.array(z.unknown()).nullable().default(null),
+  workability_facts: z.record(z.unknown()).nullable().default(null),
+  queue_status: z.string().nullable().default(null),
 });
 export type ShortlistRow = z.infer<typeof ShortlistRowSchema>;

@@ -1,7 +1,112 @@
 {
   "$ref": "#/definitions/JobObservation",
   "definitions": {
-    "JobObservation": {}
+    "JobObservation": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "GMAIL_ALERT",
+            "GREENHOUSE",
+            "LEVER",
+            "ASHBY",
+            "HIMALAYAS",
+            "JOBICY",
+            "REMOTIVE",
+            "WE_WORK_REMOTELY",
+            "STARTUP_JOBS",
+            "MANUAL_IMPORT",
+            "MANUAL_STREAMLIT",
+            "LINKEDIN"
+          ]
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "company_name_raw": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title_raw": {
+          "type": "string",
+          "minLength": 1
+        },
+        "location_raw": {
+          "type": "string",
+          "default": "Unknown"
+        },
+        "workplace_type_raw": {
+          "type": "string",
+          "default": "UNKNOWN"
+        },
+        "employment_type_raw": {
+          "type": "string",
+          "default": "UNKNOWN"
+        },
+        "compensation_raw": {
+          "type": "string",
+          "default": "UNKNOWN"
+        },
+        "canonical_apply_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description_text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "raw_payload_hash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "processing_status": {
+          "type": "string",
+          "enum": [
+            "PENDING",
+            "PROCESSED",
+            "PARSE_FAILED",
+            "FETCH_FAILED",
+            "DESCRIPTION_INCOMPLETE"
+          ],
+          "default": "PENDING"
+        },
+        "error_history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "id",
+        "source_type",
+        "source_id",
+        "source_run_id",
+        "observed_at",
+        "company_name_raw",
+        "title_raw",
+        "canonical_apply_url",
+        "description_text",
+        "raw_payload_hash"
+      ],
+      "additionalProperties": false
+    }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"
 }

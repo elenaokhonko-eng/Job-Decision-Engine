@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import fs from "fs";
+import path from "path";
 import {
   IngestionEnvelopeSchema,
   ExtractedJobSchema,
@@ -24,6 +26,29 @@ import {
 import { SHORTLIST_FIELD_LINEAGE, generateFieldLineageMarkdown } from "../../contracts/fieldLineage.js";
 
 describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
+  it("exports structurally non-empty JSON schemas for every boundary contract", () => {
+    const schemaDir = path.resolve(process.cwd(), "src/contracts/json");
+    const expectedNames = [
+      "IngestionEnvelope",
+      "ExtractedJob",
+      "JobObservation",
+      "CanonicalJobVersion",
+      "GateDecision",
+      "LaneDecision",
+      "EvaluationQueueItem",
+      "EvaluationResult",
+      "ShortlistRow"
+    ];
+
+    for (const name of expectedNames) {
+      const json = JSON.parse(fs.readFileSync(path.join(schemaDir, `${name}.schema.json`), "utf-8"));
+      const definition = json.definitions?.[name] ?? json.$defs?.[name] ?? json;
+      expect(definition.type, `${name} must export as an object schema`).toBe("object");
+      expect(Object.keys(definition.properties ?? {}).length, `${name} must have properties`).toBeGreaterThan(0);
+      expect((definition.required ?? []).length, `${name} must have required fields`).toBeGreaterThan(0);
+    }
+  });
+
   it("should successfully parse and validate all 8 canonical boundary fixtures", () => {
     expect(() => IngestionEnvelopeSchema.parse(sampleGmailEnvelope)).not.toThrow();
     expect(() => JobObservationSchema.parse(sampleAtsObservation)).not.toThrow();

@@ -2,7 +2,7 @@ import { BaseSourceAdapter, AdapterResult } from "./baseAdapter.js";
 import { ExtractedJob, SCHEMA_VERSION } from "../../contracts/index.js";
 
 export class AshbyAdapter extends BaseSourceAdapter {
-  sourceName = "ASHBY";
+  sourceName = "ASHBY" as const;
   private orgSlug: string;
 
   constructor(orgSlug: string = "anthropic") {
