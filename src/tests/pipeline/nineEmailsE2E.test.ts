@@ -198,7 +198,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
   it("Integrity — every observation maps to a canonical job version", async () => {
     const unmapped = await countWhere("raw_job_observations",
-      "NOT EXISTS (SELECT 1 FROM job_versions jv WHERE jv.content_hash = raw_job_observations.raw_payload_hash)");
+      "job_version_id IS NULL");
     expect(unmapped).toBe(0);
   });
 });

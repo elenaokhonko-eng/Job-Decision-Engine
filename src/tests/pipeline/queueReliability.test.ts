@@ -93,15 +93,19 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
       [JOB_ID3, "Data Strategy Lead", V_ID_3]
     ]) {
       await q(
-        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane, latest_job_version_id)
-         VALUES ($1, 'ReliabilityTestCo', $2, 'https://test.rl', 'LANE_ROUTED', 'CORE_AI_DATA', $3)
-         ON CONFLICT (id) DO UPDATE SET processing_status = 'LANE_ROUTED', latest_job_version_id = $3`,
-        [id, title, vId]
+        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane)
+         VALUES ($1, 'ReliabilityTestCo', $2, 'https://test.rl', 'LANE_ROUTED', 'CORE_AI_DATA')
+         ON CONFLICT (id) DO UPDATE SET processing_status = 'LANE_ROUTED'`,
+        [id, title]
       );
       await q(
         `INSERT INTO job_versions (id, canonical_job_id, description_text, observed_at)
          VALUES ($1, $2, 'Test job description', NOW())
          ON CONFLICT (id) DO NOTHING`,
+        [vId, id]
+      );
+      await q(
+        `UPDATE canonical_jobs SET latest_job_version_id = $1, updated_at = NOW() WHERE id = $2`,
         [vId, id]
       );
     }
