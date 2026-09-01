@@ -30,7 +30,7 @@
     "imapflow": "^1.4.7",
     "openai": "^4.30.0",
     "pdf-parse": "^2.4.5",
-    "pg": "^8.11.5",
+    "pg": "^8.23.0",
     "playwright": "^1.62.1",
     "puppeteer": "^25.9.0",
     "react": "^19.2.8",
@@ -41,7 +41,7 @@
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.14.0",
-    "@types/pg": "^8.11.5",
+    "@types/pg": "^8.23.1",
     "js-yaml": "^5.2.1",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
