@@ -45,10 +45,10 @@ async function insertCanonicalJob(id: string, title: string): Promise<string> {
     [id, title]
   );
   await q(
-    `INSERT INTO job_versions (id, canonical_job_id, description_text, observed_at)
-     VALUES ($1, $2, 'Test job description', NOW())
+    `INSERT INTO job_versions (id, canonical_job_id, content_hash, description_text, observed_at)
+     VALUES ($1, $2, $3, 'Test job description', NOW())
      ON CONFLICT (id) DO NOTHING`,
-    [versionId, id]
+    [versionId, id, `failure-injection-${id}`]
   );
   await q(
     `UPDATE canonical_jobs SET latest_job_version_id = $1, updated_at = NOW() WHERE id = $2`,
