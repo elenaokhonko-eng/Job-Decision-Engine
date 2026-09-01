@@ -234,13 +234,26 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       );
       expect(after.rows).toHaveLength(1);
 
+      // Migration 008 temporarily repairs unlinked queue rows. Migration 010 then
+      // quarantines synthetic placeholder-linked queue rows and removes them from
+      // active evaluation_queue.
       const queueRows = await client.query(
         `SELECT status, job_version_id FROM evaluation_queue WHERE canonical_job_id = $1`,
         [canonicalJobId]
       );
-      expect(queueRows.rows).toHaveLength(1);
-      expect(queueRows.rows[0].status).toBe("NEEDS_MANUAL_REVIEW");
-      expect(queueRows.rows[0].job_version_id).toBeTruthy();
+      expect(queueRows.rows).toHaveLength(0);
+
+      const quarantinedRows = await client.query(
+        `SELECT canonical_job_id, quarantine_reason, raw_record_payload
+         FROM quarantined_queue_records
+         WHERE canonical_job_id = $1`,
+        [canonicalJobId]
+      );
+      expect(quarantinedRows.rows).toHaveLength(1);
+      expect(quarantinedRows.rows[0].quarantine_reason).toContain("synthetic migration-008 placeholder version");
+      expect(quarantinedRows.rows[0].canonical_job_id).toBe(canonicalJobId);
+      expect(quarantinedRows.rows[0].raw_record_payload).toBeTruthy();
+      expect(quarantinedRows.rows[0].raw_record_payload.canonical_job_id).toBe(canonicalJobId);
     } finally {
       await client.query(`RESET search_path`).catch(() => undefined);
       await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
