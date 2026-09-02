@@ -16,6 +16,9 @@ export interface QuotedProviderOutput {
   provider: string;
   model: string;
   extractorVersion: string;
+  attempts: number;
+  fallbackUsed: boolean;
+  errors: Array<{ provider: string; model: string; error: string }>;
 }
 
 const extractorSchema = (zodToJsonSchema(
@@ -57,5 +60,8 @@ export async function runQuotedRequirementProvider(
     provider: response.provider,
     model: response.model,
     extractorVersion: `quoted_provider_${REQUIREMENTS_SCHEMA_VERSION}`,
+    attempts: response.attempts,
+    fallbackUsed: response.fallbackUsed,
+    errors: response.errors,
   };
 }

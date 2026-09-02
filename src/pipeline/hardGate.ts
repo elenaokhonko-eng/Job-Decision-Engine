@@ -127,14 +127,39 @@ function applyPersistedRequirementGates(
     }
   }
 
-  const textCorpus = deterministicRequirements
+  const functionRequirements = deterministicRequirements.filter(
+    (r) => r.requirement_type === "FUNCTION"
+  );
+  const domainRequirements = deterministicRequirements.filter(
+    (r) => r.requirement_type === "DOMAIN"
+  );
+
+  const hasSemanticSignals = functionRequirements.length > 0 || domainRequirements.length > 0;
+  const semanticCorpus = [...functionRequirements, ...domainRequirements]
     .map((r) => quoteOrText(r).toLowerCase())
     .join(" \n");
-  const techCheck = isTechnicalRole(title, textCorpus);
-  if (!techCheck.isTechnical) {
+
+  let hasTechnicalEvidence = false;
+  if (hasSemanticSignals) {
+    hasTechnicalEvidence = /(engineer|architect|developer|scientist|machine learning|artificial intelligence|ai\b|llm|nlp|data|bioinformatics|genomics|regtech|legaltech|quant|fintech|trading)/i.test(
+      semanticCorpus
+    );
+  } else {
+    const textCorpus = deterministicRequirements
+      .map((r) => quoteOrText(r).toLowerCase())
+      .join(" \n");
+    const techCheck = isTechnicalRole(title, textCorpus);
+    hasTechnicalEvidence = techCheck.isTechnical;
+  }
+
+  if (!hasTechnicalEvidence) {
     return makeReject(
       ["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"],
-      [techCheck.reason || "Axis 1 Failed: Role lacks evidence of technical function"]
+      [
+        hasSemanticSignals
+          ? "Persisted FUNCTION/DOMAIN requirements indicate non-technical scope"
+          : "Axis 1 Failed: Role lacks evidence of technical function",
+      ]
     );
   }
 

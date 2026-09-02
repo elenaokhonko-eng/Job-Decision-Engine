@@ -97,6 +97,68 @@ describe('runRequirementsExtraction', () => {
     expect(summary.errors).toBe(0);
     expect(summary.quotedFailed).toBe(1);
     expect(summary.details[0].warning).toContain('Quote not found');
+    expect(summary.metrics.quotedAttempted).toBe(1);
+    expect(summary.metrics.quotedValidationFailures).toBe(1);
+    expect(summary.metrics.quotedSucceeded).toBe(0);
+    expect(summary.metrics.quotedPassRate).toBe(0);
+  });
+
+  it('tracks quoted provider/model retry metrics and pass-rate', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
+        return {
+          rows: [
+            {
+              canonical_job_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa',
+              job_version_id: 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb',
+              description_text:
+                'Hybrid role. Work rights required. Machine learning engineer for platform systems.',
+            },
+          ],
+        };
+      }
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'DETERMINISTIC'")) {
+        return { rows: [{ id: 'det-run-id-3' }] };
+      }
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'LLM_QUOTED'")) {
+        return { rows: [{ id: 'quoted-run-id-3' }] };
+      }
+      return { rows: [] };
+    });
+
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    const summary = await runRequirementsExtraction(fakePool, {
+      quotedExtractor: async () => ({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        attempts: 2,
+        errors: [{ provider: 'gemini', model: 'gemini-2.0-flash', error: '429' }],
+        payload: {
+          schema_version: '2.0',
+          requirements: [
+            {
+              requirement_key: 'R-001',
+              requirement_type: 'WORK_AUTH',
+              importance: 'MUST',
+              requirement_text: 'Work rights required.',
+              quote_text: 'Work rights required',
+              confidence: 0.91,
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(summary.metrics.quotedAttempted).toBe(1);
+    expect(summary.metrics.quotedSucceeded).toBe(1);
+    expect(summary.metrics.quotedPassRate).toBe(1);
+    expect(summary.metrics.byProviderModel['openai:gpt-4o-mini'].attempts).toBe(1);
+    expect(summary.metrics.byProviderModel['openai:gpt-4o-mini'].retries).toBe(1);
   });
 
   it('is idempotent across reruns for the same job_version with stable requirement keys', async () => {

@@ -264,6 +264,40 @@ export function extractDeterministicRequirements(
     );
   }
 
+  const functionRequirement = findFirstMatch(description, [
+    /\b(machine\s+learning\s+engineer|ml\s+engineer|data\s+engineer|platform\s+engineer|software\s+engineer|ai\s+engineer|research\s+scientist|quant(?:itative)?\s+(?:engineer|developer)|bioinformatics\s+engineer|systems\s+architect|ai\s+architect)\b/i,
+  ]);
+  if (functionRequirement) {
+    const normalized = functionRequirement.quote_text.toUpperCase().replace(/\s+/g, '_');
+    requirements.push(
+      buildRequirement(
+        input,
+        sequence++,
+        'FUNCTION',
+        'Role includes a technical function requirement.',
+        functionRequirement,
+        { function_key: normalized }
+      )
+    );
+  }
+
+  const domainRequirement = findFirstMatch(description, [
+    /\b(machine\s+learning|artificial\s+intelligence|ai\b|llm|nlp|data\s+platform|regtech|legaltech|compliance\s+automation|bioinformatics|genomics|biotech|pharma|quant(?:itative)?|trading|fintech|market\s+data)\b/i,
+  ]);
+  if (domainRequirement) {
+    const normalized = domainRequirement.quote_text.toUpperCase().replace(/\s+/g, '_');
+    requirements.push(
+      buildRequirement(
+        input,
+        sequence++,
+        'DOMAIN',
+        'Role includes a target technical domain requirement.',
+        domainRequirement,
+        { domain_key: normalized }
+      )
+    );
+  }
+
   if (requirements.length === 0) {
     warnings.push('No deterministic requirements identified.');
   }

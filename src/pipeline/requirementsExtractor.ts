@@ -31,6 +31,9 @@ export interface QuotedExtractorResult {
   provider: string;
   model: string;
   extractorVersion?: string;
+  attempts?: number;
+  fallbackUsed?: boolean;
+  errors?: Array<{ provider: string; model: string; error: string }>;
 }
 
 export interface RequirementExtractionStageOptions {
@@ -44,6 +47,24 @@ export interface RequirementExtractionSummary {
   quotedInserted: number;
   quotedFailed: number;
   errors: number;
+  metrics: {
+    quotedAttempted: number;
+    quotedSucceeded: number;
+    quotedValidationFailures: number;
+    quotedProviderFailures: number;
+    retryWaitTransitions: number;
+    quotedPassRate: number;
+    byProviderModel: Record<
+      string,
+      {
+        attempts: number;
+        successes: number;
+        validationFailures: number;
+        providerFailures: number;
+        retries: number;
+      }
+    >;
+  };
   details: Array<{
     canonicalJobId: string;
     jobVersionId: string;
@@ -59,6 +80,53 @@ const QUOTED_VERSION = 'quoted_v1';
 
 function shouldRunQuotedExtractor(): boolean {
   return process.env.REQUIREMENTS_ENABLE_QUOTED === 'true';
+}
+
+function providerModelKey(provider: string, model: string): string {
+  return `${provider || 'unknown'}:${model || 'unknown'}`;
+}
+
+function ensureMetricBucket(
+  summary: RequirementExtractionSummary,
+  provider: string,
+  model: string
+): {
+  attempts: number;
+  successes: number;
+  validationFailures: number;
+  providerFailures: number;
+  retries: number;
+} {
+  const key = providerModelKey(provider, model);
+  if (!summary.metrics.byProviderModel[key]) {
+    summary.metrics.byProviderModel[key] = {
+      attempts: 0,
+      successes: 0,
+      validationFailures: 0,
+      providerFailures: 0,
+      retries: 0,
+    };
+  }
+  return summary.metrics.byProviderModel[key];
+}
+
+function parseProviderFailuresFromError(errorMessage: string): Array<{ provider: string; model: string }> {
+  const marker = 'All model providers failed:';
+  const idx = errorMessage.indexOf(marker);
+  if (idx < 0) {
+    return [];
+  }
+
+  const jsonPart = errorMessage.slice(idx + marker.length).trim();
+  try {
+    const parsed = JSON.parse(jsonPart) as Array<{ provider?: string; model?: string }>;
+    return parsed.map((item) => ({
+      provider: item.provider || 'unknown',
+      model: item.model || 'unknown',
+    }));
+  } catch {
+    return [];
+  }
 }
 
 async function upsertPipelineState(
@@ -222,6 +290,15 @@ export async function runRequirementsExtraction(
     quotedInserted: 0,
     quotedFailed: 0,
     errors: 0,
+    metrics: {
+      quotedAttempted: 0,
+      quotedSucceeded: 0,
+      quotedValidationFailures: 0,
+      quotedProviderFailures: 0,
+      retryWaitTransitions: 0,
+      quotedPassRate: 0,
+      byProviderModel: {},
+    },
     details: [],
   };
 
@@ -293,6 +370,7 @@ export async function runRequirementsExtraction(
         let warning: string | undefined;
 
         if (quotedExtractor) {
+          summary.metrics.quotedAttempted += 1;
           const quotedRunStart = await client.query<{ id: string }>(
             `INSERT INTO requirement_extraction_runs (
                canonical_job_id,
@@ -316,10 +394,23 @@ export async function runRequirementsExtraction(
             });
 
             if (quotedResult?.payload) {
+              const bucket = ensureMetricBucket(
+                summary,
+                quotedResult.provider,
+                quotedResult.model
+              );
+              bucket.attempts += 1;
+
+              const retriesFromAttempts = Math.max(0, (quotedResult.attempts || 1) - 1);
+              const retriesFromErrors = quotedResult.errors?.length || 0;
+              bucket.retries += Math.max(retriesFromAttempts, retriesFromErrors);
+
               const validated = validateQuotedRequirements(job.description_text, quotedResult.payload);
 
               if (!validated.valid) {
                 summary.quotedFailed += 1;
+                summary.metrics.quotedValidationFailures += 1;
+                bucket.validationFailures += 1;
                 warning = validated.issues.map((i) => `${i.requirement_key}: ${i.message}`).join('; ');
 
                 await client.query(
@@ -361,6 +452,8 @@ export async function runRequirementsExtraction(
 
                 quotedInserted = await persistRequirements(client, quotedRequirements);
                 summary.quotedInserted += quotedInserted;
+                summary.metrics.quotedSucceeded += 1;
+                bucket.successes += 1;
 
                 await client.query(
                   `UPDATE requirement_extraction_runs
@@ -392,7 +485,21 @@ export async function runRequirementsExtraction(
             }
           } catch (quotedError) {
             summary.quotedFailed += 1;
+            summary.metrics.quotedProviderFailures += 1;
             warning = quotedError instanceof Error ? quotedError.message : String(quotedError);
+
+            const parsedFailures = parseProviderFailuresFromError(warning);
+            if (parsedFailures.length > 0) {
+              for (const fail of parsedFailures) {
+                const bucket = ensureMetricBucket(summary, fail.provider, fail.model);
+                bucket.providerFailures += 1;
+                bucket.retries += 1;
+              }
+            } else {
+              const bucket = ensureMetricBucket(summary, 'unknown', 'unknown');
+              bucket.providerFailures += 1;
+              bucket.retries += 1;
+            }
 
             await client.query(
               `UPDATE requirement_extraction_runs
@@ -425,6 +532,7 @@ export async function runRequirementsExtraction(
       } catch (error) {
         await client.query('ROLLBACK');
         summary.errors += 1;
+        summary.metrics.retryWaitTransitions += 1;
 
         const errorMessage = error instanceof Error ? error.message : String(error);
         summary.details.push({
@@ -445,6 +553,20 @@ export async function runRequirementsExtraction(
       client.release();
     }
   }
+
+  summary.metrics.quotedPassRate = summary.metrics.quotedAttempted
+    ? Number((summary.metrics.quotedSucceeded / summary.metrics.quotedAttempted).toFixed(4))
+    : 0;
+
+  console.log('Requirements extraction quoted metrics:', {
+    quotedPassRate: summary.metrics.quotedPassRate,
+    quotedAttempted: summary.metrics.quotedAttempted,
+    quotedSucceeded: summary.metrics.quotedSucceeded,
+    quotedValidationFailures: summary.metrics.quotedValidationFailures,
+    quotedProviderFailures: summary.metrics.quotedProviderFailures,
+    retryWaitTransitions: summary.metrics.retryWaitTransitions,
+    byProviderModel: summary.metrics.byProviderModel,
+  });
 
   return summary;
 }

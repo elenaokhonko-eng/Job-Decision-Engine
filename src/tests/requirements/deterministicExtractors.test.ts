@@ -8,6 +8,7 @@ describe('extractDeterministicRequirements', () => {
       'Must have at least 6 years of experience in production ML systems.',
       'No sponsorship and valid work rights required.',
       'Role includes regular on-call rotation and up to 25% travel.',
+      'Machine learning engineer for data platform systems.',
     ].join(' ');
 
     const result = extractDeterministicRequirements({
@@ -17,11 +18,18 @@ describe('extractDeterministicRequirements', () => {
     });
 
     expect(result.warnings).toEqual([]);
-    expect(result.requirements.length).toBeGreaterThanOrEqual(5);
+    expect(result.requirements.length).toBeGreaterThanOrEqual(7);
 
     const office = result.requirements.find((r) => r.requirement_type === 'OFFICE_DAYS');
     expect(office).toBeTruthy();
     expect(office?.structured_value).toEqual({ office_days_per_week: 5 });
+
+    const functionReq = result.requirements.find((r) => r.requirement_type === 'FUNCTION');
+    const domainReq = result.requirements.find((r) => r.requirement_type === 'DOMAIN');
+    expect(functionReq).toBeTruthy();
+    expect(domainReq).toBeTruthy();
+    expect(functionReq?.structured_value).toHaveProperty('function_key');
+    expect(domainReq?.structured_value).toHaveProperty('domain_key');
 
     for (const req of result.requirements) {
       expect(req.quote_start_offset).toBeGreaterThanOrEqual(0);
