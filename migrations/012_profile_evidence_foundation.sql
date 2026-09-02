@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS profile_facts (
     structured_value JSONB,
     evidence_tier TEXT NOT NULL CHECK (
         evidence_tier IN (
-            'PRODUCTION_PROFESSIONAL',
+            'PROFESSIONAL_PRODUCTION',
             'DEPLOYED_OPEN_SOURCE',
             'APPLIED_PROJECT',
             'COURSE_PROJECT',
