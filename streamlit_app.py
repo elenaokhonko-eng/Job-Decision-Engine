@@ -146,6 +146,28 @@ def show_generated_document_downloads(started_at, key_prefix):
                 key=f"{key_prefix}_{index}",
             )
 
+def validate_shortlist_row_shape(row):
+    required = [
+        "id",
+        "job_version_id",
+        "title",
+        "company",
+        "careers_portal_url",
+        "location",
+        "workplace_type",
+        "status",
+        "postedDate",
+    ]
+    missing = [key for key in required if row.get(key) is None]
+    if missing:
+        return False, f"Missing required fields: {', '.join(missing)}"
+
+    gate = row.get("gate_status")
+    if gate not in ("PASS", "NEEDS_VERIFICATION", "HARD_REJECT"):
+        return False, f"Invalid gate_status: {gate}"
+
+    return True, "OK"
+
 def fetch_jobs_from_db():
     """
     Fetch the canonical shortlist from v_canonical_shortlist (migration 007).
@@ -193,51 +215,50 @@ def fetch_jobs_from_db():
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
-        return [dict(r) for r in rows]
+
+        valid_rows = []
+        invalid_count = 0
+        for row in rows:
+            row_dict = dict(row)
+            ok, reason = validate_shortlist_row_shape(row_dict)
+            if ok:
+                valid_rows.append(row_dict)
+            else:
+                invalid_count += 1
+                st.warning(f"Dropped invalid shortlist row from read model: {reason}")
+
+        if invalid_count > 0:
+            st.warning(f"Filtered out {invalid_count} invalid shortlist rows due to schema mismatch.")
+
+        return valid_rows
     except Exception as e:
         st.error(f"Failed to fetch jobs from database: {e}")
         return []
 
 def fetch_rejected_jobs_from_db():
-    """Fetch hard-rejected and removed jobs for audit inspection."""
+    """Fetch hard-rejected and removed jobs from canonical audit view."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             SELECT
-                c.id,
-                c.normalized_title AS title,
-                c.company_name AS company,
-                c.canonical_url AS careers_portal_url,
-                COALESCE(ro.source_name, 'UNKNOWN') AS source,
-                c.processing_status AS status,
-                c.rejection_reason,
-                gd.decision AS gate_status,
-                gd.rejection_codes,
-                gd.evidence_quotes AS gate_evidence_quotes,
-                jv.description_text AS description,
-                (ae.full_evaluation_payload->>'nd_friendly_score')::numeric AS nd_friendly_score,
-                (ae.full_evaluation_payload->>'politics_stress_score')::numeric AS politics_stress_score,
-                (ae.full_evaluation_payload->>'sensory_overload_index')::numeric AS sensory_overload_index,
-                c.created_at::text AS "postedDate"
-            FROM canonical_jobs c
-            LEFT JOIN job_versions jv ON jv.id = c.latest_job_version_id
-            LEFT JOIN LATERAL (
-                SELECT source_name FROM raw_job_observations
-                WHERE job_version_id = jv.id ORDER BY retrieved_at DESC LIMIT 1
-            ) ro ON TRUE
-            LEFT JOIN LATERAL (
-                SELECT decision, rejection_codes, evidence_quotes FROM gate_decisions
-                WHERE canonical_job_id = c.id AND job_version_id = jv.id
-                ORDER BY created_at DESC LIMIT 1
-            ) gd ON TRUE
-            LEFT JOIN LATERAL (
-                SELECT full_evaluation_payload FROM ai_evaluations
-                WHERE canonical_job_id = c.id AND job_version_id = jv.id
-                ORDER BY evaluated_at DESC LIMIT 1
-            ) ae ON TRUE
-            WHERE c.processing_status IN ('HARD_REJECTED', 'MANUALLY_REMOVED')
-            ORDER BY c.created_at DESC
+                id,
+                title,
+                company,
+                careers_portal_url,
+                source,
+                status,
+                rejection_reason,
+                gate_status,
+                rejection_codes,
+                gate_evidence_quotes,
+                description,
+                nd_friendly_score,
+                politics_stress_score,
+                sensory_overload_index,
+                "postedDate"
+            FROM v_rejected_jobs_audit
+            ORDER BY "postedDate" DESC
             LIMIT 50
         """)
         rows = cursor.fetchall()
@@ -245,6 +266,7 @@ def fetch_rejected_jobs_from_db():
         conn.close()
         return [dict(r) for r in rows]
     except Exception as e:
+        st.error(f"Failed to fetch rejected jobs from database: {e}")
         return []
 
 def delete_job_from_db(job_id):
