@@ -1,23 +1,63 @@
-lane: CORE_AI_DATA
-description: "General AI/data platforms and ML architecture"
-enabled_sources:
-  - greenhouse
-  - ashby
-  - lever
-  - himalayas
-  - startup_jobs
-title_families:
-  - machine learning engineer
-  - applied ai engineer
-  - research engineer
-  - applied scientist
-  - data scientist
-  - ml platform engineer
-  - ai evaluation engineer
-  - agent or rag engineer
-  - data/ai platform architect
-  - model evaluation
-  - training-data
+schema_version: "2.0"
+lane_key: CORE_AI_DATA
+display_name: "Core AI & Data Engineering"
+description: "Hands-on distributed AI systems, LLM infrastructure, data pipelines, MLOps, deep learning research, and technical architecture."
+
+scope:
+  required_function_concepts:
+    any:
+      - AI_ENGINEERING
+      - ML_ENGINEERING
+      - DATA_ENGINEERING
+      - AI_DATA_ARCHITECTURE
+      - AI_SYSTEMS_ARCHITECTURE
+      - LLM_INFRASTRUCTURE
+      - AI_RESEARCH
+
+  included_domain_concepts:
+    any:
+      - AI
+      - MACHINE_LEARNING
+      - DEEP_LEARNING
+      - LLM
+      - NLP
+      - COMPUTER_VISION
+      - DATA_PLATFORM
+      - DATA_ENGINEERING
+      - MLOPS
+      - AI_INFRASTRUCTURE
+
+prototypes:
+  - prototype_key: ai_systems_building
+    text: "Building production AI/ML systems, LLM applications, data platforms and MLOps infrastructure."
+    weight: 1.0
+  - prototype_key: ai_research
+    text: "AI research, deep learning research, computer vision, NLP and ML innovation."
+    weight: 0.9
+
+routing:
+  minimum_domain_score: 0.60
+  minimum_function_score: 0.60
+  minimum_semantic_score: 0.35
+  secondary_lane_threshold: 0.30
+
+sourcing:
+  enabled_sources:
+    - GREENHOUSE
+    - ASHBY
+    - LEVER
+    - HIMALAYAS
+  query_sets:
+    - "remote machine learning engineer"
+    - "remote ai engineer"
+    - "remote data engineer"
+    - "remote mlops engineer"
+
+budget:
+  maximum_ai_interpretations_per_run: 3
+
+documents:
+  include_criteria_snapshot: true
 positive_concepts:
   - machine learning
   - deep learning

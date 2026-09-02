@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Profile Engagements",
+  "description": "Employment, founder, contractor, and research engagements",
+  "type": "object",
+  "required": ["schema_version", "profile_key", "engagements"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "profile_key": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]{0,63}$"
+    },
+    "engagements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "engagement_key",
+          "organization_legal_name",
+          "role_title",
+          "engagement_type",
+          "experience_class",
+          "start_date",
+          "is_current",
+          "hours_per_week_band",
+          "summary",
+          "verification_status"
+        ],
+        "properties": {
+          "engagement_key": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.]{1,127}$"
+          },
+          "organization_legal_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "brand_or_program_name": {
+            "type": ["string", "null"],
+            "maxLength": 256
+          },
+          "role_title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "engagement_type": {
+            "type": "string",
+            "enum": ["EMPLOYEE", "FOUNDER_OPERATOR", "CONTRACTOR", "RESEARCHER"]
+          },
+          "experience_class": {
+            "type": "string",
+            "enum": [
+              "PROFESSIONAL_PRODUCTION",
+              "DEPLOYED_OPEN_SOURCE",
+              "APPLIED_PROJECT",
+              "COURSE_PROJECT",
+              "KNOWLEDGE_ONLY"
+            ]
+          },
+          "operating_model": {
+            "type": ["string", "null"],
+            "examples": ["TECHNOLOGY_OWNER_AND_NONPROFIT_SOCIAL_IMPACT_ARM"]
+          },
+          "start_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "end_date": {
+            "type": ["string", "null"],
+            "format": "date"
+          },
+          "is_current": {
+            "type": "boolean"
+          },
+          "production_start_date": {
+            "type": ["string", "null"],
+            "format": "date"
+          },
+          "first_external_user_date": {
+            "type": ["string", "null"],
+            "format": "date"
+          },
+          "hours_per_week_band": {
+            "type": "string",
+            "enum": ["FULL_TIME", "SUBSTANTIAL_PART_TIME", "LIMITED"]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 1024,
+            "description": "Factual, not marketing copy"
+          },
+          "verification_status": {
+            "type": "string",
+            "enum": ["VERIFIED", "SELF_ATTESTED", "UNVERIFIED"]
+          },
+          "evidence_source_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

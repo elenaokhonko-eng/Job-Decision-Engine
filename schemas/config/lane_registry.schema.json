@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Lane Registry",
+  "description": "Unified registry of all available career lanes",
+  "type": "object",
+  "required": ["schema_version", "config_version", "lanes"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "config_version": {
+      "type": "string",
+      "pattern": "^lanes_\\d+\\.\\d+$"
+    },
+    "lanes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["lane_key", "config_file", "enabled_by_default"],
+        "properties": {
+          "lane_key": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+          },
+          "config_file": {
+            "type": "string",
+            "pattern": "^[a-z_]+\\.yml$"
+          },
+          "enabled_by_default": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

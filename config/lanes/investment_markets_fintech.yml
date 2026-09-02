@@ -1,43 +1,84 @@
-lane: INVESTMENT_MARKETS_FINTECH
-description: "Investment management, asset management, wealth management, public markets, institutional investing, WealthTech, and market infrastructure."
-enabled_sources:
-  - greenhouse
-  - ashby
-  - lever
-  - himalayas
-  - startup_jobs
-title_families:
-  - quantitative research
-  - time-series ml
-  - investment-data engineering
-  - portfolio analytics
-  - optimisation
-  - risk modelling
-  - trading technology
-  - market-data platforms
-  - investment-research automation
-  - wealthtech
-  - investtech
-  - asset/fund-management ai
-  - digital-asset analytics
-  - custody
-  - trading infrastructure
-positive_concepts:
-  - time-series modelling
-  - institutional investing
-  - capital markets
-  - securities
-  - robo-advisory
-  - market data
-negative_concepts:
-  - payments
-  - cards
-  - consumer lending
-  - bnpl
-  - corporate finance
-  - treasury
-  - m&a
-  - private equity
+schema_version: "2.0"
+lane_key: INVESTMENT_MARKETS_FINTECH
+display_name: "Investment, Markets & FinTech"
+description: "AI, data, quantitative and platform work in investing, asset management, institutional markets, and investment-focused fintech."
+
+scope:
+  required_function_concepts:
+    any:
+      - AI_ENGINEERING
+      - ML_ENGINEERING
+      - QUANTITATIVE_RESEARCH
+      - DATA_ENGINEERING
+      - INVESTMENT_DATA_PLATFORM
+      - AI_DATA_ARCHITECTURE
+      - TIME_SERIES_MODELLING
+
+  included_domain_concepts:
+    any:
+      - INVESTMENT_MANAGEMENT
+      - ASSET_MANAGEMENT
+      - FUND_MANAGEMENT
+      - WEALTH_MANAGEMENT
+      - PORTFOLIO_MANAGEMENT
+      - INSTITUTIONAL_INVESTING
+      - PUBLIC_MARKETS
+      - CAPITAL_MARKETS
+      - TRADING
+      - MARKET_DATA
+      - DIGITAL_ASSETS
+      - WEALTHTECH
+      - INVESTTECH
+      - TRADING_INFRASTRUCTURE
+
+  excluded_domain_concepts:
+    any:
+      - PAYMENTS
+      - CARDS
+      - MERCHANT_ACQUIRING
+      - REMITTANCE
+      - BNPL
+      - CONSUMER_LENDING
+      - CORPORATE_FINANCE
+      - TREASURY
+      - M_AND_A
+      - PRIVATE_EQUITY
+      - INVESTMENT_BANKING
+
+prototypes:
+  - prototype_key: investment_quant_ml
+    text: "Quantitative ML research, time-series modelling, portfolio analytics and investment data."
+    weight: 1.0
+  - prototype_key: investment_platform
+    text: "Investment data platforms, market data engineering, trading technology and AI architecture."
+    weight: 1.0
+  - prototype_key: investment_wealthtech
+    text: "WealthTech, InvestTech, portfolio platforms and investment research automation."
+    weight: 0.8
+
+routing:
+  minimum_domain_score: 0.60
+  minimum_function_score: 0.60
+  minimum_semantic_score: 0.35
+  secondary_lane_threshold: 0.30
+
+sourcing:
+  enabled_sources:
+    - GREENHOUSE
+    - ASHBY
+    - LEVER
+    - HIMALAYAS
+  query_sets:
+    - "remote quantitative machine learning"
+    - "remote investment data engineer"
+    - "remote asset management ai"
+    - "remote market data platform architect"
+
+budget:
+  maximum_ai_interpretations_per_run: 3
+
+documents:
+  include_criteria_snapshot: true
   - investment banking
   - deal advisory
   - fundraising

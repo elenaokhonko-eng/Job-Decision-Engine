@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Candidate Profile",
+  "description": "Top-level profile metadata and status",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "profile_key",
+    "profile_version",
+    "display_name",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$",
+      "examples": ["2.0"]
+    },
+    "profile_key": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]{0,63}$",
+      "description": "Stable identifier, e.g. elena_okhonko"
+    },
+    "profile_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "professional_headline": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "career_objectives": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 256
+      },
+      "maxItems": 10
+    },
+    "status": {
+      "type": "string",
+      "enum": ["DRAFT", "ACTIVE", "RETIRED"]
+    }
+  },
+  "additionalProperties": false
+}

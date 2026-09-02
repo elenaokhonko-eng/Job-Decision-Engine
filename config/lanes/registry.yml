@@ -1,0 +1,19 @@
+schema_version: "2.0"
+config_version: "lanes_2.0"
+
+lanes:
+  - lane_key: CORE_AI_DATA
+    config_file: core_ai_data.yml
+    enabled_by_default: true
+
+  - lane_key: LEGAL_REGTECH
+    config_file: legal_regtech.yml
+    enabled_by_default: true
+
+  - lane_key: HEALTH_BIO_PHARMA
+    config_file: health_bio_pharma.yml
+    enabled_by_default: true
+
+  - lane_key: INVESTMENT_MARKETS_FINTECH
+    config_file: investment_markets_fintech.yml
+    enabled_by_default: true

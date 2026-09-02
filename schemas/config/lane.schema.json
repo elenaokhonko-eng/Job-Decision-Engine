@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Lane Definition",
+  "description": "Configuration for a single career lane: scope, prototypes, routing, sourcing, budget, documents policy",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "lane_key",
+    "display_name",
+    "description",
+    "scope"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "lane_key": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+    },
+    "display_name": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "required_function_concepts": {
+          "type": "object",
+          "properties": {
+            "any": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "included_domain_concepts": {
+          "type": "object",
+          "properties": {
+            "any": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "excluded_domain_concepts": {
+          "type": "object",
+          "properties": {
+            "any": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "prototypes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["prototype_key", "text", "weight"],
+        "properties": {
+          "prototype_key": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 20
+          },
+          "weight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "properties": {
+        "minimum_domain_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minimum_function_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minimum_semantic_score": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "secondary_lane_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "sourcing": {
+      "type": "object",
+      "properties": {
+        "enabled_sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "query_sets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "maximum_ai_interpretations_per_run": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "documents": {
+      "type": "object",
+      "properties": {
+        "include_criteria_snapshot": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}
