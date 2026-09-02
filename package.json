@@ -7,6 +7,7 @@
     "dev": "tsx server.ts",
     "db:init": "tsx scripts/db_init.ts",
     "eval:run": "tsx scripts/evaluate_jobs.ts",
+    "profile:import": "tsx scripts/import_profile.ts",
     "docs:cv": "tsx scripts/generate_cv.ts",
     "docs:cover-letter": "tsx scripts/generate_cover_letter.ts",
     "contracts:export": "tsx scripts/export_contracts.ts",
