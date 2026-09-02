@@ -45,6 +45,45 @@ describe('runRequirementsExtraction', () => {
     expect(calls.some((sql) => sql.includes('INSERT INTO pipeline_stage_events'))).toBe(true);
   });
 
+  it('accepts an already-connected pg client without calling connect() or releasing it', async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
+        return {
+          rows: [
+            {
+              canonical_job_id: '11111111-1111-4111-8111-111111111111',
+              job_version_id: '22222222-2222-4222-8222-222222222222',
+              description_text: 'Must have work rights.',
+            },
+          ],
+        };
+      }
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'DETERMINISTIC'")) {
+        return { rows: [{ id: 'det-run-id-client' }] };
+      }
+      if (sql.includes('UPDATE requirement_extraction_runs') && Array.isArray(params) && params[0] === 'det-run-id-client') {
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const connect = vi.fn(() => {
+      throw new Error('should not call connect on an already-connected client');
+    });
+    const release = vi.fn(() => undefined);
+    const fakeClient = { query, connect, release } as any;
+
+    const summary = await runRequirementsExtraction(fakeClient);
+
+    expect(summary.discovered).toBe(1);
+    expect(summary.processed).toBe(1);
+    expect(connect).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
   it('records quoted extraction failures without failing deterministic completion', async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {

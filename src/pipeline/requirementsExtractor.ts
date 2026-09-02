@@ -261,6 +261,8 @@ export async function runRequirementsExtraction(
   options: RequirementExtractionStageOptions = {}
 ): Promise<RequirementExtractionSummary> {
   const pool = clientOrPool || defaultPool;
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === 'function' && !('release' in value);
 
   const queryTargetJobs = `
     SELECT
@@ -302,7 +304,8 @@ export async function runRequirementsExtraction(
     details: [],
   };
 
-  const client = 'connect' in pool ? await pool.connect() : pool;
+  const ownsClient = isPool(pool);
+  const client = ownsClient ? await pool.connect() : pool;
   const quotedExtractor = options.quotedExtractor
     ? options.quotedExtractor
     : shouldRunQuotedExtractor()
@@ -549,7 +552,7 @@ export async function runRequirementsExtraction(
       }
     }
   } finally {
-    if ('release' in client && typeof client.release === 'function') {
+    if (ownsClient && typeof client.release === 'function') {
       client.release();
     }
   }
