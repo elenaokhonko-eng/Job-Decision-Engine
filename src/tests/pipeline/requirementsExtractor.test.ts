@@ -98,4 +98,63 @@ describe('runRequirementsExtraction', () => {
     expect(summary.quotedFailed).toBe(1);
     expect(summary.details[0].warning).toContain('Quote not found');
   });
+
+  it('is idempotent across reruns for the same job_version with stable requirement keys', async () => {
+    const insertedKeysByVersion = new Map<string, Set<string>>();
+
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
+        return {
+          rows: [
+            {
+              canonical_job_id: '77777777-7777-4777-8777-777777777777',
+              job_version_id: '88888888-8888-4888-8888-888888888888',
+              description_text:
+                'Mandatory 4 days per week in office and at least 7 years of experience. Full-time role.',
+            },
+          ],
+        };
+      }
+
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'DETERMINISTIC'")) {
+        return { rows: [{ id: 'det-run-id-idempotent' }] };
+      }
+
+      if (sql.includes('INSERT INTO job_requirements') && Array.isArray(params)) {
+        const versionId = String(params[1]);
+        const key = String(params[2]);
+        const existing = insertedKeysByVersion.get(versionId) || new Set<string>();
+        existing.add(key);
+        insertedKeysByVersion.set(versionId, existing);
+        return { rows: [] };
+      }
+
+      return { rows: [] };
+    });
+
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    const first = await runRequirementsExtraction(fakePool);
+    const firstKeySet = new Set(insertedKeysByVersion.get('88888888-8888-4888-8888-888888888888') || []);
+
+    const second = await runRequirementsExtraction(fakePool);
+    const secondKeySet = new Set(insertedKeysByVersion.get('88888888-8888-4888-8888-888888888888') || []);
+
+    expect(first.processed).toBe(1);
+    expect(second.processed).toBe(1);
+    expect([...firstKeySet]).toEqual([...secondKeySet]);
+
+    const requirementInsertSqlCalls = query.mock.calls
+      .map((call: unknown[]) => String(call[0]))
+      .filter((sqlText) => sqlText.includes('INSERT INTO job_requirements'));
+    expect(requirementInsertSqlCalls.length).toBeGreaterThan(0);
+    for (const sqlText of requirementInsertSqlCalls) {
+      expect(sqlText).toContain('ON CONFLICT (job_version_id, requirement_key)');
+    }
+  });
 });

@@ -1,6 +1,11 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { applyGlobalGates } from "../services/criteria.js";
+import {
+  applyGlobalGates,
+  GLOBAL_TITLE_EXCLUSIONS,
+  isTechnicalRole,
+  type GateResult,
+} from "../services/criteria.js";
 import { pgSslConfig } from "../db/pgSsl.js";
 
 dotenv.config();
@@ -11,6 +16,230 @@ const defaultPool = new pg.Pool({
   ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
+interface PersistedRequirement {
+  requirement_key: string;
+  requirement_type: string;
+  requirement_text: string;
+  quote_text: string | null;
+  structured_value: Record<string, unknown> | null;
+}
+
+function makePass(extraFacts?: Partial<GateResult["workability_facts"]>): GateResult {
+  return {
+    passed: true,
+    status: "PASS",
+    rejection_codes: [],
+    evidence_quotes: [],
+    workability_facts: {
+      office_days_min: null,
+      office_days_max: null,
+      travel_pct_max: null,
+      employment_type: "UNKNOWN",
+      location_restriction: null,
+      ...extraFacts,
+    },
+  };
+}
+
+function makeReject(
+  codes: string[],
+  evidence: string[],
+  facts?: Partial<GateResult["workability_facts"]>
+): GateResult {
+  return {
+    passed: false,
+    status: "HARD_REJECT",
+    rejection_code: codes[0],
+    rejection_codes: codes,
+    evidence_quotes: evidence,
+    workability_facts: {
+      office_days_min: null,
+      office_days_max: null,
+      travel_pct_max: null,
+      employment_type: "UNKNOWN",
+      location_restriction: null,
+      ...facts,
+    },
+  };
+}
+
+function makeVerification(
+  codes: string[],
+  evidence: string[],
+  facts?: Partial<GateResult["workability_facts"]>
+): GateResult {
+  return {
+    passed: false,
+    status: "NEEDS_VERIFICATION",
+    rejection_code: codes[0],
+    rejection_codes: codes,
+    evidence_quotes: evidence,
+    workability_facts: {
+      office_days_min: null,
+      office_days_max: null,
+      travel_pct_max: null,
+      employment_type: "UNKNOWN",
+      location_restriction: null,
+      ...facts,
+    },
+  };
+}
+
+function quoteOrText(req: PersistedRequirement): string {
+  return req.quote_text || req.requirement_text;
+}
+
+function detectOfficeDays(req: PersistedRequirement): number | null {
+  const raw = req.structured_value?.office_days_per_week;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw;
+  }
+  const txt = quoteOrText(req);
+  const m = txt.match(/([1-5])\s*days?/i);
+  return m ? Number(m[1]) : null;
+}
+
+function detectTravelPct(req: PersistedRequirement): number | null {
+  const raw = req.structured_value?.max_travel_pct;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw;
+  }
+  const txt = quoteOrText(req);
+  const m = txt.match(/(\d{1,2})%/);
+  return m ? Number(m[1]) : null;
+}
+
+function applyPersistedRequirementGates(
+  job: {
+    title: string;
+    company_name: string;
+    employment_type?: string;
+  },
+  deterministicRequirements: PersistedRequirement[]
+): GateResult {
+  const title = job.title || "";
+  for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
+    if (pattern.test(title)) {
+      return makeReject(
+        ["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"],
+        [`Non-target title exclusion: "${title}"`]
+      );
+    }
+  }
+
+  const textCorpus = deterministicRequirements
+    .map((r) => quoteOrText(r).toLowerCase())
+    .join(" \n");
+  const techCheck = isTechnicalRole(title, textCorpus);
+  if (!techCheck.isTechnical) {
+    return makeReject(
+      ["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"],
+      [techCheck.reason || "Axis 1 Failed: Role lacks evidence of technical function"]
+    );
+  }
+
+  const employmentReq = deterministicRequirements.find((r) => r.requirement_type === "EMPLOYMENT_TYPE");
+  const normalizedEmployment = (employmentReq ? quoteOrText(employmentReq) : (job.employment_type || "")).toLowerCase();
+  if (normalizedEmployment.includes("contract")) {
+    return makeReject(
+      ["GATE_CONTRACT_ROLE"],
+      [employmentReq ? quoteOrText(employmentReq) : "Structured employment_type is CONTRACT"],
+      { employment_type: "CONTRACT" }
+    );
+  }
+
+  const officeReq = deterministicRequirements.find((r) => r.requirement_type === "OFFICE_DAYS");
+  if (officeReq) {
+    const days = detectOfficeDays(officeReq);
+    if (days !== null && days >= 4) {
+      return makeReject(
+        ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
+        [quoteOrText(officeReq)],
+        { office_days_min: days, office_days_max: days }
+      );
+    }
+    if (days === null) {
+      return makeVerification(
+        ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+        [quoteOrText(officeReq)],
+        { office_days_min: null, office_days_max: null }
+      );
+    }
+  }
+
+  const workModeReq = deterministicRequirements.find((r) => r.requirement_type === "WORK_MODE");
+  if (workModeReq) {
+    const mode = quoteOrText(workModeReq).toLowerCase();
+    if (
+      mode.includes("onsite only") ||
+      mode.includes("on-site only") ||
+      mode.includes("fully on-site") ||
+      mode.includes("fully onsite") ||
+      mode.includes("100% on-site") ||
+      mode.includes("100% onsite")
+    ) {
+      return makeReject(
+        ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
+        [quoteOrText(workModeReq)],
+        { office_days_min: 4, office_days_max: 5 }
+      );
+    }
+  }
+
+  const travelReq = deterministicRequirements.find((r) => r.requirement_type === "TRAVEL");
+  if (travelReq) {
+    const travelPct = detectTravelPct(travelReq);
+    const txt = quoteOrText(travelReq).toLowerCase();
+    if ((travelPct !== null && travelPct >= 25) || txt.includes("frequent travel")) {
+      return makeReject(
+        ["GATE_LIFESTYLE_INCOMPATIBLE"],
+        [quoteOrText(travelReq)],
+        { travel_pct_max: travelPct }
+      );
+    }
+  }
+
+  const onCallReq = deterministicRequirements.find((r) => r.requirement_type === "ON_CALL");
+  if (onCallReq) {
+    return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(onCallReq)]);
+  }
+
+  const shiftReq = deterministicRequirements.find((r) => r.requirement_type === "SHIFT_WORK");
+  if (shiftReq) {
+    return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(shiftReq)]);
+  }
+
+  const workAuthReq = deterministicRequirements.find((r) => r.requirement_type === "WORK_AUTH");
+  if (workAuthReq) {
+    const authText = quoteOrText(workAuthReq).toLowerCase();
+    const blockedTerms = ["us only", "australian work rights", "canada only", "eu only", "uk only"];
+    for (const term of blockedTerms) {
+      if (authText.includes(term)) {
+        return makeReject(
+          ["GATE_LOCATION_RESTRICTED"],
+          [quoteOrText(workAuthReq)],
+          { location_restriction: term.toUpperCase() }
+        );
+      }
+    }
+  }
+
+  if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && !officeReq) {
+    return makeVerification(
+      ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+      [quoteOrText(workModeReq)],
+      { office_days_min: null, office_days_max: null }
+    );
+  }
+
+  return makePass({
+    office_days_min: officeReq ? detectOfficeDays(officeReq) : null,
+    office_days_max: officeReq ? detectOfficeDays(officeReq) : null,
+    travel_pct_max: travelReq ? detectTravelPct(travelReq) : null,
+    employment_type: normalizedEmployment.includes("permanent") ? "PERMANENT" : "UNKNOWN",
+  });
+}
+
 export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Promise<{ passed: number; hardRejected: number; needsVerification: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
   const pool = clientOrPool || defaultPool;
@@ -18,13 +247,16 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
   const { rows: stagedJobs } = await pool.query(`
     SELECT c.*, jv.description_text, jv.id AS job_version_id
     FROM canonical_jobs c
-    JOIN LATERAL (
-      SELECT id, description_text
-      FROM job_versions
-      WHERE canonical_job_id = c.id
-      ORDER BY observed_at DESC
-      LIMIT 1
-    ) jv ON TRUE
+    JOIN job_versions jv ON jv.id = COALESCE(
+      c.latest_job_version_id,
+      (
+        SELECT jv2.id
+        FROM job_versions jv2
+        WHERE jv2.canonical_job_id = c.id
+        ORDER BY jv2.observed_at DESC
+        LIMIT 1
+      )
+    )
     WHERE c.processing_status = 'RAW_STAGED'
   `);
 
@@ -51,7 +283,20 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
           employment_type: job.employment_type
         };
 
-        const gateResult = applyGlobalGates(rawJobAdapter as any);
+        const { rows: requirementRows } = await client.query(
+          `SELECT requirement_key, requirement_type, requirement_text, quote_text, structured_value
+           FROM job_requirements
+           WHERE job_version_id = $1
+             AND extractor_type = 'DETERMINISTIC'
+             AND status IN ('EXTRACTED', 'VALIDATED')
+           ORDER BY requirement_key ASC`,
+          [job.job_version_id]
+        );
+
+        const deterministicRequirements = requirementRows as PersistedRequirement[];
+        const gateResult = deterministicRequirements.length > 0
+          ? applyPersistedRequirementGates(rawJobAdapter as any, deterministicRequirements)
+          : applyGlobalGates(rawJobAdapter as any);
 
         let processingStatus: string;
         switch (gateResult.status) {

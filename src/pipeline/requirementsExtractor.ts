@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import { pgSslConfig } from '../db/pgSsl.js';
 import { extractDeterministicRequirements } from '../requirements/deterministicExtractors.js';
 import { validateQuotedRequirements } from '../requirements/quotedRequirementExtractor.js';
+import { runQuotedRequirementProvider } from '../requirements/quotedProvider.js';
 import { JobRequirementSchema } from '../requirements/contracts.js';
 
 dotenv.config();
@@ -55,6 +56,10 @@ export interface RequirementExtractionSummary {
 
 const DETERMINISTIC_VERSION = 'deterministic_v1';
 const QUOTED_VERSION = 'quoted_v1';
+
+function shouldRunQuotedExtractor(): boolean {
+  return process.env.REQUIREMENTS_ENABLE_QUOTED === 'true';
+}
 
 async function upsertPipelineState(
   client: { query: pg.PoolClient['query'] },
@@ -221,6 +226,11 @@ export async function runRequirementsExtraction(
   };
 
   const client = 'connect' in pool ? await pool.connect() : pool;
+  const quotedExtractor = options.quotedExtractor
+    ? options.quotedExtractor
+    : shouldRunQuotedExtractor()
+      ? async (input: QuotedExtractorInvocation) => runQuotedRequirementProvider(input)
+      : undefined;
 
   try {
     for (const job of jobs) {
@@ -282,7 +292,7 @@ export async function runRequirementsExtraction(
         let quotedInserted = 0;
         let warning: string | undefined;
 
-        if (options.quotedExtractor) {
+        if (quotedExtractor) {
           const quotedRunStart = await client.query<{ id: string }>(
             `INSERT INTO requirement_extraction_runs (
                canonical_job_id,
@@ -299,7 +309,7 @@ export async function runRequirementsExtraction(
           );
 
           try {
-            const quotedResult = await options.quotedExtractor({
+            const quotedResult = await quotedExtractor({
               canonicalJobId: job.canonical_job_id,
               jobVersionId: job.job_version_id,
               descriptionText: job.description_text,

@@ -18,7 +18,9 @@ vi.mock('pg', () => {
 });
 
 vi.mock('../../services/criteria.js', () => ({
-  applyGlobalGates: vi.fn()
+  applyGlobalGates: vi.fn(),
+  GLOBAL_TITLE_EXCLUSIONS: [],
+  isTechnicalRole: vi.fn(() => ({ isTechnical: true, hasBuildingEvidence: true }))
 }));
 
 const mPool = new pg.Pool();
@@ -57,7 +59,7 @@ describe('Pipeline Stage: Hard Gates', () => {
     vi.clearAllMocks();
   });
 
-  it('should process RAW_STAGED jobs and mark PREQUALIFIED on pass', async () => {
+  it('should consume persisted deterministic requirements and gate without legacy parser', async () => {
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -71,23 +73,36 @@ describe('Pipeline Stage: Hard Gates', () => {
       ]
     });
 
-    (criteria.applyGlobalGates as any).mockReturnValueOnce(makePassResult());
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // BEGIN
+    (mPool.query as any).mockResolvedValueOnce({
+      rows: [
+        {
+          requirement_key: 'R-001',
+          requirement_type: 'OFFICE_DAYS',
+          requirement_text: 'Requires 2 days in office.',
+          quote_text: '2 days per week in office',
+          structured_value: { office_days_per_week: 2 }
+        }
+      ]
+    });
 
-    // BEGIN, UPDATE canonical_jobs, INSERT gate_decisions, COMMIT
-    (mPool.query as any).mockResolvedValue({ rows: [], rowCount: 1 });
+    (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE canonical_jobs
+    (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // INSERT gate_decisions
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // COMMIT
 
     await runHardGates();
 
-    expect(mPool.query).toHaveBeenCalledTimes(5); // SELECT + BEGIN + UPDATE canonical_jobs + INSERT gate_decisions + COMMIT
+    expect(criteria.applyGlobalGates).not.toHaveBeenCalled();
+    expect(mPool.query).toHaveBeenCalledTimes(6); // SELECT + BEGIN + SELECT requirements + UPDATE + INSERT + COMMIT
 
-    const updateCall = (mPool.query as any).mock.calls[2];
+    const updateCall = (mPool.query as any).mock.calls[3];
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCall[1][0]).toBe('PASS');
     expect(updateCall[1][1]).toBe('PREQUALIFIED');
     expect(updateCall[1][5]).toBe('canon-1');
   });
 
-  it('should mark HARD_REJECTED on fail with rejection reason and evidence', async () => {
+  it('falls back to legacy parser when no persisted requirements exist', async () => {
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -101,14 +116,20 @@ describe('Pipeline Stage: Hard Gates', () => {
       ]
     });
 
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // BEGIN
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // SELECT requirements empty
+
     vi.spyOn(criteria, 'applyGlobalGates').mockReturnValueOnce(makeRejectResult('GATE_LOCATION_RESTRICTED'));
 
-    (mPool.query as any).mockResolvedValue({ rows: [], rowCount: 1 });
+    (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE canonical_jobs
+    (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // INSERT gate_decisions
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // COMMIT
 
     await runHardGates();
 
-    expect(mPool.query).toHaveBeenCalledTimes(5);
-    const updateCall = (mPool.query as any).mock.calls[2];
+    expect(criteria.applyGlobalGates).toHaveBeenCalledTimes(1);
+    expect(mPool.query).toHaveBeenCalledTimes(6);
+    const updateCall = (mPool.query as any).mock.calls[3];
     expect(updateCall[1][0]).toBe('HARD_REJECT');
     expect(updateCall[1][1]).toBe('HARD_REJECTED');
     expect(updateCall[1][2]).toBe('GATE_LOCATION_RESTRICTED');

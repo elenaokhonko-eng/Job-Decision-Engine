@@ -41,4 +41,23 @@ describe('extractDeterministicRequirements', () => {
     expect(result.requirements).toEqual([]);
     expect(result.warnings).toContain('No deterministic requirements identified.');
   });
+
+  it('is idempotent for the same job_version with stable keys and no duplicate requirement types', () => {
+    const input = {
+      canonical_job_id: '55555555-5555-4555-8555-555555555555',
+      job_version_id: '66666666-6666-4666-8666-666666666666',
+      description_text:
+        'Hybrid role with 2 days per week in office. Must have at least 5 years of experience. Full-time permanent role.',
+    };
+
+    const first = extractDeterministicRequirements(input);
+    const second = extractDeterministicRequirements(input);
+
+    const firstKeys = first.requirements.map((r) => r.requirement_key);
+    const secondKeys = second.requirements.map((r) => r.requirement_key);
+    expect(firstKeys).toEqual(secondKeys);
+
+    const types = first.requirements.map((r) => r.requirement_type);
+    expect(new Set(types).size).toBe(types.length);
+  });
 });
