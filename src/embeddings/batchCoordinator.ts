@@ -3,6 +3,8 @@ import dotenv from 'dotenv';
 import { pgSslConfig } from '../db/pgSsl.js';
 import { generateEmbedding } from '../services/agent.js';
 import { validateEmbeddingVector } from './batchValidator.js';
+import { buildEmbeddingInputs } from './inputBuilder.js';
+import { seedEmbeddingSpaces } from './spaceRegistry.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -18,7 +20,23 @@ export interface EmbeddingBatchSummary {
   processed: number;
   succeeded: number;
   failed: number;
+  failedInputIds: string[];
+  runType: 'PRIMARY' | 'FALLBACK';
   errors: string[];
+}
+
+export interface EmbeddingFallbackSummary {
+  seededSpaces: {
+    primarySpaceId: string;
+    fallbackSpaceId: string;
+  };
+  inputBuild: {
+    inserted: number;
+    fromRequirements: number;
+    fromProfileFacts: number;
+  };
+  primary: EmbeddingBatchSummary;
+  fallback?: EmbeddingBatchSummary;
 }
 
 interface InputRow {
@@ -36,6 +54,9 @@ export async function runEmbeddingBatch(
   batchKey: string,
   runType: 'PRIMARY' | 'FALLBACK' = 'PRIMARY',
   maxItems = 50,
+  inputIds?: string[],
+  fallbackFromBatchId?: string,
+  rerunOfBatchId?: string,
   clientOrPool?: pg.Pool | pg.PoolClient
 ): Promise<EmbeddingBatchSummary> {
   const pool = clientOrPool || defaultPool;
@@ -63,33 +84,61 @@ export async function runEmbeddingBatch(
          embedding_space_id,
          batch_key,
          run_type,
+         fallback_from_batch_id,
+         rerun_of_batch_id,
          status,
          item_count,
          success_count,
          failure_count
        )
-       VALUES ($1, $2, $3, 'RUNNING', 0, 0, 0)
+       VALUES ($1, $2, $3, $4, $5, 'RUNNING', 0, 0, 0)
        RETURNING id`,
-      [space.id, batchKey, runType]
+      [space.id, batchKey, runType, fallbackFromBatchId || null, rerunOfBatchId || null]
     );
     const batchId = batchRes.rows[0].id;
 
-    const inputRes = await client.query<InputRow>(
-      `SELECT ei.id, ei.content_text
-       FROM embedding_inputs ei
-       WHERE NOT EXISTS (
-         SELECT 1
-         FROM semantic_embeddings se
-         WHERE se.embedding_space_id = $1
-           AND se.embedding_input_id = ei.id
-       )
-       ORDER BY ei.created_at ASC
-       LIMIT $2`,
-      [space.id, maxItems]
-    );
+    const inputRes = inputIds && inputIds.length > 0
+      ? await client.query<InputRow>(
+          `SELECT ei.id, ei.content_text
+           FROM embedding_inputs ei
+           WHERE ei.id = ANY($1::uuid[])
+           ORDER BY ei.created_at ASC`,
+          [inputIds]
+        )
+      : await client.query<InputRow>(
+          `SELECT ei.id, ei.content_text
+           FROM embedding_inputs ei
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM semantic_embeddings se
+             WHERE se.embedding_space_id = $1
+               AND se.embedding_input_id = ei.id
+           )
+           ORDER BY ei.created_at ASC
+           LIMIT $2`,
+          [space.id, maxItems]
+        );
+
+    for (const input of inputRes.rows) {
+      await client.query(
+        `INSERT INTO embedding_batch_items (
+           embedding_batch_id,
+           embedding_input_id,
+           status,
+           attempt_count,
+           error_message,
+           updated_at
+         )
+         VALUES ($1, $2, 'PENDING', 1, NULL, NOW())
+         ON CONFLICT (embedding_batch_id, embedding_input_id)
+         DO NOTHING`,
+        [batchId, input.id]
+      );
+    }
 
     let succeeded = 0;
     let failed = 0;
+    const failedInputIds: string[] = [];
 
     for (const input of inputRes.rows) {
       try {
@@ -97,7 +146,16 @@ export async function runEmbeddingBatch(
         const validation = validateEmbeddingVector(vector, space.dimensions);
         if (!validation.valid) {
           failed += 1;
+          failedInputIds.push(input.id);
           errors.push(`input ${input.id}: ${validation.issues.join('; ')}`);
+          await client.query(
+            `UPDATE embedding_batch_items
+             SET status = 'FAILED',
+                 error_message = $3,
+                 updated_at = NOW()
+             WHERE embedding_batch_id = $1 AND embedding_input_id = $2`,
+            [batchId, input.id, validation.issues.join('; ')]
+          );
           continue;
         }
 
@@ -124,9 +182,26 @@ export async function runEmbeddingBatch(
         );
 
         succeeded += 1;
+        await client.query(
+          `UPDATE embedding_batch_items
+           SET status = 'COMPLETED',
+               error_message = NULL,
+               updated_at = NOW()
+           WHERE embedding_batch_id = $1 AND embedding_input_id = $2`,
+          [batchId, input.id]
+        );
       } catch (error) {
         failed += 1;
+        failedInputIds.push(input.id);
         errors.push(`input ${input.id}: ${error instanceof Error ? error.message : String(error)}`);
+        await client.query(
+          `UPDATE embedding_batch_items
+           SET status = 'FAILED',
+               error_message = $3,
+               updated_at = NOW()
+           WHERE embedding_batch_id = $1 AND embedding_input_id = $2`,
+          [batchId, input.id, error instanceof Error ? error.message : String(error)]
+        );
       }
     }
 
@@ -157,11 +232,62 @@ export async function runEmbeddingBatch(
       processed: inputRes.rows.length,
       succeeded,
       failed,
+      failedInputIds,
+      runType,
       errors,
     };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
+  } finally {
+    if ('release' in client && typeof client.release === 'function') {
+      client.release();
+    }
+  }
+}
+
+export async function runEmbeddingBatchWithFallback(
+  maxItems = 100,
+  clientOrPool?: pg.Pool | pg.PoolClient
+): Promise<EmbeddingFallbackSummary> {
+  const pool = clientOrPool || defaultPool;
+  const client = 'connect' in pool ? await pool.connect() : pool;
+
+  try {
+    const seeded = await seedEmbeddingSpaces(client as pg.PoolClient);
+    const inputBuild = await buildEmbeddingInputs(client as pg.PoolClient, maxItems);
+
+    const primary = await runEmbeddingBatch(
+      seeded.primarySpaceId,
+      `primary-${Date.now()}`,
+      'PRIMARY',
+      maxItems,
+      undefined,
+      undefined,
+      undefined,
+      client as pg.PoolClient
+    );
+
+    let fallback: EmbeddingBatchSummary | undefined;
+    if (primary.failedInputIds.length > 0) {
+      fallback = await runEmbeddingBatch(
+        seeded.fallbackSpaceId,
+        `fallback-${Date.now()}`,
+        'FALLBACK',
+        maxItems,
+        primary.failedInputIds,
+        primary.batchId,
+        undefined,
+        client as pg.PoolClient
+      );
+    }
+
+    return {
+      seededSpaces: seeded,
+      inputBuild,
+      primary,
+      fallback,
+    };
   } finally {
     if ('release' in client && typeof client.release === 'function') {
       client.release();

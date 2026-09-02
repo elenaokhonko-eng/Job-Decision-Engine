@@ -47,12 +47,32 @@ export const EmbeddingBatchSchema = z.object({
   batch_key: z.string().min(3).max(128),
   run_type: EmbeddingBatchRunTypeSchema,
   status: EmbeddingBatchStatusSchema,
+  fallback_from_batch_id: z.string().uuid().nullable().optional(),
+  rerun_of_batch_id: z.string().uuid().nullable().optional(),
   item_count: z.number().int().min(0),
   success_count: z.number().int().min(0),
   failure_count: z.number().int().min(0),
   error_message: z.string().max(4000).nullable().optional(),
   created_at: z.date().optional(),
   completed_at: z.date().nullable().optional(),
+});
+
+export const EmbeddingBatchItemStatusSchema = z.enum([
+  'PENDING',
+  'COMPLETED',
+  'FAILED',
+  'SKIPPED',
+]);
+
+export const EmbeddingBatchItemSchema = z.object({
+  id: z.string().uuid().optional(),
+  embedding_batch_id: z.string().uuid(),
+  embedding_input_id: z.string().uuid(),
+  status: EmbeddingBatchItemStatusSchema,
+  attempt_count: z.number().int().min(1),
+  error_message: z.string().max(4000).nullable().optional(),
+  created_at: z.date().optional(),
+  updated_at: z.date().optional(),
 });
 
 export const SemanticEmbeddingSchema = z.object({
