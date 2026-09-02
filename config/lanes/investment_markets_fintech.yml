@@ -79,6 +79,22 @@ budget:
 
 documents:
   include_criteria_snapshot: true
+positive_concepts:
+  - time-series modelling
+  - institutional investing
+  - capital markets
+  - securities
+  - robo-advisory
+  - market data
+negative_concepts:
+  - payments
+  - cards
+  - consumer lending
+  - bnpl
+  - corporate finance
+  - treasury
+  - m&a
+  - private equity
   - investment banking
   - deal advisory
   - fundraising

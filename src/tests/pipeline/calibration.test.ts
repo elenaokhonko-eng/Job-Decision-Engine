@@ -3,7 +3,7 @@ import { loadLanesConfig } from "../../pipeline/laneRouter.js";
 import { DiscoveryScoutPlanner } from "../../ingestion/scouts/discoveryScouts.js";
 
 describe("P1-07: Real-Job Calibration, Counterfactual & Yield Suite", () => {
-  it("should verify lanes.yaml defines all 4 core career lanes with valid prototype queries", () => {
+  it("should verify lane registry defines all 4 core career lanes with valid prototype queries", () => {
     const config = loadLanesConfig();
     const laneKeys = Object.keys(config.lanes);
 

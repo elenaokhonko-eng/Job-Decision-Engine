@@ -1,14 +1,16 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import fs from "fs";
-import path from "path";
-import * as yaml from "js-yaml";
-import { fileURLToPath } from "url";
 import { generateEmbedding } from "../services/agent.js";
 import { pgSslConfig } from "../db/pgSsl.js";
+import {
+  loadGlobalLanesConfig,
+  loadLanesConfig,
+  type GlobalLanesConfig,
+  type LaneDefinition,
+} from "./laneConfigLoader.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+export { loadGlobalLanesConfig, loadLanesConfig };
+export type { GlobalLanesConfig, LaneDefinition };
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -18,32 +20,6 @@ const defaultPool = new pg.Pool({
   ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-export interface LaneDefinition {
-  title: string;
-  description: string;
-  threshold: number;
-  semantic_threshold?: number;
-  ai_evaluation_limit?: number;
-  enabled_sources?: string[];
-  title_families?: string[];
-  keywords: string[];
-  positive_concepts?: string[];
-  negative_concepts?: string[];
-  prototype_query: string;
-}
-
-export interface GlobalLanesConfig {
-  version?: string;
-  description?: string;
-  lanes: Record<string, LaneDefinition>;
-  unclassified_policy: {
-    label: string;
-    fallback_behavior: string;
-    min_similarity_floor: number;
-  };
-}
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
 
@@ -57,23 +33,6 @@ const cosineSimilarity = (vecA: number[], vecB: number[]): number => {
   if (normA === 0 || normB === 0) return 0;
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 };
-
-// ── Config loader ────────────────────────────────────────────────────────────
-
-/**
- * Load authoritative consolidated lane definitions from lanes.yaml.
- * Single read, all 4 lanes evaluated together on every run.
- */
-export function loadGlobalLanesConfig(): GlobalLanesConfig {
-  const lanesPath = path.resolve(__dirname, "../../lanes.yaml");
-  if (!fs.existsSync(lanesPath)) {
-    throw new Error(`lanes.yaml not found at ${lanesPath}`);
-  }
-  const loadFn = (yaml as any).load || (yaml as any).default?.load || yaml;
-  return loadFn(fs.readFileSync(lanesPath, "utf-8")) as GlobalLanesConfig;
-}
-
-export const loadLanesConfig = loadGlobalLanesConfig;
 
 // ── Keyword negative-concept exclusion ────────────────────────────────────────
 
@@ -106,7 +65,7 @@ export async function runLaneRouting(clientOrPool?: pg.Pool | pg.PoolClient): Pr
 }
 
 export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Promise<{ routed: number; deferred: number }> {
-  console.log("Starting Semantic Lane Routing from authoritative lanes.yaml...");
+  console.log("Starting Semantic Lane Routing from config/lanes registry...");
   const config = loadGlobalLanesConfig();
   const pool = clientOrPool || defaultPool;
 

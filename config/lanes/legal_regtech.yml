@@ -62,6 +62,12 @@ budget:
 
 documents:
   include_criteria_snapshot: true
+positive_concepts:
+  - compliance
+  - regulatory tech
+  - fraud detection
+  - kyc aml
+  - legal domain
   - digital trust
 negative_concepts:
   - traditional legal
