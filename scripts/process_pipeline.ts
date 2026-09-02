@@ -2,6 +2,7 @@ import { runNormalization } from "../src/pipeline/normalize.js";
 import { runRequirementsExtraction } from "../src/pipeline/requirementsExtractor.js";
 import { runHardGates } from "../src/pipeline/hardGate.js";
 import { runLaneRouting } from "../src/pipeline/laneRouter.js";
+import { runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
 import { runEvaluationBudgeter } from "../src/pipeline/evaluationBudgeter.js";
 import pg from "pg";
 import dotenv from "dotenv";
@@ -36,19 +37,22 @@ export async function processPipeline(): Promise<void> {
       return;
     }
     
-    console.log("\n[1/4] Running Normalization...");
+    console.log("\n[1/6] Running Normalization...");
     const normSummary = await runNormalization(pool);
 
-    console.log("\n[2/5] Running Requirements Extraction...");
+    console.log("\n[2/6] Running Requirements Extraction...");
     const requirementsSummary = await runRequirementsExtraction(pool);
 
-    console.log("\n[3/5] Running Hard Gates...");
+    console.log("\n[3/6] Running Hard Gates...");
     const gateSummary = await runHardGates(pool);
 
-    console.log("\n[4/5] Running Semantic Lane Routing...");
+    console.log("\n[4/6] Running Semantic Lane Routing...");
     const routingSummary = await runLaneRouting(pool);
 
-    console.log("\n[5/5] Running Evaluation Budgeter...");
+    console.log("\n[5/6] Running Deterministic Matching...");
+    const matchingSummary = await runDeterministicMatcher(pool);
+
+    console.log("\n[6/6] Running Evaluation Budgeter...");
     const budgetSummary = await runEvaluationBudgeter(pool);
 
     // ── Funnel Conservation & Stranded Record Verification ──
@@ -70,9 +74,10 @@ export async function processPipeline(): Promise<void> {
     const strandedRawStaged = counts["RAW_STAGED"] || 0;
     const strandedPrequalified = counts["PREQUALIFIED"] || 0;
     const strandedLaneRouted = counts["LANE_ROUTED"] || 0;
+    const strandedMatched = counts["MATCHED"] || 0;
 
-    if (strandedRawStaged > 0 || strandedPrequalified > 0 || strandedLaneRouted > 0) {
-      const errorMsg = `❌ Funnel conservation failure: Found stranded records in intermediate states! (RAW_STAGED: ${strandedRawStaged}, PREQUALIFIED: ${strandedPrequalified}, LANE_ROUTED: ${strandedLaneRouted})`;
+    if (strandedRawStaged > 0 || strandedPrequalified > 0 || strandedLaneRouted > 0 || strandedMatched > 0) {
+      const errorMsg = `❌ Funnel conservation failure: Found stranded records in intermediate states! (RAW_STAGED: ${strandedRawStaged}, PREQUALIFIED: ${strandedPrequalified}, LANE_ROUTED: ${strandedLaneRouted}, MATCHED: ${strandedMatched})`;
       console.error(errorMsg);
       throw new Error(errorMsg);
     }
@@ -85,9 +90,14 @@ export async function processPipeline(): Promise<void> {
       throw new Error(`Requirements extraction failed for ${requirementsSummary.errors} job version(s); records moved to RETRY_WAIT.`);
     }
 
+    if (matchingSummary.errors > 0) {
+      throw new Error(`Deterministic matching failed for ${matchingSummary.errors} job(s); records remain recoverable for retry.`);
+    }
+
     console.log("Requirements extraction summary:", requirementsSummary);
     console.log("Hard gate summary:", gateSummary);
     console.log("Lane routing summary:", routingSummary);
+    console.log("Deterministic matching summary:", matchingSummary);
     console.log("Evaluation budget summary:", budgetSummary);
 
     console.log("\n✅ Pipeline execution and funnel conservation verified successfully.");
