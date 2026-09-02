@@ -10,6 +10,7 @@
     "profile:import": "tsx scripts/import_profile.ts",
     "docs:cv": "tsx scripts/generate_cv.ts",
     "docs:cover-letter": "tsx scripts/generate_cover_letter.ts",
+    "cutover:audit": "tsx scripts/backfill_cutover.ts",
     "contracts:export": "tsx scripts/export_contracts.ts",
     "contracts:check": "npm run contracts:export && git diff --exit-code -- src/contracts/json",
     "test": "vitest run",
