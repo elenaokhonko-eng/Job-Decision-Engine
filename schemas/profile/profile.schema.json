@@ -13,8 +13,8 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "pattern": "^\\d+\\.\\d+$",
-      "examples": ["2.0"]
+      "pattern": "^\\d+\\.\\d+(\\.\\d+)?$",
+      "examples": ["2.2.0"]
     },
     "profile_key": {
       "type": "string",

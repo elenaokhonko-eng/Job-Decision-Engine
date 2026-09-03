@@ -8,6 +8,20 @@ import { runAgent } from "./src/services/agent.ts";
 // Load environment variables
 dotenv.config();
 
+function isResetRouteAllowed(): boolean {
+  if (process.env.NODE_ENV === "production") {
+    return false;
+  }
+  return process.env.ALLOW_RESET_ROUTE === "true";
+}
+
+type AsyncRoute = (req: express.Request, res: express.Response, next: express.NextFunction) => Promise<void> | void;
+function asyncHandler(handler: AsyncRoute) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -25,14 +39,10 @@ async function startServer() {
   });
 
   // Get all jobs in database
-  app.get("/api/jobs", (req, res) => {
-    try {
-      const jobs = db.queryJobs();
-      res.json({ success: true, jobs });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
+  app.get("/api/jobs", asyncHandler(async (_req, res) => {
+    const jobs = await db.queryJobs();
+    res.json({ success: true, jobs });
+  }));
 
   // Add a new job description to local database
   app.post("/api/jobs", async (req, res) => {
@@ -59,14 +69,10 @@ async function startServer() {
   });
 
   // Delete a job description
-  app.delete("/api/jobs/:id", (req, res) => {
-    try {
-      const success = db.deleteJob(req.params.id);
-      res.json({ success });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
+  app.delete("/api/jobs/:id", asyncHandler(async (req, res) => {
+    const success = await db.deleteJob(req.params.id);
+    res.json({ success });
+  }));
 
   // Ask the agent / evaluate question
   app.post("/api/ask", async (req, res) => {
@@ -104,33 +110,36 @@ async function startServer() {
   });
 
   // Get interaction logs
-  app.get("/api/interactions", (req, res) => {
-    try {
-      const interactions = db.getInteractions();
-      res.json({ success: true, interactions });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
+  app.get("/api/interactions", asyncHandler(async (_req, res) => {
+    const interactions = await db.getInteractions();
+    res.json({ success: true, interactions });
+  }));
 
   // Get workplace culture aggregates and toxic blacklists
-  app.get("/api/analytics", (req, res) => {
-    try {
-      const analytics = db.getNdCultureAnalytics();
-      res.json({ success: true, analytics });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
+  app.get("/api/analytics", asyncHandler(async (_req, res) => {
+    const analytics = await db.getNdCultureAnalytics();
+    res.json({ success: true, analytics });
+  }));
 
   // Reset database state to original seeded value
-  app.post("/api/reset", (req, res) => {
-    try {
-      db.resetToDefaults();
-      res.json({ success: true, message: "Database reset to original seed state successfully." });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
+  app.post("/api/reset", asyncHandler(async (_req, res) => {
+    if (!isResetRouteAllowed()) {
+      res.status(403).json({ success: false, error: "Reset route is disabled." });
+      return;
     }
+    await db.resetToDefaults();
+    res.json({ success: true, message: "Database reset to original seed state successfully." });
+  }));
+
+  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error("Unhandled API error:", err);
+    if (res.headersSent) {
+      return;
+    }
+    res.status(500).json({
+      success: false,
+      error: err?.message || "An unexpected error occurred.",
+    });
   });
 
   // Vite Integration

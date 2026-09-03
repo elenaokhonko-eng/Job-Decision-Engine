@@ -1,5 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
+import { pgSslConfig } from "./pgSsl.js";
 
 // Load environment variables
 dotenv.config();
@@ -9,7 +10,7 @@ const databaseUrl = process.env.DATABASE_URL;
 
 const pool = new pg.Pool({
   connectionString: databaseUrl,
-  ssl: databaseUrl && (databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
+  ssl: pgSslConfig(databaseUrl)
 });
 
 pool.on("error", (err) => {

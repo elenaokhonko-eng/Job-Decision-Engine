@@ -1,12 +1,13 @@
 /**
  * Matching engine contracts
  * @description Zod schemas for requirement-evidence matching and scoring
- * @version 2.0
+ * @version 2.2.0
  */
 
 import { z } from 'zod';
+import { SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION, SchemaVersionSchema } from '../contracts/version.js';
 
-export const MATCHING_SCHEMA_VERSION = '2.0';
+export const MATCHING_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
 export const MatchRunStatusSchema = z.enum(['STARTED', 'COMPLETED', 'FAILED']);
 export const MatchTypeSchema = z.enum(['EXACT', 'SEMANTIC', 'NO_MATCH', 'UNKNOWN']);
@@ -48,7 +49,7 @@ export const MatchScoringSchema = z.object({
 });
 
 export const MatchingContractPlaceholder = z.object({
-  schema_version: z.literal(MATCHING_SCHEMA_VERSION).default(MATCHING_SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(MATCHING_SCHEMA_VERSION),
   run: MatchRunSchema,
   matches: z.array(RequirementEvidenceMatchSchema),
   scoring: MatchScoringSchema,

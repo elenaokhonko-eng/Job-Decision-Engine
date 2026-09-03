@@ -1,12 +1,12 @@
 /**
  * Embedding infrastructure contracts
  * @description Zod schemas for embedding spaces, batches, vectors, caching
- * @version 2.0
+ * @version 2.2.0
  */
 
 import { z } from 'zod';
 
-export const EMBEDDING_SCHEMA_VERSION = '2.0';
+export const EMBEDDING_SCHEMA_VERSION = '2.2.0';
 
 export const EmbeddingProviderSchema = z.enum(['gemini', 'openai']);
 export const DistanceMetricSchema = z.enum(['COSINE', 'DOT', 'L2']);

@@ -6,8 +6,12 @@
       "properties": {
         "schema_version": {
           "type": "string",
-          "const": "1.0.0",
-          "default": "1.0.0"
+          "enum": [
+            "2.2.0",
+            "2.0",
+            "1.0.0"
+          ],
+          "default": "2.2.0"
         },
         "canonical_job_id": {
           "type": "string",
@@ -65,15 +69,21 @@
           "enum": [
             "RAW_STAGED",
             "HARD_REJECTED",
+            "MANUALLY_REMOVED",
             "NEEDS_VERIFICATION",
             "PREQUALIFIED",
+            "ROUTING_DEFERRED",
+            "LANE_ROUTED",
+            "MATCHED",
             "SEMANTIC_SHORTLISTED",
             "QUEUED_FOR_AI",
             "DEFERRED_BUDGET",
             "EVALUATING",
             "AI_EVALUATED",
+            "EVALUATED",
             "RETRY_WAIT",
-            "NEEDS_MANUAL_REVIEW"
+            "NEEDS_MANUAL_REVIEW",
+            "REJECTED_AFTER_EVALUATION"
           ],
           "default": "RAW_STAGED"
         }

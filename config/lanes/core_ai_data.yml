@@ -1,4 +1,4 @@
-schema_version: "2.0"
+schema_version: "2.2.0"
 lane_key: CORE_AI_DATA
 display_name: "Core AI & Data Engineering"
 description: "Hands-on distributed AI systems, LLM infrastructure, data pipelines, MLOps, deep learning research, and technical architecture."

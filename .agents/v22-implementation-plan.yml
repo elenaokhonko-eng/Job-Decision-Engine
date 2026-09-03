@@ -1,0 +1,104 @@
+schema_version: "2.2.0"
+plan_key: job-decision-engine-configurable-v22
+baseline_commit: 0fd8ef9e2712fb60502287af3c9437705d171c8a
+target_branch: feat/v2.2-configurable-core
+rules:
+  one_phase_per_pr: true
+  edit_existing_migrations: false
+  destructive_migrations: false
+  llm_may_set_deterministic_score: false
+  per_lane_business_quotas: false
+  require_workspace_scope: true
+required_checks:
+  - npm_run_lint
+  - contracts_clean
+  - unit_tests
+  - postgres_integration_tests
+  - fresh_migration
+  - upgrade_from_018
+  - git_diff_check
+phases:
+  - id: P0
+    title: Baseline truth and correctness
+    status: pending
+    depends_on: []
+    migrations: []
+    deliverables: [contract_version_unification, ui_score_fix, workspace_profile_scope, security_seams]
+    gate: baseline_green
+  - id: P1
+    title: Unlimited deterministic processing
+    status: pending
+    depends_on: [P0]
+    migrations: [019_or_separate_legacy_status_backfill]
+    deliverables: [quota_removal, lifecycle_split, all_eligible_test]
+    gate: one_hundred_of_one_hundred_terminal
+  - id: P2
+    title: Registry and profile revision core
+    status: pending
+    depends_on: [P0]
+    migrations: [019, 020]
+    deliverables: [workspace_scope, registry_loader, stable_fact_identity, immutable_revisions]
+    gate: legacy_v22_profile_parity
+  - id: P3
+    title: Conversational profile updates
+    status: pending
+    depends_on: [P2]
+    migrations: [021]
+    deliverables: [sessions, proposals, clarifications, approval_transaction]
+    gate: profile_update_e2e
+  - id: P4
+    title: Evidence graph and capability metrics
+    status: pending
+    depends_on: [P2]
+    migrations: [022]
+    deliverables: [evidence_edges, strength_registry, metric_materializer]
+    gate: deterministic_metric_replay
+  - id: P5
+    title: Requirement sets and corrections
+    status: pending
+    depends_on: [P2]
+    migrations: [023]
+    deliverables: [immutable_sets, extraction_cache, correction_workflow]
+    gate: requirement_history_preserved
+  - id: P6
+    title: Policy snapshots and decisions
+    status: pending
+    depends_on: [P4, P5]
+    migrations: [024]
+    deliverables: [safe_rule_dsl, resolved_snapshots, deterministic_decisions]
+    gate: cross_runtime_golden_replay
+  - id: P7
+    title: Dynamic lanes
+    status: pending
+    depends_on: [P2, P5]
+    migrations: [025]
+    deliverables: [lane_revisions, preferences, decisions, crud_import_export]
+    gate: no_deploy_custom_lane
+  - id: P8
+    title: Tasks embeddings and semantic matching
+    status: pending
+    depends_on: [P1, P4, P5, P6, P7]
+    migrations: [026, 027]
+    deliverables: [durable_tasks, atomic_embedding_batches, matchable_nodes, scorer]
+    gate: fault_injection_green
+  - id: P9
+    title: Model routes and document plugins
+    status: pending
+    depends_on: [P3, P6, P8]
+    migrations: [028, 029]
+    deliverables: [route_snapshots, plugin_versions, deterministic_claim_selection]
+    gate: provenance_complete_documents
+  - id: P10
+    title: API and product integration
+    status: pending
+    depends_on: [P3, P5, P6, P7, P8, P9]
+    migrations: []
+    deliverables: [v2_api, cursor_read_model, streamlit_workflows]
+    gate: browser_e2e_green
+  - id: P11
+    title: Backfill parity and cutover
+    status: pending
+    depends_on: [P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10]
+    migrations: [030]
+    deliverables: [resumable_backfill, parity_audit, runbooks, release_tag]
+    gate: v22_definition_of_done

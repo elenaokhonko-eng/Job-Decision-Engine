@@ -13,7 +13,7 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "pattern": "^\\d+\\.\\d+$"
+      "pattern": "^\\d+\\.\\d+(\\.\\d+)?$"
     },
     "lane_key": {
       "type": "string",

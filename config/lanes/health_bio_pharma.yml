@@ -1,4 +1,4 @@
-schema_version: "2.0"
+schema_version: "2.2.0"
 lane_key: HEALTH_BIO_PHARMA
 display_name: "Health, Bio & Pharma"
 description: "Life sciences, health, pharmaceutical AI, bioinformatics, computational biology and scientific machine learning."

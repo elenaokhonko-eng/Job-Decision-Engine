@@ -1,12 +1,13 @@
 /**
  * Job requirements contracts
  * @description Zod schemas for requirement extraction, validation, and matching
- * @version 2.0
+ * @version 2.2.0
  */
 
 import { z } from 'zod';
+import { SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION, SchemaVersionSchema } from '../contracts/version.js';
 
-export const REQUIREMENTS_SCHEMA_VERSION = '2.0';
+export const REQUIREMENTS_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
 export const RequirementTypeSchema = z.enum([
   'OFFICE_DAYS',
@@ -131,6 +132,6 @@ export const QuotedRequirementSchema = z.object({
 });
 
 export const QuotedRequirementExtractorResponseSchema = z.object({
-  schema_version: z.string(),
+  schema_version: SchemaVersionSchema.default(REQUIREMENTS_SCHEMA_VERSION),
   requirements: z.array(QuotedRequirementSchema).min(1).max(25),
 });

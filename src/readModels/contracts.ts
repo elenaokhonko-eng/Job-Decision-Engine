@@ -1,12 +1,13 @@
 /**
  * Read model contracts
  * @description Zod schemas for Streamlit and report consumers of canonical data
- * @version 2.0
+ * @version 2.2.0
  */
 
 import { z } from 'zod';
+import { SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION, SchemaVersionSchema } from '../contracts/version.js';
 
-export const READ_MODEL_SCHEMA_VERSION = '2.0';
+export const READ_MODEL_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
 export const ShortlistRowV2Schema = z.object({
   canonical_job_id: z.string().uuid(),
@@ -77,7 +78,7 @@ export const DocumentStatusSchema = z.object({
 });
 
 export const ReadModelContractPlaceholder = z.object({
-  schema_version: z.literal(READ_MODEL_SCHEMA_VERSION).default(READ_MODEL_SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(READ_MODEL_SCHEMA_VERSION),
   shortlist_row: ShortlistRowV2Schema,
   job_detail: StreamlitJobDetailSchema,
   pipeline_health: PipelineHealthSchema,
