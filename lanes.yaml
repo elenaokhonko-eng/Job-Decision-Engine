@@ -1,5 +1,10 @@
+# ⚠️ DEPRECATED: This file is superseded by config/lanes/registry.yml
+# This file is retained for backward compatibility during Phase 0-2 of the evidence-first redesign.
+# Do not edit. All lane configuration must be added to config/lanes/ directory.
+# TODO: Remove after evidence-first-v2 branch merges and legacy lane code is retired.
+
 version: "1.0"
-description: "Authoritative multi-lane definition and semantic threshold registry"
+description: "Authoritative multi-lane definition and semantic threshold registry [DEPRECATED]"
 
 lanes:
   CORE_AI_DATA:

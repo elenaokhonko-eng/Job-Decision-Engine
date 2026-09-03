@@ -1,0 +1,35 @@
+schema_version: "2.0"
+policy_version: "experience_v2"
+description: "Professional experience policy defining equivalence classes and duration calculation rules"
+
+professional_experience:
+  eligible_classes:
+    - PROFESSIONAL_PRODUCTION
+  engagement_type_parity:
+    EMPLOYEE: 1.0
+    FOUNDER_OPERATOR: 1.0
+    CONTRACTOR: 1.0
+    RESEARCHER: 1.0
+
+non_professional_capability_evidence:
+  DEPLOYED_OPEN_SOURCE: 0.70
+  APPLIED_PROJECT: 0.60
+  COURSE_PROJECT: 0.35
+  KNOWLEDGE_ONLY: 0.10
+
+duration:
+  merge_overlapping_intervals: true
+  calculate_by_normalized_concept: true
+  count_course_months_as_professional: false
+  current_date_source: runtime_utc_date
+
+founder_validation:
+  acceptable_evidence:
+    - incorporated_or_operating_entity
+    - source_repository
+    - deployed_product
+    - release_history
+    - external_user_onboarding
+    - anonymized_usage_evidence
+  paying_users_required: false
+  consulting_delivery_required: false

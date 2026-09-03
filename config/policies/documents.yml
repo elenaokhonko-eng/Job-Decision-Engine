@@ -1,0 +1,39 @@
+schema_version: "2.0"
+policy_version: "documents_v2"
+description: "Document eligibility, criteria snapshot, and claim validation policies"
+
+eligibility:
+  allowed_decisions:
+    - PRIORITY_APPLY
+    - STRONG_MATCH
+    - PREQUALIFIED
+  minimum_criteria_coverage_pct: 70
+  minimum_verified_evidence_pct: 80
+  block_on_hard_qualification_gap: true
+
+criteria_snapshot:
+  enabled: true
+  maximum_items: 4
+  label: "Evidence-based role alignment"
+  show_percentage: true
+  exclude_private_workability_criteria: true
+  allowed_outcomes:
+    - EXCEEDS
+    - MEETS
+    - NEAR_MATCH
+    - TRANSFERABLE
+
+cv_policy:
+  include_match_run_id: true
+  include_evidence_citations: true
+  require_profile_fact_attestation: true
+
+cover_letter_policy:
+  include_match_run_id: true
+  use_match_snapshot: true
+  max_fact_references: 6
+
+claim_validation:
+  require_profile_fact_or_credential: true
+  require_job_requirement_link: true
+  verify_evidence_tier: true

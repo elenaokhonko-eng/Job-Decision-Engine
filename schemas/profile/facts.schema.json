@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Profile Facts",
+  "description": "Atomic factual claims about professional capabilities, achievements, projects, skills, domains, technologies, publications",
+  "type": "object",
+  "required": ["schema_version", "profile_key", "facts"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "profile_key": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]{0,63}$"
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "fact_key",
+          "fact_type",
+          "statement",
+          "evidence_tier",
+          "verification_status",
+          "confidentiality"
+        ],
+        "properties": {
+          "fact_key": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.]{1,127}$"
+          },
+          "engagement_key": {
+            "type": ["string", "null"]
+          },
+          "fact_type": {
+            "type": "string",
+            "enum": [
+              "ACHIEVEMENT",
+              "RESPONSIBILITY",
+              "PROJECT",
+              "SKILL",
+              "DOMAIN",
+              "TECHNOLOGY",
+              "PUBLICATION",
+              "OPEN_SOURCE"
+            ]
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 2048,
+            "description": "One atomic factual claim"
+          },
+          "structured_value": {
+            "type": ["object", "null"]
+          },
+          "concept_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evidence_tier": {
+            "type": "string",
+            "enum": [
+              "PRODUCTION_PROFESSIONAL",
+              "DEPLOYED_OPEN_SOURCE",
+              "APPLIED_PROJECT",
+              "COURSE_PROJECT",
+              "KNOWLEDGE_ONLY"
+            ]
+          },
+          "verification_status": {
+            "type": "string",
+            "enum": ["VERIFIED", "SELF_ATTESTED", "UNVERIFIED"]
+          },
+          "start_date": {
+            "type": ["string", "null"],
+            "format": "date"
+          },
+          "end_date": {
+            "type": ["string", "null"],
+            "format": "date"
+          },
+          "is_current": {
+            "type": "boolean"
+          },
+          "confidentiality": {
+            "type": "string",
+            "enum": ["PUBLIC", "PRIVATE_REUSABLE", "PRIVATE_INTERNAL"]
+          },
+          "evidence_source_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

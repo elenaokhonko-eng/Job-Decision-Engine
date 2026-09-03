@@ -123,6 +123,17 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("006_schema_hardening_v2.sql");
     expect(versions).toContain("007_job_version_integrity.sql");
     expect(versions).toContain("008_job_version_integrity_v2.sql");
+    expect(versions).toContain("009_canonical_read_model_and_quarantine.sql");
+    expect(versions).toContain("010_read_model_version_strictness_and_quarantine_cleanup.sql");
+    expect(versions).toContain("011_source_runs_hardening.sql");
+    expect(versions).toContain("012_profile_evidence_foundation.sql");
+    expect(versions).toContain("013_job_requirements_and_pipeline_state.sql");
+    expect(versions).toContain("014_embedding_spaces_and_batches.sql");
+    expect(versions).toContain("014b_embedding_manifest_and_fallback.sql");
+    expect(versions).toContain("015_deterministic_matching.sql");
+    expect(versions).toContain("016_document_provenance.sql");
+    expect(versions).toContain("017_streamlit_read_model_integrity.sql");
+    expect(versions).toContain("018_backfill_cutover.sql");
   });
 
   it("canonical_jobs table has all required columns from migrations 001–004", async () => {

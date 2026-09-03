@@ -1,0 +1,29 @@
+schema_version: "2.0"
+policy_version: "workability_v2"
+description: "Pre-lane workability hard gates and constraints"
+
+global_workability_gates:
+  work_mode:
+    onsite_only_allowed: false
+    max_office_days_per_week: 3
+    max_office_days_hard_fail: 5
+
+  operations:
+    regular_on_call_allowed: false
+    shift_work_allowed: false
+    frequent_travel_allowed: false
+
+  work_composition:
+    minimum_building_research_pct: 60
+    maximum_interaction_pct: 40
+    external_client_primary_allowed: false
+    people_management_primary_allowed: false
+
+decision_outcomes:
+  HARD_REJECTED: "Deterministic conflict with work preferences"
+  NEEDS_VERIFICATION: "Ambiguous or unknown workability fact"
+  OUT_OF_SCOPE: "Lane disabled or budget exhausted"
+  INSUFFICIENT_EVIDENCE: "Verified evidence below threshold"
+  PREQUALIFIED: "Meets all mandatory criteria"
+  STRONG_MATCH: "High capability alignment"
+  PRIORITY_APPLY: "Strategic priority or best match"

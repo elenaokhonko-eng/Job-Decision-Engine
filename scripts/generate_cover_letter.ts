@@ -26,6 +26,7 @@ import { generateContent, MODEL_REGISTRY } from "../src/services/agent.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
+import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -72,6 +73,34 @@ function profileFactIds(masterProfile: any): Set<string> {
   return new Set(facts.map((f) => f?.id).filter((id: any) => typeof id === "string" && id.trim().length > 0));
 }
 
+function collectCoverLetterClaims(finalCl: any): DocumentClaimInput[] {
+  const claims: DocumentClaimInput[] = [];
+  const bodyParagraphs = Array.isArray(finalCl?.cover_letter?.body_paragraphs)
+    ? finalCl.cover_letter.body_paragraphs
+    : [];
+
+  for (let idx = 0; idx < bodyParagraphs.length; idx += 1) {
+    const paragraph = bodyParagraphs[idx] || {};
+    const text = typeof paragraph.text === "string" ? paragraph.text : "";
+    const evidenceIds = Array.isArray(paragraph.evidence_ids)
+      ? paragraph.evidence_ids.filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
+      : [];
+    const requirementMatches: string[] = text.match(/R-[0-9]{3}/g)?.map((m: string) => m) || [];
+    const requirementKeys: string[] = Array.from(new Set(requirementMatches));
+
+    if (text.trim().length > 0 && evidenceIds.length > 0) {
+      claims.push({
+        sectionLabel: `body_paragraph_${idx + 1}`,
+        claimText: text,
+        profileFactIds: evidenceIds,
+        requirementKeys,
+      });
+    }
+  }
+
+  return claims;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function generateTailoredCoverLetter(): Promise<void> {
@@ -106,6 +135,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const jobRes = await pool.query(
       `SELECT
          c.id,
+        c.latest_match_run_id,
          c.normalized_title   AS title,
          c.company_name,
          c.primary_lane,
@@ -154,6 +184,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const jdDescription = job.raw_description || "";
     const primaryLane = job.primary_lane || "UNKNOWN";
     const resolvedJobVersionId = job.job_version_id;
+    const latestMatchRunId = job.latest_match_run_id || null;
 
     // Pull structured fields out of full_evaluation_payload if available
     const evalPayload = job.full_evaluation_payload || {};
@@ -302,11 +333,30 @@ ${JSON.stringify(coverLetterSchema)}`;
     await generatePdf(docxPath, pdfPath);
 
     const pdfCreated = fs.existsSync(pdfPath);
+    const claims = collectCoverLetterClaims(finalCl);
+    const provenance = await persistDocumentProvenance(
+      {
+        canonicalJobId: jobId,
+        jobVersionId: resolvedJobVersionId,
+        matchRunId: latestMatchRunId,
+        documentType: 'COVER_LETTER',
+        policyVersion: 'documents_v2',
+        generatorVersion: 'cover_letter_generator_v2',
+        outputManifest: {
+          json_path: jsonPath,
+          docx_path: docxPath,
+          pdf_path: pdfCreated ? pdfPath : null,
+        },
+        claims,
+      },
+      pool
+    );
 
     console.log(`\n✅ Cover Letter Generation Complete!
   JSON : ${jsonPath}
   DOCX : ${docxPath}
-  PDF  : ${pdfCreated ? pdfPath : "NOT CREATED (no Word/LibreOffice in environment)"}`);
+  PDF  : ${pdfCreated ? pdfPath : "NOT CREATED (no Word/LibreOffice in environment)"}
+  document_run_id: ${provenance.documentRunId} (claims: ${provenance.claimCount})`);
 
   } catch (error: any) {
     console.error("❌ ERROR during Cover Letter generation:", error.message || error);

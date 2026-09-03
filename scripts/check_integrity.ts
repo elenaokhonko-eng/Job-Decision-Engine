@@ -1,13 +1,14 @@
 import { db } from "../src/db/db.js";
 import pg from "pg";
 import dotenv from "dotenv";
+import { pgSslConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
+  ssl: pgSslConfig(process.env.DATABASE_URL)
 });
 
 async function runIntegrityChecks() {
@@ -44,7 +45,22 @@ async function runIntegrityChecks() {
     }
 
     // Check 3: Invalid statuses
-    const validStatuses = ['RAW_STAGED', 'HARD_REJECTED', 'PREQUALIFIED', 'SEMANTIC_SHORTLISTED', 'QUEUED_FOR_AI', 'AI_EVALUATED', 'REJECTED_AFTER_EVALUATION'];
+    const validStatuses = [
+      'RAW_STAGED',
+      'HARD_REJECTED',
+      'NEEDS_VERIFICATION',
+      'PREQUALIFIED',
+      'ROUTING_DEFERRED',
+      'LANE_ROUTED',
+      'MATCHED',
+      'QUEUED_FOR_AI',
+      'DEFERRED_BUDGET',
+      'EVALUATING',
+      'AI_EVALUATED',
+      'RETRY_WAIT',
+      'NEEDS_MANUAL_REVIEW',
+      'MANUALLY_REMOVED'
+    ];
     const { rows: invalidStatus } = await pool.query(`
       SELECT id, processing_status 
       FROM canonical_jobs 
@@ -91,9 +107,10 @@ async function runIntegrityChecks() {
     }
   } catch (err: any) {
     console.error("Failed to run integrity checks", err.message);
+    errors++;
   } finally {
     await pool.end();
-    process.exit(0);
+    process.exit(errors === 0 ? 0 : 1);
   }
 }
 

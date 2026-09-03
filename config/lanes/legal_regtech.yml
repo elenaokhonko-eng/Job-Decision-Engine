@@ -1,32 +1,72 @@
-lane: LEGAL_REGTECH
-description: "LegalTech, RegTech, fraud and digital trust"
-enabled_sources:
-  - greenhouse
-  - ashby
-  - lever
-  - himalayas
-  - startup_jobs
-title_families:
-  - legal ai
-  - legaltech
-  - regulatory technology
-  - claims and disputes technology
-  - legal knowledge engineering
-  - fraud
-  - scams
-  - financial crime
-  - aml
-  - kyc
-  - compliance automation
-  - digital trust
-  - legal nlp
-  - document intelligence
-  - knowledge graphs
+schema_version: "2.0"
+lane_key: LEGAL_REGTECH
+display_name: "Legal, RegTech & Digital Trust"
+description: "LegalTech, regulatory technology, fraud detection, compliance automation, digital trust and legal AI."
+
+scope:
+  required_function_concepts:
+    any:
+      - AI_ENGINEERING
+      - ML_ENGINEERING
+      - LEGAL_AI
+      - COMPLIANCE_AUTOMATION
+      - FRAUD_DETECTION
+      - DOCUMENT_INTELLIGENCE
+
+  included_domain_concepts:
+    any:
+      - LEGAL_AI
+      - LEGALTECH
+      - REGULATORY_TECH
+      - REGTECH
+      - COMPLIANCE_AUTOMATION
+      - FRAUD_DETECTION
+      - AML
+      - KYC
+      - DIGITAL_TRUST
+      - DOCUMENT_INTELLIGENCE
+      - LEGAL_NLP
+      - KNOWLEDGE_GRAPHS
+
+prototypes:
+  - prototype_key: regtech_compliance
+    text: "RegTech, compliance automation, AML/KYC, regulatory technology and risk management."
+    weight: 1.0
+  - prototype_key: fraud_digital_trust
+    text: "Fraud detection, digital trust, financial crime prevention and digital identity."
+    weight: 0.9
+  - prototype_key: legal_ai
+    text: "Legal AI, LegalTech, document intelligence and legal knowledge automation."
+    weight: 0.9
+
+routing:
+  minimum_domain_score: 0.65
+  minimum_function_score: 0.60
+  minimum_semantic_score: 0.40
+  secondary_lane_threshold: 0.35
+
+sourcing:
+  enabled_sources:
+    - GREENHOUSE
+    - ASHBY
+    - LEVER
+    - HIMALAYAS
+  query_sets:
+    - "remote legaltech engineer"
+    - "remote regtech engineer"
+    - "remote compliance engineer"
+    - "remote fraud detection engineer"
+
+budget:
+  maximum_ai_interpretations_per_run: 3
+
+documents:
+  include_criteria_snapshot: true
 positive_concepts:
   - compliance
   - regulatory tech
   - fraud detection
-  - kyc/aml
+  - kyc aml
   - legal domain
   - digital trust
 negative_concepts:

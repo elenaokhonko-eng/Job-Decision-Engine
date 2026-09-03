@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Lane Preferences",
+  "description": "Candidate preferences for career lanes: enabled lanes, priority weights, AI evaluation budgets",
+  "type": "object",
+  "required": ["schema_version", "profile_key", "lanes"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "profile_key": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]{0,63}$"
+    },
+    "lanes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["lane_key", "enabled"],
+        "properties": {
+          "lane_key": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "priority_weight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "ai_evaluation_budget": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

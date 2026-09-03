@@ -145,6 +145,8 @@ export const sampleEvaluatedShortlistRow: ShortlistRow = {
   secondary_lanes: ["INVESTMENT_MARKETS_FINTECH"],
   lane_confidence: "Medium",
   priority_score: 0.449,
+  deterministic_match_score: 82.5,
+  deterministic_match_coverage: 66.7,
   processing_status: "AI_EVALUATED",
   nd_friendly_score: 75,
   politics_stress_score: 35,
@@ -160,5 +162,9 @@ export const sampleEvaluatedShortlistRow: ShortlistRow = {
   evaluated_at: "2026-08-28T12:30:00.000Z",
   lane_matches: [],
   workability_facts: {},
-  queue_status: "COMPLETED"
+  queue_status: "COMPLETED",
+  latest_match_run_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  cv_document_run_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  cover_letter_document_run_id: null,
+  document_ready: true
 };

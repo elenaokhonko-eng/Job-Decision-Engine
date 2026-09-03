@@ -8,6 +8,7 @@ import { generateContent, MODEL_REGISTRY } from "../src/services/agent.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
+import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -17,9 +18,17 @@ const databaseUrl = process.env.DATABASE_URL;
 const Ajv2020 = (Ajv2020Import as any).default || Ajv2020Import;
 const addFormats = (addFormatsImport as any).default || addFormatsImport;
 const ajv = new Ajv2020({ allErrors: true, strict: false });
+const normalizingAjv = new Ajv2020({ allErrors: true, strict: false, removeAdditional: "all" });
 addFormats(ajv);
+addFormats(normalizingAjv);
 
 function validateAgainstSchema(payload: unknown, schema: any, schemaName: string): void {
+  const before = JSON.stringify(payload);
+  const normalize = normalizingAjv.compile(schema);
+  normalize(payload);
+  if (JSON.stringify(payload) !== before) {
+    console.warn(`${schemaName}: removed fields not declared by the strict schema.`);
+  }
   const validate = ajv.compile(schema);
   const ok = validate(payload);
   if (!ok) {
@@ -76,6 +85,62 @@ function cleanJsonResponse(rawText: string) {
   return cleaned;
 }
 
+function normalizeTailoredCvRoot(payload: any): any {
+  const unwrapped = payload?.tailored_cv && typeof payload.tailored_cv === "object"
+    ? payload.tailored_cv
+    : payload;
+  if (!unwrapped || typeof unwrapped !== "object" || Array.isArray(unwrapped)) {
+    return unwrapped;
+  }
+
+  const allowedKeys = new Set(["metadata", "strategy", "cv", "validation"]);
+  const extraKeys = Object.keys(unwrapped).filter((key) => !allowedKeys.has(key));
+  if (extraKeys.length > 0) {
+    console.warn(`Ignoring non-schema top-level CV keys: ${extraKeys.join(", ")}`);
+  }
+  return Object.fromEntries(Object.entries(unwrapped).filter(([key]) => allowedKeys.has(key)));
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+}
+
+function collectCvClaims(finalCv: any): DocumentClaimInput[] {
+  const claims: DocumentClaimInput[] = [];
+  const snapshotItems = finalCv?.cv?.role_alignment_snapshot?.items || [];
+
+  for (const item of snapshotItems) {
+    claims.push({
+      sectionLabel: "role_alignment_snapshot",
+      claimText: String(item?.evidence_statement || ""),
+      profileFactIds: stringArray(item?.profile_fact_ids),
+      requirementKeys: stringArray([item?.requirement_id]),
+    });
+  }
+
+  const experienceSections = [
+    ...(Array.isArray(finalCv?.cv?.experience) ? finalCv.cv.experience : []),
+    ...(Array.isArray(finalCv?.cv?.selected_ventures_and_research) ? finalCv.cv.selected_ventures_and_research : []),
+  ];
+
+  for (const section of experienceSections) {
+    const achievements = Array.isArray(section?.achievements) ? section.achievements : [];
+    for (const achievement of achievements) {
+      claims.push({
+        sectionLabel: "experience_achievement",
+        claimText: String(achievement?.text || ""),
+        profileFactIds: stringArray(achievement?.profile_fact_ids),
+        requirementKeys: stringArray(achievement?.requirement_ids),
+      });
+    }
+  }
+
+  return claims.filter((claim) => claim.claimText.trim().length > 0 && claim.profileFactIds.length > 0);
+}
+
 async function generateTailoredCV() {
   const jobId = process.argv[2];
   const requestedJobVersionId = process.argv[3];
@@ -99,6 +164,7 @@ async function generateTailoredCV() {
     const jobRes = await pool.query(
       `SELECT
          c.id AS canonical_job_id,
+         c.latest_match_run_id,
          c.normalized_title as title,
          c.company_name,
          v.id AS job_version_id,
@@ -131,6 +197,7 @@ async function generateTailoredCV() {
     const jdCompany = job.company_name;
     const jdDescription = job.raw_description;
     const resolvedJobVersionId = job.job_version_id;
+    const latestMatchRunId = job.latest_match_run_id || null;
 
     // Load Schemas
     const schemaDir = path.join(process.cwd(), "scripts", "schemas");
@@ -186,7 +253,8 @@ ${jdDescription}`;
       responseMimeType: "application/json",
       systemInstruction: "You are an analytical engine extracting objective requirements from a job description."
     });
-    const jobAnalysis = JSON.parse(cleanJsonResponse(analysisRes));
+    const jobAnalysisPayload = JSON.parse(cleanJsonResponse(analysisRes));
+    const jobAnalysis = jobAnalysisPayload.job_analysis ?? jobAnalysisPayload.analysis ?? jobAnalysisPayload;
     validateAgainstSchema(jobAnalysis, jobAnalysisSchema, "job_analysis.schema.json");
 
     // --- STAGE 2: REQUIREMENT-TO-EVIDENCE MATCHING ---
@@ -208,7 +276,8 @@ ${JSON.stringify(evidenceMapSchema)}`;
       responseMimeType: "application/json",
       systemInstruction: "You strictly map job requirements to verifiable fact IDs in the master profile and assess objective candidate match strengths."
     });
-    const evidenceMap = JSON.parse(cleanJsonResponse(matchRes));
+    const evidenceMapPayload = JSON.parse(cleanJsonResponse(matchRes));
+    const evidenceMap = evidenceMapPayload.evidence_map ?? evidenceMapPayload;
     validateAgainstSchema(evidenceMap, evidenceMapSchema, "evidence_map.schema.json");
     for (const [idx, req] of (evidenceMap?.role_alignment_analysis?.requirements || []).entries()) {
       for (const factId of req?.profile_fact_ids || []) {
@@ -312,7 +381,7 @@ The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard
       responseMimeType: "application/json",
       systemInstruction: "You generate the final tailored JSON CV. DO NOT invent facts. Only use data from the master profile."
     });
-    let finalCv = JSON.parse(cleanJsonResponse(cvRes));
+    let finalCv = normalizeTailoredCvRoot(JSON.parse(cleanJsonResponse(cvRes)));
 
      // Grounded snapshot text is required when the deterministic selection says it is eligible.
     if (snapshotEligible && !finalCv.cv.role_alignment_snapshot) {
@@ -358,10 +427,30 @@ The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard
     await generatePdf(docxPath, pdfPath);
     const pdfCreated = fs.existsSync(pdfPath);
 
+    const claims = collectCvClaims(finalCv);
+    const provenance = await persistDocumentProvenance(
+      {
+        canonicalJobId: jobId,
+        jobVersionId: resolvedJobVersionId,
+        matchRunId: latestMatchRunId,
+        documentType: 'CV',
+        policyVersion: 'documents_v2',
+        generatorVersion: 'cv_generator_v2',
+        outputManifest: {
+          json_path: path.join(exportDir, `${baseFilename}.cv.json`),
+          docx_path: docxPath,
+          pdf_path: pdfCreated ? pdfPath : null,
+        },
+        claims,
+      },
+      pool
+    );
+
     console.log(`✅ CV Generation Complete! Files saved to scripts/exports/:
 - ${baseFilename}.cv.json
 - ${baseFilename}.docx
-- ${pdfCreated ? `${baseFilename}.pdf` : "PDF not created (Word/LibreOffice unavailable)"}`);
+- ${pdfCreated ? `${baseFilename}.pdf` : "PDF not created (Word/LibreOffice unavailable)"}
+- document_run_id: ${provenance.documentRunId} (claims: ${provenance.claimCount})`);
 
   } catch (err: any) {
     console.error("❌ Error generating tailored CV:", err.message || err);

@@ -264,6 +264,8 @@ export const ShortlistRowSchema = z.object({
   secondary_lanes: z.array(LaneEnum).default([]),
   lane_confidence: z.enum(["High", "Medium", "Low", "None"]).default("None"),
   priority_score: z.number().default(0),
+  deterministic_match_score: z.number().nullable().default(null),
+  deterministic_match_coverage: z.number().nullable().default(null),
   processing_status: z.string(),
   nd_friendly_score: z.number().int().min(0).max(100).nullable().default(null),
   politics_stress_score: z.number().int().min(0).max(100).nullable().default(null),
@@ -280,5 +282,9 @@ export const ShortlistRowSchema = z.object({
   lane_matches: z.array(z.unknown()).nullable().default(null),
   workability_facts: z.record(z.unknown()).nullable().default(null),
   queue_status: z.string().nullable().default(null),
+  latest_match_run_id: z.string().uuid().nullable().default(null),
+  cv_document_run_id: z.string().uuid().nullable().default(null),
+  cover_letter_document_run_id: z.string().uuid().nullable().default(null),
+  document_ready: z.boolean().default(false),
 });
 export type ShortlistRow = z.infer<typeof ShortlistRowSchema>;

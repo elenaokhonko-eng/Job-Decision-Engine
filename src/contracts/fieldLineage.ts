@@ -150,6 +150,22 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     nullable: false
   },
   {
+    field: "deterministic_match_score",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "deterministic_match_score",
+    producerStage: "deterministicMatcher.ts",
+    transformation: "Weighted requirement-to-profile match score (0-100)",
+    nullable: true
+  },
+  {
+    field: "deterministic_match_coverage",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "deterministic_match_coverage",
+    producerStage: "deterministicMatcher.ts",
+    transformation: "Percentage of validated requirements with evidence matches",
+    nullable: true
+  },
+  {
     field: "processing_status",
     sourceTable: "canonical_jobs",
     sourceColumn: "processing_status",
@@ -276,6 +292,38 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     producerStage: "evaluationBudgeter.ts",
     transformation: "Latest queue state for displayed version",
     nullable: true
+  },
+  {
+    field: "latest_match_run_id",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "latest_match_run_id",
+    producerStage: "deterministicMatcher.ts",
+    transformation: "Latest deterministic matching run id for displayed job version",
+    nullable: true
+  },
+  {
+    field: "cv_document_run_id",
+    sourceTable: "document_runs",
+    sourceColumn: "id",
+    producerStage: "generate_cv.ts -> provenance.ts",
+    transformation: "Latest completed CV document run for displayed job version",
+    nullable: true
+  },
+  {
+    field: "cover_letter_document_run_id",
+    sourceTable: "document_runs",
+    sourceColumn: "id",
+    producerStage: "generate_cover_letter.ts -> provenance.ts",
+    transformation: "Latest completed cover letter run for displayed job version",
+    nullable: true
+  },
+  {
+    field: "document_ready",
+    sourceTable: "document_runs",
+    sourceColumn: "id",
+    producerStage: "v_canonical_shortlist",
+    transformation: "True when CV or cover letter provenance exists for displayed version",
+    nullable: false
   }
 ];
 

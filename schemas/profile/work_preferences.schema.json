@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Work Preferences",
+  "description": "Remote/hybrid/onsite preferences, building/interaction balance, operations constraints",
+  "type": "object",
+  "required": ["schema_version", "profile_key"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "profile_key": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]{0,63}$"
+    },
+    "work_mode": {
+      "type": "object",
+      "properties": {
+        "preferred": {
+          "type": "array",
+          "items": {
+            "enum": ["REMOTE", "REMOTE_FIRST", "HYBRID", "ONSITE"]
+          }
+        },
+        "acceptable": {
+          "type": "array",
+          "items": {
+            "enum": ["REMOTE", "REMOTE_FIRST", "HYBRID", "ONSITE"]
+          }
+        },
+        "max_office_days_per_week": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 5
+        },
+        "onsite_only_allowed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "work_composition": {
+      "type": "object",
+      "properties": {
+        "preferred_building_research_pct_min": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "minimum_building_research_pct": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "preferred_interaction_pct_max": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "external_client_primary_allowed": {
+          "type": "boolean"
+        },
+        "people_management_primary_allowed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "properties": {
+        "regular_on_call_allowed": {
+          "type": "boolean"
+        },
+        "shift_work_allowed": {
+          "type": "boolean"
+        },
+        "frequent_travel_allowed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "employment": {
+      "type": "object",
+      "properties": {
+        "full_time_preferred": {
+          "type": "boolean"
+        },
+        "contract_allowed": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

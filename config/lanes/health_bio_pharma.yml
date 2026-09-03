@@ -1,25 +1,66 @@
-lane: HEALTH_BIO_PHARMA
-description: "Life sciences, health and scientific ML"
-enabled_sources:
-  - greenhouse
-  - ashby
-  - lever
-  - himalayas
-  - startup_jobs
-title_families:
-  - computational biology
-  - bioinformatics
-  - scientific ml
-  - cheminformatics
-  - clinical nlp
-  - healthcare data science
-  - medical ai
-  - imaging
-  - research software engineering
-  - health-data platforms
-  - pharmaceutical ai
-  - data engineering
-  - healthcare models
+schema_version: "2.0"
+lane_key: HEALTH_BIO_PHARMA
+display_name: "Health, Bio & Pharma"
+description: "Life sciences, health, pharmaceutical AI, bioinformatics, computational biology and scientific machine learning."
+
+scope:
+  required_function_concepts:
+    any:
+      - ML_ENGINEERING
+      - DATA_ENGINEERING
+      - SCIENTIFIC_ML
+      - RESEARCH_ENGINEERING
+      - BIOINFORMATICS
+      - CLINICAL_INFORMATICS
+
+  included_domain_concepts:
+    any:
+      - PHARMACEUTICAL
+      - BIOTECH
+      - HEALTHCARE
+      - LIFE_SCIENCES
+      - BIOINFORMATICS
+      - COMPUTATIONAL_BIOLOGY
+      - SCIENTIFIC_ML
+      - CHEMINFORMATICS
+      - CLINICAL_NLP
+      - GENOMICS
+      - MEDICAL_IMAGING
+
+prototypes:
+  - prototype_key: pharma_biotech_ml
+    text: "Pharmaceutical AI, biotech machine learning, drug discovery and computational biology."
+    weight: 1.0
+  - prototype_key: clinical_health_ai
+    text: "Clinical AI, healthcare ML, medical imaging, clinical NLP and health data platforms."
+    weight: 0.95
+  - prototype_key: scientific_ml
+    text: "Scientific machine learning, research engineering, bioinformatics and research software."
+    weight: 0.9
+
+routing:
+  minimum_domain_score: 0.60
+  minimum_function_score: 0.60
+  minimum_semantic_score: 0.35
+  secondary_lane_threshold: 0.30
+
+sourcing:
+  enabled_sources:
+    - GREENHOUSE
+    - ASHBY
+    - LEVER
+    - HIMALAYAS
+  query_sets:
+    - "remote pharmaceutical engineer"
+    - "remote biotech machine learning"
+    - "remote healthcare data scientist"
+    - "remote scientific ml researcher"
+
+budget:
+  maximum_ai_interpretations_per_run: 3
+
+documents:
+  include_criteria_snapshot: true
 positive_concepts:
   - pharma
   - bioinformatics

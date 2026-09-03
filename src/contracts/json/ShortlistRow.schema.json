@@ -135,6 +135,20 @@
           "type": "number",
           "default": 0
         },
+        "deterministic_match_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null
+        },
+        "deterministic_match_coverage": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null
+        },
         "processing_status": {
           "type": "string"
         },
@@ -269,6 +283,46 @@
             "null"
           ],
           "default": null
+        },
+        "latest_match_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cv_document_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cover_letter_document_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "document_ready": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [

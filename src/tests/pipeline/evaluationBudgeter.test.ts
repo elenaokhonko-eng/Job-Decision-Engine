@@ -2,6 +2,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runEvaluationBudgeter } from '../../pipeline/evaluationBudgeter.js';
 import pg from 'pg';
 
+vi.mock('../../pipeline/laneConfigLoader.js', () => ({
+  loadGlobalLanesConfig: vi.fn(() => ({
+    lanes: {
+      CORE_AI_DATA: { ai_evaluation_limit: 3 },
+      LEGAL_REGTECH: { ai_evaluation_limit: 3 },
+      HEALTH_BIO_PHARMA: { ai_evaluation_limit: 3 },
+      INVESTMENT_MARKETS_FINTECH: { ai_evaluation_limit: 3 },
+    },
+    unclassified_policy: {
+      label: 'UNCLASSIFIED',
+      fallback_behavior: 'DEFER_ROUTING',
+      min_similarity_floor: 0.25,
+    },
+  }))
+}));
+
 vi.mock('pg', () => {
   const mPool: any = {
     query: vi.fn(),
@@ -50,5 +66,59 @@ describe('Pipeline Stage: Evaluation Budgeter', () => {
     expect(insertCall).toBeDefined();
     expect(insertCall[1][1]).toEqual('ver-1');
     expect(insertCall[1][2]).toEqual('CORE_AI_DATA');
+  });
+
+  it('reads mixed lane-level caps from config at runtime', async () => {
+    const laneLoader = await import('../../pipeline/laneConfigLoader.js');
+    vi.mocked(laneLoader.loadGlobalLanesConfig).mockReturnValue({
+      lanes: {
+        CORE_AI_DATA: { ai_evaluation_limit: 2 },
+        LEGAL_REGTECH: { ai_evaluation_limit: 1 },
+        HEALTH_BIO_PHARMA: { ai_evaluation_limit: 3 },
+        INVESTMENT_MARKETS_FINTECH: { ai_evaluation_limit: 3 },
+      },
+      unclassified_policy: {
+        label: 'UNCLASSIFIED',
+        fallback_behavior: 'DEFER_ROUTING',
+        min_similarity_floor: 0.25,
+      },
+    } as any);
+
+    (mPool.query as any).mockResolvedValueOnce({
+      rows: [
+        { id: 'c1', latest_job_version_id: 'v1', primary_lane: 'CORE_AI_DATA', semantic_score: 0.95 },
+        { id: 'c2', latest_job_version_id: 'v2', primary_lane: 'CORE_AI_DATA', semantic_score: 0.85 },
+        { id: 'c3', latest_job_version_id: 'v3', primary_lane: 'CORE_AI_DATA', semantic_score: 0.75 },
+        { id: 'l1', latest_job_version_id: 'v4', primary_lane: 'LEGAL_REGTECH', semantic_score: 0.91 },
+        { id: 'l2', latest_job_version_id: 'v5', primary_lane: 'LEGAL_REGTECH', semantic_score: 0.81 },
+      ],
+    });
+
+    const summary = await runEvaluationBudgeter();
+    expect(summary.queued).toBe(3);
+    expect(summary.deferred).toBe(2);
+
+    const calls = (mPool.query as any).mock.calls;
+    const queuedCore = calls.filter(
+      (c: any) => typeof c[0] === 'string' && c[0].includes('INSERT INTO evaluation_queue') && c[1][2] === 'CORE_AI_DATA'
+    );
+    const queuedLegal = calls.filter(
+      (c: any) => typeof c[0] === 'string' && c[0].includes('INSERT INTO evaluation_queue') && c[1][2] === 'LEGAL_REGTECH'
+    );
+    expect(queuedCore).toHaveLength(2);
+    expect(queuedLegal).toHaveLength(1);
+
+    const deferredIds = calls
+      .filter(
+        (c: any) =>
+          typeof c[0] === 'string' &&
+          c[0].includes('UPDATE canonical_jobs') &&
+          c[0].includes('DEFERRED_BUDGET')
+      )
+      .map((c: any) => c[1][0]);
+
+    expect(deferredIds).toContain('c3');
+    expect(deferredIds).toContain('l2');
+    expect(laneLoader.loadGlobalLanesConfig).toHaveBeenCalledTimes(1);
   });
 });
