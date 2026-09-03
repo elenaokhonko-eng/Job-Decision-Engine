@@ -1,12 +1,13 @@
 /**
  * Document generation contracts
  * @description Zod schemas for CV, cover letter, and document provenance
- * @version 2.0
+ * @version 2.2.0
  */
 
 import { z } from 'zod';
+import { SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION, SchemaVersionSchema } from '../contracts/version.js';
 
-export const DOCUMENTS_SCHEMA_VERSION = '2.0';
+export const DOCUMENTS_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
 export const DocumentTypeSchema = z.enum(['CV', 'COVER_LETTER']);
 export const DocumentRunStatusSchema = z.enum(['STARTED', 'COMPLETED', 'FAILED']);
@@ -59,7 +60,7 @@ export const DocumentRunSchema = z.object({
 });
 
 export const DocumentContractPlaceholder = z.object({
-  schema_version: z.literal(DOCUMENTS_SCHEMA_VERSION).default(DOCUMENTS_SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(DOCUMENTS_SCHEMA_VERSION),
   document_run: DocumentRunSchema,
   claims: z.array(DocumentClaimSchema),
   match_snapshot: MatchSnapshotSchema.optional(),

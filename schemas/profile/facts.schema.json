@@ -7,7 +7,7 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "pattern": "^\\d+\\.\\d+$"
+      "pattern": "^\\d+\\.\\d+(\\.\\d+)?$"
     },
     "profile_key": {
       "type": "string",
@@ -64,7 +64,7 @@
           "evidence_tier": {
             "type": "string",
             "enum": [
-              "PRODUCTION_PROFESSIONAL",
+              "PROFESSIONAL_PRODUCTION",
               "DEPLOYED_OPEN_SOURCE",
               "APPLIED_PROJECT",
               "COURSE_PROJECT",

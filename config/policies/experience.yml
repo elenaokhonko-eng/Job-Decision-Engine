@@ -1,4 +1,4 @@
-schema_version: "2.0"
+schema_version: "2.2.0"
 policy_version: "experience_v2"
 description: "Professional experience policy defining equivalence classes and duration calculation rules"
 

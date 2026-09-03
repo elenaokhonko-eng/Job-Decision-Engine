@@ -58,7 +58,10 @@ export async function runEvaluationBudgeter(clientOrPool?: pg.Pool | pg.PoolClie
   let queuedCount = 0;
   let deferredCount = 0;
 
-  const client = 'connect' in pool ? await pool.connect() : pool;
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === 'function' && !('release' in value);
+  const ownsClient = isPool(pool);
+  const client = ownsClient ? await pool.connect() : pool;
   try {
     for (const lane of Object.keys(jobsByLane)) {
       const laneLimit = laneLimitFor(lanesConfig, lane);
@@ -116,7 +119,7 @@ export async function runEvaluationBudgeter(clientOrPool?: pg.Pool | pg.PoolClie
       }
     }
   } finally {
-    if ('release' in client && typeof client.release === 'function') {
+    if (ownsClient && typeof client.release === 'function') {
       client.release();
     }
   }

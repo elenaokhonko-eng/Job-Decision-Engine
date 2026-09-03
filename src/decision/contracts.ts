@@ -1,12 +1,13 @@
 /**
  * Deterministic decision engine contracts
  * @description Zod schemas for workability, qualification, and final decision logic
- * @version 2.0
+ * @version 2.2.0
  */
 
 import { z } from 'zod';
+import { SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION, SchemaVersionSchema } from '../contracts/version.js';
 
-export const DECISION_SCHEMA_VERSION = '2.0';
+export const DECISION_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
 export const WorkabilityDecisionSchema = z.object({
   status: z.enum(['PASS', 'NEEDS_VERIFICATION', 'HARD_REJECT']),
@@ -23,7 +24,7 @@ export const QualificationDecisionSchema = z.object({
 });
 
 export const DeterministicDecisionSchema = z.object({
-  schema_version: z.literal(DECISION_SCHEMA_VERSION).default(DECISION_SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(DECISION_SCHEMA_VERSION),
   canonical_job_id: z.string().uuid(),
   job_version_id: z.string().uuid(),
   match_run_id: z.string().uuid(),
@@ -42,7 +43,7 @@ export const DecisionPolicySchema = z.object({
 });
 
 export const DecisionContractPlaceholder = z.object({
-  schema_version: z.literal(DECISION_SCHEMA_VERSION).default(DECISION_SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(DECISION_SCHEMA_VERSION),
   decision: DeterministicDecisionSchema,
   policy: DecisionPolicySchema,
 });

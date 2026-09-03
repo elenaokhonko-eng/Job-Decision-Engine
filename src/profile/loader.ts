@@ -30,10 +30,10 @@ export interface LoadedProfile {
 /**
  * Load and validate a single profile JSON file
  */
-async function loadProfileFile<T>(
+async function loadProfileFile<S extends z.ZodTypeAny>(
   fileName: string,
-  schema: z.ZodSchema<T>
-): Promise<T> {
+  schema: S
+): Promise<z.output<S>> {
   const filePath = path.join(PROFILE_DIR, fileName);
 
   try {

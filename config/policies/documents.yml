@@ -1,4 +1,4 @@
-schema_version: "2.0"
+schema_version: "2.2.0"
 policy_version: "documents_v2"
 description: "Document eligibility, criteria snapshot, and claim validation policies"
 

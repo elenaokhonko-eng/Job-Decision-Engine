@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import * as yaml from "js-yaml";
 import { fileURLToPath } from "url";
+import { SCHEMA_VERSION } from "../contracts/version.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -144,7 +145,7 @@ export function loadGlobalLanesConfig(): GlobalLanesConfig {
   }
 
   return {
-    version: registry.config_version || registry.schema_version || "2.0",
+    version: registry.config_version || registry.schema_version || SCHEMA_VERSION,
     description: "Authoritative multi-lane definition and semantic threshold registry",
     lanes,
     unclassified_policy: {

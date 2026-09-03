@@ -1,12 +1,13 @@
 /**
  * Profile evidence contracts
  * @description Zod schemas for candidate profile data structures
- * @version 2.0
+ * @version 2.2.0
  */
 
 import { z } from 'zod';
+import { SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION, SchemaVersionSchema } from '../contracts/version.js';
 
-export const SCHEMA_VERSION = '2.0';
+export const SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
 // ============================================================================
 // Enums and base schemas
@@ -113,7 +114,7 @@ export const ProfileVersionSchema = z.object({
   id: z.string().uuid(),
   candidate_profile_id: z.string().uuid(),
   version_number: z.number().int().positive(),
-  schema_version: z.string(),
+  schema_version: SchemaVersionSchema,
   source_hash: z.string(),
   status: ProfileVersionStatusSchema,
   effective_at: z.date().nullable(),
@@ -239,7 +240,7 @@ export const ProfileFactEvidenceSourceSchema = z.object({
 // ============================================================================
 
 export const ProfileJsonSchema = z.object({
-  schema_version: z.string(),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   profile_key: z.string().regex(/^[a-z_][a-z0-9_]{0,63}$/),
   profile_version: z.number().int().positive(),
   display_name: z.string().min(1).max(256),
@@ -249,7 +250,7 @@ export const ProfileJsonSchema = z.object({
 });
 
 export const EngagementJsonSchema = z.object({
-  schema_version: z.string(),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   profile_key: z.string().regex(/^[a-z_][a-z0-9_]{0,63}$/),
   engagements: z.array(
     z.object({
@@ -274,7 +275,7 @@ export const EngagementJsonSchema = z.object({
 });
 
 export const FactJsonSchema = z.object({
-  schema_version: z.string(),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   profile_key: z.string().regex(/^[a-z_][a-z0-9_]{0,63}$/),
   facts: z.array(
     z.object({
@@ -296,7 +297,7 @@ export const FactJsonSchema = z.object({
 });
 
 export const CredentialJsonSchema = z.object({
-  schema_version: z.string(),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   profile_key: z.string().regex(/^[a-z_][a-z0-9_]{0,63}$/),
   credentials: z.array(
     z.object({
@@ -345,7 +346,7 @@ export const EmploymentPreferenceSchema = z.object({
 });
 
 export const WorkPreferencesJsonSchema = z.object({
-  schema_version: z.string(),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   profile_key: z.string().regex(/^[a-z_][a-z0-9_]{0,63}$/),
   work_mode: WorkModePreferenceSchema.optional(),
   work_composition: WorkCompositionPreferenceSchema.optional(),
@@ -365,7 +366,7 @@ export const LanePreferenceSchema = z.object({
 });
 
 export const LanePreferencesJsonSchema = z.object({
-  schema_version: z.string(),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   profile_key: z.string().regex(/^[a-z_][a-z0-9_]{0,63}$/),
   lanes: z.array(LanePreferenceSchema),
 });

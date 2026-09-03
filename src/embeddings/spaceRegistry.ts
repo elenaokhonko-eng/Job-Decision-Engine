@@ -67,7 +67,10 @@ export async function seedEmbeddingSpaces(
   clientOrPool?: pg.Pool | pg.PoolClient
 ): Promise<SeedEmbeddingSpacesResult> {
   const pool = clientOrPool || defaultPool;
-  const client = 'connect' in pool ? await pool.connect() : pool;
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === 'function' && !('release' in value);
+  const ownsClient = isPool(pool);
+  const client = ownsClient ? await pool.connect() : pool;
 
   const primaryProvider = process.env.EMBEDDING_PRIMARY_PROVIDER || 'gemini';
   const fallbackProvider = process.env.EMBEDDING_FALLBACK_PROVIDER || 'openai';
@@ -109,7 +112,7 @@ export async function seedEmbeddingSpaces(
     await client.query('ROLLBACK');
     throw error;
   } finally {
-    if ('release' in client && typeof client.release === 'function') {
+    if (ownsClient && typeof client.release === 'function') {
       client.release();
     }
   }

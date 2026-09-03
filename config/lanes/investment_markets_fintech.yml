@@ -1,4 +1,4 @@
-schema_version: "2.0"
+schema_version: "2.2.0"
 lane_key: INVESTMENT_MARKETS_FINTECH
 display_name: "Investment, Markets & FinTech"
 description: "AI, data, quantitative and platform work in investing, asset management, institutional markets, and investment-focused fintech."

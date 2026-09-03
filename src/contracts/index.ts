@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-export const SCHEMA_VERSION = "1.0.0";
+import { SCHEMA_VERSION, SchemaVersionSchema } from "./version.js";
+export { SCHEMA_VERSION } from "./version.js";
 
 export const SourceNameSchema = z.enum([
   "GMAIL_ALERT",
@@ -23,7 +24,7 @@ export type SourceName = z.infer<typeof SourceNameSchema>;
  * Preserves raw input payload, source identity, and cryptographic hash before extraction.
  */
 export const IngestionEnvelopeSchema = z.object({
-  schema_version: z.literal(SCHEMA_VERSION).default(SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   source_type: SourceNameSchema,
   source_id: z.string().min(1),
   source_run_id: z.string().uuid(),
@@ -39,7 +40,7 @@ export type IngestionEnvelope = z.infer<typeof IngestionEnvelopeSchema>;
  * Structured representation of a vacancy extracted from an ingestion envelope.
  */
 export const ExtractedJobSchema = z.object({
-  schema_version: z.literal(SCHEMA_VERSION).default(SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   source_external_id: z.string().min(1).optional(),
   company_name: z.string().min(1),
   title: z.string().min(1),
@@ -85,7 +86,7 @@ export type JobObservation = z.infer<typeof JobObservationSchema>;
  * Deduplicated canonical record and versioned snapshot.
  */
 export const CanonicalJobVersionSchema = z.object({
-  schema_version: z.literal(SCHEMA_VERSION).default(SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   canonical_job_id: z.string().uuid(),
   job_version_id: z.string().min(1),
   company_name: z.string().min(1),
@@ -100,15 +101,21 @@ export const CanonicalJobVersionSchema = z.object({
   processing_status: z.enum([
     "RAW_STAGED",
     "HARD_REJECTED",
+    "MANUALLY_REMOVED",
     "NEEDS_VERIFICATION",
     "PREQUALIFIED",
+    "ROUTING_DEFERRED",
+    "LANE_ROUTED",
+    "MATCHED",
     "SEMANTIC_SHORTLISTED",
     "QUEUED_FOR_AI",
     "DEFERRED_BUDGET",
     "EVALUATING",
     "AI_EVALUATED",
+    "EVALUATED",
     "RETRY_WAIT",
-    "NEEDS_MANUAL_REVIEW"
+    "NEEDS_MANUAL_REVIEW",
+    "REJECTED_AFTER_EVALUATION"
   ]).default("RAW_STAGED"),
 });
 export type CanonicalJobVersion = z.infer<typeof CanonicalJobVersionSchema>;
@@ -141,7 +148,7 @@ export function toEvaluationWorkabilityFacts(facts: unknown) {
  * Deterministic global workability gate outcome.
  */
 export const GateDecisionSchema = z.object({
-  schema_version: z.literal(SCHEMA_VERSION).default(SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   canonical_job_id: z.string().uuid(),
   job_version_id: z.string().min(1),
   pipeline_run_id: z.string().uuid(),
@@ -168,7 +175,7 @@ export const LaneEnum = z.enum([
 export type Lane = z.infer<typeof LaneEnum>;
 
 export const LaneDecisionSchema = z.object({
-  schema_version: z.literal(SCHEMA_VERSION).default(SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   canonical_job_id: z.string().uuid(),
   job_version_id: z.string().min(1),
   pipeline_run_id: z.string().uuid(),
@@ -214,7 +221,7 @@ export type EvaluationQueueItem = z.infer<typeof EvaluationQueueItemSchema>;
  * Full structured LLM output with cultural, risk, and career scoring.
  */
 export const EvaluationResultSchema = z.object({
-  schema_version: z.literal(SCHEMA_VERSION).default(SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   canonical_job_id: z.string().uuid(),
   job_version_id: z.string().min(1),
   pipeline_run_id: z.string().uuid(),

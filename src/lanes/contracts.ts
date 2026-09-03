@@ -1,10 +1,11 @@
 /**
  * Lane definition contracts
  * @description Zod schemas for career lane configuration and routing
- * @version 2.0
+ * @version 2.2.0
  */
 
 import { z } from 'zod';
+import { SCHEMA_VERSION, SchemaVersionSchema } from '../contracts/version.js';
 
 export const LaneKeySchema = z
   .string()
@@ -18,7 +19,7 @@ export const LaneKeySchema = z
 // - CandidateLanePreferenceSchema
 
 export const LaneContractPlaceholder = z.object({
-  schema_version: z.string(),
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   lane_key: LaneKeySchema,
   note: z.literal('Phase 4: Lane configuration contracts to be implemented'),
 });
