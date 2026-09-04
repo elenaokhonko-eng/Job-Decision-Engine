@@ -216,16 +216,16 @@ SELECT
 FROM base
 ON CONFLICT (fact_identity_id, content_hash) DO NOTHING;
 
--- Link profile_facts rows to identities+revisions.
-UPDATE profile_facts pf
-SET fact_identity_id = pfi.id
-FROM profile_versions pv
-JOIN profile_fact_identities pfi
-  ON pfi.workspace_id = pv.workspace_id
- AND pfi.candidate_profile_id = pv.candidate_profile_id
- AND pfi.fact_key = pf.fact_key
-WHERE pv.id = pf.profile_version_id
-  AND pf.fact_identity_id IS NULL;
+	-- Link profile_facts rows to identities+revisions.
+	UPDATE profile_facts pf
+	SET fact_identity_id = pfi.id
+	FROM profile_versions pv,
+	     profile_fact_identities pfi
+	WHERE pv.id = pf.profile_version_id
+	  AND pfi.workspace_id = pv.workspace_id
+	  AND pfi.candidate_profile_id = pv.candidate_profile_id
+	  AND pfi.fact_key = pf.fact_key
+	  AND pf.fact_identity_id IS NULL;
 
 UPDATE profile_facts pf
 SET fact_revision_id = pfr.id
@@ -235,25 +235,25 @@ WHERE pfr.source_profile_fact_id = pf.id
 
 -- If multiple profile_facts map to the same content_hash (deduped revision),
 -- fall back to identity + content_hash mapping.
-UPDATE profile_facts pf
-SET fact_revision_id = pfr.id
-FROM profile_versions pv
-JOIN profile_fact_identities pfi
-  ON pfi.workspace_id = pv.workspace_id
- AND pfi.candidate_profile_id = pv.candidate_profile_id
- AND pfi.fact_key = pf.fact_key
-JOIN profile_fact_revisions pfr
-  ON pfr.fact_identity_id = pfi.id
- AND pfr.content_hash = md5(
-      COALESCE(pf.fact_type, '') || '|' ||
-      COALESCE(pf.statement, '') || '|' ||
-      COALESCE(pf.evidence_tier, '') || '|' ||
-      COALESCE(pf.verification_status, '') || '|' ||
-      COALESCE(pf.confidentiality, '') || '|' ||
-      COALESCE(pf.structured_value::text, '')
-    )
-WHERE pv.id = pf.profile_version_id
-  AND pf.fact_revision_id IS NULL;
+	UPDATE profile_facts pf
+	SET fact_revision_id = pfr.id
+	FROM profile_versions pv,
+	     profile_fact_identities pfi,
+	     profile_fact_revisions pfr
+	WHERE pv.id = pf.profile_version_id
+	  AND pfi.workspace_id = pv.workspace_id
+	  AND pfi.candidate_profile_id = pv.candidate_profile_id
+	  AND pfi.fact_key = pf.fact_key
+	  AND pfr.fact_identity_id = pfi.id
+	  AND pfr.content_hash = md5(
+	      COALESCE(pf.fact_type, '') || '|' ||
+	      COALESCE(pf.statement, '') || '|' ||
+	      COALESCE(pf.evidence_tier, '') || '|' ||
+	      COALESCE(pf.verification_status, '') || '|' ||
+	      COALESCE(pf.confidentiality, '') || '|' ||
+	      COALESCE(pf.structured_value::text, '')
+	    )
+	  AND pf.fact_revision_id IS NULL;
 
 -- Snapshot mapping for each profile version.
 INSERT INTO profile_version_fact_snapshots (
