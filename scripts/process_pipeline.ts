@@ -3,7 +3,8 @@ import { runRequirementsExtraction } from "../src/pipeline/requirementsExtractor
 import { runHardGates } from "../src/pipeline/hardGate.js";
 import { runLaneRouting } from "../src/pipeline/laneRouter.js";
 import { runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
-import { runEvaluationBudgeter } from "../src/pipeline/evaluationBudgeter.js";
+import { runRecommendationDecider } from "../src/pipeline/recommendationDecider.js";
+import { runExplanationQueueEnqueuer } from "../src/pipeline/explanationQueueEnqueuer.js";
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../src/db/pgSsl.js";
@@ -13,14 +14,14 @@ dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: pgSslConfig(process.env.DATABASE_URL)
+  ssl: pgSslConfig(process.env.DATABASE_URL),
 });
 
 const LOCK_ID = 1001; // Global lock ID for pipeline processing
 
 export async function processPipeline(): Promise<void> {
   console.log("====================================================");
-  console.log("         STAGE 0: DISCOVERY (PROCESS PIPELINE)      ");
+  console.log("                PROCESS PIPELINE                    ");
   console.log("====================================================");
 
   const client = await pool.connect();
@@ -28,82 +29,104 @@ export async function processPipeline(): Promise<void> {
   let pipelineError: Error | null = null;
 
   try {
-    // Attempt to acquire an exclusive session-level advisory lock
     const { rows } = await client.query(`SELECT pg_try_advisory_lock($1) as locked`, [LOCK_ID]);
     lockAcquired = Boolean(rows[0]?.locked);
 
     if (!lockAcquired) {
-      console.warn("⚠️ Another instance of the pipeline is currently running. Exiting cleanly.");
+      console.warn("Another instance of the pipeline is currently running. Exiting cleanly.");
       return;
     }
-    
-    console.log("\n[1/6] Running Normalization...");
+
+    console.log("\n[1/7] Normalization...");
     const normSummary = await runNormalization(pool);
 
-    console.log("\n[2/6] Running Requirements Extraction...");
+    console.log("\n[2/7] Requirements Extraction...");
     const requirementsSummary = await runRequirementsExtraction(pool);
 
-    console.log("\n[3/6] Running Hard Gates...");
+    console.log("\n[3/7] Hard Gates...");
     const gateSummary = await runHardGates(pool);
 
-    console.log("\n[4/6] Running Semantic Lane Routing...");
+    console.log("\n[4/7] Semantic Lane Routing...");
     const routingSummary = await runLaneRouting(pool);
 
-    console.log("\n[5/6] Running Deterministic Matching...");
+    console.log("\n[5/7] Deterministic Matching...");
     const matchingSummary = await runDeterministicMatcher(pool);
 
-    console.log("\n[6/6] Running Evaluation Budgeter...");
-    const budgetSummary = await runEvaluationBudgeter(pool);
+    console.log("\n[6/7] Deterministic Recommendation Decider...");
+    const decisionSummary = await runRecommendationDecider(pool);
 
-    // ── Funnel Conservation & Stranded Record Verification ──
+    console.log("\n[7/7] Explanation Queue Enqueue (optional; no quota/deferral)...");
+    const enqueueSummary = await runExplanationQueueEnqueuer(pool);
+
     console.log("\n--- Verifying Funnel Conservation ---");
-    const { rows: statusCounts } = await pool.query(`
-      SELECT processing_status, COUNT(*)::int as count
+    const { rows: stateCounts } = await pool.query(`
+      SELECT COALESCE(processing_state, processing_status) AS processing_state, COUNT(*)::int as count
       FROM canonical_jobs
-      GROUP BY processing_status
+      GROUP BY COALESCE(processing_state, processing_status)
     `);
 
     const counts: Record<string, number> = {};
-    for (const r of statusCounts) {
-      counts[r.processing_status] = r.count;
+    for (const r of stateCounts) {
+      counts[r.processing_state] = r.count;
     }
 
-    console.log("Current Canonical Jobs Status Distribution:", counts);
+    console.log("Current Canonical Jobs State Distribution:", counts);
 
-    // Check for stranded intermediate states
     const strandedRawStaged = counts["RAW_STAGED"] || 0;
     const strandedPrequalified = counts["PREQUALIFIED"] || 0;
-    const strandedLaneRouted = counts["LANE_ROUTED"] || 0;
-    const strandedMatched = counts["MATCHED"] || 0;
+    if (strandedRawStaged > 0 || strandedPrequalified > 0) {
+      throw new Error(
+        `Funnel conservation failure: Found stranded records in upstream states (RAW_STAGED: ${strandedRawStaged}, PREQUALIFIED: ${strandedPrequalified})`
+      );
+    }
 
-    if (strandedRawStaged > 0 || strandedPrequalified > 0 || strandedLaneRouted > 0 || strandedMatched > 0) {
-      const errorMsg = `❌ Funnel conservation failure: Found stranded records in intermediate states! (RAW_STAGED: ${strandedRawStaged}, PREQUALIFIED: ${strandedPrequalified}, LANE_ROUTED: ${strandedLaneRouted}, MATCHED: ${strandedMatched})`;
-      console.error(errorMsg);
-      throw new Error(errorMsg);
+    const deferredBudget = counts["DEFERRED_BUDGET"] || 0;
+    if (deferredBudget > 0) {
+      throw new Error(`Funnel invariant failure: Found ${deferredBudget} record(s) in DEFERRED_BUDGET.`);
+    }
+
+    const { rows: undecidedRows } = await pool.query(`
+      SELECT COUNT(*)::int AS n
+      FROM canonical_jobs
+      WHERE COALESCE(processing_state, processing_status) <> 'MANUALLY_REMOVED'
+        AND recommendation_outcome IS NULL
+    `);
+    const missingDecisions = undecidedRows?.[0]?.n ?? 0;
+    if (missingDecisions > 0) {
+      throw new Error(
+        `Funnel invariant failure: ${missingDecisions} job(s) are missing deterministic recommendation_outcome.`
+      );
     }
 
     if (normSummary.totalErrors > 0) {
-      throw new Error(`Normalization failed for ${normSummary.totalErrors} observation(s); records remain pending for retry.`);
+      throw new Error(
+        `Normalization failed for ${normSummary.totalErrors} observation(s); records remain pending for retry.`
+      );
     }
 
     if (requirementsSummary.errors > 0) {
-      throw new Error(`Requirements extraction failed for ${requirementsSummary.errors} job version(s); records moved to RETRY_WAIT.`);
+      throw new Error(
+        `Requirements extraction failed for ${requirementsSummary.errors} job version(s); records moved to RETRY_WAIT.`
+      );
     }
 
     if (matchingSummary.errors > 0) {
-      throw new Error(`Deterministic matching failed for ${matchingSummary.errors} job(s); records remain recoverable for retry.`);
+      throw new Error(
+        `Deterministic matching failed for ${matchingSummary.errors} job(s); records remain recoverable for retry.`
+      );
     }
 
     console.log("Requirements extraction summary:", requirementsSummary);
     console.log("Hard gate summary:", gateSummary);
     console.log("Lane routing summary:", routingSummary);
     console.log("Deterministic matching summary:", matchingSummary);
-    console.log("Evaluation budget summary:", budgetSummary);
+    console.log("Deterministic decision summary:", decisionSummary);
+    console.log("Explanation queue enqueue summary:", enqueueSummary);
 
-    console.log("\n✅ Pipeline execution and funnel conservation verified successfully.");
+    console.log("\nPipeline execution and funnel conservation verified successfully.");
   } catch (err: any) {
     pipelineError = err;
-    console.error("❌ Pipeline execution failed:", err.message || err);
+    console.error("Pipeline execution failed:", err?.message || err);
   } finally {
     if (lockAcquired) {
       await client.query(`SELECT pg_advisory_unlock($1)`, [LOCK_ID]).catch(() => {});
@@ -123,3 +146,4 @@ if (process.argv[1] && process.argv[1].includes("process_pipeline")) {
     process.exit(1);
   });
 }
+

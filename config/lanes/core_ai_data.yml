@@ -74,5 +74,4 @@ negative_concepts:
   - technical account management
   - programme governance
   - people-management-heavy
-ai_evaluation_limit: 3
 semantic_threshold: 0.68

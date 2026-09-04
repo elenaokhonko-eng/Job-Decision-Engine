@@ -283,7 +283,7 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
         LIMIT 1
       )
     )
-    WHERE c.processing_status = 'RAW_STAGED'
+    WHERE COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
   `);
 
   console.log(`Found ${stagedJobs.length} canonical jobs to gate.`);
@@ -355,6 +355,7 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
         await client.query(
           `UPDATE canonical_jobs
            SET gate_decision      = $1,
+               processing_state   = $2,
                processing_status  = $2,
                rejection_reason   = $3,
                gate_evidence_quotes = $4,

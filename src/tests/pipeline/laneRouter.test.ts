@@ -63,7 +63,8 @@ describe('Pipeline Stage: Lane Routing', () => {
     expect(updateCall[1][0]).toEqual('CORE_AI_DATA'); // bestLane (arg 1)
     expect(updateCall[1][1]).toBe(1);                  // bestScore (arg 2)
     expect(updateCall[1][2]).toEqual('LANE_ROUTED');   // processingStatus (arg 3)
-    // arg 4 = secondary_lanes JSON, arg 5 = lane_evidence, arg 6 = id
-    expect(updateCall[1][5]).toEqual('canon-1');        // job id (arg 6)
+    expect(updateCall[1][3]).toEqual('High');          // laneConfidence (arg 4)
+    // arg 5 = secondary_lanes JSON, arg 6 = lane_evidence, arg 7 = id
+    expect(updateCall[1][6]).toEqual('canon-1');        // job id (arg 7)
   });
 });

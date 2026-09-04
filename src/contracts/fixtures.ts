@@ -54,7 +54,14 @@ export const sampleDuplicateRepostVersion: CanonicalJobVersion = {
   description_text: "Updated reposted description with platform governance...",
   version_number: 2,
   observed_at: "2026-08-28T12:10:00.000Z",
-  processing_status: "RAW_STAGED"
+  processing_state: "RAW_STAGED",
+  processing_status: "RAW_STAGED",
+  recommendation_eligibility: null,
+  recommendation_outcome: null,
+  recommendation_requirement_score: null,
+  recommendation_coverage_score: null,
+  recommendation_evidence_completeness: null,
+  recommendation_decided_at: null
 };
 
 export const sampleHardRejectGate: GateDecision = {
@@ -95,13 +102,13 @@ export const sampleNeedsVerificationGate: GateDecision = {
   evaluated_at: "2026-08-28T12:16:00.000Z"
 };
 
-export const sampleDeferredBudgetQueueItem: EvaluationQueueItem = {
+export const samplePendingQueueItem: EvaluationQueueItem = {
   id: "88888888-8888-4888-8888-888888888888",
   canonical_job_id: "99999999-9999-4999-8999-999999999999",
   job_version_id: "v1",
   lane: "CORE_AI_DATA",
   priority_score: 0.32,
-  status: "DEFERRED_BUDGET",
+  status: "PENDING",
   lease_id: null,
   lease_expires_at: null,
   attempt_count: 0,
@@ -147,7 +154,14 @@ export const sampleEvaluatedShortlistRow: ShortlistRow = {
   priority_score: 0.449,
   deterministic_match_score: 82.5,
   deterministic_match_coverage: 66.7,
+  processing_state: "AI_EVALUATED",
   processing_status: "AI_EVALUATED",
+  recommendation_eligibility: "ELIGIBLE",
+  recommendation_outcome: "REVIEW",
+  recommendation_requirement_score: 0.825,
+  recommendation_coverage_score: 0.667,
+  recommendation_evidence_completeness: 0.25,
+  recommendation_decided_at: "2026-08-28T12:30:00.000Z",
   nd_friendly_score: 75,
   politics_stress_score: 35,
   sensory_overload_index: 30,

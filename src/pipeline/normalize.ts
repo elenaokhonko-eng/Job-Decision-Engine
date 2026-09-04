@@ -113,8 +113,8 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
           const insertCanon = await client.query(
             `INSERT INTO canonical_jobs (
                company_name, normalized_title, canonical_url, location, 
-               workplace_type, employment_type, processing_status, version_count
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1) RETURNING id`,
+               workplace_type, employment_type, processing_state, processing_status, version_count
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1) RETURNING id`,
             [
               obs.company_name,
               obs.title.toLowerCase(),
@@ -122,6 +122,7 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
               obs.location_raw || "Unknown",
               obs.workplace_type_raw || "UNKNOWN",
               obs.employment_type_raw || "UNKNOWN",
+              "RAW_STAGED",
               "RAW_STAGED"
             ]
           );
@@ -164,6 +165,7 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
                  location = CASE WHEN NULLIF($3, 'Unknown') IS NULL THEN location ELSE $3 END,
                  workplace_type = CASE WHEN NULLIF($4, 'UNKNOWN') IS NULL THEN workplace_type ELSE $4 END,
                  employment_type = CASE WHEN NULLIF($5, 'UNKNOWN') IS NULL THEN employment_type ELSE $5 END,
+                 processing_state = 'RAW_STAGED',
                  processing_status = 'RAW_STAGED',
                  updated_at = NOW()
              WHERE id = $6`,

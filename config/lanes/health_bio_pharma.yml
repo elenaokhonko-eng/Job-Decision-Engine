@@ -74,5 +74,4 @@ negative_concepts:
   - clinical-operations
   - medical sales
   - laboratory-only work
-ai_evaluation_limit: 3
 semantic_threshold: 0.68

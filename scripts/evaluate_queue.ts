@@ -1,5 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
+import crypto from "crypto";
 import { EvaluationRequest } from "../src/pipeline/types.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationWorkabilityFacts } from "../src/contracts/index.js";
 import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.js";
@@ -70,7 +71,7 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
             [item.id]
           );
           await client.query(
-            `UPDATE canonical_jobs SET processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`,
+            `UPDATE canonical_jobs SET processing_state = 'NEEDS_MANUAL_REVIEW', processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`,
             [item.canonical_job_id]
           );
           await client.query("COMMIT");
@@ -165,7 +166,7 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         await client.query("BEGIN");
         try {
           await client.query(
-            `UPDATE canonical_jobs SET processing_status = 'AI_EVALUATED', updated_at = NOW() WHERE id = $1`,
+            `UPDATE canonical_jobs SET processing_state = 'AI_EVALUATED', processing_status = 'AI_EVALUATED', updated_at = NOW() WHERE id = $1`,
             [item.canonical_job_id]
           );
 

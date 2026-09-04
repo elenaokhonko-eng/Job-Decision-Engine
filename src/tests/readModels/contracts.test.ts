@@ -27,7 +27,14 @@ describe('readModels contracts', () => {
       priority_score: 88,
       deterministic_match_score: 86,
       deterministic_match_coverage: 71,
+      processing_state: 'AI_EVALUATED',
       processing_status: 'AI_EVALUATED',
+      recommendation_eligibility: 'ELIGIBLE',
+      recommendation_outcome: 'PRIORITY',
+      recommendation_requirement_score: 0.86,
+      recommendation_coverage_score: 0.71,
+      recommendation_evidence_completeness: 0.75,
+      recommendation_decided_at: '2026-09-02T10:30:00.000Z',
       nd_friendly_score: 78,
       politics_stress_score: 31,
       sensory_overload_index: 30,
@@ -54,7 +61,7 @@ describe('readModels contracts', () => {
   it('parses pipeline health and document status', () => {
     const health = PipelineHealthSchema.parse({
       generated_at: '2026-09-02T12:00:00.000Z',
-      counts_by_status: { AI_EVALUATED: 10, DEFERRED_BUDGET: 5 },
+      counts_by_status: { AI_EVALUATED: 10, QUEUED_FOR_AI: 5 },
       version_mismatch_count: 1,
       document_ready_count: 4,
     });

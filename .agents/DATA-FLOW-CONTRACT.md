@@ -11,7 +11,8 @@ The `data-contract-checker` owns this contract. Feature agents propose changes; 
 | Observation -> canonical job/version | source broker | `src/pipeline/normalize.ts` | Idempotent identity test; reposts create versions without duplicating the canonical job |
 | Job version -> gate decision | normalizer | `src/pipeline/hardGate.ts` | Structured workplace fields and description evidence agree; tri-state status is stored |
 | Gate decision -> lane decision | hard gate | `src/pipeline/laneRouter.ts` | Only eligible records route; primary/secondary lane, confidence, evidence and model version persist |
-| Lane decision -> evaluation queue | lane router | `src/pipeline/evaluationBudgeter.ts` | Per-lane quota; overflow is `DEFERRED_BUDGET`; one queue item per job version |
+| Lane decision -> deterministic matching | lane router | `src/pipeline/deterministicMatcher.ts` | Only `LANE_ROUTED` records match; match runs are version-pinned and recoverable failures never become rejections |
+| Deterministic decision -> evaluation queue | `src/pipeline/recommendationDecider.ts` | `src/pipeline/explanationQueueEnqueuer.ts` | Unbounded enqueue for eligible jobs; no per-lane business quotas; never writes `DEFERRED_BUDGET`; one queue item per job version |
 | Queue item -> AI evaluation | evaluation worker | evaluation store | Lease, attempts, provider/model, fallback/degraded state, full validated result and matching job identity persist atomically |
 | Canonical data -> shortlist read model | database view/query | `streamlit_app.py` | One row per current job version; no legacy joins; every displayed field has a real source; UI sanitizes untrusted content + validates links; missing scores remain null/N/A (never coerced to 0) |
 | Evaluation -> documents | evaluation/profile ledgers | CV and cover-letter generators | Every substantive claim resolves to verified evidence IDs |
@@ -44,7 +45,7 @@ Every persisted contract includes `schema_version`. Every processing decision in
 | Deterministic gate conflict | `HARD_REJECTED` plus codes/evidence | Only after rule change | Yes |
 | Work pattern unknown | `NEEDS_VERIFICATION` plus questions | Enrichment/manual | No |
 | Lane embedding/provider failure | `ROUTING_DEFERRED` | Yes | No |
-| AI budget exhausted | `DEFERRED_BUDGET` | Next run | No |
+| AI evaluation capacity not drained | `QUEUED_FOR_AI` / queue remains `PENDING` | Next run | No |
 | Evaluation provider/schema failure | `RETRY_WAIT` | Backoff | No |
 | Evaluation retries exhausted | `NEEDS_MANUAL_REVIEW` | Manual | No |
 
@@ -52,7 +53,7 @@ Every persisted contract includes `schema_version`. Every processing decision in
 
 The checker must add:
 
-- Contract fixtures covering Gmail, one ATS source, one duplicate/repost, one hard reject, one needs-verification job, one deferred-budget job, one failed-then-retried evaluation and one evaluated shortlist row.
+- Contract fixtures covering Gmail, one ATS source, one duplicate/repost, one hard reject, one needs-verification job, one queued-for-AI job, one failed-then-retried evaluation and one evaluated shortlist row.
 - A schema-drift test that inspects PostgreSQL columns and fails when runtime schemas or Streamlit queries reference missing fields.
 - A field-lineage report generated during CI, mapping each `ShortlistRow` field back to its table/column and producer.
-- A state-conservation assertion: input count equals terminal plus retry/deferred counts; no record disappears between stages.
+- A state-conservation assertion: input count equals terminal plus retry/queued counts; no record disappears between stages.

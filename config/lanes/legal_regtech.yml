@@ -72,5 +72,4 @@ positive_concepts:
 negative_concepts:
   - traditional legal
   - compliance operations
-ai_evaluation_limit: 3
 semantic_threshold: 0.68

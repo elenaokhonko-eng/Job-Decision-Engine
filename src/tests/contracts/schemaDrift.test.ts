@@ -19,7 +19,7 @@ import {
   sampleDuplicateRepostVersion,
   sampleHardRejectGate,
   sampleNeedsVerificationGate,
-  sampleDeferredBudgetQueueItem,
+  samplePendingQueueItem,
   sampleFailedThenRetriedQueueItem,
   sampleEvaluatedShortlistRow
 } from "../../contracts/fixtures.js";
@@ -55,7 +55,7 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
     expect(() => CanonicalJobVersionSchema.parse(sampleDuplicateRepostVersion)).not.toThrow();
     expect(() => GateDecisionSchema.parse(sampleHardRejectGate)).not.toThrow();
     expect(() => GateDecisionSchema.parse(sampleNeedsVerificationGate)).not.toThrow();
-    expect(() => EvaluationQueueItemSchema.parse(sampleDeferredBudgetQueueItem)).not.toThrow();
+    expect(() => EvaluationQueueItemSchema.parse(samplePendingQueueItem)).not.toThrow();
     expect(() => EvaluationQueueItemSchema.parse(sampleFailedThenRetriedQueueItem)).not.toThrow();
     expect(() => ShortlistRowSchema.parse(sampleEvaluatedShortlistRow)).not.toThrow();
   });
@@ -119,7 +119,7 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
       HARD_REJECTED: 3,
       NEEDS_VERIFICATION: 2,
       AI_EVALUATED: 2,
-      DEFERRED_BUDGET: 1,
+      QUEUED_FOR_AI: 1,
       RETRY_WAIT: 1,
       EVALUATING: 1,
       PENDING: 0
@@ -128,7 +128,7 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
     const terminalCount = stateCounts.HARD_REJECTED + stateCounts.AI_EVALUATED;
     const activeOrDeferredCount =
       stateCounts.NEEDS_VERIFICATION +
-      stateCounts.DEFERRED_BUDGET +
+      stateCounts.QUEUED_FOR_AI +
       stateCounts.RETRY_WAIT +
       stateCounts.EVALUATING +
       stateCounts.PENDING;

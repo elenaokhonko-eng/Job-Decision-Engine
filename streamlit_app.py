@@ -362,7 +362,8 @@ def delete_job_from_db(job_id):
         cursor.execute(
             """
             UPDATE canonical_jobs
-            SET processing_status = 'MANUALLY_REMOVED',
+            SET processing_state = 'MANUALLY_REMOVED',
+                processing_status = 'MANUALLY_REMOVED',
                 rejection_reason = 'Manually removed by user via Streamlit UI',
                 updated_at = NOW()
             WHERE id = %s
@@ -826,7 +827,7 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("🔍 Filter Listings")
 search_query = st.sidebar.text_input("Keyword Search", "")
 lane_filter = st.sidebar.selectbox("Filter Target Lane", ["All Lanes", "CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", "UNCLASSIFIED"])
-status_filter = st.sidebar.selectbox("Filter Pipeline Status", ["All Statuses", "AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION", "DEFERRED_BUDGET", "ROUTING_DEFERRED"])
+status_filter = st.sidebar.selectbox("Filter Pipeline Status", ["All Statuses", "AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION", "ROUTING_DEFERRED"])
 source_values = sorted({(j.get("source") or "UNKNOWN") for j in jobs_list})
 board_filter = st.sidebar.selectbox("Filter Source", ["All Sources", *source_values])
 track_values = sorted({(j.get("assigned_track") or "UNASSIGNED") for j in jobs_list})
@@ -964,13 +965,12 @@ with tab_dashboard:
             status_rank = {
                 "AI_EVALUATED": 0,
                 "QUEUED_FOR_AI": 1,
-                "DEFERRED_BUDGET": 2,
-                "MATCHED": 3,
-                "LANE_ROUTED": 4,
-                "PREQUALIFIED": 5,
-                "NEEDS_VERIFICATION": 6,
-                "RAW_STAGED": 7,
-                "ROUTING_DEFERRED": 8,
+                "MATCHED": 2,
+                "LANE_ROUTED": 3,
+                "PREQUALIFIED": 4,
+                "NEEDS_VERIFICATION": 5,
+                "RAW_STAGED": 6,
+                "ROUTING_DEFERRED": 7,
             }.get(status, 99)
 
             match_score = j.get("deterministic_match_score")

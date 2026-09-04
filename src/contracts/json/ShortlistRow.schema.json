@@ -149,8 +149,95 @@
           ],
           "default": null
         },
+        "processing_state": {
+          "type": "string"
+        },
         "processing_status": {
           "type": "string"
+        },
+        "recommendation_eligibility": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "ELIGIBLE",
+                "VERIFY",
+                "INELIGIBLE"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_outcome": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "PRIORITY",
+                "REVIEW",
+                "TRACK",
+                "SKIP"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_requirement_score": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_coverage_score": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_evidence_completeness": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_decided_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "nd_friendly_score": {
           "anyOf": [
@@ -333,6 +420,7 @@
         "canonical_url",
         "gate_status",
         "primary_lane",
+        "processing_state",
         "processing_status",
         "observed_at"
       ],

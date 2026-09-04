@@ -37,7 +37,6 @@
             "COMPLETED",
             "RETRY_WAIT",
             "FAILED",
-            "DEFERRED_BUDGET",
             "NEEDS_MANUAL_REVIEW"
           ],
           "default": "PENDING"

@@ -39,9 +39,9 @@ async function countWhere(table: string, condition: string): Promise<number> {
 async function insertCanonicalJob(id: string, title: string): Promise<string> {
   const versionId = id.replace(/^0/, "5");
   await q(
-    `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane)
-     VALUES ($1, 'Test Failure Corp', $2, 'https://fail.test', 'LANE_ROUTED', 'CORE_AI_DATA')
-     ON CONFLICT (id) DO UPDATE SET processing_status = 'LANE_ROUTED'`,
+    `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_state, processing_status, primary_lane)
+     VALUES ($1, 'Test Failure Corp', $2, 'https://fail.test', 'LANE_ROUTED', 'LANE_ROUTED', 'CORE_AI_DATA')
+     ON CONFLICT (id) DO UPDATE SET processing_state = 'LANE_ROUTED', processing_status = 'LANE_ROUTED'`,
     [id, title]
   );
   await q(
@@ -96,7 +96,7 @@ describe.skipIf(skipReal)("P0-10: Real Failure-Injection E2E (PostgreSQL)", () =
     );
     await q(
       `UPDATE canonical_jobs
-       SET processing_status = 'LANE_ROUTED', updated_at = NOW()
+       SET processing_state = 'LANE_ROUTED', processing_status = 'LANE_ROUTED', updated_at = NOW()
        WHERE id = $1`,
       [JOB_ID_1]
     );
@@ -136,7 +136,7 @@ describe.skipIf(skipReal)("P0-10: Real Failure-Injection E2E (PostgreSQL)", () =
       [ITEM_ID_3]
     );
     await q(
-      `UPDATE canonical_jobs SET processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`,
+      `UPDATE canonical_jobs SET processing_state = 'NEEDS_MANUAL_REVIEW', processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`,
       [JOB_ID_3]
     );
 

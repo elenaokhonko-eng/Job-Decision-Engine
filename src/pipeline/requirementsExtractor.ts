@@ -272,7 +272,7 @@ export async function runRequirementsExtraction(
     FROM canonical_jobs c
     JOIN job_versions jv
       ON jv.id = c.latest_job_version_id
-    WHERE c.processing_status = 'RAW_STAGED'
+    WHERE COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
       AND NOT EXISTS (
         SELECT 1
         FROM job_version_pipeline_state ps

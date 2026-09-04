@@ -119,34 +119,34 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
   },
   {
     field: "primary_lane",
-    sourceTable: "ai_evaluations",
-    sourceColumn: "lane_matches[0].lane",
-    producerStage: "laneRouter.ts -> evaluate_queue.ts",
-    transformation: "Semantic pre-score confirmed by LLM evaluation",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "primary_lane",
+    producerStage: "laneRouter.ts",
+    transformation: "Primary semantic lane key assigned from YAML lane registry",
     nullable: true
   },
   {
     field: "secondary_lanes",
-    sourceTable: "ai_evaluations",
+    sourceTable: "canonical_jobs",
     sourceColumn: "secondary_lanes",
-    producerStage: "evaluate_queue.ts",
-    transformation: "Array of secondary matching career lanes",
+    producerStage: "laneRouter.ts",
+    transformation: "Secondary semantic lane keys meeting per-lane thresholds with positive evidence (no negative exclusions)",
     nullable: false
   },
   {
     field: "lane_confidence",
-    sourceTable: "ai_evaluations",
-    sourceColumn: "lane_matches[0].confidence",
-    producerStage: "evaluate_queue.ts",
-    transformation: "High / Medium / Low evidence confidence",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "lane_confidence",
+    producerStage: "laneRouter.ts",
+    transformation: "High / Medium / Low / None confidence derived from semantic score band relative to lane threshold",
     nullable: false
   },
   {
     field: "priority_score",
     sourceTable: "evaluation_queue",
     sourceColumn: "priority_score",
-    producerStage: "laneRouter.ts",
-    transformation: "Cosine similarity against target lane prototype vector",
+    producerStage: "explanationQueueEnqueuer.ts",
+    transformation: "Queue priority derived from deterministic_match_score when available, otherwise semantic_score fallback",
     nullable: false
   },
   {
@@ -166,12 +166,68 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     nullable: true
   },
   {
+    field: "processing_state",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "processing_state",
+    producerStage: "State Machine",
+    transformation: "Current lifecycle state enum (preferred)",
+    nullable: false
+  },
+  {
     field: "processing_status",
     sourceTable: "canonical_jobs",
     sourceColumn: "processing_status",
     producerStage: "State Machine",
-    transformation: "Current lifecycle state enum",
+    transformation: "Legacy lifecycle state enum (superseded by processing_state)",
     nullable: false
+  },
+  {
+    field: "recommendation_eligibility",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "recommendation_eligibility",
+    producerStage: "recommendationDecider.ts",
+    transformation: "Deterministic eligibility: ELIGIBLE / VERIFY / INELIGIBLE",
+    nullable: true
+  },
+  {
+    field: "recommendation_outcome",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "recommendation_outcome",
+    producerStage: "recommendationDecider.ts",
+    transformation: "Deterministic outcome: PRIORITY / REVIEW / TRACK / SKIP",
+    nullable: true
+  },
+  {
+    field: "recommendation_requirement_score",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "recommendation_requirement_score",
+    producerStage: "recommendationDecider.ts",
+    transformation: "Deterministic requirement score (0-1) derived from deterministic_match_score",
+    nullable: true
+  },
+  {
+    field: "recommendation_coverage_score",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "recommendation_coverage_score",
+    producerStage: "recommendationDecider.ts",
+    transformation: "Deterministic coverage score (0-1) derived from deterministic_match_coverage",
+    nullable: true
+  },
+  {
+    field: "recommendation_evidence_completeness",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "recommendation_evidence_completeness",
+    producerStage: "recommendationDecider.ts",
+    transformation: "Deterministic evidence completeness (0-1) from workability facts completeness",
+    nullable: true
+  },
+  {
+    field: "recommendation_decided_at",
+    sourceTable: "canonical_jobs",
+    sourceColumn: "recommendation_decided_at",
+    producerStage: "recommendationDecider.ts",
+    transformation: "Timestamp when deterministic outcome was last updated",
+    nullable: true
   },
   {
     field: "nd_friendly_score",
@@ -289,7 +345,7 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     field: "queue_status",
     sourceTable: "evaluation_queue",
     sourceColumn: "status",
-    producerStage: "evaluationBudgeter.ts",
+    producerStage: "explanationQueueEnqueuer.ts",
     transformation: "Latest queue state for displayed version",
     nullable: true
   },

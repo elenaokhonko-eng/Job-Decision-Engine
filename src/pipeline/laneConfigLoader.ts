@@ -12,7 +12,6 @@ export interface LaneDefinition {
   description: string;
   threshold: number;
   semantic_threshold?: number;
-  ai_evaluation_limit?: number;
   enabled_sources?: string[];
   title_families?: string[];
   keywords: string[];
@@ -71,7 +70,6 @@ interface LaneFileConfig {
   };
   positive_concepts?: string[];
   negative_concepts?: string[];
-  ai_evaluation_limit?: number;
   semantic_threshold?: number;
 }
 
@@ -134,7 +132,6 @@ export function loadGlobalLanesConfig(): GlobalLanesConfig {
       description: laneConfig.description,
       threshold: laneConfig.routing?.minimum_semantic_score ?? laneConfig.semantic_threshold ?? 0.35,
       semantic_threshold: laneConfig.routing?.minimum_semantic_score ?? laneConfig.semantic_threshold ?? 0.35,
-      ai_evaluation_limit: laneConfig.budget?.maximum_ai_interpretations_per_run ?? laneConfig.ai_evaluation_limit ?? 3,
       enabled_sources: (laneConfig.sourcing?.enabled_sources || []).map((s) => s.toLowerCase()),
       title_families: dedupe(requiredFunctions.map(normalizeConcept)),
       keywords: dedupe(concepts.map(normalizeConcept)),

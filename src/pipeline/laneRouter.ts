@@ -144,7 +144,7 @@ export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Pro
       ORDER BY observed_at DESC
       LIMIT 1
     ) jv ON TRUE
-    WHERE c.processing_status = 'PREQUALIFIED'
+    WHERE COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
   `);
 
   console.log(`Found ${jobs.length} canonical jobs to route.`);
@@ -168,7 +168,7 @@ export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Pro
         if (isZeroVector) {
           console.warn(`⚠️ Zero embedding for job ${job.id}. Deferring (never default lane).`);
           await client.query(
-            `UPDATE canonical_jobs SET primary_lane = 'UNCLASSIFIED', semantic_score = 0.0, processing_status = 'ROUTING_DEFERRED', updated_at = NOW() WHERE id = $1`,
+            `UPDATE canonical_jobs SET primary_lane = 'UNCLASSIFIED', semantic_score = 0.0, lane_confidence = 'None', processing_state = 'ROUTING_DEFERRED', processing_status = 'ROUTING_DEFERRED', updated_at = NOW() WHERE id = $1`,
             [job.id]
           );
           await client.query("COMMIT");
@@ -203,6 +203,15 @@ export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Pro
           bestLane = "UNCLASSIFIED";
         }
 
+        const laneConfidence =
+          bestLane === "UNCLASSIFIED"
+            ? "None"
+            : bestScore >= perLaneThreshold + 0.2
+              ? "High"
+              : bestScore >= perLaneThreshold + 0.1
+                ? "Medium"
+                : "Low";
+
         // Secondary lanes: must meet per-lane threshold, have positive concept evidence, and not be excluded
         const secondaryLanes: string[] = [];
         for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
@@ -233,15 +242,18 @@ export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Pro
           `UPDATE canonical_jobs
            SET primary_lane       = $1,
                semantic_score     = $2,
+               processing_state   = $3,
                processing_status  = $3,
-               secondary_lanes    = $4,
-               lane_evidence      = $5,
+               lane_confidence    = $4,
+               secondary_lanes    = $5,
+               lane_evidence      = $6,
                updated_at         = NOW()
-           WHERE id = $6`,
+           WHERE id = $7`,
           [
             bestLane,
             bestScore,
             processingStatus,
+            laneConfidence,
             JSON.stringify(secondaryLanes),
             JSON.stringify(laneEvidence),
             job.id,

@@ -64,6 +64,28 @@
           "type": "string",
           "format": "date-time"
         },
+        "processing_state": {
+          "type": "string",
+          "enum": [
+            "RAW_STAGED",
+            "HARD_REJECTED",
+            "MANUALLY_REMOVED",
+            "NEEDS_VERIFICATION",
+            "PREQUALIFIED",
+            "ROUTING_DEFERRED",
+            "LANE_ROUTED",
+            "MATCHED",
+            "SEMANTIC_SHORTLISTED",
+            "QUEUED_FOR_AI",
+            "EVALUATING",
+            "AI_EVALUATED",
+            "EVALUATED",
+            "RETRY_WAIT",
+            "NEEDS_MANUAL_REVIEW",
+            "REJECTED_AFTER_EVALUATION"
+          ],
+          "default": "RAW_STAGED"
+        },
         "processing_status": {
           "type": "string",
           "enum": [
@@ -77,7 +99,6 @@
             "MATCHED",
             "SEMANTIC_SHORTLISTED",
             "QUEUED_FOR_AI",
-            "DEFERRED_BUDGET",
             "EVALUATING",
             "AI_EVALUATED",
             "EVALUATED",
@@ -86,6 +107,90 @@
             "REJECTED_AFTER_EVALUATION"
           ],
           "default": "RAW_STAGED"
+        },
+        "recommendation_eligibility": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "ELIGIBLE",
+                "VERIFY",
+                "INELIGIBLE"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_outcome": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "PRIORITY",
+                "REVIEW",
+                "TRACK",
+                "SKIP"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_requirement_score": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_coverage_score": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_evidence_completeness": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_decided_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [

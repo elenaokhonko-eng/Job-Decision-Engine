@@ -93,9 +93,9 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
       [JOB_ID3, "Data Strategy Lead", V_ID_3]
     ]) {
       await q(
-        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane)
-         VALUES ($1, 'ReliabilityTestCo', $2, 'https://test.rl', 'LANE_ROUTED', 'CORE_AI_DATA')
-         ON CONFLICT (id) DO UPDATE SET processing_status = 'LANE_ROUTED'`,
+        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_state, processing_status, primary_lane)
+         VALUES ($1, 'ReliabilityTestCo', $2, 'https://test.rl', 'LANE_ROUTED', 'LANE_ROUTED', 'CORE_AI_DATA')
+         ON CONFLICT (id) DO UPDATE SET processing_state = 'LANE_ROUTED', processing_status = 'LANE_ROUTED'`,
         [id, title]
       );
       await q(
@@ -178,7 +178,7 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
 
     // Simulate exhausted transition
     await q(`UPDATE evaluation_queue SET status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`, [Q_ID_3]);
-    await q(`UPDATE canonical_jobs SET processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`, [JOB_ID3]);
+    await q(`UPDATE canonical_jobs SET processing_state = 'NEEDS_MANUAL_REVIEW', processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`, [JOB_ID3]);
 
     const queueStatus = (await q(`SELECT status FROM evaluation_queue WHERE id = $1`, [Q_ID_3])).rows[0].status;
     const canonStatus = (await q(`SELECT processing_status FROM canonical_jobs WHERE id = $1`, [JOB_ID3])).rows[0].processing_status;

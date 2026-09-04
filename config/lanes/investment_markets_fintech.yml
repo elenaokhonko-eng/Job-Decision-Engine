@@ -102,5 +102,4 @@ negative_concepts:
   - retail banking
   - merchant acquiring
   - remittance
-ai_evaluation_limit: 3
 semantic_threshold: 0.68

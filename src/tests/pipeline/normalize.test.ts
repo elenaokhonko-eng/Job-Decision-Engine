@@ -68,6 +68,7 @@ describe('Pipeline Stage: Normalization', () => {
       'Unknown',
       'UNKNOWN',
       'UNKNOWN',
+      'RAW_STAGED',
       'RAW_STAGED'
     ]);
     

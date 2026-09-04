@@ -173,6 +173,12 @@ export async function runDeterministicMatcher(
       [profileVersionId]
     );
 
+    if (factsRes.rows.length === 0) {
+      throw new Error(
+        `No profile facts found for ACTIVE profile version ${profileVersionId}; deterministic matching cannot run.`
+      );
+    }
+
     const { rows: jobs } = await client.query<RoutingCandidate>(
       `SELECT c.id,
               c.latest_job_version_id,
@@ -185,7 +191,7 @@ export async function runDeterministicMatcher(
          ORDER BY observed_at DESC
          LIMIT 1
        ) jv ON TRUE
-       WHERE c.processing_status = 'LANE_ROUTED'
+       WHERE COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
          AND c.primary_lane IS NOT NULL
          AND c.primary_lane != 'UNCLASSIFIED'`
     );
@@ -227,6 +233,21 @@ export async function runDeterministicMatcher(
            ORDER BY jr.requirement_key ASC`,
           [versionId]
         );
+
+        if (reqRes.rows.length === 0) {
+          await client.query(
+            `UPDATE match_runs
+             SET status = 'FAILED',
+                 error_message = $2,
+                 completed_at = NOW()
+             WHERE id = $1`,
+            [matchRunId, "No VALIDATED job_requirements found; deterministic matching skipped."]
+          );
+
+          await client.query("COMMIT");
+          errors += 1;
+          continue;
+        }
 
         let weightedScoreSum = 0;
         let weightSum = 0;
@@ -332,6 +353,7 @@ export async function runDeterministicMatcher(
            SET deterministic_match_score = $2,
                deterministic_match_coverage = $3,
                latest_match_run_id = $4,
+               processing_state = 'MATCHED',
                processing_status = 'MATCHED',
                updated_at = NOW()
            WHERE id = $1`,
