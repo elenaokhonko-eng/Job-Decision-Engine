@@ -277,27 +277,27 @@ ALTER TABLE embedding_batches ALTER COLUMN workspace_id SET DEFAULT jdec_default
 ALTER TABLE embedding_batches ALTER COLUMN workspace_id SET NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_embedding_batches_workspace_id ON embedding_batches(workspace_id);
 
-ALTER TABLE embedding_batch_items ADD COLUMN IF NOT EXISTS workspace_id UUID;
-UPDATE embedding_batch_items ebi
-SET workspace_id = eb.workspace_id
-FROM embedding_batches eb
-WHERE ebi.batch_id = eb.id
-  AND ebi.workspace_id IS NULL;
-UPDATE embedding_batch_items SET workspace_id = jdec_default_workspace_id() WHERE workspace_id IS NULL;
-ALTER TABLE embedding_batch_items ALTER COLUMN workspace_id SET DEFAULT jdec_default_workspace_id();
-ALTER TABLE embedding_batch_items ALTER COLUMN workspace_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_embedding_batch_items_workspace_id ON embedding_batch_items(workspace_id);
+	ALTER TABLE embedding_batch_items ADD COLUMN IF NOT EXISTS workspace_id UUID;
+	UPDATE embedding_batch_items ebi
+	SET workspace_id = eb.workspace_id
+	FROM embedding_batches eb
+	WHERE ebi.embedding_batch_id = eb.id
+	  AND ebi.workspace_id IS NULL;
+	UPDATE embedding_batch_items SET workspace_id = jdec_default_workspace_id() WHERE workspace_id IS NULL;
+	ALTER TABLE embedding_batch_items ALTER COLUMN workspace_id SET DEFAULT jdec_default_workspace_id();
+	ALTER TABLE embedding_batch_items ALTER COLUMN workspace_id SET NOT NULL;
+	CREATE INDEX IF NOT EXISTS idx_embedding_batch_items_workspace_id ON embedding_batch_items(workspace_id);
 
-ALTER TABLE semantic_embeddings ADD COLUMN IF NOT EXISTS workspace_id UUID;
-UPDATE semantic_embeddings se
-SET workspace_id = eb.workspace_id
-FROM embedding_batches eb
-WHERE se.batch_id = eb.id
-  AND se.workspace_id IS NULL;
-UPDATE semantic_embeddings SET workspace_id = jdec_default_workspace_id() WHERE workspace_id IS NULL;
-ALTER TABLE semantic_embeddings ALTER COLUMN workspace_id SET DEFAULT jdec_default_workspace_id();
-ALTER TABLE semantic_embeddings ALTER COLUMN workspace_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_workspace_id ON semantic_embeddings(workspace_id);
+	ALTER TABLE semantic_embeddings ADD COLUMN IF NOT EXISTS workspace_id UUID;
+	UPDATE semantic_embeddings se
+	SET workspace_id = eb.workspace_id
+	FROM embedding_batches eb
+	WHERE se.embedding_batch_id = eb.id
+	  AND se.workspace_id IS NULL;
+	UPDATE semantic_embeddings SET workspace_id = jdec_default_workspace_id() WHERE workspace_id IS NULL;
+	ALTER TABLE semantic_embeddings ALTER COLUMN workspace_id SET DEFAULT jdec_default_workspace_id();
+	ALTER TABLE semantic_embeddings ALTER COLUMN workspace_id SET NOT NULL;
+	CREATE INDEX IF NOT EXISTS idx_semantic_embeddings_workspace_id ON semantic_embeddings(workspace_id);
 
 -- Replace global embedding uniqueness with per-workspace uniqueness.
 DO $$
