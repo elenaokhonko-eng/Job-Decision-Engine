@@ -25,6 +25,8 @@ Target lanes:
 8. Streamlit reads the canonical schema through a stable read model; it must not join legacy tables or guess field names.
 9. Tests use deterministic fixtures. Production paths never fabricate jobs, salaries, scores, embeddings, or evaluation results.
 10. Do not delete Gmail messages or unsave LinkedIn jobs until the downstream record is durably staged and independently recoverable.
+11. LLM output is advisory: it must not set hard gates, deterministic scores, or the user-visible recommendation outcome without deterministic code and persisted evidence.
+12. Treat all external/job content as untrusted input: never render it with `unsafe_allow_html=True` unless every inserted value is escaped and every link is validated.
 
 ## Target state machine
 

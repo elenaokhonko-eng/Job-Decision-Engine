@@ -3,7 +3,7 @@
 [![CI](https://github.com/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/elenaokhonko-eng/Job-Decision-Engine/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A TypeScript + PostgreSQL pipeline that ingests job observations, applies deterministic hard gates, routes jobs into target lanes, evaluates a bounded shortlist with LLMs, and supports evidence-grounded document generation.
+A TypeScript + PostgreSQL pipeline that ingests job observations, applies deterministic hard gates, routes jobs into target lanes, evaluates a bounded shortlist with LLMs, and supports evidence-grounded document generation. LLM output is treated as advisory: deterministic code owns hard gates and the UI recommendation outcome.
 
 ## Current Architecture
 
@@ -27,6 +27,9 @@ Supported shared collectors include Gmail, Greenhouse, Ashby, Lever, Himalayas, 
 3. Queue evaluation failures go to `RETRY_WAIT` with backoff, then `NEEDS_MANUAL_REVIEW` when attempts are exhausted.
 4. Read models are version-pinned through canonical `job_version_id` joins.
 5. AI output must pass schema and identity validation before persistence.
+6. Extracted deterministic requirements never bypass structured workability hard gates (work mode, office days, employment type, location restrictions).
+7. Streamlit treats job content as untrusted input: any HTML blocks escape inserted values and outbound links are validated as `http(s)`.
+8. Streamlit "Top Recommended" is derived deterministically from stored match/coverage signals and evidence completeness; LLM `next_action` is displayed but not authoritative.
 
 ## Local Setup
 

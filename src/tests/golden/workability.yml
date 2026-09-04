@@ -1,0 +1,26 @@
+schema_version: "2.2.0"
+cases:
+  - case_id: onsite_plus_degree_is_ineligible
+    job:
+      title: "Senior Machine Learning Engineer"
+      description: "Bachelor's degree or equivalent experience required."
+      location: "Singapore"
+      workplace_type: "ONSITE"
+      employment_type: "FULL_TIME"
+    expected:
+      gate_status: "HARD_REJECT"
+      rejection_codes_include:
+        - "GATE_HIGH_OFFICE_DAYS"
+
+  - case_id: hybrid_unknown_days_requires_verification
+    job:
+      title: "Applied Scientist"
+      description: "This is a hybrid role with office attendance expectations."
+      location: "Singapore"
+      workplace_type: "HYBRID"
+      employment_type: "FULL_TIME"
+    expected:
+      gate_status: "NEEDS_VERIFICATION"
+      rejection_codes_include:
+        - "NEEDS_VERIFICATION_OFFICE_DAYS"
+

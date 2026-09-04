@@ -3,6 +3,7 @@ import sys
 import subprocess
 import urllib.request
 import json
+import html
 import glob
 import time
 import psycopg2
@@ -39,6 +40,83 @@ def load_dotenv():
                         os.environ[key.strip()] = val
 
 load_dotenv()
+
+def escape_text(value):
+    return html.escape(str(value if value is not None else ""))
+
+def safe_http_url(value):
+    url = str(value or "").strip()
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return None
+
+def normalize_workability_facts(raw):
+    if not isinstance(raw, dict):
+        return {
+            "office_days_min": None,
+            "office_days_max": None,
+            "travel_pct_max": None,
+            "employment_type": "UNKNOWN",
+            "location_restriction": None,
+        }
+
+    # Canonical gate facts shape
+    if "office_days_max" in raw or "employment_type" in raw:
+        return {
+            "office_days_min": raw.get("office_days_min"),
+            "office_days_max": raw.get("office_days_max"),
+            "travel_pct_max": raw.get("travel_pct_max"),
+            "employment_type": raw.get("employment_type") or "UNKNOWN",
+            "location_restriction": raw.get("location_restriction"),
+        }
+
+    # Legacy evaluation-request shape
+    office_days = raw.get("officeDays")
+    travel_pct = raw.get("travelPercentage")
+    is_contract = raw.get("isContract")
+    location_elig = raw.get("locationEligibility")
+    return {
+        "office_days_min": office_days if isinstance(office_days, int) else None,
+        "office_days_max": office_days if isinstance(office_days, int) else None,
+        "travel_pct_max": travel_pct if isinstance(travel_pct, (int, float)) else None,
+        "employment_type": "CONTRACT" if is_contract is True else "UNKNOWN",
+        "location_restriction": None if location_elig in ("PASS", "UNKNOWN", None) else "RESTRICTED",
+    }
+
+def derive_deterministic_recommendation(job):
+    gate_status = job.get("gate_status")
+    eligibility = "ELIGIBLE" if gate_status == "PASS" else "VERIFY" if gate_status == "NEEDS_VERIFICATION" else "INELIGIBLE"
+
+    match_score = job.get("deterministic_match_score")
+    coverage = job.get("deterministic_match_coverage")
+
+    req_score = (float(match_score) / 100.0) if isinstance(match_score, (int, float)) else None
+    cov_score = (float(coverage) / 100.0) if isinstance(coverage, (int, float)) else None
+
+    facts = normalize_workability_facts(job.get("workability_facts") or {})
+    work_mode_known = str(job.get("workplace_type") or "").upper() in ("REMOTE", "HYBRID", "ONSITE")
+    office_days_known = facts.get("office_days_max") is not None or str(job.get("workplace_type") or "").upper() == "REMOTE"
+    employment_known = facts.get("employment_type") in ("PERMANENT", "CONTRACT")
+    travel_known = facts.get("travel_pct_max") is not None
+
+    completeness_parts = [work_mode_known, office_days_known, employment_known, travel_known]
+    evidence_completeness = sum(1 for x in completeness_parts if x) / float(len(completeness_parts))
+
+    if eligibility == "INELIGIBLE":
+        return eligibility, "SKIP", req_score, cov_score, evidence_completeness
+
+    # Deterministic PRIORITY/REVIEW/TRACK mapping (LLM next_action is displayed but not authoritative).
+    if req_score is None or cov_score is None:
+        outcome = "REVIEW" if eligibility == "VERIFY" else "TRACK"
+        return eligibility, outcome, req_score, cov_score, evidence_completeness
+
+    if eligibility == "ELIGIBLE" and req_score >= 0.75 and cov_score >= 0.55 and evidence_completeness >= 0.70:
+        return eligibility, "PRIORITY", req_score, cov_score, evidence_completeness
+
+    if req_score >= 0.50:
+        return eligibility, "REVIEW", req_score, cov_score, evidence_completeness
+
+    return eligibility, "TRACK", req_score, cov_score, evidence_completeness
 
 
 # Configure the page setting with modern style
@@ -182,6 +260,7 @@ def fetch_jobs_from_db():
                 title,
                 company,
                 canonical_url           AS careers_portal_url,
+                source,
                 location,
                 workplace_type,
                 employment_type,
@@ -192,7 +271,9 @@ def fetch_jobs_from_db():
                 primary_lane            AS assigned_track,
                 secondary_lanes,
                 lane_confidence,
-                priority_score          AS confidence_level,
+                priority_score,
+                deterministic_match_score,
+                deterministic_match_coverage,
                 processing_status       AS status,
                 nd_friendly_score,
                 politics_stress_score,
@@ -648,6 +729,14 @@ def fetch_company_analytics_from_db():
 jobs_list = fetch_jobs_from_db()
 rejected_jobs_audit = fetch_rejected_jobs_from_db()
 
+for job in jobs_list:
+    eligibility, outcome, req_score, cov_score, evidence_completeness = derive_deterministic_recommendation(job)
+    job["decision_eligibility"] = eligibility
+    job["decision_outcome"] = outcome
+    job["decision_requirement_score"] = req_score
+    job["decision_coverage_score"] = cov_score
+    job["decision_evidence_completeness"] = evidence_completeness
+
 # Title
 st.title("💼 Job Decision Engine — Streamlit Console (v4.1)")
 st.markdown("### *Multi-Stage Weighted High-Autonomy Technical Architect & Builder Console*")
@@ -658,16 +747,18 @@ st.sidebar.header("🎯 Navigation & Filters")
 
 # Metrics
 total_jobs = len(jobs_list)
-evaluated_count = sum(1 for j in jobs_list if j.get("status") and j.get("status") != "UNASSIGNED")
-approved_count = sum(1 for j in jobs_list if j.get("status") in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK"))
-review_count = sum(1 for j in jobs_list if j.get("status") in ("REVIEW REQUIRED", "APPLY_AFTER_VERIFICATION"))
-toxic_count = sum(1 for j in jobs_list if (j.get("politics_stress_score") or 0) >= 70 or (j.get("nd_friendly_score") or 100) < 50)
+evaluated_count = sum(1 for j in jobs_list if j.get("status") == "AI_EVALUATED" and not j.get("version_mismatch"))
+priority_count = sum(1 for j in jobs_list if j.get("status") == "AI_EVALUATED" and j.get("decision_outcome") == "PRIORITY")
+review_count = sum(1 for j in jobs_list if j.get("status") == "AI_EVALUATED" and j.get("decision_outcome") == "REVIEW")
+verify_count = sum(1 for j in jobs_list if j.get("gate_status") == "NEEDS_VERIFICATION")
+toxic_count = sum(1 for j in jobs_list if isinstance(j.get("politics_stress_score"), (int, float)) and j.get("politics_stress_score") >= 70)
 
 st.sidebar.subheader("📊 Engine Statistics")
 st.sidebar.metric("Total Vault Jobs", total_jobs)
 st.sidebar.metric("Fully Evaluated", evaluated_count)
-st.sidebar.metric("Top Recommended (Strong)", approved_count)
-st.sidebar.metric("Needs Review", review_count)
+st.sidebar.metric("Top Recommended (Priority)", priority_count)
+st.sidebar.metric("Recommended (Review)", review_count)
+st.sidebar.metric("Needs Verification", verify_count)
 st.sidebar.metric("Toxicity Flags", toxic_count)
 
 st.sidebar.markdown("---")
@@ -761,9 +852,35 @@ if track_filter != "All Tracks":
 tab_dashboard, tab_add_job, tab_linkedin, tab_analytics, tab_cv = st.tabs(["📁 Postgres Job Vault", "➕ Add Job Ad", "🔗 LinkedIn Saved Jobs", "🔥 ND Culture Analytics", "📄 CV Customizer"])
 
 with tab_dashboard:
-    # Segment out Top Recommended Jobs based on next_action and AI evaluation
-    top_recommended = [j for j in jobs_list if j.get("next_action") in ("PRIORITY_APPLY", "APPLY_NOW", "CUSTOMIZE_CV", "APPLY_AFTER_VERIFICATION") or j.get("status") == "AI_EVALUATED"]
-    top_recommended = sorted(top_recommended, key=lambda x: (x.get("nd_friendly_score") or 0), reverse=True)[:10]
+    def top_rec_sort_key(j):
+        outcome_rank = 0 if j.get("decision_outcome") == "PRIORITY" else 1
+        eligibility_rank = 0 if j.get("decision_eligibility") == "ELIGIBLE" else 1
+        req = j.get("decision_requirement_score")
+        cov = j.get("decision_coverage_score")
+        evidence = j.get("decision_evidence_completeness")
+        nd = j.get("nd_friendly_score")
+        pol = j.get("politics_stress_score")
+        return (
+            outcome_rank,
+            eligibility_rank,
+            -(req if isinstance(req, (int, float)) else -1),
+            -(cov if isinstance(cov, (int, float)) else -1),
+            -(evidence if isinstance(evidence, (int, float)) else 0),
+            -(nd if isinstance(nd, (int, float)) else -1),
+            (pol if isinstance(pol, (int, float)) else 999),
+            escape_text(j.get("company")),
+            escape_text(j.get("title")),
+        )
+
+    # Deterministic Top Recommended list (LLM next_action is displayed but not authoritative).
+    top_recommended = [
+        j for j in jobs_list
+        if j.get("status") == "AI_EVALUATED"
+        and not j.get("version_mismatch")
+        and j.get("decision_outcome") in ("PRIORITY", "REVIEW")
+        and j.get("next_action") not in ("REJECTED", "LOW_STRATEGIC_VALUE")
+    ]
+    top_recommended = sorted(top_recommended, key=top_rec_sort_key)[:10]
 
     st.subheader("🏆 Top Recommended Opportunities")
     if not top_recommended:
@@ -774,17 +891,50 @@ with tab_dashboard:
             col_idx = idx % 2
             with cols[col_idx]:
                 version_warn = " ⚠️ Stale Evaluation" if rjob.get("version_mismatch") else ""
+
+                title = escape_text(rjob.get("title") or "")
+                company = escape_text(rjob.get("company") or "")
+                lane = escape_text(rjob.get("assigned_track") or "UNCLASSIFIED")
+                location = escape_text(rjob.get("location") or "Unknown")
+                workplace = escape_text(rjob.get("workplace_type") or "UNKNOWN")
+
+                outcome = escape_text(rjob.get("decision_outcome") or "TRACK")
+                eligibility = escape_text(rjob.get("decision_eligibility") or "VERIFY")
+
+                match_score = rjob.get("deterministic_match_score")
+                coverage = rjob.get("deterministic_match_coverage")
+                match_str = f"{float(match_score):.1f}/100" if isinstance(match_score, (int, float)) else "N/A"
+                cov_str = f"{float(coverage):.1f}%" if isinstance(coverage, (int, float)) else "N/A"
+
+                evidence_pct = rjob.get("decision_evidence_completeness")
+                evidence_str = f"{int(float(evidence_pct) * 100)}%" if isinstance(evidence_pct, (int, float)) else "N/A"
+
+                llm_action = escape_text(rjob.get("next_action") or "N/A")
+                lane_conf = escape_text(rjob.get("lane_confidence") or "None")
+
+                nd = rjob.get("nd_friendly_score")
+                pol = rjob.get("politics_stress_score")
+                nd_str = f"{int(nd)}%" if isinstance(nd, (int, float)) else "N/A"
+                pol_str = f"{int(pol)}%" if isinstance(pol, (int, float)) else "N/A"
+
+                summary = escape_text(rjob.get("evaluation_summary") or "N/A")
+
                 st.markdown(f"""
                 <div class="top-rec-card">
-                    <h4>⭐ #{idx+1} {rjob['title']} {version_warn}</h4>
-                    <p><b>Company:</b> {rjob['company']} | <b>Lane:</b> <code>{rjob.get('assigned_track')}</code></p>
-                    <p><b>Location:</b> {rjob.get('location')} ({rjob.get('workplace_type')})</p>
-                    <p><b>Action:</b> <code style='color:#22c55e;'>{rjob.get('next_action')}</code> | <b>Confidence:</b> {rjob.get('lane_confidence')}</p>
-                    <p><b>Workplace Culture:</b> Autonomy: {rjob.get('nd_friendly_score')}% | Politics: {rjob.get('politics_stress_score')}%</p>
-                    <p><b>Summary:</b> {rjob.get('evaluation_summary') or 'N/A'}</p>
+                    <h4>⭐ #{idx+1} {title} {version_warn}</h4>
+                    <p><b>Company:</b> {company} | <b>Lane:</b> <code>{lane}</code></p>
+                    <p><b>Location:</b> {location} ({workplace})</p>
+                    <p><b>Deterministic:</b> <code>{outcome}</code> ({eligibility}) | <b>Match:</b> {match_str} | <b>Coverage:</b> {cov_str} | <b>Evidence:</b> {evidence_str}</p>
+                    <p><b>LLM suggestion:</b> <code style='color:#22c55e;'>{llm_action}</code> | <b>Lane confidence:</b> {lane_conf}</p>
+                    <p><b>Workplace Culture:</b> Autonomy: {nd_str} | Politics: {pol_str}</p>
+                    <p><b>Summary:</b> {summary}</p>
                 </div>
                 """, unsafe_allow_html=True)
-                st.markdown(f"🔗 [Verify Job Ad & Apply]({rjob['careers_portal_url']})")
+                url = safe_http_url(rjob.get("careers_portal_url"))
+                if url:
+                    st.markdown(f"🔗 [Verify Job Ad & Apply]({url})")
+                else:
+                    st.write("Verify Job Ad & Apply URL unavailable.")
 
     st.markdown("---")
 
@@ -805,19 +955,34 @@ with tab_dashboard:
     with col_left:
         # Sort and split active vs rejected jobs
         def status_sort_key(j):
-            status = j.get("status", "UNASSIGNED")
-            score = (j.get("total_score") or 0)
-            if status in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK"):
-                return (0, -score)
-            elif status in ("REVIEW REQUIRED", "APPLY_AFTER_VERIFICATION"):
-                return (1, -score)
-            elif status == "REJECTED":
-                return (2, -score)
-            else:
-                return (3, -score)
+            outcome = j.get("decision_outcome") or "TRACK"
+            eligibility = j.get("decision_eligibility") or "VERIFY"
+            status = j.get("status") or "UNKNOWN"
+
+            outcome_rank = {"PRIORITY": 0, "REVIEW": 1, "TRACK": 2, "SKIP": 3}.get(outcome, 9)
+            eligibility_rank = {"ELIGIBLE": 0, "VERIFY": 1, "INELIGIBLE": 2}.get(eligibility, 9)
+            status_rank = {
+                "AI_EVALUATED": 0,
+                "QUEUED_FOR_AI": 1,
+                "DEFERRED_BUDGET": 2,
+                "MATCHED": 3,
+                "LANE_ROUTED": 4,
+                "PREQUALIFIED": 5,
+                "NEEDS_VERIFICATION": 6,
+                "RAW_STAGED": 7,
+                "ROUTING_DEFERRED": 8,
+            }.get(status, 99)
+
+            match_score = j.get("deterministic_match_score")
+            match_sort = -(float(match_score) if isinstance(match_score, (int, float)) else -1.0)
+
+            priority_score = j.get("priority_score")
+            priority_sort = -(float(priority_score) if isinstance(priority_score, (int, float)) else -1.0)
+
+            return (outcome_rank, eligibility_rank, status_rank, match_sort, priority_sort)
 
         sorted_filtered_jobs = sorted(filtered_jobs, key=status_sort_key)
-        active_jobs = [j for j in sorted_filtered_jobs if j.get("status") != "REJECTED"]
+        active_jobs = sorted_filtered_jobs
         rejected_jobs = rejected_jobs_audit
 
         st.subheader("📋 Available Listings Vault")
@@ -826,28 +991,59 @@ with tab_dashboard:
         else:
             # Render Active (Green & Orange) Jobs
             if active_jobs:
-                st.write(f"Showing {len(active_jobs)} Active Match Listings:")
+                st.write(f"Showing {len(active_jobs)} listings:")
                 for idx, job in enumerate(active_jobs):
-                    status = job.get("status", "UNASSIGNED")
-                    score = job.get("total_score", 0)
-                    company = job.get("company", "Unknown")
-                    title = job.get("title", "Job Title")
-                    badge_style = "✅" if status in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK") else "⚠️"
+                    status = job.get("status") or "UNKNOWN"
+                    company = job.get("company") or "Unknown"
+                    title = job.get("title") or "Job Title"
+
+                    gate_status = job.get("gate_status") or "NEEDS_VERIFICATION"
+                    outcome = job.get("decision_outcome") or "TRACK"
+                    eligibility = job.get("decision_eligibility") or "VERIFY"
+
+                    if gate_status == "HARD_REJECT":
+                        badge_style = "⛔"
+                    elif gate_status == "NEEDS_VERIFICATION":
+                        badge_style = "🔎"
+                    elif status == "AI_EVALUATED" and outcome == "PRIORITY":
+                        badge_style = "⭐"
+                    elif status == "AI_EVALUATED" and outcome == "REVIEW":
+                        badge_style = "🟡"
+                    else:
+                        badge_style = "📌"
                     
                     with st.expander(f"{badge_style} {title} — {company} ({status})"):
-                        st.markdown(f"**Source Board:** `{job.get('source')}`")
-                        st.markdown(f"**Salary Range:** {job.get('salaryRange') or 'Not specified'}")
-                        st.markdown(f"**Location:** {job.get('location') or 'Singapore'}")
-                        st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
-                        score = job.get('total_score', 0)
-                        aut = job.get('nd_friendly_score')
-                        pol = job.get('politics_stress_score')
-                        
-                        aut_str = f"🟢 {aut}%" if aut and aut >= 70 else (f"🔴 {aut}%" if aut else "N/A")
-                        pol_str = f"🔴 {pol}%" if pol and pol >= 40 else (f"🟢 {pol}%" if pol else "N/A")
-                        
-                        st.markdown(f"**Match Score:** `{score}/100`")
-                        st.markdown(f"**Autonomy Score:** {aut_str} | **Politics Stress:** {pol_str}")
+                        st.markdown(f"**Decision:** `{outcome}` ({eligibility}) | **Gate:** `{gate_status}`")
+                        st.markdown(f"**Source:** `{job.get('source') or 'UNKNOWN'}`")
+                        st.markdown(f"**Lane:** `{job.get('assigned_track') or 'UNCLASSIFIED'}` | **Lane confidence:** `{job.get('lane_confidence') or 'None'}`")
+                        st.markdown(f"**Location:** {job.get('location') or 'Unknown'} ({job.get('workplace_type') or 'UNKNOWN'}) | **Employment:** `{job.get('employment_type') or 'UNKNOWN'}`")
+
+                        url = safe_http_url(job.get("careers_portal_url"))
+                        if url:
+                            st.markdown(f"**Verification Link:** [Go to Careers Portal]({url})")
+                        else:
+                            st.markdown("**Verification Link:** N/A")
+
+                        match_score = job.get("deterministic_match_score")
+                        coverage = job.get("deterministic_match_coverage")
+                        match_str = f"{float(match_score):.1f}/100" if isinstance(match_score, (int, float)) else "N/A"
+                        cov_str = f"{float(coverage):.1f}%" if isinstance(coverage, (int, float)) else "N/A"
+
+                        evidence_pct = job.get("decision_evidence_completeness")
+                        evidence_str = f"{int(float(evidence_pct) * 100)}%" if isinstance(evidence_pct, (int, float)) else "N/A"
+
+                        st.markdown(f"**Deterministic match:** `{match_str}` | **Coverage:** `{cov_str}` | **Evidence completeness:** `{evidence_str}`")
+
+                        aut = job.get("nd_friendly_score")
+                        pol = job.get("politics_stress_score")
+                        env = job.get("sensory_overload_index")
+
+                        aut_str = f"{int(aut)}%" if isinstance(aut, (int, float)) else "N/A"
+                        pol_str = f"{int(pol)}%" if isinstance(pol, (int, float)) else "N/A"
+                        env_str = f"{int(env)}%" if isinstance(env, (int, float)) else "N/A"
+
+                        st.markdown(f"**Workplace signals:** Autonomy {aut_str} | Politics {pol_str} | Sensory {env_str}")
+                        st.markdown(f"**LLM suggestion:** `{job.get('next_action') or 'N/A'}` (display only)")
                         
                         desc_text = job.get("description", "")
                         parsed_desc = None
@@ -869,7 +1065,7 @@ with tab_dashboard:
                 if rejected_jobs:
                     st.info(f"💡 No active matches found, but {len(rejected_jobs)} matching listings are in the Rejected/Discarded folder below.")
                 else:
-                    st.info("No active matching jobs (STRONG MATCH or REVIEW REQUIRED) are currently stored.")
+                    st.info("No active listings match the current filters.")
 
             # Render Rejected (Red) Jobs inside an expander
             if rejected_jobs:
@@ -881,11 +1077,14 @@ with tab_dashboard:
                     for idx, job in enumerate(rejected_jobs[:display_limit]):
                         company = job.get("company", "Unknown")
                         title = job.get("title", "Job Title")
-                        score = (job.get("total_score") or 0)
                         
                         with st.popover(f"🔴 {title} — {company}"):
                             st.markdown(f"**Source Board:** `{job.get('source')}`")
-                            st.markdown(f"**Verification Link:** [Go to Careers Portal]({job.get('careers_portal_url')})")
+                            url = safe_http_url(job.get("careers_portal_url"))
+                            if url:
+                                st.markdown(f"**Verification Link:** [Go to Careers Portal]({url})")
+                            else:
+                                st.markdown("**Verification Link:** N/A")
                             st.markdown(f"**Status:** `{job.get('status')}` | **Gate:** `{job.get('gate_status') or 'N/A'}`")
                             st.markdown(f"**Reason Codes:** {', '.join(job.get('rejection_codes') or []) or 'N/A'}")
                             st.markdown(f"**Evidence:** {'; '.join(job.get('gate_evidence_quotes') or []) or job.get('rejection_reason') or 'N/A'}")
@@ -916,66 +1115,92 @@ with tab_dashboard:
 
     with col_right:
         st.subheader("🤖 Scoring & Match Analysis Details")
-        st.write("Select an evaluated job to view detailed autonomy & focus match metrics, workplace stress assessments, and strategic CV targeting.")
+        st.write("Select an evaluated job/version to view deterministic match scores, gate evidence, and the latest AI evaluation summary.")
         
-        evaluated_jobs = [j for j in filtered_jobs if j.get("status") and j.get("status") not in ("UNASSIGNED", "REJECTED")]
+        evaluated_jobs = [j for j in filtered_jobs if j.get("status") == "AI_EVALUATED"]
         
         def format_job_option(j):
-            return f"{j.get('title')} ({j.get('company')}) - {str(j.get('id'))[:8]}"
+            outcome = j.get("decision_outcome") or "TRACK"
+            eligibility = j.get("decision_eligibility") or "VERIFY"
+            version_warn = " ⚠️ stale" if j.get("version_mismatch") else ""
+            suffix = str(j.get("job_version_id") or "")[:8]
+            return f"{j.get('company') or 'Unknown'} — {j.get('title') or 'Job Title'} [{outcome}/{eligibility}]{version_warn} ({suffix})"
             
         selected_job_title = st.selectbox(
-            "Select Job to Analyze", 
+            "Select evaluated job/version", 
             [format_job_option(j) for j in evaluated_jobs] if evaluated_jobs else ["No Evaluated Jobs Available"]
         )
         
         # Get actual job object
         job_to_show = None
         if evaluated_jobs and selected_job_title != "No Evaluated Jobs Available":
-            idx_selected = [format_job_option(j) for j in evaluated_jobs].index(selected_job_title)
-            job_to_show = evaluated_jobs[idx_selected]
+            options = {format_job_option(j): j for j in evaluated_jobs}
+            job_to_show = options.get(selected_job_title)
 
         if job_to_show:
-            st.markdown(f"#### Selected: **{job_to_show['title']}** at *{job_to_show['company']}*")
-            st.markdown(f"**Verifiable Careers Link:** `{job_to_show['careers_portal_url']}`")
+            st.markdown(f"#### Selected: **{job_to_show.get('title') or ''}** at *{job_to_show.get('company') or ''}*")
+            url = safe_http_url(job_to_show.get("careers_portal_url"))
+            if url:
+                st.markdown(f"🔗 [View Posting]({url})")
+            else:
+                st.caption("Posting URL unavailable or invalid.")
+
+            if job_to_show.get("version_mismatch"):
+                st.warning("Stale evaluation detected: the canonical job/version changed since the last stored AI evaluation.")
             
             # Show score metrics
             st.markdown("---")
-            core = job_to_show.get('total_score', 0)
-            core_emoji = "🟢" if core >= 80 else "🔴"
-            st.markdown(f"### Match Score: `{core} / 100` {core_emoji}")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                aut = job_to_show.get('nd_friendly_score')
-                aut_emoji = "🟢" if aut and aut >= 70 else ("🔴" if aut else "")
-                st.metric("Autonomy Culture Score", f"{aut}% {aut_emoji}")
-            with col2:
-                pol = job_to_show.get('politics_stress_score')
-                pol_emoji = "🔴" if pol and pol >= 40 else ("🟢" if pol else "")
-                st.metric("Politics Stress Score", f"{pol}% {pol_emoji}")
-            with col3:
-                env = job_to_show.get('sensory_overload_index')
-                env_emoji = "🔴" if env and env >= 50 else ("🟢" if env else "")
-                st.metric("Environmental Stress Index", f"{env}% {env_emoji}")
+            outcome = job_to_show.get("decision_outcome") or "TRACK"
+            eligibility = job_to_show.get("decision_eligibility") or "VERIFY"
+            st.markdown(f"### Deterministic Decision: `{outcome}` ({eligibility})")
 
-            st.markdown("#### **Evaluation Axes Breakdown**")
-            st.json({
-                "Environmental & Biological Guardrails (30%)": f"{job_to_show.get('score_environment_guardrails') or 0} pts",
-                "Technical & Creative Autonomy (25%)": f"{job_to_show.get('score_technical_autonomy') or 0} pts",
-                "Domain Relevance (20%)": f"{job_to_show.get('score_domain_relevance') or 0} pts",
-                "Compensation & Capital Potential (15%)": f"{job_to_show.get('score_compensation_potential') or 0} pts",
-                "Future-Proofing & Domain Growth (10%)": f"{job_to_show.get('score_future_mobility') or 0} pts"
-            })
+            match_score = job_to_show.get("deterministic_match_score")
+            coverage = job_to_show.get("deterministic_match_coverage")
+            evidence_pct = job_to_show.get("decision_evidence_completeness")
 
-            st.markdown("#### **Workplace & Strategic Assessment**")
-            st.info(f"**Workplace Stress & Politics Risk:**\n{job_to_show.get('biological_stress_risk') or 'N/A'}")
-            st.success(f"**Strategic Career Value:**\n{job_to_show.get('strategic_value') or 'N/A'}")
+            match_str = f"{float(match_score):.1f}/100" if isinstance(match_score, (int, float)) else "N/A"
+            cov_str = f"{float(coverage):.1f}%" if isinstance(coverage, (int, float)) else "N/A"
+            evidence_str = f"{int(float(evidence_pct) * 100)}%" if isinstance(evidence_pct, (int, float)) else "N/A"
             
-            st.markdown(f"**Target Application Strategy:**")
-            st.write(f"📝 **Recommended CV:** `{job_to_show.get('recommended_cv_version') or 'N/A'}`")
-            st.write(f"🚀 **Next Action:** `{job_to_show.get('next_action') or 'N/A'}`")
+            metric_a, metric_b, metric_c = st.columns(3)
+            with metric_a:
+                st.metric("Deterministic Match", match_str)
+            with metric_b:
+                st.metric("Match Coverage", cov_str)
+            with metric_c:
+                st.metric("Evidence Completeness", evidence_str)
+
+            st.markdown("#### Workplace Signals (from AI evaluation payload)")
+            aut = job_to_show.get("nd_friendly_score")
+            pol = job_to_show.get("politics_stress_score")
+            env = job_to_show.get("sensory_overload_index")
+
+            aut_str = f"{int(aut)}%" if isinstance(aut, (int, float)) else "N/A"
+            pol_str = f"{int(pol)}%" if isinstance(pol, (int, float)) else "N/A"
+            env_str = f"{int(env)}%" if isinstance(env, (int, float)) else "N/A"
+
+            sig1, sig2, sig3 = st.columns(3)
+            with sig1:
+                st.metric("Autonomy", aut_str)
+            with sig2:
+                st.metric("Politics", pol_str)
+            with sig3:
+                st.metric("Sensory", env_str)
+
+            st.markdown("#### Gate Evidence")
+            st.markdown(f"**Gate status:** `{job_to_show.get('gate_status') or 'N/A'}`")
+            st.markdown(f"**Reason codes:** {', '.join(job_to_show.get('rejection_codes') or []) or 'None'}")
+            st.markdown(f"**Evidence quotes:** {'; '.join(job_to_show.get('gate_evidence_quotes') or []) or 'None'}")
+
+            st.markdown("#### Workability Facts")
+            st.json(normalize_workability_facts(job_to_show.get("workability_facts") or {}))
+
+            st.markdown("#### AI Evaluation (display-only)")
+            st.write(job_to_show.get("evaluation_summary") or "N/A")
+            st.caption(f"Provider: {job_to_show.get('eval_provider') or 'N/A'} | Fallback: {job_to_show.get('eval_is_fallback')}")
+            st.caption(f"LLM suggestion: {job_to_show.get('next_action') or 'N/A'} | Strategic value: {job_to_show.get('strategic_value') or 'N/A'}")
         else:
-            st.info("No evaluated jobs in view. The daily automation pipeline automatically processes imported unread email jobs.")
+            st.info("No evaluated jobs in view. Run the discovery & evaluation pipeline to populate AI_EVALUATED rows.")
 
 with tab_add_job:
     st.subheader("➕ Import a New Job Advertisement")
@@ -1316,8 +1541,9 @@ with tab_cv:
         st.markdown(f"**Canonical Job ID:** {selected_job.get('id')}")
         st.markdown(f"**Job Version ID:** {selected_job.get('job_version_id')}")
         st.markdown(f"**Company:** {selected_job.get('company')} | **Role:** {selected_job.get('title')}")
-        if selected_job.get("careers_portal_url"):
-            st.markdown(f"🔗 [View Posting]({selected_job.get('careers_portal_url')})")
+        url = safe_http_url(selected_job.get("careers_portal_url"))
+        if url:
+            st.markdown(f"🔗 [View Posting]({url})")
 
         with st.expander("Preview job description"):
             description = selected_job.get("description") or ""

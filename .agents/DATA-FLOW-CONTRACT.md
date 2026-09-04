@@ -13,7 +13,7 @@ The `data-contract-checker` owns this contract. Feature agents propose changes; 
 | Gate decision -> lane decision | hard gate | `src/pipeline/laneRouter.ts` | Only eligible records route; primary/secondary lane, confidence, evidence and model version persist |
 | Lane decision -> evaluation queue | lane router | `src/pipeline/evaluationBudgeter.ts` | Per-lane quota; overflow is `DEFERRED_BUDGET`; one queue item per job version |
 | Queue item -> AI evaluation | evaluation worker | evaluation store | Lease, attempts, provider/model, fallback/degraded state, full validated result and matching job identity persist atomically |
-| Canonical data -> shortlist read model | database view/query | `streamlit_app.py` | One row per current job version; no legacy joins; every displayed field has a real source |
+| Canonical data -> shortlist read model | database view/query | `streamlit_app.py` | One row per current job version; no legacy joins; every displayed field has a real source; UI sanitizes untrusted content + validates links; missing scores remain null/N/A (never coerced to 0) |
 | Evaluation -> documents | evaluation/profile ledgers | CV and cover-letter generators | Every substantive claim resolves to verified evidence IDs |
 
 ## Contract implementation target

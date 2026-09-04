@@ -1,0 +1,12 @@
+schema_version: "2.2.0"
+cases:
+  - case_id: smart_contract_analysis_is_not_contract_employment
+    description_text: "We are building smart contract analysis tooling for compliance teams. This is a full-time permanent role."
+    expected:
+      extracted_employment_type: "FULL_TIME"
+
+  - case_id: explicit_fixed_term_contract_is_contract_employment
+    description_text: "This is a 6 month contract position with possibility of extension. Hybrid role with 2 days per week in office."
+    expected:
+      extracted_employment_type: "CONTRACT"
+

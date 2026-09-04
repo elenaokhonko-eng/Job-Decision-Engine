@@ -6,6 +6,7 @@ import {
   isTechnicalRole,
   type GateResult,
 } from "../services/criteria.js";
+import { GATE_VERSION } from "../contracts/version.js";
 import { pgSslConfig } from "../db/pgSsl.js";
 
 dotenv.config();
@@ -322,9 +323,18 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
         );
 
         const deterministicRequirements = requirementRows as PersistedRequirement[];
-        const gateResult = deterministicRequirements.length > 0
-          ? applyPersistedRequirementGates(rawJobAdapter as any, deterministicRequirements)
-          : applyGlobalGates(rawJobAdapter as any);
+        const requirementHints = deterministicRequirements
+          .map((r) => r.quote_text || r.requirement_text)
+          .filter(Boolean)
+          .slice(0, 60)
+          .join("\n");
+
+        const gateResult = applyGlobalGates({
+          ...(rawJobAdapter as any),
+          raw_description: requirementHints
+            ? `${rawJobAdapter.raw_description}\n\n---\nExtracted requirements:\n${requirementHints}`
+            : rawJobAdapter.raw_description,
+        } as any);
 
         let processingStatus: string;
         switch (gateResult.status) {
@@ -370,7 +380,7 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
           [
             job.id,
             job.job_version_id,
-            "2.0",
+            GATE_VERSION,
             gateResult.status,
             JSON.stringify(gateResult.rejection_codes),
             JSON.stringify(gateResult.evidence_quotes),

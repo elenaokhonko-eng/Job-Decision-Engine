@@ -1,5 +1,7 @@
 import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
+import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
+import { stripHtmlToText } from "../security/sanitize.js";
 
 /**
  * Custom weights and criteria configuration file for the Job Decision Engine.
@@ -8,30 +10,24 @@ import { RawJob } from "../db/db.ts";
  */
 
 export const CANDIDATE_PROFILE = {
-  name: "Elena Okhonko",
-  experienceYears: 20,
-  workplacePreference: "High-Autonomy Technical Architect & SME Builder",
-  minAcceptableBaseSgdMonth: 22000,
+  name: "Candidate Alpha",
+  experienceYears: 10,
+  workplacePreference: "High-autonomy technical builder",
+  minAcceptableBaseSgdMonth: 0,
   maxTravelPercentage: 10,
   idealOfficeDaysPerWeek: 2,
   maxOfficeDaysPerWeek: 3,
   coreSkills: [
-    "IT Architecture",
-    "Institutional Finance ($54B+ governance)",
-    "AI/RegTech Engineering",
-    "Python Coding",
-    "Agentic RAG Pipelines",
-    "LLM Guardrails"
+    "Software engineering",
+    "Data systems",
+    "AI/ML systems",
+    "Python/TypeScript",
+    "PostgreSQL"
   ],
   nonNegotiables: [
-    "No traditional Program Manager / Project Manager / Scrum Master roles",
-    "No Client Relationship Management, Sales, or Presales roles",
-    "No Forward Deployed Engineering (FDE) or outsourcing/consulting roles",
-    "No contract roles (only permanent FTE)",
-    "Travel < 10%",
-    "Max 3 days in-office (100% on-premises is unacceptable)",
-    "Low stress / organizational politics",
-    "Protected deep-focus time"
+    "No contract roles (only permanent/FTE)",
+    "Travel <= 10%",
+    "Max 3 days in-office (100% on-premises is unacceptable)"
   ]
 };
 
@@ -118,19 +114,51 @@ export function evaluateWorkability(
   description: string,
   employmentType?: string
 ): { workable: boolean; needsVerify: boolean; reason?: string; reasonCode?: string; facts?: Partial<GateResult["workability_facts"]> } {
-  const wp = (workplaceType || "").toUpperCase().trim();
+  const wp = normalizeWorkMode(workplaceType);
   const loc = (location || "").toLowerCase().trim();
   const d = (description || "").toLowerCase().trim();
   const emp = (employmentType || "").toUpperCase().trim();
 
-  // Structured employment type is deterministic.
-  if (emp === "CONTRACT") {
+  const removeNonEmploymentContractPhrases = (text: string): string =>
+    text
+      .replace(/\bsmart contracts?\b/g, " ")
+      .replace(/\bcontract (analysis|analytics|management|automation|lifecycle|intelligence|review)\b/g, " ")
+      .replace(/\bcontracts (analysis|analytics|management|review)\b/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const normalizedEmp = (() => {
+    if (emp.includes("CONTRACT")) return "CONTRACT" as const;
+    if (emp.includes("PERMANENT") || emp.includes("FULL_TIME") || emp === "FTE") return "PERMANENT" as const;
+
+    const cleaned = removeNonEmploymentContractPhrases(d);
+    const isContractEmployment = /\bcontract[- ]to[- ]hire\b/i.test(cleaned)
+      || /\b\d{1,2}\s*(?:month|months|mo|week|weeks|wk|day|days)\s+contract\b/i.test(cleaned)
+      || /\bcontract\s+(?:role|position|assignment|opportunity)\b/i.test(cleaned)
+      || /\bfixed[- ]term\b/i.test(cleaned)
+      || /\btemporary\b/i.test(cleaned)
+      || /\bcontractor\b/i.test(cleaned);
+
+    if (isContractEmployment) return "CONTRACT" as const;
+
+    const isPermanentEmployment = /\bfull[- ]?time\b/i.test(d) || /\bpermanent\b/i.test(d) || /\bfte\b/i.test(d);
+    if (isPermanentEmployment) return "PERMANENT" as const;
+
+    return "UNKNOWN" as const;
+  })();
+
+  const baseFacts: Partial<GateResult["workability_facts"]> = {
+    employment_type: normalizedEmp,
+  };
+
+  // Structured or strongly indicated contract employment is deterministic.
+  if (normalizedEmp === "CONTRACT") {
     return {
       workable: false,
       needsVerify: false,
-      reason: "Structured employment_type is CONTRACT",
+      reason: "Contract employment detected",
       reasonCode: "GATE_CONTRACT_ROLE",
-      facts: { employment_type: "CONTRACT" }
+      facts: baseFacts
     };
   }
 
@@ -138,13 +166,13 @@ export function evaluateWorkability(
   const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|mandatory\s*5\s*days|5\s*days\s*(a\s*week|per\s*week)?\s*in\s*the\s*office|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
     || /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i.test(d);
 
-  if (wp === "ONSITE" || wp === "ON_SITE" || isExplicitOnsiteText) {
+  if (wp === "ONSITE" || isExplicitOnsiteText) {
     return {
       workable: false,
       needsVerify: false,
       reason: "Requires 100% on-premises / on-site presence (ONSITE mode not workable)",
       reasonCode: "GATE_HIGH_OFFICE_DAYS",
-      facts: { office_days_min: 4, office_days_max: 5 }
+      facts: { ...baseFacts, office_days_min: 4, office_days_max: 5 }
     };
   }
 
@@ -160,7 +188,7 @@ export function evaluateWorkability(
         needsVerify: false,
         reason: `Geographic restriction detected: ${kw.toUpperCase()}`,
         reasonCode: "GATE_LOCATION_RESTRICTED",
-        facts: { location_restriction: kw.toUpperCase() }
+        facts: { ...baseFacts, location_restriction: kw.toUpperCase() }
       };
     }
   }
@@ -170,7 +198,7 @@ export function evaluateWorkability(
     return {
       workable: true,
       needsVerify: false,
-      facts: { office_days_min: 0, office_days_max: 0 }
+      facts: { ...baseFacts, office_days_min: 0, office_days_max: 0 }
     };
   }
 
@@ -182,7 +210,7 @@ export function evaluateWorkability(
         needsVerify: false,
         reason: "Hybrid arrangement requires 4-5 days in-office",
         reasonCode: "GATE_HIGH_OFFICE_DAYS",
-        facts: { office_days_min: 4, office_days_max: 5 }
+        facts: { ...baseFacts, office_days_min: 4, office_days_max: 5 }
       };
     }
     const daysMatch = d.match(/\b([1-3])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i);
@@ -191,7 +219,7 @@ export function evaluateWorkability(
         workable: true,
         needsVerify: true,
         reason: "Hybrid arrangement listed without explicit office-day count",
-        facts: { office_days_min: null, office_days_max: null }
+        facts: { ...baseFacts, office_days_min: null, office_days_max: null }
       };
     }
     const days = daysMatch
@@ -204,7 +232,7 @@ export function evaluateWorkability(
     return {
       workable: true,
       needsVerify: false,
-      facts: { office_days_min: days, office_days_max: days }
+      facts: { ...baseFacts, office_days_min: days, office_days_max: days }
     };
   }
 
@@ -219,21 +247,21 @@ export function evaluateWorkability(
       workable: true,
       needsVerify: true,
       reason: "Workplace model ambiguous/unspecified; needs manual verification",
-      facts: { office_days_min: null, office_days_max: null }
+      facts: { ...baseFacts, office_days_min: null, office_days_max: null }
     };
   }
 
   // 6. Unspecified workplace_type and no remote/hybrid clues -> NEEDS_VERIFICATION
-  if (!wp || wp === "UNKNOWN") {
+  if (wp === "UNKNOWN") {
     return {
       workable: true,
       needsVerify: true,
       reason: "Workplace model unspecified; needs manual verification",
-      facts: { office_days_min: null, office_days_max: null }
+      facts: { ...baseFacts, office_days_min: null, office_days_max: null }
     };
   }
 
-  return { workable: true, needsVerify: false };
+  return { workable: true, needsVerify: false, facts: baseFacts };
 }
 
 export function evaluateHardGates(title: string, description: string, location: string, workplaceType: string): GateEvaluationResult {
@@ -345,30 +373,32 @@ export function extractDescriptionText(job: RawJob): string {
   if (!job.raw_description) return "";
   if (typeof job.raw_description === "object") {
     const d = job.raw_description as any;
-    return [
+    const merged = [
       d.job_description || "",
       ...(d.key_responsibilities || []),
       ...(d.technical_skills || []),
       ...(d.qualifications_education || []),
       ...(d.nice_to_haves || [])
-    ].join(" ").toLowerCase();
+    ].join("\n");
+    return stripHtmlToText(merged).toLowerCase();
   }
   if (typeof job.raw_description === "string") {
     if (job.raw_description.trim().startsWith("{")) {
       try {
         const parsed = JSON.parse(job.raw_description);
-        return [
+        const merged = [
           parsed.job_description || "",
           ...(parsed.key_responsibilities || []),
           ...(parsed.technical_skills || []),
           ...(parsed.qualifications_education || []),
           ...(parsed.nice_to_haves || [])
-        ].join(" ").toLowerCase();
+        ].join("\n");
+        return stripHtmlToText(merged).toLowerCase();
       } catch {
-        return job.raw_description.toLowerCase();
+        return stripHtmlToText(job.raw_description).toLowerCase();
       }
     }
-    return job.raw_description.toLowerCase();
+    return stripHtmlToText(job.raw_description).toLowerCase();
   }
   return "";
 }

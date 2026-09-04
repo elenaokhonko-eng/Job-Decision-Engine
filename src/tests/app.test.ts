@@ -6,7 +6,14 @@ import dotenv from "dotenv";
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-describe.skipIf(!process.env.DATABASE_URL).sequential("Job Decision Engine Test Suite", () => {
+const databaseUrl = process.env.DATABASE_URL;
+const dbWipeBlocked =
+  !!databaseUrl &&
+  databaseUrl.includes("neon.tech") &&
+  process.env.ALLOW_TEST_DB_WIPE !== "true";
+const skipDbTests = !databaseUrl || dbWipeBlocked;
+
+describe.sequential("Job Decision Engine Test Suite", () => {
   beforeEach(async () => {
     if (!process.env.DATABASE_URL) {
       return;
@@ -23,7 +30,7 @@ describe.skipIf(!process.env.DATABASE_URL).sequential("Job Decision Engine Test 
   });
 
   // Test 1: Database Read Happy Path
-  it("Test 1: should fetch seeded jobs from database", async () => {
+  it.skipIf(skipDbTests)("Test 1: should fetch seeded jobs from database", async () => {
 
     let jobs = await db.queryJobs();
     if (jobs.length === 0) {
@@ -51,7 +58,7 @@ describe.skipIf(!process.env.DATABASE_URL).sequential("Job Decision Engine Test 
   });
 
   // Test 2: Database Write Happy Path
-  it("Test 2: should add a new job to the database", async () => {
+  it.skipIf(skipDbTests)("Test 2: should add a new job to the database", async () => {
 
     const newJobPayload = {
       title: "Senior Biotech Specialist",
@@ -78,7 +85,7 @@ describe.skipIf(!process.env.DATABASE_URL).sequential("Job Decision Engine Test 
   });
 
   // Test 3: Database Delete
-  it("Test 3: should delete an existing job from the database", async () => {
+  it.skipIf(skipDbTests)("Test 3: should delete an existing job from the database", async () => {
 
     let jobsBefore = await db.queryJobs();
     if (jobsBefore.length === 0) {
@@ -108,7 +115,7 @@ describe.skipIf(!process.env.DATABASE_URL).sequential("Job Decision Engine Test 
   });
 
   // Test 4: Database Interaction Logging Happy Path
-  it("Test 4: should successfully log agent interactions", async () => {
+  it.skipIf(skipDbTests)("Test 4: should successfully log agent interactions", async () => {
 
     const question = "Check high paying finance jobs in the database";
     const toolsUsed = ["queryDatabaseForJobs"];

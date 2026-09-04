@@ -2,6 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { generateEmbedding } from "../services/agent.js";
 import { pgSslConfig } from "../db/pgSsl.js";
+import { stripHtmlToText } from "../security/sanitize.js";
 import {
   loadGlobalLanesConfig,
   loadLanesConfig,
@@ -49,12 +50,69 @@ function applyNegativeExclusion(description: string, laneDef: LaneDefinition): b
 }
 
 function extractCoreJobText(title: string, description: string): string {
-  const cleanedDesc = (description || "")
-    .replace(/equal opportunity employer[\s\S]*/i, "")
-    .replace(/benefits & perks[\s\S]*/i, "")
-    .replace(/about us[\s\S]*/i, "")
+  const raw = (description || "").trim();
+
+  let mergedText = raw;
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw) as any;
+      const parts: string[] = [];
+      if (typeof parsed?.job_description === "string") parts.push(parsed.job_description);
+      if (Array.isArray(parsed?.key_responsibilities)) parts.push(parsed.key_responsibilities.join("\n"));
+      if (Array.isArray(parsed?.technical_skills)) parts.push(parsed.technical_skills.join("\n"));
+      if (Array.isArray(parsed?.qualifications_education)) parts.push(parsed.qualifications_education.join("\n"));
+      if (Array.isArray(parsed?.nice_to_haves)) parts.push(parsed.nice_to_haves.join("\n"));
+      mergedText = parts.filter(Boolean).join("\n");
+    } catch {
+      mergedText = raw;
+    }
+  }
+
+  const plain = stripHtmlToText(mergedText);
+  const lines = plain
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const boilerplateHeadings = new Set([
+    "equal opportunity employer",
+    "benefits & perks",
+    "benefits",
+    "about us",
+    "diversity & inclusion",
+    "diversity and inclusion",
+  ]);
+
+  const sections: Array<{ heading: string | null; body: string[] }> = [];
+  let current: { heading: string | null; body: string[] } = { heading: null, body: [] };
+
+  const flush = () => {
+    if (current.heading || current.body.length) {
+      sections.push(current);
+      current = { heading: null, body: [] };
+    }
+  };
+
+  for (const line of lines) {
+    const normalizedHeading = line.replace(/:\s*$/, "").toLowerCase();
+    const isBoilerplateHeading = boilerplateHeadings.has(normalizedHeading);
+    const isHeading = isBoilerplateHeading || (line.endsWith(":") && line.length <= 60);
+    if (isHeading) {
+      flush();
+      current.heading = normalizedHeading;
+      continue;
+    }
+    current.body.push(line);
+  }
+  flush();
+
+  const kept = sections
+    .filter((s) => !s.heading || !boilerplateHeadings.has(s.heading))
+    .flatMap((s) => s.body)
+    .join(" ")
     .slice(0, 2000);
-  return `${title}. ${cleanedDesc}`.trim();
+
+  return `${title}. ${kept}`.trim();
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────

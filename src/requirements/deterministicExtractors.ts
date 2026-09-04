@@ -52,6 +52,68 @@ function findFirstMatch(description: string, patterns: RegExp[]): MatchInfo | nu
   return null;
 }
 
+function isContractEmploymentFalsePositive(description: string, match: MatchInfo): boolean {
+  const start = Math.max(0, match.quote_start_offset - 24);
+  const end = Math.min(description.length, match.quote_end_offset + 48);
+  const window = description.slice(start, end).toLowerCase();
+
+  // Domain terms that often contain the token "contract" but do not imply contract employment.
+  const nonEmploymentPhrases = [
+    "smart contract",
+    "smart contracts",
+    "contract analysis",
+    "contract analytics",
+    "contract management",
+    "contract automation",
+    "contract intelligence",
+    "contract lifecycle",
+    "contracts analysis",
+    "contracts analytics",
+    "contract review",
+  ];
+
+  return nonEmploymentPhrases.some((p) => window.includes(p));
+}
+
+function findEmploymentTypeMatch(description: string): { match: MatchInfo; employmentType: string } | null {
+  const contractStrong = findFirstMatch(description, [
+    /\bcontract[- ]to[- ]hire\b/i,
+    /\b(\d{1,2})\s*(?:month|months|mo|week|weeks|wk|day|days)\s+contract\b/i,
+    /\bcontract\s+(?:role|position|assignment|opportunity)\b/i,
+    /\bfixed[- ]term\b/i,
+    /\btemporary\b/i,
+  ]);
+  if (contractStrong && !isContractEmploymentFalsePositive(description, contractStrong)) {
+    return { match: contractStrong, employmentType: "CONTRACT" };
+  }
+
+  const fullTime = findFirstMatch(description, [
+    /\bfull[- ]?time\b/i,
+    /\bpermanent\b/i,
+    /\bfte\b/i,
+  ]);
+  if (fullTime) {
+    return { match: fullTime, employmentType: "FULL_TIME" };
+  }
+
+  const partTime = findFirstMatch(description, [
+    /\bpart[- ]?time\b/i,
+  ]);
+  if (partTime) {
+    return { match: partTime, employmentType: "PART_TIME" };
+  }
+
+  const contractWeak = findFirstMatch(description, [
+    /\bcontractor\b/i,
+    /\bcontract\b/i,
+  ]);
+  if (contractWeak && !isContractEmploymentFalsePositive(description, contractWeak)) {
+    return { match: contractWeak, employmentType: "CONTRACT" };
+  }
+
+  return null;
+}
+
 function inferImportance(quoteText: string): z.infer<typeof RequirementImportanceSchema> {
   const lower = quoteText.toLowerCase();
   if (lower.includes('must') || lower.includes('mandatory') || lower.includes('required')) {
@@ -182,18 +244,16 @@ export function extractDeterministicRequirements(
     );
   }
 
-  const employmentType = findFirstMatch(description, [
-    /\b(full[- ]?time|part[- ]?time|contract|permanent)\b/i,
-  ]);
-  if (employmentType) {
+  const employmentMatch = findEmploymentTypeMatch(description);
+  if (employmentMatch) {
     requirements.push(
       buildRequirement(
         input,
         sequence++,
         'EMPLOYMENT_TYPE',
         'Role specifies an employment type.',
-        employmentType,
-        { employment_type: employmentType.quote_text.toUpperCase() }
+        employmentMatch.match,
+        { employment_type: employmentMatch.employmentType }
       )
     );
   }

@@ -1,5 +1,6 @@
 import { BaseSourceAdapter, AdapterResult } from "./baseAdapter.js";
 import { ExtractedJob, SCHEMA_VERSION } from "../../contracts/index.js";
+import { inferWorkModeFromSignals } from "../../pipeline/workModeNormalizer.js";
 
 export class AshbyAdapter extends BaseSourceAdapter {
   sourceName = "ASHBY" as const;
@@ -29,16 +30,22 @@ export class AshbyAdapter extends BaseSourceAdapter {
       let quarantined = 0;
 
       for (const item of rawJobs.slice(0, options.limit || 50)) {
+        const inferredWorkMode = inferWorkModeFromSignals({
+          workplaceTypeRaw: item.workplaceType || item.workplace_type || item.workplaceTypeRaw,
+          locationRaw: item.location,
+          isRemoteFlag: item.isRemote,
+        });
+
         const candidate = {
           schema_version: SCHEMA_VERSION,
           company_name: this.orgSlug.toUpperCase(),
           title: item.title || "Unknown Title",
           location_raw: item.location || "Unknown",
-          workplace_type_raw: item.isRemote ? "REMOTE" : "HYBRID",
+          workplace_type_raw: inferredWorkMode,
           employment_type_raw: item.employmentType || "FULL_TIME",
           compensation_raw: item.compensation?.text || "UNKNOWN",
           canonical_apply_url: item.jobUrl || url,
-          description_raw: item.descriptionHtml || item.title || "No description.",
+          description_raw: this.sanitizeHtml(item.descriptionHtml || item.description || item.title || "No description."),
         };
 
         const validated = this.validateJob(candidate, item.id || item.title);

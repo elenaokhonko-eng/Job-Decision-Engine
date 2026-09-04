@@ -2,6 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { EvaluationRequest } from "../src/pipeline/types.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationWorkabilityFacts } from "../src/contracts/index.js";
+import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
@@ -124,7 +125,7 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         canonicalJobId: item.canonical_job_id,
         jobVersionId,
         gateDecisionId: gateDecisionId || "LEGACY_NO_GATE_RECORD",
-        gateVersion: "2.0",
+        gateVersion: GATE_VERSION,
         candidateLanes: [{ lane: item.lane, semanticScore: item.priority_score, evidence: [] }],
         workabilityFacts: toEvaluationWorkabilityFacts(item.workability_facts || {
           office_days_min: null,
@@ -134,7 +135,7 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
           location_restriction: null
         }),
         unknownFields: [],
-        profileVersion: "1.0",
+        profileVersion: PROFILE_SCHEMA_VERSION,
         evaluationSchemaVersion: SCHEMA_VERSION
       };
 
@@ -178,11 +179,11 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
               item.canonical_job_id,
               jobVersionId,
               item.gate_decision || "PASS",
-              "2.0",
+              GATE_VERSION,
               JSON.stringify([{ lane: item.lane, semanticScore: item.priority_score, evidence: validatedResult.lane_evidence }]),
-              JSON.stringify(evalReq.workabilityFacts),
+              JSON.stringify(item.workability_facts || {}),
               JSON.stringify([]),
-              "1.0",
+              PROFILE_SCHEMA_VERSION,
               SCHEMA_VERSION,
               validatedResult.provider,
               validatedResult.model,

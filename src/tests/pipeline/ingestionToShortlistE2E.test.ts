@@ -101,7 +101,7 @@ describe('End-to-End Funnel & Gate Verification Suite', () => {
       'QA Coordinator',
       'Manual testing and quality assurance coordination for desktop applications.',
       'Singapore',
-      'On-site'
+      'Remote'
     );
     expect(qaResult.passed).toBe(false);
     expect(qaResult.reasonCode).toBe('NON_TECHNICAL_FUNCTION');

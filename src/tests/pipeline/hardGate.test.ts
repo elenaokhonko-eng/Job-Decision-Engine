@@ -59,7 +59,7 @@ describe('Pipeline Stage: Hard Gates', () => {
     vi.clearAllMocks();
   });
 
-  it('should consume persisted deterministic requirements and gate without legacy parser', async () => {
+  it('should always evaluate hard gates using structured evidence even when deterministic requirements exist', async () => {
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -86,13 +86,18 @@ describe('Pipeline Stage: Hard Gates', () => {
       ]
     });
 
+    (criteria.applyGlobalGates as any).mockReturnValueOnce(makePassResult());
+
     (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE canonical_jobs
     (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // INSERT gate_decisions
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // COMMIT
 
     await runHardGates();
 
-    expect(criteria.applyGlobalGates).not.toHaveBeenCalled();
+    expect(criteria.applyGlobalGates).toHaveBeenCalledTimes(1);
+    const gateCallArg = (criteria.applyGlobalGates as any).mock.calls[0]?.[0];
+    expect(String(gateCallArg?.raw_description || "")).toContain("Extracted requirements");
+    expect(String(gateCallArg?.raw_description || "")).toContain("2 days per week in office");
     expect(mPool.query).toHaveBeenCalledTimes(6); // SELECT + BEGIN + SELECT requirements + UPDATE + INSERT + COMMIT
 
     const updateCall = (mPool.query as any).mock.calls[3];
@@ -102,7 +107,7 @@ describe('Pipeline Stage: Hard Gates', () => {
     expect(updateCall[1][5]).toBe('canon-1');
   });
 
-  it('falls back to legacy parser when no persisted requirements exist', async () => {
+  it('gates via applyGlobalGates when no persisted requirements exist', async () => {
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -119,7 +124,7 @@ describe('Pipeline Stage: Hard Gates', () => {
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // BEGIN
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // SELECT requirements empty
 
-    vi.spyOn(criteria, 'applyGlobalGates').mockReturnValueOnce(makeRejectResult('GATE_LOCATION_RESTRICTED'));
+    (criteria.applyGlobalGates as any).mockReturnValueOnce(makeRejectResult('GATE_LOCATION_RESTRICTED'));
 
     (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE canonical_jobs
     (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // INSERT gate_decisions
