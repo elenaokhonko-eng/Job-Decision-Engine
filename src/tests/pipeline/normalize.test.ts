@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runNormalization } from '../../pipeline/normalize.js';
 import { generateContentHash } from '../../services/criteria.js';
 import pg from 'pg';
+import type { WorkspaceContext } from '../../workspace/context.js';
 
 // Mock the entire pg module
 vi.mock('pg', () => {
@@ -26,6 +27,14 @@ describe('Pipeline Stage: Normalization', () => {
   });
 
   it('should process pending observations and create new canonical jobs with Unknown defaults', async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
     // 1. Mock finding pending observations with missing location & employment type
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
@@ -51,7 +60,7 @@ describe('Pipeline Stage: Normalization', () => {
       return { rows: [] };
     });
 
-    const summary = await runNormalization();
+    const summary = await runNormalization(undefined, { context });
 
     expect(summary.totalDiscovered).toBe(1);
     expect(summary.totalProcessed).toBe(1);
@@ -62,6 +71,7 @@ describe('Pipeline Stage: Normalization', () => {
     const insertCanonCall = calls.find((call: any[]) => call[0].includes('INSERT INTO canonical_jobs'));
     expect(insertCanonCall[0]).toContain('INSERT INTO canonical_jobs');
     expect(insertCanonCall[1]).toEqual([
+      context.workspaceId,
       'Test Corp',
       'ai engineer',
       'https://test.com',
@@ -76,6 +86,7 @@ describe('Pipeline Stage: Normalization', () => {
     const insertVersionCall = calls.find((call: any[]) => call[0].includes('INSERT INTO job_versions'));
     expect(insertVersionCall[0]).toContain('INSERT INTO job_versions');
     expect(insertVersionCall[1]).toEqual([
+      context.workspaceId,
       'canon-uuid-1',
       generateContentHash('Test Corp', 'AI Engineer', 'Test description'),
       'Test description'
@@ -89,10 +100,18 @@ describe('Pipeline Stage: Normalization', () => {
     // Check observation marked as PROCESSED
     const updateObsCall = calls.find((call: any[]) => call[0].includes('UPDATE raw_job_observations'));
     expect(updateObsCall[0]).toContain("job_version_id = $1, processing_status = 'PROCESSED'");
-    expect(updateObsCall[1]).toEqual(['ver-uuid-1', 'obs-uuid-1']);
+    expect(updateObsCall[1]).toEqual(['ver-uuid-1', context.workspaceId, 'obs-uuid-1']);
   });
 
   it('links a duplicate observation to its existing version without creating another version', async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
     (mPool.query as any).mockResolvedValueOnce({
       rows: [{
         id: 'obs-uuid-2',
@@ -117,12 +136,12 @@ describe('Pipeline Stage: Normalization', () => {
       .mockResolvedValueOnce({ rows: [] }) // observation mapping update
       .mockResolvedValueOnce({ rows: [] }); // COMMIT
 
-    const summary = await runNormalization();
+    const summary = await runNormalization(undefined, { context });
     const calls = (mPool.query as any).mock.calls;
 
     expect(summary.totalProcessed).toBe(1);
     expect(calls.some((call: any[]) => call[0].includes('INSERT INTO job_versions'))).toBe(false);
     const updateObsCall = calls.find((call: any[]) => call[0].includes('UPDATE raw_job_observations'));
-    expect(updateObsCall[1]).toEqual(['existing-version-uuid', 'obs-uuid-2']);
+    expect(updateObsCall[1]).toEqual(['existing-version-uuid', context.workspaceId, 'obs-uuid-2']);
   });
 });

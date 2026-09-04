@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { generateEmbedding } from "../services/agent.js";
 import { pgSslConfig } from "../db/pgSsl.js";
 import { stripHtmlToText } from "../security/sanitize.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import {
   loadGlobalLanesConfig,
   loadLanesConfig,
@@ -118,11 +119,17 @@ function extractCoreJobText(title: string, description: string): string {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 // Export under old name for backward-compat with tests
-export async function runLaneRouting(clientOrPool?: pg.Pool | pg.PoolClient): Promise<{ routed: number; deferred: number }> {
-  return runLaneRouter(clientOrPool);
+export async function runLaneRouting(
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
+): Promise<{ routed: number; deferred: number }> {
+  return runLaneRouter(clientOrPool, options);
 }
 
-export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Promise<{ routed: number; deferred: number }> {
+export async function runLaneRouter(
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
+): Promise<{ routed: number; deferred: number }> {
   console.log("Starting Semantic Lane Routing from config/lanes registry...");
   const config = loadGlobalLanesConfig();
   const pool = clientOrPool || defaultPool;
@@ -133,19 +140,26 @@ export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Pro
     laneEmbeddings[laneKey] = await generateEmbedding(laneDef.prototype_query);
   }
 
+  const ctx = options?.context ?? (await resolveWorkspaceContext(pool as any));
+
   // Use LATERAL join to get only the latest version's description
-  const { rows: jobs } = await pool.query(`
-    SELECT c.*, jv.description_text, jv.id AS latest_version_id
-    FROM canonical_jobs c
-    JOIN LATERAL (
-      SELECT id, description_text
-      FROM job_versions
-      WHERE canonical_job_id = c.id
-      ORDER BY observed_at DESC
-      LIMIT 1
-    ) jv ON TRUE
-    WHERE COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-  `);
+  const { rows: jobs } = await pool.query(
+    `
+      SELECT c.*, jv.description_text, jv.id AS latest_version_id
+      FROM canonical_jobs c
+      JOIN LATERAL (
+        SELECT id, description_text
+        FROM job_versions
+        WHERE workspace_id = $1
+          AND canonical_job_id = c.id
+        ORDER BY observed_at DESC
+        LIMIT 1
+      ) jv ON TRUE
+      WHERE c.workspace_id = $1
+        AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+    `,
+    [ctx.workspaceId]
+  );
 
   console.log(`Found ${jobs.length} canonical jobs to route.`);
 
@@ -168,8 +182,15 @@ export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Pro
         if (isZeroVector) {
           console.warn(`⚠️ Zero embedding for job ${job.id}. Deferring (never default lane).`);
           await client.query(
-            `UPDATE canonical_jobs SET primary_lane = 'UNCLASSIFIED', semantic_score = 0.0, lane_confidence = 'None', processing_state = 'ROUTING_DEFERRED', processing_status = 'ROUTING_DEFERRED', updated_at = NOW() WHERE id = $1`,
-            [job.id]
+            `UPDATE canonical_jobs
+             SET primary_lane = 'UNCLASSIFIED',
+                 semantic_score = 0.0,
+                 lane_confidence = 'None',
+                 processing_state = 'ROUTING_DEFERRED',
+                 processing_status = 'ROUTING_DEFERRED',
+                 updated_at = NOW()
+             WHERE workspace_id = $1 AND id = $2`,
+            [ctx.workspaceId, job.id]
           );
           await client.query("COMMIT");
           deferredCount++;
@@ -248,7 +269,7 @@ export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Pro
                secondary_lanes    = $5,
                lane_evidence      = $6,
                updated_at         = NOW()
-           WHERE id = $7`,
+           WHERE workspace_id = $7 AND id = $8`,
           [
             bestLane,
             bestScore,
@@ -256,6 +277,7 @@ export async function runLaneRouter(clientOrPool?: pg.Pool | pg.PoolClient): Pro
             laneConfidence,
             JSON.stringify(secondaryLanes),
             JSON.stringify(laneEvidence),
+            ctx.workspaceId,
             job.id,
           ]
         );

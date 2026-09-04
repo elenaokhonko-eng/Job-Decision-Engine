@@ -3,6 +3,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../db/pgSsl.js";
 import { generateContentHash } from "../services/criteria.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -25,32 +26,38 @@ export interface NormalizationSummary {
   }>;
 }
 
-export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): Promise<NormalizationSummary> {
+export async function runNormalization(
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
+): Promise<NormalizationSummary> {
   console.log("Starting normalization of raw_job_observations...");
   const pool = clientOrPool || defaultPool;
-  
+
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === 'function' && !('release' in value);
+  const ownsClient = isPool(pool);
+  const client = ownsClient ? await pool.connect() : pool;
+
+  const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+
   // Explicit linkage is authoritative; hash-only inference strands duplicate observations.
   const query = `
-    SELECT obs.* 
+    SELECT obs.*
     FROM raw_job_observations obs
-    WHERE obs.job_version_id IS NULL
+    WHERE obs.workspace_id = $1
+      AND obs.job_version_id IS NULL
       AND COALESCE(obs.processing_status, 'PENDING') = 'PENDING'
   `;
-  
-  const { rows: pendingObservations } = await pool.query(query);
+
+  const { rows: pendingObservations } = await client.query(query, [ctx.workspaceId]);
   console.log(`Found ${pendingObservations.length} pending observations.`);
-  
+
   const summary: NormalizationSummary = {
     totalDiscovered: pendingObservations.length,
     totalProcessed: 0,
     totalErrors: 0,
     details: []
   };
-
-  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
-    typeof (value as pg.Pool).connect === 'function' && !('release' in value);
-  const ownsClient = isPool(pool);
-  const client = ownsClient ? await pool.connect() : pool;
   try {
     for (const obs of pendingObservations) {
       await client.query("BEGIN");
@@ -70,11 +77,13 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
           `SELECT jv.canonical_job_id, jv.id AS job_version_id
            FROM raw_job_observations rjo
            JOIN job_versions jv ON jv.id = rjo.job_version_id
-           WHERE rjo.source_name = $1
-             AND rjo.source_external_id = $2
+           WHERE rjo.workspace_id = $1
+             AND jv.workspace_id = $1
+             AND rjo.source_name = $2
+             AND rjo.source_external_id = $3
            ORDER BY rjo.retrieved_at DESC
            LIMIT 1`,
-          [obs.source_name, obs.source_external_id]
+          [ctx.workspaceId, obs.source_name, obs.source_external_id]
         );
 
         let existingVersionId: string | null = null;
@@ -85,9 +94,10 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
         } else {
           const checkUrl = await client.query(
             `SELECT id FROM canonical_jobs
-             WHERE canonical_url = $1
+             WHERE workspace_id = $1
+               AND canonical_url = $2
              LIMIT 1`,
-            [obs.canonical_apply_url || obs.source_url]
+            [ctx.workspaceId, obs.canonical_apply_url || obs.source_url]
           );
           if (checkUrl.rows.length > 0) {
             canonicalJobId = checkUrl.rows[0].id;
@@ -95,11 +105,12 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
           } else {
             const checkTitleLocation = await client.query(
               `SELECT id FROM canonical_jobs
-               WHERE company_name = $1
-                 AND normalized_title = $2
-                 AND COALESCE(location, location_summary, 'Unknown') = $3
+               WHERE workspace_id = $1
+                 AND company_name = $2
+                 AND normalized_title = $3
+                 AND COALESCE(location, location_summary, 'Unknown') = $4
                LIMIT 1`,
-              [obs.company_name, obs.title.toLowerCase(), obs.location_raw || "Unknown"]
+              [ctx.workspaceId, obs.company_name, obs.title.toLowerCase(), obs.location_raw || "Unknown"]
             );
             if (checkTitleLocation.rows.length > 0) {
               canonicalJobId = checkTitleLocation.rows[0].id;
@@ -112,10 +123,12 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
           // Create new canonical job
           const insertCanon = await client.query(
             `INSERT INTO canonical_jobs (
+               workspace_id,
                company_name, normalized_title, canonical_url, location, 
                workplace_type, employment_type, processing_state, processing_status, version_count
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1) RETURNING id`,
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1) RETURNING id`,
             [
+              ctx.workspaceId,
               obs.company_name,
               obs.title.toLowerCase(),
               obs.source_url,
@@ -134,9 +147,11 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
           const existingVersion = await client.query(
             `SELECT id
              FROM job_versions
-             WHERE canonical_job_id = $1 AND content_hash = $2
+             WHERE workspace_id = $1
+               AND canonical_job_id = $2
+               AND content_hash = $3
              LIMIT 1`,
-            [canonicalJobId, normalizedContentHash]
+            [ctx.workspaceId, canonicalJobId, normalizedContentHash]
           );
           existingVersionId = existingVersion.rows[0]?.id || null;
         }
@@ -145,9 +160,9 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
         let createdNewVersion = false;
         if (!resolvedVersionId) {
           const verInsert = await client.query(
-            `INSERT INTO job_versions (canonical_job_id, content_hash, description_text, observed_at)
-             VALUES ($1, $2, $3, NOW()) RETURNING id`,
-            [canonicalJobId, normalizedContentHash, obs.description_raw]
+            `INSERT INTO job_versions (workspace_id, canonical_job_id, content_hash, description_text, observed_at)
+             VALUES ($1, $2, $3, $4, NOW()) RETURNING id`,
+            [ctx.workspaceId, canonicalJobId, normalizedContentHash, obs.description_raw]
           );
           resolvedVersionId = verInsert.rows[0].id;
           createdNewVersion = true;
@@ -168,8 +183,17 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
                  processing_state = 'RAW_STAGED',
                  processing_status = 'RAW_STAGED',
                  updated_at = NOW()
-             WHERE id = $6`,
-            [resolvedVersionId, isExistingJob, obs.location_raw || "Unknown", obs.workplace_type_raw || "UNKNOWN", obs.employment_type_raw || "UNKNOWN", canonicalJobId]
+             WHERE workspace_id = $6
+               AND id = $7`,
+            [
+              resolvedVersionId,
+              isExistingJob,
+              obs.location_raw || "Unknown",
+              obs.workplace_type_raw || "UNKNOWN",
+              obs.employment_type_raw || "UNKNOWN",
+              ctx.workspaceId,
+              canonicalJobId,
+            ]
           );
         }
 
@@ -178,8 +202,8 @@ export async function runNormalization(clientOrPool?: pg.Pool | pg.PoolClient): 
           await client.query(
             `UPDATE raw_job_observations
              SET job_version_id = $1, processing_status = 'PROCESSED'
-             WHERE id = $2`,
-            [resolvedVersionId, obs.id]
+             WHERE workspace_id = $2 AND id = $3`,
+            [resolvedVersionId, ctx.workspaceId, obs.id]
           );
         }
 

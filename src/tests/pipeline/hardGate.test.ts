@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runHardGates } from '../../pipeline/hardGate.js';
 import pg from 'pg';
 import * as criteria from '../../services/criteria.js';
+import type { WorkspaceContext } from '../../workspace/context.js';
 
 vi.mock('pg', () => {
   const mPool: any = {
@@ -60,6 +61,14 @@ describe('Pipeline Stage: Hard Gates', () => {
   });
 
   it('should always evaluate hard gates using structured evidence even when deterministic requirements exist', async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -92,7 +101,7 @@ describe('Pipeline Stage: Hard Gates', () => {
     (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // INSERT gate_decisions
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // COMMIT
 
-    await runHardGates();
+    await runHardGates(undefined, { context });
 
     expect(criteria.applyGlobalGates).toHaveBeenCalledTimes(1);
     const gateCallArg = (criteria.applyGlobalGates as any).mock.calls[0]?.[0];
@@ -104,10 +113,18 @@ describe('Pipeline Stage: Hard Gates', () => {
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCall[1][0]).toBe('PASS');
     expect(updateCall[1][1]).toBe('PREQUALIFIED');
-    expect(updateCall[1][5]).toBe('canon-1');
+    expect(updateCall[1][6]).toBe('canon-1');
   });
 
   it('gates via applyGlobalGates when no persisted requirements exist', async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -130,7 +147,7 @@ describe('Pipeline Stage: Hard Gates', () => {
     (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // INSERT gate_decisions
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // COMMIT
 
-    await runHardGates();
+    await runHardGates(undefined, { context });
 
     expect(criteria.applyGlobalGates).toHaveBeenCalledTimes(1);
     expect(mPool.query).toHaveBeenCalledTimes(6);

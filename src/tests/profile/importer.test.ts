@@ -5,6 +5,7 @@ import {
 } from '../../profile/importer.js';
 import type { LoadedProfile } from '../../profile/loader.js';
 import type { EvidenceSourceInput } from '../../profile/evidenceValidator.js';
+import type { WorkspaceContext } from '../../workspace/context.js';
 
 function createLoadedProfile(): LoadedProfile {
   return {
@@ -98,6 +99,8 @@ function createEvidenceSources(): EvidenceSourceInput[] {
 describe('importLoadedProfile', () => {
   it('imports profile data inside a transaction and sets ACTIVE status at end', async () => {
     let sourceInsertCounter = 0;
+    let factIdentityCounter = 0;
+    let factRevisionCounter = 0;
     const query = vi.fn(async (sql: string, _params?: unknown[]) => {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
         return { rows: [] };
@@ -115,8 +118,34 @@ describe('importLoadedProfile', () => {
       if (sql.includes('INSERT INTO profile_engagements')) {
         return { rows: [{ id: 'engagement-id-1' }] };
       }
+      if (sql.includes('INSERT INTO profile_fact_identities')) {
+        factIdentityCounter += 1;
+        return { rows: [{ id: `fact-identity-id-${factIdentityCounter}` }] };
+      }
+      if (sql.includes('SELECT id') && sql.includes('FROM profile_fact_revisions')) {
+        return { rows: [] };
+      }
+      if (sql.includes('SELECT COALESCE(MAX(revision_number)')) {
+        return { rows: [{ next: 1 }] };
+      }
+      if (sql.includes('INSERT INTO profile_fact_revisions')) {
+        factRevisionCounter += 1;
+        return { rows: [{ id: `fact-revision-id-${factRevisionCounter}` }] };
+      }
       if (sql.includes('INSERT INTO profile_facts')) {
         return { rows: [{ id: 'fact-id-1' }] };
+      }
+      if (sql.includes('INSERT INTO profile_version_fact_snapshots')) {
+        return { rows: [] };
+      }
+      if (sql.includes('SELECT fact_revision_id') && sql.includes('FROM profile_fact_active_revisions')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO profile_fact_active_revisions')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO profile_fact_activation_events')) {
+        return { rows: [] };
       }
       if (sql.includes('SELECT id') && sql.includes('FROM taxonomy_concepts')) {
         return { rows: [{ id: 'concept-id-1' }] };
@@ -134,11 +163,21 @@ describe('importLoadedProfile', () => {
     } as any;
 
     const loaded = createLoadedProfile();
-    const summary = await importLoadedProfile(loaded, createEvidenceSources(), fakePool);
+
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const evidenceSources = createEvidenceSources();
+    const summary = await importLoadedProfile(loaded, evidenceSources, fakePool, { context });
 
     expect(summary.candidateProfileId).toBe('candidate-id-1');
     expect(summary.profileVersionId).toBe('profile-version-id-1');
-    expect(summary.sourceHash).toBe(createProfileSourceHash('candidate_alpha', 3));
+    expect(summary.sourceHash).toBe(createProfileSourceHash(loaded, evidenceSources));
     expect(summary.inserted.engagements).toBe(1);
     expect(summary.inserted.facts).toBe(1);
     expect(summary.inserted.credentials).toBe(1);
@@ -168,6 +207,18 @@ describe('importLoadedProfile', () => {
       if (sql.includes('INSERT INTO profile_engagements')) {
         return { rows: [{ id: 'engagement-id-1' }] };
       }
+      if (sql.includes('INSERT INTO profile_fact_identities')) {
+        return { rows: [{ id: 'fact-identity-id-1' }] };
+      }
+      if (sql.includes('SELECT id') && sql.includes('FROM profile_fact_revisions')) {
+        return { rows: [] };
+      }
+      if (sql.includes('SELECT COALESCE(MAX(revision_number)')) {
+        return { rows: [{ next: 1 }] };
+      }
+      if (sql.includes('INSERT INTO profile_fact_revisions')) {
+        return { rows: [{ id: 'fact-revision-id-1' }] };
+      }
       if (sql.includes('INSERT INTO profile_facts')) {
         throw new Error('fact insert failure');
       }
@@ -184,7 +235,20 @@ describe('importLoadedProfile', () => {
     } as any;
 
     await expect(
-      importLoadedProfile(createLoadedProfile(), createEvidenceSources(), fakePool)
+      importLoadedProfile(
+        createLoadedProfile(),
+        createEvidenceSources(),
+        fakePool,
+        {
+          context: {
+            workspaceId: 'workspace-id-1',
+            workspaceKey: 'default',
+            userId: 'user-id-1',
+            userKey: 'local_user',
+            role: 'OWNER',
+          },
+        }
+      )
     ).rejects.toThrow('fact insert failure');
 
     const calls = query.mock.calls.map((call: unknown[]) => String(call[0]));

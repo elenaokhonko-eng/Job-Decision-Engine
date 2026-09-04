@@ -5,6 +5,7 @@ import { extractDeterministicRequirements } from '../requirements/deterministicE
 import { validateQuotedRequirements } from '../requirements/quotedRequirementExtractor.js';
 import { runQuotedRequirementProvider } from '../requirements/quotedProvider.js';
 import { JobRequirementSchema } from '../requirements/contracts.js';
+import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -15,6 +16,7 @@ const defaultPool = new pg.Pool({
 });
 
 interface RequirementStageJob {
+  workspace_id: string;
   canonical_job_id: string;
   job_version_id: string;
   description_text: string;
@@ -38,6 +40,7 @@ export interface QuotedExtractorResult {
 
 export interface RequirementExtractionStageOptions {
   quotedExtractor?: (input: QuotedExtractorInvocation) => Promise<QuotedExtractorResult | null>;
+  context?: WorkspaceContext;
 }
 
 export interface RequirementExtractionSummary {
@@ -137,6 +140,7 @@ async function upsertPipelineState(
 ): Promise<void> {
   await client.query(
     `INSERT INTO job_version_pipeline_state (
+       workspace_id,
        canonical_job_id,
        job_version_id,
        current_stage,
@@ -149,11 +153,12 @@ async function upsertPipelineState(
      VALUES (
        $1,
        $2,
-       'REQUIREMENTS_EXTRACTED',
        $3,
-       CASE WHEN $3 = 'RETRY_WAIT' THEN 1 ELSE 0 END,
+       'REQUIREMENTS_EXTRACTED',
        $4,
-       CASE WHEN $3 = 'RETRY_WAIT' THEN NOW() + INTERVAL '5 minutes' ELSE NULL END,
+       CASE WHEN $4 = 'RETRY_WAIT' THEN 1 ELSE 0 END,
+       $5,
+       CASE WHEN $4 = 'RETRY_WAIT' THEN NOW() + INTERVAL '5 minutes' ELSE NULL END,
        NOW()
      )
      ON CONFLICT (job_version_id)
@@ -167,7 +172,7 @@ async function upsertPipelineState(
        last_error = EXCLUDED.last_error,
        next_retry_at = EXCLUDED.next_retry_at,
        updated_at = NOW()`,
-    [job.canonical_job_id, job.job_version_id, stageStatus, lastError]
+    [job.workspace_id, job.canonical_job_id, job.job_version_id, stageStatus, lastError]
   );
 }
 
@@ -181,6 +186,7 @@ async function insertStageEvent(
 ): Promise<void> {
   await client.query(
     `INSERT INTO pipeline_stage_events (
+       workspace_id,
        canonical_job_id,
        job_version_id,
        stage,
@@ -190,18 +196,20 @@ async function insertStageEvent(
        error_message,
        payload
      )
-     VALUES ($1, $2, 'REQUIREMENTS_EXTRACTED', NULL, $3, $4, $5, $6)`,
-    [job.canonical_job_id, job.job_version_id, transitionTo, eventType, errorMessage, payload]
+     VALUES ($1, $2, $3, 'REQUIREMENTS_EXTRACTED', NULL, $4, $5, $6, $7)`,
+    [job.workspace_id, job.canonical_job_id, job.job_version_id, transitionTo, eventType, errorMessage, payload]
   );
 }
 
 async function persistRequirements(
   client: { query: pg.PoolClient['query'] },
+  workspaceId: string,
   requirements: Array<ReturnType<typeof JobRequirementSchema.parse>>
 ): Promise<number> {
   for (const req of requirements) {
     await client.query(
       `INSERT INTO job_requirements (
+         workspace_id,
          canonical_job_id,
          job_version_id,
          requirement_key,
@@ -217,7 +225,7 @@ async function persistRequirements(
          confidence,
          status
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'VALIDATED')
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'VALIDATED')
        ON CONFLICT (job_version_id, requirement_key)
        DO UPDATE SET
          requirement_type = EXCLUDED.requirement_type,
@@ -232,6 +240,7 @@ async function persistRequirements(
          confidence = EXCLUDED.confidence,
          status = EXCLUDED.status`,
       [
+        workspaceId,
         req.canonical_job_id,
         req.job_version_id,
         req.requirement_key,
@@ -264,25 +273,34 @@ export async function runRequirementsExtraction(
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
     typeof (value as pg.Pool).connect === 'function' && !('release' in value);
 
+  const ownsClient = isPool(pool);
+  const client = ownsClient ? await pool.connect() : pool;
+
+  const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
+
   const queryTargetJobs = `
     SELECT
+      c.workspace_id,
       c.id AS canonical_job_id,
       jv.id AS job_version_id,
       jv.description_text
     FROM canonical_jobs c
     JOIN job_versions jv
       ON jv.id = c.latest_job_version_id
-    WHERE COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
+    WHERE c.workspace_id = $1
+      AND jv.workspace_id = $1
+      AND COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
       AND NOT EXISTS (
         SELECT 1
         FROM job_version_pipeline_state ps
-        WHERE ps.job_version_id = jv.id
+        WHERE ps.workspace_id = $1
+          AND ps.job_version_id = jv.id
           AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
           AND ps.stage_status = 'COMPLETED'
       )
   `;
 
-  const { rows } = await pool.query(queryTargetJobs);
+  const { rows } = await client.query(queryTargetJobs, [ctx.workspaceId]);
   const jobs = rows as RequirementStageJob[];
 
   const summary: RequirementExtractionSummary = {
@@ -303,9 +321,6 @@ export async function runRequirementsExtraction(
     },
     details: [],
   };
-
-  const ownsClient = isPool(pool);
-  const client = ownsClient ? await pool.connect() : pool;
   const quotedExtractor = options.quotedExtractor
     ? options.quotedExtractor
     : shouldRunQuotedExtractor()
@@ -323,6 +338,7 @@ export async function runRequirementsExtraction(
 
         const detRunStart = await client.query<{ id: string }>(
           `INSERT INTO requirement_extraction_runs (
+             workspace_id,
              canonical_job_id,
              job_version_id,
              run_type,
@@ -331,9 +347,9 @@ export async function runRequirementsExtraction(
              status,
              started_at
            )
-           VALUES ($1, $2, 'DETERMINISTIC', NULL, NULL, 'STARTED', NOW())
+           VALUES ($1, $2, $3, 'DETERMINISTIC', NULL, NULL, 'STARTED', NOW())
            RETURNING id`,
-          [job.canonical_job_id, job.job_version_id]
+          [ctx.workspaceId, job.canonical_job_id, job.job_version_id]
         );
 
         const deterministic = extractDeterministicRequirements({
@@ -350,7 +366,7 @@ export async function runRequirementsExtraction(
           })
         );
 
-        const detInserted = await persistRequirements(client, deterministicRequirements);
+        const detInserted = await persistRequirements(client, ctx.workspaceId, deterministicRequirements);
         summary.deterministicInserted += detInserted;
 
         await client.query(
@@ -376,6 +392,7 @@ export async function runRequirementsExtraction(
           summary.metrics.quotedAttempted += 1;
           const quotedRunStart = await client.query<{ id: string }>(
             `INSERT INTO requirement_extraction_runs (
+               workspace_id,
                canonical_job_id,
                job_version_id,
                run_type,
@@ -384,9 +401,9 @@ export async function runRequirementsExtraction(
                status,
                started_at
              )
-             VALUES ($1, $2, 'LLM_QUOTED', NULL, NULL, 'STARTED', NOW())
+             VALUES ($1, $2, $3, 'LLM_QUOTED', NULL, NULL, 'STARTED', NOW())
              RETURNING id`,
-            [job.canonical_job_id, job.job_version_id]
+            [ctx.workspaceId, job.canonical_job_id, job.job_version_id]
           );
 
           try {
@@ -453,7 +470,7 @@ export async function runRequirementsExtraction(
                   })
                 );
 
-                quotedInserted = await persistRequirements(client, quotedRequirements);
+                quotedInserted = await persistRequirements(client, ctx.workspaceId, quotedRequirements);
                 summary.quotedInserted += quotedInserted;
                 summary.metrics.quotedSucceeded += 1;
                 bucket.successes += 1;

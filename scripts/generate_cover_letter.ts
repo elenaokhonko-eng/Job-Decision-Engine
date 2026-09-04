@@ -27,6 +27,7 @@ import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -132,6 +133,8 @@ async function generateTailoredCoverLetter(): Promise<void> {
     // ── Step 1: Load job data from canonical schema ──────────────────────────
     console.log(`📦 Loading job ${jobId} from canonical schema…`);
 
+    const ctx: WorkspaceContext = await resolveWorkspaceContext(pool as any);
+
     const jobRes = await pool.query(
       `SELECT
          c.id,
@@ -156,21 +159,25 @@ async function generateTailoredCoverLetter(): Promise<void> {
            SELECT jv2.id
            FROM job_versions jv2
            WHERE jv2.canonical_job_id = c.id
+             AND jv2.workspace_id = c.workspace_id
            ORDER BY jv2.observed_at DESC
            LIMIT 1
          )
        )
+        AND jv.workspace_id = c.workspace_id
        LEFT JOIN LATERAL (
          SELECT lane_matches, workability_facts, full_evaluation_payload, is_fallback, provider, evaluated_at
          FROM ai_evaluations
-         WHERE canonical_job_id = c.id
+         WHERE workspace_id = $3
+           AND canonical_job_id = c.id
            AND job_version_id = jv.id
          ORDER BY evaluated_at DESC
          LIMIT 1
        ) ae ON TRUE
-       WHERE c.id = $1
+       WHERE c.workspace_id = $3
+         AND c.id = $1
          AND jv.canonical_job_id = c.id`,
-      [jobId, requestedJobVersionId || null]
+      [jobId, requestedJobVersionId || null, ctx.workspaceId]
     );
 
     if (jobRes.rows.length === 0) {
@@ -349,7 +356,8 @@ ${JSON.stringify(coverLetterSchema)}`;
         },
         claims,
       },
-      pool
+      pool,
+      { context: ctx }
     );
 
     console.log(`\n✅ Cover Letter Generation Complete!

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { runEmbeddingBatch, runEmbeddingBatchWithFallback } from '../../embeddings/batchCoordinator.js';
 import * as agent from '../../services/agent.js';
+import type { WorkspaceContext } from '../../workspace/context.js';
 
 describe('runEmbeddingBatch', () => {
   it('creates a batch and persists validated embeddings', async () => {
@@ -9,7 +10,7 @@ describe('runEmbeddingBatch', () => {
         return { rows: [] };
       }
       if (sql.includes('FROM embedding_spaces')) {
-        return { rows: [{ id: '11111111-1111-4111-8111-111111111111', dimensions: 4 }] };
+        return { rows: [{ id: '11111111-1111-4111-8111-111111111111', workspace_id: 'workspace-id-1', dimensions: 4 }] };
       }
       if (sql.includes('INSERT INTO embedding_batches') && sql.includes('RETURNING id')) {
         return { rows: [{ id: '33333333-3333-4333-8333-333333333333' }] };
@@ -61,7 +62,8 @@ describe('runEmbeddingBatch', () => {
         return { rows: [] };
       }
       if (sql.includes('INSERT INTO embedding_spaces')) {
-        return { rows: [{ id: String(params?.[0]).includes('primary') ? 'space-primary' : 'space-fallback' }] };
+        const spaceKey = String(params?.[1] || '');
+        return { rows: [{ id: spaceKey.includes('primary') ? 'space-primary' : 'space-fallback' }] };
       }
       if (sql.includes('FROM job_requirements jr')) {
         return {
@@ -81,7 +83,7 @@ describe('runEmbeddingBatch', () => {
       }
       if (sql.includes('FROM embedding_spaces')) {
         const isPrimary = String(params?.[0]) === 'space-primary';
-        return { rows: [{ id: String(params?.[0]), dimensions: isPrimary ? 4 : 3 }] };
+        return { rows: [{ id: String(params?.[0]), workspace_id: 'workspace-id-1', dimensions: isPrimary ? 4 : 3 }] };
       }
       if (sql.includes('INSERT INTO embedding_batches') && sql.includes('RETURNING id')) {
         nextBatchId += 1;
@@ -104,7 +106,15 @@ describe('runEmbeddingBatch', () => {
       .mockResolvedValueOnce([0.1, 0.2, 0.3, 0.4])
       .mockResolvedValueOnce([0.11, 0.22, 0.33]);
 
-    const result = await runEmbeddingBatchWithFallback(10, fakePool);
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const result = await runEmbeddingBatchWithFallback(10, fakePool, { context });
 
     expect(result.primary.failed).toBe(0);
     expect(result.primary.succeeded).toBe(1);
@@ -116,7 +126,7 @@ describe('runEmbeddingBatch', () => {
       .mockResolvedValueOnce([0, 0, 0, 0])
       .mockResolvedValueOnce([0.21, 0.22, 0.23]);
 
-    const second = await runEmbeddingBatchWithFallback(10, fakePool);
+    const second = await runEmbeddingBatchWithFallback(10, fakePool, { context });
     expect(second.primary.failedInputIds).toContain('input-req-1');
     expect(second.fallback).toBeTruthy();
     expect(second.fallback?.runType).toBe('FALLBACK');

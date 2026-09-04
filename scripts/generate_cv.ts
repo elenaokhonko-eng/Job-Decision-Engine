@@ -9,6 +9,7 @@ import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -161,6 +162,8 @@ async function generateTailoredCV() {
   });
 
   try {
+    const ctx: WorkspaceContext = await resolveWorkspaceContext(pool as any);
+
     const jobRes = await pool.query(
       `SELECT
          c.id AS canonical_job_id,
@@ -178,13 +181,17 @@ async function generateTailoredCV() {
            SELECT jv2.id
            FROM job_versions jv2
            WHERE jv2.canonical_job_id = c.id
+             AND jv2.workspace_id = c.workspace_id
            ORDER BY jv2.observed_at DESC
            LIMIT 1
          )
        )
-       WHERE c.id = $1 AND v.canonical_job_id = c.id
+        AND v.workspace_id = c.workspace_id
+       WHERE c.workspace_id = $3
+         AND c.id = $1
+         AND v.canonical_job_id = c.id
        LIMIT 1`,
-      [jobId, requestedJobVersionId || null]
+      [jobId, requestedJobVersionId || null, ctx.workspaceId]
     );
 
     if (jobRes.rows.length === 0) {
@@ -443,7 +450,8 @@ The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard
         },
         claims,
       },
-      pool
+      pool,
+      { context: ctx }
     );
 
     console.log(`✅ CV Generation Complete! Files saved to scripts/exports/:

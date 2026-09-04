@@ -8,6 +8,7 @@ import { runExplanationQueueEnqueuer } from "../src/pipeline/explanationQueueEnq
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../src/db/pgSsl.js";
+import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -37,33 +38,36 @@ export async function processPipeline(): Promise<void> {
       return;
     }
 
+    const ctx = await resolveWorkspaceContext(client as any);
+
     console.log("\n[1/7] Normalization...");
-    const normSummary = await runNormalization(pool);
+    const normSummary = await runNormalization(pool, { context: ctx });
 
     console.log("\n[2/7] Requirements Extraction...");
-    const requirementsSummary = await runRequirementsExtraction(pool);
+    const requirementsSummary = await runRequirementsExtraction(pool, { context: ctx });
 
     console.log("\n[3/7] Hard Gates...");
-    const gateSummary = await runHardGates(pool);
+    const gateSummary = await runHardGates(pool, { context: ctx });
 
     console.log("\n[4/7] Semantic Lane Routing...");
-    const routingSummary = await runLaneRouting(pool);
+    const routingSummary = await runLaneRouting(pool, { context: ctx });
 
     console.log("\n[5/7] Deterministic Matching...");
-    const matchingSummary = await runDeterministicMatcher(pool);
+    const matchingSummary = await runDeterministicMatcher(pool, { context: ctx });
 
     console.log("\n[6/7] Deterministic Recommendation Decider...");
-    const decisionSummary = await runRecommendationDecider(pool);
+    const decisionSummary = await runRecommendationDecider(pool, { context: ctx });
 
     console.log("\n[7/7] Explanation Queue Enqueue (optional; no quota/deferral)...");
-    const enqueueSummary = await runExplanationQueueEnqueuer(pool);
+    const enqueueSummary = await runExplanationQueueEnqueuer(pool, { context: ctx });
 
     console.log("\n--- Verifying Funnel Conservation ---");
     const { rows: stateCounts } = await pool.query(`
       SELECT COALESCE(processing_state, processing_status) AS processing_state, COUNT(*)::int as count
       FROM canonical_jobs
+      WHERE workspace_id = $1
       GROUP BY COALESCE(processing_state, processing_status)
-    `);
+    `, [ctx.workspaceId]);
 
     const counts: Record<string, number> = {};
     for (const r of stateCounts) {
@@ -88,9 +92,10 @@ export async function processPipeline(): Promise<void> {
     const { rows: undecidedRows } = await pool.query(`
       SELECT COUNT(*)::int AS n
       FROM canonical_jobs
-      WHERE COALESCE(processing_state, processing_status) <> 'MANUALLY_REMOVED'
+      WHERE workspace_id = $1
+        AND COALESCE(processing_state, processing_status) <> 'MANUALLY_REMOVED'
         AND recommendation_outcome IS NULL
-    `);
+    `, [ctx.workspaceId]);
     const missingDecisions = undecidedRows?.[0]?.n ?? 0;
     if (missingDecisions > 0) {
       throw new Error(
@@ -146,4 +151,3 @@ if (process.argv[1] && process.argv[1].includes("process_pipeline")) {
     process.exit(1);
   });
 }
-

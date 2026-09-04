@@ -7,6 +7,15 @@ describe('persistDocumentProvenance', () => {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
         return { rows: [] };
       }
+      if (sql.includes('FROM canonical_jobs') && sql.includes('workspace_id')) {
+        return { rows: [{ ok: 1 }] };
+      }
+      if (sql.includes('FROM job_versions') && sql.includes('workspace_id')) {
+        return { rows: [{ ok: 1 }] };
+      }
+      if (sql.includes('FROM match_runs') && sql.includes('workspace_id')) {
+        return { rows: [{ ok: 1 }] };
+      }
       if (sql.includes('INSERT INTO document_runs')) {
         return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
       }
@@ -47,7 +56,16 @@ describe('persistDocumentProvenance', () => {
           },
         ],
       },
-      fakePool
+      fakePool,
+      {
+        context: {
+          workspaceId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          workspaceKey: 'default',
+          userId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          userKey: 'local_user',
+          role: 'OWNER',
+        },
+      }
     );
 
     expect(result.documentRunId).toBe('11111111-1111-4111-8111-111111111111');

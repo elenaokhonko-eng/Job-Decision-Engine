@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgSslConfig } from '../db/pgSsl.js';
+import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -52,12 +53,14 @@ function hashManifest(outputManifest: Record<string, unknown>): string {
 
 async function upsertDocumentReadyStage(
   client: { query: pg.PoolClient['query'] },
+  workspaceId: string,
   canonicalJobId: string,
   jobVersionId: string,
   payload: Record<string, unknown>
 ): Promise<void> {
   await client.query(
     `INSERT INTO job_version_pipeline_state (
+       workspace_id,
        canonical_job_id,
        job_version_id,
        current_stage,
@@ -67,7 +70,7 @@ async function upsertDocumentReadyStage(
        next_retry_at,
        updated_at
      )
-     VALUES ($1, $2, 'DOCUMENT_READY', 'COMPLETED', 0, NULL, NULL, NOW())
+     VALUES ($1, $2, $3, 'DOCUMENT_READY', 'COMPLETED', 0, NULL, NULL, NOW())
      ON CONFLICT (job_version_id)
      DO UPDATE SET
        current_stage = EXCLUDED.current_stage,
@@ -75,11 +78,12 @@ async function upsertDocumentReadyStage(
        last_error = NULL,
        next_retry_at = NULL,
        updated_at = NOW()`,
-    [canonicalJobId, jobVersionId]
+    [workspaceId, canonicalJobId, jobVersionId]
   );
 
   await client.query(
     `INSERT INTO pipeline_stage_events (
+       workspace_id,
        canonical_job_id,
        job_version_id,
        stage,
@@ -89,14 +93,64 @@ async function upsertDocumentReadyStage(
        error_message,
        payload
      )
-     VALUES ($1, $2, 'DOCUMENT_READY', NULL, 'COMPLETED', 'STAGE_COMPLETED', NULL, $3)`,
-    [canonicalJobId, jobVersionId, payload]
+     VALUES ($1, $2, $3, 'DOCUMENT_READY', NULL, 'COMPLETED', 'STAGE_COMPLETED', NULL, $4)`,
+    [workspaceId, canonicalJobId, jobVersionId, payload]
   );
+}
+
+async function assertDocumentInputsInWorkspace(
+  client: { query: pg.PoolClient['query'] },
+  workspaceId: string,
+  input: DocumentProvenanceInput
+): Promise<void> {
+  const canonicalOk = await client.query(
+    `SELECT 1
+     FROM canonical_jobs
+     WHERE workspace_id = $1 AND id = $2
+     LIMIT 1`,
+    [workspaceId, input.canonicalJobId]
+  );
+  if (canonicalOk.rows.length === 0) {
+    throw new Error(
+      `Unauthorized: canonical_job_id=${input.canonicalJobId} is not in workspace_id=${workspaceId}`
+    );
+  }
+
+  const versionOk = await client.query(
+    `SELECT 1
+     FROM job_versions
+     WHERE workspace_id = $1
+       AND id = $2
+       AND canonical_job_id = $3
+     LIMIT 1`,
+    [workspaceId, input.jobVersionId, input.canonicalJobId]
+  );
+  if (versionOk.rows.length === 0) {
+    throw new Error(
+      `Unauthorized: job_version_id=${input.jobVersionId} is not in workspace_id=${workspaceId} for canonical_job_id=${input.canonicalJobId}`
+    );
+  }
+
+  if (input.matchRunId) {
+    const matchOk = await client.query(
+      `SELECT 1
+       FROM match_runs
+       WHERE workspace_id = $1 AND id = $2
+       LIMIT 1`,
+      [workspaceId, input.matchRunId]
+    );
+    if (matchOk.rows.length === 0) {
+      throw new Error(
+        `Unauthorized: match_run_id=${input.matchRunId} is not in workspace_id=${workspaceId}`
+      );
+    }
+  }
 }
 
 export async function persistDocumentProvenance(
   input: DocumentProvenanceInput,
-  clientOrPool?: pg.Pool | pg.PoolClient
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
 ): Promise<DocumentProvenanceResult> {
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
@@ -105,7 +159,11 @@ export async function persistDocumentProvenance(
   const client = ownsClient ? await pool.connect() : pool;
 
   try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+
     await client.query('BEGIN');
+
+    await assertDocumentInputsInWorkspace(client, ctx.workspaceId, input);
 
     const claimRows = input.claims.filter(
       (claim) => claim.claimText.trim().length > 0 && uniqueStrings(claim.profileFactIds).length > 0
@@ -113,6 +171,7 @@ export async function persistDocumentProvenance(
 
     const runRes = await client.query<{ id: string }>(
       `INSERT INTO document_runs (
+         workspace_id,
          canonical_job_id,
          job_version_id,
          match_run_id,
@@ -125,9 +184,10 @@ export async function persistDocumentProvenance(
          error_message,
          completed_at
        )
-       VALUES ($1, $2, $3, $4, 'COMPLETED', $5, $6, $7, $8, NULL, NOW())
+       VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6, $7, $8, $9, NULL, NOW())
        RETURNING id`,
       [
+        ctx.workspaceId,
         input.canonicalJobId,
         input.jobVersionId,
         input.matchRunId || null,
@@ -153,9 +213,10 @@ export async function persistDocumentProvenance(
       const reqRes = await client.query<RequirementRow>(
         `SELECT id, requirement_key
          FROM job_requirements
-         WHERE job_version_id = $1
-           AND requirement_key = ANY($2::text[])`,
-        [input.jobVersionId, allRequirementKeys]
+         WHERE workspace_id = $1
+           AND job_version_id = $2
+           AND requirement_key = ANY($3::text[])`,
+        [ctx.workspaceId, input.jobVersionId, allRequirementKeys]
       );
       for (const row of reqRes.rows) {
         requirementMap.set(row.requirement_key, row.id);
@@ -178,6 +239,7 @@ export async function persistDocumentProvenance(
 
       await client.query(
         `INSERT INTO document_claims (
+           workspace_id,
            document_run_id,
            section_label,
            claim_text,
@@ -185,8 +247,9 @@ export async function persistDocumentProvenance(
            requirement_ids,
            unresolved_requirement_keys
          )
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
+          ctx.workspaceId,
           documentRunId,
           claim.sectionLabel,
           claim.claimText,
@@ -197,7 +260,7 @@ export async function persistDocumentProvenance(
       );
     }
 
-    await upsertDocumentReadyStage(client, input.canonicalJobId, input.jobVersionId, {
+    await upsertDocumentReadyStage(client, ctx.workspaceId, input.canonicalJobId, input.jobVersionId, {
       document_run_id: documentRunId,
       document_type: input.documentType,
       claim_count: claimRows.length,

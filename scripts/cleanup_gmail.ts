@@ -1,6 +1,7 @@
 import { ImapFlow } from "imapflow";
 import pg from "pg";
 import dotenv from "dotenv";
+import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -40,7 +41,8 @@ async function cleanupGmail() {
   try {
     // 1. Fetch all subjects of emails already stored in Postgres database
     console.log("Connecting to Postgres to fetch ingested alert subjects...");
-    const dbRes = await pool.query("SELECT subject FROM raw_email_alerts");
+    const ctx = await resolveWorkspaceContext(pool as any);
+    const dbRes = await pool.query("SELECT subject FROM raw_email_alerts WHERE workspace_id = $1", [ctx.workspaceId]);
     const ingestedSubjects = new Set(dbRes.rows.map(r => r.subject));
     console.log(`Found ${ingestedSubjects.size} unique email subjects already in database.`);
 

@@ -2,6 +2,7 @@ import { ImapFlow } from "imapflow";
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../src/db/pgSsl.js";
+import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
@@ -26,6 +27,8 @@ export async function ingestGmail(): Promise<number> {
     connectionString: databaseUrl,
     ssl: pgSslConfig(databaseUrl)
   });
+
+  const ctx = await resolveWorkspaceContext(pool as any);
 
   const client = new ImapFlow({
     host: "imap.gmail.com",
@@ -69,10 +72,10 @@ export async function ingestGmail(): Promise<number> {
       try {
         await dbClient.query("BEGIN");
         await dbClient.query(
-          `INSERT INTO raw_email_alerts (subject, body, gmail_message_id, processed)
-           VALUES ($1, $2, $3, FALSE)
-           ON CONFLICT DO NOTHING`,
-          [subject, body, String(msg.uid)]
+          `INSERT INTO raw_email_alerts (workspace_id, subject, body, gmail_message_id, processed)
+           VALUES ($1, $2, $3, $4, FALSE)
+           ON CONFLICT (workspace_id, gmail_message_id) DO NOTHING`,
+          [ctx.workspaceId, subject, body, String(msg.uid)]
         );
         await dbClient.query("COMMIT");
       } catch (txErr) {

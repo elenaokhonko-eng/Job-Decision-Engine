@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildEmbeddingInputs } from '../../embeddings/inputBuilder.js';
+import type { WorkspaceContext } from '../../workspace/context.js';
 
 describe('buildEmbeddingInputs', () => {
   it('generates embedding inputs from job_requirements and profile_facts', async () => {
@@ -39,7 +40,15 @@ describe('buildEmbeddingInputs', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    const summary = await buildEmbeddingInputs(fakePool, 20);
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const summary = await buildEmbeddingInputs(fakePool, 20, { context });
 
     expect(summary.inserted).toBe(2);
     expect(summary.fromRequirements).toBe(1);

@@ -1,6 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../db/pgSsl.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -137,7 +138,8 @@ function scoreMatch(requirement: RequirementRow, fact: FactRow): number {
 }
 
 export async function runDeterministicMatcher(
-  clientOrPool?: pg.Pool | pg.PoolClient
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
 ): Promise<DeterministicMatchSummary> {
   console.log("Starting Deterministic Matcher...");
 
@@ -152,12 +154,16 @@ export async function runDeterministicMatcher(
   let errors = 0;
 
   try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+
     const profileRes = await client.query<{ id: string }>(
       `SELECT pv.id
        FROM profile_versions pv
-       WHERE pv.status = 'ACTIVE'
+       WHERE pv.workspace_id = $1
+         AND pv.status = 'ACTIVE'
        ORDER BY pv.created_at DESC
-       LIMIT 1`
+       LIMIT 1`,
+      [ctx.workspaceId]
     );
 
     if (profileRes.rows.length === 0) {
@@ -169,8 +175,9 @@ export async function runDeterministicMatcher(
     const factsRes = await client.query<FactRow>(
       `SELECT pf.id, pf.fact_type, pf.statement, pf.evidence_tier, pf.structured_value
        FROM profile_facts pf
-       WHERE pf.profile_version_id = $1`,
-      [profileVersionId]
+       WHERE pf.workspace_id = $1
+         AND pf.profile_version_id = $2`,
+      [ctx.workspaceId, profileVersionId]
     );
 
     if (factsRes.rows.length === 0) {
@@ -187,13 +194,16 @@ export async function runDeterministicMatcher(
        LEFT JOIN LATERAL (
          SELECT id
          FROM job_versions
-         WHERE canonical_job_id = c.id
+         WHERE workspace_id = $1
+           AND canonical_job_id = c.id
          ORDER BY observed_at DESC
          LIMIT 1
        ) jv ON TRUE
-       WHERE COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+       WHERE c.workspace_id = $1
+         AND COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
          AND c.primary_lane IS NOT NULL
-         AND c.primary_lane != 'UNCLASSIFIED'`
+         AND c.primary_lane != 'UNCLASSIFIED'`,
+      [ctx.workspaceId]
     );
 
     for (const job of jobs) {
@@ -207,15 +217,16 @@ export async function runDeterministicMatcher(
       try {
         const runRes = await client.query<{ id: string }>(
           `INSERT INTO match_runs (
+             workspace_id,
              canonical_job_id,
              job_version_id,
              profile_version_id,
              status,
              policy_version
            )
-           VALUES ($1, $2, $3, 'STARTED', 'deterministic_v1')
+           VALUES ($1, $2, $3, $4, 'STARTED', 'deterministic_v1')
            RETURNING id`,
-          [job.id, versionId, profileVersionId]
+          [ctx.workspaceId, job.id, versionId, profileVersionId]
         );
         const matchRunId = runRes.rows[0].id;
 
@@ -228,10 +239,11 @@ export async function runDeterministicMatcher(
                   jr.quote_text,
                   jr.structured_value
            FROM job_requirements jr
-           WHERE jr.job_version_id = $1
+           WHERE jr.workspace_id = $1
+             AND jr.job_version_id = $2
              AND jr.status = 'VALIDATED'
            ORDER BY jr.requirement_key ASC`,
-          [versionId]
+          [ctx.workspaceId, versionId]
         );
 
         if (reqRes.rows.length === 0) {
@@ -260,6 +272,7 @@ export async function runDeterministicMatcher(
           if (factsRes.rows.length === 0) {
             await client.query(
               `INSERT INTO requirement_evidence_matches (
+                 workspace_id,
                  match_run_id,
                  requirement_id,
                  profile_fact_id,
@@ -268,8 +281,9 @@ export async function runDeterministicMatcher(
                  rationale,
                  evidence
                )
-               VALUES ($1, $2, NULL, 'UNKNOWN', 0, $3, $4)`,
+               VALUES ($1, $2, $3, NULL, 'UNKNOWN', 0, $4, $5)`,
               [
+                ctx.workspaceId,
                 matchRunId,
                 req.id,
                 'No profile facts available for deterministic matching.',
@@ -305,6 +319,7 @@ export async function runDeterministicMatcher(
 
           await client.query(
             `INSERT INTO requirement_evidence_matches (
+               workspace_id,
                match_run_id,
                requirement_id,
                profile_fact_id,
@@ -313,8 +328,9 @@ export async function runDeterministicMatcher(
                rationale,
                evidence
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
             [
+              ctx.workspaceId,
               matchRunId,
               req.id,
               bestFact?.id || null,
@@ -356,8 +372,9 @@ export async function runDeterministicMatcher(
                processing_state = 'MATCHED',
                processing_status = 'MATCHED',
                updated_at = NOW()
-           WHERE id = $1`,
-          [job.id, overallScore, coverageScore, matchRunId]
+           WHERE workspace_id = $1
+             AND id = $5`,
+          [ctx.workspaceId, overallScore, coverageScore, matchRunId, job.id]
         );
 
         await client.query("COMMIT");

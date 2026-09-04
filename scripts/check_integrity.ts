@@ -1,6 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../src/db/pgSsl.js";
+import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -15,13 +16,18 @@ async function runIntegrityChecks() {
   let errors = 0;
 
   try {
+    const ctx = await resolveWorkspaceContext(pool as any);
+
     // Check 1: Orphaned job versions
     const { rows: orphans } = await pool.query(`
       SELECT jv.id
       FROM job_versions jv
-      LEFT JOIN canonical_jobs c ON jv.canonical_job_id = c.id
-      WHERE c.id IS NULL
-    `);
+      LEFT JOIN canonical_jobs c
+        ON c.id = jv.canonical_job_id
+       AND c.workspace_id = jv.workspace_id
+      WHERE jv.workspace_id = $1
+        AND c.id IS NULL
+    `, [ctx.workspaceId]);
     if (orphans.length > 0) {
       console.error(`Found ${orphans.length} orphaned job version(s).`);
       errors++;
@@ -33,9 +39,12 @@ async function runIntegrityChecks() {
     const { rows: missingVersions } = await pool.query(`
       SELECT c.id
       FROM canonical_jobs c
-      LEFT JOIN job_versions jv ON c.id = jv.canonical_job_id
-      WHERE jv.id IS NULL
-    `);
+      LEFT JOIN job_versions jv
+        ON jv.canonical_job_id = c.id
+       AND jv.workspace_id = c.workspace_id
+      WHERE c.workspace_id = $1
+        AND jv.id IS NULL
+    `, [ctx.workspaceId]);
     if (missingVersions.length > 0) {
       console.error(`Found ${missingVersions.length} canonical job(s) without a version.`);
       errors++;
@@ -64,9 +73,10 @@ async function runIntegrityChecks() {
       `
       SELECT id, COALESCE(processing_state, processing_status) AS processing_state
       FROM canonical_jobs
-      WHERE COALESCE(processing_state, processing_status) != ALL($1::varchar[])
+      WHERE workspace_id = $2
+        AND COALESCE(processing_state, processing_status) != ALL($1::varchar[])
     `,
-      [validStates]
+      [validStates, ctx.workspaceId]
     );
     if (invalidState.length > 0) {
       console.error(`Found ${invalidState.length} job(s) with invalid processing_state.`);
@@ -79,8 +89,9 @@ async function runIntegrityChecks() {
     const { rows: missingFields } = await pool.query(`
       SELECT id
       FROM canonical_jobs
-      WHERE company_name IS NULL OR normalized_title IS NULL
-    `);
+      WHERE workspace_id = $1
+        AND (company_name IS NULL OR normalized_title IS NULL)
+    `, [ctx.workspaceId]);
     if (missingFields.length > 0) {
       console.error(`Found ${missingFields.length} job(s) with missing company name or title.`);
       errors++;
@@ -92,9 +103,12 @@ async function runIntegrityChecks() {
     const { rows: invalidQueue } = await pool.query(`
       SELECT eq.id
       FROM evaluation_queue eq
-      LEFT JOIN canonical_jobs c ON eq.canonical_job_id = c.id
-      WHERE c.id IS NULL
-    `);
+      LEFT JOIN canonical_jobs c
+        ON c.id = eq.canonical_job_id
+       AND c.workspace_id = eq.workspace_id
+      WHERE eq.workspace_id = $1
+        AND c.id IS NULL
+    `, [ctx.workspaceId]);
     if (invalidQueue.length > 0) {
       console.error(`Found ${invalidQueue.length} evaluation queue item(s) without a canonical job.`);
       errors++;
@@ -117,4 +131,3 @@ async function runIntegrityChecks() {
 }
 
 runIntegrityChecks();
-

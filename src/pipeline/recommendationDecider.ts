@@ -1,6 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../db/pgSsl.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -46,7 +47,8 @@ function buildDecisionUpdateSql(): string {
           ) / 4.0
         )::numeric(4,3) AS evidence_completeness
       FROM canonical_jobs c
-      WHERE COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+      WHERE c.workspace_id = $1
+        AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
     ),
     resolved AS (
       SELECT
@@ -77,7 +79,8 @@ function buildDecisionUpdateSql(): string {
         recommendation_outcome = resolved.outcome,
         recommendation_decided_at = NOW()
     FROM resolved
-    WHERE c.id = resolved.canonical_job_id
+    WHERE c.workspace_id = $1
+      AND c.id = resolved.canonical_job_id
       AND (
         c.recommendation_eligibility IS DISTINCT FROM resolved.eligibility
         OR c.recommendation_requirement_score IS DISTINCT FROM resolved.requirement_score
@@ -91,7 +94,8 @@ function buildDecisionUpdateSql(): string {
 }
 
 export async function runRecommendationDecider(
-  clientOrPool?: pg.Pool | pg.PoolClient
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
 ): Promise<RecommendationDeciderSummary> {
   console.log("Starting Deterministic Recommendation Decider...");
   const pool = clientOrPool || defaultPool;
@@ -102,7 +106,8 @@ export async function runRecommendationDecider(
   const client = ownsClient ? await pool.connect() : pool;
 
   try {
-    const res = await client.query(buildDecisionUpdateSql());
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const res = await client.query(buildDecisionUpdateSql(), [ctx.workspaceId]);
     console.log(`Recommendation Decider complete. Updated: ${res.rowCount ?? 0}`);
     return { updated: res.rowCount ?? 0 };
   } finally {
@@ -113,4 +118,3 @@ export async function runRecommendationDecider(
 }
 
 export const runDeterministicDecisions = runRecommendationDecider;
-

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { seedEmbeddingSpaces } from '../../embeddings/spaceRegistry.js';
+import type { WorkspaceContext } from '../../workspace/context.js';
 
 describe('seedEmbeddingSpaces', () => {
   it('upserts primary and fallback spaces and returns ids', async () => {
@@ -18,7 +19,15 @@ describe('seedEmbeddingSpaces', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    const res = await seedEmbeddingSpaces(fakePool);
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const res = await seedEmbeddingSpaces(fakePool, { context });
 
     expect(res.primarySpaceId).toBe('space-1');
     expect(res.fallbackSpaceId).toBe('space-2');

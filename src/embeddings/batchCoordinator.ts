@@ -5,6 +5,7 @@ import { generateEmbedding } from '../services/agent.js';
 import { validateEmbeddingVector } from './batchValidator.js';
 import { buildEmbeddingInputs } from './inputBuilder.js';
 import { seedEmbeddingSpaces } from './spaceRegistry.js';
+import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -46,6 +47,7 @@ interface InputRow {
 
 interface SpaceRow {
   id: string;
+  workspace_id: string;
   dimensions: number;
 }
 
@@ -57,7 +59,8 @@ export async function runEmbeddingBatch(
   inputIds?: string[],
   fallbackFromBatchId?: string,
   rerunOfBatchId?: string,
-  clientOrPool?: pg.Pool | pg.PoolClient
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
 ): Promise<EmbeddingBatchSummary> {
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
@@ -71,7 +74,7 @@ export async function runEmbeddingBatch(
     await client.query('BEGIN');
 
     const spaceRes = await client.query<SpaceRow>(
-      `SELECT id, dimensions
+      `SELECT id, workspace_id, dimensions
        FROM embedding_spaces
        WHERE id = $1 AND active = TRUE
        LIMIT 1`,
@@ -81,9 +84,16 @@ export async function runEmbeddingBatch(
       throw new Error(`Embedding space not found or inactive: ${embeddingSpaceId}`);
     }
     const space = spaceRes.rows[0];
+    const workspaceId = space.workspace_id;
+    if (options?.context && options.context.workspaceId !== workspaceId) {
+      throw new Error(
+        `Embedding space ${space.id} is in workspace_id=${workspaceId} but context.workspaceId=${options.context.workspaceId}`
+      );
+    }
 
     const batchRes = await client.query<{ id: string }>(
       `INSERT INTO embedding_batches (
+         workspace_id,
          embedding_space_id,
          batch_key,
          run_type,
@@ -94,9 +104,9 @@ export async function runEmbeddingBatch(
          success_count,
          failure_count
        )
-       VALUES ($1, $2, $3, $4, $5, 'RUNNING', 0, 0, 0)
+       VALUES ($1, $2, $3, $4, $5, $6, 'RUNNING', 0, 0, 0)
        RETURNING id`,
-      [space.id, batchKey, runType, fallbackFromBatchId || null, rerunOfBatchId || null]
+      [workspaceId, space.id, batchKey, runType, fallbackFromBatchId || null, rerunOfBatchId || null]
     );
     const batchId = batchRes.rows[0].id;
 
@@ -104,27 +114,31 @@ export async function runEmbeddingBatch(
       ? await client.query<InputRow>(
           `SELECT ei.id, ei.content_text
            FROM embedding_inputs ei
-           WHERE ei.id = ANY($1::uuid[])
+           WHERE ei.workspace_id = $1
+             AND ei.id = ANY($2::uuid[])
            ORDER BY ei.created_at ASC`,
-          [inputIds]
+          [workspaceId, inputIds]
         )
       : await client.query<InputRow>(
           `SELECT ei.id, ei.content_text
            FROM embedding_inputs ei
-           WHERE NOT EXISTS (
+           WHERE ei.workspace_id = $1
+             AND NOT EXISTS (
              SELECT 1
              FROM semantic_embeddings se
-             WHERE se.embedding_space_id = $1
+             WHERE se.workspace_id = $1
+               AND se.embedding_space_id = $2
                AND se.embedding_input_id = ei.id
            )
            ORDER BY ei.created_at ASC
-           LIMIT $2`,
-          [space.id, maxItems]
+           LIMIT $3`,
+          [workspaceId, space.id, maxItems]
         );
 
     for (const input of inputRes.rows) {
       await client.query(
         `INSERT INTO embedding_batch_items (
+           workspace_id,
            embedding_batch_id,
            embedding_input_id,
            status,
@@ -132,10 +146,10 @@ export async function runEmbeddingBatch(
            error_message,
            updated_at
          )
-         VALUES ($1, $2, 'PENDING', 1, NULL, NOW())
+         VALUES ($1, $2, $3, 'PENDING', 1, NULL, NOW())
          ON CONFLICT (embedding_batch_id, embedding_input_id)
          DO NOTHING`,
-        [batchId, input.id]
+        [workspaceId, batchId, input.id]
       );
     }
 
@@ -154,16 +168,17 @@ export async function runEmbeddingBatch(
           await client.query(
             `UPDATE embedding_batch_items
              SET status = 'FAILED',
-                 error_message = $3,
+                 error_message = $4,
                  updated_at = NOW()
-             WHERE embedding_batch_id = $1 AND embedding_input_id = $2`,
-            [batchId, input.id, validation.issues.join('; ')]
+             WHERE workspace_id = $1 AND embedding_batch_id = $2 AND embedding_input_id = $3`,
+            [workspaceId, batchId, input.id, validation.issues.join('; ')]
           );
           continue;
         }
 
         await client.query(
           `INSERT INTO semantic_embeddings (
+             workspace_id,
              embedding_space_id,
              embedding_input_id,
              embedding_batch_id,
@@ -171,10 +186,11 @@ export async function runEmbeddingBatch(
              embedding_values,
              vector_checksum
            )
-           VALUES ($1, $2, $3, $4, $5, $6)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT (embedding_space_id, embedding_input_id)
            DO NOTHING`,
           [
+            workspaceId,
             space.id,
             input.id,
             batchId,
@@ -190,8 +206,8 @@ export async function runEmbeddingBatch(
            SET status = 'COMPLETED',
                error_message = NULL,
                updated_at = NOW()
-           WHERE embedding_batch_id = $1 AND embedding_input_id = $2`,
-          [batchId, input.id]
+           WHERE workspace_id = $1 AND embedding_batch_id = $2 AND embedding_input_id = $3`,
+          [workspaceId, batchId, input.id]
         );
       } catch (error) {
         failed += 1;
@@ -200,10 +216,10 @@ export async function runEmbeddingBatch(
         await client.query(
           `UPDATE embedding_batch_items
            SET status = 'FAILED',
-               error_message = $3,
+               error_message = $4,
                updated_at = NOW()
-           WHERE embedding_batch_id = $1 AND embedding_input_id = $2`,
-          [batchId, input.id, error instanceof Error ? error.message : String(error)]
+           WHERE workspace_id = $1 AND embedding_batch_id = $2 AND embedding_input_id = $3`,
+          [workspaceId, batchId, input.id, error instanceof Error ? error.message : String(error)]
         );
       }
     }
@@ -216,7 +232,7 @@ export async function runEmbeddingBatch(
            failure_count = $5,
            error_message = $6,
            completed_at = NOW()
-       WHERE id = $1`,
+       WHERE workspace_id = $7 AND id = $1`,
       [
         batchId,
         failed > 0 ? 'FAILED' : 'COMPLETED',
@@ -224,6 +240,7 @@ export async function runEmbeddingBatch(
         succeeded,
         failed,
         errors.length > 0 ? errors.join(' | ') : null,
+        workspaceId,
       ]
     );
 
@@ -251,7 +268,8 @@ export async function runEmbeddingBatch(
 
 export async function runEmbeddingBatchWithFallback(
   maxItems = 100,
-  clientOrPool?: pg.Pool | pg.PoolClient
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
 ): Promise<EmbeddingFallbackSummary> {
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
@@ -260,8 +278,9 @@ export async function runEmbeddingBatchWithFallback(
   const client = ownsClient ? await pool.connect() : pool;
 
   try {
-    const seeded = await seedEmbeddingSpaces(client as pg.PoolClient);
-    const inputBuild = await buildEmbeddingInputs(client as pg.PoolClient, maxItems);
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const seeded = await seedEmbeddingSpaces(client as pg.PoolClient, { context: ctx });
+    const inputBuild = await buildEmbeddingInputs(client as pg.PoolClient, maxItems, { context: ctx });
 
     const primary = await runEmbeddingBatch(
       seeded.primarySpaceId,
@@ -271,7 +290,8 @@ export async function runEmbeddingBatchWithFallback(
       undefined,
       undefined,
       undefined,
-      client as pg.PoolClient
+      client as pg.PoolClient,
+      { context: ctx }
     );
 
     let fallback: EmbeddingBatchSummary | undefined;
@@ -284,7 +304,8 @@ export async function runEmbeddingBatchWithFallback(
         primary.failedInputIds,
         primary.batchId,
         undefined,
-        client as pg.PoolClient
+        client as pg.PoolClient,
+        { context: ctx }
       );
     }
 

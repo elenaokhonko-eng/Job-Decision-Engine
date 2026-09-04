@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { runRequirementsExtraction } from '../../pipeline/requirementsExtractor.js';
+import type { WorkspaceContext } from '../../workspace/context.js';
+
+const context: WorkspaceContext = {
+  workspaceId: 'workspace-id-1',
+  workspaceKey: 'default',
+  userId: 'user-id-1',
+  userKey: 'local_user',
+  role: 'OWNER',
+};
 
 describe('runRequirementsExtraction', () => {
   it('persists deterministic requirements and completes stage state', async () => {
@@ -8,6 +17,7 @@ describe('runRequirementsExtraction', () => {
         return {
           rows: [
             {
+              workspace_id: context.workspaceId,
               canonical_job_id: '11111111-1111-4111-8111-111111111111',
               job_version_id: '22222222-2222-4222-8222-222222222222',
               description_text:
@@ -31,7 +41,7 @@ describe('runRequirementsExtraction', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    const summary = await runRequirementsExtraction(fakePool);
+    const summary = await runRequirementsExtraction(fakePool, { context });
 
     expect(summary.discovered).toBe(1);
     expect(summary.processed).toBe(1);
@@ -51,6 +61,7 @@ describe('runRequirementsExtraction', () => {
         return {
           rows: [
             {
+              workspace_id: context.workspaceId,
               canonical_job_id: '11111111-1111-4111-8111-111111111111',
               job_version_id: '22222222-2222-4222-8222-222222222222',
               description_text: 'Must have work rights.',
@@ -76,7 +87,7 @@ describe('runRequirementsExtraction', () => {
     const release = vi.fn(() => undefined);
     const fakeClient = { query, connect, release } as any;
 
-    const summary = await runRequirementsExtraction(fakeClient);
+    const summary = await runRequirementsExtraction(fakeClient, { context });
 
     expect(summary.discovered).toBe(1);
     expect(summary.processed).toBe(1);
@@ -90,6 +101,7 @@ describe('runRequirementsExtraction', () => {
         return {
           rows: [
             {
+              workspace_id: context.workspaceId,
               canonical_job_id: '11111111-1111-4111-8111-111111111111',
               job_version_id: '22222222-2222-4222-8222-222222222222',
               description_text: 'Hybrid role with regular team collaboration.',
@@ -113,6 +125,7 @@ describe('runRequirementsExtraction', () => {
     const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
     const summary = await runRequirementsExtraction(fakePool, {
+      context,
       quotedExtractor: async () => ({
         provider: 'gemini',
         model: 'gemini-2.5-flash',
@@ -148,6 +161,7 @@ describe('runRequirementsExtraction', () => {
         return {
           rows: [
             {
+              workspace_id: context.workspaceId,
               canonical_job_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa',
               job_version_id: 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb',
               description_text:
@@ -172,6 +186,7 @@ describe('runRequirementsExtraction', () => {
     const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
     const summary = await runRequirementsExtraction(fakePool, {
+      context,
       quotedExtractor: async () => ({
         provider: 'openai',
         model: 'gpt-4o-mini',
@@ -208,6 +223,7 @@ describe('runRequirementsExtraction', () => {
         return {
           rows: [
             {
+              workspace_id: context.workspaceId,
               canonical_job_id: '77777777-7777-4777-8777-777777777777',
               job_version_id: '88888888-8888-4888-8888-888888888888',
               description_text:
@@ -226,8 +242,8 @@ describe('runRequirementsExtraction', () => {
       }
 
       if (sql.includes('INSERT INTO job_requirements') && Array.isArray(params)) {
-        const versionId = String(params[1]);
-        const key = String(params[2]);
+        const versionId = String(params[2]);
+        const key = String(params[3]);
         const existing = insertedKeysByVersion.get(versionId) || new Set<string>();
         existing.add(key);
         insertedKeysByVersion.set(versionId, existing);
@@ -240,10 +256,10 @@ describe('runRequirementsExtraction', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    const first = await runRequirementsExtraction(fakePool);
+    const first = await runRequirementsExtraction(fakePool, { context });
     const firstKeySet = new Set(insertedKeysByVersion.get('88888888-8888-4888-8888-888888888888') || []);
 
-    const second = await runRequirementsExtraction(fakePool);
+    const second = await runRequirementsExtraction(fakePool, { context });
     const secondKeySet = new Set(insertedKeysByVersion.get('88888888-8888-4888-8888-888888888888') || []);
 
     expect(first.processed).toBe(1);

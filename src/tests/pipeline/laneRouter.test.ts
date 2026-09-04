@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runLaneRouting } from '../../pipeline/laneRouter.js';
 import pg from 'pg';
 import * as agent from '../../services/agent.js';
+import type { WorkspaceContext } from '../../workspace/context.js';
 
 vi.mock('pg', () => {
   const mPool: any = {
@@ -29,6 +30,14 @@ describe('Pipeline Stage: Lane Routing', () => {
   });
 
   it('should calculate cosine similarity and update job lane', async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
     // 1. Mock DB query for jobs
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
@@ -50,7 +59,7 @@ describe('Pipeline Stage: Lane Routing', () => {
       return Promise.resolve([0, 1, 0, 0]); // Everything else
     });
 
-    await runLaneRouting();
+    await runLaneRouting(undefined, { context });
 
     // 4 prototypes + 1 job = 5 calls
     expect(agent.generateEmbedding).toHaveBeenCalledTimes(5);
@@ -65,6 +74,6 @@ describe('Pipeline Stage: Lane Routing', () => {
     expect(updateCall[1][2]).toEqual('LANE_ROUTED');   // processingStatus (arg 3)
     expect(updateCall[1][3]).toEqual('High');          // laneConfidence (arg 4)
     // arg 5 = secondary_lanes JSON, arg 6 = lane_evidence, arg 7 = id
-    expect(updateCall[1][6]).toEqual('canon-1');        // job id (arg 7)
+    expect(updateCall[1][7]).toEqual('canon-1');        // job id (arg 8)
   });
 });

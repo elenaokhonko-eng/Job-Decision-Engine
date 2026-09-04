@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runDeterministicMatcher } from '../../pipeline/deterministicMatcher.js';
 import pg from 'pg';
+import type { WorkspaceContext } from '../../workspace/context.js';
 
 vi.mock('pg', () => {
   const mPool: any = {
@@ -25,7 +26,7 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
 
   it('creates a match run, stores requirement matches, and marks canonical job as MATCHED', async () => {
     (mPool.query as any).mockImplementation(async (sql: string, params?: any[]) => {
-      if (sql.includes("FROM profile_versions") && sql.includes("WHERE pv.status = 'ACTIVE'")) {
+      if (sql.includes("FROM profile_versions") && sql.includes("pv.status = 'ACTIVE'")) {
         return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
       }
       if (sql.includes('FROM profile_facts pf')) {
@@ -73,7 +74,15 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
       return { rows: [] };
     });
 
-    const summary = await runDeterministicMatcher();
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const summary = await runDeterministicMatcher(undefined, { context });
 
     expect(summary.matchedJobs).toBe(1);
     expect(summary.errors).toBe(0);

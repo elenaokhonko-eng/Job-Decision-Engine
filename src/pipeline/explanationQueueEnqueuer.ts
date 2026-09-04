@@ -1,6 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../db/pgSsl.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -16,7 +17,8 @@ export interface ExplanationQueueEnqueuerSummary {
 }
 
 export async function runExplanationQueueEnqueuer(
-  clientOrPool?: pg.Pool | pg.PoolClient
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
 ): Promise<ExplanationQueueEnqueuerSummary> {
   console.log("Starting Explanation Queue Enqueuer (unbounded eligibility)...");
   const pool = clientOrPool || defaultPool;
@@ -27,10 +29,12 @@ export async function runExplanationQueueEnqueuer(
   const client = ownsClient ? await pool.connect() : pool;
 
   try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
     const { rows } = await client.query<{
       enqueued: number;
       updated: number;
-    }>(`
+    }>(
+      `
       WITH candidates AS (
         SELECT
           c.id AS canonical_job_id,
@@ -48,7 +52,8 @@ export async function runExplanationQueueEnqueuer(
           ORDER BY observed_at DESC
           LIMIT 1
         ) lv ON TRUE
-        WHERE COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI')
+        WHERE c.workspace_id = $1
+          AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI')
           AND c.primary_lane IS NOT NULL
           AND c.primary_lane <> 'UNCLASSIFIED'
           AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
@@ -56,12 +61,14 @@ export async function runExplanationQueueEnqueuer(
           AND NOT EXISTS (
             SELECT 1
             FROM ai_evaluations ae
-            WHERE ae.canonical_job_id = c.id
+            WHERE ae.workspace_id = $1
+              AND ae.canonical_job_id = c.id
               AND ae.job_version_id = COALESCE(c.latest_job_version_id, lv.id)
           )
       ),
       inserted AS (
         INSERT INTO evaluation_queue (
+          workspace_id,
           canonical_job_id,
           job_version_id,
           lane,
@@ -71,6 +78,7 @@ export async function runExplanationQueueEnqueuer(
           updated_at
         )
         SELECT
+          $1,
           canonical_job_id,
           job_version_id,
           lane,
@@ -90,14 +98,17 @@ export async function runExplanationQueueEnqueuer(
             processing_status = 'QUEUED_FOR_AI',
             updated_at = NOW()
         FROM inserted i
-        WHERE c.id = i.canonical_job_id
+        WHERE c.workspace_id = $1
+          AND c.id = i.canonical_job_id
           AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED')
         RETURNING c.id
       )
       SELECT
         (SELECT COUNT(*)::int FROM inserted) AS enqueued,
         (SELECT COUNT(*)::int FROM updated_jobs) AS updated
-    `);
+    `,
+      [ctx.workspaceId]
+    );
 
     const summary = rows[0] ?? { enqueued: 0, updated: 0 };
     console.log(
@@ -112,4 +123,3 @@ export async function runExplanationQueueEnqueuer(
 }
 
 export const runEvaluationEnqueuer = runExplanationQueueEnqueuer;
-

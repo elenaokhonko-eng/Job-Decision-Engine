@@ -2,6 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
+import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
@@ -22,8 +23,16 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
 
   const { generateContent, MODEL_REGISTRY } = await import("../src/services/agent.js");
 
+  const ctx = await resolveWorkspaceContext(pool as any);
+
   const { rows: emails } = await pool.query(
-    `SELECT id, gmail_message_id, subject, body FROM raw_email_alerts WHERE processed = FALSE ORDER BY id ASC LIMIT 20`
+    `SELECT id, gmail_message_id, subject, body
+     FROM raw_email_alerts
+     WHERE workspace_id = $1
+       AND processed = FALSE
+     ORDER BY id ASC
+     LIMIT 20`,
+    [ctx.workspaceId]
   );
 
   if (emails.length === 0) {
@@ -33,7 +42,7 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
 
   console.log(`Found ${emails.length} unprocessed email alerts. Parsing via LLM...`);
 
-  const broker = new SourceBroker();
+  const broker = new SourceBroker(pool, ctx);
   await broker.startRun("EMAIL_PARSER_RUN");
 
   let parsedEmails = 0;
@@ -148,8 +157,10 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
 
         // Only mark processed = TRUE when all staging succeeded
         await dbClient.query(
-          `UPDATE raw_email_alerts SET processed = TRUE, last_error = NULL WHERE id = $1`,
-          [email.id]
+          `UPDATE raw_email_alerts
+           SET processed = TRUE, last_error = NULL
+           WHERE workspace_id = $1 AND id = $2`,
+          [ctx.workspaceId, email.id]
         );
 
         await dbClient.query("COMMIT");
@@ -160,8 +171,10 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
         await dbClient.query("ROLLBACK");
         // Mark with error but do NOT set processed = TRUE — email will be retried
         await dbClient.query(
-          `UPDATE raw_email_alerts SET last_error = $1 WHERE id = $2`,
-          [stageErr.message, email.id]
+          `UPDATE raw_email_alerts
+           SET last_error = $1
+           WHERE workspace_id = $2 AND id = $3`,
+          [stageErr.message, ctx.workspaceId, email.id]
         );
         throw stageErr;
       }

@@ -186,6 +186,19 @@ def get_db_connection():
             
     return psycopg2.connect(database_url)
 
+def get_workspace_key():
+    return (os.environ.get("WORKSPACE_KEY") or "default").strip()
+
+def resolve_workspace_id(cursor):
+    workspace_key = get_workspace_key()
+    cursor.execute("SELECT id FROM workspaces WHERE workspace_key = %s", (workspace_key,))
+    row = cursor.fetchone()
+    if not row:
+        raise Exception(f"No workspace found for WORKSPACE_KEY={workspace_key}. Did you run migrations 020+?")
+    if isinstance(row, dict):
+        return row.get("id")
+    return row[0]
+
 def run_checked_command(command_args, step_label):
     """Run a local command safely and surface stdout/stderr to the UI."""
     result = subprocess.run(
@@ -253,6 +266,7 @@ def fetch_jobs_from_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
+        workspace_id = resolve_workspace_id(cursor)
         cursor.execute("""
             SELECT
                 canonical_job_id        AS id,
@@ -290,9 +304,11 @@ def fetch_jobs_from_db():
                 lane_matches,
                 workability_facts,
                 queue_status
-            FROM v_canonical_shortlist
-            ORDER BY observed_at DESC
-        """)
+            FROM v_canonical_shortlist s
+            JOIN canonical_jobs c_ws ON c_ws.id = s.canonical_job_id
+            WHERE c_ws.workspace_id = %s
+            ORDER BY s.observed_at DESC
+        """, (workspace_id,))
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -321,6 +337,7 @@ def fetch_rejected_jobs_from_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
+        workspace_id = resolve_workspace_id(cursor)
         cursor.execute("""
             SELECT
                 id,
@@ -338,10 +355,12 @@ def fetch_rejected_jobs_from_db():
                 politics_stress_score,
                 sensory_overload_index,
                 "postedDate"
-            FROM v_rejected_jobs_audit
-            ORDER BY "postedDate" DESC
+            FROM v_rejected_jobs_audit a
+            JOIN canonical_jobs c_ws ON c_ws.id = a.id
+            WHERE c_ws.workspace_id = %s
+            ORDER BY a."postedDate" DESC
             LIMIT 50
-        """)
+        """, (workspace_id,))
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -357,6 +376,8 @@ def delete_job_from_db(job_id):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        workspace_id = resolve_workspace_id(cursor)
+        workspace_id = resolve_workspace_id(cursor)
 
         # Soft-delete: set status to MANUALLY_REMOVED (never hard-delete; preserves audit trail)
         cursor.execute(
@@ -366,9 +387,9 @@ def delete_job_from_db(job_id):
                 processing_status = 'MANUALLY_REMOVED',
                 rejection_reason = 'Manually removed by user via Streamlit UI',
                 updated_at = NOW()
-            WHERE id = %s
+            WHERE workspace_id = %s AND id = %s
             """,
-            (job_id,)
+            (workspace_id, job_id)
         )
 
         conn.commit()
@@ -403,22 +424,25 @@ def save_new_job_to_db(job):
 
         # Ensure a source_run exists for manual entries
         cursor.execute(
-            "INSERT INTO source_runs (status) VALUES ('MANUAL_STREAMLIT') RETURNING id"
+            "INSERT INTO source_runs (workspace_id, status) VALUES (%s, 'MANUAL_STREAMLIT') RETURNING id",
+            (workspace_id,),
         )
         source_run_id = cursor.fetchone()[0]
 
         cursor.execute(
             """
             INSERT INTO raw_job_observations (
+                workspace_id,
                 source_run_id, source_name, source_external_id, source_url,
                 retrieved_at, company_name, title, description_raw,
                 location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
                 canonical_apply_url, source_lane, search_plan_version,
                 raw_payload, raw_payload_hash
-            ) VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (raw_payload_hash) DO NOTHING
+            ) VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (workspace_id, raw_payload_hash) DO NOTHING
             """,
             (
+                workspace_id,
                 source_run_id,
                 "MANUAL_STREAMLIT",
                 f"manual-{raw_payload_hash[:16]}",
@@ -644,9 +668,13 @@ def ingest_linkedin_saved_json(jobs):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        workspace_id = resolve_workspace_id(cursor)
         
         # Ensure a source_run exists
-        cursor.execute("INSERT INTO source_runs (status) VALUES ('LINKEDIN_IMPORT') RETURNING id")
+        cursor.execute(
+            "INSERT INTO source_runs (workspace_id, status) VALUES (%s, 'LINKEDIN_IMPORT') RETURNING id",
+            (workspace_id,),
+        )
         source_run_id = cursor.fetchone()[0]
         
         inserted_count = 0
@@ -668,15 +696,17 @@ def ingest_linkedin_saved_json(jobs):
             
             cursor.execute("""
                 INSERT INTO raw_job_observations (
+                    workspace_id,
                     source_run_id, source_name, source_external_id, source_url,
                     retrieved_at, company_name, title, description_raw,
                     location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
                     canonical_apply_url, source_lane, search_plan_version,
                     raw_payload, raw_payload_hash
-                ) VALUES (%s, 'LINKEDIN', %s, %s, NOW(), %s, %s, %s, %s, 'UNKNOWN', 'PERMANENT', 'UNKNOWN', %s, 'UNKNOWN', '1.0', %s, %s)
-                ON CONFLICT (raw_payload_hash) DO NOTHING
+                ) VALUES (%s, %s, 'LINKEDIN', %s, %s, NOW(), %s, %s, %s, %s, 'UNKNOWN', 'PERMANENT', 'UNKNOWN', %s, 'UNKNOWN', '1.0', %s, %s)
+                ON CONFLICT (workspace_id, raw_payload_hash) DO NOTHING
                 RETURNING id
             """, (
+                workspace_id,
                 source_run_id,
                 f"linkedin-{raw_payload_hash[:16]}",
                 url,

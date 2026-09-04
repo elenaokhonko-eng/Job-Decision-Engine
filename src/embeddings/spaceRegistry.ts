@@ -1,6 +1,7 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgSslConfig } from '../db/pgSsl.js';
+import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -18,6 +19,7 @@ export interface SeedEmbeddingSpacesResult {
 async function upsertSpace(
   client: { query: pg.PoolClient['query'] },
   params: {
+    workspaceId: string;
     spaceKey: string;
     provider: string;
     model: string;
@@ -29,6 +31,7 @@ async function upsertSpace(
 ): Promise<string> {
   const res = await client.query<{ id: string }>(
     `INSERT INTO embedding_spaces (
+       workspace_id,
        space_key,
        provider,
        model,
@@ -38,8 +41,8 @@ async function upsertSpace(
        is_fallback_space,
        active
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)
-     ON CONFLICT (space_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
+     ON CONFLICT (workspace_id, space_key)
      DO UPDATE SET
        provider = EXCLUDED.provider,
        model = EXCLUDED.model,
@@ -50,6 +53,7 @@ async function upsertSpace(
        active = TRUE
      RETURNING id`,
     [
+      params.workspaceId,
       params.spaceKey,
       params.provider,
       params.model,
@@ -64,7 +68,8 @@ async function upsertSpace(
 }
 
 export async function seedEmbeddingSpaces(
-  clientOrPool?: pg.Pool | pg.PoolClient
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
 ): Promise<SeedEmbeddingSpacesResult> {
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
@@ -80,9 +85,12 @@ export async function seedEmbeddingSpaces(
   const fallbackDimensions = Number(process.env.EMBEDDING_FALLBACK_DIMENSIONS || 1536);
 
   try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+
     await client.query('BEGIN');
 
     const primarySpaceId = await upsertSpace(client, {
+      workspaceId: ctx.workspaceId,
       spaceKey: 'phase3_primary',
       provider: primaryProvider,
       model: primaryModel,
@@ -93,6 +101,7 @@ export async function seedEmbeddingSpaces(
     });
 
     const fallbackSpaceId = await upsertSpace(client, {
+      workspaceId: ctx.workspaceId,
       spaceKey: 'phase3_fallback',
       provider: fallbackProvider,
       model: fallbackModel,

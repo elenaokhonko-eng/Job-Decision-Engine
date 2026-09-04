@@ -5,6 +5,7 @@ import { EvaluationRequest } from "../src/pipeline/types.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationWorkabilityFacts } from "../src/contracts/index.js";
 import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
@@ -39,6 +40,8 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
       throw new Error(`Model registry preflight failed: ${preflight.warnings.join(" | ")}`);
     }
 
+    const ctx: WorkspaceContext = await resolveWorkspaceContext(client as any);
+
     // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
     // Join strictly to evaluation_queue.job_version_id and gate_decisions for the same job_version_id (invariant: never substitute latest version during retry)
     const { rows: queueItems } = await client.query(
@@ -47,13 +50,24 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
               jv.description_text, eq.job_version_id AS resolved_job_version_id,
               gd.id AS resolved_gate_decision_id
        FROM evaluation_queue eq
-       JOIN canonical_jobs c ON eq.canonical_job_id = c.id
-       JOIN job_versions jv ON eq.job_version_id = jv.id
-       LEFT JOIN gate_decisions gd ON (gd.canonical_job_id = eq.canonical_job_id AND gd.job_version_id = eq.job_version_id)
-       WHERE (eq.status = 'PENDING')
-          OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
-          OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
-       ORDER BY eq.priority_score DESC`
+       JOIN canonical_jobs c
+         ON c.id = eq.canonical_job_id
+        AND c.workspace_id = eq.workspace_id
+       JOIN job_versions jv
+         ON jv.id = eq.job_version_id
+        AND jv.workspace_id = eq.workspace_id
+       LEFT JOIN gate_decisions gd
+         ON gd.workspace_id = eq.workspace_id
+        AND gd.canonical_job_id = eq.canonical_job_id
+        AND gd.job_version_id = eq.job_version_id
+       WHERE eq.workspace_id = $1
+         AND (
+           (eq.status = 'PENDING')
+           OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
+           OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
+         )
+       ORDER BY eq.priority_score DESC`,
+      [ctx.workspaceId]
     );
 
     console.log(`Found ${queueItems.length} items eligible for AI evaluation. Pipeline run: ${pipelineRunId}`);
@@ -67,12 +81,18 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         await client.query("BEGIN");
         try {
           await client.query(
-            `UPDATE evaluation_queue SET status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`,
-            [item.id]
+            `UPDATE evaluation_queue
+             SET status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW()
+             WHERE workspace_id = $1 AND id = $2`,
+            [ctx.workspaceId, item.id]
           );
           await client.query(
-            `UPDATE canonical_jobs SET processing_state = 'NEEDS_MANUAL_REVIEW', processing_status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW() WHERE id = $1`,
-            [item.canonical_job_id]
+            `UPDATE canonical_jobs
+             SET processing_state = 'NEEDS_MANUAL_REVIEW',
+                 processing_status = 'NEEDS_MANUAL_REVIEW',
+                 updated_at = NOW()
+             WHERE workspace_id = $1 AND id = $2`,
+            [ctx.workspaceId, item.canonical_job_id]
           );
           await client.query("COMMIT");
           manualReviewCount++;
@@ -92,9 +112,10 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
              attempt_count = attempt_count + 1,
              updated_at = NOW()
          WHERE id = $1
+           AND workspace_id = $2
            AND (status IN ('PENDING', 'RETRY_WAIT') OR (status = 'EVALUATING' AND lease_expires_at < NOW()))
          RETURNING *`,
-        [item.id]
+        [item.id, ctx.workspaceId]
       );
 
       if (leaseRows.length === 0) {
@@ -113,8 +134,8 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         await client.query(
           `UPDATE evaluation_queue SET status = 'RETRY_WAIT', last_error = $1,
            available_at = ${nextAvailableAt(attemptNum)}, lease_id = NULL, lease_expires_at = NULL, updated_at = NOW()
-           WHERE id = $2`,
-          ["No job_version found", item.id]
+           WHERE workspace_id = $2 AND id = $3`,
+          ["No job_version found", ctx.workspaceId, item.id]
         );
         continue;
       }
@@ -166,17 +187,23 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         await client.query("BEGIN");
         try {
           await client.query(
-            `UPDATE canonical_jobs SET processing_state = 'AI_EVALUATED', processing_status = 'AI_EVALUATED', updated_at = NOW() WHERE id = $1`,
-            [item.canonical_job_id]
+            `UPDATE canonical_jobs
+             SET processing_state = 'AI_EVALUATED',
+                 processing_status = 'AI_EVALUATED',
+                 updated_at = NOW()
+             WHERE workspace_id = $1 AND id = $2`,
+            [ctx.workspaceId, item.canonical_job_id]
           );
 
           await client.query(
             `INSERT INTO ai_evaluations (
+              workspace_id,
               canonical_job_id, job_version_id, gate_decision, gate_version,
               lane_matches, workability_facts, unknown_fields, profile_version, evaluation_schema_version,
               provider, model, attempt, is_fallback, degraded_state, full_evaluation_payload, evaluated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())`,
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())`,
             [
+              ctx.workspaceId,
               item.canonical_job_id,
               jobVersionId,
               item.gate_decision || "PASS",
@@ -197,9 +224,10 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
 
           await client.query(
             `INSERT INTO evaluation_attempts (
-               canonical_job_id, job_version_id, attempt_number, provider, model, status, error_message, latency_ms
-             ) VALUES ($1, $2, $3, $4, $5, 'COMPLETED', NULL, NULL)`,
+               workspace_id, canonical_job_id, job_version_id, attempt_number, provider, model, status, error_message, latency_ms
+             ) VALUES ($1, $2, $3, $4, $5, $6, 'COMPLETED', NULL, NULL)`,
             [
+              ctx.workspaceId,
               item.canonical_job_id,
               jobVersionId,
               attemptNum,
@@ -211,8 +239,8 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
           await client.query(
             `UPDATE evaluation_queue
              SET status = 'COMPLETED', lease_id = NULL, lease_expires_at = NULL, available_at = NULL, updated_at = NOW()
-             WHERE id = $1`,
-            [item.id]
+             WHERE workspace_id = $1 AND id = $2`,
+            [ctx.workspaceId, item.id]
           );
 
           await client.query("COMMIT");
@@ -227,9 +255,10 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
 
         await client.query(
           `INSERT INTO evaluation_attempts (
-             canonical_job_id, job_version_id, attempt_number, provider, model, status, error_message, latency_ms
-           ) VALUES ($1, $2, $3, $4, $5, 'FAILED', $6, NULL)`,
+             workspace_id, canonical_job_id, job_version_id, attempt_number, provider, model, status, error_message, latency_ms
+           ) VALUES ($1, $2, $3, $4, $5, $6, 'FAILED', $7, NULL)`,
           [
+            ctx.workspaceId,
             item.canonical_job_id,
             jobVersionId,
             attemptNum,
@@ -249,8 +278,8 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
                lease_id = NULL,
                lease_expires_at = NULL,
                updated_at = NOW()
-           WHERE id = $2`,
-          [err.message || String(err), item.id]
+           WHERE workspace_id = $2 AND id = $3`,
+          [err.message || String(err), ctx.workspaceId, item.id]
         );
       }
     }

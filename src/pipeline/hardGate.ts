@@ -8,6 +8,7 @@ import {
 } from "../services/criteria.js";
 import { GATE_VERSION } from "../contracts/version.js";
 import { pgSslConfig } from "../db/pgSsl.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -266,27 +267,12 @@ function applyPersistedRequirementGates(
   });
 }
 
-export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Promise<{ passed: number; hardRejected: number; needsVerification: number }> {
+export async function runHardGates(
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
+): Promise<{ passed: number; hardRejected: number; needsVerification: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
   const pool = clientOrPool || defaultPool;
-
-  const { rows: stagedJobs } = await pool.query(`
-    SELECT c.*, jv.description_text, jv.id AS job_version_id
-    FROM canonical_jobs c
-    JOIN job_versions jv ON jv.id = COALESCE(
-      c.latest_job_version_id,
-      (
-        SELECT jv2.id
-        FROM job_versions jv2
-        WHERE jv2.canonical_job_id = c.id
-        ORDER BY jv2.observed_at DESC
-        LIMIT 1
-      )
-    )
-    WHERE COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
-  `);
-
-  console.log(`Found ${stagedJobs.length} canonical jobs to gate.`);
 
   let passedCount = 0;
   let rejectedCount = 0;
@@ -296,6 +282,32 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
     typeof (value as pg.Pool).connect === 'function' && !('release' in value);
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
+
+  const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+
+  const { rows: stagedJobs } = await client.query(
+    `
+      SELECT c.*, jv.description_text, jv.id AS job_version_id
+      FROM canonical_jobs c
+      JOIN job_versions jv ON jv.id = COALESCE(
+        c.latest_job_version_id,
+        (
+          SELECT jv2.id
+          FROM job_versions jv2
+          WHERE jv2.workspace_id = $1
+            AND jv2.canonical_job_id = c.id
+          ORDER BY jv2.observed_at DESC
+          LIMIT 1
+        )
+      )
+      WHERE c.workspace_id = $1
+        AND jv.workspace_id = $1
+        AND COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
+    `,
+    [ctx.workspaceId]
+  );
+
+  console.log(`Found ${stagedJobs.length} canonical jobs to gate.`);
   try {
     for (const job of stagedJobs) {
       await client.query("BEGIN");
@@ -315,11 +327,12 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
         const { rows: requirementRows } = await client.query(
           `SELECT requirement_key, requirement_type, requirement_text, quote_text, structured_value
            FROM job_requirements
-           WHERE job_version_id = $1
+           WHERE workspace_id = $1
+             AND job_version_id = $2
              AND extractor_type = 'DETERMINISTIC'
              AND status IN ('EXTRACTED', 'VALIDATED')
            ORDER BY requirement_key ASC`,
-          [job.job_version_id]
+          [ctx.workspaceId, job.job_version_id]
         );
 
         const deterministicRequirements = requirementRows as PersistedRequirement[];
@@ -361,13 +374,15 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
                gate_evidence_quotes = $4,
                workability_facts  = $5,
                updated_at         = NOW()
-           WHERE id = $6`,
+           WHERE workspace_id = $6
+             AND id = $7`,
           [
             gateResult.status,
             processingStatus,
             gateResult.rejection_codes.length > 0 ? gateResult.rejection_codes.join(", ") : null,
             JSON.stringify(gateResult.evidence_quotes),
             JSON.stringify(gateResult.workability_facts),
+            ctx.workspaceId,
             job.id
           ]
         );
@@ -375,10 +390,12 @@ export async function runHardGates(clientOrPool?: pg.Pool | pg.PoolClient): Prom
         // Write immutable gate_decisions audit row (invariant 6)
         await client.query(
           `INSERT INTO gate_decisions (
+             workspace_id,
              canonical_job_id, job_version_id, gate_version,
              decision, rejection_codes, evidence_quotes, workability_facts
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [
+            ctx.workspaceId,
             job.id,
             job.job_version_id,
             GATE_VERSION,
