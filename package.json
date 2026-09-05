@@ -15,7 +15,8 @@
     "contracts:check": "npm run contracts:export && git diff --exit-code -- src/contracts/json",
     "test": "vitest run",
     "eval:golden": "tsx scripts/run_evals.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "gemini:models": "tsx scripts/list_gemini_models.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

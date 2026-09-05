@@ -47,6 +47,14 @@ npm ci
 npm run db:init
 ```
 
+## Model Configuration & Troubleshooting
+
+- Validate your current provider/model routes before ingestion: `npx tsx scripts/preflight_models.ts`
+- If Gemini embeddings fail with `404 NOT_FOUND` / `embedContent` errors, list models visible to your key: `npm run gemini:models`
+  - Set `EMBEDDING_PRIMARY_MODEL` to a model that supports `embedContent`
+  - Optionally set `GEMINI_API_VERSION` (examples: `v1`, `v1alpha`)
+  - To skip Gemini embeddings entirely: set `EMBEDDING_PRIMARY_PROVIDER="openai"`
+
 4. Run checks:
 
 ```bash

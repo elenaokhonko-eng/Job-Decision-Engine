@@ -1,6 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { generateEmbedding } from "../services/agent.js";
+import { generateEmbeddingWithProvider, type EmbeddingProvider } from "../services/agent.js";
 import { pgSslConfig } from "../db/pgSsl.js";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
@@ -26,6 +26,7 @@ const defaultPool = new pg.Pool({
 // ── Cosine similarity ─────────────────────────────────────────────────────────
 
 const cosineSimilarity = (vecA: number[], vecB: number[]): number => {
+  if (vecA.length === 0 || vecB.length === 0 || vecA.length !== vecB.length) return 0;
   let dotProduct = 0, normA = 0, normB = 0;
   for (let i = 0; i < vecA.length; i++) {
     dotProduct += vecA[i] * vecB[i];
@@ -133,13 +134,6 @@ export async function runLaneRouter(
   console.log("Starting Semantic Lane Routing from config/lanes registry...");
   const config = loadGlobalLanesConfig();
   const pool = clientOrPool || defaultPool;
-
-  // Generate prototype embeddings for each lane
-  const laneEmbeddings: Record<string, number[]> = {};
-  for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
-    laneEmbeddings[laneKey] = await generateEmbedding(laneDef.prototype_query);
-  }
-
   const ctx = options?.context ?? (await resolveWorkspaceContext(pool as any));
 
   // Use LATERAL join to get only the latest version's description
@@ -163,140 +157,319 @@ export async function runLaneRouter(
 
   console.log(`Found ${jobs.length} canonical jobs to route.`);
 
-  let routedCount = 0;
-  let deferredCount = 0;
+  if (jobs.length === 0) {
+    return { routed: 0, deferred: 0 };
+  }
+
+  class EmbeddingRunError extends Error {
+    provider: EmbeddingProvider;
+    jobId?: string;
+
+    constructor(provider: EmbeddingProvider, message: string, jobId?: string) {
+      super(message);
+      this.name = "EmbeddingRunError";
+      this.provider = provider;
+      this.jobId = jobId;
+    }
+  }
+
+  const primaryProviderRaw = (process.env.EMBEDDING_PRIMARY_PROVIDER || "").trim().toLowerCase();
+  const primaryProvider: EmbeddingProvider =
+    primaryProviderRaw === "openai" || process.env.FORCE_OPENAI === "true" ? "openai" : "gemini";
+  const providerOrder: EmbeddingProvider[] =
+    primaryProvider === "openai" ? ["openai", "gemini"] : ["gemini", "openai"];
 
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
     typeof (value as pg.Pool).connect === 'function' && !('release' in value);
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
   try {
-    for (const job of jobs) {
-      await client.query("BEGIN");
-      try {
-        const coreText = extractCoreJobText(job.normalized_title, job.description_text || "");
-        const jobEmbedding = await generateEmbedding(coreText);
+    const routeWithProvider = async (
+      provider: EmbeddingProvider
+    ): Promise<{ routed: number; deferred: number }> => {
+      console.log(`Lane routing embedding provider: ${provider}`);
 
-        // Strict zero-vector check — embedding failure must not produce a default lane
-        const isZeroVector = jobEmbedding.every((v) => v === 0);
-        if (isZeroVector) {
-          console.warn(`⚠️ Zero embedding for job ${job.id}. Deferring (never default lane).`);
-          await client.query(
-            `UPDATE canonical_jobs
-             SET primary_lane = 'UNCLASSIFIED',
-                 semantic_score = 0.0,
-                 lane_confidence = 'None',
-                 processing_state = 'ROUTING_DEFERRED',
-                 processing_status = 'ROUTING_DEFERRED',
-                 updated_at = NOW()
-             WHERE workspace_id = $1 AND id = $2`,
-            [ctx.workspaceId, job.id]
+      const laneEmbeddings: Record<string, number[]> = {};
+      let prototypeDimensions: number | null = null;
+
+      for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
+        let vector: number[];
+        try {
+          vector = await generateEmbeddingWithProvider(laneDef.prototype_query, provider);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new EmbeddingRunError(
+            provider,
+            `prototype embedding failed for lane ${laneKey}: ${message}`
           );
-          await client.query("COMMIT");
-          deferredCount++;
-          continue;
         }
 
-        let bestLane: string | null = null;
-        let bestScore = -1;
-        const scoreMap: Record<string, number> = {};
-        const laneEvidence: string[] = [];
-        const descText = (job.description_text || "").toLowerCase();
+        if (vector.length === 0) {
+          throw new EmbeddingRunError(provider, `prototype embedding was empty for lane ${laneKey}`);
+        }
 
-        for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
-          // If excluded by lane's negative concepts, skip
-          if (applyNegativeExclusion(descText, laneDef)) {
-            scoreMap[laneKey] = -1;
+        if (prototypeDimensions == null) {
+          prototypeDimensions = vector.length;
+        } else if (vector.length !== prototypeDimensions) {
+          throw new EmbeddingRunError(
+            provider,
+            `prototype embedding dimension mismatch for lane ${laneKey}: expected ${prototypeDimensions} got ${vector.length}`
+          );
+        }
+
+        laneEmbeddings[laneKey] = vector;
+      }
+
+      let routedCount = 0;
+      let deferredCount = 0;
+
+      for (const job of jobs) {
+        await client.query("BEGIN");
+        try {
+          const coreText = extractCoreJobText(job.normalized_title, job.description_text || "");
+          let jobEmbedding: number[];
+          try {
+            jobEmbedding = await generateEmbeddingWithProvider(coreText, provider);
+          } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new EmbeddingRunError(provider, `job embedding failed: ${message}`, job.id);
+          }
+
+          // Strict zero-vector check — embedding failure must not produce a default lane
+          const isZeroVector = jobEmbedding.every((v) => v === 0);
+          if (isZeroVector) {
+            console.warn(`⚠️ Zero embedding for job ${job.id}. Deferring (never default lane).`);
+            await client.query(
+              `UPDATE canonical_jobs
+               SET primary_lane = 'UNCLASSIFIED',
+                   semantic_score = 0.0,
+                   lane_confidence = 'None',
+                   secondary_lanes = $3,
+                   lane_evidence = $4,
+                   processing_state = 'ROUTING_DEFERRED',
+                   processing_status = 'ROUTING_DEFERRED',
+                   updated_at = NOW()
+               WHERE workspace_id = $1 AND id = $2`,
+              [ctx.workspaceId, job.id, JSON.stringify([]), JSON.stringify(["ZERO_VECTOR_EMBEDDING"])]
+            );
+            await client.query("COMMIT");
+            deferredCount++;
             continue;
           }
-          const score = cosineSimilarity(jobEmbedding, laneEmbeddings[laneKey]);
-          scoreMap[laneKey] = score;
-          if (score > bestScore) {
-            bestScore = score;
-            bestLane = laneKey;
+
+          if (prototypeDimensions != null && jobEmbedding.length !== prototypeDimensions) {
+            console.warn(
+              `⚠️ Embedding dimension mismatch for job ${job.id}: expected ${prototypeDimensions} got ${jobEmbedding.length}. Deferring.`
+            );
+            await client.query(
+              `UPDATE canonical_jobs
+               SET primary_lane = 'UNCLASSIFIED',
+                   semantic_score = 0.0,
+                   lane_confidence = 'None',
+                   secondary_lanes = $3,
+                   lane_evidence = $4,
+                   processing_state = 'ROUTING_DEFERRED',
+                   processing_status = 'ROUTING_DEFERRED',
+                   updated_at = NOW()
+               WHERE workspace_id = $1 AND id = $2`,
+              [
+                ctx.workspaceId,
+                job.id,
+                JSON.stringify([]),
+                JSON.stringify([`EMBEDDING_DIM_MISMATCH:${jobEmbedding.length}!=${prototypeDimensions}`]),
+              ]
+            );
+            await client.query("COMMIT");
+            deferredCount++;
+            continue;
           }
-        }
 
-        // Per-lane threshold check: must meet the lane's own semantic_threshold or min_similarity_floor
-        const bestLaneDef = bestLane ? config.lanes[bestLane] : null;
-        const perLaneThreshold = bestLaneDef?.semantic_threshold ?? bestLaneDef?.threshold ?? (config.unclassified_policy.min_similarity_floor || 0.25);
-        if (bestScore < perLaneThreshold || !bestLane) {
-          bestLane = "UNCLASSIFIED";
-        }
+          let bestLane: string | null = null;
+          let bestScore = -1;
+          const scoreMap: Record<string, number> = {};
+          const laneEvidence: string[] = [];
+          const descText = (job.description_text || "").toLowerCase();
 
-        const laneConfidence =
-          bestLane === "UNCLASSIFIED"
-            ? "None"
-            : bestScore >= perLaneThreshold + 0.2
-              ? "High"
-              : bestScore >= perLaneThreshold + 0.1
-                ? "Medium"
-                : "Low";
+          for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
+            // If excluded by lane's negative concepts, skip
+            if (applyNegativeExclusion(descText, laneDef)) {
+              scoreMap[laneKey] = -1;
+              continue;
+            }
+            const score = cosineSimilarity(jobEmbedding, laneEmbeddings[laneKey]);
+            scoreMap[laneKey] = score;
+            if (score > bestScore) {
+              bestScore = score;
+              bestLane = laneKey;
+            }
+          }
 
-        // Secondary lanes: must meet per-lane threshold, have positive concept evidence, and not be excluded
-        const secondaryLanes: string[] = [];
-        for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
-          if (laneKey === bestLane) continue;
-          const threshold = laneDef.semantic_threshold ?? laneDef.threshold;
-          const score = scoreMap[laneKey] || 0;
-          if (score >= threshold && !applyNegativeExclusion(descText, laneDef)) {
-            // Require at least one positive concept match for secondary lane qualification
-            const hasPositiveEvidence = laneDef.positive_concepts?.some(pc => descText.includes(pc.toLowerCase()));
-            if (hasPositiveEvidence) {
-              secondaryLanes.push(laneKey);
-              if (laneDef.positive_concepts) {
-                for (const pc of laneDef.positive_concepts) {
-                  if (descText.includes(pc.toLowerCase())) {
-                    laneEvidence.push(`${laneKey}: "${pc}"`);
-                    break;
+          // Per-lane threshold check: must meet the lane's own semantic_threshold or min_similarity_floor
+          const bestLaneDef = bestLane ? config.lanes[bestLane] : null;
+          const perLaneThreshold =
+            bestLaneDef?.semantic_threshold ??
+            bestLaneDef?.threshold ??
+            (config.unclassified_policy.min_similarity_floor || 0.25);
+          if (bestScore < perLaneThreshold || !bestLane) {
+            bestLane = "UNCLASSIFIED";
+          }
+
+          const laneConfidence =
+            bestLane === "UNCLASSIFIED"
+              ? "None"
+              : bestScore >= perLaneThreshold + 0.2
+                ? "High"
+                : bestScore >= perLaneThreshold + 0.1
+                  ? "Medium"
+                  : "Low";
+
+          // Secondary lanes: must meet per-lane threshold, have positive concept evidence, and not be excluded
+          const secondaryLanes: string[] = [];
+          for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
+            if (laneKey === bestLane) continue;
+            const threshold = laneDef.semantic_threshold ?? laneDef.threshold;
+            const score = scoreMap[laneKey] || 0;
+            if (score >= threshold && !applyNegativeExclusion(descText, laneDef)) {
+              // Require at least one positive concept match for secondary lane qualification
+              const hasPositiveEvidence = laneDef.positive_concepts?.some(pc =>
+                descText.includes(pc.toLowerCase())
+              );
+              if (hasPositiveEvidence) {
+                secondaryLanes.push(laneKey);
+                if (laneDef.positive_concepts) {
+                  for (const pc of laneDef.positive_concepts) {
+                    if (descText.includes(pc.toLowerCase())) {
+                      laneEvidence.push(`${laneKey}: "${pc}"`);
+                      break;
+                    }
                   }
                 }
               }
             }
           }
+
+          const processingStatus =
+            bestLane === "UNCLASSIFIED" ? "ROUTING_DEFERRED" : "LANE_ROUTED";
+          if (bestLane === "UNCLASSIFIED") deferredCount++; else routedCount++;
+
+          await client.query(
+            `UPDATE canonical_jobs
+             SET primary_lane       = $1,
+                 semantic_score     = $2,
+                 processing_state   = $3,
+                 processing_status  = $3,
+                 lane_confidence    = $4,
+                 secondary_lanes    = $5,
+                 lane_evidence      = $6,
+                 updated_at         = NOW()
+             WHERE workspace_id = $7 AND id = $8`,
+            [
+              bestLane,
+              bestScore,
+              processingStatus,
+              laneConfidence,
+              JSON.stringify(secondaryLanes),
+              JSON.stringify(laneEvidence),
+              ctx.workspaceId,
+              job.id,
+            ]
+          );
+
+          await client.query("COMMIT");
+          console.log(
+            `  -> Job ${job.id} ("${job.normalized_title}"): ${bestLane} (Score: ${bestScore.toFixed(3)}, Status: ${processingStatus})`
+          );
+        } catch (jobErr) {
+          await client.query("ROLLBACK");
+          if (jobErr instanceof EmbeddingRunError) {
+            throw jobErr;
+          }
+
+          const message = jobErr instanceof Error ? jobErr.message : String(jobErr);
+          const trimmed = message.length > 200 ? `${message.slice(0, 200)}...` : message;
+          console.error(`❌ Failed to route job ${job.id}:`, jobErr);
+          await client.query(
+            `UPDATE canonical_jobs
+             SET primary_lane = 'UNCLASSIFIED',
+                 semantic_score = 0.0,
+                 lane_confidence = 'None',
+                 secondary_lanes = $3,
+                 lane_evidence = $4,
+                 processing_state = 'ROUTING_DEFERRED',
+                 processing_status = 'ROUTING_DEFERRED',
+                 updated_at = NOW()
+             WHERE workspace_id = $1 AND id = $2`,
+            [
+              ctx.workspaceId,
+              job.id,
+              JSON.stringify([]),
+              JSON.stringify([`ROUTING_ERROR:${trimmed}`]),
+            ]
+          );
+          deferredCount += 1;
         }
+      }
 
-        const processingStatus = bestLane === "UNCLASSIFIED" ? "ROUTING_DEFERRED" : "LANE_ROUTED";
-        if (bestLane === "UNCLASSIFIED") deferredCount++; else routedCount++;
+      return { routed: routedCount, deferred: deferredCount };
+    };
 
-        await client.query(
-          `UPDATE canonical_jobs
-           SET primary_lane       = $1,
-               semantic_score     = $2,
-               processing_state   = $3,
-               processing_status  = $3,
-               lane_confidence    = $4,
-               secondary_lanes    = $5,
-               lane_evidence      = $6,
-               updated_at         = NOW()
-           WHERE workspace_id = $7 AND id = $8`,
-          [
-            bestLane,
-            bestScore,
-            processingStatus,
-            laneConfidence,
-            JSON.stringify(secondaryLanes),
-            JSON.stringify(laneEvidence),
-            ctx.workspaceId,
-            job.id,
-          ]
+    let lastError: unknown = null;
+    for (const provider of providerOrder) {
+      try {
+        const result = await routeWithProvider(provider);
+        console.log(
+          `Semantic Lane Routing complete. Routed: ${result.routed}, Deferred: ${result.deferred}`
         );
-
-        await client.query("COMMIT");
-        console.log(`  -> Job ${job.id} ("${job.normalized_title}"): ${bestLane} (Score: ${bestScore.toFixed(3)}, Status: ${processingStatus})`);
-      } catch (jobErr) {
-        await client.query("ROLLBACK");
-        console.error(`❌ Failed to route job ${job.id}:`, jobErr);
+        return result;
+      } catch (error: unknown) {
+        lastError = error;
+        if (error instanceof EmbeddingRunError) {
+          const where = error.jobId ? `job ${error.jobId}` : "prototype embeddings";
+          console.warn(
+            `⚠️ Embedding provider ${provider} failed during ${where}: ${error.message}. Trying fallback...`
+          );
+          continue;
+        }
+        throw error;
       }
     }
+
+    const message = lastError instanceof Error ? lastError.message : String(lastError || "unknown");
+    const trimmed = message.length > 200 ? `${message.slice(0, 200)}...` : message;
+    let deferredCount = 0;
+
+    for (const job of jobs) {
+      await client.query(
+        `UPDATE canonical_jobs
+         SET primary_lane = 'UNCLASSIFIED',
+             semantic_score = 0.0,
+             lane_confidence = 'None',
+             secondary_lanes = $3,
+             lane_evidence = $4,
+             processing_state = 'ROUTING_DEFERRED',
+             processing_status = 'ROUTING_DEFERRED',
+             updated_at = NOW()
+         WHERE workspace_id = $1 AND id = $2`,
+        [
+          ctx.workspaceId,
+          job.id,
+          JSON.stringify([]),
+          JSON.stringify([`EMBEDDING_UNAVAILABLE:${trimmed}`]),
+        ]
+      );
+      deferredCount += 1;
+    }
+
+    console.warn(
+      `⚠️ Semantic Lane Routing deferred all jobs due to embedding failure: ${trimmed}`
+    );
+
+    return { routed: 0, deferred: deferredCount };
   } finally {
     if (ownsClient && typeof client.release === 'function') {
       client.release();
     }
   }
-
-  console.log(`Semantic Lane Routing complete. Routed: ${routedCount}, Deferred: ${deferredCount}`);
-  return { routed: routedCount, deferred: deferredCount };
 }
 
 // ====================================================================

@@ -67,8 +67,10 @@ export function getGeminiClient(): GoogleGenAI {
         "CRITICAL API KEY CONFLICT: GEMINI_API_KEY is not configured for Gemini 2.0 Flash."
       );
     }
+    const apiVersionRaw = (process.env.GEMINI_API_VERSION || "").trim();
     aiClient = new GoogleGenAI({
       apiKey: apiKey,
+      apiVersion: apiVersionRaw || undefined,
       httpOptions: {
         headers: {
           "User-Agent": "aistudio-build",
@@ -499,6 +501,113 @@ export async function generateContent(options: {
   throw new Error("All model API calls failed or no API keys were configured.");
 }
 
+export type EmbeddingProvider = "gemini" | "openai";
+
+let geminiEmbeddingDisabledReason: string | null = null;
+let geminiEmbeddingDisableLogged = false;
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function isGeminiEmbeddingModelNotFound(error: unknown): boolean {
+  const message = describeError(error);
+  try {
+    const parsed = JSON.parse(message) as any;
+    const code = parsed?.error?.code;
+    const status = parsed?.error?.status;
+    if (code === 404 || status === "NOT_FOUND") {
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes("not found for api version") ||
+    (lowered.includes("not found") && lowered.includes("text-embedding")) ||
+    lowered.includes("not supported for embedcontent") ||
+    lowered.includes("status\":\"not_found\"")
+  );
+}
+
+async function embedWithGemini(text: string): Promise<number[]> {
+  if (geminiEmbeddingDisabledReason) {
+    throw new Error(`Gemini embedding disabled: ${geminiEmbeddingDisabledReason}`);
+  }
+
+  const ai = getGeminiClient();
+  try {
+    const response = await ai.models.embedContent({
+      model: MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL,
+      contents: text,
+    });
+    const vals = response.embeddings?.[0]?.values;
+    if (vals && vals.length > 0) return vals;
+    throw new Error("Gemini embedding returned empty values");
+  } catch (error: unknown) {
+    if (isGeminiEmbeddingModelNotFound(error)) {
+      geminiEmbeddingDisabledReason = `model not found/unsupported (${MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL}); set GEMINI_API_VERSION or EMBEDDING_PRIMARY_MODEL`;
+      if (!geminiEmbeddingDisableLogged) {
+        geminiEmbeddingDisableLogged = true;
+        console.warn(`⚠️ ${geminiEmbeddingDisabledReason}`);
+      }
+    }
+    throw error;
+  }
+}
+
+async function embedWithOpenAI(text: string): Promise<number[]> {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    throw new Error("OpenAI embedding requested but OPENAI_API_KEY is not configured.");
+  }
+
+  const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${openaiKey}`,
+    },
+    body: JSON.stringify({ input: text, model: MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL }),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!oResponse.ok) {
+    const errText = await oResponse.text();
+    throw new Error(`OpenAI embedding HTTP ${oResponse.status}: ${errText}`);
+  }
+  const oData = await oResponse.json();
+  const vals: number[] = oData.data?.[0]?.embedding;
+  if (vals && vals.length > 0) return vals;
+  throw new Error("OpenAI embedding returned empty values");
+}
+
+export async function generateEmbeddingWithProvider(
+  text: string,
+  provider: EmbeddingProvider
+): Promise<number[]> {
+  if (provider === "gemini") {
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+    if (!geminiKey) {
+      throw new Error("Gemini embedding requested but GEMINI_API_KEY is not configured.");
+    }
+    return embedWithGemini(text);
+  }
+
+  return embedWithOpenAI(text);
+}
+
 /**
  * Generate a text embedding vector. Provider order:
  *  1. Gemini text-embedding-004 (if GEMINI_API_KEY present)
@@ -510,51 +619,37 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
-  // Try Gemini first (if key present)
-  if (geminiKey) {
-    try {
-      const ai = getGeminiClient();
-      const response = await ai.models.embedContent({
-        model: MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL,
-        contents: text
-      });
-      const vals = response.embeddings?.[0]?.values;
-      if (vals && vals.length > 0) return vals;
-      throw new Error("Gemini embedding returned empty values");
-    } catch (err: any) {
-      console.warn(`⚠️ Gemini embedding failed: ${err.message}. Trying OpenAI fallback...`);
-    }
-  }
+  const providerOrder = resolveProviderOrder(process.env.EMBEDDING_PRIMARY_PROVIDER);
 
-  // Try OpenAI (if key present)
-  if (openaiKey) {
-    try {
-      const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${openaiKey}`
-        },
-        body: JSON.stringify({ input: text, model: MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL }),
-        signal: AbortSignal.timeout(30000)
-      });
-      if (!oResponse.ok) {
-        const errText = await oResponse.text();
-        throw new Error(`OpenAI embedding HTTP ${oResponse.status}: ${errText}`);
+  let lastError: unknown = null;
+
+  for (const provider of providerOrder) {
+    if (provider === "gemini") {
+      if (!geminiKey || geminiEmbeddingDisabledReason) {
+        continue;
       }
-      const oData = await oResponse.json();
-      const vals: number[] = oData.data?.[0]?.embedding;
-      if (vals && vals.length > 0) return vals;
-      throw new Error("OpenAI embedding returned empty values");
-    } catch (oErr: any) {
-      console.warn(`⚠️ OpenAI embedding failed: ${oErr.message}`);
+    } else {
+      if (!openaiKey) {
+        continue;
+      }
+    }
+
+    try {
+      return await generateEmbeddingWithProvider(text, provider);
+    } catch (error: unknown) {
+      lastError = error;
+      const message = describeError(error);
+      if (provider === "gemini") {
+        console.warn(`⚠️ Gemini embedding failed: ${message}. Trying OpenAI fallback...`);
+      } else {
+        console.warn(`⚠️ OpenAI embedding failed: ${message}`);
+      }
     }
   }
 
-  // Both providers failed — throw, never fabricate vectors
   throw new Error(
     "Embedding generation failed: both Gemini and OpenAI providers unavailable or returned no values. " +
-    "Configure at least one of GEMINI_API_KEY or OPENAI_API_KEY."
+      `Last error: ${describeError(lastError)}`
   );
 }
 

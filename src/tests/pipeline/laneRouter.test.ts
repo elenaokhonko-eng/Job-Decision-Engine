@@ -19,7 +19,7 @@ vi.mock('pg', () => {
 });
 
 vi.mock('../../services/agent.js', () => ({
-  generateEmbedding: vi.fn()
+  generateEmbeddingWithProvider: vi.fn()
 }));
 
 const mPool = new pg.Pool();
@@ -51,7 +51,7 @@ describe('Pipeline Stage: Lane Routing', () => {
 
     // 2. Mock embeddings for the 4 prototypes + 1 job
     let embedCallCount = 0;
-    (agent.generateEmbedding as any).mockImplementation((text: string) => {
+    (agent.generateEmbeddingWithProvider as any).mockImplementation((text: string) => {
       embedCallCount++;
       if (text.includes('AI') || text.includes('ML')) {
         return Promise.resolve([1, 0, 0, 0]); // Perfect match for first lane
@@ -62,7 +62,7 @@ describe('Pipeline Stage: Lane Routing', () => {
     await runLaneRouting(undefined, { context });
 
     // 4 prototypes + 1 job = 5 calls
-    expect(agent.generateEmbedding).toHaveBeenCalledTimes(5);
+    expect(agent.generateEmbeddingWithProvider).toHaveBeenCalledTimes(5);
 
     // DB update: SELECT + BEGIN + UPDATE canonical_jobs + COMMIT
     expect(mPool.query).toHaveBeenCalledTimes(4);
