@@ -326,12 +326,18 @@ export async function runHardGates(
 
         const { rows: requirementRows } = await client.query(
           `SELECT requirement_key, requirement_type, requirement_text, quote_text, structured_value
-           FROM job_requirements
-           WHERE workspace_id = $1
-             AND job_version_id = $2
-             AND extractor_type = 'DETERMINISTIC'
-             AND status IN ('EXTRACTED', 'VALIDATED')
-           ORDER BY requirement_key ASC`,
+           FROM job_versions jv
+           JOIN job_requirements jr
+             ON jr.workspace_id = jv.workspace_id
+            AND (
+              (jv.active_requirement_set_id IS NOT NULL AND jr.requirement_set_id = jv.active_requirement_set_id)
+              OR (jv.active_requirement_set_id IS NULL AND jr.job_version_id = jv.id)
+            )
+           WHERE jv.workspace_id = $1
+             AND jv.id = $2
+             AND jr.extractor_type = 'DETERMINISTIC'
+             AND jr.status IN ('EXTRACTED', 'VALIDATED')
+           ORDER BY jr.requirement_key ASC`,
           [ctx.workspaceId, job.job_version_id]
         );
 

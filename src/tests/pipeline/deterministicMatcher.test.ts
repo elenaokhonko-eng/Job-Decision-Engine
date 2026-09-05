@@ -56,7 +56,7 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
       if (sql.includes('INSERT INTO match_runs') && sql.includes('RETURNING id')) {
         return { rows: [{ id: '55555555-5555-4555-8555-555555555555' }] };
       }
-      if (sql.includes('FROM job_requirements jr')) {
+      if (sql.includes('JOIN job_requirements jr')) {
         return {
           rows: [
             {

@@ -238,9 +238,15 @@ export async function runDeterministicMatcher(
                   jr.requirement_text,
                   jr.quote_text,
                   jr.structured_value
-           FROM job_requirements jr
-           WHERE jr.workspace_id = $1
-             AND jr.job_version_id = $2
+           FROM job_versions jv
+           JOIN job_requirements jr
+             ON jr.workspace_id = jv.workspace_id
+            AND (
+              (jv.active_requirement_set_id IS NOT NULL AND jr.requirement_set_id = jv.active_requirement_set_id)
+              OR (jv.active_requirement_set_id IS NULL AND jr.job_version_id = jv.id)
+            )
+           WHERE jv.workspace_id = $1
+             AND jv.id = $2
              AND jr.status = 'VALIDATED'
            ORDER BY jr.requirement_key ASC`,
           [ctx.workspaceId, versionId]

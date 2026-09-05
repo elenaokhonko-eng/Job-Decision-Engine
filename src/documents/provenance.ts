@@ -211,11 +211,17 @@ export async function persistDocumentProvenance(
 
     if (allRequirementKeys.length > 0) {
       const reqRes = await client.query<RequirementRow>(
-        `SELECT id, requirement_key
-         FROM job_requirements
-         WHERE workspace_id = $1
-           AND job_version_id = $2
-           AND requirement_key = ANY($3::text[])`,
+        `SELECT jr.id, jr.requirement_key
+         FROM job_versions jv
+         JOIN job_requirements jr
+           ON jr.workspace_id = jv.workspace_id
+          AND (
+            (jv.active_requirement_set_id IS NOT NULL AND jr.requirement_set_id = jv.active_requirement_set_id)
+            OR (jv.active_requirement_set_id IS NULL AND jr.job_version_id = jv.id)
+          )
+         WHERE jv.workspace_id = $1
+           AND jv.id = $2
+           AND jr.requirement_key = ANY($3::text[])`,
         [ctx.workspaceId, input.jobVersionId, allRequirementKeys]
       );
       for (const row of reqRes.rows) {

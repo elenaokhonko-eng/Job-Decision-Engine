@@ -29,63 +29,63 @@ phases:
     title: Unlimited deterministic processing
     status: pending
     depends_on: [P0]
-    migrations: [019_or_separate_legacy_status_backfill]
+    migrations: [019]
     deliverables: [quota_removal, lifecycle_split, all_eligible_test]
     gate: one_hundred_of_one_hundred_terminal
   - id: P2
     title: Registry and profile revision core
     status: pending
     depends_on: [P0]
-    migrations: [019, 020]
+    migrations: [020, 021]
     deliverables: [workspace_scope, registry_loader, stable_fact_identity, immutable_revisions]
     gate: legacy_v22_profile_parity
   - id: P3
     title: Conversational profile updates
     status: pending
     depends_on: [P2]
-    migrations: [021]
+    migrations: [022]
     deliverables: [sessions, proposals, clarifications, approval_transaction]
     gate: profile_update_e2e
   - id: P4
     title: Evidence graph and capability metrics
     status: pending
     depends_on: [P2]
-    migrations: [022]
+    migrations: [023]
     deliverables: [evidence_edges, strength_registry, metric_materializer]
     gate: deterministic_metric_replay
   - id: P5
     title: Requirement sets and corrections
     status: pending
     depends_on: [P2]
-    migrations: [023]
+    migrations: [024]
     deliverables: [immutable_sets, extraction_cache, correction_workflow]
     gate: requirement_history_preserved
   - id: P6
     title: Policy snapshots and decisions
     status: pending
     depends_on: [P4, P5]
-    migrations: [024]
+    migrations: [025]
     deliverables: [safe_rule_dsl, resolved_snapshots, deterministic_decisions]
     gate: cross_runtime_golden_replay
   - id: P7
     title: Dynamic lanes
     status: pending
     depends_on: [P2, P5]
-    migrations: [025]
+    migrations: [026]
     deliverables: [lane_revisions, preferences, decisions, crud_import_export]
     gate: no_deploy_custom_lane
   - id: P8
     title: Tasks embeddings and semantic matching
     status: pending
     depends_on: [P1, P4, P5, P6, P7]
-    migrations: [026, 027]
+    migrations: [027, 028]
     deliverables: [durable_tasks, atomic_embedding_batches, matchable_nodes, scorer]
     gate: fault_injection_green
   - id: P9
     title: Model routes and document plugins
     status: pending
     depends_on: [P3, P6, P8]
-    migrations: [028, 029]
+    migrations: [029, 030]
     deliverables: [route_snapshots, plugin_versions, deterministic_claim_selection]
     gate: provenance_complete_documents
   - id: P10
@@ -95,10 +95,31 @@ phases:
     migrations: []
     deliverables: [v2_api, cursor_read_model, streamlit_workflows]
     gate: browser_e2e_green
+  - id: P12
+    title: Source plugin SDK and compliant discovery
+    status: pending
+    depends_on: [P2]
+    migrations: [031, 032]
+    deliverables: [source_revisions, connector_accounts, checkpoints, compliant_connectors, discovery_health]
+    gate: source_contract_fixtures_green
+  - id: P13
+    title: Accessible neuroinclusive product
+    status: pending
+    depends_on: [P10]
+    migrations: [033, 034]
+    deliverables: [wcag_22_aa_baseline, quiet_mode, preference_modes, consent_controls, usability_tests]
+    gate: accessibility_walkthrough_green
   - id: P11
     title: Backfill parity and cutover
     status: pending
-    depends_on: [P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10]
-    migrations: [030]
+    depends_on: [P0, P1, P2, P3, P4, P5, P6, P7, P8, P9, P10, P12, P13]
+    migrations: [035]
     deliverables: [resumable_backfill, parity_audit, runbooks, release_tag]
     gate: v22_definition_of_done
+  - id: P14
+    title: Open-source trust and adoption release
+    status: pending
+    depends_on: [P11]
+    migrations: []
+    deliverables: [one_command_install, synthetic_demo, docs_pack, compliance_matrix, sbom_signed_release, public_benchmarks]
+    gate: v22_adoption_release_exit

@@ -72,8 +72,15 @@ export async function buildEmbeddingInputs(
     }>(
       `SELECT jr.id, jr.requirement_type, jr.requirement_text, jr.quote_text, jr.structured_value
        FROM job_requirements jr
+       JOIN job_versions jv
+         ON jv.workspace_id = jr.workspace_id
+        AND jv.id = jr.job_version_id
        WHERE jr.workspace_id = $1
          AND jr.status = 'VALIDATED'
+         AND (
+           jv.active_requirement_set_id IS NULL
+           OR jr.requirement_set_id = jv.active_requirement_set_id
+         )
          AND NOT EXISTS (
            SELECT 1
            FROM embedding_inputs ei

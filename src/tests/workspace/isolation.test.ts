@@ -166,11 +166,54 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
         )
       ).rows[0].id as string;
 
+      const identityId = (
+        await q(
+          `INSERT INTO requirement_set_identities (
+             workspace_id,
+             canonical_job_id,
+             identity_hash,
+             job_content_hash,
+             deterministic_extractor_version,
+             quoted_extractor_version,
+             quoted_prompt_hash,
+             normalizer_hash,
+             quoted_enabled
+           )
+           VALUES ($1, $2, $3, $4, 'test', 'none', 'test', 'test', FALSE)
+           RETURNING id`,
+          [workspaceId, canonicalId, `id-${company}-${Math.random()}`, `content-${company}`]
+        )
+      ).rows[0].id as string;
+
+      const requirementSetId = (
+        await q(
+          `INSERT INTO requirement_sets (
+             workspace_id,
+             requirement_identity_id,
+             canonical_job_id,
+             job_version_id,
+             revision_number,
+             source_type,
+             base_requirement_set_id,
+             created_by_user_id
+           )
+           VALUES ($1, $2, $3, $4, 1, 'EXTRACTED', NULL, NULL)
+           RETURNING id`,
+          [workspaceId, identityId, canonicalId, versionId]
+        )
+      ).rows[0].id as string;
+
+      await q(
+        `UPDATE job_versions SET active_requirement_set_id = $1 WHERE workspace_id = $2 AND id = $3`,
+        [requirementSetId, workspaceId, versionId]
+      );
+
       await q(
         `INSERT INTO job_requirements (
            workspace_id,
            canonical_job_id,
            job_version_id,
+           requirement_set_id,
            requirement_key,
            requirement_type,
            importance,
@@ -184,8 +227,8 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
            confidence,
            status
          )
-         VALUES ($1, $2, $3, 'REQ-1', 'DOMAIN', 'MUST', 'Python', NULL, NULL, NULL, NULL, 'DETERMINISTIC', 'test', 1.0, 'VALIDATED')`,
-        [workspaceId, canonicalId, versionId]
+         VALUES ($1, $2, $3, $4, 'REQ-1', 'DOMAIN', 'MUST', 'Python', NULL, NULL, NULL, NULL, 'DETERMINISTIC', 'test', 1.0, 'VALIDATED')`,
+        [workspaceId, canonicalId, versionId, requirementSetId]
       );
 
       return { canonicalId, versionId };
