@@ -2,6 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { computeEvidenceStrength, loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -36,6 +37,7 @@ interface FactRow {
   fact_type: string;
   statement: string;
   evidence_tier: string;
+  verification_status: string;
   structured_value: Record<string, unknown> | null;
 }
 
@@ -102,6 +104,7 @@ function buildFactText(fact: FactRow): string {
     fact.fact_type,
     fact.statement,
     fact.evidence_tier,
+    fact.verification_status,
     flattenStructuredValue(fact.structured_value),
   ]
     .join(" ")
@@ -173,7 +176,7 @@ export async function runDeterministicMatcher(
     const profileVersionId = profileRes.rows[0].id;
 
     const factsRes = await client.query<FactRow>(
-      `SELECT pf.id, pf.fact_type, pf.statement, pf.evidence_tier, pf.structured_value
+      `SELECT pf.id, pf.fact_type, pf.statement, pf.evidence_tier, pf.verification_status, pf.structured_value
        FROM profile_facts pf
        WHERE pf.workspace_id = $1
          AND pf.profile_version_id = $2`,
@@ -206,6 +209,14 @@ export async function runDeterministicMatcher(
       [ctx.workspaceId]
     );
 
+    const evidenceStrengthPolicy = await loadActiveEvidenceStrengthPolicy(client as any, {
+      context: ctx,
+    });
+    const evidencePolicyRevisionId =
+      evidenceStrengthPolicy.source === "REGISTRY"
+        ? evidenceStrengthPolicy.configRevisionId ?? null
+        : null;
+
     for (const job of jobs) {
       const versionId = job.resolved_job_version_id || job.latest_job_version_id;
       if (!versionId) {
@@ -222,11 +233,20 @@ export async function runDeterministicMatcher(
              job_version_id,
              profile_version_id,
              status,
-             policy_version
+             policy_version,
+             evidence_strength_policy_config_revision_id,
+             evidence_strength_policy_hash
            )
-           VALUES ($1, $2, $3, $4, 'STARTED', 'deterministic_v1')
+           VALUES ($1, $2, $3, $4, 'STARTED', 'deterministic_v1', $5, $6)
            RETURNING id`,
-          [ctx.workspaceId, job.id, versionId, profileVersionId]
+          [
+            ctx.workspaceId,
+            job.id,
+            versionId,
+            profileVersionId,
+            evidencePolicyRevisionId,
+            evidenceStrengthPolicy.policyHash,
+          ]
         );
         const matchRunId = runRes.rows[0].id;
 
@@ -310,7 +330,15 @@ export async function runDeterministicMatcher(
             }
           }
 
-          weightedScoreSum += bestScore * weight;
+          const evidenceStrength = bestFact
+            ? computeEvidenceStrength(
+                bestFact.evidence_tier as any,
+                bestFact.verification_status as any,
+                evidenceStrengthPolicy.policy
+              )
+            : 0;
+          const weightedScore = bestScore * evidenceStrength;
+          weightedScoreSum += weightedScore * weight;
 
           let matchType: 'EXACT' | 'SEMANTIC' | 'NO_MATCH' = 'NO_MATCH';
           if (bestScore >= 0.85) {
@@ -349,6 +377,10 @@ export async function runDeterministicMatcher(
                 requirement_key: req.requirement_key,
                 requirement_type: req.requirement_type,
                 matched_fact_type: bestFact?.fact_type || null,
+                evidence_tier: bestFact?.evidence_tier || null,
+                verification_status: bestFact?.verification_status || null,
+                evidence_strength: bestFact ? evidenceStrength : null,
+                weighted_score: bestFact ? Number(weightedScore.toFixed(6)) : null,
               }),
             ]
           );

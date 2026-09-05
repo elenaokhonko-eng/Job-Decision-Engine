@@ -47,3 +47,45 @@ export const DecisionContractPlaceholder = z.object({
   decision: DeterministicDecisionSchema,
   policy: DecisionPolicySchema,
 });
+
+// ---------------------------------------------------------------------------
+// P6: Policy snapshots + deterministic recommendation decisions (policy-driven)
+// ---------------------------------------------------------------------------
+
+export const RecommendationEligibilitySchema = z.enum(['ELIGIBLE', 'VERIFY', 'INELIGIBLE']);
+export const RecommendationOutcomeSchema = z.enum(['PRIORITY', 'REVIEW', 'TRACK', 'SKIP']);
+
+export const RecommendationDecisionInputsSchema = z.object({
+  gate_decision: z.enum(['PASS', 'NEEDS_VERIFICATION', 'HARD_REJECT']).nullable(),
+  requirement_score: z.number().min(0).max(1).nullable(),
+  coverage_score: z.number().min(0).max(1).nullable(),
+  evidence_completeness: z.number().min(0).max(1).nullable(),
+});
+
+export const RecommendationDecisionOutputsSchema = z.object({
+  eligibility: RecommendationEligibilitySchema,
+  outcome: RecommendationOutcomeSchema,
+  recommendation_requirement_score: z.number().min(0).max(1).nullable(),
+  recommendation_coverage_score: z.number().min(0).max(1).nullable(),
+  recommendation_evidence_completeness: z.number().min(0).max(1).nullable(),
+});
+
+export const RecommendationDecisionTraceSchema = z.object({
+  policy_version: z.string().min(1).max(100),
+  policy_hash: z.string().min(1).max(200),
+  policy_snapshot_id: z.string().uuid(),
+  eligibility_rule_id: z.string().nullable(),
+  outcome_rule_id: z.string().nullable(),
+  notes: z.array(z.string()).default([]),
+});
+
+export const RecommendationDecisionSchema = z.object({
+  schema_version: SchemaVersionSchema.default(DECISION_SCHEMA_VERSION),
+  canonical_job_id: z.string().uuid(),
+  job_version_id: z.string().uuid(),
+  match_run_id: z.string().uuid().nullable(),
+  inputs: RecommendationDecisionInputsSchema,
+  outputs: RecommendationDecisionOutputsSchema,
+  trace: RecommendationDecisionTraceSchema,
+  created_at: z.date().optional(),
+});

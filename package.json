@@ -13,6 +13,7 @@
     "cutover:audit": "tsx scripts/backfill_cutover.ts",
     "contracts:export": "tsx scripts/export_contracts.ts",
     "contracts:check": "npm run contracts:export && git diff --exit-code -- src/contracts/json",
+    "decisions:replay": "tsx scripts/replay_deterministic_decisions.ts",
     "test": "vitest run",
     "eval:golden": "tsx scripts/run_evals.ts",
     "lint": "tsc --noEmit",

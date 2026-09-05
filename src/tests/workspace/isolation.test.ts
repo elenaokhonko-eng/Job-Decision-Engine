@@ -338,5 +338,73 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
     ).rows[0].id as string;
 
     await expect(q(`UPDATE profile_fact_revisions SET statement = 'Java' WHERE id = $1`, [factRevId])).rejects.toThrow();
+
+    const snapshotId = (
+      await q(
+        `INSERT INTO workspace_policy_snapshots (
+           workspace_id,
+           snapshot_hash,
+           resolved_snapshot,
+           created_by_user_id
+         )
+         VALUES ($1, 'snap_hash', '{}'::jsonb, $2)
+         RETURNING id`,
+        [alphaId, aliceId]
+      )
+    ).rows[0].id as string;
+
+    await expect(
+      q(`UPDATE workspace_policy_snapshots SET resolved_snapshot = '{"x":1}'::jsonb WHERE id = $1`, [snapshotId])
+    ).rejects.toThrow();
+
+    const canonicalId = (
+      await q(
+        `INSERT INTO canonical_jobs (
+           workspace_id,
+           company_name,
+           normalized_title,
+           canonical_url,
+           processing_state,
+           processing_status,
+           primary_lane
+         )
+         VALUES ($1, 'AlphaCo', 'data engineer', 'https://example.com/alpha', 'MATCHED', 'MATCHED', 'CORE_AI_DATA')
+         RETURNING id`,
+        [alphaId]
+      )
+    ).rows[0].id as string;
+
+    const versionId = (
+      await q(
+        `INSERT INTO job_versions (workspace_id, canonical_job_id, content_hash, description_text)
+         VALUES ($1, $2, 'hash', 'desc')
+         RETURNING id`,
+        [alphaId, canonicalId]
+      )
+    ).rows[0].id as string;
+
+    const decisionId = (
+      await q(
+        `INSERT INTO deterministic_decisions (
+           workspace_id,
+           canonical_job_id,
+           job_version_id,
+           match_run_id,
+           policy_snapshot_id,
+           decision_hash,
+           decision_json,
+           recommendation_eligibility,
+           recommendation_outcome,
+           created_by_user_id
+         )
+         VALUES ($1, $2, $3, NULL, $4, 'hash', '{"decision":"x"}'::jsonb, 'ELIGIBLE', 'TRACK', $5)
+         RETURNING id`,
+        [alphaId, canonicalId, versionId, snapshotId, aliceId]
+      )
+    ).rows[0].id as string;
+
+    await expect(
+      q(`UPDATE deterministic_decisions SET decision_json = '{"y":2}'::jsonb WHERE id = $1`, [decisionId])
+    ).rejects.toThrow();
   });
 });
