@@ -28,6 +28,77 @@ export interface UpsertConfigRevisionOptions {
   note?: string;
 }
 
+export interface ActiveConfigRevision {
+  configDefinitionId: string;
+  configRevisionId: string;
+  revisionNumber: number;
+  schemaVersion: string;
+  contentHash: string;
+  content: unknown;
+}
+
+export interface GetActiveConfigRevisionOptions {
+  context?: WorkspaceContext;
+}
+
+export async function getActiveConfigRevision(
+  configKey: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  options?: GetActiveConfigRevisionOptions
+): Promise<ActiveConfigRevision | null> {
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === 'function' && !('release' in value);
+  const ownsClient = isPool(clientOrPool);
+  const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
+
+  try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+
+    const { rows } = await (client as QueryClient).query<{
+      config_definition_id: string;
+      config_revision_id: string;
+      revision_number: number;
+      schema_version: string;
+      content_hash: string;
+      content: unknown;
+    }>(
+      `
+        SELECT
+          cd.id AS config_definition_id,
+          cr.id AS config_revision_id,
+          cr.revision_number AS revision_number,
+          cr.schema_version AS schema_version,
+          cr.content_hash AS content_hash,
+          cr.content AS content
+        FROM config_definitions cd
+        JOIN config_active_revisions car ON car.config_definition_id = cd.id
+        JOIN config_revisions cr ON cr.id = car.config_revision_id
+        WHERE cd.workspace_id = $1
+          AND cd.config_key = $2
+        LIMIT 1
+      `,
+      [ctx.workspaceId, configKey]
+    );
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    return {
+      configDefinitionId: rows[0].config_definition_id,
+      configRevisionId: rows[0].config_revision_id,
+      revisionNumber: rows[0].revision_number,
+      schemaVersion: rows[0].schema_version,
+      contentHash: rows[0].content_hash,
+      content: rows[0].content,
+    };
+  } finally {
+    if (ownsClient && typeof (client as any).release === 'function') {
+      (client as any).release();
+    }
+  }
+}
+
 export async function upsertConfigRevision(
   input: UpsertConfigRevisionInput,
   clientOrPool: pg.Pool | pg.PoolClient,
@@ -182,4 +253,3 @@ export async function upsertConfigRevision(
     }
   }
 }
-

@@ -1,0 +1,17 @@
+schema_version: "2.2.0"
+policy_key: "evidence_strength_v1"
+evidence_tier_weights:
+  PROFESSIONAL_PRODUCTION: 1.0
+  DEPLOYED_OPEN_SOURCE: 0.8
+  APPLIED_PROJECT: 0.6
+  COURSE_PROJECT: 0.3
+  KNOWLEDGE_ONLY: 0.1
+verification_status_weights:
+  VERIFIED: 1.0
+  SELF_ATTESTED: 0.7
+  UNVERIFIED: 0.4
+hours_per_week_band_weights:
+  FULL_TIME: 1.0
+  SUBSTANTIAL_PART_TIME: 0.6
+  LIMITED: 0.3
+

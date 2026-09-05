@@ -53,6 +53,16 @@ const LaneFileSchema = z
   })
   .passthrough();
 
+const EvidenceStrengthPolicySchema = z
+  .object({
+    schema_version: z.string().optional(),
+    policy_key: z.string().optional(),
+    evidence_tier_weights: z.record(z.number()).default({}),
+    verification_status_weights: z.record(z.number()).default({}),
+    hours_per_week_band_weights: z.record(z.number()).default({}),
+  })
+  .passthrough();
+
 async function main(): Promise<void> {
   if (!databaseUrl) {
     throw new Error('DATABASE_URL is required.');
@@ -121,11 +131,34 @@ async function main(): Promise<void> {
       laneCount += 1;
     }
 
+    const evidenceStrengthPath = path.resolve(process.cwd(), 'config', 'evidence_strength.yml');
+    const evidenceStrength = await loadStructuredFile(
+      evidenceStrengthPath,
+      EvidenceStrengthPolicySchema
+    );
+    const evidenceStrengthRes = await upsertConfigRevision(
+      {
+        configKey: 'evidence_strength',
+        configType: 'EVIDENCE_STRENGTH',
+        description: 'config/evidence_strength.yml',
+        schemaVersion: evidenceStrength.data.schema_version ?? '2.2.0',
+        content: evidenceStrength.data,
+      },
+      pool,
+      {
+        context: ctx,
+        note: `sync from ${evidenceStrengthPath}`,
+      }
+    );
+
     console.log('Config registry sync complete.');
     console.log(`- workspace: ${ctx.workspaceKey} (${ctx.workspaceId})`);
     console.log(`- sources: revision ${sourcesRes.revisionNumber} (hash ${sourcesRes.contentHash.slice(0, 12)}...)`);
     console.log(`- lanes_registry: revision ${registryRes.revisionNumber} (hash ${registryRes.contentHash.slice(0, 12)}...)`);
     console.log(`- lane definitions synced: ${laneCount}`);
+    console.log(
+      `- evidence_strength: revision ${evidenceStrengthRes.revisionNumber} (hash ${evidenceStrengthRes.contentHash.slice(0, 12)}...)`
+    );
   } finally {
     await pool.end();
   }
@@ -137,4 +170,3 @@ if (process.argv[1] && process.argv[1].includes('sync_config_registry')) {
     process.exit(1);
   });
 }
-
