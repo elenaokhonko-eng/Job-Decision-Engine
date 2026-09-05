@@ -19,8 +19,65 @@ vi.mock('pg', () => {
 });
 
 vi.mock('../../services/agent.js', () => ({
-  generateEmbeddingWithProvider: vi.fn()
+  generateEmbeddingWithProvider: vi.fn(),
+  MODEL_REGISTRY: {
+    EMBEDDING_PRIMARY_MODEL: 'text-embedding-004',
+    EMBEDDING_FALLBACK_MODEL: 'text-embedding-3-small',
+  },
 }));
+
+vi.mock('../../pipeline/laneConfigLoader.js', async () => {
+  const actual: any = await vi.importActual('../../pipeline/laneConfigLoader.js');
+  return {
+    ...actual,
+    loadWorkspaceLanesConfig: vi.fn(async () => ({
+      source: 'FILES',
+      config: {
+        version: 'test',
+        description: 'test config',
+        lanes: {
+          CORE_AI_DATA: {
+            title: 'Core AI',
+            description: 'Core AI lane',
+            threshold: 0,
+            semantic_threshold: 0,
+            keywords: [],
+            prototype_query: 'AI ML',
+          },
+          LEGAL_REGTECH: {
+            title: 'Legal',
+            description: 'Legal lane',
+            threshold: 0,
+            semantic_threshold: 0,
+            keywords: [],
+            prototype_query: 'Legal compliance',
+          },
+          HEALTH_BIO_PHARMA: {
+            title: 'Health',
+            description: 'Health lane',
+            threshold: 0,
+            semantic_threshold: 0,
+            keywords: [],
+            prototype_query: 'Health bio pharma',
+          },
+          INVESTMENT_MARKETS_FINTECH: {
+            title: 'Fintech',
+            description: 'Fintech lane',
+            threshold: 0,
+            semantic_threshold: 0,
+            keywords: [],
+            prototype_query: 'Markets fintech',
+          },
+        },
+        unclassified_policy: {
+          label: 'UNCLASSIFIED',
+          fallback_behavior: 'DEFER_ROUTING',
+          min_similarity_floor: 0.25,
+        },
+      },
+    })),
+  };
+});
 
 const mPool = new pg.Pool();
 

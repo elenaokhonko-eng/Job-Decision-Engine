@@ -59,13 +59,7 @@
           "anyOf": [
             {
               "type": "string",
-              "enum": [
-                "CORE_AI_DATA",
-                "LEGAL_REGTECH",
-                "HEALTH_BIO_PHARMA",
-                "INVESTMENT_MARKETS_FINTECH",
-                "UNCLASSIFIED"
-              ]
+              "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
             },
             {
               "type": "null"

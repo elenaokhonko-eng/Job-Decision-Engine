@@ -1,15 +1,23 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { generateEmbeddingWithProvider, type EmbeddingProvider } from "../services/agent.js";
+import crypto from "crypto";
+import {
+  generateEmbeddingWithProvider,
+  MODEL_REGISTRY,
+  type EmbeddingProvider,
+} from "../services/agent.js";
 import { pgSslConfig } from "../db/pgSsl.js";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
 import {
   loadGlobalLanesConfig,
   loadLanesConfig,
+  loadWorkspaceLanesConfig,
   type GlobalLanesConfig,
   type LaneDefinition,
 } from "./laneConfigLoader.js";
+import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
 
 export { loadGlobalLanesConfig, loadLanesConfig };
 export type { GlobalLanesConfig, LaneDefinition };
@@ -131,10 +139,20 @@ export async function runLaneRouter(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options?: { context?: WorkspaceContext }
 ): Promise<{ routed: number; deferred: number }> {
-  console.log("Starting Semantic Lane Routing from config/lanes registry...");
-  const config = loadGlobalLanesConfig();
   const pool = clientOrPool || defaultPool;
   const ctx = options?.context ?? (await resolveWorkspaceContext(pool as any));
+  const configResult = await loadWorkspaceLanesConfig(pool, {
+    context: ctx,
+    seedIfEmpty: true,
+  });
+  const config = configResult.config;
+  const configSourceLabel =
+    configResult.source === "FILES" ? "config/lanes (FILES)" : "workspace lanes (DB)";
+  console.log(
+    `Starting Semantic Lane Routing from ${configSourceLabel}. Lanes version: ${
+      config.version || "unknown"
+    }`
+  );
 
   // Use LATERAL join to get only the latest version's description
   const { rows: jobs } = await pool.query(
@@ -161,6 +179,38 @@ export async function runLaneRouter(
     return { routed: 0, deferred: 0 };
   }
 
+  if (process.env.PIPELINE_TASKS_SHADOW_ENQUEUE === "true") {
+    let enqueued = 0;
+    for (const job of jobs) {
+      const taskKey = `lane_route:${job.latest_version_id}:${config.version || "unknown"}`;
+      try {
+        const res = await enqueuePipelineTask(
+          {
+            taskType: "LANE_ROUTE_JOB_VERSION",
+            taskKey,
+            payload: {
+              canonical_job_id: job.id,
+              job_version_id: job.latest_version_id,
+              lanes_version: config.version ?? null,
+            },
+          },
+          pool as any,
+          { context: ctx }
+        );
+        if (res.inserted) {
+          enqueued += 1;
+        }
+      } catch (err: any) {
+        if (err?.code === "42P01") {
+          console.warn("⚠️ pipeline_tasks table missing; skipping shadow enqueue for lane routing.");
+          break;
+        }
+        throw err;
+      }
+    }
+    console.log(`Shadow-enqueued ${enqueued} lane routing task(s).`);
+  }
+
   class EmbeddingRunError extends Error {
     provider: EmbeddingProvider;
     jobId?: string;
@@ -184,6 +234,170 @@ export async function runLaneRouter(
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
   try {
+    const useWorkspaceLaneTables = configResult.source === "LANE_REGISTRY_DB";
+    const pipelineRunId = crypto.randomUUID();
+    const laneSnapshot = {
+      source: configResult.source,
+      lanes_version: config.version ?? null,
+      active_lane_revisions:
+        configResult.activeLaneRevisions?.map((lane) => ({
+          lane_key: lane.laneKey,
+          lane_identity_id: lane.laneIdentityId,
+          lane_revision_id: lane.laneRevisionId,
+          revision_number: lane.revisionNumber,
+          content_hash: lane.contentHash,
+          activated_at: lane.activatedAt,
+        })) ?? [],
+    };
+
+    const loadPreferenceOrdering = async (): Promise<{
+      laneRankByKey: Record<string, number>;
+      laneEnabledByKey: Record<string, boolean>;
+    }> => {
+      if (!useWorkspaceLaneTables) {
+        return { laneRankByKey: {}, laneEnabledByKey: {} };
+      }
+      try {
+        const { rows } = await client.query<{
+          lane_key: string;
+          enabled: boolean;
+          priority_rank: number;
+        }>(
+          `
+            SELECT li.lane_key, wlp.enabled, wlp.priority_rank
+            FROM workspace_lane_preferences wlp
+            JOIN lane_identities li ON li.id = wlp.lane_identity_id
+            WHERE wlp.workspace_id = $1
+              AND wlp.workspace_user_id = $2
+          `,
+          [ctx.workspaceId, ctx.userId]
+        );
+
+        const laneRankByKey: Record<string, number> = {};
+        const laneEnabledByKey: Record<string, boolean> = {};
+
+        for (const row of rows) {
+          laneRankByKey[row.lane_key] = row.priority_rank ?? 1000;
+          laneEnabledByKey[row.lane_key] = row.enabled !== false;
+        }
+
+        return { laneRankByKey, laneEnabledByKey };
+      } catch (error: any) {
+        // Allow running without preferences table (pre-migration).
+        if (error?.code === "42P01") {
+          return { laneRankByKey: {}, laneEnabledByKey: {} };
+        }
+        throw error;
+      }
+    };
+
+    const preferences = await loadPreferenceOrdering();
+    const preferenceRank = (laneKey: string): number => preferences.laneRankByKey[laneKey] ?? 1000;
+    const preferenceEnabled = (laneKey: string): boolean => {
+      if (laneKey in preferences.laneEnabledByKey) {
+        return preferences.laneEnabledByKey[laneKey];
+      }
+      return true;
+    };
+
+    const persistLaneDecision = async (params: {
+      canonicalJobId: string;
+      jobVersionId: string;
+      embeddingProvider: EmbeddingProvider;
+      embeddingDimensions: number;
+      primaryLane: string;
+      secondaryLanes: string[];
+      laneConfidence: string;
+      semanticScores: Record<string, number>;
+      laneEvidence: string[];
+      evaluatedAt: string;
+    }): Promise<string | null> => {
+      if (!useWorkspaceLaneTables) {
+        return null;
+      }
+      const embeddingModel =
+        params.embeddingProvider === "gemini"
+          ? MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL
+          : MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL;
+      const modelVersion = [
+        "lane_router_v2.2.0",
+        config.version ?? "lanes_unknown",
+        `${params.embeddingProvider}:${embeddingModel}:${params.embeddingDimensions}`,
+      ].join("|");
+
+      const decisionJson = {
+        schema_version: "2.2.0",
+        canonical_job_id: params.canonicalJobId,
+        job_version_id: params.jobVersionId,
+        pipeline_run_id: pipelineRunId,
+        model_version: modelVersion,
+        primary_lane: params.primaryLane,
+        secondary_lanes: params.secondaryLanes,
+        lane_confidence: params.laneConfidence,
+        semantic_scores: params.semanticScores,
+        lane_evidence: params.laneEvidence,
+        evaluated_at: params.evaluatedAt,
+      };
+
+      const decisionHash = sha256Hex(stableStringify(decisionJson));
+
+      try {
+        const inserted = await client.query<{ id: string }>(
+          `
+            INSERT INTO lane_decisions (
+              workspace_id,
+              canonical_job_id,
+              job_version_id,
+              decision_hash,
+              schema_version,
+              model_version,
+              lane_snapshot,
+              decision_json,
+              created_by_user_id,
+              created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+            ON CONFLICT (workspace_id, decision_hash)
+            DO NOTHING
+            RETURNING id
+          `,
+          [
+            ctx.workspaceId,
+            params.canonicalJobId,
+            params.jobVersionId,
+            decisionHash,
+            "2.2.0",
+            modelVersion,
+            laneSnapshot,
+            decisionJson,
+            ctx.userId,
+          ]
+        );
+
+        if (inserted.rows.length > 0) {
+          return inserted.rows[0].id;
+        }
+
+        const existing = await client.query<{ id: string }>(
+          `
+            SELECT id
+            FROM lane_decisions
+            WHERE workspace_id = $1
+              AND decision_hash = $2
+            LIMIT 1
+          `,
+          [ctx.workspaceId, decisionHash]
+        );
+        return existing.rows[0]?.id ?? null;
+      } catch (error: any) {
+        // Allow running against pre-migration databases.
+        if (error?.code === "42P01") {
+          return null;
+        }
+        throw error;
+      }
+    };
+
     const routeWithProvider = async (
       provider: EmbeddingProvider
     ): Promise<{ routed: number; deferred: number }> => {
@@ -239,6 +453,19 @@ export async function runLaneRouter(
           const isZeroVector = jobEmbedding.every((v) => v === 0);
           if (isZeroVector) {
             console.warn(`⚠️ Zero embedding for job ${job.id}. Deferring (never default lane).`);
+            const evaluatedAt = new Date().toISOString();
+            const laneDecisionId = await persistLaneDecision({
+              canonicalJobId: job.id,
+              jobVersionId: job.latest_version_id,
+              embeddingProvider: provider,
+              embeddingDimensions: jobEmbedding.length,
+              primaryLane: "UNCLASSIFIED",
+              secondaryLanes: [],
+              laneConfidence: "None",
+              semanticScores: {},
+              laneEvidence: ["ZERO_VECTOR_EMBEDDING"],
+              evaluatedAt,
+            });
             await client.query(
               `UPDATE canonical_jobs
                SET primary_lane = 'UNCLASSIFIED',
@@ -252,6 +479,15 @@ export async function runLaneRouter(
                WHERE workspace_id = $1 AND id = $2`,
               [ctx.workspaceId, job.id, JSON.stringify([]), JSON.stringify(["ZERO_VECTOR_EMBEDDING"])]
             );
+            if (laneDecisionId) {
+              await client.query(
+                `UPDATE canonical_jobs
+                 SET latest_lane_decision_id = $3,
+                     updated_at = NOW()
+                 WHERE workspace_id = $1 AND id = $2`,
+                [ctx.workspaceId, job.id, laneDecisionId]
+              );
+            }
             await client.query("COMMIT");
             deferredCount++;
             continue;
@@ -261,6 +497,19 @@ export async function runLaneRouter(
             console.warn(
               `⚠️ Embedding dimension mismatch for job ${job.id}: expected ${prototypeDimensions} got ${jobEmbedding.length}. Deferring.`
             );
+            const evaluatedAt = new Date().toISOString();
+            const laneDecisionId = await persistLaneDecision({
+              canonicalJobId: job.id,
+              jobVersionId: job.latest_version_id,
+              embeddingProvider: provider,
+              embeddingDimensions: jobEmbedding.length,
+              primaryLane: "UNCLASSIFIED",
+              secondaryLanes: [],
+              laneConfidence: "None",
+              semanticScores: {},
+              laneEvidence: [`EMBEDDING_DIM_MISMATCH:${jobEmbedding.length}!=${prototypeDimensions}`],
+              evaluatedAt,
+            });
             await client.query(
               `UPDATE canonical_jobs
                SET primary_lane = 'UNCLASSIFIED',
@@ -279,6 +528,15 @@ export async function runLaneRouter(
                 JSON.stringify([`EMBEDDING_DIM_MISMATCH:${jobEmbedding.length}!=${prototypeDimensions}`]),
               ]
             );
+            if (laneDecisionId) {
+              await client.query(
+                `UPDATE canonical_jobs
+                 SET latest_lane_decision_id = $3,
+                     updated_at = NOW()
+                 WHERE workspace_id = $1 AND id = $2`,
+                [ctx.workspaceId, job.id, laneDecisionId]
+              );
+            }
             await client.query("COMMIT");
             deferredCount++;
             continue;
@@ -291,6 +549,10 @@ export async function runLaneRouter(
           const descText = (job.description_text || "").toLowerCase();
 
           for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
+            if (!preferenceEnabled(laneKey)) {
+              scoreMap[laneKey] = -1;
+              continue;
+            }
             // If excluded by lane's negative concepts, skip
             if (applyNegativeExclusion(descText, laneDef)) {
               scoreMap[laneKey] = -1;
@@ -304,30 +566,58 @@ export async function runLaneRouter(
             }
           }
 
-          // Per-lane threshold check: must meet the lane's own semantic_threshold or min_similarity_floor
-          const bestLaneDef = bestLane ? config.lanes[bestLane] : null;
-          const perLaneThreshold =
-            bestLaneDef?.semantic_threshold ??
-            bestLaneDef?.threshold ??
-            (config.unclassified_policy.min_similarity_floor || 0.25);
-          if (bestScore < perLaneThreshold || !bestLane) {
+          // Primary lane selection:
+          // - Only lanes meeting their own thresholds qualify.
+          // - User preference ordering (priority_rank) is applied as the first tie-breaker.
+          const minSimilarityFloor = config.unclassified_policy.min_similarity_floor || 0.25;
+          const qualifyingPrimary = Object.entries(config.lanes)
+            .map(([laneKey, laneDef]) => {
+              const threshold = laneDef.semantic_threshold ?? laneDef.threshold ?? minSimilarityFloor;
+              const score = scoreMap[laneKey] ?? -1;
+              return {
+                laneKey,
+                laneDef,
+                threshold,
+                score,
+                rank: preferenceRank(laneKey),
+              };
+            })
+            .filter((c) => preferenceEnabled(c.laneKey))
+            .filter((c) => c.score >= c.threshold)
+            .filter((c) => !applyNegativeExclusion(descText, c.laneDef));
+
+          if (qualifyingPrimary.length === 0) {
             bestLane = "UNCLASSIFIED";
+            bestScore = Math.max(bestScore, 0);
+          } else {
+            qualifyingPrimary.sort((a, b) => {
+              if (a.rank !== b.rank) return a.rank - b.rank;
+              return b.score - a.score;
+            });
+            bestLane = qualifyingPrimary[0].laneKey;
+            bestScore = qualifyingPrimary[0].score;
           }
+
+          const selectedLaneDef = bestLane === "UNCLASSIFIED" ? null : config.lanes[bestLane];
+          const selectedThreshold =
+            selectedLaneDef?.semantic_threshold ?? selectedLaneDef?.threshold ?? minSimilarityFloor;
 
           const laneConfidence =
             bestLane === "UNCLASSIFIED"
               ? "None"
-              : bestScore >= perLaneThreshold + 0.2
+              : bestScore >= selectedThreshold + 0.2
                 ? "High"
-                : bestScore >= perLaneThreshold + 0.1
+                : bestScore >= selectedThreshold + 0.1
                   ? "Medium"
                   : "Low";
 
-          // Secondary lanes: must meet per-lane threshold, have positive concept evidence, and not be excluded
-          const secondaryLanes: string[] = [];
+          // Secondary lanes: must meet per-lane threshold, have positive concept evidence, and not be excluded.
+          // Preference rank is applied as a stable ordering (not a classifier).
+          const secondaryCandidates: Array<{ laneKey: string; score: number; rank: number }> = [];
           for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
             if (laneKey === bestLane) continue;
-            const threshold = laneDef.semantic_threshold ?? laneDef.threshold;
+            if (!preferenceEnabled(laneKey)) continue;
+            const threshold = laneDef.semantic_threshold ?? laneDef.threshold ?? minSimilarityFloor;
             const score = scoreMap[laneKey] || 0;
             if (score >= threshold && !applyNegativeExclusion(descText, laneDef)) {
               // Require at least one positive concept match for secondary lane qualification
@@ -335,7 +625,7 @@ export async function runLaneRouter(
                 descText.includes(pc.toLowerCase())
               );
               if (hasPositiveEvidence) {
-                secondaryLanes.push(laneKey);
+                secondaryCandidates.push({ laneKey, score, rank: preferenceRank(laneKey) });
                 if (laneDef.positive_concepts) {
                   for (const pc of laneDef.positive_concepts) {
                     if (descText.includes(pc.toLowerCase())) {
@@ -347,10 +637,29 @@ export async function runLaneRouter(
               }
             }
           }
+          secondaryCandidates.sort((a, b) => {
+            if (a.rank !== b.rank) return a.rank - b.rank;
+            return b.score - a.score;
+          });
+          const secondaryLanes = secondaryCandidates.map((c) => c.laneKey);
 
           const processingStatus =
             bestLane === "UNCLASSIFIED" ? "ROUTING_DEFERRED" : "LANE_ROUTED";
           if (bestLane === "UNCLASSIFIED") deferredCount++; else routedCount++;
+
+          const evaluatedAt = new Date().toISOString();
+          const laneDecisionId = await persistLaneDecision({
+            canonicalJobId: job.id,
+            jobVersionId: job.latest_version_id,
+            embeddingProvider: provider,
+            embeddingDimensions: jobEmbedding.length,
+            primaryLane: bestLane,
+            secondaryLanes,
+            laneConfidence,
+            semanticScores: scoreMap,
+            laneEvidence,
+            evaluatedAt,
+          });
 
           await client.query(
             `UPDATE canonical_jobs
@@ -375,6 +684,16 @@ export async function runLaneRouter(
             ]
           );
 
+          if (laneDecisionId) {
+            await client.query(
+              `UPDATE canonical_jobs
+               SET latest_lane_decision_id = $3,
+                   updated_at = NOW()
+               WHERE workspace_id = $1 AND id = $2`,
+              [ctx.workspaceId, job.id, laneDecisionId]
+            );
+          }
+
           await client.query("COMMIT");
           console.log(
             `  -> Job ${job.id} ("${job.normalized_title}"): ${bestLane} (Score: ${bestScore.toFixed(3)}, Status: ${processingStatus})`
@@ -388,6 +707,19 @@ export async function runLaneRouter(
           const message = jobErr instanceof Error ? jobErr.message : String(jobErr);
           const trimmed = message.length > 200 ? `${message.slice(0, 200)}...` : message;
           console.error(`❌ Failed to route job ${job.id}:`, jobErr);
+          const evaluatedAt = new Date().toISOString();
+          const laneDecisionId = await persistLaneDecision({
+            canonicalJobId: job.id,
+            jobVersionId: job.latest_version_id,
+            embeddingProvider: provider,
+            embeddingDimensions: prototypeDimensions ?? 0,
+            primaryLane: "UNCLASSIFIED",
+            secondaryLanes: [],
+            laneConfidence: "None",
+            semanticScores: {},
+            laneEvidence: [`ROUTING_ERROR:${trimmed}`],
+            evaluatedAt,
+          });
           await client.query(
             `UPDATE canonical_jobs
              SET primary_lane = 'UNCLASSIFIED',
@@ -406,6 +738,15 @@ export async function runLaneRouter(
               JSON.stringify([`ROUTING_ERROR:${trimmed}`]),
             ]
           );
+          if (laneDecisionId) {
+            await client.query(
+              `UPDATE canonical_jobs
+               SET latest_lane_decision_id = $3,
+                   updated_at = NOW()
+               WHERE workspace_id = $1 AND id = $2`,
+              [ctx.workspaceId, job.id, laneDecisionId]
+            );
+          }
           deferredCount += 1;
         }
       }

@@ -1,7 +1,11 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgSslConfig } from '../db/pgSsl.js';
-import { generateEmbedding } from '../services/agent.js';
+import {
+  generateEmbeddingWithProvider,
+  MODEL_REGISTRY,
+  type EmbeddingProvider,
+} from '../services/agent.js';
 import { validateEmbeddingVector } from './batchValidator.js';
 import { buildEmbeddingInputs } from './inputBuilder.js';
 import { seedEmbeddingSpaces } from './spaceRegistry.js';
@@ -48,6 +52,8 @@ interface InputRow {
 interface SpaceRow {
   id: string;
   workspace_id: string;
+  provider: string;
+  model: string;
   dimensions: number;
 }
 
@@ -74,7 +80,7 @@ export async function runEmbeddingBatch(
     await client.query('BEGIN');
 
     const spaceRes = await client.query<SpaceRow>(
-      `SELECT id, workspace_id, dimensions
+      `SELECT id, workspace_id, provider, model, dimensions
        FROM embedding_spaces
        WHERE id = $1 AND active = TRUE
        LIMIT 1`,
@@ -85,6 +91,20 @@ export async function runEmbeddingBatch(
     }
     const space = spaceRes.rows[0];
     const workspaceId = space.workspace_id;
+    const provider = (space.provider || '').toLowerCase() as EmbeddingProvider;
+    if (provider !== 'gemini' && provider !== 'openai') {
+      throw new Error(`Unsupported embedding provider for space ${space.id}: ${space.provider}`);
+    }
+
+    const runtimeModel =
+      provider === 'gemini'
+        ? MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL
+        : MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL;
+    if (space.model !== runtimeModel) {
+      throw new Error(
+        `Embedding space model mismatch for ${space.id}: expected ${space.model}, runtime uses ${runtimeModel}`
+      );
+    }
     if (options?.context && options.context.workspaceId !== workspaceId) {
       throw new Error(
         `Embedding space ${space.id} is in workspace_id=${workspaceId} but context.workspaceId=${options.context.workspaceId}`
@@ -159,7 +179,7 @@ export async function runEmbeddingBatch(
 
     for (const input of inputRes.rows) {
       try {
-        const vector = await generateEmbedding(input.content_text);
+        const vector = await generateEmbeddingWithProvider(input.content_text, provider);
         const validation = validateEmbeddingVector(vector, space.dimensions);
         if (!validation.valid) {
           failed += 1;
@@ -176,29 +196,59 @@ export async function runEmbeddingBatch(
           continue;
         }
 
-        await client.query(
-          `INSERT INTO semantic_embeddings (
-             workspace_id,
-             embedding_space_id,
-             embedding_input_id,
-             embedding_batch_id,
-             vector_dimensions,
-             embedding_values,
-             vector_checksum
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (embedding_space_id, embedding_input_id)
-           DO NOTHING`,
-          [
-            workspaceId,
-            space.id,
-            input.id,
-            batchId,
-            validation.dimensions,
-            vector,
-            validation.checksum,
-          ]
-        );
+        try {
+          await client.query(
+            `INSERT INTO semantic_embeddings (
+               workspace_id,
+               embedding_space_id,
+               embedding_input_id,
+               embedding_batch_id,
+               vector_dimensions,
+               embedding_values,
+               embedding_vector,
+               vector_checksum
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $6::vector, $7)
+             ON CONFLICT (embedding_space_id, embedding_input_id)
+             DO NOTHING`,
+            [
+              workspaceId,
+              space.id,
+              input.id,
+              batchId,
+              validation.dimensions,
+              vector,
+              validation.checksum,
+            ]
+          );
+        } catch (writeErr: any) {
+          if (writeErr?.code !== '42703' && writeErr?.code !== '42704' && writeErr?.code !== '42883') {
+            throw writeErr;
+          }
+          await client.query(
+            `INSERT INTO semantic_embeddings (
+               workspace_id,
+               embedding_space_id,
+               embedding_input_id,
+               embedding_batch_id,
+               vector_dimensions,
+               embedding_values,
+               vector_checksum
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (embedding_space_id, embedding_input_id)
+             DO NOTHING`,
+            [
+              workspaceId,
+              space.id,
+              input.id,
+              batchId,
+              validation.dimensions,
+              vector,
+              validation.checksum,
+            ]
+          );
+        }
 
         succeeded += 1;
         await client.query(
@@ -243,6 +293,23 @@ export async function runEmbeddingBatch(
         workspaceId,
       ]
     );
+
+    if (failed === 0) {
+      try {
+        await client.query(
+          `UPDATE embedding_batches
+           SET published_at = NOW(),
+               publication_note = NULL
+           WHERE workspace_id = $1 AND id = $2`,
+          [workspaceId, batchId]
+        );
+      } catch (publishErr: any) {
+        // Allow running against pre-migration databases.
+        if (publishErr?.code !== '42703') {
+          throw publishErr;
+        }
+      }
+    }
 
     await client.query('COMMIT');
 

@@ -188,14 +188,8 @@ export type GateDecision = z.infer<typeof GateDecisionSchema>;
  * 6. Lane Decision
  * Multi-lane semantic classification outcome.
  */
-export const LaneEnum = z.enum([
-  "CORE_AI_DATA",
-  "LEGAL_REGTECH",
-  "HEALTH_BIO_PHARMA",
-  "INVESTMENT_MARKETS_FINTECH",
-  "UNCLASSIFIED"
-]);
-export type Lane = z.infer<typeof LaneEnum>;
+export const LaneKeySchema = z.string().regex(/^[A-Z][A-Z0-9_]{2,63}$/);
+export type LaneKey = z.infer<typeof LaneKeySchema>;
 
 export const LaneDecisionSchema = z.object({
   schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
@@ -203,16 +197,10 @@ export const LaneDecisionSchema = z.object({
   job_version_id: z.string().min(1),
   pipeline_run_id: z.string().uuid(),
   model_version: z.string().min(1),
-  primary_lane: LaneEnum.nullable(),
-  secondary_lanes: z.array(LaneEnum).default([]),
+  primary_lane: LaneKeySchema.nullable(),
+  secondary_lanes: z.array(LaneKeySchema).default([]),
   lane_confidence: z.enum(["High", "Medium", "Low", "None"]),
-  semantic_scores: z.record(LaneEnum, z.number()).default({
-    CORE_AI_DATA: 0,
-    LEGAL_REGTECH: 0,
-    HEALTH_BIO_PHARMA: 0,
-    INVESTMENT_MARKETS_FINTECH: 0,
-    UNCLASSIFIED: 0,
-  }),
+  semantic_scores: z.record(LaneKeySchema, z.number()).default({}),
   lane_evidence: z.array(z.string()).default([]),
   evaluated_at: z.string().datetime(),
 });
@@ -226,7 +214,7 @@ export const EvaluationQueueItemSchema = z.object({
   id: z.string().uuid(),
   canonical_job_id: z.string().uuid(),
   job_version_id: z.string().min(1),
-  lane: LaneEnum,
+  lane: LaneKeySchema,
   priority_score: z.number(),
   status: z.enum(["PENDING", "EVALUATING", "COMPLETED", "RETRY_WAIT", "FAILED", "NEEDS_MANUAL_REVIEW"]).default("PENDING"),
   lease_id: z.string().uuid().nullable().default(null),
@@ -254,8 +242,8 @@ export const EvaluationResultSchema = z.object({
   is_fallback: z.boolean().default(false),
   degraded_state: z.boolean().default(false),
   evaluation_summary: z.string().min(1),
-  primary_lane: LaneEnum.nullable(),
-  secondary_lanes: z.array(LaneEnum).default([]),
+  primary_lane: LaneKeySchema.nullable(),
+  secondary_lanes: z.array(LaneKeySchema).default([]),
   lane_confidence: z.enum(["High", "Medium", "Low"]),
   lane_evidence: z.string().default(""),
   nd_score: z.number().int().min(0).max(100),
@@ -290,8 +278,8 @@ export const ShortlistRowSchema = z.object({
   gate_status: z.enum(["PASS", "NEEDS_VERIFICATION", "HARD_REJECT"]),
   rejection_codes: z.array(z.string()).nullable().default(null),
   gate_evidence_quotes: z.array(z.string()).nullable().default(null),
-  primary_lane: LaneEnum.nullable(),
-  secondary_lanes: z.array(LaneEnum).default([]),
+  primary_lane: LaneKeySchema.nullable(),
+  secondary_lanes: z.array(LaneKeySchema).default([]),
   lane_confidence: z.enum(["High", "Medium", "Low", "None"]).default("None"),
   priority_score: z.number().default(0),
   deterministic_match_score: z.number().nullable().default(null),

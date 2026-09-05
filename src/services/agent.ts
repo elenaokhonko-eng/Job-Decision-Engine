@@ -110,7 +110,7 @@ export interface AgentResult {
     job_title: string;
     company: string;
     careers_portal_url: string;
-    primary_lane: "CORE_AI_DATA" | "LEGAL_REGTECH" | "HEALTH_BIO_PHARMA" | "INVESTMENT_MARKETS_FINTECH" | null;
+    primary_lane: string | null;
     secondary_lanes: string[];
     lane_confidence: "High" | "Medium" | "Low";
     lane_evidence: string;

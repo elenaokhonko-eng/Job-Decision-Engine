@@ -33,13 +33,7 @@
           "anyOf": [
             {
               "type": "string",
-              "enum": [
-                "CORE_AI_DATA",
-                "LEGAL_REGTECH",
-                "HEALTH_BIO_PHARMA",
-                "INVESTMENT_MARKETS_FINTECH",
-                "UNCLASSIFIED"
-              ]
+              "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
             },
             {
               "type": "null"
@@ -68,21 +62,9 @@
             "type": "number"
           },
           "propertyNames": {
-            "enum": [
-              "CORE_AI_DATA",
-              "LEGAL_REGTECH",
-              "HEALTH_BIO_PHARMA",
-              "INVESTMENT_MARKETS_FINTECH",
-              "UNCLASSIFIED"
-            ]
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
           },
-          "default": {
-            "CORE_AI_DATA": 0,
-            "LEGAL_REGTECH": 0,
-            "HEALTH_BIO_PHARMA": 0,
-            "INVESTMENT_MARKETS_FINTECH": 0,
-            "UNCLASSIFIED": 0
-          }
+          "default": {}
         },
         "lane_evidence": {
           "type": "array",

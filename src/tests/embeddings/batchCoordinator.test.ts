@@ -10,7 +10,17 @@ describe('runEmbeddingBatch', () => {
         return { rows: [] };
       }
       if (sql.includes('FROM embedding_spaces')) {
-        return { rows: [{ id: '11111111-1111-4111-8111-111111111111', workspace_id: 'workspace-id-1', dimensions: 4 }] };
+        return {
+          rows: [
+            {
+              id: '11111111-1111-4111-8111-111111111111',
+              workspace_id: 'workspace-id-1',
+              provider: 'openai',
+              model: agent.MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL,
+              dimensions: 4,
+            },
+          ],
+        };
       }
       if (sql.includes('INSERT INTO embedding_batches') && sql.includes('RETURNING id')) {
         return { rows: [{ id: '33333333-3333-4333-8333-333333333333' }] };
@@ -29,7 +39,7 @@ describe('runEmbeddingBatch', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    vi.spyOn(agent, 'generateEmbedding').mockResolvedValue([0.1, 0.2, 0.3, 0.4]);
+    vi.spyOn(agent, 'generateEmbeddingWithProvider').mockResolvedValue([0.1, 0.2, 0.3, 0.4]);
 
     const result = await runEmbeddingBatch(
       '11111111-1111-4111-8111-111111111111',
@@ -83,7 +93,19 @@ describe('runEmbeddingBatch', () => {
       }
       if (sql.includes('FROM embedding_spaces')) {
         const isPrimary = String(params?.[0]) === 'space-primary';
-        return { rows: [{ id: String(params?.[0]), workspace_id: 'workspace-id-1', dimensions: isPrimary ? 4 : 3 }] };
+        return {
+          rows: [
+            {
+              id: String(params?.[0]),
+              workspace_id: 'workspace-id-1',
+              provider: isPrimary ? 'gemini' : 'openai',
+              model: isPrimary
+                ? agent.MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL
+                : agent.MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL,
+              dimensions: isPrimary ? 4 : 3,
+            },
+          ],
+        };
       }
       if (sql.includes('INSERT INTO embedding_batches') && sql.includes('RETURNING id')) {
         nextBatchId += 1;
@@ -101,7 +123,7 @@ describe('runEmbeddingBatch', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    const spy = vi.spyOn(agent, 'generateEmbedding');
+    const spy = vi.spyOn(agent, 'generateEmbeddingWithProvider');
     spy
       .mockResolvedValueOnce([0.1, 0.2, 0.3, 0.4])
       .mockResolvedValueOnce([0.11, 0.22, 0.33]);

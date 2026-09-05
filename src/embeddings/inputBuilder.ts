@@ -3,6 +3,8 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgSslConfig } from '../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { listActiveLaneRevisions } from '../lanes/registry.js';
+import type { LaneFileConfig } from '../lanes/contracts.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -16,6 +18,7 @@ export interface EmbeddingInputBuildSummary {
   inserted: number;
   fromRequirements: number;
   fromProfileFacts: number;
+  fromLanePrototypes?: number;
 }
 
 function hashText(value: string): string {
@@ -43,6 +46,13 @@ function buildProfileFactInputText(row: {
   return `${row.fact_type} (${row.evidence_tier}): ${row.statement}${structured}`.trim();
 }
 
+function buildLanePrototypeInputText(lane: LaneFileConfig): string {
+  const prototypeTexts = (lane.prototypes || [])
+    .map((p) => (typeof p?.text === 'string' ? p.text.trim() : ''))
+    .filter((p) => p.length > 0);
+  return (prototypeTexts.join(' ') || lane.description || lane.display_name || lane.lane_key).trim();
+}
+
 export async function buildEmbeddingInputs(
   clientOrPool?: pg.Pool | pg.PoolClient,
   maxPerSource = 200,
@@ -57,6 +67,7 @@ export async function buildEmbeddingInputs(
   let inserted = 0;
   let fromRequirements = 0;
   let fromProfileFacts = 0;
+  let fromLanePrototypes = 0;
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
@@ -161,12 +172,44 @@ export async function buildEmbeddingInputs(
       fromProfileFacts += 1;
     }
 
+    try {
+      const activeLanes = await listActiveLaneRevisions(client as any, { context: ctx });
+      for (const lane of activeLanes) {
+        const contentText = buildLanePrototypeInputText(lane.content);
+        const contentHash = hashText(contentText);
+        const inputKey = `lane:${lane.laneRevisionId}:${contentHash.slice(0, 16)}`;
+
+        await client.query(
+          `INSERT INTO embedding_inputs (
+             workspace_id,
+             input_key,
+             source_type,
+             source_id,
+             content_text,
+             content_hash
+           )
+           VALUES ($1, $2, 'LANE_PROTOTYPE', $3, $4, $5)
+           ON CONFLICT (workspace_id, input_key) DO NOTHING`,
+          [ctx.workspaceId, inputKey, lane.laneRevisionId, contentText, contentHash]
+        );
+
+        inserted += 1;
+        fromLanePrototypes += 1;
+      }
+    } catch (err: any) {
+      // Allow running against pre-migration databases.
+      if (err?.code !== '42P01') {
+        throw err;
+      }
+    }
+
     await client.query('COMMIT');
 
     return {
       inserted,
       fromRequirements,
       fromProfileFacts,
+      fromLanePrototypes,
     };
   } catch (error) {
     await client.query('ROLLBACK');

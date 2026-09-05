@@ -83,7 +83,7 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
       is_fallback: false,
       degraded_state: false,
       evaluation_summary: "summary",
-      primary_lane: "INVALID_LANE",
+      primary_lane: "invalid-lane",
       secondary_lanes: [],
       lane_confidence: "Extreme", // Invalid confidence enum
       nd_score: 150,              // Out of 0-100 bounds
