@@ -14,9 +14,11 @@ const isCI = DB_URL.includes("localhost") || DB_URL.includes("127.0.0.1");
 const skipReal = !DB_URL || !isCI;
 
 let pool: pg.Pool;
+let client: pg.PoolClient;
+let schemaName = "";
 
 async function q(sql: string, params?: any[]): Promise<pg.QueryResult> {
-  return pool.query(sql, params);
+  return client.query(sql, params);
 }
 
 describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normalization", () => {
@@ -51,25 +53,32 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DB_URL });
-    await runMigrations(pool);
+
+    client = await pool.connect();
+    schemaName = `rec_decider_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
+    await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+    await client.query(`SET search_path TO ${schemaName}, public`);
+    await runMigrations(client);
     await seed();
   });
 
   beforeEach(async () => {
     await seed();
-    await q(`DELETE FROM deterministic_decisions WHERE canonical_job_id = $1`, [JOB_ID]);
   });
 
   afterAll(async () => {
-    await q(`DELETE FROM deterministic_decisions WHERE canonical_job_id = $1`, [JOB_ID]);
-    await q(`DELETE FROM job_versions WHERE id = $1`, [VERSION_ID]);
-    await q(`DELETE FROM canonical_jobs WHERE id = $1`, [JOB_ID]);
+    await client.query("RESET search_path").catch(() => undefined);
+    if (schemaName) {
+      await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+    }
+    client.release();
     await pool.end();
   });
 
   it("does not crash on canonical_jobs.gate_decision='FAIL' and records a normalized decision", async () => {
     const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
-    const summary = await runRecommendationDecider(pool);
+    const summary = await runRecommendationDecider(client);
     expect(summary.errors).toBe(0);
 
     const res = await q(
@@ -91,4 +100,3 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     expect(decisionJson.trace.notes).toContain("legacy_gate_decision:FAIL->PASS");
   });
 });
-

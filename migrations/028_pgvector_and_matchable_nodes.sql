@@ -9,7 +9,8 @@
 -- - Additive and reversible (no destructive drops).
 
 -- 1) pgvector extension (required for vector-typed columns and similarity ops)
-CREATE EXTENSION IF NOT EXISTS vector;
+-- Install into public so isolated-schema CI tests don't install extension objects into temp schemas.
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
 -- 2) Add vector column to semantic_embeddings (keeps existing double precision[] for backwards compatibility)
 ALTER TABLE semantic_embeddings
@@ -45,4 +46,3 @@ CREATE OR REPLACE VIEW v_published_semantic_embeddings AS
 
 COMMENT ON VIEW v_published_semantic_embeddings IS
   'Semantic embeddings that belong to a COMPLETED batch; intended for coherent comparisons and atomic publication.';
-

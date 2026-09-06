@@ -1,5 +1,8 @@
 -- Migration 001: Legacy Base Tables
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- Install extensions into a stable schema so CI tests that run migrations in an isolated
+-- search_path schema don't accidentally install extension objects into a temp schema
+-- that gets dropped later.
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
 
 CREATE TABLE IF NOT EXISTS companies (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

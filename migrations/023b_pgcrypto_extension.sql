@@ -6,4 +6,5 @@
 -- This migration is intentionally placed before 024_* so requirement-set hashing
 -- can rely on pgcrypto's digest() function.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- Install into public to avoid creating extension objects in per-test schemas.
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;

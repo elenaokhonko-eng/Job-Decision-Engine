@@ -9,7 +9,9 @@
 --   digest(text, text) -> digest(convert_to(text,'UTF8'), algo)
 -- so earlier migrations do not need to be edited.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- Ensure pgcrypto exists in a stable schema. This migration may run with a non-public
+-- search_path during CI tests, so always install into public.
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
 -- In many environments pgcrypto already provides digest(text, text). When it does,
 -- it is owned by the extension owner (often a superuser), so attempting to
@@ -18,7 +20,9 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- Only create the overload when it's missing.
 DO $do$
 BEGIN
-  IF to_regprocedure('public.digest(text, text)') IS NULL THEN
+  -- If pgcrypto already provides this overload (newer pgcrypto builds), do nothing.
+  -- Use an unqualified lookup so it works correctly under non-public search_path.
+  IF to_regprocedure('digest(text, text)') IS NULL THEN
     EXECUTE $sql$
       CREATE FUNCTION digest(data text, type text)
       RETURNS bytea
