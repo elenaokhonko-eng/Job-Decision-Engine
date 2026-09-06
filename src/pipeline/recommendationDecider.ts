@@ -23,6 +23,8 @@ export interface RecommendationDeciderSummary {
   policySnapshotHash: string;
 }
 
+type GateDecision = "PASS" | "NEEDS_VERIFICATION" | "HARD_REJECT";
+
 function asNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() !== "") {
@@ -43,6 +45,27 @@ function normalizeWorkabilityFacts(value: unknown): Record<string, unknown> {
     }
   }
   return {};
+}
+
+function normalizeGateDecision(raw: unknown): GateDecision | null {
+  if (raw == null) return null;
+  const normalized = String(raw).trim().toUpperCase();
+  if (normalized === "PASS") return "PASS";
+  if (normalized === "NEEDS_VERIFICATION") return "NEEDS_VERIFICATION";
+  if (normalized === "HARD_REJECT") return "HARD_REJECT";
+
+  // Legacy/unknown values (e.g. "FAIL") must not crash the deterministic decider.
+  // Treat as unknown so the decision policy defaults to VERIFY/TRACK.
+  return null;
+}
+
+function inferGateDecisionFromProcessingState(stateRaw: unknown): GateDecision | null {
+  const state = typeof stateRaw === "string" ? stateRaw.trim().toUpperCase() : "";
+  if (!state) return null;
+  if (state === "HARD_REJECTED") return "HARD_REJECT";
+  if (state === "NEEDS_VERIFICATION") return "NEEDS_VERIFICATION";
+  if (state === "RAW_STAGED") return null;
+  return "PASS";
 }
 
 function computeEvidenceCompleteness(workplaceTypeRaw: unknown, workabilityFactsRaw: unknown): number {
@@ -81,6 +104,7 @@ export async function runRecommendationDecider(
     const { rows: jobs } = await client.query<{
       canonical_job_id: string;
       job_version_id: string | null;
+      processing_state: string | null;
       gate_decision: string | null;
       deterministic_match_score: any;
       deterministic_match_coverage: any;
@@ -100,6 +124,7 @@ export async function runRecommendationDecider(
       SELECT
         c.id AS canonical_job_id,
         COALESCE(c.latest_job_version_id, lv.id) AS job_version_id,
+        COALESCE(c.processing_state, c.processing_status) AS processing_state,
         c.gate_decision,
         c.deterministic_match_score,
         c.deterministic_match_coverage,
@@ -147,6 +172,10 @@ export async function runRecommendationDecider(
 
       await client.query("BEGIN");
       try {
+        const normalizedGateDecision =
+          normalizeGateDecision(job.gate_decision) ??
+          inferGateDecisionFromProcessingState(job.processing_state);
+
         const requirementScorePct = asNumber(job.deterministic_match_score);
         const coverageScorePct = asNumber(job.deterministic_match_coverage);
 
@@ -160,7 +189,7 @@ export async function runRecommendationDecider(
         );
 
         const evaluation = evaluateDecisionPolicy(snapshot.decisionPolicy.policy, {
-          gate_decision: job.gate_decision,
+          gate_decision: normalizedGateDecision,
           requirement_score: requirementScore,
           coverage_score: coverageScore,
           evidence_completeness: evidenceCompleteness,
@@ -168,6 +197,11 @@ export async function runRecommendationDecider(
 
         const semanticReady = Boolean(job.match_embedding_space_id);
         const adjustedNotes = [...evaluation.notes];
+        if (job.gate_decision && normalizedGateDecision !== job.gate_decision) {
+          adjustedNotes.push(`legacy_gate_decision:${job.gate_decision}->${normalizedGateDecision ?? "null"}`);
+        } else if (!job.gate_decision && normalizedGateDecision) {
+          adjustedNotes.push(`gate_decision_inferred_from_state:${normalizedGateDecision}`);
+        }
         let adjustedOutcome = evaluation.outcome;
         if (!semanticReady && adjustedOutcome === "PRIORITY") {
           adjustedOutcome = "REVIEW";
@@ -179,7 +213,7 @@ export async function runRecommendationDecider(
           job_version_id: job.job_version_id,
           match_run_id: job.latest_match_run_id,
           inputs: {
-            gate_decision: job.gate_decision,
+            gate_decision: normalizedGateDecision,
             requirement_score: requirementScore,
             coverage_score: coverageScore,
             evidence_completeness: evidenceCompleteness,

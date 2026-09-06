@@ -79,6 +79,26 @@ export async function processPipeline(): Promise<void> {
     console.log("\n[8/8] Explanation Queue Enqueue (optional; no quota/deferral)...");
     const enqueueSummary = await runExplanationQueueEnqueuer(pool, { context: ctx });
 
+    console.log("Requirements extraction summary:", {
+      discovered: requirementsSummary.discovered,
+      processed: requirementsSummary.processed,
+      deterministicInserted: requirementsSummary.deterministicInserted,
+      quotedInserted: requirementsSummary.quotedInserted,
+      quotedFailed: requirementsSummary.quotedFailed,
+      errors: requirementsSummary.errors,
+    });
+    if (requirementsSummary.errors > 0) {
+      console.log(
+        "Requirements extraction sample failures:",
+        requirementsSummary.details.filter((d) => d.error).slice(0, 5)
+      );
+    }
+    console.log("Hard gate summary:", gateSummary);
+    console.log("Lane routing summary:", routingSummary);
+    console.log("Deterministic matching summary:", matchingSummary);
+    console.log("Deterministic decision summary:", decisionSummary);
+    console.log("Explanation queue enqueue summary:", enqueueSummary);
+
     console.log("\n--- Verifying Funnel Conservation ---");
     const { rows: stateCounts } = await pool.query(`
       SELECT COALESCE(processing_state, processing_status) AS processing_state, COUNT(*)::int as count
@@ -138,13 +158,6 @@ export async function processPipeline(): Promise<void> {
         `Deterministic matching failed for ${matchingSummary.errors} job(s); records remain recoverable for retry.`
       );
     }
-
-    console.log("Requirements extraction summary:", requirementsSummary);
-    console.log("Hard gate summary:", gateSummary);
-    console.log("Lane routing summary:", routingSummary);
-    console.log("Deterministic matching summary:", matchingSummary);
-    console.log("Deterministic decision summary:", decisionSummary);
-    console.log("Explanation queue enqueue summary:", enqueueSummary);
 
     console.log("\nPipeline execution and funnel conservation verified successfully.");
   } catch (err: any) {

@@ -282,6 +282,10 @@ export async function runRequirementsExtraction(
 
   const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
 
+  // NOTE: requirements extraction is a *job-version* stage, but canonical job processing_state
+  // can advance (e.g. RAW_STAGED -> PREQUALIFIED -> LANE_ROUTED) even when this stage fails.
+  // If we only target RAW_STAGED, retries become impossible and LANE_ROUTED jobs can get stuck
+  // forever with zero VALIDATED job_requirements (breaking deterministic matching + documents).
   const queryTargetJobs = `
     SELECT
       c.workspace_id,
@@ -291,18 +295,41 @@ export async function runRequirementsExtraction(
       jv.description_text
     FROM canonical_jobs c
     JOIN job_versions jv
-      ON jv.id = c.latest_job_version_id
-    WHERE c.workspace_id = $1
-      AND jv.workspace_id = $1
-      AND COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
-      AND NOT EXISTS (
-        SELECT 1
-        FROM job_version_pipeline_state ps
-        WHERE ps.workspace_id = $1
-          AND ps.job_version_id = jv.id
-          AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
-          AND ps.stage_status = 'COMPLETED'
+      ON jv.id = COALESCE(
+        c.latest_job_version_id,
+        (
+          SELECT jv2.id
+          FROM job_versions jv2
+          WHERE jv2.workspace_id = c.workspace_id
+            AND jv2.canonical_job_id = c.id
+          ORDER BY jv2.observed_at DESC
+          LIMIT 1
+        )
       )
+     AND jv.workspace_id = c.workspace_id
+    LEFT JOIN job_version_pipeline_state ps
+      ON ps.workspace_id = c.workspace_id
+     AND ps.job_version_id = jv.id
+     AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+    WHERE c.workspace_id = $1
+      AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+      AND (
+        COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED')
+        OR (
+          COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+          AND ps.stage_status IS NOT NULL
+          AND ps.stage_status <> 'COMPLETED'
+        )
+      )
+      AND ps.stage_status IS DISTINCT FROM 'COMPLETED'
+      AND (
+        ps.stage_status IS NULL
+        OR ps.stage_status <> 'RETRY_WAIT'
+        OR ps.next_retry_at IS NULL
+        OR ps.next_retry_at <= NOW()
+      )
+    ORDER BY jv.observed_at ASC
+    LIMIT 200
   `;
 
   const { rows } = await client.query(queryTargetJobs, [ctx.workspaceId]);
@@ -816,6 +843,13 @@ export async function runRequirementsExtraction(
         summary.metrics.retryWaitTransitions += 1;
 
         const errorMessage = error instanceof Error ? error.message : String(error);
+        // Emit a small amount of context so CI logs show the true root-cause (missing columns,
+        // drifted migrations, constraint violations, etc.) instead of only a summary count.
+        if (summary.errors <= 5) {
+          console.warn(
+            `[requirementsExtractor] failed for canonical_job_id=${job.canonical_job_id} job_version_id=${job.job_version_id}: ${errorMessage}`
+          );
+        }
         summary.details.push({
           canonicalJobId: job.canonical_job_id,
           jobVersionId: job.job_version_id,
@@ -838,6 +872,13 @@ export async function runRequirementsExtraction(
   summary.metrics.quotedPassRate = summary.metrics.quotedAttempted
     ? Number((summary.metrics.quotedSucceeded / summary.metrics.quotedAttempted).toFixed(4))
     : 0;
+
+  if (summary.errors > 0) {
+    const sample = summary.details.filter((d) => d.error).slice(0, 5);
+    console.warn(
+      `[requirementsExtractor] errors=${summary.errors}. Sample failures: ${JSON.stringify(sample)}`
+    );
+  }
 
   console.log('Requirements extraction quoted metrics:', {
     quotedPassRate: summary.metrics.quotedPassRate,

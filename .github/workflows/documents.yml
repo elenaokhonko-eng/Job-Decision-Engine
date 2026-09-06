@@ -5,7 +5,7 @@ on:
     inputs:
       canonical_job_id:
         description: Canonical job UUID
-        required: true
+        required: false
         type: string
       job_version_id:
         description: Job version UUID (optional strict pin)
@@ -36,6 +36,36 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx src/db/migrate.ts
 
+      - name: Resolve canonical_job_id/job_version_id (auto-pick if missing)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${{ inputs.canonical_job_id }}" ]]; then
+            echo "CANONICAL_JOB_ID=${{ inputs.canonical_job_id }}" >> "$GITHUB_ENV"
+            if [[ -n "${{ inputs.job_version_id }}" ]]; then
+              echo "JOB_VERSION_ID=${{ inputs.job_version_id }}" >> "$GITHUB_ENV"
+            fi
+            exit 0
+          fi
+
+          echo "No canonical_job_id provided; selecting an eligible job automatically..."
+          OUT="$(npx tsx scripts/pick_documents_job.ts)"
+          echo "$OUT"
+
+          CANONICAL="$(echo "$OUT" | sed -n 's/^canonical_job_id: //p' | head -n 1 | tr -d '\r')"
+          VERSION="$(echo "$OUT" | sed -n 's/^job_version_id:[[:space:]]*//p' | head -n 1 | tr -d '\r')"
+
+          if [[ -z "$CANONICAL" || -z "$VERSION" ]]; then
+            echo "Failed to parse canonical_job_id/job_version_id from pick_documents_job output." >&2
+            exit 1
+          fi
+
+          echo "CANONICAL_JOB_ID=$CANONICAL" >> "$GITHUB_ENV"
+          echo "JOB_VERSION_ID=$VERSION" >> "$GITHUB_ENV"
+
       - name: Ensure exports directory exists
         run: mkdir -p scripts/exports
 
@@ -50,7 +80,14 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
           DOCUMENT_CONTACT_JSON: ${{ secrets.DOCUMENT_CONTACT_JSON }}
           MASTER_PROFILE_JSON: ${{ secrets.MASTER_PROFILE_JSON }}
-        run: npx tsx scripts/generate_cv.ts ${{ inputs.canonical_job_id }} ${{ inputs.job_version_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${JOB_VERSION_ID:-}" ]]; then
+            npx tsx scripts/generate_cv.ts "$CANONICAL_JOB_ID" "$JOB_VERSION_ID"
+          else
+            npx tsx scripts/generate_cv.ts "$CANONICAL_JOB_ID"
+          fi
 
       - name: Generate cover letter
         env:
@@ -63,13 +100,20 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
           DOCUMENT_CONTACT_JSON: ${{ secrets.DOCUMENT_CONTACT_JSON }}
           MASTER_PROFILE_JSON: ${{ secrets.MASTER_PROFILE_JSON }}
-        run: npx tsx scripts/generate_cover_letter.ts ${{ inputs.canonical_job_id }} ${{ inputs.job_version_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${JOB_VERSION_ID:-}" ]]; then
+            npx tsx scripts/generate_cover_letter.ts "$CANONICAL_JOB_ID" "$JOB_VERSION_ID"
+          else
+            npx tsx scripts/generate_cover_letter.ts "$CANONICAL_JOB_ID"
+          fi
 
       - name: Upload generated documents
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: application-documents-${{ inputs.canonical_job_id }}
+          name: application-documents-${{ inputs.canonical_job_id || 'auto' }}
           path: scripts/exports/
           if-no-files-found: warn
           retention-days: 3

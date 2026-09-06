@@ -176,6 +176,10 @@ export async function buildEmbeddingInputs(
       fromProfileFacts += 1;
     }
 
+    await client.query('COMMIT');
+
+    // Lane prototypes are optional and depend on dynamic-lanes migrations.
+    // Never let missing lane registry tables abort the entire embedding-input build.
     try {
       const activeLanes = await listActiveLaneRevisions(client as any, { context: ctx });
       for (const lane of activeLanes) {
@@ -206,8 +210,6 @@ export async function buildEmbeddingInputs(
         throw err;
       }
     }
-
-    await client.query('COMMIT');
 
     return {
       inserted,
