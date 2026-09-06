@@ -11,12 +11,24 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-CREATE OR REPLACE FUNCTION digest(data text, type text)
-RETURNS bytea
-LANGUAGE sql
-IMMUTABLE
-STRICT
-AS $$
-  SELECT digest(convert_to(data, 'UTF8'), type);
-$$;
-
+-- In many environments pgcrypto already provides digest(text, text). When it does,
+-- it is owned by the extension owner (often a superuser), so attempting to
+-- CREATE OR REPLACE will fail with "must be owner of function digest".
+--
+-- Only create the overload when it's missing.
+DO $do$
+BEGIN
+  IF to_regprocedure('public.digest(text, text)') IS NULL THEN
+    EXECUTE $sql$
+      CREATE FUNCTION digest(data text, type text)
+      RETURNS bytea
+      LANGUAGE sql
+      IMMUTABLE
+      STRICT
+      AS $fn$
+        SELECT digest(convert_to(data, 'UTF8'), type);
+      $fn$;
+    $sql$;
+  END IF;
+END
+$do$;
