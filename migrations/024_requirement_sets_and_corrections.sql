@@ -123,15 +123,41 @@ CREATE INDEX IF NOT EXISTS idx_job_requirements_requirement_set_id
 -- 5) Backfill: create requirement_set identity + first set per existing job_version
 -- ============================================================================
 
+-- Legacy repair: job_requirements can drift from job_versions due to earlier schema evolution.
+-- Ensure each job_requirements row points at the same canonical_job as its job_version.
+UPDATE job_requirements jr
+SET canonical_job_id = jv.canonical_job_id
+FROM job_versions jv
+WHERE jr.job_version_id = jv.id
+  AND jr.canonical_job_id IS DISTINCT FROM jv.canonical_job_id;
+
+-- Legacy repair: job_versions.workspace_id should match canonical_jobs.workspace_id.
+UPDATE job_versions jv
+SET workspace_id = c.workspace_id
+FROM canonical_jobs c
+WHERE jv.canonical_job_id = c.id
+  AND jv.workspace_id IS DISTINCT FROM c.workspace_id;
+
+-- Legacy repair: ensure job_requirements.workspace_id stays aligned with canonical_jobs.workspace_id.
+-- Some older datasets can have job_requirements rows with a default workspace_id that did not join
+-- during earlier backfills (e.g., missing/legacy job_version linkage).
+UPDATE job_requirements jr
+SET workspace_id = c.workspace_id
+FROM canonical_jobs c
+WHERE jr.canonical_job_id = c.id
+  AND jr.workspace_id IS DISTINCT FROM c.workspace_id;
+
 -- Hash constants (must match src/pipeline/requirementsExtractor.ts)
 -- - quoted_prompt_hash: sha256("quoted_prompt_v1|schema_version:2.2.0")
 -- - normalizer_hash:   sha256("requirements_normalizer_v1")
 WITH targets AS (
   SELECT DISTINCT
-    jr.workspace_id,
+    c.workspace_id,
     jr.canonical_job_id,
     jr.job_version_id
   FROM job_requirements jr
+  JOIN canonical_jobs c
+    ON c.id = jr.canonical_job_id
   WHERE jr.requirement_set_id IS NULL
 ),
 meta AS (
@@ -170,8 +196,7 @@ meta AS (
     encode(digest('requirements_normalizer_v1', 'sha256'), 'hex') AS normalizer_hash
   FROM targets t
   JOIN job_versions jv
-    ON jv.workspace_id = t.workspace_id
-   AND jv.id = t.job_version_id
+    ON jv.id = t.job_version_id
 ),
 identity_rows AS (
   SELECT
@@ -277,8 +302,7 @@ WHERE jv.workspace_id = rs.workspace_id
 UPDATE job_requirements jr
 SET requirement_set_id = rs.id
 FROM requirement_sets rs
-WHERE rs.workspace_id = jr.workspace_id
-  AND rs.job_version_id = jr.job_version_id
+WHERE rs.job_version_id = jr.job_version_id
   AND rs.revision_number = 1
   AND jr.requirement_set_id IS NULL;
 
@@ -292,19 +316,47 @@ WHERE rs.workspace_id = rer.workspace_id
   AND rer.requirement_set_id IS NULL;
 
 -- Enforce requirement_set_id is present for all persisted requirements.
-UPDATE job_requirements
+UPDATE job_requirements jr
 SET requirement_set_id = (
   SELECT rs.id
   FROM requirement_sets rs
-  WHERE rs.workspace_id = job_requirements.workspace_id
-    AND rs.job_version_id = job_requirements.job_version_id
-  ORDER BY rs.revision_number ASC
+  WHERE rs.workspace_id = c.workspace_id
+    AND rs.canonical_job_id = jr.canonical_job_id
+  ORDER BY
+    CASE
+      WHEN jr.job_version_id IS NOT NULL AND rs.job_version_id = jr.job_version_id THEN 0
+      WHEN c.latest_job_version_id IS NOT NULL AND rs.job_version_id = c.latest_job_version_id THEN 1
+      ELSE 2
+    END,
+    rs.revision_number ASC,
+    rs.created_at ASC
   LIMIT 1
 )
-WHERE requirement_set_id IS NULL;
+FROM canonical_jobs c
+WHERE jr.canonical_job_id = c.id
+  AND jr.requirement_set_id IS NULL;
 
-ALTER TABLE job_requirements
-  ALTER COLUMN requirement_set_id SET NOT NULL;
+DO $$
+DECLARE
+  remaining INTEGER;
+BEGIN
+  SELECT COUNT(*) INTO remaining FROM job_requirements WHERE requirement_set_id IS NULL;
+  IF remaining = 0 THEN
+    ALTER TABLE job_requirements
+      ALTER COLUMN requirement_set_id SET NOT NULL;
+  ELSE
+    RAISE NOTICE 'Skipping NOT NULL on job_requirements.requirement_set_id because % legacy rows remain unlinked.', remaining;
+    -- Enforce for new writes without blocking existing legacy rows.
+    BEGIN
+      ALTER TABLE job_requirements
+        ADD CONSTRAINT job_requirements_requirement_set_id_present
+        CHECK (requirement_set_id IS NOT NULL)
+        NOT VALID;
+    EXCEPTION WHEN duplicate_object THEN
+      -- ignore
+    END;
+  END IF;
+END $$;
 
 -- Replace per-job-version requirement_key uniqueness with per-requirement-set uniqueness.
 DO $$
@@ -362,4 +414,3 @@ DROP TRIGGER IF EXISTS trg_job_requirements_immutable ON job_requirements;
 CREATE TRIGGER trg_job_requirements_immutable
 BEFORE UPDATE OR DELETE ON job_requirements
 FOR EACH ROW EXECUTE FUNCTION job_requirements_immutable_guard();
-
