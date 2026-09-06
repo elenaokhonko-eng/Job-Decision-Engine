@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "dev:setup": "tsx scripts/dev_setup.ts",
     "db:init": "tsx scripts/db_init.ts",
     "eval:run": "tsx scripts/evaluate_jobs.ts",
     "profile:import": "tsx scripts/import_profile.ts",

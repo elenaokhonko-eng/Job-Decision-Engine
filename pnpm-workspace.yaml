@@ -1,5 +1,0 @@
-onlyBuiltDependencies:
-  - esbuild
-  - protobufjs
-  - "@google/genai"
-  - puppeteer

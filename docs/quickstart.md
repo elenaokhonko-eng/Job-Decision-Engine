@@ -39,7 +39,7 @@ npm ci
 3. Initialize schema + seed baseline:
 
 ```bash
-npm run db:init
+npm run dev:setup
 npm run sources:sync
 ```
 
@@ -58,4 +58,3 @@ npm run gemini:models
 ```
 
 Then set `EMBEDDING_PRIMARY_MODEL` to a model supporting `embedContent`, and optionally set `GEMINI_API_VERSION` (e.g. `v1`).
-

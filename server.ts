@@ -5,6 +5,8 @@ import { createServer as createViteServer } from "vite";
 import { db } from "./src/db/db.ts";
 import { runAgent } from "./src/services/agent.ts";
 import { createApiV2Router } from "./src/api/v2/router.ts";
+import { apiAuthMiddleware } from "./src/api/v2/auth.ts";
+import { legacyApiGateMiddleware } from "./src/api/legacy/access.ts";
 
 // Load environment variables
 dotenv.config();
@@ -33,6 +35,9 @@ async function startServer() {
   // API v2 (authenticated, workspace-scoped)
   app.use("/api/v2", createApiV2Router());
 
+  const legacyApiGate = legacyApiGateMiddleware();
+  const legacyApiAuth = apiAuthMiddleware();
+
   // API Routes
   app.get("/api/health", (req, res) => {
     res.json({
@@ -43,13 +48,13 @@ async function startServer() {
   });
 
   // Get all jobs in database
-  app.get("/api/jobs", asyncHandler(async (_req, res) => {
+  app.get("/api/jobs", legacyApiGate, legacyApiAuth, asyncHandler(async (_req, res) => {
     const jobs = await db.queryJobs();
     res.json({ success: true, jobs });
   }));
 
   // Add a new job description to local database
-  app.post("/api/jobs", async (req, res) => {
+  app.post("/api/jobs", legacyApiGate, legacyApiAuth, async (req, res) => {
     try {
       const { title, company, source, description, salaryRange, location, careers_portal_url } = req.body;
       if (!title || !company || !source || !description) {
@@ -73,13 +78,19 @@ async function startServer() {
   });
 
   // Delete a job description
-  app.delete("/api/jobs/:id", asyncHandler(async (req, res) => {
-    const success = await db.deleteJob(req.params.id);
+  app.delete("/api/jobs/:id", legacyApiGate, legacyApiAuth, asyncHandler(async (req, res) => {
+    const raw = req.params.id;
+    const id = Array.isArray(raw) ? raw[0] : raw;
+    if (!id) {
+      res.status(400).json({ success: false, error: "Job id is required." });
+      return;
+    }
+    const success = await db.deleteJob(id);
     res.json({ success });
   }));
 
   // Ask the agent / evaluate question
-  app.post("/api/ask", async (req, res) => {
+  app.post("/api/ask", legacyApiGate, legacyApiAuth, async (req, res) => {
     try {
       const { question } = req.body;
       if (!question || question.trim() === "") {
@@ -114,19 +125,19 @@ async function startServer() {
   });
 
   // Get interaction logs
-  app.get("/api/interactions", asyncHandler(async (_req, res) => {
+  app.get("/api/interactions", legacyApiGate, legacyApiAuth, asyncHandler(async (_req, res) => {
     const interactions = await db.getInteractions();
     res.json({ success: true, interactions });
   }));
 
   // Get workplace culture aggregates and toxic blacklists
-  app.get("/api/analytics", asyncHandler(async (_req, res) => {
+  app.get("/api/analytics", legacyApiGate, legacyApiAuth, asyncHandler(async (_req, res) => {
     const analytics = await db.getNdCultureAnalytics();
     res.json({ success: true, analytics });
   }));
 
   // Reset database state to original seeded value
-  app.post("/api/reset", asyncHandler(async (_req, res) => {
+  app.post("/api/reset", legacyApiGate, legacyApiAuth, asyncHandler(async (_req, res) => {
     if (!isResetRouteAllowed()) {
       res.status(403).json({ success: false, error: "Reset route is disabled." });
       return;

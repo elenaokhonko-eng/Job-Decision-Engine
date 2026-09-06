@@ -45,9 +45,15 @@ Supported shared collectors include Gmail, Greenhouse, Ashby, Lever, Himalayas, 
 npm ci
 ```
 
-2. Configure `.env.local` from [.env.example](.env.example).
+2. Configure `.env.local` from [.env.example](.env.example) (at least `DATABASE_URL`).
 
-3. Initialize database schema:
+3. Start Postgres + initialize schema:
+
+```bash
+npm run dev:setup
+```
+
+If you are using a managed Postgres (Neon/hosted), run:
 
 ```bash
 npm run db:init

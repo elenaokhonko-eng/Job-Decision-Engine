@@ -6,7 +6,10 @@
 npm ci
 npm run contracts:check
 npm run lint
-npm run db:init
+# If using Docker Compose local Postgres:
+npm run dev:setup
+# If using managed Postgres (Neon/hosted):
+# npm run db:init
 npm run sources:sync
 npm run docs:compliance
 npm run backfill:v22 -- --dry-run
