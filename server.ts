@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { db } from "./src/db/db.ts";
 import { runAgent } from "./src/services/agent.ts";
+import { createApiV2Router } from "./src/api/v2/router.ts";
 
 // Load environment variables
 dotenv.config();
@@ -28,6 +29,9 @@ async function startServer() {
 
   // Enable JSON request parsing
   app.use(express.json());
+
+  // API v2 (authenticated, workspace-scoped)
+  app.use("/api/v2", createApiV2Router());
 
   // API Routes
   app.get("/api/health", (req, res) => {

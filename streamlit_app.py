@@ -6,8 +6,6 @@ import json
 import html
 import glob
 import time
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import datetime
 import pandas as pd
 import streamlit as st
@@ -40,6 +38,44 @@ def load_dotenv():
                         os.environ[key.strip()] = val
 
 load_dotenv()
+
+def get_api_base_url():
+    base = (os.environ.get("JDEC_API_BASE_URL") or os.environ.get("API_BASE_URL") or "http://localhost:3000").strip()
+    return base.rstrip("/")
+
+def get_api_token():
+    return (os.environ.get("JDEC_API_TOKEN") or os.environ.get("API_TOKEN") or "").strip()
+
+def get_workspace_user_key():
+    return (os.environ.get("WORKSPACE_USER_KEY") or os.environ.get("USER_KEY") or "local_user").strip()
+
+def api_request(method, path, params=None, body=None, timeout=30):
+    import urllib.parse
+
+    base = get_api_base_url()
+    url = f"{base}{path}"
+    if params:
+        query = urllib.parse.urlencode(params)
+        url = f"{url}?{query}"
+
+    headers = {"Content-Type": "application/json"}
+    token = get_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    headers["X-Workspace-Key"] = get_workspace_key()
+    headers["X-User-Key"] = get_workspace_user_key()
+
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        if response.status == 204:
+            return {}
+        raw = response.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
 
 def escape_text(value):
     return html.escape(str(value if value is not None else ""))
@@ -170,34 +206,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Neon Database Helper
-def get_db_connection():
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        st.error("❌ DATABASE_URL environment variable is missing. Please set it in your environment or Streamlit Secrets.")
-        st.stop()
-    
-    # Ensure sslmode=require for Neon serverless Postgres
-    if "sslmode=" not in database_url and "localhost" not in database_url and "127.0.0.1" not in database_url:
-        if "?" in database_url:
-            database_url += "&sslmode=require"
-        else:
-            database_url += "?sslmode=require"
-            
-    return psycopg2.connect(database_url)
-
+# Workspace config (Streamlit uses /api/v2; no direct DB connections)
 def get_workspace_key():
     return (os.environ.get("WORKSPACE_KEY") or "default").strip()
-
-def resolve_workspace_id(cursor):
-    workspace_key = get_workspace_key()
-    cursor.execute("SELECT id FROM workspaces WHERE workspace_key = %s", (workspace_key,))
-    row = cursor.fetchone()
-    if not row:
-        raise Exception(f"No workspace found for WORKSPACE_KEY={workspace_key}. Did you run migrations 020+?")
-    if isinstance(row, dict):
-        return row.get("id")
-    return row[0]
 
 def run_checked_command(command_args, step_label):
     """Run a local command safely and surface stdout/stderr to the UI."""
@@ -239,15 +250,16 @@ def show_generated_document_downloads(started_at, key_prefix):
 
 def validate_shortlist_row_shape(row):
     required = [
-        "id",
+        "canonical_job_id",
         "job_version_id",
         "title",
         "company",
-        "careers_portal_url",
+        "canonical_url",
+        "source",
         "location",
         "workplace_type",
-        "status",
-        "postedDate",
+        "processing_state",
+        "observed_at",
     ]
     missing = [key for key in required if row.get(key) is None]
     if missing:
@@ -261,63 +273,38 @@ def validate_shortlist_row_shape(row):
 
 def fetch_jobs_from_db():
     """
-    Fetch the canonical shortlist from v_canonical_shortlist (migration 007).
+    Fetch the canonical shortlist via /api/v2 (cursor-paginated).
     """
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        workspace_id = resolve_workspace_id(cursor)
-        cursor.execute("""
-            SELECT
-                canonical_job_id        AS id,
-                job_version_id,
-                title,
-                company,
-                canonical_url           AS careers_portal_url,
-                source,
-                location,
-                workplace_type,
-                employment_type,
-                description,
-                gate_status,
-                rejection_codes,
-                gate_evidence_quotes,
-                primary_lane            AS assigned_track,
-                secondary_lanes,
-                lane_confidence,
-                priority_score,
-                deterministic_match_score,
-                deterministic_match_coverage,
-                processing_status       AS status,
-                nd_friendly_score,
-                politics_stress_score,
-                sensory_overload_index,
-                next_action,
-                strategic_value,
-                recommended_cv_version,
-                evaluation_summary,
-                eval_provider,
-                eval_is_fallback,
-                version_mismatch,
-                observed_at::text       AS "postedDate",
-                evaluated_at,
-                lane_matches,
-                workability_facts,
-                queue_status
-            FROM v_canonical_shortlist s
-            JOIN canonical_jobs c_ws ON c_ws.id = s.canonical_job_id
-            WHERE c_ws.workspace_id = %s
-            ORDER BY s.observed_at DESC
-        """, (workspace_id,))
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
+        all_rows = []
+        cursor = None
+        pages = 0
+
+        while True:
+            pages += 1
+            params = {"limit": 500}
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = api_request("GET", "/api/v2/shortlist", params=params, timeout=60)
+            rows = resp.get("jobs") or []
+            if not isinstance(rows, list):
+                raise Exception("API returned invalid shortlist payload (jobs is not a list).")
+
+            all_rows.extend(rows)
+            cursor = resp.get("next_cursor")
+
+            if not cursor:
+                break
+            if pages >= 20:
+                st.warning("Shortlist pagination stopped after 20 pages to avoid excessive load.")
+                break
 
         valid_rows = []
         invalid_count = 0
-        for row in rows:
-            row_dict = dict(row)
-            ok, reason = validate_shortlist_row_shape(row_dict)
+        for row in all_rows:
+            row_dict = dict(row) if isinstance(row, dict) else {}
+            ok, reason = validate_shortlist_row_shape(row_dict) if row_dict else (False, "Row is not a JSON object")
             if ok:
                 valid_rows.append(row_dict)
             else:
@@ -329,144 +316,58 @@ def fetch_jobs_from_db():
 
         return valid_rows
     except Exception as e:
-        st.error(f"Failed to fetch jobs from database: {e}")
+        st.error(f"Failed to fetch jobs from API: {e}")
         return []
 
 def fetch_rejected_jobs_from_db():
     """Fetch hard-rejected and removed jobs from canonical audit view."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        workspace_id = resolve_workspace_id(cursor)
-        cursor.execute("""
-            SELECT
-                id,
-                title,
-                company,
-                careers_portal_url,
-                source,
-                status,
-                rejection_reason,
-                gate_status,
-                rejection_codes,
-                gate_evidence_quotes,
-                description,
-                nd_friendly_score,
-                politics_stress_score,
-                sensory_overload_index,
-                "postedDate"
-            FROM v_rejected_jobs_audit a
-            JOIN canonical_jobs c_ws ON c_ws.id = a.id
-            WHERE c_ws.workspace_id = %s
-            ORDER BY a."postedDate" DESC
-            LIMIT 50
-        """, (workspace_id,))
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return [dict(r) for r in rows]
+        resp = api_request("GET", "/api/v2/rejected", params={"limit": 50}, timeout=60)
+        rows = resp.get("jobs") or []
+        if not isinstance(rows, list):
+            raise Exception("API returned invalid rejected-jobs payload (jobs is not a list).")
+        return [dict(r) for r in rows if isinstance(r, dict)]
     except Exception as e:
-        st.error(f"Failed to fetch rejected jobs from database: {e}")
+        st.error(f"Failed to fetch rejected jobs from API: {e}")
         return []
 
 def delete_job_from_db(job_id):
-    """Soft-delete a canonical job by marking it MANUALLY_REMOVED.
-    HARD_REJECTED is reserved for deterministic gate failures only (AGENTS.md invariant).
-    """
+    """Soft-delete a canonical job by marking it MANUALLY_REMOVED (via /api/v2)."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        workspace_id = resolve_workspace_id(cursor)
-        workspace_id = resolve_workspace_id(cursor)
-
-        # Soft-delete: set status to MANUALLY_REMOVED (never hard-delete; preserves audit trail)
-        cursor.execute(
-            """
-            UPDATE canonical_jobs
-            SET processing_state = 'MANUALLY_REMOVED',
-                processing_status = 'MANUALLY_REMOVED',
-                rejection_reason = 'Manually removed by user via Streamlit UI',
-                updated_at = NOW()
-            WHERE workspace_id = %s AND id = %s
-            """,
-            (workspace_id, job_id)
-        )
-
-        conn.commit()
-        cursor.close()
-        conn.close()
-        st.success("Listing removed successfully (soft-delete — record preserved for audit).")
-        return True
+        resp = api_request("DELETE", f"/api/v2/jobs/{job_id}", timeout=30)
+        if resp.get("ok") and resp.get("updated"):
+            st.success("Listing removed successfully (soft-delete — record preserved for audit).")
+            return True
+        if resp.get("ok") and not resp.get("updated"):
+            st.warning("Job was not updated (not found or already removed).")
+            return False
+        st.error(f"Failed to remove job (unexpected API response): {resp}")
+        return False
     except Exception as e:
         st.error(f"Failed to remove job: {e}")
         return False
 
 def save_new_job_to_db(job):
-    """Insert a manually-added job into raw_job_observations so it enters the
-    canonical pipeline (normalize → gate → lane → budget → evaluate).
-    Writing to raw_jobs (legacy) is insufficient — that table is not read by the pipeline.
-    """
-    import hashlib, uuid
+    """Stage a manually-added job via /api/v2 so it enters the canonical pipeline."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        description_text = job.get("description", "")
-        payload = {
-            "company_name": job.get("company", "Unknown"),
-            "title": job.get("title", "Unknown"),
-            "description": description_text,
-            "source": job.get("source", "MANUAL_STREAMLIT"),
-            "careers_portal_url": job.get("careers_portal_url", ""),
+        body = {
+            "title": job.get("title"),
+            "company": job.get("company"),
+            "source": job.get("source") or "MANUAL_STREAMLIT",
+            "description": job.get("description"),
+            "salaryRange": job.get("salaryRange"),
+            "location": job.get("location"),
+            "careers_portal_url": job.get("careers_portal_url"),
         }
-        raw_payload_str = json.dumps(payload)
-        raw_payload_hash = hashlib.sha256(raw_payload_str.encode()).hexdigest()
-
-        # Ensure a source_run exists for manual entries
-        cursor.execute(
-            "INSERT INTO source_runs (workspace_id, status) VALUES (%s, 'MANUAL_STREAMLIT') RETURNING id",
-            (workspace_id,),
-        )
-        source_run_id = cursor.fetchone()[0]
-
-        cursor.execute(
-            """
-            INSERT INTO raw_job_observations (
-                workspace_id,
-                source_run_id, source_name, source_external_id, source_url,
-                retrieved_at, company_name, title, description_raw,
-                location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
-                canonical_apply_url, source_lane, search_plan_version,
-                raw_payload, raw_payload_hash
-            ) VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (workspace_id, raw_payload_hash) DO NOTHING
-            """,
-            (
-                workspace_id,
-                source_run_id,
-                "MANUAL_STREAMLIT",
-                f"manual-{raw_payload_hash[:16]}",
-                job.get("careers_portal_url", ""),
-                job.get("company", "Unknown"),
-                job.get("title", "Unknown"),
-                description_text,
-                job.get("location", "Singapore"),
-                "UNKNOWN",
-                "UNKNOWN",
-                job.get("salaryRange", "UNKNOWN"),
-                job.get("careers_portal_url", ""),
-                "UNKNOWN",
-                "1.0",
-                raw_payload_str,
-                raw_payload_hash,
-            ),
-        )
-
-        conn.commit()
-        cursor.close()
-        conn.close()
-        st.success(f"✅ '{job['title']}' added to the ingestion pipeline (raw_job_observations). It will be normalized, gated, and evaluated in the next run.")
-        return True
+        resp = api_request("POST", "/api/v2/observations/manual", body=body, timeout=60)
+        if resp.get("ok") and resp.get("inserted"):
+            st.success("✅ Job staged successfully. It will be normalized, gated, and evaluated in the next run.")
+            return True
+        if resp.get("ok") and not resp.get("inserted"):
+            st.warning("Job was already staged previously (duplicate raw payload).")
+            return True
+        st.error(f"Failed to stage job (unexpected API response): {resp}")
+        return False
     except Exception as e:
         st.error(f"Failed to save job: {e}")
         return False
@@ -664,94 +565,23 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
     raise Exception("All configured models (OpenAI, Gemini) failed or no API keys are set.")
 
 def ingest_linkedin_saved_json(jobs):
-    import hashlib
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        workspace_id = resolve_workspace_id(cursor)
-        
-        # Ensure a source_run exists
-        cursor.execute(
-            "INSERT INTO source_runs (workspace_id, status) VALUES (%s, 'LINKEDIN_IMPORT') RETURNING id",
-            (workspace_id,),
-        )
-        source_run_id = cursor.fetchone()[0]
-        
-        inserted_count = 0
-        skipped_count = 0
-        
-        for job in jobs:
-            title = job.get("title", "").strip()
-            company = job.get("company", "").strip()
-            url = job.get("url", "").strip()
-            description = job.get("description", "").strip()
-            location = job.get("location", "Singapore").strip()
-            
-            if not title or not company or not url or not description:
-                skipped_count += 1
-                continue
-                
-            raw_payload_str = json.dumps(job)
-            raw_payload_hash = hashlib.sha256(raw_payload_str.encode()).hexdigest()
-            
-            cursor.execute("""
-                INSERT INTO raw_job_observations (
-                    workspace_id,
-                    source_run_id, source_name, source_external_id, source_url,
-                    retrieved_at, company_name, title, description_raw,
-                    location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
-                    canonical_apply_url, source_lane, search_plan_version,
-                    raw_payload, raw_payload_hash
-                ) VALUES (%s, %s, 'LINKEDIN', %s, %s, NOW(), %s, %s, %s, %s, 'UNKNOWN', 'PERMANENT', 'UNKNOWN', %s, 'UNKNOWN', '1.0', %s, %s)
-                ON CONFLICT (workspace_id, raw_payload_hash) DO NOTHING
-                RETURNING id
-            """, (
-                workspace_id,
-                source_run_id,
-                f"linkedin-{raw_payload_hash[:16]}",
-                url,
-                company,
-                title,
-                description,
-                location,
-                url,
-                raw_payload_str,
-                raw_payload_hash
-            ))
-            res = cursor.fetchone()
-            if res:
-                inserted_count += 1
-            else:
-                skipped_count += 1
-                
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return inserted_count, skipped_count
+        resp = api_request("POST", "/api/v2/observations/linkedin", body={"jobs": jobs}, timeout=120)
+        if not resp.get("ok"):
+            st.error(f"LinkedIn import failed (unexpected API response): {resp}")
+            return 0, 0
+        return int(resp.get("inserted") or 0), int(resp.get("skipped") or 0)
     except Exception as e:
-        st.error(f"Database insertion failed: {e}")
+        st.error(f"LinkedIn import failed: {e}")
         return 0, 0
 
 def fetch_company_analytics_from_db():
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("""
-            SELECT name as "Company", 
-                   industry as "Industry",
-                   nd_friendly_avg_score as "Avg Autonomy Score",
-                   politics_stress_avg_score as "Avg Politics Score",
-                   sensory_overload_avg_index as "Avg Sensory Index",
-                   focus_protection_avg_score as "Avg Focus Score",
-                   is_neurodivergent_approved as "Approved",
-                   is_toxic_culture_blacklisted as "Toxic"
-            FROM companies
-            ORDER BY nd_friendly_avg_score DESC
-        """)
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return [dict(r) for r in rows]
+        resp = api_request("GET", "/api/v2/analytics/companies", timeout=60)
+        rows = resp.get("companies") or []
+        if not isinstance(rows, list):
+            raise Exception("API returned invalid companies payload (companies is not a list).")
+        return [dict(r) for r in rows if isinstance(r, dict)]
     except Exception as e:
         st.error(f"Failed to fetch company analytics: {e}")
         return []
@@ -778,9 +608,9 @@ st.sidebar.header("🎯 Navigation & Filters")
 
 # Metrics
 total_jobs = len(jobs_list)
-evaluated_count = sum(1 for j in jobs_list if j.get("status") == "AI_EVALUATED" and not j.get("version_mismatch"))
-priority_count = sum(1 for j in jobs_list if j.get("status") == "AI_EVALUATED" and j.get("decision_outcome") == "PRIORITY")
-review_count = sum(1 for j in jobs_list if j.get("status") == "AI_EVALUATED" and j.get("decision_outcome") == "REVIEW")
+evaluated_count = sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED" and not j.get("version_mismatch"))
+priority_count = sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED" and j.get("decision_outcome") == "PRIORITY")
+review_count = sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED" and j.get("decision_outcome") == "REVIEW")
 verify_count = sum(1 for j in jobs_list if j.get("gate_status") == "NEEDS_VERIFICATION")
 toxic_count = sum(1 for j in jobs_list if isinstance(j.get("politics_stress_score"), (int, float)) and j.get("politics_stress_score") >= 70)
 
@@ -860,24 +690,24 @@ lane_filter = st.sidebar.selectbox("Filter Target Lane", ["All Lanes", "CORE_AI_
 status_filter = st.sidebar.selectbox("Filter Pipeline Status", ["All Statuses", "AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION", "ROUTING_DEFERRED"])
 source_values = sorted({(j.get("source") or "UNKNOWN") for j in jobs_list})
 board_filter = st.sidebar.selectbox("Filter Source", ["All Sources", *source_values])
-track_values = sorted({(j.get("assigned_track") or "UNASSIGNED") for j in jobs_list})
+track_values = sorted({(j.get("primary_lane") or "UNASSIGNED") for j in jobs_list})
 track_filter = st.sidebar.selectbox("Filter Track", ["All Tracks", "Unassigned", *track_values])
 
 # Apply filters
 filtered_jobs = jobs_list
 if lane_filter and lane_filter != "All Lanes":
-    filtered_jobs = [j for j in filtered_jobs if j.get("assigned_track") == lane_filter]
+    filtered_jobs = [j for j in filtered_jobs if j.get("primary_lane") == lane_filter]
 if status_filter and status_filter != "All Statuses":
-    filtered_jobs = [j for j in filtered_jobs if j.get("status") == status_filter]
+    filtered_jobs = [j for j in filtered_jobs if j.get("processing_state") == status_filter]
 if search_query:
     filtered_jobs = [j for j in filtered_jobs if search_query.lower() in (j.get("title") or "").lower() or search_query.lower() in (j.get("company") or "").lower() or search_query.lower() in (j.get("description") or "").lower()]
 if board_filter != "All Sources":
     filtered_jobs = [j for j in filtered_jobs if (j.get("source") or "UNKNOWN") == board_filter]
 if track_filter != "All Tracks":
     if track_filter == "Unassigned":
-        filtered_jobs = [j for j in filtered_jobs if not j.get("assigned_track") or j.get("assigned_track") == "UNASSIGNED"]
+        filtered_jobs = [j for j in filtered_jobs if not j.get("primary_lane") or j.get("primary_lane") == "UNASSIGNED"]
     else:
-        filtered_jobs = [j for j in filtered_jobs if j.get("assigned_track") == track_filter]
+        filtered_jobs = [j for j in filtered_jobs if j.get("primary_lane") == track_filter]
 
 # Main Dashboard Layout tabs
 tab_dashboard, tab_add_job, tab_linkedin, tab_analytics, tab_cv = st.tabs(["📁 Postgres Job Vault", "➕ Add Job Ad", "🔗 LinkedIn Saved Jobs", "🔥 ND Culture Analytics", "📄 CV Customizer"])
@@ -906,7 +736,7 @@ with tab_dashboard:
     # Deterministic Top Recommended list (LLM next_action is displayed but not authoritative).
     top_recommended = [
         j for j in jobs_list
-        if j.get("status") == "AI_EVALUATED"
+        if j.get("processing_state") == "AI_EVALUATED"
         and not j.get("version_mismatch")
         and j.get("decision_outcome") in ("PRIORITY", "REVIEW")
         and j.get("next_action") not in ("REJECTED", "LOW_STRATEGIC_VALUE")
@@ -925,7 +755,7 @@ with tab_dashboard:
 
                 title = escape_text(rjob.get("title") or "")
                 company = escape_text(rjob.get("company") or "")
-                lane = escape_text(rjob.get("assigned_track") or "UNCLASSIFIED")
+                lane = escape_text(rjob.get("primary_lane") or "UNCLASSIFIED")
                 location = escape_text(rjob.get("location") or "Unknown")
                 workplace = escape_text(rjob.get("workplace_type") or "UNKNOWN")
 
@@ -961,7 +791,7 @@ with tab_dashboard:
                     <p><b>Summary:</b> {summary}</p>
                 </div>
                 """, unsafe_allow_html=True)
-                url = safe_http_url(rjob.get("careers_portal_url"))
+                url = safe_http_url(rjob.get("canonical_url") or rjob.get("careers_portal_url"))
                 if url:
                     st.markdown(f"🔗 [Verify Job Ad & Apply]({url})")
                 else:
@@ -988,7 +818,7 @@ with tab_dashboard:
         def status_sort_key(j):
             outcome = j.get("decision_outcome") or "TRACK"
             eligibility = j.get("decision_eligibility") or "VERIFY"
-            status = j.get("status") or "UNKNOWN"
+            status = j.get("processing_state") or "UNKNOWN"
 
             outcome_rank = {"PRIORITY": 0, "REVIEW": 1, "TRACK": 2, "SKIP": 3}.get(outcome, 9)
             eligibility_rank = {"ELIGIBLE": 0, "VERIFY": 1, "INELIGIBLE": 2}.get(eligibility, 9)
@@ -1023,7 +853,7 @@ with tab_dashboard:
             if active_jobs:
                 st.write(f"Showing {len(active_jobs)} listings:")
                 for idx, job in enumerate(active_jobs):
-                    status = job.get("status") or "UNKNOWN"
+                    status = job.get("processing_state") or "UNKNOWN"
                     company = job.get("company") or "Unknown"
                     title = job.get("title") or "Job Title"
 
@@ -1045,10 +875,10 @@ with tab_dashboard:
                     with st.expander(f"{badge_style} {title} — {company} ({status})"):
                         st.markdown(f"**Decision:** `{outcome}` ({eligibility}) | **Gate:** `{gate_status}`")
                         st.markdown(f"**Source:** `{job.get('source') or 'UNKNOWN'}`")
-                        st.markdown(f"**Lane:** `{job.get('assigned_track') or 'UNCLASSIFIED'}` | **Lane confidence:** `{job.get('lane_confidence') or 'None'}`")
+                        st.markdown(f"**Lane:** `{job.get('primary_lane') or 'UNCLASSIFIED'}` | **Lane confidence:** `{job.get('lane_confidence') or 'None'}`")
                         st.markdown(f"**Location:** {job.get('location') or 'Unknown'} ({job.get('workplace_type') or 'UNKNOWN'}) | **Employment:** `{job.get('employment_type') or 'UNKNOWN'}`")
 
-                        url = safe_http_url(job.get("careers_portal_url"))
+                        url = safe_http_url(job.get("canonical_url"))
                         if url:
                             st.markdown(f"**Verification Link:** [Go to Careers Portal]({url})")
                         else:
@@ -1088,8 +918,8 @@ with tab_dashboard:
                                 pass
                         st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"active_desc_{idx}")
                         
-                        if st.button("🗑️ Delete Listing", key=f"active_del_{job.get('id') or idx}"):
-                            if delete_job_from_db(job.get("id")):
+                        if st.button("🗑️ Delete Listing", key=f"active_del_{job.get('canonical_job_id') or idx}"):
+                            if delete_job_from_db(job.get("canonical_job_id")):
                                 st.rerun()
             else:
                 if rejected_jobs:
@@ -1110,12 +940,12 @@ with tab_dashboard:
                         
                         with st.popover(f"🔴 {title} — {company}"):
                             st.markdown(f"**Source Board:** `{job.get('source')}`")
-                            url = safe_http_url(job.get("careers_portal_url"))
+                            url = safe_http_url(job.get("canonical_url"))
                             if url:
                                 st.markdown(f"**Verification Link:** [Go to Careers Portal]({url})")
                             else:
                                 st.markdown("**Verification Link:** N/A")
-                            st.markdown(f"**Status:** `{job.get('status')}` | **Gate:** `{job.get('gate_status') or 'N/A'}`")
+                            st.markdown(f"**Status:** `{job.get('processing_state')}` | **Gate:** `{job.get('gate_status') or 'N/A'}`")
                             st.markdown(f"**Reason Codes:** {', '.join(job.get('rejection_codes') or []) or 'N/A'}")
                             st.markdown(f"**Evidence:** {'; '.join(job.get('gate_evidence_quotes') or []) or job.get('rejection_reason') or 'N/A'}")
                             st.markdown(
@@ -1137,8 +967,8 @@ with tab_dashboard:
                                     pass
                             st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"rej_desc_{idx}")
                             
-                            if job.get("status") != "MANUALLY_REMOVED" and st.button("🗑️ Remove Listing", key=f"rej_del_{job.get('id') or idx}"):
-                                if delete_job_from_db(job.get("id")):
+                            if job.get("processing_state") != "MANUALLY_REMOVED" and st.button("🗑️ Remove Listing", key=f"rej_del_{job.get('canonical_job_id') or idx}"):
+                                if delete_job_from_db(job.get("canonical_job_id")):
                                     st.rerun()
                     if len(rejected_jobs) > display_limit:
                         st.caption(f"⚠️ Showing first {display_limit} rejected listings to maintain UI performance. Use the search inputs above to filter down further.")
@@ -1147,7 +977,7 @@ with tab_dashboard:
         st.subheader("🤖 Scoring & Match Analysis Details")
         st.write("Select an evaluated job/version to view deterministic match scores, gate evidence, and the latest AI evaluation summary.")
         
-        evaluated_jobs = [j for j in filtered_jobs if j.get("status") == "AI_EVALUATED"]
+        evaluated_jobs = [j for j in filtered_jobs if j.get("processing_state") == "AI_EVALUATED"]
         
         def format_job_option(j):
             outcome = j.get("decision_outcome") or "TRACK"
@@ -1169,7 +999,7 @@ with tab_dashboard:
 
         if job_to_show:
             st.markdown(f"#### Selected: **{job_to_show.get('title') or ''}** at *{job_to_show.get('company') or ''}*")
-            url = safe_http_url(job_to_show.get("careers_portal_url"))
+            url = safe_http_url(job_to_show.get("canonical_url"))
             if url:
                 st.markdown(f"🔗 [View Posting]({url})")
             else:
@@ -1255,7 +1085,6 @@ with tab_add_job:
                 "company": company,
                 "source": source,
                 "salaryRange": salary,
-                "postedDate": str(datetime.date.today()),
                 "location": location,
                 "careers_portal_url": careers_url if careers_url else f"https://www.{company.lower().replace(' ', '')}.com/careers",
                 "description": desc
@@ -1554,7 +1383,14 @@ with tab_cv:
         if len(fact_ids) == 0:
             st.error("No profile fact IDs found in the master profile ledger. Document generation is disabled.")
 
-    eligible_jobs = [j for j in jobs_list if j.get("id") and j.get("job_version_id") and j.get("status") in ("AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION")]
+    eligible_jobs = [
+        j
+        for j in jobs_list
+        if j.get("canonical_job_id")
+        and j.get("job_version_id")
+        and j.get("processing_state")
+        in ("AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION")
+    ]
 
     if not eligible_jobs:
         st.info("No canonical shortlist jobs with version IDs are currently available.")
@@ -1562,16 +1398,16 @@ with tab_cv:
         st.info("Fix the master profile ledger first, then generate documents.")
     else:
         def _job_label(j):
-            return f"{j.get('company')} - {j.get('title')} [{j.get('status')}] ({str(j.get('job_version_id'))[:8]})"
+            return f"{j.get('company')} - {j.get('title')} [{j.get('processing_state')}] ({str(j.get('job_version_id'))[:8]})"
 
         options = {_job_label(j): j for j in eligible_jobs}
         selected_label = st.selectbox("Select canonical job/version", list(options.keys()))
         selected_job = options[selected_label]
 
-        st.markdown(f"**Canonical Job ID:** {selected_job.get('id')}")
+        st.markdown(f"**Canonical Job ID:** {selected_job.get('canonical_job_id')}")
         st.markdown(f"**Job Version ID:** {selected_job.get('job_version_id')}")
         st.markdown(f"**Company:** {selected_job.get('company')} | **Role:** {selected_job.get('title')}")
-        url = safe_http_url(selected_job.get("careers_portal_url"))
+        url = safe_http_url(selected_job.get("canonical_url"))
         if url:
             st.markdown(f"🔗 [View Posting]({url})")
 
@@ -1593,7 +1429,7 @@ with tab_cv:
                                 "npx",
                                 "tsx",
                                 "scripts/generate_cv.ts",
-                                str(selected_job.get("id")),
+                                str(selected_job.get("canonical_job_id")),
                                 str(selected_job.get("job_version_id"))
                             ],
                             "generate_cv"
@@ -1617,7 +1453,7 @@ with tab_cv:
                                 "npx",
                                 "tsx",
                                 "scripts/generate_cover_letter.ts",
-                                str(selected_job.get("id")),
+                                str(selected_job.get("canonical_job_id")),
                                 str(selected_job.get("job_version_id"))
                             ],
                             "generate_cover_letter"

@@ -7,6 +7,8 @@ npm ci
 npm run contracts:check
 npm run lint
 npm run db:init
+npm run backfill:v22 -- --dry-run
+npm run cutover:audit
 npm test
 ```
 
@@ -32,6 +34,15 @@ git diff --name-status origin/main...HEAD
 ```
 
 Also capture URLs for green CI, ingestion, and document-generation runs, source-by-source counts, and exact artifact names. If any evidence is missing, the release remains incomplete.
+
+## Tagging
+
+Only after all gates pass and parity/backfill audits are recorded:
+
+```bash
+git tag -a v2.2.0 -m "Job Decision Engine v2.2.0"
+git push origin v2.2.0
+```
 
 ## Privacy And Security
 
