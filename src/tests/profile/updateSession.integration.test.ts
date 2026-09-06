@@ -23,7 +23,7 @@ describe.skipIf(skipReal)('P3: profile update sessions (optimistic + idempotent 
 
     schemaName = `p3_profile_update_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
     await q(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-    await q(`SET search_path TO ${schemaName}`);
+    await q(`SET search_path TO ${schemaName}, public`);
 
     await runMigrations(client);
   });
@@ -354,4 +354,3 @@ describe.skipIf(skipReal)('P3: profile update sessions (optimistic + idempotent 
     expect(conflict.status).toBe('CONFLICT');
   });
 });
-

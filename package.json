@@ -14,6 +14,8 @@
     "docs:compliance": "tsx scripts/generate_source_compliance_matrix.ts",
     "cutover:audit": "tsx scripts/backfill_cutover.ts",
     "backfill:v22": "tsx scripts/v22_backfill.ts",
+    "api:v2": "tsx scripts/start_api_v2.ts",
+    "test:streamlit": "tsx scripts/streamlit_e2e.ts",
     "contracts:export": "tsx scripts/export_contracts.ts",
     "contracts:check": "npm run contracts:export && git diff --exit-code -- src/contracts/json",
     "sources:sync": "tsx scripts/load_source_plugins.ts",

@@ -199,7 +199,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
 
     try {
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-      await client.query(`SET search_path TO ${schemaName}`);
+      await client.query(`SET search_path TO ${schemaName}, public`);
       await client.query(`
         CREATE TABLE IF NOT EXISTS schema_migrations (
           version VARCHAR(255) PRIMARY KEY,

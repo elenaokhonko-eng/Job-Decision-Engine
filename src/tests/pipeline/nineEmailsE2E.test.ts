@@ -57,7 +57,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     await q("DELETE FROM raw_email_alerts WHERE gmail_message_id LIKE 'fixture-email-%'");
 
     // Mock embeddings for deterministic offline CI runs
-    vi.spyOn(agent, "generateEmbedding").mockImplementation(async (text: string) => {
+    const embedMock = async (text: string) => {
       const t = text.toLowerCase();
       if (
         t.includes("ai systems engineer") ||
@@ -80,7 +80,10 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         return [0, 0, 0, 1];
       }
       return [0.1, 0.1, 0.1, 0.1];
-    });
+    };
+
+    vi.spyOn(agent, "generateEmbedding").mockImplementation(embedMock);
+    vi.spyOn(agent, "generateEmbeddingWithProvider").mockImplementation(embedMock as any);
   });
 
   afterAll(async () => {
@@ -206,4 +209,3 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(unmapped).toBe(0);
   });
 });
-

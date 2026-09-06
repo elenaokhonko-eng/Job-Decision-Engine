@@ -10,6 +10,7 @@ import { legacyApiGateMiddleware } from "./src/api/legacy/access.ts";
 
 // Load environment variables
 dotenv.config();
+dotenv.config({ path: ".env.local" });
 
 function isResetRouteAllowed(): boolean {
   if (process.env.NODE_ENV === "production") {

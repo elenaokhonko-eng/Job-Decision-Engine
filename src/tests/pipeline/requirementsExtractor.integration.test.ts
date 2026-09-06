@@ -15,7 +15,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
 
     try {
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-      await client.query(`SET search_path TO ${schemaName}`);
+      await client.query(`SET search_path TO ${schemaName}, public`);
       await runMigrations(client);
 
       const canonicalJobId = '90000000-0000-4000-8000-000000000001';

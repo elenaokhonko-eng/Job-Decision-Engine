@@ -1,0 +1,74 @@
+name: Streamlit Browser E2E
+
+on:
+  workflow_dispatch: {}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  streamlit-e2e:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d testdb"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Initialize Database
+        env:
+          DATABASE_URL: postgres://test:password@localhost:5432/testdb
+        run: npm run db:init
+
+      - name: Run Streamlit E2E smoke + accessibility snapshot
+        env:
+          DATABASE_URL: postgres://test:password@localhost:5432/testdb
+          JDEC_API_TOKEN: streamlit-e2e-token
+          WORKSPACE_KEY: default
+          WORKSPACE_USER_KEY: local_user
+        run: npm run test:streamlit
+
+      - name: Upload Streamlit accessibility artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamlit-accessibility-snapshot
+          path: scripts/exports/streamlit_accessibility_snapshot.json
+          if-no-files-found: warn
+          retention-days: 7
+

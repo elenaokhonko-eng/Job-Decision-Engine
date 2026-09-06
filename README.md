@@ -111,6 +111,7 @@ npm run docs:cover-letter
 2. Ingestion: [.github/workflows/ingest.yml](.github/workflows/ingest.yml)
 3. Queue worker: [.github/workflows/queue_worker.yml](.github/workflows/queue_worker.yml)
 4. Documents: [.github/workflows/documents.yml](.github/workflows/documents.yml)
+5. Streamlit browser E2E (manual): [.github/workflows/streamlit_e2e.yml](.github/workflows/streamlit_e2e.yml)
 
 ## Required Secrets
 
@@ -119,6 +120,7 @@ npm run docs:cover-letter
 3. `GMAIL_APP_PASSWORD`
 4. At least one of `GEMINI_API_KEY` or `OPENAI_API_KEY`
 5. `MASTER_PROFILE_JSON` for document workflows
+6. `DOCUMENT_CONTACT_JSON` (recommended) for document workflows
 
 ## Notes For Open-Source Usage
 

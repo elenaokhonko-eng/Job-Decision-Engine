@@ -23,7 +23,7 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
 
     schemaName = `p2_ws_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
     await q(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-    await q(`SET search_path TO ${schemaName}`);
+    await q(`SET search_path TO ${schemaName}, public`);
 
     await runMigrations(client);
   });

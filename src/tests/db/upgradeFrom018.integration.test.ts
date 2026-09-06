@@ -43,7 +43,7 @@ describe.skipIf(skipReal)("P11: upgrade from migration 018 (integration)", () =>
 
     try {
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-      await client.query(`SET search_path TO ${schemaName}`);
+      await client.query(`SET search_path TO ${schemaName}, public`);
 
       await client.query(`
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -96,4 +96,3 @@ describe.skipIf(skipReal)("P11: upgrade from migration 018 (integration)", () =>
     }
   });
 });
-
