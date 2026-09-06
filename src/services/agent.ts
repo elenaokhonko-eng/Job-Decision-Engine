@@ -804,8 +804,8 @@ export async function generateContentAudited(options: {
 
 export type EmbeddingProvider = "gemini" | "openai";
 
-let geminiEmbeddingDisabledReason: string | null = null;
-let geminiEmbeddingDisableLogged = false;
+type GeminiEmbeddingDisableState = { reason: string; logged: boolean };
+const geminiEmbeddingDisableByModel = new Map<string, GeminiEmbeddingDisableState>();
 
 function describeError(error: unknown): string {
   if (error instanceof Error) {
@@ -844,14 +844,24 @@ function isGeminiEmbeddingModelNotFound(error: unknown): boolean {
 }
 
 async function embedWithGemini(text: string): Promise<number[]> {
-  if (geminiEmbeddingDisabledReason) {
-    throw new Error(`Gemini embedding disabled: ${geminiEmbeddingDisabledReason}`);
+  return embedWithGeminiModel(text, MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL);
+}
+
+async function embedWithGeminiModel(text: string, model: string): Promise<number[]> {
+  const normalizedModel = (model || "").trim();
+  if (!normalizedModel) {
+    throw new Error("Gemini embedding requested but model is empty.");
+  }
+
+  const disabled = geminiEmbeddingDisableByModel.get(normalizedModel);
+  if (disabled?.reason) {
+    throw new Error(`Gemini embedding disabled for ${normalizedModel}: ${disabled.reason}`);
   }
 
   const ai = getGeminiClient();
   try {
     const response = await ai.models.embedContent({
-      model: MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL,
+      model: normalizedModel,
       contents: text,
     });
     const vals = response.embeddings?.[0]?.values;
@@ -859,10 +869,12 @@ async function embedWithGemini(text: string): Promise<number[]> {
     throw new Error("Gemini embedding returned empty values");
   } catch (error: unknown) {
     if (isGeminiEmbeddingModelNotFound(error)) {
-      geminiEmbeddingDisabledReason = `model not found/unsupported (${MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL}); set GEMINI_API_VERSION or EMBEDDING_PRIMARY_MODEL`;
-      if (!geminiEmbeddingDisableLogged) {
-        geminiEmbeddingDisableLogged = true;
-        console.warn(`⚠️ ${geminiEmbeddingDisabledReason}`);
+      const reason = `model not found/unsupported; set GEMINI_API_VERSION or configure EMBEDDING_PRIMARY_MODEL to one that supports embedContent`;
+      const prior = geminiEmbeddingDisableByModel.get(normalizedModel) || { reason: "", logged: false };
+      geminiEmbeddingDisableByModel.set(normalizedModel, { reason, logged: prior.logged });
+      if (!prior.logged) {
+        geminiEmbeddingDisableByModel.set(normalizedModel, { reason, logged: true });
+        console.warn(`⚠️ Gemini embedding disabled for ${normalizedModel}: ${reason}`);
       }
     }
     throw error;
@@ -870,9 +882,18 @@ async function embedWithGemini(text: string): Promise<number[]> {
 }
 
 async function embedWithOpenAI(text: string): Promise<number[]> {
+  return embedWithOpenAIModel(text, MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL);
+}
+
+async function embedWithOpenAIModel(text: string, model: string): Promise<number[]> {
   const openaiKey = process.env.OPENAI_API_KEY;
   if (!openaiKey) {
     throw new Error("OpenAI embedding requested but OPENAI_API_KEY is not configured.");
+  }
+
+  const normalizedModel = (model || "").trim();
+  if (!normalizedModel) {
+    throw new Error("OpenAI embedding requested but model is empty.");
   }
 
   const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
@@ -881,7 +902,7 @@ async function embedWithOpenAI(text: string): Promise<number[]> {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${openaiKey}`,
     },
-    body: JSON.stringify({ input: text, model: MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL }),
+    body: JSON.stringify({ input: text, model: normalizedModel }),
     signal: AbortSignal.timeout(30000),
   });
   if (!oResponse.ok) {
@@ -898,15 +919,27 @@ export async function generateEmbeddingWithProvider(
   text: string,
   provider: EmbeddingProvider
 ): Promise<number[]> {
+  return generateEmbeddingWithProviderAndModel(
+    text,
+    provider,
+    provider === "gemini" ? MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL : MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL
+  );
+}
+
+export async function generateEmbeddingWithProviderAndModel(
+  text: string,
+  provider: EmbeddingProvider,
+  model: string
+): Promise<number[]> {
   if (provider === "gemini") {
     const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
     if (!geminiKey) {
       throw new Error("Gemini embedding requested but GEMINI_API_KEY is not configured.");
     }
-    return embedWithGemini(text);
+    return embedWithGeminiModel(text, model);
   }
 
-  return embedWithOpenAI(text);
+  return embedWithOpenAIModel(text, model);
 }
 
 /**
@@ -926,7 +959,10 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 
   for (const provider of providerOrder) {
     if (provider === "gemini") {
-      if (!geminiKey || geminiEmbeddingDisabledReason) {
+      const disabled =
+        MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL &&
+        geminiEmbeddingDisableByModel.get(MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL)?.reason;
+      if (!geminiKey || disabled) {
         continue;
       }
     } else {

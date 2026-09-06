@@ -39,7 +39,7 @@ describe('runEmbeddingBatch', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    vi.spyOn(agent, 'generateEmbeddingWithProvider').mockResolvedValue([0.1, 0.2, 0.3, 0.4]);
+    vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel').mockResolvedValue([0.1, 0.2, 0.3, 0.4]);
 
     const result = await runEmbeddingBatch(
       '11111111-1111-4111-8111-111111111111',
@@ -144,7 +144,7 @@ describe('runEmbeddingBatch', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    const spy = vi.spyOn(agent, 'generateEmbeddingWithProvider');
+    const spy = vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel');
     spy
       .mockResolvedValueOnce([0.1, 0.2, 0.3, 0.4])
       .mockResolvedValueOnce([0.2, 0.3, 0.4, 0.5]);

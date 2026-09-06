@@ -36,14 +36,19 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx src/db/migrate.ts
 
+      - name: Ensure exports directory exists
+        run: mkdir -p scripts/exports
+
       - name: Generate customized CV
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DOCUMENT_PRIMARY_PROVIDER: ${{ vars.DOCUMENT_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          DOCUMENT_CONTACT_JSON: ${{ secrets.DOCUMENT_CONTACT_JSON }}
           MASTER_PROFILE_JSON: ${{ secrets.MASTER_PROFILE_JSON }}
         run: npx tsx scripts/generate_cv.ts ${{ inputs.canonical_job_id }} ${{ inputs.job_version_id }}
 
@@ -52,9 +57,11 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DOCUMENT_PRIMARY_PROVIDER: ${{ vars.DOCUMENT_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          DOCUMENT_CONTACT_JSON: ${{ secrets.DOCUMENT_CONTACT_JSON }}
           MASTER_PROFILE_JSON: ${{ secrets.MASTER_PROFILE_JSON }}
         run: npx tsx scripts/generate_cover_letter.ts ${{ inputs.canonical_job_id }} ${{ inputs.job_version_id }}
 
@@ -64,5 +71,5 @@ jobs:
         with:
           name: application-documents-${{ inputs.canonical_job_id }}
           path: scripts/exports/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 3

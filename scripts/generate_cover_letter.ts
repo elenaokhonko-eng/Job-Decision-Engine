@@ -5,7 +5,7 @@
  *  1. canonical_jobs + job_versions (job description + title + company)
  *  2. ai_evaluations.full_evaluation_payload (lane context, ND scores)
  *  3. ai_evaluations.lane_matches + workability_facts
- *  4. master_profile.json (committed factual evidence ledger)
+ *  4. active profile facts in PostgreSQL (profile_versions/profile_facts)
  *
  * Invariants:
  *  - Provider failover: Gemini → OpenAI (via generateContent in agent.ts)
@@ -60,7 +60,7 @@ function cleanJsonResponse(rawText: string): string {
 function requireEnv(name: string): string {
   const val = process.env[name];
   if (!val) {
-    console.error(`❌ ERROR: ${name} environment variable is missing.`);
+    console.error(`ERROR: ${name} environment variable is missing.`);
     process.exit(1);
   }
   return val;
@@ -73,11 +73,6 @@ function validateAgainstSchema(payload: unknown, schema: any, schemaName: string
     const details = (validate.errors || []).map((e: any) => `${e.instancePath || "/"} ${e.message}`).join("; ");
     throw new Error(`${schemaName} validation failed: ${details}`);
   }
-}
-
-function profileFactIds(masterProfile: any): Set<string> {
-  const facts: any[] = masterProfile.profile_facts || masterProfile.facts || [];
-  return new Set(facts.map((f) => f?.id).filter((id: any) => typeof id === "string" && id.trim().length > 0));
 }
 
 function collectCoverLetterClaims(finalCl: any): DocumentClaimInput[] {
@@ -216,28 +211,54 @@ async function generateTailoredCoverLetter(): Promise<void> {
       console.log(`  ℹ️  AI evaluation used fallback provider: ${job.eval_provider}`);
     }
 
-    // ── Step 2: Load master profile (evidence ledger) ────────────────────────
-    let masterProfile: any;
-    if (process.env.MASTER_PROFILE_JSON) {
+    // ── Step 2: Resolve document contact info (no master_profile evidence dependency) ──
+    const profileNameRes = await pool.query<{ display_name: string }>(
+      `SELECT cp.display_name
+       FROM profile_versions pv
+       JOIN candidate_profiles cp ON cp.id = pv.candidate_profile_id
+       WHERE pv.workspace_id = $1
+         AND pv.status = 'ACTIVE'
+       ORDER BY pv.created_at DESC
+       LIMIT 1`,
+      [ctx.workspaceId]
+    );
+    const candidateName = String(profileNameRes.rows[0]?.display_name || "").trim();
+
+    let contactInfo: any = {};
+    const contactJson = String(process.env.DOCUMENT_CONTACT_JSON || "").trim();
+    if (contactJson) {
       try {
-        masterProfile = JSON.parse(process.env.MASTER_PROFILE_JSON);
+        contactInfo = JSON.parse(contactJson);
       } catch (err: any) {
-        console.error("❌ ERROR: Failed to parse MASTER_PROFILE_JSON environment variable:", err.message);
-        process.exit(1);
+        throw new Error(`Failed to parse DOCUMENT_CONTACT_JSON: ${err?.message || err}`);
+      }
+    } else if (process.env.MASTER_PROFILE_JSON) {
+      // Backward-compatibility: allow using MASTER_PROFILE_JSON *only* for contact info.
+      try {
+        const parsed = JSON.parse(String(process.env.MASTER_PROFILE_JSON));
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && (parsed as any).contact) {
+          console.warn("WARNING: Using MASTER_PROFILE_JSON.contact for contact info only. Prefer DOCUMENT_CONTACT_JSON.");
+          contactInfo = (parsed as any).contact;
+        }
+      } catch {
+        // Ignore legacy parse failures here; contact can still be derived from DB display_name.
       }
     } else {
-      const profilePath = path.join(process.cwd(), "master_profile.json");
-      if (!fs.existsSync(profilePath)) {
-        console.error("❌ ERROR: Neither MASTER_PROFILE_JSON env secret nor local 'master_profile.json' found.");
-        process.exit(1);
+      const contactPath = path.join(process.cwd(), "private", "profile", "contact.json");
+      if (fs.existsSync(contactPath)) {
+        contactInfo = JSON.parse(fs.readFileSync(contactPath, "utf8"));
       }
-      masterProfile = JSON.parse(fs.readFileSync(profilePath, "utf8"));
     }
-    const profileFacts: any[] = masterProfile.profile_facts || masterProfile.facts || [];
-    const knownFactIds = profileFactIds(masterProfile);
-    const contactInfo: any = masterProfile.contact || {};
 
-    console.log(`📋 Profile loaded: ${profileFacts.length} evidence items`);
+    if (!contactInfo || typeof contactInfo !== "object" || Array.isArray(contactInfo)) {
+      contactInfo = {};
+    }
+    if (typeof contactInfo.full_name !== "string" || contactInfo.full_name.trim().length === 0) {
+      if (candidateName.length === 0) {
+        throw new Error("No ACTIVE profile display_name found and no DOCUMENT_CONTACT_JSON.full_name provided.");
+      }
+      contactInfo.full_name = candidateName;
+    }
 
     // ── Step 3: Load cover letter schema ─────────────────────────────────────
     const schemaDir = path.join(process.cwd(), "scripts", "schemas");
@@ -259,40 +280,45 @@ async function generateTailoredCoverLetter(): Promise<void> {
     }> = [];
     let allowedFactIds: string[] = [];
 
-    try {
-      if (latestMatchRunId) {
-        const matchRows = await loadRequirementMatchesForJobVersion(
-          resolvedJobVersionId,
-          latestMatchRunId,
-          pool,
-          { context: ctx }
-        );
-        selectedClaims = selectCoverLetterClaimPlan(matchRows, { maxRequirements: 3 }).map((claim) => ({
-          requirementKey: claim.requirementKey,
-          importance: claim.importance,
-          requirementText: claim.requirementText,
-          profileFactIds: claim.profileFactIds,
-          matchType: claim.matchType,
-          matchScore: claim.matchScore,
-        }));
-        allowedFactIds = Array.from(new Set(selectedClaims.flatMap((claim) => claim.profileFactIds)));
-      }
-    } catch (err: any) {
-      console.warn(
-        `⚠️ Deterministic claim selection failed; falling back to master_profile subset. ${err?.message || err}`
+    if (!latestMatchRunId) {
+      throw new Error(
+        "No latest_match_run_id found for this job. Run deterministic matching before generating documents."
       );
     }
 
+    const matchRows = await loadRequirementMatchesForJobVersion(
+      resolvedJobVersionId,
+      latestMatchRunId,
+      pool,
+      { context: ctx }
+    );
+    selectedClaims = selectCoverLetterClaimPlan(matchRows, { maxRequirements: 3 }).map((claim) => ({
+      requirementKey: claim.requirementKey,
+      importance: claim.importance,
+      requirementText: claim.requirementText,
+      profileFactIds: claim.profileFactIds,
+      matchType: claim.matchType,
+      matchScore: claim.matchScore,
+    }));
+    allowedFactIds = Array.from(new Set(selectedClaims.flatMap((claim) => claim.profileFactIds)));
+
     if (allowedFactIds.length === 0) {
-      const fallbackFacts = profileFacts
-        .map((fact: any) => (typeof fact?.id === "string" ? fact.id.trim() : ""))
-        .filter((id: string) => id.length > 0)
-        .slice(0, 12);
-      allowedFactIds = Array.from(new Set(fallbackFacts));
+      throw new Error(
+        "No grounded requirement-evidence matches are available for this job/version. Ensure embeddings are published and deterministic matching has produced matches."
+      );
     }
 
     const allowedFactSet = new Set(allowedFactIds);
     const selectedFacts = await loadProfileFactsByIds(allowedFactIds, pool, { context: ctx });
+    const selectedFactIdSet = new Set(selectedFacts.map((f) => f.id));
+    const missingFactIds = allowedFactIds.filter((id) => !selectedFactIdSet.has(id));
+    if (missingFactIds.length > 0) {
+      throw new Error(`Selected profile facts were not found in the database: ${missingFactIds.join(", ")}`);
+    }
+
+    if (selectedFacts.length === 0) {
+      throw new Error("No profile facts available to ground the cover letter.");
+    }
 
     // ── Step 3.6: Optional document template plugin revision ─────────────────
     const pluginRevision = await getActiveDocumentTemplatePluginRevision("COVER_LETTER", pool, {
@@ -303,9 +329,9 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const pluginRouteKey = (pluginRevision?.content?.model_route_key || "").trim();
 
     // ── Step 4: Build prompt ─────────────────────────────────────────────────
-    console.log("🤖 STAGE 1: Requesting AI cover letter draft…");
+    console.log("STAGE 1: Requesting AI cover letter draft...");
 
-    const clPrompt = `You are an expert cover letter writer generating a professional cover letter for Elena Okhonko.
+    const clPrompt = `You are an expert cover letter writer generating a professional cover letter for ${contactInfo.full_name}.
 
 ROLE: ${jdTitle} at ${jdCompany}
 LANE: ${primaryLane}
@@ -366,9 +392,7 @@ ${JSON.stringify(coverLetterSchema)}`;
     const unknownEvidence: string[] = [];
     for (const [idx, para] of cl.body_paragraphs.entries()) {
       for (const evId of para.evidence_ids || []) {
-        if (!knownFactIds.has(evId)) {
-          unknownEvidence.push(`body_paragraphs[${idx}].evidence_ids contains unknown id '${evId}'`);
-        } else if (allowedFactSet.size > 0 && !allowedFactSet.has(evId)) {
+        if (!allowedFactSet.has(evId)) {
           unknownEvidence.push(`body_paragraphs[${idx}].evidence_ids used non-selected id '${evId}'`);
         }
       }
@@ -389,7 +413,10 @@ ${JSON.stringify(coverLetterSchema)}`;
 
     const safeTitle = jdTitle.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 20);
     const safeCompany = jdCompany.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 20);
-    const baseFilename = `Elena_Okhonko_CL_${safeCompany}_${safeTitle}`;
+    const safeCandidate = String(contactInfo.full_name || "Candidate")
+      .replace(/[^a-zA-Z0-9]/g, "_")
+      .substring(0, 20);
+    const baseFilename = `${safeCandidate}_CL_${safeCompany}_${safeTitle}`;
     finalCl.metadata = {
       canonical_job_id: jobId,
       job_version_id: resolvedJobVersionId

@@ -3,6 +3,9 @@ import path from "path";
 import crypto from "crypto";
 import * as yaml from "js-yaml";
 import dotenv from "dotenv";
+import type { SourceName, SourcePlugin } from "../src/contracts/index.js";
+import { SourceNameSchema, SourcePluginSchema } from "../src/contracts/index.js";
+import { loadStructuredFile } from "../src/config/structuredLoader.js";
 import { GreenhouseAdapter } from "../src/ingestion/adapters/greenhouseAdapter.js";
 import { AshbyAdapter } from "../src/ingestion/adapters/ashbyAdapter.js";
 import { LeverAdapter } from "../src/ingestion/adapters/leverAdapter.js";
@@ -10,20 +13,144 @@ import { HimalayasAdapter } from "../src/ingestion/adapters/himalayasAdapter.js"
 import { JobicyAdapter } from "../src/ingestion/adapters/jobicyAdapter.js";
 import { RemotiveAdapter } from "../src/ingestion/adapters/remotiveAdapter.js";
 import { createWeWorkRemotelyAdapter } from "../src/ingestion/adapters/attributedRssAdapter.js";
-import { AdapterResult, BaseSourceAdapter } from "../src/ingestion/adapters/baseAdapter.js";
+import type { AdapterResult, BaseSourceAdapter } from "../src/ingestion/adapters/baseAdapter.js";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
 
 dotenv.config();
-dotenv.config({ path: ".env.local" });
+dotenv.config({ path: ".env.local", override: true });
 
-async function stageAdapterJobs(broker: SourceBroker, result: AdapterResult): Promise<number> {
+type CompanyConfig = {
+  id?: string;
+  name?: string;
+  enabled?: boolean;
+  ats_provider?: string;
+  board_slug?: string | null;
+  target_lanes?: string[];
+};
+
+function stableExternalIdForJob(resultSourceName: string, job: any): string {
+  const raw = String(job?.source_external_id || job?.id || job?.canonical_apply_url || "").trim();
+  if (raw.length > 0) {
+    return raw;
+  }
+  const fallback = `${resultSourceName}|${job?.company_name || ""}|${job?.title || ""}|${job?.canonical_apply_url || ""}`;
+  return `${resultSourceName.toLowerCase()}-${crypto.createHash("sha256").update(fallback).digest("hex").slice(0, 16)}`;
+}
+
+function extractTextForFiltering(job: any): string {
+  return [
+    job?.company_name,
+    job?.title,
+    job?.location_raw,
+    job?.workplace_type_raw,
+    job?.description_raw,
+  ]
+    .map((v) => (typeof v === "string" ? v : ""))
+    .join(" ")
+    .toLowerCase();
+}
+
+function matchesPluginQuery(job: any, plugin: SourcePlugin): boolean {
+  const query = (plugin as any)?.request?.query || {};
+  const keywords: string[] = Array.isArray(query.keywords) ? query.keywords : [];
+  const locations: string[] = Array.isArray(query.locations) ? query.locations : [];
+  const workModes: string[] = Array.isArray(query.work_modes) ? query.work_modes : [];
+
+  const text = extractTextForFiltering(job);
+  if (keywords.length > 0) {
+    const ok = keywords.some((kw) => {
+      const needle = String(kw || "").trim().toLowerCase();
+      return needle.length > 0 && text.includes(needle);
+    });
+    if (!ok) return false;
+  }
+
+  if (locations.length > 0) {
+    const locationText = typeof job?.location_raw === "string" ? job.location_raw.toLowerCase() : "";
+    const ok = locations.some((loc) => {
+      const needle = String(loc || "").trim().toLowerCase();
+      if (needle.length === 0) return false;
+      return locationText.includes(needle) || text.includes(needle);
+    });
+    if (!ok) return false;
+  }
+
+  const workMode = typeof job?.workplace_type_raw === "string" ? job.workplace_type_raw.trim() : "UNKNOWN";
+  if (workModes.length > 0 && !workModes.includes(workMode)) {
+    return false;
+  }
+
+  return true;
+}
+
+function asSourceName(sourceKey: string): SourceName | null {
+  const candidate = String(sourceKey || "").trim().toUpperCase();
+  const parsed = SourceNameSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
+function loadCompaniesConfig(): CompanyConfig[] {
+  const companiesPath = path.resolve(process.cwd(), "config/companies.yml");
+  if (!fs.existsSync(companiesPath)) {
+    return [];
+  }
+  const fileContents = fs.readFileSync(companiesPath, "utf8");
+  const loadFn = (yaml as any).load || (yaml as any).default?.load || yaml;
+  const doc = loadFn(fileContents) as any;
+  const companies = Array.isArray(doc?.companies) ? (doc.companies as CompanyConfig[]) : [];
+  return companies;
+}
+
+async function loadSourcePluginsFromDisk(): Promise<SourcePlugin[]> {
+  const pluginsDir = path.resolve(process.cwd(), "config/source-plugins");
+  if (!fs.existsSync(pluginsDir)) {
+    console.warn(`WARNING: Source plugin directory not found: ${pluginsDir}`);
+    return [];
+  }
+
+  const pluginFiles = fs
+    .readdirSync(pluginsDir)
+    .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
+    .sort()
+    .map((f) => path.join(pluginsDir, f));
+
+  const plugins: SourcePlugin[] = [];
+  for (const filePath of pluginFiles) {
+    const loaded = await loadStructuredFile(filePath, SourcePluginSchema);
+    plugins.push(loaded.data);
+  }
+  return plugins;
+}
+
+async function runAdapter(
+  adapter: BaseSourceAdapter,
+  options: { limit?: number } = {}
+): Promise<AdapterResult> {
+  return adapter.fetchJobs({ limit: options.limit ?? 50 });
+}
+
+async function stageAdapterResult(
+  broker: SourceBroker,
+  plugin: SourcePlugin,
+  result: AdapterResult,
+  options?: { targetCompanyId?: string; sourceLane?: string }
+): Promise<{ discovered: number; staged: number; filteredOut: number }> {
   let staged = 0;
+  let filteredOut = 0;
+  let discovered = 0;
+
   for (const job of result.jobs) {
-    const stableExternalId = job.source_external_id ||
-      `${result.sourceName.toLowerCase()}-${crypto.createHash("sha256").update(job.canonical_apply_url || `${job.title}${job.company_name}`).digest("hex").substring(0, 16)}`;
+    discovered += 1;
+    if (!matchesPluginQuery(job, plugin)) {
+      filteredOut += 1;
+      continue;
+    }
+
+    const stableExternalId = stableExternalIdForJob(result.sourceName, job);
     await broker.processObservation(
       {
         sourceName: result.sourceName,
+        sourcePluginKey: plugin.source_key,
         sourceExternalId: stableExternalId,
         sourceUrl: job.canonical_apply_url,
         retrievedAt: new Date().toISOString(),
@@ -35,24 +162,50 @@ async function stageAdapterJobs(broker: SourceBroker, result: AdapterResult): Pr
         employmentTypeRaw: job.employment_type_raw,
         compensationRaw: job.compensation_raw,
         canonicalApplyUrl: job.canonical_apply_url,
-        sourceLane: "UNKNOWN",
+        sourceLane: options?.sourceLane || "UNKNOWN",
         searchPlanVersion: "1.0",
-        rawPayload: job.raw_payload ?? job
+        targetCompanyId: options?.targetCompanyId,
+        rawPayload: job.raw_payload ?? job,
       },
       job.raw_payload ?? job
     );
-    staged++;
+    staged += 1;
   }
-  return staged;
+
+  return { discovered, staged, filteredOut };
 }
 
-export async function runAdapters(): Promise<{ totalDiscovered: number; totalStaged: number; errors: number; status: "HEALTHY" | "DEGRADED" | "FAILED" }> {
+function pickAtsAdapter(sourceKey: string, boardSlug: string): BaseSourceAdapter | null {
+  if (sourceKey === "greenhouse") return new GreenhouseAdapter(boardSlug);
+  if (sourceKey === "ashby") return new AshbyAdapter(boardSlug);
+  if (sourceKey === "lever") return new LeverAdapter(boardSlug);
+  return null;
+}
+
+function pickFeedAdapter(plugin: SourcePlugin): BaseSourceAdapter | null {
+  const endpoint = String((plugin as any)?.request?.endpoint || "").trim();
+  if (!endpoint) {
+    return null;
+  }
+  if (plugin.source_key === "himalayas") return new HimalayasAdapter(endpoint);
+  if (plugin.source_key === "jobicy") return new JobicyAdapter(endpoint);
+  if (plugin.source_key === "remotive") return new RemotiveAdapter(endpoint);
+  if (plugin.source_key === "we_work_remotely") return createWeWorkRemotelyAdapter(endpoint);
+  return null;
+}
+
+export async function runAdapters(): Promise<{
+  totalDiscovered: number;
+  totalStaged: number;
+  errors: number;
+  status: "HEALTHY" | "DEGRADED" | "FAILED";
+}> {
   console.log("====================================================");
-  console.log("       STAGE 0: UNIFIED SOURCE ADAPTER RUNNER       ");
+  console.log("   STAGE 0: MANIFEST-DRIVEN SOURCE ADAPTER RUNNER    ");
   console.log("====================================================");
 
   const broker = new SourceBroker();
-  await broker.startRun("UNIFIED_ADAPTERS_RUN");
+  await broker.startRun("UNIFIED_MANIFEST_ADAPTERS_RUN");
 
   let totalDiscovered = 0;
   let totalStaged = 0;
@@ -61,190 +214,122 @@ export async function runAdapters(): Promise<{ totalDiscovered: number; totalSta
   const failedSources: string[] = [];
   const successfulSources: string[] = [];
 
-  // 1. Process Companies from config/companies.yml
-  const companiesPath = path.resolve(process.cwd(), "config/companies.yml");
-  if (fs.existsSync(companiesPath)) {
-    try {
-      const fileContents = fs.readFileSync(companiesPath, "utf8");
-      const loadFn = (yaml as any).load || (yaml as any).default?.load || yaml;
-      const doc = loadFn(fileContents) as any;
-      const companies = doc.companies || [];
+  const plugins = await loadSourcePluginsFromDisk();
+  const companies = loadCompaniesConfig();
 
-      for (const company of companies) {
-        if (!company.enabled) {
-          console.log(`  ⏸️ Skipping disabled source: ${company.name} (${company.board_slug || "no slug"})`);
-          continue;
-        }
-        enabledSourceCount++;
-        console.log(`\n📡 Polling ATS for ${company.name} (${company.ats_provider || "unknown"})...`);
+  const enabledPlugins = plugins.filter((p) => p.status === "active" && (p as any)?.schedule?.enabled !== false);
 
-        try {
-          let adapterResult;
-          if (company.ats_provider === "greenhouse") {
-            const adapter = new GreenhouseAdapter(company.board_slug);
-            adapterResult = await adapter.fetchJobs({ limit: 50 });
-          } else if (company.ats_provider === "ashby") {
-            const adapter = new AshbyAdapter(company.board_slug);
-            adapterResult = await adapter.fetchJobs({ limit: 50 });
-          } else if (company.ats_provider === "lever") {
-            const adapter = new LeverAdapter(company.board_slug);
-            adapterResult = await adapter.fetchJobs({ limit: 50 });
-          } else {
-            console.log(`  ℹ️ Skipping unsupported ATS provider "${company.ats_provider}" for ${company.name}`);
-            continue;
-          }
-
-          if (adapterResult.success) {
-            successfulSources.push(company.name);
-            console.log(`  -> Discovered ${adapterResult.jobs.length} jobs for ${company.name}`);
-            totalDiscovered += adapterResult.jobs.length;
-
-            for (const job of adapterResult.jobs) {
-              const stableExternalId = (job as any).id 
-                ? String((job as any).id)
-                : `${company.id || company.name}-${crypto.createHash("sha256").update(job.canonical_apply_url || job.title).digest("hex").substring(0, 16)}`;
-
-              await broker.processObservation(
-                {
-                  sourceName: adapterResult.sourceName as any,
-                  sourceExternalId: stableExternalId,
-                  sourceUrl: job.canonical_apply_url,
-                  retrievedAt: new Date().toISOString(),
-                  companyName: job.company_name || company.name,
-                  title: job.title,
-                  descriptionRaw: job.description_raw,
-                  locationRaw: job.location_raw,
-                  workplaceTypeRaw: job.workplace_type_raw,
-                  employmentTypeRaw: job.employment_type_raw,
-                  compensationRaw: job.compensation_raw,
-                  canonicalApplyUrl: job.canonical_apply_url,
-                  sourceLane: (company.target_lanes && company.target_lanes[0]) || "UNKNOWN",
-                  searchPlanVersion: "1.0",
-                  rawPayload: job
-                },
-                job
-              );
-              totalStaged++;
-            }
-          } else {
-            console.warn(`  ⚠️ Adapter warning for ${company.name}: ${adapterResult.error}`);
-            failedSources.push(company.name);
-            errorCount++;
-          }
-        } catch (err: any) {
-          console.error(`  ❌ Error polling ${company.name}:`, err.message || err);
-          failedSources.push(company.name);
-          errorCount++;
-        }
-      }
-    } catch (cfgErr: any) {
-      console.error("❌ Failed to parse config/companies.yml:", cfgErr.message || cfgErr);
-      errorCount++;
+  for (const plugin of enabledPlugins) {
+    const sourceName = asSourceName(plugin.source_key);
+    if (!sourceName) {
+      console.warn(`  SKIP: unknown source_key (not in SourceName enum): ${plugin.source_key}`);
+      continue;
     }
-  }
 
-  // 2. Poll Public Job Boards (Himalayas)
-  console.log("\n🏔️ Polling Himalayas Job Board...");
-  enabledSourceCount++;
-  try {
-    const himalayasAdapter = new HimalayasAdapter();
-    const himalayasResult = await himalayasAdapter.fetchJobs({ limit: 30 });
-    if (himalayasResult.success) {
-      successfulSources.push("Himalayas");
-      console.log(`  -> Discovered ${himalayasResult.jobs.length} jobs from Himalayas`);
-      totalDiscovered += himalayasResult.jobs.length;
+    const itemsPerRunRaw = (plugin as any)?.request?.rate_limit?.items_per_run;
+    const parsedItemsPerRun =
+      itemsPerRunRaw == null ? NaN : typeof itemsPerRunRaw === "number" ? itemsPerRunRaw : Number(itemsPerRunRaw);
+    const itemsPerRun = Number.isFinite(parsedItemsPerRun) && parsedItemsPerRun > 0 ? parsedItemsPerRun : 50;
 
-      for (const job of himalayasResult.jobs) {
-        const stableExternalId = (job as any).id 
-          ? String((job as any).id)
-          : `himalayas-${crypto.createHash("sha256").update(job.canonical_apply_url || (job.title + job.company_name)).digest("hex").substring(0, 16)}`;
-
-        await broker.processObservation(
-          {
-            sourceName: himalayasResult.sourceName as any,
-            sourceExternalId: stableExternalId,
-            sourceUrl: job.canonical_apply_url,
-            retrievedAt: new Date().toISOString(),
-            companyName: job.company_name,
-            title: job.title,
-            descriptionRaw: job.description_raw,
-            locationRaw: job.location_raw,
-            workplaceTypeRaw: job.workplace_type_raw,
-            employmentTypeRaw: job.employment_type_raw,
-            compensationRaw: job.compensation_raw,
-            canonicalApplyUrl: job.canonical_apply_url,
-            sourceLane: "UNKNOWN",
-            searchPlanVersion: "1.0",
-            rawPayload: job
-          },
-          job
-        );
-        totalStaged++;
-      }
-    } else {
-      console.warn(`  ⚠️ Himalayas warning: ${himalayasResult.error}`);
-      failedSources.push("Himalayas");
-      errorCount++;
-    }
-  } catch (himErr: any) {
-    console.error("  ❌ Error polling Himalayas:", himErr.message || himErr);
-    failedSources.push("Himalayas");
-    errorCount++;
-  }
-
-  // 3. Poll configured public API/RSS sources.
-  const sourcesPath = path.resolve(process.cwd(), "config/sources.yml");
-  if (fs.existsSync(sourcesPath)) {
-    const sourceDoc = yaml.load(fs.readFileSync(sourcesPath, "utf8")) as any;
-    for (const source of sourceDoc?.sources ?? []) {
-      if (!source.enabled || source.id === "HIMALAYAS") continue;
-      enabledSourceCount++;
-
-      let adapter: BaseSourceAdapter | null = null;
-      if (source.id === "JOBICY") adapter = new JobicyAdapter(source.endpoint);
-      if (source.id === "REMOTIVE") adapter = new RemotiveAdapter(source.endpoint);
-      if (source.id === "WE_WORK_REMOTELY") adapter = createWeWorkRemotelyAdapter(source.endpoint);
-      if (!adapter) {
-        broker.recordError(`Unsupported configured source: ${source.id}`);
-        failedSources.push(source.id);
-        errorCount++;
+    if (plugin.kind === "ats") {
+      const atsCompanies = companies.filter(
+        (c) =>
+          c.enabled !== false &&
+          typeof c.ats_provider === "string" &&
+          c.ats_provider.trim().toLowerCase() === plugin.source_key
+      );
+      if (atsCompanies.length === 0) {
         continue;
       }
 
-      console.log(`\n📡 Polling ${source.id} (${source.type})...`);
-      try {
-        const result = await adapter.fetchJobs({ limit: source.rate_limit_per_run ?? 50 });
-        if (!result.success) {
-          const detail = `${result.error || "unknown failure"}${result.isRateLimited ? " [rate-limited]" : ""}`;
-          broker.recordError(`${source.id}: ${detail}`);
-          failedSources.push(source.id);
-          errorCount++;
-          console.warn(`  ⚠️ ${source.id} failed: ${detail}`);
+      for (const company of atsCompanies) {
+        const boardSlug = typeof company.board_slug === "string" ? company.board_slug.trim() : "";
+        if (!boardSlug) {
           continue;
         }
-
-        const staged = await stageAdapterJobs(broker, result);
-        totalDiscovered += result.totalFetched;
-        totalStaged += staged;
-        successfulSources.push(source.id);
-        console.log(`  -> Fetched ${result.totalFetched}; valid ${result.jobs.length}; quarantined ${result.quarantined ?? 0}; staged ${staged}`);
-      } catch (err: any) {
-        broker.recordError(`${source.id}: ${err.message || err}`);
-        failedSources.push(source.id);
-        errorCount++;
-        console.error(`  ❌ ${source.id} failed: ${err.message || err}`);
+        enabledSourceCount += 1;
+        const label = `${plugin.source_key}:${company.id || company.name || boardSlug}`;
+        console.log(`\nPolling ${label}...`);
+        try {
+          const adapter = pickAtsAdapter(plugin.source_key, boardSlug);
+          if (!adapter) {
+            broker.recordError(`Unsupported ATS provider: ${plugin.source_key}`);
+            failedSources.push(label);
+            errorCount += 1;
+            continue;
+          }
+          const result = await runAdapter(adapter, { limit: itemsPerRun });
+          if (!result.success) {
+            const detail = `${result.error || "unknown failure"}${result.isRateLimited ? " [rate-limited]" : ""}`;
+            broker.recordError(`${label}: ${detail}`);
+            failedSources.push(label);
+            errorCount += 1;
+            console.warn(`  WARN: ${label} failed: ${detail}`);
+            continue;
+          }
+          const staged = await stageAdapterResult(broker, plugin, result, {
+            targetCompanyId: company.id,
+            sourceLane: Array.isArray(company.target_lanes) && company.target_lanes.length > 0 ? String(company.target_lanes[0]) : "UNKNOWN",
+          });
+          totalDiscovered += staged.discovered;
+          totalStaged += staged.staged;
+          successfulSources.push(label);
+          console.log(
+            `  -> discovered ${staged.discovered}; filtered ${staged.filteredOut}; staged ${staged.staged} (quarantined ${result.quarantined ?? 0})`
+          );
+        } catch (err: any) {
+          broker.recordError(`${label}: ${err.message || err}`);
+          failedSources.push(label);
+          errorCount += 1;
+          console.error(`  ERROR: ${label} failed:`, err.message || err);
+        }
       }
+      continue;
+    }
+
+    if (plugin.kind === "json_api" || plugin.kind === "rss" || plugin.kind === "atom" || plugin.kind === "schema_org") {
+      enabledSourceCount += 1;
+      const label = plugin.source_key;
+      console.log(`\nPolling ${label} (${plugin.kind})...`);
+      try {
+        const adapter = pickFeedAdapter(plugin);
+        if (!adapter) {
+          broker.recordError(`Unsupported feed adapter: ${plugin.source_key} (${plugin.kind})`);
+          failedSources.push(label);
+          errorCount += 1;
+          continue;
+        }
+        const result = await runAdapter(adapter, { limit: itemsPerRun });
+        if (!result.success) {
+          const detail = `${result.error || "unknown failure"}${result.isRateLimited ? " [rate-limited]" : ""}`;
+          broker.recordError(`${label}: ${detail}`);
+          failedSources.push(label);
+          errorCount += 1;
+          console.warn(`  WARN: ${label} failed: ${detail}`);
+          continue;
+        }
+        const staged = await stageAdapterResult(broker, plugin, result);
+        totalDiscovered += staged.discovered;
+        totalStaged += staged.staged;
+        successfulSources.push(label);
+        console.log(
+          `  -> discovered ${staged.discovered}; filtered ${staged.filteredOut}; staged ${staged.staged} (quarantined ${result.quarantined ?? 0})`
+        );
+      } catch (err: any) {
+        broker.recordError(`${label}: ${err.message || err}`);
+        failedSources.push(label);
+        errorCount += 1;
+        console.error(`  ERROR: ${label} failed:`, err.message || err);
+      }
+      continue;
     }
   }
 
-  const finalStatus: "HEALTHY" | "DEGRADED" | "FAILED" = 
-    failedSources.length === 0 
-      ? "HEALTHY" 
-      : successfulSources.length > 0 
-        ? "DEGRADED" 
-        : "FAILED";
+  const finalStatus: "HEALTHY" | "DEGRADED" | "FAILED" =
+    failedSources.length === 0 ? "HEALTHY" : successfulSources.length > 0 ? "DEGRADED" : "FAILED";
 
   await broker.endRun(finalStatus === "FAILED" ? "FAILED" : finalStatus === "DEGRADED" ? "DEGRADED" : "COMPLETED");
+
   console.log(`\n====================================================`);
   console.log(`Source Adapter Summary:`);
   console.log(`  Status: ${finalStatus}`);

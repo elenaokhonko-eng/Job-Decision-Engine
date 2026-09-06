@@ -3,14 +3,18 @@ import { ExtractedJob, SCHEMA_VERSION } from "../../contracts/index.js";
 
 export class HimalayasAdapter extends BaseSourceAdapter {
   sourceName = "HIMALAYAS" as const;
+  private readonly endpoint: string;
 
-  constructor() {
+  constructor(endpoint = "https://himalayas.app/jobs/api") {
     super();
+    this.endpoint = endpoint;
     this.timeoutMs = 15_000;
   }
 
   async fetchJobs(options: { limit?: number; page?: number } = {}): Promise<AdapterResult> {
-    const url = `https://himalayas.app/jobs/api?limit=${options.limit || 50}`;
+    const limit = typeof options.limit === "number" && options.limit > 0 ? options.limit : 50;
+    const separator = this.endpoint.includes("?") ? "&" : "?";
+    const url = `${this.endpoint}${separator}limit=${limit}`;
     try {
       const response = await this.fetchWithTimeout(url);
 
@@ -26,16 +30,17 @@ export class HimalayasAdapter extends BaseSourceAdapter {
       const jobs: ExtractedJob[] = [];
       let quarantined = 0;
 
-      for (const item of rawJobs.slice(0, options.limit || 50)) {
+      for (const item of rawJobs.slice(0, limit)) {
         const candidate = {
           schema_version: SCHEMA_VERSION,
+          source_external_id: String(item.id ?? ""),
           company_name: item.companyName || "Unknown Company",
           title: item.title || "Unknown Title",
           location_raw: item.location || "Remote",
-          workplace_type_raw: "REMOTE",
-          employment_type_raw: "FULL_TIME",
+          workplace_type_raw: typeof item.workplaceType === "string" ? item.workplaceType : "REMOTE",
+          employment_type_raw: typeof item.employmentType === "string" ? item.employmentType : "FULL_TIME",
           compensation_raw: item.salary || "UNKNOWN",
-          canonical_apply_url: item.applicationUrl || url,
+          canonical_apply_url: item.applicationUrl || item.jobUrl || url,
           description_raw: item.description || item.title || "Remote position.",
         };
 

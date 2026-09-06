@@ -136,6 +136,10 @@ export async function buildEmbeddingInputs(
     }>(
       `SELECT pf.id, pf.fact_type, pf.statement, pf.structured_value, pf.evidence_tier
        FROM profile_facts pf
+       JOIN profile_versions pv
+         ON pv.workspace_id = pf.workspace_id
+        AND pv.id = pf.profile_version_id
+        AND pv.status = 'ACTIVE'
        WHERE pf.workspace_id = $1
          AND NOT EXISTS (
            SELECT 1

@@ -87,6 +87,7 @@ export async function runRecommendationDecider(
       workplace_type: string | null;
       workability_facts: any;
       latest_match_run_id: string | null;
+      match_embedding_space_id: string | null;
       recommendation_eligibility: string | null;
       recommendation_outcome: string | null;
       recommendation_requirement_score: any;
@@ -105,6 +106,7 @@ export async function runRecommendationDecider(
         c.workplace_type,
         c.workability_facts,
         c.latest_match_run_id,
+        mr.embedding_space_id AS match_embedding_space_id,
         c.recommendation_eligibility,
         c.recommendation_outcome,
         c.recommendation_requirement_score,
@@ -113,6 +115,9 @@ export async function runRecommendationDecider(
         c.recommendation_decided_at,
         c.latest_deterministic_decision_id
       FROM canonical_jobs c
+      LEFT JOIN match_runs mr
+        ON mr.workspace_id = c.workspace_id
+       AND mr.id = c.latest_match_run_id
       LEFT JOIN LATERAL (
         SELECT id
         FROM job_versions
@@ -161,6 +166,14 @@ export async function runRecommendationDecider(
           evidence_completeness: evidenceCompleteness,
         });
 
+        const semanticReady = Boolean(job.match_embedding_space_id);
+        const adjustedNotes = [...evaluation.notes];
+        let adjustedOutcome = evaluation.outcome;
+        if (!semanticReady && adjustedOutcome === "PRIORITY") {
+          adjustedOutcome = "REVIEW";
+          adjustedNotes.push("priority_downgraded_semantic_pending");
+        }
+
         const decisionJson = RecommendationDecisionSchema.parse({
           canonical_job_id: job.canonical_job_id,
           job_version_id: job.job_version_id,
@@ -173,7 +186,7 @@ export async function runRecommendationDecider(
           },
           outputs: {
             eligibility: evaluation.eligibility,
-            outcome: evaluation.outcome,
+            outcome: adjustedOutcome,
             recommendation_requirement_score: requirementScore,
             recommendation_coverage_score: coverageScore,
             recommendation_evidence_completeness: evidenceCompleteness,
@@ -184,7 +197,7 @@ export async function runRecommendationDecider(
             policy_snapshot_id: snapshot.snapshotId,
             eligibility_rule_id: evaluation.eligibilityRuleId,
             outcome_rule_id: evaluation.outcomeRuleId,
-            notes: evaluation.notes,
+            notes: adjustedNotes,
           },
         });
 
@@ -229,7 +242,7 @@ export async function runRecommendationDecider(
             decisionHash,
             JSON.stringify(decisionJson),
             evaluation.eligibility,
-            evaluation.outcome,
+            adjustedOutcome,
             ctx.userId,
           ]
         );
@@ -270,7 +283,7 @@ export async function runRecommendationDecider(
           [
             ctx.workspaceId,
             evaluation.eligibility,
-            evaluation.outcome,
+            adjustedOutcome,
             requirementScore,
             coverageScore,
             evidenceCompleteness,

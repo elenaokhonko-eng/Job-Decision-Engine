@@ -166,15 +166,10 @@ interface MatchableNodeEmbeddingRow {
   embedding_values: number[];
 }
 
-async function pickSemanticEmbeddingSpaceId(
+async function listSemanticEmbeddingSpaceCandidates(
   client: { query: pg.PoolClient["query"] },
-  ctx: WorkspaceContext,
-  factIds: string[]
-): Promise<string | null> {
-  if (factIds.length === 0) {
-    return null;
-  }
-
+  ctx: WorkspaceContext
+): Promise<string[]> {
   try {
     const primary = await client.query<{ id: string }>(
       `SELECT id
@@ -201,26 +196,40 @@ async function pickSemanticEmbeddingSpaceId(
     const candidates = [primary.rows[0]?.id, fallback.rows[0]?.id].filter(
       (id): id is string => typeof id === "string" && id.length > 0
     );
-
-    for (const candidate of candidates) {
-      const exists = await client.query<{ n: number }>(
-        `SELECT COUNT(*)::int AS n
-         FROM v_matchable_nodes
-         WHERE workspace_id = $1
-           AND embedding_space_id = $2
-           AND node_type = 'PROFILE_FACT'
-           AND node_id = ANY($3::uuid[])`,
-        [ctx.workspaceId, candidate, factIds]
-      );
-      if ((exists.rows[0]?.n ?? 0) > 0) {
-        return candidate;
-      }
-    }
-
-    return null;
+    return candidates;
   } catch (error: any) {
     if (error?.code === "42P01") {
-      return null;
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function countMatchableNodes(
+  client: { query: pg.PoolClient["query"] },
+  ctx: WorkspaceContext,
+  embeddingSpaceId: string,
+  nodeType: MatchableNodeType,
+  nodeIds: string[]
+): Promise<number> {
+  if (!embeddingSpaceId || nodeIds.length === 0) {
+    return 0;
+  }
+
+  try {
+    const res = await client.query<{ n: number }>(
+      `SELECT COUNT(DISTINCT node_id)::int AS n
+       FROM v_matchable_nodes
+       WHERE workspace_id = $1
+         AND embedding_space_id = $2
+         AND node_type = $3
+         AND node_id = ANY($4::uuid[])`,
+      [ctx.workspaceId, embeddingSpaceId, nodeType, nodeIds]
+    );
+    return res.rows[0]?.n ?? 0;
+  } catch (error: any) {
+    if (error?.code === "42P01") {
+      return 0;
     }
     throw error;
   }
@@ -342,10 +351,21 @@ export async function runDeterministicMatcher(
         : null;
 
     const factIds = factsRes.rows.map((row) => row.id);
-    const semanticEmbeddingSpaceId = await pickSemanticEmbeddingSpaceId(client as any, ctx, factIds);
-    const factEmbeddings = semanticEmbeddingSpaceId
-      ? await loadNodeEmbeddings(client as any, ctx, semanticEmbeddingSpaceId, "PROFILE_FACT", factIds)
-      : new Map<string, number[]>();
+    const embeddingSpaceCandidates = await listSemanticEmbeddingSpaceCandidates(client as any, ctx);
+    const semanticSpaceCandidates: string[] = [];
+    for (const candidate of embeddingSpaceCandidates) {
+      const availableFacts = await countMatchableNodes(
+        client as any,
+        ctx,
+        candidate,
+        "PROFILE_FACT",
+        factIds
+      );
+      if (availableFacts === factIds.length) {
+        semanticSpaceCandidates.push(candidate);
+      }
+    }
+    const factEmbeddingsBySpace = new Map<string, Map<string, number[]>>();
 
     for (const job of jobs) {
       const versionId = job.resolved_job_version_id || job.latest_job_version_id;
@@ -418,6 +438,37 @@ export async function runDeterministicMatcher(
         }
 
         const requirementIds = reqRes.rows.map((row) => row.id);
+
+        let semanticEmbeddingSpaceId: string | null = null;
+        for (const candidate of semanticSpaceCandidates) {
+          const availableReqs = await countMatchableNodes(
+            client as any,
+            ctx,
+            candidate,
+            "JOB_REQUIREMENT",
+            requirementIds
+          );
+          if (availableReqs === requirementIds.length) {
+            semanticEmbeddingSpaceId = candidate;
+            break;
+          }
+        }
+
+        const factEmbeddings =
+          semanticEmbeddingSpaceId
+            ? factEmbeddingsBySpace.get(semanticEmbeddingSpaceId) ||
+              (await loadNodeEmbeddings(
+                client as any,
+                ctx,
+                semanticEmbeddingSpaceId,
+                "PROFILE_FACT",
+                factIds
+              ))
+            : new Map<string, number[]>();
+        if (semanticEmbeddingSpaceId && !factEmbeddingsBySpace.has(semanticEmbeddingSpaceId)) {
+          factEmbeddingsBySpace.set(semanticEmbeddingSpaceId, factEmbeddings);
+        }
+
         const requirementEmbeddings =
           semanticEmbeddingSpaceId && requirementIds.length > 0
             ? await loadNodeEmbeddings(
@@ -428,8 +479,11 @@ export async function runDeterministicMatcher(
                 requirementIds
               )
             : new Map<string, number[]>();
+
         const usedEmbeddings =
-          !!semanticEmbeddingSpaceId && requirementEmbeddings.size > 0 && factEmbeddings.size > 0;
+          !!semanticEmbeddingSpaceId &&
+          factEmbeddings.size === factIds.length &&
+          requirementEmbeddings.size === requirementIds.length;
 
         let weightedScoreSum = 0;
         let weightSum = 0;
@@ -494,17 +548,24 @@ export async function runDeterministicMatcher(
                 evidenceStrengthPolicy.policy
               )
             : 0;
-          const weightedScore = bestScore * evidenceStrength;
-          weightedScoreSum += weightedScore * weight;
 
-          let matchType: 'EXACT' | 'SEMANTIC' | 'NO_MATCH' = 'NO_MATCH';
-          if (bestScore >= 0.85) {
-            matchType = 'EXACT';
+          let matchType: 'EXACT' | 'SEMANTIC' | 'NO_MATCH' | 'UNKNOWN' = 'NO_MATCH';
+          if (usedEmbeddings) {
+            if (bestScore >= 0.85) {
+              matchType = 'EXACT';
+            } else if (bestScore >= 0.2) {
+              matchType = 'SEMANTIC';
+            }
           } else if (bestScore >= 0.2) {
-            matchType = 'SEMANTIC';
+            // Embeddings are not fully published for this job+profile; preserve a pending record
+            // without treating lexical similarity as a semantic match.
+            matchType = 'UNKNOWN';
           }
 
-          if (matchType !== 'NO_MATCH') {
+          const isCountedMatch = matchType === 'EXACT' || matchType === 'SEMANTIC';
+          const weightedScore = isCountedMatch ? bestScore * evidenceStrength : 0;
+          weightedScoreSum += weightedScore * weight;
+          if (isCountedMatch) {
             matchedCount += 1;
           }
 
@@ -538,10 +599,17 @@ export async function runDeterministicMatcher(
                  verification_status: bestFact?.verification_status || null,
                  evidence_strength: bestFact ? evidenceStrength : null,
                  lexical_score: bestFact ? Number(bestLexical.toFixed(6)) : null,
-                 semantic_score: bestFact ? Number(bestSemantic.toFixed(6)) : null,
-                 match_method: bestFact ? (bestSemantic > bestLexical ? "EMBEDDING" : "LEXICAL") : null,
+                 semantic_score: usedEmbeddings && bestFact ? Number(bestSemantic.toFixed(6)) : null,
+                 match_method: bestFact
+                   ? usedEmbeddings
+                     ? bestSemantic > bestLexical
+                       ? "EMBEDDING"
+                       : "LEXICAL"
+                     : "PENDING_EMBEDDINGS"
+                   : null,
                  embedding_space_id: usedEmbeddings ? semanticEmbeddingSpaceId : null,
                  weighted_score: bestFact ? Number(weightedScore.toFixed(6)) : null,
+                 semantic_ready: usedEmbeddings,
                }),
              ]
            );

@@ -2,8 +2,7 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgSslConfig } from '../db/pgSsl.js';
 import {
-  generateEmbeddingWithProvider,
-  MODEL_REGISTRY,
+  generateEmbeddingWithProviderAndModel,
   type EmbeddingProvider,
 } from '../services/agent.js';
 import { validateEmbeddingVector } from './batchValidator.js';
@@ -20,7 +19,7 @@ const defaultPool = new pg.Pool({
 });
 
 export interface EmbeddingBatchSummary {
-  batchId: string;
+  batchId: string | null;
   embeddingSpaceId: string;
   processed: number;
   processedInputIds: string[];
@@ -97,19 +96,61 @@ export async function runEmbeddingBatch(
       throw new Error(`Unsupported embedding provider for space ${space.id}: ${space.provider}`);
     }
 
-    const runtimeModel =
-      provider === 'gemini'
-        ? MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL
-        : MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL;
-    if (space.model !== runtimeModel) {
-      throw new Error(
-        `Embedding space model mismatch for ${space.id}: expected ${space.model}, runtime uses ${runtimeModel}`
-      );
+    const spaceModel = (space.model || '').trim();
+    if (!spaceModel) {
+      throw new Error(`Embedding space ${space.id} has empty model; cannot run batch.`);
     }
     if (options?.context && options.context.workspaceId !== workspaceId) {
       throw new Error(
         `Embedding space ${space.id} is in workspace_id=${workspaceId} but context.workspaceId=${options.context.workspaceId}`
       );
+    }
+
+    const inputRes = inputIds && inputIds.length > 0
+      ? await client.query<InputRow>(
+          `SELECT ei.id, ei.content_text
+           FROM embedding_inputs ei
+           WHERE ei.workspace_id = $1
+             AND ei.id = ANY($2::uuid[])
+             AND NOT EXISTS (
+               SELECT 1
+               FROM semantic_embeddings se
+               WHERE se.workspace_id = $1
+                 AND se.embedding_space_id = $3
+                 AND se.embedding_input_id = ei.id
+             )
+           ORDER BY ei.created_at ASC`,
+          [workspaceId, inputIds, space.id]
+        )
+      : await client.query<InputRow>(
+          `SELECT ei.id, ei.content_text
+           FROM embedding_inputs ei
+           WHERE ei.workspace_id = $1
+             AND NOT EXISTS (
+             SELECT 1
+             FROM semantic_embeddings se
+             WHERE se.workspace_id = $1
+               AND se.embedding_space_id = $2
+               AND se.embedding_input_id = ei.id
+           )
+           ORDER BY ei.created_at ASC
+           LIMIT $3`,
+          [workspaceId, space.id, maxItems]
+        );
+
+    if (inputRes.rows.length === 0) {
+      await client.query('COMMIT');
+      return {
+        batchId: null,
+        embeddingSpaceId: space.id,
+        processed: 0,
+        processedInputIds: [],
+        succeeded: 0,
+        failed: 0,
+        failedInputIds: [],
+        runType,
+        errors: [],
+      };
     }
 
     const batchRes = await client.query<{ id: string }>(
@@ -130,31 +171,6 @@ export async function runEmbeddingBatch(
       [workspaceId, space.id, batchKey, runType, fallbackFromBatchId || null, rerunOfBatchId || null]
     );
     const batchId = batchRes.rows[0].id;
-
-    const inputRes = inputIds && inputIds.length > 0
-      ? await client.query<InputRow>(
-          `SELECT ei.id, ei.content_text
-           FROM embedding_inputs ei
-           WHERE ei.workspace_id = $1
-             AND ei.id = ANY($2::uuid[])
-           ORDER BY ei.created_at ASC`,
-          [workspaceId, inputIds]
-        )
-      : await client.query<InputRow>(
-          `SELECT ei.id, ei.content_text
-           FROM embedding_inputs ei
-           WHERE ei.workspace_id = $1
-             AND NOT EXISTS (
-             SELECT 1
-             FROM semantic_embeddings se
-             WHERE se.workspace_id = $1
-               AND se.embedding_space_id = $2
-               AND se.embedding_input_id = ei.id
-           )
-           ORDER BY ei.created_at ASC
-           LIMIT $3`,
-          [workspaceId, space.id, maxItems]
-        );
 
     const processedInputIds = inputRes.rows.map((row) => row.id);
 
@@ -182,7 +198,11 @@ export async function runEmbeddingBatch(
 
     for (const input of inputRes.rows) {
       try {
-        const vector = await generateEmbeddingWithProvider(input.content_text, provider);
+        const vector = await generateEmbeddingWithProviderAndModel(
+          input.content_text,
+          provider,
+          spaceModel
+        );
         const validation = validateEmbeddingVector(vector, space.dimensions);
         if (!validation.valid) {
           failed += 1;
@@ -373,8 +393,8 @@ export async function runEmbeddingBatchWithFallback(
         'FALLBACK',
         maxItems,
         primary.processedInputIds,
-        primary.batchId,
-        primary.batchId,
+        primary.batchId ?? undefined,
+        primary.batchId ?? undefined,
         client as pg.PoolClient,
         { context: ctx }
       );

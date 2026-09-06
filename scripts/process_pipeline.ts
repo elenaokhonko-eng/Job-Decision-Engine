@@ -5,6 +5,7 @@ import { runLaneRouting } from "../src/pipeline/laneRouter.js";
 import { runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
 import { runRecommendationDecider } from "../src/pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer } from "../src/pipeline/explanationQueueEnqueuer.js";
+import { runEmbeddingBatchWithFallback } from "../src/embeddings/batchCoordinator.js";
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../src/db/pgSsl.js";
@@ -40,25 +41,42 @@ export async function processPipeline(): Promise<void> {
 
     const ctx = await resolveWorkspaceContext(client as any);
 
-    console.log("\n[1/7] Normalization...");
+    console.log("\n[1/8] Normalization...");
     const normSummary = await runNormalization(pool, { context: ctx });
 
-    console.log("\n[2/7] Requirements Extraction...");
+    console.log("\n[2/8] Requirements Extraction...");
     const requirementsSummary = await runRequirementsExtraction(pool, { context: ctx });
 
-    console.log("\n[3/7] Hard Gates...");
+    console.log("\n[3/8] Embedding Publication (requirements + profile facts)...");
+    let embeddingTotalEmbedded = 0;
+    let embeddingCycles = 0;
+    for (let cycle = 0; cycle < 10; cycle += 1) {
+      const summary = await runEmbeddingBatchWithFallback(200, pool, { context: ctx });
+      const embedded =
+        (summary.primary.succeeded ?? 0) + (summary.fallback?.succeeded ?? 0);
+      if (embedded === 0) {
+        break;
+      }
+      embeddingTotalEmbedded += embedded;
+      embeddingCycles += 1;
+    }
+    console.log(
+      `Embedding publication cycles: ${embeddingCycles}; embedded vectors: ${embeddingTotalEmbedded}`
+    );
+
+    console.log("\n[4/8] Hard Gates...");
     const gateSummary = await runHardGates(pool, { context: ctx });
 
-    console.log("\n[4/7] Semantic Lane Routing...");
+    console.log("\n[5/8] Semantic Lane Routing...");
     const routingSummary = await runLaneRouting(pool, { context: ctx });
 
-    console.log("\n[5/7] Deterministic Matching...");
+    console.log("\n[6/8] Deterministic Matching...");
     const matchingSummary = await runDeterministicMatcher(pool, { context: ctx });
 
-    console.log("\n[6/7] Deterministic Recommendation Decider...");
+    console.log("\n[7/8] Deterministic Recommendation Decider...");
     const decisionSummary = await runRecommendationDecider(pool, { context: ctx });
 
-    console.log("\n[7/7] Explanation Queue Enqueue (optional; no quota/deferral)...");
+    console.log("\n[8/8] Explanation Queue Enqueue (optional; no quota/deferral)...");
     const enqueueSummary = await runExplanationQueueEnqueuer(pool, { context: ctx });
 
     console.log("\n--- Verifying Funnel Conservation ---");
