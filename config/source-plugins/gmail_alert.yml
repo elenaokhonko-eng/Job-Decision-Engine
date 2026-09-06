@@ -1,0 +1,57 @@
+schema_version: "2.2.0"
+source_key: gmail_alert
+display_name: User-provided Gmail alerts (IMAP)
+kind: email_alert
+status: active
+capabilities:
+  discovery: true
+  pagination: true
+  incremental: true
+  location_filter: false
+  work_mode_evidence: false
+compliance:
+  access_basis: user_supplied
+  terms_url: https://policies.google.com/terms
+  license: null
+  attribution_required: false
+  attribution_text: null
+  authenticated_scraping: false
+  reviewed_at: "2026-09-06"
+schedule:
+  enabled: true
+  interval_minutes: 1440
+  jitter_seconds: 180
+request:
+  endpoint: https://gmail.example.invalid/imap
+  timeout_ms: 60000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 3
+    base_delay_ms: 2000
+    max_delay_ms: 60000
+  rate_limit:
+    requests_per_minute: 60
+    items_per_run: null
+  pagination:
+    strategy: updated_since
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: gmail_message_id
+  query:
+    keywords: []
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: []
+mapping:
+  external_id: $context.gmail_message_id
+  title: $derive.title_from_email
+  company: $derive.company_from_email
+  description: $derive.description_from_email
+  url: $derive.url_from_email
+  location: $derive.location_from_email
+  work_mode: $derive.work_mode_from_structured_and_text_evidence
+  employment_type: $derive.employment_type_from_text
+  posted_at: null
+  updated_at: null
+

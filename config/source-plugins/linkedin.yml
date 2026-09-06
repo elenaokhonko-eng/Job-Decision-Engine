@@ -1,0 +1,57 @@
+schema_version: "2.2.0"
+source_key: linkedin
+display_name: LinkedIn manual import (no automated scraping)
+kind: manual_import
+status: active
+capabilities:
+  discovery: false
+  pagination: false
+  incremental: false
+  location_filter: false
+  work_mode_evidence: false
+compliance:
+  access_basis: manual_import
+  terms_url: https://www.linkedin.com/legal/user-agreement
+  license: null
+  attribution_required: true
+  attribution_text: User-supplied LinkedIn job URL is stored for attribution; no automated scraping.
+  authenticated_scraping: false
+  reviewed_at: "2026-09-06"
+schedule:
+  enabled: false
+  interval_minutes: 1440
+  jitter_seconds: 0
+request:
+  endpoint: http://localhost:3000/api/v2/observations/linkedin
+  timeout_ms: 30000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 0
+    base_delay_ms: 1000
+    max_delay_ms: 1000
+  rate_limit:
+    requests_per_minute: 60
+    items_per_run: null
+  pagination:
+    strategy: none
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: null
+  query:
+    keywords: []
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: []
+mapping:
+  external_id: $context.linkedin_job_id
+  title: $.title
+  company: $.company
+  description: $.description
+  url: $.url
+  location: $.location
+  work_mode: $.work_mode
+  employment_type: $.employment_type
+  posted_at: null
+  updated_at: null
+

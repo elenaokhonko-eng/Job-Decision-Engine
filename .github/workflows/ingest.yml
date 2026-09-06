@@ -34,6 +34,11 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx src/db/migrate.ts
 
+      - name: Sync source plugin manifests (P12 registry)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx tsx scripts/load_source_plugins.ts
+
       - name: Verify configured model routes
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

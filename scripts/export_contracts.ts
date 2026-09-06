@@ -12,6 +12,7 @@ import {
   EvaluationQueueItemSchema,
   EvaluationResultSchema,
   ShortlistRowSchema,
+  SourcePluginSchema,
 } from "../src/contracts/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,6 +33,7 @@ const schemas = {
   EvaluationQueueItem: EvaluationQueueItemSchema,
   EvaluationResult: EvaluationResultSchema,
   ShortlistRow: ShortlistRowSchema,
+  SourcePlugin: SourcePluginSchema,
 };
 
 console.log("Exporting runtime Zod contracts to JSON Schemas for Python and Streamlit...");

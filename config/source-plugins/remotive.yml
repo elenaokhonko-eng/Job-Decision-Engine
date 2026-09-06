@@ -1,0 +1,57 @@
+schema_version: "2.2.0"
+source_key: remotive
+display_name: Remotive remote jobs feed
+kind: json_api
+status: active
+capabilities:
+  discovery: true
+  pagination: false
+  incremental: false
+  location_filter: false
+  work_mode_evidence: false
+compliance:
+  access_basis: public_feed
+  terms_url: https://remotive.com/
+  license: null
+  attribution_required: true
+  attribution_text: Remotive feed is delayed and may require link-back attribution; use canonical job URL for attribution.
+  authenticated_scraping: false
+  reviewed_at: "2026-09-06"
+schedule:
+  enabled: true
+  interval_minutes: 1440
+  jitter_seconds: 180
+request:
+  endpoint: https://remotive.com/api/remote-jobs
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 2
+    base_delay_ms: 1000
+    max_delay_ms: 30000
+  rate_limit:
+    requests_per_minute: 20
+    items_per_run: 50
+  pagination:
+    strategy: none
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: null
+  query:
+    keywords: [ai, data, software, product]
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH]
+mapping:
+  external_id: $.id
+  title: $.title
+  company: $.company_name
+  description: $.description
+  url: $.url
+  location: $.candidate_required_location
+  work_mode: $derive.work_mode_from_structured_and_text_evidence
+  employment_type: $.job_type
+  posted_at: $.publication_date
+  updated_at: null
+

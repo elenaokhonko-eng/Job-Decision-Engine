@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { SCHEMA_VERSION, SchemaVersionSchema } from "./version.js";
 export { SCHEMA_VERSION } from "./version.js";
+export { SourcePluginSchema, type SourcePlugin } from "./sourcePlugin.js";
 
 export const SourceNameSchema = z.enum([
   "GMAIL_ALERT",

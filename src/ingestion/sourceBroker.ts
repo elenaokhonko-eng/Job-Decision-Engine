@@ -5,6 +5,7 @@ import crypto from "crypto";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { getActiveSourcePluginRevision } from "./sourcePluginRegistry.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -20,6 +21,8 @@ export class SourceBroker {
   private errors: string[] = [];
   private executor: pg.Pool | pg.PoolClient;
   private context: WorkspaceContext | null = null;
+  private sourcePluginRevisionCache = new Map<string, string | null>();
+  private sourcePluginColumnsAvailable: boolean | null = null;
 
   constructor(clientOrPool?: pg.Pool | pg.PoolClient, context?: WorkspaceContext) {
     this.executor = clientOrPool || defaultPool;
@@ -32,6 +35,30 @@ export class SourceBroker {
     }
     this.context = await resolveWorkspaceContext(this.executor as any);
     return this.context;
+  }
+
+  private async resolveSourcePluginRevisionId(
+    sourcePluginKey: string,
+    executor: pg.Pool | pg.PoolClient,
+    ctx: WorkspaceContext
+  ): Promise<string | null> {
+    if (this.sourcePluginRevisionCache.has(sourcePluginKey)) {
+      return this.sourcePluginRevisionCache.get(sourcePluginKey) ?? null;
+    }
+
+    try {
+      const active = await getActiveSourcePluginRevision(sourcePluginKey, executor as any, { context: ctx });
+      const revisionId = active?.sourcePluginRevisionId ?? null;
+      this.sourcePluginRevisionCache.set(sourcePluginKey, revisionId);
+      return revisionId;
+    } catch (err: any) {
+      // Allow running against pre-P12 databases (tables missing).
+      if (err?.code === "42P01") {
+        this.sourcePluginRevisionCache.set(sourcePluginKey, null);
+        return null;
+      }
+      throw err;
+    }
   }
 
   async startRun(status: string = "RUNNING"): Promise<string> {
@@ -69,43 +96,116 @@ export class SourceBroker {
 
     try {
       const executor = executorOverride || this.executor;
-      const result = await executor.query(
-        `INSERT INTO raw_job_observations (
+      const sourcePluginKey = (obs as any).sourcePluginKey
+        ? String((obs as any).sourcePluginKey).trim()
+        : String(obs.sourceName).toLowerCase();
+
+      const sourcePluginRevisionId =
+        typeof (obs as any).sourcePluginRevisionId === "string"
+          ? String((obs as any).sourcePluginRevisionId).trim()
+          : await this.resolveSourcePluginRevisionId(sourcePluginKey, executor, ctx);
+
+      const canUseSourcePluginColumns =
+        this.sourcePluginColumnsAvailable === true || this.sourcePluginColumnsAvailable === null;
+
+      const sqlWithPlugin = `INSERT INTO raw_job_observations (
           workspace_id,
-          source_run_id, source_name, source_external_id, source_url, 
-          retrieved_at, company_name, title, description_raw, 
+          source_run_id, source_name, source_plugin_key, source_plugin_revision_id,
+          source_external_id, source_url,
+          retrieved_at, company_name, title, description_raw,
           location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
-          canonical_apply_url, source_lane, search_plan_version, 
+          canonical_apply_url, source_lane, search_plan_version,
+          raw_payload, raw_payload_hash
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        ON CONFLICT (workspace_id, raw_payload_hash)
+        DO UPDATE SET
+          source_plugin_key = COALESCE(raw_job_observations.source_plugin_key, EXCLUDED.source_plugin_key),
+          source_plugin_revision_id = COALESCE(raw_job_observations.source_plugin_revision_id, EXCLUDED.source_plugin_revision_id)
+        RETURNING (xmax = 0) AS inserted`;
+
+      const sqlLegacy = `INSERT INTO raw_job_observations (
+          workspace_id,
+          source_run_id, source_name, source_external_id, source_url,
+          retrieved_at, company_name, title, description_raw,
+          location_raw, workplace_type_raw, employment_type_raw, compensation_raw,
+          canonical_apply_url, source_lane, search_plan_version,
           raw_payload, raw_payload_hash
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-        ON CONFLICT (workspace_id, raw_payload_hash) DO NOTHING`,
-        [
-          ctx.workspaceId,
-          this.sourceRunId,
-          obs.sourceName,
-          obs.sourceExternalId,
-          obs.sourceUrl,
-          obs.retrievedAt || new Date().toISOString(),
-          obs.companyName,
-          obs.title,
-          obs.descriptionRaw,
-          obs.locationRaw || null,
-          obs.workplaceTypeRaw || null,
-          obs.employmentTypeRaw || null,
-          obs.compensationRaw || null,
-          obs.canonicalApplyUrl || null,
-          obs.sourceLane,
-          obs.searchPlanVersion,
-          JSON.stringify(rawPayload),
-          rawPayloadHash
-        ]
+        ON CONFLICT (workspace_id, raw_payload_hash) DO NOTHING`;
+
+      const result = await executor.query(
+        canUseSourcePluginColumns ? sqlWithPlugin : sqlLegacy,
+        canUseSourcePluginColumns
+          ? [
+              ctx.workspaceId,
+              this.sourceRunId,
+              obs.sourceName,
+              sourcePluginKey,
+              sourcePluginRevisionId,
+              obs.sourceExternalId,
+              obs.sourceUrl,
+              obs.retrievedAt || new Date().toISOString(),
+              obs.companyName,
+              obs.title,
+              obs.descriptionRaw,
+              obs.locationRaw || null,
+              obs.workplaceTypeRaw || null,
+              obs.employmentTypeRaw || null,
+              obs.compensationRaw || null,
+              obs.canonicalApplyUrl || null,
+              obs.sourceLane,
+              obs.searchPlanVersion,
+              JSON.stringify(rawPayload),
+              rawPayloadHash,
+            ]
+          : [
+              ctx.workspaceId,
+              this.sourceRunId,
+              obs.sourceName,
+              obs.sourceExternalId,
+              obs.sourceUrl,
+              obs.retrievedAt || new Date().toISOString(),
+              obs.companyName,
+              obs.title,
+              obs.descriptionRaw,
+              obs.locationRaw || null,
+              obs.workplaceTypeRaw || null,
+              obs.employmentTypeRaw || null,
+              obs.compensationRaw || null,
+              obs.canonicalApplyUrl || null,
+              obs.sourceLane,
+              obs.searchPlanVersion,
+              JSON.stringify(rawPayload),
+              rawPayloadHash,
+            ]
       );
-      if (result.rowCount && result.rowCount > 0) {
+      if (
+        canUseSourcePluginColumns &&
+        result.rows &&
+        result.rows.length > 0 &&
+        typeof result.rows[0]?.inserted === "boolean"
+      ) {
+        if (result.rows[0].inserted) {
+          this.stats.new++;
+        } else {
+          this.stats.duplicates++;
+        }
+      } else if (result.rowCount && result.rowCount > 0) {
         this.stats.new++;
       } else {
         this.stats.duplicates++;
       }
     } catch (err: any) {
+      if (
+        err?.code === "42703" &&
+        typeof err?.message === "string" &&
+        err.message.includes("source_plugin") &&
+        this.sourcePluginColumnsAvailable !== false
+      ) {
+        // Pre-P12 databases: retry with legacy insert shape (no plugin columns).
+        this.sourcePluginColumnsAvailable = false;
+        return this.processObservation(obs, rawPayload, executorOverride);
+      }
       this.recordError(`Failed to stage observation "${obs.title}" from ${obs.companyName}: ${err.message}`);
       // INVARIANT: never swallow observation staging failures.
       // Callers must handle this error and must not mark the source email/record as processed.

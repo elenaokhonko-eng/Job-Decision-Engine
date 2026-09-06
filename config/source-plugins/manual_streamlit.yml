@@ -1,0 +1,57 @@
+schema_version: "2.2.0"
+source_key: manual_streamlit
+display_name: Streamlit manual entry
+kind: manual_import
+status: active
+capabilities:
+  discovery: false
+  pagination: false
+  incremental: false
+  location_filter: false
+  work_mode_evidence: false
+compliance:
+  access_basis: manual_import
+  terms_url: https://example.invalid/manual-streamlit
+  license: null
+  attribution_required: false
+  attribution_text: null
+  authenticated_scraping: false
+  reviewed_at: "2026-09-06"
+schedule:
+  enabled: false
+  interval_minutes: 1440
+  jitter_seconds: 0
+request:
+  endpoint: http://localhost:3000/api/v2/observations/manual
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 0
+    base_delay_ms: 1000
+    max_delay_ms: 1000
+  rate_limit:
+    requests_per_minute: 60
+    items_per_run: null
+  pagination:
+    strategy: none
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: null
+  query:
+    keywords: []
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: []
+mapping:
+  external_id: $context.manual_streamlit_id
+  title: $.title
+  company: $.company_name
+  description: $.raw_description
+  url: $.canonical_url
+  location: $.location_summary
+  work_mode: $.workplace_type
+  employment_type: $.employment_type
+  posted_at: null
+  updated_at: null
+

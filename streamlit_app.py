@@ -77,6 +77,74 @@ def api_request(method, path, params=None, body=None, timeout=30):
         raw = response.read().decode("utf-8")
         return json.loads(raw) if raw else {}
 
+def default_accessibility_settings():
+    return {
+        "quiet_mode": False,
+        "reduced_motion": False,
+        "high_contrast": False,
+        "density": "comfortable",
+        "font_scale": 1.0,
+        "show_emojis": True,
+    }
+
+def fetch_accessibility_settings():
+    resp = api_request("GET", "/api/v2/accessibility", timeout=15)
+    if isinstance(resp, dict) and resp.get("ok"):
+        settings = resp.get("settings") or {}
+        merged = dict(default_accessibility_settings())
+        merged.update(settings if isinstance(settings, dict) else {})
+        return merged
+    return default_accessibility_settings()
+
+def update_accessibility_settings(patch):
+    resp = api_request("PUT", "/api/v2/accessibility", body=patch, timeout=15)
+    if isinstance(resp, dict) and resp.get("ok"):
+        return resp.get("settings") or {}
+    raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
+
+def fetch_preference_modes():
+    resp = api_request("GET", "/api/v2/preference-modes", timeout=20)
+    if isinstance(resp, dict) and resp.get("ok"):
+        modes = resp.get("modes") or []
+        return modes if isinstance(modes, list) else []
+    return []
+
+def create_preference_mode(mode_key, display_name, description, content):
+    body = {
+        "mode_key": mode_key,
+        "display_name": display_name,
+        "description": description,
+        "content": content,
+    }
+    resp = api_request("POST", "/api/v2/preference-modes", body=body, timeout=20)
+    if isinstance(resp, dict) and resp.get("ok"):
+        return resp.get("mode") or {}
+    raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
+
+def activate_preference_mode(mode_key):
+    resp = api_request("POST", "/api/v2/preference-modes/activate", body={"mode_key": mode_key}, timeout=20)
+    if isinstance(resp, dict) and resp.get("ok"):
+        return resp.get("mode") or {}
+    raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
+
+def fetch_consents():
+    resp = api_request("GET", "/api/v2/consents", timeout=20)
+    if isinstance(resp, dict) and resp.get("ok"):
+        rows = resp.get("consents") or []
+        rows = rows if isinstance(rows, list) else []
+        mapping = {}
+        for row in rows:
+            if isinstance(row, dict) and row.get("consent_key"):
+                mapping[str(row.get("consent_key"))] = bool(row.get("granted"))
+        return mapping, rows
+    return {}, []
+
+def update_consents(consents_patch):
+    resp = api_request("PUT", "/api/v2/consents", body={"consents": consents_patch}, timeout=20)
+    if isinstance(resp, dict) and resp.get("ok"):
+        return resp.get("consents") or []
+    raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
+
 def escape_text(value):
     return html.escape(str(value if value is not None else ""))
 
@@ -604,6 +672,213 @@ st.markdown("### *Multi-Stage Weighted High-Autonomy Technical Architect & Build
 st.markdown("---")
 
 # Sidebar - Filters & Stats
+with st.sidebar.expander("Accessibility & Preferences", expanded=False):
+    if "accessibility_settings" not in st.session_state:
+        try:
+            st.session_state["accessibility_settings"] = fetch_accessibility_settings()
+        except Exception as e:
+            st.warning(f"Unable to load accessibility settings: {e}")
+            st.session_state["accessibility_settings"] = default_accessibility_settings()
+
+    settings = st.session_state.get("accessibility_settings") or default_accessibility_settings()
+
+    quiet_mode = st.toggle(
+        "Quiet mode (reduce visual noise)",
+        value=bool(settings.get("quiet_mode")),
+        help="Keeps the UI predictable and reduces emphasis on bright accents.",
+        key="acc_quiet_mode",
+    )
+    density = st.selectbox(
+        "Density",
+        options=["comfortable", "compact"],
+        index=0 if settings.get("density") != "compact" else 1,
+        help="Compact mode reduces padding and large visual blocks.",
+        key="acc_density",
+    )
+    font_scale = st.slider(
+        "Font scale",
+        min_value=0.80,
+        max_value=1.50,
+        value=float(settings.get("font_scale") or 1.0),
+        step=0.05,
+        help="Changes the base font size (useful for readability and fatigue management).",
+        key="acc_font_scale",
+    )
+    show_emojis = st.toggle(
+        "Show emojis",
+        value=bool(settings.get("show_emojis", True)),
+        help="Turn off decorative emojis if they distract you.",
+        key="acc_show_emojis",
+    )
+    high_contrast = st.toggle(
+        "High contrast",
+        value=bool(settings.get("high_contrast")),
+        help="Uses higher contrast colors.",
+        key="acc_high_contrast",
+    )
+    reduced_motion = st.toggle(
+        "Reduced motion",
+        value=bool(settings.get("reduced_motion")),
+        help="Disables optional animations.",
+        key="acc_reduced_motion",
+    )
+
+    patch = {}
+    if quiet_mode != bool(settings.get("quiet_mode")):
+        patch["quiet_mode"] = quiet_mode
+    if density != settings.get("density"):
+        patch["density"] = density
+    if abs(float(font_scale) - float(settings.get("font_scale") or 1.0)) > 1e-6:
+        patch["font_scale"] = float(font_scale)
+    if show_emojis != bool(settings.get("show_emojis", True)):
+        patch["show_emojis"] = show_emojis
+    if high_contrast != bool(settings.get("high_contrast")):
+        patch["high_contrast"] = high_contrast
+    if reduced_motion != bool(settings.get("reduced_motion")):
+        patch["reduced_motion"] = reduced_motion
+
+    if patch:
+        try:
+            updated = update_accessibility_settings(patch)
+            merged = dict(settings)
+            merged.update(updated if isinstance(updated, dict) else {})
+            st.session_state["accessibility_settings"] = merged
+            st.success("Saved.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to save settings: {e}")
+
+    st.markdown("---")
+
+    if "preference_modes" not in st.session_state:
+        try:
+            st.session_state["preference_modes"] = fetch_preference_modes()
+        except Exception as e:
+            st.warning(f"Unable to load preference modes: {e}")
+            st.session_state["preference_modes"] = []
+
+    modes = st.session_state.get("preference_modes") or []
+    mode_labels = []
+    mode_key_by_label = {}
+    active_label = None
+    for m in modes:
+        if not isinstance(m, dict):
+            continue
+        key = str(m.get("mode_key") or "").strip()
+        name = str(m.get("display_name") or key).strip()
+        if not key:
+            continue
+        label = f"{name} ({key})"
+        if m.get("is_active") is True:
+            label = f"{label} [active]"
+            active_label = label
+        mode_labels.append(label)
+        mode_key_by_label[label] = key
+
+    st.caption("Preference modes let you save multiple day modes (e.g. focus-heavy vs social-heavy days).")
+    if mode_labels:
+        chosen_label = st.selectbox(
+            "Preference modes",
+            options=mode_labels,
+            index=mode_labels.index(active_label) if active_label in mode_labels else 0,
+        )
+        if st.button("Set active mode", key="pref_activate"):
+            try:
+                activate_preference_mode(mode_key_by_label[chosen_label])
+                st.session_state["preference_modes"] = fetch_preference_modes()
+                st.success("Updated active mode.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to activate mode: {e}")
+    else:
+        st.info("No modes saved yet. Create one below.")
+
+    with st.expander("Create a new preference mode", expanded=False):
+        name = st.text_input("Display name", value="Focus day", key="pref_new_name")
+        mode_key = st.text_input(
+            "Mode key (lowercase, underscores)",
+            value="focus_day",
+            help="Example: focus_day, high_energy_day, interview_week",
+            key="pref_new_key",
+        )
+        desc = st.text_area("Description (optional)", value="", key="pref_new_desc")
+        allowed_work_modes = st.multiselect(
+            "Allowed work modes",
+            options=["REMOTE", "HYBRID", "ONSITE"],
+            default=["REMOTE", "HYBRID"],
+            key="pref_work_modes",
+        )
+        max_office_days = st.slider("Max office days/week", min_value=0, max_value=5, value=2, key="pref_office_days")
+        max_travel = st.slider("Max travel (%)", min_value=0, max_value=100, value=10, key="pref_travel")
+
+        content = {
+            "schema_version": "2.2.0",
+            "mode_key": mode_key,
+            "hard_constraints": {
+                "work_modes": allowed_work_modes,
+                "max_office_days_per_week": int(max_office_days),
+                "employment_types": ["FULL_TIME"],
+                "max_travel_pct": int(max_travel),
+                "on_call_allowed": True,
+                "shift_work_allowed": True,
+                "authorized_regions": [],
+            },
+            "soft_preferences": {},
+            "unknown_handling": {
+                "hard_constraint": "VERIFY",
+                "soft_preference": "NEUTRAL_EXCLUDED_FROM_DENOMINATOR",
+                "show_verification_questions": True,
+            },
+        }
+
+        if st.button("Save mode", key="pref_save"):
+            try:
+                create_preference_mode(mode_key, name, desc or None, content)
+                st.session_state["preference_modes"] = fetch_preference_modes()
+                st.success("Mode saved.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to save mode: {e}")
+
+    st.markdown("---")
+
+    if "consents_mapping" not in st.session_state:
+        try:
+            mapping, _rows = fetch_consents()
+            st.session_state["consents_mapping"] = mapping
+        except Exception as e:
+            st.warning(f"Unable to load consent settings: {e}")
+            st.session_state["consents_mapping"] = {}
+
+    consents = st.session_state.get("consents_mapping") or {}
+    allow_docs = st.toggle(
+        "Consent: AI-generated documents",
+        value=bool(consents.get("allow_documents", True)),
+        help="Controls whether document generators are allowed to run.",
+        key="consent_allow_docs",
+    )
+    allow_eval = st.toggle(
+        "Consent: AI evaluation",
+        value=bool(consents.get("allow_ai_evaluation", True)),
+        help="Controls whether LLM-based job evaluation is allowed to run.",
+        key="consent_allow_eval",
+    )
+
+    consent_patch = {}
+    if allow_docs != bool(consents.get("allow_documents", True)):
+        consent_patch["allow_documents"] = allow_docs
+    if allow_eval != bool(consents.get("allow_ai_evaluation", True)):
+        consent_patch["allow_ai_evaluation"] = allow_eval
+
+    if consent_patch:
+        try:
+            update_consents(consent_patch)
+            mapping, _rows = fetch_consents()
+            st.session_state["consents_mapping"] = mapping
+            st.success("Saved consents.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to save consents: {e}")
 st.sidebar.header("🎯 Navigation & Filters")
 
 # Metrics
@@ -1353,6 +1628,22 @@ with tab_analytics:
         st.bar_chart(df.set_index("Company")[["Avg Autonomy Score", "Avg Politics Score"]])
     else:
         st.info("No compiled analytics are available. Please run the evaluation engine pipeline to score listings.")
+
+    st.markdown("---")
+    st.subheader("Source Health (Compliance-Aware)")
+    st.caption("Counts are based on staged raw observations. Compliance metadata comes from source plugin manifests.")
+    try:
+        resp = api_request("GET", "/api/v2/sources/health", timeout=30)
+        sources = resp.get("sources") if isinstance(resp, dict) else None
+        if isinstance(resp, dict) and resp.get("ok") and isinstance(sources, list) and sources:
+            sdf = pd.DataFrame(sources)
+            st.dataframe(sdf, use_container_width=True)
+        elif isinstance(resp, dict) and resp.get("ok") and isinstance(sources, list) and not sources:
+            st.info("No source plugin rows found yet. Run `npm run sources:sync` and ingest at least one source.")
+        else:
+            st.warning(f"Source health endpoint returned an unexpected payload: {resp}")
+    except Exception as e:
+        st.error(f"Failed to fetch source health from API: {e}")
 
 with tab_cv:
     st.subheader("📄 Canonical Documents")

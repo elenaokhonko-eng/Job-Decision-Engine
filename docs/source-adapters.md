@@ -2,6 +2,14 @@
 
 All adapters extend `BaseSourceAdapter`, validate mapped records with `ExtractedJobSchema`, and feed `SourceBroker`. Adapters never write canonical tables.
 
+## Source Plugins (P12)
+
+Source compliance/attribution metadata is defined in `config/source-plugins/*.yml` and can be synced into Postgres (versioned, immutable revisions) with:
+
+```bash
+npm run sources:sync
+```
+
 ## Configured Sources
 
 `config/sources.yml` controls enablement, endpoints, polling intervals, query/lane filters, attribution, per-run limits, timeout, and retry policy.

@@ -1,0 +1,367 @@
+{
+  "$ref": "#/definitions/SourcePlugin",
+  "definitions": {
+    "SourcePlugin": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "2.2.0"
+        },
+        "source_key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{2,63}$"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "ats",
+            "json_api",
+            "rss",
+            "atom",
+            "schema_org",
+            "email_alert",
+            "manual_import"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "experimental",
+            "disabled",
+            "deprecated"
+          ]
+        },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "discovery": {
+              "type": "boolean"
+            },
+            "pagination": {
+              "type": "boolean"
+            },
+            "incremental": {
+              "type": "boolean"
+            },
+            "location_filter": {
+              "type": "boolean"
+            },
+            "work_mode_evidence": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "discovery",
+            "pagination",
+            "incremental",
+            "location_filter",
+            "work_mode_evidence"
+          ],
+          "additionalProperties": false
+        },
+        "compliance": {
+          "type": "object",
+          "properties": {
+            "access_basis": {
+              "type": "string",
+              "enum": [
+                "official_api",
+                "public_feed",
+                "user_supplied",
+                "manual_import",
+                "documented_permission"
+              ]
+            },
+            "terms_url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "license": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "attribution_required": {
+              "type": "boolean"
+            },
+            "attribution_text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "authenticated_scraping": {
+              "type": "boolean",
+              "const": false
+            },
+            "reviewed_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "access_basis",
+            "terms_url",
+            "attribution_required",
+            "authenticated_scraping"
+          ],
+          "additionalProperties": false
+        },
+        "schedule": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "interval_minutes": {
+              "type": "integer",
+              "minimum": 15,
+              "maximum": 10080
+            },
+            "jitter_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3600,
+              "default": 0
+            }
+          },
+          "required": [
+            "enabled",
+            "interval_minutes"
+          ],
+          "additionalProperties": false
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "format": "uri"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 120000
+            },
+            "headers_from_secret_keys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "retry": {
+              "type": "object",
+              "properties": {
+                "max_attempts": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10
+                },
+                "base_delay_ms": {
+                  "type": "integer",
+                  "minimum": 100
+                },
+                "max_delay_ms": {
+                  "type": "integer",
+                  "minimum": 100
+                }
+              },
+              "required": [
+                "max_attempts",
+                "base_delay_ms",
+                "max_delay_ms"
+              ],
+              "additionalProperties": false
+            },
+            "rate_limit": {
+              "type": "object",
+              "properties": {
+                "requests_per_minute": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "items_per_run": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "requests_per_minute",
+                "items_per_run"
+              ],
+              "additionalProperties": false
+            },
+            "pagination": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "page",
+                    "cursor",
+                    "link_header",
+                    "updated_since"
+                  ]
+                },
+                "page_parameter": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "cursor_json_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "next_link_json_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "checkpoint_field": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "strategy"
+              ],
+              "additionalProperties": false
+            },
+            "query": {
+              "type": "object",
+              "properties": {
+                "keywords": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "locations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "work_modes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "REMOTE",
+                      "HYBRID",
+                      "ONSITE",
+                      "UNKNOWN"
+                    ]
+                  }
+                },
+                "lane_keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "endpoint",
+            "timeout_ms",
+            "retry",
+            "rate_limit",
+            "pagination"
+          ],
+          "additionalProperties": false
+        },
+        "mapping": {
+          "type": "object",
+          "properties": {
+            "external_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "company": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            },
+            "work_mode": {
+              "type": "string"
+            },
+            "employment_type": {
+              "type": "string"
+            },
+            "posted_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "updated_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "external_id",
+            "title",
+            "company",
+            "description",
+            "url",
+            "location",
+            "work_mode",
+            "employment_type"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "source_key",
+        "display_name",
+        "kind",
+        "status",
+        "capabilities",
+        "compliance",
+        "schedule",
+        "request",
+        "mapping"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

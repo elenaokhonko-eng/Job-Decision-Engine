@@ -465,6 +465,50 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
   );
 
   router.get(
+    "/sources/health",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const { rows } = await pool.query(
+        `
+          SELECT
+            sp.source_key,
+            sp.display_name,
+            sp.kind,
+            sp.status,
+            spr.revision_number AS active_revision_number,
+            spr.content->'compliance'->>'access_basis' AS access_basis,
+            spr.content->'compliance'->>'terms_url' AS terms_url,
+            spr.content->'compliance'->>'attribution_required' AS attribution_required,
+            COUNT(rjo.id)::int AS observation_count,
+            MAX(rjo.retrieved_at) AS last_observed_at
+          FROM source_plugins sp
+          LEFT JOIN source_plugin_active_revisions spar
+            ON spar.source_plugin_id = sp.id
+          LEFT JOIN source_plugin_revisions spr
+            ON spr.id = spar.source_plugin_revision_id
+          LEFT JOIN raw_job_observations rjo
+            ON rjo.workspace_id = sp.workspace_id
+           AND rjo.source_plugin_key = sp.source_key
+          WHERE sp.workspace_id = $1
+          GROUP BY
+            sp.source_key,
+            sp.display_name,
+            sp.kind,
+            sp.status,
+            spr.revision_number,
+            access_basis,
+            terms_url,
+            attribution_required
+          ORDER BY last_observed_at DESC NULLS LAST, sp.source_key ASC
+        `,
+        [ctx.workspaceId]
+      );
+
+      res.json({ ok: true, sources: rows });
+    })
+  );
+
+  router.get(
     "/tasks",
     asyncHandler(async (req, res) => {
       const ctx = (req as any).workspaceContext as WorkspaceContext;
@@ -567,6 +611,366 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
       );
 
       res.status(201).json({ ok: true, task_id: queued.taskId, inserted: queued.inserted });
+    })
+  );
+
+  router.get(
+    "/accessibility",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const { rows } = await pool.query<{
+        quiet_mode: boolean;
+        reduced_motion: boolean;
+        high_contrast: boolean;
+        density: string;
+        font_scale: number;
+        show_emojis: boolean;
+        updated_at: string;
+      }>(
+        `
+          SELECT
+            quiet_mode,
+            reduced_motion,
+            high_contrast,
+            density,
+            font_scale,
+            show_emojis,
+            updated_at
+          FROM workspace_user_accessibility_settings
+          WHERE workspace_id = $1
+            AND user_id = $2
+          LIMIT 1
+        `,
+        [ctx.workspaceId, ctx.userId]
+      );
+
+      const defaults = {
+        quiet_mode: false,
+        reduced_motion: false,
+        high_contrast: false,
+        density: "comfortable",
+        font_scale: 1.0,
+        show_emojis: true,
+      };
+
+      res.json({ ok: true, settings: rows[0] ? { ...defaults, ...rows[0] } : defaults });
+    })
+  );
+
+  router.put(
+    "/accessibility",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const body = req.body ?? {};
+
+      const boolKeys = ["quiet_mode", "reduced_motion", "high_contrast", "show_emojis"] as const;
+      for (const key of boolKeys) {
+        if (body[key] !== undefined && typeof body[key] !== "boolean") {
+          res.status(400).json({ ok: false, error: `${key} must be boolean.` });
+          return;
+        }
+      }
+      if (body.density !== undefined && body.density !== "comfortable" && body.density !== "compact") {
+        res.status(400).json({ ok: false, error: "density must be one of: comfortable, compact." });
+        return;
+      }
+      if (body.font_scale !== undefined) {
+        if (typeof body.font_scale !== "number" || Number.isNaN(body.font_scale)) {
+          res.status(400).json({ ok: false, error: "font_scale must be a number." });
+          return;
+        }
+        if (body.font_scale < 0.8 || body.font_scale > 1.5) {
+          res.status(400).json({ ok: false, error: "font_scale must be between 0.80 and 1.50." });
+          return;
+        }
+      }
+
+      const updated = await withTransaction(pool, async (client) => {
+        const { rows: existingRows } = await client.query<{
+          quiet_mode: boolean;
+          reduced_motion: boolean;
+          high_contrast: boolean;
+          density: string;
+          font_scale: number;
+          show_emojis: boolean;
+        }>(
+          `
+            SELECT quiet_mode, reduced_motion, high_contrast, density, font_scale, show_emojis
+            FROM workspace_user_accessibility_settings
+            WHERE workspace_id = $1 AND user_id = $2
+            LIMIT 1
+          `,
+          [ctx.workspaceId, ctx.userId]
+        );
+
+        const base = existingRows[0] || {
+          quiet_mode: false,
+          reduced_motion: false,
+          high_contrast: false,
+          density: "comfortable",
+          font_scale: 1.0,
+          show_emojis: true,
+        };
+
+        const next = {
+          quiet_mode: body.quiet_mode ?? base.quiet_mode,
+          reduced_motion: body.reduced_motion ?? base.reduced_motion,
+          high_contrast: body.high_contrast ?? base.high_contrast,
+          density: body.density ?? base.density,
+          font_scale: body.font_scale ?? base.font_scale,
+          show_emojis: body.show_emojis ?? base.show_emojis,
+        };
+
+        const { rows } = await client.query(
+          `
+            INSERT INTO workspace_user_accessibility_settings (
+              workspace_id,
+              user_id,
+              quiet_mode,
+              reduced_motion,
+              high_contrast,
+              density,
+              font_scale,
+              show_emojis
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (workspace_id, user_id)
+            DO UPDATE SET
+              quiet_mode = EXCLUDED.quiet_mode,
+              reduced_motion = EXCLUDED.reduced_motion,
+              high_contrast = EXCLUDED.high_contrast,
+              density = EXCLUDED.density,
+              font_scale = EXCLUDED.font_scale,
+              show_emojis = EXCLUDED.show_emojis,
+              updated_at = NOW()
+            RETURNING quiet_mode, reduced_motion, high_contrast, density, font_scale, show_emojis, updated_at
+          `,
+          [
+            ctx.workspaceId,
+            ctx.userId,
+            next.quiet_mode,
+            next.reduced_motion,
+            next.high_contrast,
+            next.density,
+            next.font_scale,
+            next.show_emojis,
+          ]
+        );
+
+        return rows[0];
+      });
+
+      res.json({ ok: true, settings: updated });
+    })
+  );
+
+  router.get(
+    "/consents",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const { rows } = await pool.query<{
+        consent_key: string;
+        granted: boolean;
+        granted_at: string | null;
+        revoked_at: string | null;
+        updated_at: string;
+      }>(
+        `
+          SELECT consent_key, granted, granted_at, revoked_at, updated_at
+          FROM workspace_user_consents
+          WHERE workspace_id = $1 AND user_id = $2
+          ORDER BY updated_at DESC
+        `,
+        [ctx.workspaceId, ctx.userId]
+      );
+      res.json({ ok: true, consents: rows });
+    })
+  );
+
+  router.put(
+    "/consents",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const consents = req.body?.consents;
+      if (!consents || typeof consents !== "object" || Array.isArray(consents)) {
+        res.status(400).json({ ok: false, error: "Body must include consents object." });
+        return;
+      }
+
+      const entries = Object.entries(consents as Record<string, unknown>);
+      for (const [key, val] of entries) {
+        if (!key.trim()) {
+          res.status(400).json({ ok: false, error: "consent_key must be non-empty." });
+          return;
+        }
+        if (typeof val !== "boolean") {
+          res.status(400).json({ ok: false, error: `consents.${key} must be boolean.` });
+          return;
+        }
+      }
+
+      const updated = await withTransaction(pool, async (client) => {
+        for (const [key, val] of entries) {
+          const granted = Boolean(val);
+          await client.query(
+            `
+              INSERT INTO workspace_user_consents (
+                workspace_id,
+                user_id,
+                consent_key,
+                granted,
+                granted_at,
+                revoked_at,
+                updated_at
+              )
+              VALUES ($1, $2, $3, $4, CASE WHEN $4 THEN NOW() ELSE NULL END, CASE WHEN $4 THEN NULL ELSE NOW() END, NOW())
+              ON CONFLICT (workspace_id, user_id, consent_key)
+              DO UPDATE SET
+                granted = EXCLUDED.granted,
+                granted_at = EXCLUDED.granted_at,
+                revoked_at = EXCLUDED.revoked_at,
+                updated_at = NOW()
+            `,
+            [ctx.workspaceId, ctx.userId, key, granted]
+          );
+        }
+
+        const { rows } = await client.query(
+          `
+            SELECT consent_key, granted, granted_at, revoked_at, updated_at
+            FROM workspace_user_consents
+            WHERE workspace_id = $1 AND user_id = $2
+            ORDER BY updated_at DESC
+          `,
+          [ctx.workspaceId, ctx.userId]
+        );
+        return rows;
+      });
+
+      res.json({ ok: true, consents: updated });
+    })
+  );
+
+  router.get(
+    "/preference-modes",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const { rows } = await pool.query(
+        `
+          SELECT
+            mode_key,
+            display_name,
+            description,
+            is_active,
+            content,
+            updated_at
+          FROM workspace_user_preference_modes
+          WHERE workspace_id = $1
+            AND user_id = $2
+          ORDER BY is_active DESC, updated_at DESC
+        `,
+        [ctx.workspaceId, ctx.userId]
+      );
+      res.json({ ok: true, modes: rows });
+    })
+  );
+
+  router.post(
+    "/preference-modes",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const modeKey = String(req.body?.mode_key || "").trim();
+      const displayName = String(req.body?.display_name || "").trim();
+      const description = req.body?.description != null ? String(req.body?.description || "").trim() : null;
+      const content = req.body?.content ?? {};
+
+      if (!modeKey || !modeKey.match(/^[a-z][a-z0-9_]{2,63}$/)) {
+        res.status(400).json({ ok: false, error: "mode_key must match ^[a-z][a-z0-9_]{2,63}$." });
+        return;
+      }
+      if (!displayName) {
+        res.status(400).json({ ok: false, error: "display_name is required." });
+        return;
+      }
+      if (!content || typeof content !== "object" || Array.isArray(content)) {
+        res.status(400).json({ ok: false, error: "content must be a JSON object." });
+        return;
+      }
+
+      const mode = await withTransaction(pool, async (client) => {
+        const { rows } = await client.query(
+          `
+            INSERT INTO workspace_user_preference_modes (
+              workspace_id,
+              user_id,
+              mode_key,
+              display_name,
+              description,
+              content,
+              is_active
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, FALSE)
+            ON CONFLICT (workspace_id, user_id, mode_key)
+            DO UPDATE SET
+              display_name = EXCLUDED.display_name,
+              description = EXCLUDED.description,
+              content = EXCLUDED.content,
+              updated_at = NOW()
+            RETURNING mode_key, display_name, description, is_active, content, updated_at
+          `,
+          [ctx.workspaceId, ctx.userId, modeKey, displayName, description, JSON.stringify(content)]
+        );
+        return rows[0];
+      });
+
+      res.status(201).json({ ok: true, mode });
+    })
+  );
+
+  router.post(
+    "/preference-modes/activate",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const modeKey = String(req.body?.mode_key || "").trim();
+      if (!modeKey) {
+        res.status(400).json({ ok: false, error: "mode_key is required." });
+        return;
+      }
+
+      const mode = await withTransaction(pool, async (client) => {
+        await client.query(
+          `
+            UPDATE workspace_user_preference_modes
+            SET is_active = FALSE, updated_at = NOW()
+            WHERE workspace_id = $1
+              AND user_id = $2
+              AND is_active = TRUE
+              AND mode_key <> $3
+          `,
+          [ctx.workspaceId, ctx.userId, modeKey]
+        );
+
+        const { rows } = await client.query(
+          `
+            UPDATE workspace_user_preference_modes
+            SET is_active = TRUE, updated_at = NOW()
+            WHERE workspace_id = $1
+              AND user_id = $2
+              AND mode_key = $3
+            RETURNING mode_key, display_name, description, is_active, content, updated_at
+          `,
+          [ctx.workspaceId, ctx.userId, modeKey]
+        );
+
+        return rows[0] || null;
+      });
+
+      if (!mode) {
+        res.status(404).json({ ok: false, error: "Mode not found." });
+        return;
+      }
+
+      res.json({ ok: true, mode });
     })
   );
 

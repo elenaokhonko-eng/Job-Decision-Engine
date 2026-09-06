@@ -5,6 +5,10 @@ export type { SourceName };
 export interface RawJobObservation {
   sourceRunId: string;
   sourceName: SourceName;
+  /** Lowercase manifest key (P12 source plugin registry); defaults to sourceName.toLowerCase(). */
+  sourcePluginKey?: string;
+  /** Active source plugin revision id (if registry is seeded). */
+  sourcePluginRevisionId?: string | null;
   sourceExternalId: string;
   sourceUrl: string;
   canonicalApplyUrl?: string;

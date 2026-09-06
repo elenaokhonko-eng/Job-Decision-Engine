@@ -402,23 +402,61 @@ ${pluginPreamble ? `\nPLUGIN PREAMBLE (additional constraints):\n${pluginPreambl
       context: ctx,
       seedRoute: true,
     });
-    let finalCv = normalizeTailoredCvRoot(JSON.parse(cleanJsonResponse(cvGeneration.text)));
+    const rawCvPayload = JSON.parse(cleanJsonResponse(cvGeneration.text));
+    const normalizedCv = normalizeTailoredCvRoot(rawCvPayload);
+    if (!normalizedCv || typeof normalizedCv !== "object" || Array.isArray(normalizedCv)) {
+      throw new Error("CV generation returned a non-object payload; refusing to continue.");
+    }
+
+    const schemaVersion =
+      typeof (normalizedCv as any)?.metadata?.schema_version === "string"
+        ? String((normalizedCv as any).metadata.schema_version).trim()
+        : "2.2.0";
+
+    const profileVersion =
+      typeof (normalizedCv as any)?.metadata?.profile_version === "string" &&
+      String((normalizedCv as any).metadata.profile_version).trim().length > 0
+        ? String((normalizedCv as any).metadata.profile_version).trim()
+        : typeof masterProfile?.profile_version === "string" && masterProfile.profile_version.trim().length > 0
+          ? masterProfile.profile_version.trim()
+          : typeof masterProfile?.schema_version === "string" && masterProfile.schema_version.trim().length > 0
+            ? masterProfile.schema_version.trim()
+            : "unknown";
+
+    const documentVariantRaw = (normalizedCv as any)?.metadata?.document_variant;
+    const documentVariant =
+      documentVariantRaw === "ats_application" || documentVariantRaw === "executive_search"
+        ? documentVariantRaw
+        : "executive_search";
+
+    const pageTargetRaw = (normalizedCv as any)?.metadata?.page_target;
+    const pageTarget =
+      Number.isInteger(pageTargetRaw) && pageTargetRaw >= 2 && pageTargetRaw <= 3 ? pageTargetRaw : 2;
+
+    const finalCv = {
+      metadata: {
+        ...((normalizedCv as any).metadata || {}),
+        schema_version: schemaVersion,
+        job_id: jobId,
+        job_version_id: resolvedJobVersionId,
+        target_title: jdTitle,
+        target_company: jdCompany,
+        profile_version: profileVersion,
+        document_variant: documentVariant,
+        page_target: pageTarget,
+      },
+      strategy: (normalizedCv as any).strategy,
+      cv: (normalizedCv as any).cv,
+      validation: (normalizedCv as any).validation,
+    };
 
      // Grounded snapshot text is required when the deterministic selection says it is eligible.
-    if (snapshotEligible && !finalCv.cv.role_alignment_snapshot) {
+    if (snapshotEligible && !finalCv.cv?.role_alignment_snapshot) {
       throw new Error("CV generation omitted required grounded role_alignment_snapshot; refusing placeholder application prose.");
     }
 
     validateAgainstSchema(finalCv, tailoredCvSchema, "tailored_cv.schema.json");
     ensureKnownEvidenceIds(finalCv, knownFactIds);
-
-    finalCv.metadata = {
-      ...(finalCv.metadata || {}),
-      job_id: jobId,
-      job_version_id: resolvedJobVersionId,
-      target_title: jdTitle,
-      target_company: jdCompany
-    };
 
     // --- STAGE 5: EXPORT ---
     console.log("STAGE 5: Rendering documents...");

@@ -1,0 +1,57 @@
+schema_version: "2.2.0"
+source_key: jobicy
+display_name: Jobicy remote jobs feed
+kind: json_api
+status: active
+capabilities:
+  discovery: true
+  pagination: false
+  incremental: false
+  location_filter: false
+  work_mode_evidence: false
+compliance:
+  access_basis: public_feed
+  terms_url: https://jobicy.com/
+  license: null
+  attribution_required: true
+  attribution_text: Source postings are attributed to Jobicy; include canonical apply URL attribution where feasible.
+  authenticated_scraping: false
+  reviewed_at: "2026-09-06"
+schedule:
+  enabled: true
+  interval_minutes: 60
+  jitter_seconds: 180
+request:
+  endpoint: https://jobicy.com/api/v2/remote-jobs
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 2
+    base_delay_ms: 1000
+    max_delay_ms: 30000
+  rate_limit:
+    requests_per_minute: 30
+    items_per_run: 50
+  pagination:
+    strategy: none
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: null
+  query:
+    keywords: [ai, data, legal technology, biotech, fintech]
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH]
+mapping:
+  external_id: $.id
+  title: $.jobTitle
+  company: $.companyName
+  description: $.jobDescription
+  url: $.url
+  location: $.jobGeo
+  work_mode: $derive.work_mode_from_structured_and_text_evidence
+  employment_type: $.jobType
+  posted_at: $.pubDate
+  updated_at: null
+

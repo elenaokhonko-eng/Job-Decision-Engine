@@ -11,6 +11,12 @@ Pipeline flow:
 
 `source adapters + Gmail -> raw observations -> canonical jobs + versions -> hard gates -> lane routing -> budget queue -> AI evaluation -> shortlist read model -> documents`
 
+Docs:
+
+- `docs/quickstart.md`
+- `docs/architecture.md`
+- `docs/source-compliance-matrix.md` (generated from `config/source-plugins/*.yml`)
+
 Target lanes:
 
 1. CORE_AI_DATA

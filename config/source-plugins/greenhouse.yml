@@ -1,0 +1,57 @@
+schema_version: "2.2.0"
+source_key: greenhouse
+display_name: Greenhouse public job boards
+kind: ats
+status: active
+capabilities:
+  discovery: true
+  pagination: false
+  incremental: false
+  location_filter: false
+  work_mode_evidence: false
+compliance:
+  access_basis: official_api
+  terms_url: https://developers.greenhouse.io/job-board.html
+  license: null
+  attribution_required: true
+  attribution_text: Source job URL links to the employer's Greenhouse board.
+  authenticated_scraping: false
+  reviewed_at: "2026-09-06"
+schedule:
+  enabled: true
+  interval_minutes: 1440
+  jitter_seconds: 180
+request:
+  endpoint: https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 3
+    base_delay_ms: 1000
+    max_delay_ms: 30000
+  rate_limit:
+    requests_per_minute: 10
+    items_per_run: null
+  pagination:
+    strategy: none
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: null
+  query:
+    keywords: []
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: []
+mapping:
+  external_id: $.id
+  title: $.title
+  company: $context.company_name
+  description: $.content
+  url: $.absolute_url
+  location: $.location.name
+  work_mode: $derive.work_mode_from_structured_and_text_evidence
+  employment_type: $derive.employment_type_from_structured_and_contextual_text
+  posted_at: null
+  updated_at: $.updated_at
+

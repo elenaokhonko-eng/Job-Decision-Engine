@@ -46,10 +46,10 @@ function parseYaml(rawText: string): unknown {
   return loadFn(rawText) as unknown;
 }
 
-export async function loadStructuredFile<T>(
+export async function loadStructuredFile<S extends z.ZodTypeAny>(
   filePath: string,
-  schema: z.ZodType<T>
-): Promise<LoadedStructuredFile<T>> {
+  schema: S
+): Promise<LoadedStructuredFile<z.output<S>>> {
   const ext = path.extname(filePath).toLowerCase();
   const rawText = await fs.readFile(filePath, 'utf-8');
 
@@ -65,7 +65,7 @@ export async function loadStructuredFile<T>(
     throw new Error(`Unsupported structured file extension "${ext}" for ${filePath}`);
   }
 
-  let data: T;
+  let data: z.output<S>;
   try {
     data = schema.parse(parsed);
   } catch (error) {
@@ -89,4 +89,3 @@ export async function loadStructuredFile<T>(
     contentHash,
   };
 }
-

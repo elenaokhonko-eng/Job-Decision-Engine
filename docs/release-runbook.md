@@ -7,6 +7,8 @@ npm ci
 npm run contracts:check
 npm run lint
 npm run db:init
+npm run sources:sync
+npm run docs:compliance
 npm run backfill:v22 -- --dry-run
 npm run cutover:audit
 npm test
