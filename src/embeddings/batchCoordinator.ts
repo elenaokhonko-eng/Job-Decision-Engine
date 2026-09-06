@@ -77,8 +77,6 @@ export async function runEmbeddingBatch(
   const errors: string[] = [];
 
   try {
-    await client.query('BEGIN');
-
     const spaceRes = await client.query<SpaceRow>(
       `SELECT id, workspace_id, provider, model, dimensions
        FROM embedding_spaces
@@ -139,7 +137,6 @@ export async function runEmbeddingBatch(
         );
 
     if (inputRes.rows.length === 0) {
-      await client.query('COMMIT');
       return {
         batchId: null,
         embeddingSpaceId: space.id,
@@ -153,43 +150,56 @@ export async function runEmbeddingBatch(
       };
     }
 
-    const batchRes = await client.query<{ id: string }>(
-      `INSERT INTO embedding_batches (
-         workspace_id,
-         embedding_space_id,
-         batch_key,
-         run_type,
-         fallback_from_batch_id,
-         rerun_of_batch_id,
-         status,
-         item_count,
-         success_count,
-         failure_count
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, 'RUNNING', 0, 0, 0)
-       RETURNING id`,
-      [workspaceId, space.id, batchKey, runType, fallbackFromBatchId || null, rerunOfBatchId || null]
-    );
-    const batchId = batchRes.rows[0].id;
-
     const processedInputIds = inputRes.rows.map((row) => row.id);
 
-    for (const input of inputRes.rows) {
-      await client.query(
-        `INSERT INTO embedding_batch_items (
+    let batchId: string;
+
+    // Keep the transaction window small: do not hold a DB transaction while waiting on
+    // external embedding providers, otherwise a single SQL error will abort the entire
+    // transaction and prevent fallback writes.
+    await client.query('BEGIN');
+    try {
+      const batchRes = await client.query<{ id: string }>(
+        `INSERT INTO embedding_batches (
            workspace_id,
-           embedding_batch_id,
-           embedding_input_id,
+           embedding_space_id,
+           batch_key,
+           run_type,
+           fallback_from_batch_id,
+           rerun_of_batch_id,
            status,
-           attempt_count,
-           error_message,
-           updated_at
+           item_count,
+           success_count,
+           failure_count
          )
-         VALUES ($1, $2, $3, 'PENDING', 1, NULL, NOW())
-         ON CONFLICT (embedding_batch_id, embedding_input_id)
-         DO NOTHING`,
-        [workspaceId, batchId, input.id]
+         VALUES ($1, $2, $3, $4, $5, $6, 'RUNNING', 0, 0, 0)
+         RETURNING id`,
+        [workspaceId, space.id, batchKey, runType, fallbackFromBatchId || null, rerunOfBatchId || null]
       );
+      batchId = batchRes.rows[0].id;
+
+      for (const input of inputRes.rows) {
+        await client.query(
+          `INSERT INTO embedding_batch_items (
+             workspace_id,
+             embedding_batch_id,
+             embedding_input_id,
+             status,
+             attempt_count,
+             error_message,
+             updated_at
+           )
+           VALUES ($1, $2, $3, 'PENDING', 1, NULL, NOW())
+           ON CONFLICT (embedding_batch_id, embedding_input_id)
+           DO NOTHING`,
+          [workspaceId, batchId, input.id]
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     }
 
     let succeeded = 0;
@@ -231,7 +241,7 @@ export async function runEmbeddingBatch(
                embedding_vector,
                vector_checksum
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $6::vector, $7)
+             VALUES ($1, $2, $3, $4, $5, $6, ($6::float8[])::vector, $7)
              ON CONFLICT (embedding_space_id, embedding_input_id)
              DO NOTHING`,
             [
@@ -245,7 +255,13 @@ export async function runEmbeddingBatch(
             ]
           );
         } catch (writeErr: any) {
-          if (writeErr?.code !== '42703' && writeErr?.code !== '42704' && writeErr?.code !== '42883') {
+          if (
+            writeErr?.code !== '42703' && // undefined_column
+            writeErr?.code !== '42704' && // undefined_object
+            writeErr?.code !== '42883' && // undefined_function
+            writeErr?.code !== '42846' && // cannot_coerce
+            writeErr?.code !== '22P02' // invalid_text_representation
+          ) {
             throw writeErr;
           }
           await client.query(
@@ -334,8 +350,6 @@ export async function runEmbeddingBatch(
       }
     }
 
-    await client.query('COMMIT');
-
     return {
       batchId,
       embeddingSpaceId: space.id,
@@ -348,7 +362,6 @@ export async function runEmbeddingBatch(
       errors,
     };
   } catch (error) {
-    await client.query('ROLLBACK');
     throw error;
   } finally {
     if (ownsClient && typeof client.release === 'function') {
