@@ -36,6 +36,12 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('Profile import failed:', error instanceof Error ? error.message : error);
+  const message = error instanceof Error ? error.message : String(error);
+  console.error('Profile import failed:', message);
+  if (error instanceof Error && error.stack) {
+    console.error(error.stack);
+  } else {
+    console.error(error);
+  }
   process.exit(1);
 });
