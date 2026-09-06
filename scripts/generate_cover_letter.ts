@@ -22,11 +22,17 @@ import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import { generateContent, MODEL_REGISTRY } from "../src/services/agent.js";
+import { generateContentAudited, MODEL_REGISTRY } from "../src/services/agent.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
+import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
+import {
+  loadProfileFactsByIds,
+  loadRequirementMatchesForJobVersion,
+  selectCoverLetterClaimPlan,
+} from "../src/documents/claimSelector.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -242,6 +248,60 @@ async function generateTailoredCoverLetter(): Promise<void> {
     }
     const coverLetterSchema = JSON.parse(fs.readFileSync(clSchemaPath, "utf8"));
 
+    // ── Step 3.5: Deterministic claim selection (least-data prompt) ──────────
+    let selectedClaims: Array<{
+      requirementKey: string;
+      importance: string;
+      requirementText: string;
+      profileFactIds: string[];
+      matchType: string;
+      matchScore: number;
+    }> = [];
+    let allowedFactIds: string[] = [];
+
+    try {
+      if (latestMatchRunId) {
+        const matchRows = await loadRequirementMatchesForJobVersion(
+          resolvedJobVersionId,
+          latestMatchRunId,
+          pool,
+          { context: ctx }
+        );
+        selectedClaims = selectCoverLetterClaimPlan(matchRows, { maxRequirements: 3 }).map((claim) => ({
+          requirementKey: claim.requirementKey,
+          importance: claim.importance,
+          requirementText: claim.requirementText,
+          profileFactIds: claim.profileFactIds,
+          matchType: claim.matchType,
+          matchScore: claim.matchScore,
+        }));
+        allowedFactIds = Array.from(new Set(selectedClaims.flatMap((claim) => claim.profileFactIds)));
+      }
+    } catch (err: any) {
+      console.warn(
+        `⚠️ Deterministic claim selection failed; falling back to master_profile subset. ${err?.message || err}`
+      );
+    }
+
+    if (allowedFactIds.length === 0) {
+      const fallbackFacts = profileFacts
+        .map((fact: any) => (typeof fact?.id === "string" ? fact.id.trim() : ""))
+        .filter((id: string) => id.length > 0)
+        .slice(0, 12);
+      allowedFactIds = Array.from(new Set(fallbackFacts));
+    }
+
+    const allowedFactSet = new Set(allowedFactIds);
+    const selectedFacts = await loadProfileFactsByIds(allowedFactIds, pool, { context: ctx });
+
+    // ── Step 3.6: Optional document template plugin revision ─────────────────
+    const pluginRevision = await getActiveDocumentTemplatePluginRevision("COVER_LETTER", pool, {
+      context: ctx,
+    });
+    const pluginPreamble = (pluginRevision?.content?.prompt_preamble || "").trim();
+    const pluginSystemInstruction = (pluginRevision?.content?.system_instruction || "").trim();
+    const pluginRouteKey = (pluginRevision?.content?.model_route_key || "").trim();
+
     // ── Step 4: Build prompt ─────────────────────────────────────────────────
     console.log("🤖 STAGE 1: Requesting AI cover letter draft…");
 
@@ -257,29 +317,38 @@ NEXT ACTION: ${nextAction}
 WORKABILITY FACTS (use these to ground the letter; unknown = NEEDS_VERIFICATION):
 ${JSON.stringify(workabilityFacts, null, 2)}
 
-JOB DESCRIPTION:
-${jdDescription.substring(0, 4000)}
+DETERMINISTIC CLAIM PLAN (requirements + allowed evidence ids):
+${JSON.stringify(selectedClaims, null, 2)}
 
-EVIDENCE LEDGER (only cite professional facts from this list; do not invent):
-${JSON.stringify(profileFacts.slice(0, 40), null, 2)}
+ALLOWED EVIDENCE FACTS (only cite facts from this list; do not invent or cite other ids):
+${JSON.stringify(selectedFacts, null, 2)}
 
 INSTRUCTIONS:
 - Maximum 1 page (3–4 tight, professional paragraphs)
 - Opening: name the role and company; state clear interest and fit signal
-- Body: cite 2–3 specific technical evidence items and achievements from the ledger that directly address the JD requirements
+- Body: each paragraph must cite 1–2 evidence_ids from the allowed facts above; do not use any other evidence_ids
 - Closing: clear, confident call to action
 - NEVER invent experience, credentials, companies, degrees, or metrics not present in the evidence ledger
 - DO NOT disclose or discuss neurodivergence or personal health accommodations in the letter
+- If possible, mention the requirement_key(s) (e.g., R-001) you are addressing in each paragraph text for provenance
+${pluginPreamble ? `\nPLUGIN PREAMBLE (additional constraints):\n${pluginPreamble}\n` : ""}
 - Return ONLY valid JSON matching this exact schema:
 ${JSON.stringify(coverLetterSchema)}`;
 
-    const rawResponse = await generateContent({
+    const generation = await generateContentAudited({
       model: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
       contents: clPrompt,
       responseMimeType: "application/json",
       systemInstruction:
+        pluginSystemInstruction ||
         "You are an expert cover letter writer. Return only valid JSON conforming strictly to the schema. Do not hallucinate evidence not in the ledger.",
+      purpose: "DOCUMENT",
+      routeKey: pluginRouteKey || undefined,
+      clientOrPool: pool,
+      context: ctx,
+      seedRoute: true,
     });
+    const rawResponse = generation.text;
 
     // ── Step 5: Validate the response ────────────────────────────────────────
     let finalCl: any;
@@ -299,6 +368,8 @@ ${JSON.stringify(coverLetterSchema)}`;
       for (const evId of para.evidence_ids || []) {
         if (!knownFactIds.has(evId)) {
           unknownEvidence.push(`body_paragraphs[${idx}].evidence_ids contains unknown id '${evId}'`);
+        } else if (allowedFactSet.size > 0 && !allowedFactSet.has(evId)) {
+          unknownEvidence.push(`body_paragraphs[${idx}].evidence_ids used non-selected id '${evId}'`);
         }
       }
     }
@@ -349,6 +420,9 @@ ${JSON.stringify(coverLetterSchema)}`;
         documentType: 'COVER_LETTER',
         policyVersion: 'documents_v2',
         generatorVersion: 'cover_letter_generator_v2',
+        modelRouteInvocationId: generation.invocationId ?? null,
+        documentTemplatePluginRevisionId: pluginRevision?.revisionId ?? null,
+        documentTemplatePluginKey: pluginRevision?.pluginKey ?? null,
         outputManifest: {
           json_path: jsonPath,
           docx_path: docxPath,

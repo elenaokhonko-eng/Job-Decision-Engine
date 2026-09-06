@@ -1,9 +1,19 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import crypto from "crypto";
+import pg from "pg";
 import { db, Job } from "../db/db.ts";
 import { fetchGmailAlerts } from "./gmail.js";
 import { extractWithFallback } from "./llmFallback.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION } from "../contracts/index.js";
+import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
+import {
+  ensureModelRouteActiveRevision,
+  getActiveModelRouteRevision,
+  recordModelRouteInvocation,
+  type ModelRoutePurpose,
+  type ModelRouteRevisionContent,
+} from "../modelRoutes/registry.js";
+import type { WorkspaceContext } from "../workspace/context.js";
 import {
   CANDIDATE_PROFILE,
   MULTI_LANE_SCORECARDS,
@@ -464,6 +474,8 @@ export async function generateContent(options: {
   responseSchema?: any;
   systemInstruction?: string;
 }): Promise<string> {
+  return (await generateContentAudited({ ...options })).text;
+
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
   const isDocumentRoute =
@@ -480,7 +492,7 @@ export async function generateContent(options: {
     if (provider === "gemini" && geminiKey && !tried.has("gemini")) {
       tried.add("gemini");
       try {
-        const text = await tryGemini(geminiKey, options);
+        const text = await tryGemini(geminiKey as string, options);
         if (text) return text;
       } catch (err: any) {
         console.warn(`⚠️ Gemini request failed (${err.message || err}).`);
@@ -490,7 +502,7 @@ export async function generateContent(options: {
     if (provider === "openai" && openaiKey && !tried.has("openai")) {
       tried.add("openai");
       try {
-        const text = await tryOpenAI(openaiKey, options);
+        const text = await tryOpenAI(openaiKey as string, options);
         if (text) return text;
       } catch (err: any) {
         console.warn(`⚠️ OpenAI request failed (${err.message || err}).`);
@@ -499,6 +511,295 @@ export async function generateContent(options: {
   }
 
   throw new Error("All model API calls failed or no API keys were configured.");
+}
+
+export interface GenerateContentAuditedResult {
+  text: string;
+  provider: "gemini" | "openai";
+  model: string;
+  fallbackUsed: boolean;
+  attempts: number;
+  errors: Array<{ provider: string; model: string; error: string }>;
+  latencyMs: number;
+  routeKey?: string;
+  routeRevisionId?: string;
+  invocationId?: string | null;
+}
+
+function inferPurposeFromModel(model: string): ModelRoutePurpose {
+  if (
+    model === MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL ||
+    model === MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL
+  ) {
+    return "DOCUMENT";
+  }
+  return "EVALUATION";
+}
+
+function buildRouteDefaults(purpose: ModelRoutePurpose): {
+  primaryProviderRaw: string | undefined;
+  geminiModel: string;
+  openaiModel: string;
+} {
+  if (purpose === "DOCUMENT") {
+    return {
+      primaryProviderRaw:
+        process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER,
+      geminiModel: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
+      openaiModel: MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
+    };
+  }
+  if (purpose === "EMBEDDING") {
+    return {
+      primaryProviderRaw: process.env.EMBEDDING_PRIMARY_PROVIDER,
+      geminiModel: MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL,
+      openaiModel: MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL,
+    };
+  }
+  if (purpose === "EXTRACTION") {
+    return {
+      primaryProviderRaw: process.env.EXTRACTION_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER,
+      geminiModel: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
+      openaiModel: process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+    };
+  }
+  return {
+    primaryProviderRaw: process.env.EVALUATION_PRIMARY_PROVIDER,
+    geminiModel: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
+    openaiModel: process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+  };
+}
+
+function safeText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return stableStringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+export async function generateContentAudited(options: {
+  model: string;
+  contents: any;
+  responseMimeType?: string;
+  responseSchema?: any;
+  systemInstruction?: string;
+  purpose?: ModelRoutePurpose;
+  routeKey?: string;
+  clientOrPool?: pg.Pool | pg.PoolClient;
+  context?: WorkspaceContext;
+  seedRoute?: boolean;
+}): Promise<GenerateContentAuditedResult> {
+  const startedAt = Date.now();
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+
+  const purpose = options.purpose ?? inferPurposeFromModel(options.model);
+  const routeKey = (options.routeKey || purpose.toLowerCase()).trim();
+
+  const { primaryProviderRaw, geminiModel, openaiModel } = buildRouteDefaults(purpose);
+  const order = resolveProviderOrder(primaryProviderRaw);
+  const explicitModel = String(options.model || "").trim();
+  const explicitIsGemini = explicitModel.toLowerCase().startsWith("gemini");
+  const geminiModelForCall = explicitIsGemini && explicitModel.length > 0 ? explicitModel : geminiModel;
+  const openaiModelForCall = !explicitIsGemini && explicitModel.length > 0 ? explicitModel : openaiModel;
+  const defaultContent: ModelRouteRevisionContent = {
+    primary_provider: order[0],
+    primary_model: order[0] === "gemini" ? geminiModelForCall : openaiModelForCall,
+    fallback_provider: order[1],
+    fallback_model: order[1] === "gemini" ? geminiModelForCall : openaiModelForCall,
+  };
+
+  let routeId: string | null = null;
+  let routeRevisionId: string | null = null;
+  let routeContent: ModelRouteRevisionContent = defaultContent;
+
+  if (options.clientOrPool) {
+    try {
+      const ctx = options.context;
+      if (ctx && options.seedRoute === true) {
+        const ensured = await ensureModelRouteActiveRevision(
+          {
+            routeKey,
+            purpose,
+            description: `Auto-seeded from environment for ${purpose.toLowerCase()} route`,
+            content: defaultContent,
+          },
+          options.clientOrPool,
+          { context: ctx }
+        );
+        routeId = ensured.routeId;
+        routeRevisionId = ensured.revisionId;
+        routeContent = ensured.content;
+      } else {
+        const active = await getActiveModelRouteRevision(
+          routeKey,
+          options.clientOrPool as any,
+          ctx ? { context: ctx } : undefined
+        );
+        if (active) {
+          routeId = active.routeId;
+          routeRevisionId = active.revisionId;
+          routeContent = active.content;
+        }
+      }
+    } catch (error: any) {
+      if (error?.code !== "42P01") {
+        throw error;
+      }
+    }
+  }
+
+  const attemptedErrors: Array<{ provider: string; model: string; error: string }> = [];
+  const providers: Array<"gemini" | "openai"> = [
+    routeContent.primary_provider,
+    routeContent.fallback_provider,
+  ].filter((value, idx, arr) => arr.indexOf(value) === idx) as Array<"gemini" | "openai">;
+
+  const contentsText = safeText(options.contents);
+  const systemText = safeText(options.systemInstruction || "");
+  const schemaText = options.responseSchema ? safeText(options.responseSchema) : "";
+  const requestHash = sha256Hex(
+    stableStringify({
+      purpose,
+      routeKey,
+      contents_sha256: sha256Hex(contentsText),
+      system_sha256: sha256Hex(systemText),
+      schema_sha256: schemaText ? sha256Hex(schemaText) : null,
+      response_mime_type: options.responseMimeType ?? null,
+    })
+  );
+
+  const requestMetadata: Record<string, unknown> = {
+    purpose,
+    route_key: routeKey,
+    response_mime_type: options.responseMimeType ?? null,
+    has_schema: !!options.responseSchema,
+    contents_length: contentsText.length,
+    system_length: systemText.length,
+  };
+
+  let successText: string | null = null;
+  let successProvider: "gemini" | "openai" = "gemini";
+  let successModel = options.model;
+
+  for (const provider of providers) {
+    const isFallbackAttempt = provider !== routeContent.primary_provider;
+    const modelForProvider =
+      provider === routeContent.primary_provider
+        ? routeContent.primary_model
+        : routeContent.fallback_model;
+
+    if (provider === "gemini") {
+      if (!geminiKey) {
+        attemptedErrors.push({ provider, model: modelForProvider, error: "GEMINI_API_KEY not configured" });
+        continue;
+      }
+      try {
+        const text = await tryGemini(geminiKey, { ...options, model: modelForProvider });
+        successText = text;
+        successProvider = "gemini";
+        successModel = modelForProvider;
+        break;
+      } catch (err: any) {
+        const message = err?.message || String(err);
+        console.warn(`âš ï¸ Gemini request failed (${message}).`);
+        attemptedErrors.push({ provider, model: modelForProvider, error: message });
+      }
+    }
+
+    if (provider === "openai") {
+      if (!openaiKey) {
+        attemptedErrors.push({ provider, model: modelForProvider, error: "OPENAI_API_KEY not configured" });
+        continue;
+      }
+      try {
+        const text = await tryOpenAI(openaiKey, { ...options, model: modelForProvider });
+        successText = text;
+        successProvider = "openai";
+        successModel = modelForProvider;
+        break;
+      } catch (err: any) {
+        const message = err?.message || String(err);
+        console.warn(`âš ï¸ OpenAI request failed (${message}).`);
+        attemptedErrors.push({ provider, model: modelForProvider, error: message });
+      }
+    }
+
+    if (isFallbackAttempt) {
+      // fall through
+    }
+  }
+
+  const latencyMs = Date.now() - startedAt;
+  const fallbackUsed = successText != null && successProvider !== routeContent.primary_provider;
+
+  if (!successText) {
+    const errorMessage = `All model API calls failed. Purpose=${purpose}, route=${routeKey}, errors=${attemptedErrors
+      .map((e) => `${e.provider}:${e.model}:${e.error}`)
+      .join(" | ")}`;
+
+    if (options.clientOrPool && options.context) {
+      await recordModelRouteInvocation(
+        {
+          routeId,
+          revisionId: routeRevisionId,
+          purpose,
+          provider: attemptedErrors[attemptedErrors.length - 1]?.provider ?? null,
+          model: attemptedErrors[attemptedErrors.length - 1]?.model ?? null,
+          status: "FAILED",
+          fallbackUsed: attemptedErrors.length > 1,
+          requestHash,
+          requestMetadata,
+          responseMetadata: { errors: attemptedErrors },
+          latencyMs,
+          errorMessage,
+        },
+        options.clientOrPool,
+        { context: options.context }
+      );
+    }
+
+    throw new Error(errorMessage);
+  }
+
+  let invocationId: string | null | undefined = null;
+  if (options.clientOrPool && options.context) {
+    invocationId = await recordModelRouteInvocation(
+      {
+        routeId,
+        revisionId: routeRevisionId,
+        purpose,
+        provider: successProvider,
+        model: successModel,
+        status: "COMPLETED",
+        fallbackUsed,
+        requestHash,
+        requestMetadata,
+        responseMetadata: {
+          response_length: successText.length,
+          errors: attemptedErrors,
+        },
+        latencyMs,
+      },
+      options.clientOrPool,
+      { context: options.context }
+    );
+  }
+
+  return {
+    text: successText,
+    provider: successProvider,
+    model: successModel,
+    fallbackUsed,
+    attempts: providers.length,
+    errors: attemptedErrors,
+    latencyMs,
+    routeKey,
+    routeRevisionId: routeRevisionId ?? undefined,
+    invocationId,
+  };
 }
 
 export type EmbeddingProvider = "gemini" | "openai";

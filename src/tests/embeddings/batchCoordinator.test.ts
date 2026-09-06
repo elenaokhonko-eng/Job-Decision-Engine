@@ -54,6 +54,10 @@ describe('runEmbeddingBatch', () => {
 
     expect(result.batchId).toBe('33333333-3333-4333-8333-333333333333');
     expect(result.processed).toBe(2);
+    expect(result.processedInputIds).toEqual([
+      '44444444-4444-4444-8444-444444444444',
+      '55555555-5555-4555-8555-555555555555',
+    ]);
     expect(result.succeeded).toBe(2);
     expect(result.failed).toBe(0);
     expect(result.failedInputIds).toEqual([]);
@@ -85,6 +89,13 @@ describe('runEmbeddingBatch', () => {
               quote_text: 'machine learning',
               structured_value: { domain_key: 'MACHINE_LEARNING' },
             },
+            {
+              id: '22222222-2222-4222-8222-222222222222',
+              requirement_type: 'FUNCTION',
+              requirement_text: 'data pipelines',
+              quote_text: null,
+              structured_value: { function_key: 'DATA_ENGINEERING' },
+            },
           ],
         };
       }
@@ -112,10 +123,20 @@ describe('runEmbeddingBatch', () => {
         return { rows: [{ id: `batch-${nextBatchId}` }] };
       }
       if (sql.includes('WHERE ei.id = ANY')) {
-        return { rows: [{ id: 'input-req-1', content_text: 'retry input' }] };
+        return {
+          rows: [
+            { id: 'input-req-1', content_text: 'retry input 1' },
+            { id: 'input-req-2', content_text: 'retry input 2' },
+          ],
+        };
       }
       if (sql.includes('FROM embedding_inputs ei')) {
-        return { rows: [{ id: 'input-req-1', content_text: 'first text' }] };
+        return {
+          rows: [
+            { id: 'input-req-1', content_text: 'first text' },
+            { id: 'input-req-2', content_text: 'second text' },
+          ],
+        };
       }
       return { rows: [] };
     });
@@ -126,7 +147,7 @@ describe('runEmbeddingBatch', () => {
     const spy = vi.spyOn(agent, 'generateEmbeddingWithProvider');
     spy
       .mockResolvedValueOnce([0.1, 0.2, 0.3, 0.4])
-      .mockResolvedValueOnce([0.11, 0.22, 0.33]);
+      .mockResolvedValueOnce([0.2, 0.3, 0.4, 0.5]);
 
     const context: WorkspaceContext = {
       workspaceId: 'workspace-id-1',
@@ -139,21 +160,29 @@ describe('runEmbeddingBatch', () => {
     const result = await runEmbeddingBatchWithFallback(10, fakePool, { context });
 
     expect(result.primary.failed).toBe(0);
-    expect(result.primary.succeeded).toBe(1);
+    expect(result.primary.succeeded).toBe(2);
     expect(result.fallback).toBeUndefined();
 
     // Force a primary failure and fallback execution.
     spy.mockReset();
     spy
       .mockResolvedValueOnce([0, 0, 0, 0])
-      .mockResolvedValueOnce([0.21, 0.22, 0.23]);
+      .mockResolvedValueOnce([0.1, 0.2, 0.3, 0.4])
+      .mockResolvedValueOnce([0.21, 0.22, 0.23])
+      .mockResolvedValueOnce([0.11, 0.12, 0.13]);
 
     const second = await runEmbeddingBatchWithFallback(10, fakePool, { context });
     expect(second.primary.failedInputIds).toContain('input-req-1');
     expect(second.fallback).toBeTruthy();
     expect(second.fallback?.runType).toBe('FALLBACK');
+    expect(second.fallback?.processedInputIds).toEqual(['input-req-1', 'input-req-2']);
 
     const sqlCalls = query.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(sqlCalls.some((sql) => sql.includes('fallback_from_batch_id'))).toBe(true);
+
+    const anyCall = query.mock.calls.find((c: unknown[]) => String(c[0]).includes('ei.id = ANY'));
+    expect(anyCall).toBeTruthy();
+    const params = (anyCall as unknown[])[1] as any[] | undefined;
+    expect(params?.[1]).toEqual(['input-req-1', 'input-req-2']);
   });
 });

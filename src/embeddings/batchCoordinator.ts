@@ -23,6 +23,7 @@ export interface EmbeddingBatchSummary {
   batchId: string;
   embeddingSpaceId: string;
   processed: number;
+  processedInputIds: string[];
   succeeded: number;
   failed: number;
   failedInputIds: string[];
@@ -154,6 +155,8 @@ export async function runEmbeddingBatch(
            LIMIT $3`,
           [workspaceId, space.id, maxItems]
         );
+
+    const processedInputIds = inputRes.rows.map((row) => row.id);
 
     for (const input of inputRes.rows) {
       await client.query(
@@ -317,6 +320,7 @@ export async function runEmbeddingBatch(
       batchId,
       embeddingSpaceId: space.id,
       processed: inputRes.rows.length,
+      processedInputIds,
       succeeded,
       failed,
       failedInputIds,
@@ -368,9 +372,9 @@ export async function runEmbeddingBatchWithFallback(
         `fallback-${Date.now()}`,
         'FALLBACK',
         maxItems,
-        primary.failedInputIds,
+        primary.processedInputIds,
         primary.batchId,
-        undefined,
+        primary.batchId,
         client as pg.PoolClient,
         { context: ctx }
       );

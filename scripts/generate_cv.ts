@@ -4,11 +4,12 @@ import path from "path";
 import dotenv from "dotenv";
 import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import { generateContent, MODEL_REGISTRY } from "../src/services/agent.js";
+import { generateContent, generateContentAudited, MODEL_REGISTRY } from "../src/services/agent.js";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
+import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -237,6 +238,11 @@ async function generateTailoredCV() {
       throw new Error("MASTER_PROFILE contains no facts/profile_facts ids; cannot ground CV evidence.");
     }
 
+    const pluginRevision = await getActiveDocumentTemplatePluginRevision("CV", pool, { context: ctx });
+    const pluginPreamble = (pluginRevision?.content?.prompt_preamble || "").trim();
+    const pluginSystemInstruction = (pluginRevision?.content?.system_instruction || "").trim();
+    const pluginRouteKey = (pluginRevision?.content?.model_route_key || "").trim();
+
 
     // --- STAGE 1: JOB ANALYSIS ---
     console.log("STAGE 1: Analyzing Job Description...");
@@ -380,15 +386,23 @@ You must include the "role_alignment_snapshot" block. Generate a 25-40 word 'evi
 Selected Requirements for Snapshot: ${JSON.stringify(selectedRequirements, null, 2)}
 ` : `INSTRUCTION FOR ROLE ALIGNMENT SNAPSHOT:
 The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard executive summary instead.`}
+${pluginPreamble ? `\nPLUGIN PREAMBLE (additional constraints):\n${pluginPreamble}\n` : ""}
 `;
 
-    const cvRes = await generateContent({
+    const cvGeneration = await generateContentAudited({
       model,
       contents: cvPrompt,
       responseMimeType: "application/json",
-      systemInstruction: "You generate the final tailored JSON CV. DO NOT invent facts. Only use data from the master profile."
+      systemInstruction:
+        pluginSystemInstruction ||
+        "You generate the final tailored JSON CV. DO NOT invent facts. Only use data from the master profile.",
+      purpose: "DOCUMENT",
+      routeKey: pluginRouteKey || undefined,
+      clientOrPool: pool,
+      context: ctx,
+      seedRoute: true,
     });
-    let finalCv = normalizeTailoredCvRoot(JSON.parse(cleanJsonResponse(cvRes)));
+    let finalCv = normalizeTailoredCvRoot(JSON.parse(cleanJsonResponse(cvGeneration.text)));
 
      // Grounded snapshot text is required when the deterministic selection says it is eligible.
     if (snapshotEligible && !finalCv.cv.role_alignment_snapshot) {
@@ -443,6 +457,9 @@ The snapshot was deemed ineligible. Do not manufacture alignment. Use a standard
         documentType: 'CV',
         policyVersion: 'documents_v2',
         generatorVersion: 'cv_generator_v2',
+        modelRouteInvocationId: cvGeneration.invocationId ?? null,
+        documentTemplatePluginRevisionId: pluginRevision?.revisionId ?? null,
+        documentTemplatePluginKey: pluginRevision?.pluginKey ?? null,
         outputManifest: {
           json_path: path.join(exportDir, `${baseFilename}.cv.json`),
           docx_path: docxPath,

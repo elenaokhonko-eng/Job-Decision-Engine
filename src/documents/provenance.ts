@@ -26,6 +26,9 @@ export interface DocumentProvenanceInput {
   documentType: 'CV' | 'COVER_LETTER';
   policyVersion: string;
   generatorVersion: string;
+  modelRouteInvocationId?: string | null;
+  documentTemplatePluginRevisionId?: string | null;
+  documentTemplatePluginKey?: string | null;
   outputManifest: Record<string, unknown>;
   claims: DocumentClaimInput[];
 }
@@ -169,38 +172,85 @@ export async function persistDocumentProvenance(
       (claim) => claim.claimText.trim().length > 0 && uniqueStrings(claim.profileFactIds).length > 0
     );
 
-    const runRes = await client.query<{ id: string }>(
-      `INSERT INTO document_runs (
-         workspace_id,
-         canonical_job_id,
-         job_version_id,
-         match_run_id,
-         document_type,
-         status,
-         policy_version,
-         generator_version,
-         output_manifest,
-         claim_count,
-         error_message,
-         completed_at
-       )
-       VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6, $7, $8, $9, NULL, NOW())
-       RETURNING id`,
-      [
-        ctx.workspaceId,
-        input.canonicalJobId,
-        input.jobVersionId,
-        input.matchRunId || null,
-        input.documentType,
-        input.policyVersion,
-        input.generatorVersion,
-        {
-          ...input.outputManifest,
-          manifest_hash: hashManifest(input.outputManifest),
-        },
-        claimRows.length,
-      ]
-    );
+    let runRes: { rows: Array<{ id: string }> };
+    try {
+      runRes = await client.query<{ id: string }>(
+        `INSERT INTO document_runs (
+           workspace_id,
+           canonical_job_id,
+           job_version_id,
+           match_run_id,
+           document_type,
+           status,
+           policy_version,
+           generator_version,
+           model_route_invocation_id,
+           document_template_plugin_revision_id,
+           document_template_plugin_key,
+           output_manifest,
+           claim_count,
+           error_message,
+           completed_at
+         )
+         VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6, $7, $8, $9, $10, $11, $12, $13, NULL, NOW())
+         RETURNING id`,
+        [
+          ctx.workspaceId,
+          input.canonicalJobId,
+          input.jobVersionId,
+          input.matchRunId || null,
+          input.documentType,
+          input.policyVersion,
+          input.generatorVersion,
+          input.modelRouteInvocationId || null,
+          input.documentTemplatePluginRevisionId || null,
+          input.documentTemplatePluginKey || null,
+          {
+            ...input.outputManifest,
+            manifest_hash: hashManifest(input.outputManifest),
+          },
+          claimRows.length,
+        ]
+      );
+    } catch (error: any) {
+      if (error?.code !== '42703') {
+        throw error;
+      }
+
+      // Backward compatibility when migration 030 has not been applied.
+      runRes = await client.query<{ id: string }>(
+        `INSERT INTO document_runs (
+           workspace_id,
+           canonical_job_id,
+           job_version_id,
+           match_run_id,
+           document_type,
+           status,
+           policy_version,
+           generator_version,
+           output_manifest,
+           claim_count,
+           error_message,
+           completed_at
+         )
+         VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6, $7, $8, $9, NULL, NOW())
+         RETURNING id`,
+        [
+          ctx.workspaceId,
+          input.canonicalJobId,
+          input.jobVersionId,
+          input.matchRunId || null,
+          input.documentType,
+          input.policyVersion,
+          input.generatorVersion,
+          {
+            ...input.outputManifest,
+            manifest_hash: hashManifest(input.outputManifest),
+          },
+          claimRows.length,
+        ]
+      );
+    }
 
     const documentRunId = runRes.rows[0].id;
 
