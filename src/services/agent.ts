@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
+import dotenv from "dotenv";
 import crypto from "crypto";
 import pg from "pg";
 import { db, Job } from "../db/db.ts";
@@ -20,6 +21,9 @@ import {
   ND_FRIENDLY_DIMENSIONS,
   POLITICS_STRESS_RISK_DIMENSIONS
 } from "./criteria.ts";
+
+dotenv.config();
+dotenv.config({ path: ".env.local" });
 
 export const MODEL_REGISTRY = {
   EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash",

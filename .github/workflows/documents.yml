@@ -52,8 +52,15 @@ jobs:
           fi
 
           echo "No canonical_job_id provided; selecting an eligible job automatically..."
+          set +e
           OUT="$(npx tsx scripts/pick_documents_job.ts)"
+          PICK_STATUS=$?
+          set -e
           echo "$OUT"
+
+          if [[ $PICK_STATUS -ne 0 ]]; then
+            exit $PICK_STATUS
+          fi
 
           CANONICAL="$(echo "$OUT" | sed -n 's/^canonical_job_id: //p' | head -n 1 | tr -d '\r')"
           VERSION="$(echo "$OUT" | sed -n 's/^job_version_id:[[:space:]]*//p' | head -n 1 | tr -d '\r')"
