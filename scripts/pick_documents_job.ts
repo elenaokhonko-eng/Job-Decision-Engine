@@ -23,6 +23,18 @@ type CandidateRow = {
   grounded_match_facts: number;
 };
 
+type DiagnosticsRow = {
+  canonical_total: number;
+  lane_routed: number;
+  matched: number;
+  canonical_with_match: number;
+  match_runs_for_active_profile: number;
+  validated_requirements: number;
+  active_profile_facts_total: number;
+  active_profile_facts_public_long: number;
+  grounded_match_rows_for_active_profile: number;
+};
+
 async function main(): Promise<void> {
   const databaseUrl = requireEnv("DATABASE_URL");
   const pool = new pg.Pool({
@@ -122,6 +134,60 @@ async function main(): Promise<void> {
 
     if (candidates.rows.length === 0) {
       console.log("No eligible jobs found for documents generation.");
+
+      try {
+        const diagnostics = await pool.query<DiagnosticsRow>(
+          `
+          SELECT
+            (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1) AS canonical_total,
+            (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1 AND COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED') AS lane_routed,
+            (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1 AND COALESCE(c.processing_state, c.processing_status) = 'MATCHED') AS matched,
+            (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1 AND c.latest_match_run_id IS NOT NULL) AS canonical_with_match,
+            (SELECT COUNT(*)::int FROM match_runs mr WHERE mr.workspace_id = $1 AND mr.profile_version_id = $2) AS match_runs_for_active_profile,
+            (SELECT COUNT(*)::int FROM job_requirements jr WHERE jr.workspace_id = $1 AND jr.status = 'VALIDATED') AS validated_requirements,
+            (SELECT COUNT(*)::int FROM profile_facts pf WHERE pf.workspace_id = $1 AND pf.profile_version_id = $2) AS active_profile_facts_total,
+            (SELECT COUNT(*)::int FROM profile_facts pf WHERE pf.workspace_id = $1 AND pf.profile_version_id = $2 AND pf.confidentiality <> 'PRIVATE_INTERNAL' AND length(pf.statement) >= 40) AS active_profile_facts_public_long,
+            (SELECT COUNT(*)::int
+             FROM requirement_evidence_matches rem
+             JOIN match_runs mr
+               ON mr.workspace_id = rem.workspace_id
+              AND mr.id = rem.match_run_id
+              AND mr.profile_version_id = $2
+             WHERE rem.workspace_id = $1
+               AND rem.profile_fact_id IS NOT NULL
+               AND rem.match_type <> 'NO_MATCH'
+            ) AS grounded_match_rows_for_active_profile
+          `,
+          [ctx.workspaceId, activeProfileVersionId]
+        );
+
+        const row = diagnostics.rows[0];
+        console.log("\nDiagnostics:");
+        console.log(
+          JSON.stringify(
+            {
+              workspace_id: ctx.workspaceId,
+              active_profile_version_id: activeProfileVersionId,
+              canonical_total: row?.canonical_total ?? 0,
+              lane_routed: row?.lane_routed ?? 0,
+              matched: row?.matched ?? 0,
+              canonical_with_latest_match_run_id: row?.canonical_with_match ?? 0,
+              match_runs_for_active_profile: row?.match_runs_for_active_profile ?? 0,
+              validated_job_requirements: row?.validated_requirements ?? 0,
+              active_profile_facts_total: row?.active_profile_facts_total ?? 0,
+              active_profile_facts_non_private_len_ge_40: row?.active_profile_facts_public_long ?? 0,
+              grounded_match_rows_for_active_profile: row?.grounded_match_rows_for_active_profile ?? 0,
+            },
+            null,
+            2
+          )
+        );
+      } catch (diagErr: any) {
+        console.warn(
+          `Diagnostics query failed (non-fatal): ${diagErr?.message || diagErr}`
+        );
+      }
+
       console.log("Requirements:");
       console.log("- canonical_jobs.latest_match_run_id must be set");
       console.log("- match_runs.profile_version_id must equal the ACTIVE profile_version");
@@ -154,4 +220,3 @@ main().catch((err: any) => {
   console.error(err?.message || err);
   process.exit(1);
 });
-
