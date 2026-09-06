@@ -9,8 +9,6 @@
 --   digest(text, text) -> digest(convert_to(text,'UTF8'), algo)
 -- so earlier migrations do not need to be edited.
 
-BEGIN;
-
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE OR REPLACE FUNCTION digest(data text, type text)
@@ -21,6 +19,4 @@ STRICT
 AS $$
   SELECT digest(convert_to(data, 'UTF8'), type);
 $$;
-
-COMMIT;
 

@@ -10,8 +10,6 @@
 -- - Additive and reversible (no drops of user data).
 -- - Runtime should treat session application as transactional and idempotent.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Profile update sessions
 -- ============================================================================
@@ -148,6 +146,3 @@ CREATE INDEX IF NOT EXISTS idx_taxonomy_concept_candidates_workspace
   ON taxonomy_concept_candidates(workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_taxonomy_concept_candidates_status
   ON taxonomy_concept_candidates(workspace_id, status);
-
-COMMIT;
-

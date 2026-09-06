@@ -8,8 +8,6 @@
 -- - Requires a Postgres image/build with the pgvector extension available.
 -- - Additive and reversible (no destructive drops).
 
-BEGIN;
-
 -- 1) pgvector extension (required for vector-typed columns and similarity ops)
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -47,6 +45,4 @@ CREATE OR REPLACE VIEW v_published_semantic_embeddings AS
 
 COMMENT ON VIEW v_published_semantic_embeddings IS
   'Semantic embeddings that belong to a COMPLETED batch; intended for coherent comparisons and atomic publication.';
-
-COMMIT;
 

@@ -5,8 +5,6 @@
 -- 2) Expose deterministic matching and document provenance summary columns.
 -- 3) Provide a canonical rejected/removed audit view for UI inspection.
 
-BEGIN;
-
 DROP VIEW IF EXISTS shortlist_view CASCADE;
 DROP VIEW IF EXISTS v_canonical_shortlist CASCADE;
 DROP VIEW IF EXISTS v_rejected_jobs_audit CASCADE;
@@ -221,4 +219,3 @@ WHERE c.processing_status IN ('HARD_REJECTED', 'MANUALLY_REMOVED');
 CREATE OR REPLACE VIEW shortlist_view AS
 SELECT * FROM v_canonical_shortlist;
 
-COMMIT;

@@ -11,8 +11,6 @@
 -- - Additive and reversible (no destructive drops).
 -- - Lane revisions are immutable; changes create a new revision and activate it.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Stable lane identities
 -- ============================================================================
@@ -166,5 +164,3 @@ DROP TRIGGER IF EXISTS trg_lane_decisions_immutable ON lane_decisions;
 CREATE TRIGGER trg_lane_decisions_immutable
 BEFORE UPDATE OR DELETE ON lane_decisions
 FOR EACH ROW EXECUTE FUNCTION lane_decisions_immutable_guard();
-
-COMMIT;

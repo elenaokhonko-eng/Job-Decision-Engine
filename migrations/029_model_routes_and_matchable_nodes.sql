@@ -9,8 +9,6 @@
 -- - Additive and reversible (no destructive drops).
 -- - Designed to be optional: app code should tolerate missing tables pre-migration.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Model routes (stable identity + immutable revisions + activation audit)
 -- ============================================================================
@@ -176,5 +174,3 @@ CREATE OR REPLACE VIEW v_matchable_nodes AS
 
 COMMENT ON VIEW v_matchable_nodes IS
   'Published embeddings joined to their input identity (requirements/facts/lane prototypes) for similarity queries.';
-
-COMMIT;

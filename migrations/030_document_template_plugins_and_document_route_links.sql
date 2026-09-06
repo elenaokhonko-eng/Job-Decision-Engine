@@ -8,8 +8,6 @@
 -- - Additive and reversible (no destructive drops).
 -- - Does not change existing generators; code can adopt these tables gradually.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Document template plugin registry (stable identity + immutable revisions)
 -- ============================================================================
@@ -103,6 +101,3 @@ CREATE INDEX IF NOT EXISTS idx_document_runs_route_invocation
 
 CREATE INDEX IF NOT EXISTS idx_document_runs_template_revision
   ON document_runs(document_template_plugin_revision_id);
-
-COMMIT;
-

@@ -5,8 +5,6 @@
 -- 2. Track per-version pipeline stage state with retry/manual-review transitions.
 -- 3. Record extraction run metadata and stage transition events.
 
-BEGIN;
-
 CREATE TABLE IF NOT EXISTS job_requirements (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     canonical_job_id UUID NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
@@ -115,4 +113,3 @@ COMMENT ON TABLE job_version_pipeline_state IS
 COMMENT ON TABLE pipeline_stage_events IS
   'Append-only event stream of state transitions and failures for observability.';
 
-COMMIT;

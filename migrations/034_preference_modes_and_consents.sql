@@ -8,8 +8,6 @@
 -- - Additive and reversible.
 -- - Modes store JSONB content validated by runtime (do not infer medical status).
 
-BEGIN;
-
 CREATE TABLE IF NOT EXISTS workspace_user_preference_modes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -52,6 +50,3 @@ CREATE TABLE IF NOT EXISTS workspace_user_consents (
 
 CREATE INDEX IF NOT EXISTS idx_workspace_user_consents_lookup
   ON workspace_user_consents(workspace_id, user_id, updated_at DESC);
-
-COMMIT;
-

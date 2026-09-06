@@ -8,8 +8,6 @@
 -- - Additive and reversible (no destructive drops).
 -- - Column is nullable to allow phased backfill; runtime should set it for new ingestions.
 
-BEGIN;
-
 ALTER TABLE raw_job_observations
   ADD COLUMN IF NOT EXISTS source_plugin_key TEXT;
 
@@ -43,6 +41,3 @@ CREATE INDEX IF NOT EXISTS idx_raw_job_observations_source_plugin_key
 
 CREATE INDEX IF NOT EXISTS idx_raw_job_observations_source_plugin_revision
   ON raw_job_observations(source_plugin_revision_id);
-
-COMMIT;
-

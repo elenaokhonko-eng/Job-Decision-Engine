@@ -9,8 +9,6 @@
 -- - Additive; does not delete historical requirement rows.
 -- - Backfills existing job_requirements into a first requirement_set per job_version.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Identity registry (cache key)
 -- ============================================================================
@@ -323,7 +321,7 @@ BEGIN
     AND tc.table_name = 'job_requirements'
     AND tc.constraint_type = 'UNIQUE'
   GROUP BY tc.constraint_name
-  HAVING array_agg(kcu.column_name ORDER BY kcu.ordinal_position) = ARRAY['job_version_id','requirement_key'];
+  HAVING array_agg(kcu.column_name::text ORDER BY kcu.ordinal_position) = ARRAY['job_version_id', 'requirement_key']::text[];
 
   IF constraint_name IS NOT NULL THEN
     EXECUTE format('ALTER TABLE job_requirements DROP CONSTRAINT %I', constraint_name);
@@ -364,6 +362,4 @@ DROP TRIGGER IF EXISTS trg_job_requirements_immutable ON job_requirements;
 CREATE TRIGGER trg_job_requirements_immutable
 BEFORE UPDATE OR DELETE ON job_requirements
 FOR EACH ROW EXECUTE FUNCTION job_requirements_immutable_guard();
-
-COMMIT;
 

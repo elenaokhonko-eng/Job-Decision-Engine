@@ -11,8 +11,6 @@
 -- - This migration is additive and reversible (no drops of user data).
 -- - Existing migrations 001–018 must not be edited (IDE closeout contract).
 
-BEGIN;
-
 -- 1) Add lifecycle + deterministic recommendation columns (additive)
 ALTER TABLE canonical_jobs
   ADD COLUMN IF NOT EXISTS processing_state VARCHAR(50),
@@ -363,6 +361,3 @@ WHERE COALESCE(c.processing_state, c.processing_status) IN ('HARD_REJECTED', 'MA
 
 CREATE OR REPLACE VIEW shortlist_view AS
 SELECT * FROM v_canonical_shortlist;
-
-COMMIT;
-

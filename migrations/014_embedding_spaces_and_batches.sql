@@ -6,8 +6,6 @@
 -- 3. Track batch execution state and failures.
 -- 4. Persist vectors with per-space provenance.
 
-BEGIN;
-
 CREATE TABLE IF NOT EXISTS embedding_spaces (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     space_key TEXT NOT NULL UNIQUE,
@@ -77,4 +75,3 @@ COMMENT ON TABLE embedding_batches IS
 COMMENT ON TABLE semantic_embeddings IS
   'Persisted vectors with immutable input hash lineage and embedding space provenance.';
 
-COMMIT;

@@ -9,8 +9,6 @@
 -- - Existing edge tables (profile_fact_concepts, profile_fact_evidence_sources) remain authoritative;
 --   this migration backfills them into a generic evidence_edges table for graph queries.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Evidence spans (optional excerpt/offset/page pointers)
 -- ============================================================================
@@ -138,6 +136,3 @@ DROP TRIGGER IF EXISTS trg_profile_concept_metric_snapshots_immutable ON profile
 CREATE TRIGGER trg_profile_concept_metric_snapshots_immutable
 BEFORE UPDATE OR DELETE ON profile_concept_metric_snapshots
 FOR EACH ROW EXECUTE FUNCTION profile_concept_metric_snapshots_immutable_guard();
-
-COMMIT;
-

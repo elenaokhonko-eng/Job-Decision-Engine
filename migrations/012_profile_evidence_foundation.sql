@@ -9,8 +9,6 @@
 -- 4. All evidence has verification status and confidentiality classification
 -- 5. Taxonomy concepts normalize skills, technologies, domains, and functions
 
-BEGIN;
-
 -- ============================================================================
 -- candidate_profiles: Top-level profile container
 -- ============================================================================
@@ -260,4 +258,3 @@ COMMENT ON TABLE taxonomy_concepts IS
 COMMENT ON TABLE evidence_sources IS
     'External sources for verification: repositories, deployments, transcripts, certificates, etc.';
 
-COMMIT;

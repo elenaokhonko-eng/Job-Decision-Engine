@@ -9,8 +9,6 @@
 -- - Additive and reversible (no destructive drops).
 -- - Runtime may load manifests from disk and/or seed via scripts into this registry.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Source plugins (workspace-scoped)
 -- ============================================================================
@@ -124,6 +122,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_source_checkpoints_account
 
 CREATE INDEX IF NOT EXISTS idx_source_checkpoints_workspace
   ON source_checkpoints(workspace_id, source_plugin_id, updated_at DESC);
-
-COMMIT;
-

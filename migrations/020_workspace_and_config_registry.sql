@@ -10,8 +10,6 @@
 --   global uniqueness that would violate cross-workspace isolation.
 -- - Existing migrations 001–019 must not be edited.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Core workspace identity + membership
 -- ============================================================================
@@ -849,5 +847,3 @@ BEGIN
       FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE RESTRICT;
   END IF;
 END $$;
-
-COMMIT;

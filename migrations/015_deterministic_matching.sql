@@ -2,8 +2,6 @@
 --
 -- Adds immutable match run artifacts and per-requirement evidence mappings.
 
-BEGIN;
-
 CREATE TABLE IF NOT EXISTS match_runs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     canonical_job_id UUID NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
@@ -57,4 +55,3 @@ COMMENT ON TABLE match_runs IS
 COMMENT ON TABLE requirement_evidence_matches IS
   'Per requirement best-match evidence link to profile facts with deterministic score.';
 
-COMMIT;

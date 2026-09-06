@@ -6,9 +6,4 @@
 -- This migration is intentionally placed before 024_* so requirement-set hashing
 -- can rely on pgcrypto's digest() function.
 
-BEGIN;
-
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-COMMIT;
-

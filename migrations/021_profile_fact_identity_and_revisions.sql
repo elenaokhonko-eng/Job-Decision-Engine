@@ -9,8 +9,6 @@
 -- - Additive and reversible (no drops of user data).
 -- - Backfill creates revision records for existing profile_facts rows.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Stable identities
 -- ============================================================================
@@ -298,5 +296,3 @@ JOIN LATERAL (
   LIMIT 1
 ) pfr_latest ON TRUE
 ON CONFLICT (fact_identity_id) DO NOTHING;
-
-COMMIT;

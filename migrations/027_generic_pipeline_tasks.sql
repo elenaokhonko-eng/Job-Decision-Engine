@@ -8,8 +8,6 @@
 -- - Additive and reversible (no destructive drops).
 -- - Designed for shadow enqueue + staged cutover; does not replace existing queues yet.
 
-BEGIN;
-
 CREATE TABLE IF NOT EXISTS pipeline_tasks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -66,6 +64,3 @@ COMMENT ON TABLE pipeline_tasks IS
 
 COMMENT ON TABLE pipeline_task_attempts IS
   'Attempt ledger for durable tasks; preserves failure history for audit and replay.';
-
-COMMIT;
-

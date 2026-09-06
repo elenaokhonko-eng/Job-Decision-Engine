@@ -8,8 +8,6 @@
 -- - Additive and reversible.
 -- - Settings are optional; defaults should be safe and non-medicalized.
 
-BEGIN;
-
 CREATE TABLE IF NOT EXISTS workspace_user_accessibility_settings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -30,6 +28,3 @@ CREATE TABLE IF NOT EXISTS workspace_user_accessibility_settings (
 
 CREATE INDEX IF NOT EXISTS idx_workspace_user_accessibility_settings_lookup
   ON workspace_user_accessibility_settings(workspace_id, user_id, updated_at DESC);
-
-COMMIT;
-

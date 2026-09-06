@@ -9,8 +9,6 @@
 -- - Additive and reversible (no destructive drops).
 -- - Snapshots and decisions are immutable; corrections create new rows.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Resolved workspace policy snapshots
 -- ============================================================================
@@ -115,5 +113,3 @@ DROP TRIGGER IF EXISTS trg_deterministic_decisions_immutable ON deterministic_de
 CREATE TRIGGER trg_deterministic_decisions_immutable
 BEFORE UPDATE OR DELETE ON deterministic_decisions
 FOR EACH ROW EXECUTE FUNCTION deterministic_decisions_immutable_guard();
-
-COMMIT;

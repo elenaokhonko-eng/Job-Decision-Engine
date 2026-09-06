@@ -5,8 +5,6 @@
 -- 2) Backfill canonical latest_match_run_id and deterministic scores from completed match runs.
 -- 3) Backfill DOCUMENT_READY pipeline state from completed document_runs.
 
-BEGIN;
-
 -- Step 1: Normalize legacy/transition statuses to canonical labels.
 UPDATE canonical_jobs
 SET processing_status = 'AI_EVALUATED',
@@ -147,4 +145,3 @@ WHERE NOT EXISTS (
     AND e.transition_to = 'COMPLETED'
 );
 
-COMMIT;

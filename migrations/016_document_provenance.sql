@@ -2,8 +2,6 @@
 --
 -- Tracks generated CV/Cover Letter artifacts with claim-to-evidence lineage.
 
-BEGIN;
-
 CREATE TABLE IF NOT EXISTS document_runs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     canonical_job_id UUID NOT NULL REFERENCES canonical_jobs(id) ON DELETE CASCADE,
@@ -46,4 +44,3 @@ COMMENT ON TABLE document_runs IS
 COMMENT ON TABLE document_claims IS
   'Claim-level evidence lineage from generated document text to profile fact ids and job requirement ids.';
 
-COMMIT;

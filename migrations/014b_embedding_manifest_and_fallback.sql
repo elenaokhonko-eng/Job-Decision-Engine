@@ -2,8 +2,6 @@
 --
 -- Adds per-item manifest tracking for partial failures and fallback reruns.
 
-BEGIN;
-
 ALTER TABLE embedding_batches
   ADD COLUMN IF NOT EXISTS fallback_from_batch_id UUID REFERENCES embedding_batches(id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS rerun_of_batch_id UUID REFERENCES embedding_batches(id) ON DELETE SET NULL;
@@ -29,4 +27,3 @@ CREATE INDEX IF NOT EXISTS idx_embedding_batch_items_input
 COMMENT ON TABLE embedding_batch_items IS
   'Per-item embedding manifest rows for completion/failure tracking and fallback reruns.';
 
-COMMIT;

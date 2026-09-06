@@ -9,8 +9,6 @@
 -- - Additive and reversible (no destructive drops).
 -- - Does not mutate existing canonical data; runtime scripts perform optional backfills.
 
-BEGIN;
-
 -- ============================================================================
 -- 1) Workspace-scoped cutover flags (stage-by-stage control)
 -- ============================================================================
@@ -84,6 +82,3 @@ CREATE TABLE IF NOT EXISTS parity_audit_runs (
 
 CREATE INDEX IF NOT EXISTS idx_parity_audit_runs_workspace_created
   ON parity_audit_runs(workspace_id, created_at DESC);
-
-COMMIT;
-

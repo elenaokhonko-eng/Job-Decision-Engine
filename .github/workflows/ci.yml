@@ -57,6 +57,22 @@ jobs:
           exit 1
         fi
 
+    - name: Reject transaction statements in migrations
+      shell: bash
+      run: |
+        set +e
+        matches=$(grep -rIn --include='*.sql' -E '^[[:space:]]*(BEGIN|COMMIT|ROLLBACK)[[:space:]]*;[[:space:]]*$' migrations)
+        grep_status=$?
+        set -e
+        if [ "$grep_status" -gt 1 ]; then
+          exit "$grep_status"
+        fi
+        if [ -n "$matches" ]; then
+          echo "Transaction control statements found in migration files. The migration runner owns transactions; remove BEGIN/COMMIT/ROLLBACK from migrations:"
+          echo "$matches"
+          exit 1
+        fi
+
     - name: Validate GitHub Actions workflows
       run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
 
