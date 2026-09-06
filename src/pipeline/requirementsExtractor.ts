@@ -710,7 +710,6 @@ export async function runRequirementsExtraction(
                     requirementSetId,
                     quotedRequirements
                   );
-                  summary.quotedInserted += quotedInserted;
                   summary.metrics.quotedSucceeded += 1;
                   bucket.successes += 1;
 
