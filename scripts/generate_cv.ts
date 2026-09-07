@@ -19,7 +19,7 @@ import path from "path";
 import dotenv from "dotenv";
 import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
@@ -334,10 +334,7 @@ async function generateTailoredCV(): Promise<void> {
 
   const databaseUrl = requireEnv("DATABASE_URL");
 
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl),
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
     const ctx: WorkspaceContext = await resolveWorkspaceContext(pool as any);

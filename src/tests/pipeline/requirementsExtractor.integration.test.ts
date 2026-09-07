@@ -1,15 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import pg from 'pg';
 import { runMigrations } from '../../db/migrate.js';
+import { isLocalPostgresConnectionString, pgConnectionConfig } from '../../db/pgSsl.js';
 import { runRequirementsExtraction } from '../../pipeline/requirementsExtractor.js';
 
 const DB_URL = process.env.DATABASE_URL || '';
-const isCI = DB_URL.includes('localhost') || DB_URL.includes('127.0.0.1');
+const isCI = isLocalPostgresConnectionString(DB_URL);
 const skipReal = !DB_URL || !isCI;
 
 describe.skipIf(skipReal)('Requirements extraction integration (temporary schema)', () => {
   it('persists requirement rows, extraction runs, and stage events without duplicates on rerun', async () => {
-    const pool = new pg.Pool({ connectionString: DB_URL });
+    const pool = new pg.Pool(pgConnectionConfig(DB_URL));
     const client = await pool.connect();
     const schemaName = `req_stage_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 

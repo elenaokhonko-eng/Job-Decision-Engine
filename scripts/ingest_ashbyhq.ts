@@ -2,6 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { db } from "../src/db/db.ts";
 import { runDeduplication } from "./deduplicate.ts";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -18,10 +19,7 @@ async function ingestAshbyHQ() {
     process.exit(1);
   }
 
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false }
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
     const url = "https://jobs.ashbyhq.com/protege";

@@ -7,7 +7,7 @@ import {
   type GateResult,
 } from "../services/criteria.js";
 import { GATE_VERSION } from "../contracts/version.js";
-import { pgSslConfig } from "../db/pgSsl.js";
+import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement, type ComparableFact } from "./requirementComparators.js";
 import { loadWorkabilityPolicy } from "./workabilityPolicy.js";
@@ -15,10 +15,7 @@ import { loadWorkabilityPolicy } from "./workabilityPolicy.js";
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const defaultPool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: pgSslConfig(process.env.DATABASE_URL)
-});
+const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
 interface PersistedRequirement {
   requirement_key: string;

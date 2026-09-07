@@ -1,6 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -37,10 +37,7 @@ type DiagnosticsRow = {
 
 async function main(): Promise<void> {
   const databaseUrl = requireEnv("DATABASE_URL");
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl),
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
     const ctx = await resolveWorkspaceContext(pool as any);

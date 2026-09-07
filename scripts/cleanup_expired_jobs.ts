@@ -1,7 +1,7 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
 import puppeteer, { Browser } from 'puppeteer';
-import { pgSslConfig } from '../src/db/pgSsl.js';
+import { pgPoolConfig } from '../src/db/pgSsl.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -14,10 +14,7 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-const pool = new Pool({
-  connectionString: databaseUrl,
-  ssl: pgSslConfig(databaseUrl)
-});
+const pool = new Pool(pgPoolConfig(databaseUrl));
 
 async function checkExpiry(url: string, browser: Browser): Promise<boolean> {
   const page = await browser.newPage();

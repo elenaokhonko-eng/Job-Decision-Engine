@@ -1,6 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -12,10 +13,7 @@ export async function runDeduplication() {
     return;
   }
 
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
     console.log("🧼 Running database deduplication checks on raw_jobs...");

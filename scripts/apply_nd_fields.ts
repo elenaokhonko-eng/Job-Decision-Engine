@@ -1,10 +1,11 @@
 import pkg from 'pg';
 const { Pool } = pkg;
 import dotenv from 'dotenv';
+import { pgConnectionConfig } from '../src/db/pgSsl.js';
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool(pgConnectionConfig(process.env.DATABASE_URL));
 
 async function run() {
   console.log("Applying schema updates for ND fields...");

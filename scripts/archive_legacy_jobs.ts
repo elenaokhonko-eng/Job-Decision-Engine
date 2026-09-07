@@ -1,5 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -11,10 +12,7 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-const pool = new pg.Pool({
-  connectionString: databaseUrl,
-  ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
-});
+const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
 async function archiveLegacyTables() {
   console.log("Starting controlled reset of database schema...");

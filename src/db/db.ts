@@ -1,6 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { pgSslConfig } from "./pgSsl.js";
+import { pgPoolConfig } from "./pgSsl.js";
 
 // Load environment variables
 dotenv.config();
@@ -8,10 +8,7 @@ dotenv.config({ path: ".env.local" });
 
 const databaseUrl = process.env.DATABASE_URL;
 
-const pool = new pg.Pool({
-  connectionString: databaseUrl,
-  ssl: pgSslConfig(databaseUrl)
-});
+const pool = new pg.Pool(pgPoolConfig(databaseUrl));
 
 pool.on("error", (err) => {
   console.error("Unexpected error on idle database client:", err.message || err);

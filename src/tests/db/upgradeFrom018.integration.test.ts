@@ -4,9 +4,10 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { runMigrations } from "../../db/migrate.js";
+import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 
 const DB_URL = process.env.DATABASE_URL || "";
-const isCI = DB_URL.includes("localhost") || DB_URL.includes("127.0.0.1");
+const isCI = isLocalPostgresConnectionString(DB_URL);
 const skipReal = !DB_URL || !isCI;
 
 const __filename = fileURLToPath(import.meta.url);
@@ -37,7 +38,7 @@ async function applyMigrationFile(client: pg.PoolClient, file: string): Promise<
 
 describe.skipIf(skipReal)("P11: upgrade from migration 018 (integration)", () => {
   it("applies baseline 001-018 then upgrades to the latest schema (incl. 035)", async () => {
-    const pool = new pg.Pool({ connectionString: DB_URL });
+    const pool = new pg.Pool(pgConnectionConfig(DB_URL));
     const client = await pool.connect();
     const schemaName = `upgrade_018_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
@@ -94,5 +95,5 @@ describe.skipIf(skipReal)("P11: upgrade from migration 018 (integration)", () =>
       client.release();
       await pool.end();
     }
-  });
+  }, 30_000);
 });

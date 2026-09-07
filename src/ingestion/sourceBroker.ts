@@ -3,17 +3,14 @@ import { RawJobObservation } from "./types.js";
 import pg from "pg";
 import crypto from "crypto";
 import dotenv from "dotenv";
-import { pgSslConfig } from "../db/pgSsl.js";
+import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { getActiveSourcePluginRevision } from "./sourcePluginRegistry.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const defaultPool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: pgSslConfig(process.env.DATABASE_URL)
-});
+const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
 export class SourceBroker {
   private sourceRunId: string | null = null;

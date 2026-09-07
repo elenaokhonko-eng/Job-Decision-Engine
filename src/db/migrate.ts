@@ -2,6 +2,7 @@ import pg from "pg";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { pgPoolConfig } from "./pgSsl.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -97,10 +98,7 @@ export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.C
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1")) ? false : { rejectUnauthorized: true }
-  });
+  const pool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
 
   runMigrations(pool)

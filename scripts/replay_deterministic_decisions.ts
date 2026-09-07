@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 import pg from 'pg';
-import { pgSslConfig } from '../src/db/pgSsl.js';
+import { pgConnectionConfig } from '../src/db/pgSsl.js';
 import { resolveWorkspaceContext } from '../src/workspace/context.js';
 import {
   DecisionPolicyConfigSchema,
@@ -112,10 +112,7 @@ async function loadDecisionPolicyForSnapshot(
 }
 
 async function main(): Promise<void> {
-  const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: pgSslConfig(process.env.DATABASE_URL),
-  });
+  const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
 
   const client = await pool.connect();
   try {
@@ -193,4 +190,3 @@ main().catch((err) => {
   console.error('Replay failed:', err instanceof Error ? err.message : String(err));
   process.exit(1);
 });
-

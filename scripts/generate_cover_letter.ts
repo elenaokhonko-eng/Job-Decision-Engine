@@ -12,7 +12,7 @@
  *  - Strict schema validation of the LLM response
  *  - No hallucination: prompt explicitly restricts to evidence in the ledger
  *  - Non-zero exit on any failure (AGENTS.md invariant 7)
- *  - rejectUnauthorized:true via pgSslConfig
+ *  - rejectUnauthorized:true via pgConnectionConfig
  */
 
 import pg from "pg";
@@ -23,7 +23,7 @@ import { fileURLToPath } from "url";
 import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
 import { generateContentAudited, MODEL_REGISTRY } from "../src/services/agent.js";
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
@@ -125,10 +125,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
   }
 
   // Pool declared outside try so finally can end it safely
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl),
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
     // ── Step 1: Load job data from canonical schema ──────────────────────────

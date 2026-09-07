@@ -6,6 +6,7 @@ import { db, verifyUrlLive } from "../src/db/db.ts";
 import { applyGlobalGates, generateContentHash, LANE_VOCABULARIES, MULTI_LANE_SCORECARDS } from "../src/services/criteria.ts";
 import { runDeduplication } from "./deduplicate.ts";
 import puppeteer, { Browser } from "puppeteer";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 const jobsExtractSchema = {
   type: "object",
@@ -48,10 +49,7 @@ dotenv.config({ path: ".env.local" });
 
 const databaseUrl = process.env.DATABASE_URL;
 
-const pool = new pg.Pool({
-  connectionString: databaseUrl,
-  ssl: databaseUrl && (databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
-});
+const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
 pool.on("error", (err) => {
   console.error("Unexpected error on idle database client in evaluation script:", err.message || err);

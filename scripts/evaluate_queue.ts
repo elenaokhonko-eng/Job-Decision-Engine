@@ -4,16 +4,13 @@ import crypto from "crypto";
 import { EvaluationRequest } from "../src/pipeline/types.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationWorkabilityFacts } from "../src/contracts/index.js";
 import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.js";
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: pgSslConfig(process.env.DATABASE_URL)
-});
+const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
 
 /** Exponential backoff: 30s, 60s, 120s, … capped at 30 minutes */
 function nextAvailableAt(attemptCount: number): string {

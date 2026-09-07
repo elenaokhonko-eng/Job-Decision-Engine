@@ -3,18 +3,12 @@ import dotenv from "dotenv";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl:
-    process.env.DATABASE_URL &&
-    (process.env.DATABASE_URL.includes("localhost") || process.env.DATABASE_URL.includes("127.0.0.1"))
-      ? false
-      : { rejectUnauthorized: true }
-});
+const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
 
 export async function parseEmails(): Promise<{ parsedEmails: number; extractedJobs: number; failedEmails: number }> {
   console.log("====================================================");

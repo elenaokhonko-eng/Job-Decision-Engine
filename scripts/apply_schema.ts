@@ -2,6 +2,7 @@ import pg from "pg";
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -15,10 +16,7 @@ if (!databaseUrl) {
 
 async function applySchema() {
   console.log("Connecting to Postgres database...");
-  const client = new pg.Client({
-    connectionString: databaseUrl!,
-    ssl: databaseUrl!.includes("localhost") || databaseUrl!.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
-  });
+  const client = new pg.Client(pgConnectionConfig(databaseUrl!));
 
   try {
     await client.connect();

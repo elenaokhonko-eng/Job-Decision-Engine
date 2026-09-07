@@ -14,11 +14,12 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { runMigrations } from "../../db/migrate.js";
+import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 
 // ── CI detection ──────────────────────────────────────────────────────────────
 
 const DB_URL = process.env.DATABASE_URL || "";
-const isCI = DB_URL.includes("localhost") || DB_URL.includes("127.0.0.1");
+const isCI = isLocalPostgresConnectionString(DB_URL);
 const skipReal = !DB_URL || !isCI;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -101,7 +102,7 @@ let realPool: pg.Pool;
 
 describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () => {
   beforeAll(async () => {
-    realPool = new pg.Pool({ connectionString: DB_URL });
+    realPool = new pg.Pool(pgConnectionConfig(DB_URL));
     // Apply all migrations to ensure schema is current
     await runMigrations(realPool);
   });
@@ -270,5 +271,5 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
       client.release();
     }
-  });
+  }, 30_000);
 });

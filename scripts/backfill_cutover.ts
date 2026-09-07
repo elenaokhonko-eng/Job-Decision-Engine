@@ -1,6 +1,6 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
-import { pgSslConfig } from '../src/db/pgSsl.js';
+import { pgPoolConfig } from '../src/db/pgSsl.js';
 import { resolveWorkspaceContext } from '../src/workspace/context.js';
 
 dotenv.config();
@@ -11,10 +11,7 @@ interface StatusCount {
   count: number;
 }
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: pgSslConfig(process.env.DATABASE_URL),
-});
+const pool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
 async function getStatusCounts(client: pg.PoolClient, workspaceId: string): Promise<StatusCount[]> {
   const res = await client.query<StatusCount>(

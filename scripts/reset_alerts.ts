@@ -1,13 +1,11 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false }
-});
+const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
 
 async function main() {
   const ctx = await resolveWorkspaceContext(pool as any);

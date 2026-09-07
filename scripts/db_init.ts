@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
 
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 // Load environment variables
 dotenv.config();
@@ -19,10 +19,7 @@ if (!databaseUrl) {
 
 async function initDatabase() {
   console.log("Connecting to Postgres database...");
-  const client = new pg.Client({
-    connectionString: databaseUrl!,
-    ssl: pgSslConfig(databaseUrl!)
-  });
+  const client = new pg.Client(pgConnectionConfig(databaseUrl!));
 
   try {
     await client.connect();

@@ -6,7 +6,7 @@ import {
   MODEL_REGISTRY,
   type EmbeddingProvider,
 } from "../services/agent.js";
-import { pgSslConfig } from "../db/pgSsl.js";
+import { pgPoolConfig } from "../db/pgSsl.js";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
@@ -25,10 +25,7 @@ export type { GlobalLanesConfig, LaneDefinition };
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const defaultPool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: pgSslConfig(process.env.DATABASE_URL)
-});
+const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────

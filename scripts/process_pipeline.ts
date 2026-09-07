@@ -8,17 +8,14 @@ import { runExplanationQueueEnqueuer } from "../src/pipeline/explanationQueueEnq
 import { runEmbeddingBatchWithFallback } from "../src/embeddings/batchCoordinator.js";
 import pg from "pg";
 import dotenv from "dotenv";
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { loadWorkspaceLanesConfig } from "../src/pipeline/laneConfigLoader.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: pgSslConfig(process.env.DATABASE_URL),
-});
+const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
 
 const LOCK_ID = 1001; // Global lock ID for pipeline processing
 

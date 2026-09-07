@@ -1,6 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { GmailApiClient, loadGmailApiCredentials } from "../src/services/gmailApi.js";
 
@@ -22,10 +22,7 @@ export async function ingestGmail(): Promise<number> {
   }
 
   const gmailClient = new GmailApiClient(loadGmailApiCredentials());
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl),
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
   let ingestedCount = 0;
 
   try {

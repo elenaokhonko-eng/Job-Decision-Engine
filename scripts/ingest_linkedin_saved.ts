@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import pg from "pg";
 import dotenv from "dotenv";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 // Load environment variables
 dotenv.config();
@@ -39,10 +40,7 @@ async function ingestLinkedInSavedJobs() {
   }
 
   console.log(`Found ${jobs.length} jobs in "linkedin_saved_jobs.json". Connecting to database...`);
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   let insertedCount = 0;
   let skippedCount = 0;

@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import pg from "pg";
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -95,10 +95,7 @@ async function main(): Promise<void> {
     throw new Error("DATABASE_URL is not configured.");
   }
 
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl),
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   const client = await pool.connect();
   let runId: string | null = null;
@@ -403,4 +400,3 @@ main().catch((err) => {
   console.error("v2.2 backfill failed:", err instanceof Error ? err.message : String(err));
   process.exit(1);
 });
-

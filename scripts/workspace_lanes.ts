@@ -3,7 +3,7 @@ import path from "path";
 import * as yaml from "js-yaml";
 import dotenv from "dotenv";
 import pg from "pg";
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { LaneFileConfigSchema, type LaneFileConfig } from "../src/lanes/contracts.js";
 import {
@@ -163,10 +163,7 @@ async function main(): Promise<void> {
     throw new Error("DATABASE_URL is required.");
   }
 
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl),
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
     const cmd = (process.argv[2] || "import").toLowerCase();
@@ -204,4 +201,3 @@ if (process.argv[1] && process.argv[1].includes("workspace_lanes")) {
     process.exit(1);
   });
 }
-

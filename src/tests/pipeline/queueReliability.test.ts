@@ -14,11 +14,12 @@
 import { describe, it, expect, afterAll, beforeAll, beforeEach } from "vitest";
 import pg from "pg";
 import { runMigrations } from "../../db/migrate.js";
+import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 
 // ── CI detection ──────────────────────────────────────────────────────────────
 
 const DB_URL = process.env.DATABASE_URL || "";
-const isCI = DB_URL.includes("localhost") || DB_URL.includes("127.0.0.1");
+const isCI = isLocalPostgresConnectionString(DB_URL);
 const skipReal = !DB_URL || !isCI;
 
 // ── Tier 1: Pure logic tests ──────────────────────────────────────────────────
@@ -116,7 +117,7 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
   });
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DB_URL });
+    pool = new pg.Pool(pgConnectionConfig(DB_URL));
     await runMigrations(pool);
     await ensureSeeded();
   });

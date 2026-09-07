@@ -1,16 +1,14 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { execSync } from "child_process";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const databaseUrl = process.env.DATABASE_URL;
 
-const pool = new pg.Pool({
-  connectionString: databaseUrl,
-  ssl: databaseUrl && (databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1")) ? false : { rejectUnauthorized: false }
-});
+const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
 async function reEvaluateAll() {
   console.log("====================================================");

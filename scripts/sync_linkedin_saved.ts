@@ -2,6 +2,7 @@ import puppeteer, { Page } from "puppeteer";
 import pg from "pg";
 import dotenv from "dotenv";
 import { runDeduplication } from "./deduplicate.ts";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 
 // Load environment variables
 dotenv.config();
@@ -27,10 +28,7 @@ async function syncLinkedInSavedJobs() {
     process.exit(1);
   }
 
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") || databaseUrl.includes("127.0.0.1") ? false : { rejectUnauthorized: false }
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   console.log("Initializing headless browser...");
   const browser = await puppeteer.launch({

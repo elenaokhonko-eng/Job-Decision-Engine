@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import express from "express";
 import pg from "pg";
-import { pgSslConfig } from "../../db/pgSsl.js";
+import { pgPoolConfig } from "../../db/pgSsl.js";
 import {
   DEFAULT_USER_KEY,
   DEFAULT_WORKSPACE_KEY,
@@ -84,10 +84,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
 
   const pool =
     deps.pool ??
-    new pg.Pool({
-      connectionString: requiredDatabaseUrl(),
-      ssl: pgSslConfig(process.env.DATABASE_URL),
-    });
+    new pg.Pool(pgPoolConfig(requiredDatabaseUrl()));
 
   const resolveContext: ResolveContextFn = deps.resolveContext ?? resolveWorkspaceContext;
 

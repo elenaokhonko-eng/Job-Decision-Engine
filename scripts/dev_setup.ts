@@ -3,24 +3,10 @@ import { spawnSync } from "node:child_process";
 import pg from "pg";
 import dotenv from "dotenv";
 
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig, isLocalPostgresConnectionString } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
-
-function isLocalDatabaseUrl(databaseUrl: string): boolean {
-  try {
-    const parsed = new URL(databaseUrl);
-    const host = parsed.hostname.trim().toLowerCase();
-    return host === "localhost" || host === "127.0.0.1" || host === "::1";
-  } catch {
-    return (
-      databaseUrl.includes("localhost") ||
-      databaseUrl.includes("127.0.0.1") ||
-      databaseUrl.includes("::1")
-    );
-  }
-}
 
 function getDefaultDatabaseUrl(): string {
   const user = process.env.POSTGRES_USER ?? "jdec";
@@ -62,10 +48,7 @@ async function waitForDatabase(databaseUrl: string, timeoutMs = 60_000): Promise
   let lastError: unknown;
 
   while (Date.now() - startedAt < timeoutMs) {
-    const client = new pg.Client({
-      connectionString: databaseUrl,
-      ssl: pgSslConfig(databaseUrl)
-    });
+    const client = new pg.Client(pgConnectionConfig(databaseUrl));
 
     try {
       await client.connect();
@@ -91,7 +74,7 @@ async function main(): Promise<void> {
   const explicitDatabaseUrl = String(process.env.DATABASE_URL || "").trim();
   if (
     explicitDatabaseUrl &&
-    !isLocalDatabaseUrl(explicitDatabaseUrl) &&
+    !isLocalPostgresConnectionString(explicitDatabaseUrl) &&
     String(process.env.ALLOW_DEV_SETUP_REMOTE_DB || "").trim().toLowerCase() !== "true"
   ) {
     console.error("DATABASE_URL points to a non-local host.");
@@ -110,10 +93,7 @@ async function main(): Promise<void> {
   await waitForDatabase(databaseUrl);
 
   console.log("Initializing schema (canonical migration chain)...");
-  const client = new pg.Client({
-    connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl)
-  });
+  const client = new pg.Client(pgConnectionConfig(databaseUrl));
 
   await client.connect();
   try {

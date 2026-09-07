@@ -2,7 +2,7 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import path from 'path';
 import { z } from 'zod';
-import { pgSslConfig } from '../src/db/pgSsl.js';
+import { pgConnectionConfig } from '../src/db/pgSsl.js';
 import { resolveWorkspaceContext } from '../src/workspace/context.js';
 import { loadStructuredFile } from '../src/config/structuredLoader.js';
 import { upsertConfigRevision } from '../src/config/registry.js';
@@ -68,10 +68,7 @@ async function main(): Promise<void> {
     throw new Error('DATABASE_URL is required.');
   }
 
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl),
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
     const ctx = await resolveWorkspaceContext(pool as any);

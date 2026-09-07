@@ -12,6 +12,7 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { runMigrations } from "../../db/migrate.js";
+import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -19,7 +20,7 @@ const __dirname = path.dirname(__filename);
 
 // Skip if running locally without the CI DB
 const DB_URL = process.env.DATABASE_URL || "";
-const isCI = DB_URL.includes("localhost") || DB_URL.includes("127.0.0.1");
+const isCI = isLocalPostgresConnectionString(DB_URL);
 const skipReal = !DB_URL || !isCI;
 
 let pool: pg.Pool | undefined;
@@ -204,7 +205,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
   beforeAll(async () => {
     applyDeterministicTestEnv();
 
-    pool = new pg.Pool({ connectionString: DB_URL });
+    pool = new pg.Pool(pgConnectionConfig(DB_URL));
     client = await pool.connect();
     schemaName = `nine_emails_e2e_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 

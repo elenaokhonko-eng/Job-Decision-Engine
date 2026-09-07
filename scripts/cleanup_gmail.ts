@@ -1,7 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { GmailApiClient, loadGmailApiCredentials } from "../src/services/gmailApi.js";
-import { pgSslConfig } from "../src/db/pgSsl.js";
+import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -17,10 +17,7 @@ async function cleanupGmail(): Promise<void> {
   }
 
   const gmailClient = new GmailApiClient(loadGmailApiCredentials());
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl),
-  });
+  const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
     const ctx = await resolveWorkspaceContext(pool as any);

@@ -1,6 +1,7 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
 import path from 'path';
+import { pgConnectionConfig } from '../src/db/pgSsl.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
@@ -13,10 +14,7 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-const pool = new Pool({
-  connectionString: databaseUrl,
-  ssl: { rejectUnauthorized: false }
-});
+const pool = new Pool(pgConnectionConfig(databaseUrl));
 
 async function run() {
   console.log("====================================================");
