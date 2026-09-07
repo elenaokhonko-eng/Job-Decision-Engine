@@ -25,7 +25,7 @@ Use one exact commit SHA for all runs.
 2. Dispatch `ingest.yml` and record migrations, model preflight, Gmail counts, per-source counts, gate counts, queue outcomes, and shortlist count.
 3. Select one viable `AI_EVALUATED` row from `v_canonical_shortlist`; record its `canonical_job_id` and `job_version_id`.
 4. Dispatch `documents.yml` with those IDs.
-5. Confirm CV and cover-letter artifacts upload, evidence validation against `MASTER_PROFILE_JSON`, and explicit provider/fallback reporting.
+5. Confirm CV and cover-letter artifacts upload, provenance/claim validation against the active PostgreSQL profile facts, and explicit provider/fallback reporting (contact info may come from `DOCUMENT_CONTACT_JSON` or legacy `MASTER_PROFILE_JSON.contact`).
 
 ## Release Evidence
 

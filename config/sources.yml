@@ -1,3 +1,5 @@
+# DEPRECATED: The runtime source manifest is `config/source-plugins/*.yml` and is what the
+# adapter runner uses. This file is retained only for legacy reference/import and may be removed.
 version: "1.0"
 sources:
   - id: JOBICY

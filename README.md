@@ -120,8 +120,9 @@ npm run docs:cover-letter
 3. `GMAIL_OAUTH_CLIENT_SECRET`
 4. `GMAIL_OAUTH_REFRESH_TOKEN`
 5. At least one of `GEMINI_API_KEY` or `OPENAI_API_KEY`
-6. `MASTER_PROFILE_JSON` for document workflows
-7. `DOCUMENT_CONTACT_JSON` (recommended) for document workflows
+6. For document workflows: `DOCUMENT_CONTACT_JSON` (recommended) or `MASTER_PROFILE_JSON` (legacy contact-only fallback)
+
+Note: CV and cover-letter generation uses the active PostgreSQL profile facts for evidence; `MASTER_PROFILE_JSON` is only read for legacy `contact` fields.
 
 Gmail ingestion uses the Gmail API over HTTPS rather than direct IMAP access. Create an OAuth 2.0 client, grant the account the minimum Gmail scope needed by the workflow, and store the resulting refresh token as `GMAIL_OAUTH_REFRESH_TOKEN`. The ingestion stage reads the configured `GMAIL_FOLDER` label first; after the raw message is committed to PostgreSQL it applies `GMAIL_PROCESSED_FOLDER`, unless `GMAIL_READ_ONLY=true` is set.
 
