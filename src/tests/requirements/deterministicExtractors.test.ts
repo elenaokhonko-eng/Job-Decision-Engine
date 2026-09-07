@@ -92,4 +92,51 @@ describe('extractDeterministicRequirements', () => {
 
     expect(result.requirements.some((r) => r.requirement_type === 'FUNCTION')).toBe(true);
   });
+
+  it('extracts data pipeline associate and SQL ETL warehouse evidence', () => {
+    const result = extractDeterministicRequirements({
+      canonical_job_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      job_version_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      description_text:
+        'Junior Data Pipeline Associate supporting standard SQL ETL maintenance and dashboard data warehouse support.',
+    });
+
+    const functionReq = result.requirements.find((r) => r.requirement_type === 'FUNCTION');
+    const domainReq = result.requirements.find((r) => r.requirement_type === 'DOMAIN');
+
+    expect(functionReq?.quote_text).toMatch(/data pipeline associate/i);
+    expect(domainReq?.quote_text).toMatch(/data pipeline|sql etl|data warehouse/i);
+  });
+
+  it('extracts slash-form office days as a known workability fact', () => {
+    const result = extractDeterministicRequirements({
+      canonical_job_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      job_version_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      description_text: 'Singapore hybrid role with 1 day/week office for planning sessions.',
+    });
+
+    const officeReq = result.requirements.find((r) => r.requirement_type === 'OFFICE_DAYS');
+    expect(officeReq?.quote_text).toMatch(/1 day\/week office/i);
+    expect(officeReq?.structured_value).toEqual({ office_days_per_week: 1 });
+  });
+
+  it('expands short domain tokens into schema-valid evidence quotes', () => {
+    const description =
+      'Principal AI Systems Engineer building LLM training pipelines and NLP systems.';
+    const result = extractDeterministicRequirements({
+      canonical_job_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      job_version_id: '11111111-2222-4333-8444-555555555555',
+      description_text: description,
+    });
+
+    for (const req of result.requirements) {
+      expect(req.quote_text?.length).toBeGreaterThanOrEqual(5);
+      expect(description.slice(req.quote_start_offset || 0, req.quote_end_offset || 0)).toBe(
+        req.quote_text
+      );
+    }
+
+    const domainReq = result.requirements.find((r) => r.requirement_type === 'DOMAIN');
+    expect(domainReq?.quote_text).toMatch(/AI Systems|LLM training|NLP systems/i);
+  });
 });

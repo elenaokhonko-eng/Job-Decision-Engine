@@ -29,6 +29,76 @@ interface MatchInfo {
   quote_end_offset: number;
 }
 
+const MIN_QUOTE_LENGTH = 5;
+
+function isQuoteBoundary(char: string): boolean {
+  return /[\s<>"'.,;:()[\]{}]/.test(char);
+}
+
+function trimMatch(description: string, start: number, end: number): MatchInfo | null {
+  const raw = description.slice(start, end);
+  const leading = raw.match(/^\s*/)?.[0].length ?? 0;
+  const trailing = raw.match(/\s*$/)?.[0].length ?? 0;
+  const quoteStart = start + leading;
+  const quoteEnd = end - trailing;
+  const quote = description.slice(quoteStart, quoteEnd);
+  if (!quote) {
+    return null;
+  }
+  return {
+    quote_text: quote,
+    quote_start_offset: quoteStart,
+    quote_end_offset: quoteEnd,
+  };
+}
+
+function expandShortMatch(description: string, start: number, end: number): MatchInfo | null {
+  let expandedStart = start;
+  let expandedEnd = end;
+  let best = trimMatch(description, expandedStart, expandedEnd);
+
+  const consumeRightToken = () => {
+    while (expandedEnd < description.length && isQuoteBoundary(description[expandedEnd])) {
+      expandedEnd += 1;
+    }
+    while (expandedEnd < description.length && !isQuoteBoundary(description[expandedEnd])) {
+      expandedEnd += 1;
+    }
+  };
+
+  const consumeLeftToken = () => {
+    while (expandedStart > 0 && isQuoteBoundary(description[expandedStart - 1])) {
+      expandedStart -= 1;
+    }
+    while (expandedStart > 0 && !isQuoteBoundary(description[expandedStart - 1])) {
+      expandedStart -= 1;
+    }
+  };
+
+  while (
+    best &&
+    best.quote_text.length < MIN_QUOTE_LENGTH &&
+    (expandedStart > 0 || expandedEnd < description.length)
+  ) {
+    const beforeStart = expandedStart;
+    const beforeEnd = expandedEnd;
+
+    consumeRightToken();
+    best = trimMatch(description, expandedStart, expandedEnd);
+    if (best && best.quote_text.length >= MIN_QUOTE_LENGTH) {
+      break;
+    }
+
+    consumeLeftToken();
+    best = trimMatch(description, expandedStart, expandedEnd);
+    if (beforeStart === expandedStart && beforeEnd === expandedEnd) {
+      break;
+    }
+  }
+
+  return best;
+}
+
 function findFirstMatch(description: string, patterns: RegExp[]): MatchInfo | null {
   for (const pattern of patterns) {
     const match = description.match(pattern);
@@ -36,17 +106,17 @@ function findFirstMatch(description: string, patterns: RegExp[]): MatchInfo | nu
       continue;
     }
 
-    const quote = match[0].trim();
-    if (!quote) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const matchInfo =
+      match[0].trim().length < MIN_QUOTE_LENGTH
+        ? expandShortMatch(description, start, end)
+        : trimMatch(description, start, end);
+    if (!matchInfo || matchInfo.quote_text.length < MIN_QUOTE_LENGTH) {
       continue;
     }
 
-    const start = match.index;
-    return {
-      quote_text: quote,
-      quote_start_offset: start,
-      quote_end_offset: start + quote.length,
-    };
+    return matchInfo;
   }
 
   return null;
@@ -160,7 +230,7 @@ export function extractDeterministicRequirements(
   let sequence = 1;
 
   const officeDays = findFirstMatch(description, [
-    /\b([1-5])\s*days?\s*(?:a|per)?\s*week\s*(?:in|on)?\s*(?:the)?\s*(?:office|on[- ]?site)\b/i,
+    /\b([1-5])\s*days?\s*(?:a|per|\/)?\s*week\s*(?:in|on)?\s*(?:the)?\s*(?:office|on[- ]?site)\b/i,
     /\b(?:office|on[- ]?site)\s*[\w\s]{0,30}?\b([1-5])\s*days?\b/i,
   ]);
   if (officeDays) {
@@ -328,7 +398,7 @@ export function extractDeterministicRequirements(
     /\b(?:director|head|vp|vice\s+president)\s+of\s+(?:engineering|technology|software|data(?:\s+(?:science|engineering|platform|analytics|architecture))?|analytics?|ai|ml|platform|cloud|systems?|digital|transformation|research|science)\b/i,
     /\b(?:engineering|technology|software|data|analytics?|ai|ml|digital|transformation)\s+(?:program|programme|project|portfolio|delivery|transformation)\s+(?:manager|director|lead|head|officer|vp|vice\s+president)\b/i,
     /\b(?:engineering|technology|software|data(?:\s+(?:science|engineering|platform|analytics|architecture))?|analytics?|ai|ml|platform|cloud|systems?|digital|transformation|research|science)\s+(?:manager|director|lead|head|officer|vp|vice\s+president)\b/i,
-    /\b(?:machine\s+learning\s+engineer|ml\s+engineer|data\s+engineer|platform\s+engineer|software\s+engineer|ai\s+engineer|research\s+scientist|(?:data|ai|ml|lead|principal|chief)\s+scientist|quant(?:itative)?\s+(?:engineer|developer|researcher)|bioinformatics\s+engineer|systems\s+architect|ai\s+architect|software\s+developer|full[\s-]stack\s+developer|backend\s+developer|frontend\s+developer|data\s+scientist|data\s+architect|research\s+engineer|research\s+software\s+engineer)\b/i,
+    /\b(?:machine\s+learning\s+engineer|ml\s+engineer|data\s+engineer|data\s+(?:pipeline|platform|warehouse|etl)\s+(?:engineer|developer|architect|associate|analyst|specialist)|(?:sql\s+)?etl\s+(?:engineer|developer|associate|analyst|specialist)|data\s+warehouse\s+(?:engineer|developer|associate|analyst|specialist)|platform\s+engineer|software\s+engineer|ai\s+engineer|research\s+scientist|(?:data|ai|ml|lead|principal|chief)\s+scientist|quant(?:itative)?\s+(?:engineer|developer|researcher)|bioinformatics\s+engineer|systems\s+architect|ai\s+architect|software\s+developer|full[\s-]stack\s+developer|backend\s+developer|frontend\s+developer|data\s+scientist|data\s+architect|research\s+engineer|research\s+software\s+engineer)\b/i,
   ];
   let functionRequirement = findFirstMatch(description, technicalFunctionPatterns);
   if (!functionRequirement && /\b(?:project|program|programme|portfolio|delivery)\s+(?:manager|director|lead|head)\b/i.test(description) && /\b(?:software|data|analytics?|ai|ml|machine\s+learning|technology|technical|engineering|platform|cloud|digital|transformation|systems?)\b/i.test(description)) {
@@ -351,7 +421,7 @@ export function extractDeterministicRequirements(
   }
 
   const domainRequirement = findFirstMatch(description, [
-    /\b(machine\s+learning|artificial\s+intelligence|ai\b|llm|nlp|data\s+platform|regtech|legaltech|compliance\s+automation|bioinformatics|genomics|biotech|pharma|quant(?:itative)?|trading|fintech|market\s+data)\b/i,
+    /\b(machine\s+learning|artificial\s+intelligence|ai\b|llm|nlp|data\s+platform|data\s+pipeline|data\s+engineering|data\s+warehouse|sql\s+etl|etl|regtech|legaltech|compliance\s+automation|bioinformatics|genomics|biotech|pharma|quant(?:itative)?|trading|fintech|market\s+data)\b/i,
   ]);
   if (domainRequirement) {
     const normalized = domainRequirement.quote_text.toUpperCase().replace(/\s+/g, '_');

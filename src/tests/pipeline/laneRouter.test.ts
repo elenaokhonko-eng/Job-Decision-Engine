@@ -3,6 +3,7 @@ import { runLaneRouting } from '../../pipeline/laneRouter.js';
 import pg from 'pg';
 import * as agent from '../../services/agent.js';
 import type { WorkspaceContext } from '../../workspace/context.js';
+import { loadWorkspaceLanesConfig } from '../../pipeline/laneConfigLoader.js';
 
 vi.mock('pg', () => {
   const mPool: any = {
@@ -132,5 +133,107 @@ describe('Pipeline Stage: Lane Routing', () => {
     expect(updateCall[1][3]).toEqual('High');          // laneConfidence (arg 4)
     // arg 5 = secondary_lanes JSON, arg 6 = lane_evidence, arg 7 = id
     expect(updateCall[1][7]).toEqual('canon-1');        // job id (arg 8)
+  });
+
+  it('routes quantitative systems architecture through investment function aliases', async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    (loadWorkspaceLanesConfig as any).mockResolvedValueOnce({
+      source: 'FILES',
+      config: {
+        version: 'investment-alias-test',
+        description: 'test config',
+        lanes: {
+          CORE_AI_DATA: {
+            title: 'Core AI',
+            description: 'Core AI lane',
+            threshold: 0.8,
+            semantic_threshold: 0.8,
+            keywords: [],
+            prototype_query: 'AI ML',
+          },
+          LEGAL_REGTECH: {
+            title: 'Legal',
+            description: 'Legal lane',
+            threshold: 0.8,
+            semantic_threshold: 0.8,
+            keywords: [],
+            prototype_query: 'Legal compliance',
+          },
+          HEALTH_BIO_PHARMA: {
+            title: 'Health',
+            description: 'Health lane',
+            threshold: 0.8,
+            semantic_threshold: 0.8,
+            keywords: [],
+            prototype_query: 'Health bio pharma',
+          },
+          INVESTMENT_MARKETS_FINTECH: {
+            title: 'Fintech',
+            description: 'Fintech lane',
+            threshold: 0.6,
+            semantic_threshold: 0.6,
+            keywords: [],
+            prototype_query: 'Quantitative market data trading infrastructure',
+            included_domain_concepts: ['MARKET_DATA', 'CAPITAL_MARKETS', 'TRADING'],
+            required_function_concepts: [
+              'QUANTITATIVE_RESEARCH',
+              'INVESTMENT_DATA_PLATFORM',
+              'TRADING_INFRASTRUCTURE',
+            ],
+            minimum_domain_score: 0.6,
+            minimum_function_score: 0.6,
+          },
+        },
+        unclassified_policy: {
+          label: 'UNCLASSIFIED',
+          fallback_behavior: 'DEFER_ROUTING',
+          min_similarity_floor: 0.25,
+        },
+      },
+    });
+
+    (mPool.query as any).mockResolvedValueOnce({
+      rows: [
+        {
+          id: 'canon-investment',
+          latest_version_id: 'version-investment',
+          normalized_title: 'Quantitative Systems Architect',
+          description_text:
+            'Design low-latency market data feeds, high-frequency execution infrastructure, and algorithmic trading platforms.',
+        },
+      ],
+    });
+
+    (agent.generateEmbeddingWithProvider as any).mockImplementation((text: string) => {
+      const t = text.toLowerCase();
+      if (t.includes('quantitative') || t.includes('market data') || t.includes('trading')) {
+        return Promise.resolve([0, 0, 0, 1]);
+      }
+      if (t.includes('legal') || t.includes('compliance')) {
+        return Promise.resolve([0, 1, 0, 0]);
+      }
+      if (t.includes('health') || t.includes('bio') || t.includes('pharma')) {
+        return Promise.resolve([0, 0, 1, 0]);
+      }
+      return Promise.resolve([1, 0, 0, 0]);
+    });
+
+    const result = await runLaneRouting(undefined, { context });
+
+    expect(result.routed).toBe(1);
+    expect(result.deferred).toBe(0);
+
+    const updateCall = (mPool.query as any).mock.calls.find(
+      (call: any) => typeof call[0] === 'string' && call[0].includes('UPDATE canonical_jobs')
+    );
+    expect(updateCall?.[1][0]).toBe('INVESTMENT_MARKETS_FINTECH');
+    expect(updateCall?.[1][2]).toBe('LANE_ROUTED');
   });
 });
