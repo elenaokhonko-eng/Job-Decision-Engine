@@ -40,6 +40,8 @@ export interface QuotedExtractorResult {
 export interface RequirementExtractionStageOptions {
   quotedExtractor?: (input: QuotedExtractorInvocation) => Promise<QuotedExtractorResult | null>;
   context?: WorkspaceContext;
+  failFastOnQuotedProviderFailure?: boolean;
+  quotedProviderFailureLimit?: number;
 }
 
 export interface RequirementExtractionSummary {
@@ -181,6 +183,19 @@ async function upsertPipelineState(
        updated_at = NOW()`,
     [job.workspace_id, job.canonical_job_id, job.job_version_id, stageStatus, lastError]
   );
+}
+
+class RequirementsStageAbortError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RequirementsStageAbortError';
+  }
+}
+
+function parsePositiveInt(value: unknown, fallback: number, max: number): number {
+  const parsed = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(max, parsed));
 }
 
 async function insertStageEvent(
@@ -355,6 +370,12 @@ export async function runRequirementsExtraction(
     : shouldRunQuotedExtractor()
       ? async (input: QuotedExtractorInvocation) => runQuotedRequirementProvider(input)
       : undefined;
+  const failFastOnQuotedProviderFailure =
+    options.failFastOnQuotedProviderFailure ?? Boolean(quotedExtractor);
+  const quotedProviderFailureLimit =
+    options.quotedProviderFailureLimit ??
+    parsePositiveInt(process.env.REQUIREMENTS_PROVIDER_FAILURE_LIMIT, 1, 10);
+  let quotedProviderFailures = 0;
 
   const quotedExtractorIdentityVersion = quotedExtractor
     ? `quoted_provider_${REQUIREMENTS_SCHEMA_VERSION}`
@@ -791,6 +812,13 @@ export async function runRequirementsExtraction(
                  WHERE id = $1`,
                 [quotedRunStart.rows[0].id, warning]
               );
+
+              quotedProviderFailures += 1;
+              if (failFastOnQuotedProviderFailure && quotedProviderFailures >= quotedProviderFailureLimit) {
+                throw new RequirementsStageAbortError(
+                  `Quoted requirements provider failed ${quotedProviderFailures} time(s); aborting requirements extraction after model retry budget was exhausted. Last error: ${warning}`
+                );
+              }
             }
           }
 
@@ -858,6 +886,10 @@ export async function runRequirementsExtraction(
         // Best effort state update outside failed transaction.
         await upsertPipelineState(client, job, 'RETRY_WAIT', errorMessage);
         await insertStageEvent(client, job, 'RETRY_WAIT', 'RETRY_SCHEDULED', errorMessage, null);
+
+        if (error instanceof RequirementsStageAbortError) {
+          throw error;
+        }
       }
     }
   } finally {

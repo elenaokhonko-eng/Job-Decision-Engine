@@ -26,11 +26,11 @@ dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
 export const MODEL_REGISTRY = {
-  EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash",
+  EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-3.6-flash",
   EVALUATION_FALLBACK_MODEL: process.env.EVALUATION_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
   EMBEDDING_PRIMARY_MODEL: process.env.EMBEDDING_PRIMARY_MODEL || "gemini-embedding-001",
   EMBEDDING_FALLBACK_MODEL: process.env.EMBEDDING_FALLBACK_MODEL || "text-embedding-3-small",
-  DOCUMENT_PRIMARY_MODEL: process.env.DOCUMENT_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash",
+  DOCUMENT_PRIMARY_MODEL: process.env.DOCUMENT_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-3.6-flash",
   DOCUMENT_FALLBACK_MODEL: process.env.DOCUMENT_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
 } as const;
 
@@ -43,6 +43,31 @@ function resolveProviderOrder(primaryProviderRaw: string | undefined): TextProvi
   // Backward compatibility with existing env behavior.
   if (process.env.FORCE_OPENAI === "true") return ["openai", "gemini"];
   return ["gemini", "openai"];
+}
+
+function modelRequestMaxRetries(): number {
+  const parsed = Number.parseInt(String(process.env.MODEL_REQUEST_MAX_RETRIES || "3"), 10);
+  if (!Number.isFinite(parsed)) return 3;
+  return Math.max(1, Math.min(5, parsed));
+}
+
+function isRetryableModelRequestError(error: any): boolean {
+  const status = Number(error?.status);
+  if (Number.isFinite(status)) {
+    return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+  }
+
+  const message = String(error?.message || error || "").toLowerCase();
+  return (
+    error?.name === "AbortError" ||
+    error?.name === "TimeoutError" ||
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("econnreset") ||
+    message.includes("etimedout") ||
+    message.includes("fetch failed") ||
+    message.includes("network")
+  );
 }
 
 export function checkModelRegistryPreflight(): { ok: boolean; warnings: string[]; primaryAvailable: boolean; fallbackAvailable: boolean } {
@@ -305,7 +330,7 @@ export async function runAgentWithFallback<T>(
 
 async function tryGemini(geminiKey: string, options: any): Promise<string> {
   const ai = getGeminiClient();
-  const maxRetries = 3;
+  const maxRetries = modelRequestMaxRetries();
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -348,7 +373,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
   }
   messages.push({ role: "user", content: options.contents });
 
-  const maxRetries = 3;
+  const maxRetries = modelRequestMaxRetries();
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -387,9 +412,8 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
       const data = await response.json();
       return data.choices?.[0]?.message?.content || "";
     } catch (err: any) {
-      if (attempt === maxRetries) throw err;
+      if (attempt === maxRetries || !isRetryableModelRequestError(err)) throw err;
       
-      const isRateLimit = err.status === 429;
       // Exponential backoff: 5s, 15s or explicitly requested Retry-After
       const baseBackoff = Math.pow(3, attempt - 1) * 5000;
       const backoffMs = err.retryAfterSecs ? err.retryAfterSecs * 1000 : baseBackoff;

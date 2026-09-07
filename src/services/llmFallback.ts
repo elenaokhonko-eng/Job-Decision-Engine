@@ -1,4 +1,4 @@
-import { callLLM, generateContent } from "./agent.js";
+import { callLLM, generateContent, MODEL_REGISTRY } from "./agent.js";
 import { OpenAI } from "openai";
 
 /** Helper to call OpenAI as the final fallback */
@@ -66,7 +66,7 @@ export async function extractWithFallback(raw: string, schema?: any): Promise<st
   // 2️⃣ Gemini (requires GEMINI_API_KEY)
   try {
     let geminiRes = await generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+      model: process.env.GEMINI_MODEL || MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
       contents: raw,
       responseMimeType: "application/json",
       responseSchema: schema

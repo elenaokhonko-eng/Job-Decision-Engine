@@ -279,7 +279,7 @@ describe('runRequirementsExtraction', () => {
         provider: 'openai',
         model: 'gpt-4o-mini',
         attempts: 2,
-        errors: [{ provider: 'gemini', model: 'gemini-2.0-flash', error: '429' }],
+        errors: [{ provider: 'gemini', model: 'gemini-3.6-flash', error: '429' }],
         payload: {
           schema_version: '2.0',
           requirements: [
@@ -422,5 +422,82 @@ describe('runRequirementsExtraction', () => {
     await runRequirementsExtraction(fakePool, { context, quotedExtractor });
 
     expect(quotedExtractor).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts the requirements stage when quoted provider failures exhaust the failure budget', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
+        return {
+          rows: [
+            {
+              workspace_id: context.workspaceId,
+              canonical_job_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+              job_version_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+              content_hash: 'content-hash-failfast-1',
+              description_text: 'Hybrid role. Work rights required.',
+            },
+            {
+              workspace_id: context.workspaceId,
+              canonical_job_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+              job_version_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+              content_hash: 'content-hash-failfast-2',
+              description_text: 'Remote role. Python required.',
+            },
+          ],
+        };
+      }
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO requirement_set_identities')) {
+        return { rows: [{ id: 'req-ident-failfast' }] };
+      }
+      if (sql.includes('SELECT active_requirement_set_id') && sql.includes('FROM job_versions')) {
+        return { rows: [{ active_requirement_set_id: null }] };
+      }
+      if (sql.includes('SELECT (COALESCE(MAX(revision_number)')) {
+        return { rows: [{ next_revision: 1 }] };
+      }
+      if (sql.includes('SELECT rs.id') && sql.includes('FROM requirement_sets rs')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO requirement_sets')) {
+        return { rows: [{ id: 'req-set-failfast' }] };
+      }
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'DETERMINISTIC'")) {
+        return { rows: [{ id: 'det-run-failfast' }] };
+      }
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'LLM_QUOTED'")) {
+        return { rows: [{ id: 'quoted-run-failfast' }] };
+      }
+      if (sql.includes('INSERT INTO job_requirements')) {
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [] };
+    });
+
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+    const quotedExtractor = vi.fn(async () => {
+      throw new Error(
+        'All model providers failed: [{"provider":"openai","model":"gpt-4o-mini","error":"API request failed with status 400: invalid schema"},{"provider":"gemini","model":"gemini-3.6-flash","error":"NOT_FOUND"}]'
+      );
+    });
+
+    await expect(
+      runRequirementsExtraction(fakePool, {
+        context,
+        quotedExtractor,
+        failFastOnQuotedProviderFailure: true,
+        quotedProviderFailureLimit: 1,
+      })
+    ).rejects.toThrow(/aborting requirements extraction/);
+
+    expect(quotedExtractor).toHaveBeenCalledTimes(1);
+    expect(
+      query.mock.calls.some(
+        (call: unknown[]) => String(call[0]).includes('job_version_pipeline_state') && String(call[0]).includes('RETRY_WAIT')
+      )
+    ).toBe(true);
   });
 });

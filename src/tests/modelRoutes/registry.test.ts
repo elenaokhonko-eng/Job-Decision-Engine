@@ -16,7 +16,7 @@ describe("modelRoutes/registry", () => {
 
     const content = {
       primary_provider: "gemini" as const,
-      primary_model: "gemini-2.0-flash",
+      primary_model: "gemini-3.6-flash",
       fallback_provider: "openai" as const,
       fallback_model: "gpt-4o-mini",
     };
@@ -71,4 +71,3 @@ describe("modelRoutes/registry", () => {
     expect(calls.some((c) => c.sql.includes("INSERT INTO model_route_activation_events"))).toBe(true);
   });
 });
-

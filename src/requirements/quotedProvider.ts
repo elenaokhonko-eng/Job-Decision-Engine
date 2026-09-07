@@ -1,7 +1,7 @@
 import { runAgentWithFallback } from '../services/agent.js';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
-  QuotedRequirementExtractorResponseSchema,
+  RequirementImportanceSchema,
+  RequirementTypeSchema,
   REQUIREMENTS_SCHEMA_VERSION,
 } from './contracts.js';
 
@@ -21,16 +21,101 @@ export interface QuotedProviderOutput {
   errors: Array<{ provider: string; model: string; error: string }>;
 }
 
-const extractorSchema = (zodToJsonSchema(
-  QuotedRequirementExtractorResponseSchema,
-  'QuotedRequirementExtractorResponse'
-) as any).definitions?.QuotedRequirementExtractorResponse || zodToJsonSchema(QuotedRequirementExtractorResponseSchema, 'QuotedRequirementExtractorResponse');
+export const quotedRequirementProviderSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['schema_version', 'requirements'],
+  properties: {
+    schema_version: {
+      type: 'string',
+      enum: [REQUIREMENTS_SCHEMA_VERSION],
+    },
+    requirements: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 25,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'requirement_key',
+          'requirement_type',
+          'importance',
+          'requirement_text',
+          'quote_text',
+          'confidence',
+        ],
+        properties: {
+          requirement_key: {
+            type: 'string',
+            pattern: '^R-[0-9]{3}$',
+          },
+          requirement_type: {
+            type: 'string',
+            enum: RequirementTypeSchema.options,
+          },
+          importance: {
+            type: 'string',
+            enum: RequirementImportanceSchema.options,
+          },
+          requirement_text: {
+            type: 'string',
+            minLength: 5,
+            maxLength: 4000,
+          },
+          quote_text: {
+            type: 'string',
+            minLength: 5,
+            maxLength: 4000,
+          },
+          confidence: {
+            type: 'number',
+            minimum: 0,
+            maximum: 1,
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+export function assertQuotedRequirementProviderSchemaCompatible(): void {
+  const issues = findUntypedAdditionalProperties(quotedRequirementProviderSchema);
+  if (issues.length > 0) {
+    throw new Error(
+      `Quoted requirement provider schema contains untyped additionalProperties entries: ${issues.join(', ')}`
+    );
+  }
+}
+
+function findUntypedAdditionalProperties(value: unknown, path = '$'): string[] {
+  if (!value || typeof value !== 'object') return [];
+
+  const obj = value as Record<string, unknown>;
+  const issues: string[] = [];
+  const additionalProperties = obj.additionalProperties;
+  if (
+    additionalProperties &&
+    typeof additionalProperties === 'object' &&
+    !Array.isArray(additionalProperties) &&
+    !('type' in (additionalProperties as Record<string, unknown>))
+  ) {
+    issues.push(`${path}.additionalProperties`);
+  }
+
+  for (const [key, child] of Object.entries(obj)) {
+    issues.push(...findUntypedAdditionalProperties(child, `${path}.${key}`));
+  }
+
+  return issues;
+}
 
 function buildPrompt(input: QuotedProviderInput): string {
   return [
     'Extract job requirements using exact verbatim quotes from the supplied job description.',
     'Return STRICT JSON matching the provided schema.',
     'Rules:',
+    `- schema_version must be "${REQUIREMENTS_SCHEMA_VERSION}".`,
     '- Do not invent or paraphrase quote_text.',
     '- Every quote_text must appear verbatim in the description.',
     '- Confidence must be 0..1.',
@@ -51,7 +136,7 @@ export async function runQuotedRequirementProvider(
 
   const response = await runAgentWithFallback<any>(
     prompt,
-    extractorSchema,
+    quotedRequirementProviderSchema,
     'You are a strict requirement extractor. Return valid JSON only.'
   );
 

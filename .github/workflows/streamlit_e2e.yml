@@ -9,6 +9,8 @@ env:
 jobs:
   streamlit-e2e:
     runs-on: ubuntu-latest
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    timeout-minutes: 30
 
     services:
       postgres:
@@ -71,4 +73,3 @@ jobs:
           path: scripts/exports/streamlit_accessibility_snapshot.json
           if-no-files-found: warn
           retention-days: 7
-

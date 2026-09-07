@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: evaluation-queue-worker
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -16,6 +16,8 @@ jobs:
   drain-queue:
     name: Drain evaluation retries
     runs-on: ubuntu-latest
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    timeout-minutes: 20
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -35,6 +37,7 @@ jobs:
         run: npx tsx src/db/migrate.ts
 
       - name: Run Evaluation Queue Worker
+        timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -43,5 +46,6 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
           EVALUATION_EXIT_ON_RETRY_WAIT: "false"
         run: npx tsx scripts/evaluate_queue.ts

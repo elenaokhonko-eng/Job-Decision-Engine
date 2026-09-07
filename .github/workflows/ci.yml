@@ -12,6 +12,8 @@ env:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    timeout-minutes: 25
     
     services:
       postgres:

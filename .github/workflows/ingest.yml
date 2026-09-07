@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: job-discovery-pipeline
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -16,6 +16,8 @@ jobs:
   gmail_ingestion:
     name: Ingest Gmail job alerts
     runs-on: ubuntu-latest
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    timeout-minutes: 20
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -42,6 +44,7 @@ jobs:
           GMAIL_INGEST_MAX_ATTEMPTS: ${{ vars.GMAIL_INGEST_MAX_ATTEMPTS || '3' }}
         run: npx tsx scripts/ingest_gmail.ts
       - name: Run LLM email parser
+        timeout-minutes: 10
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -50,11 +53,14 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
         run: npx tsx scripts/parse_emails.ts
 
   public_source_ingestion:
     name: Ingest public job sources
     runs-on: ubuntu-latest
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    timeout-minutes: 20
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -74,6 +80,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx scripts/load_source_plugins.ts
       - name: Run unified ATS and job-board adapters
+        timeout-minutes: 10
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx scripts/run_adapters.ts
@@ -82,7 +89,8 @@ jobs:
     name: Run Job Decision Pipeline
     runs-on: ubuntu-latest
     needs: [gmail_ingestion, public_source_ingestion]
-    if: ${{ always() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success') }}
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && always() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success') }}
+    timeout-minutes: 30
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -98,6 +106,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx src/db/migrate.ts
       - name: Verify configured model routes
+        timeout-minutes: 5
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
@@ -116,8 +125,10 @@ jobs:
           EMBEDDING_FALLBACK_DIMENSIONS: ${{ vars.EMBEDDING_FALLBACK_DIMENSIONS || '1536' }}
           DOCUMENT_PRIMARY_MODEL: ${{ vars.DOCUMENT_PRIMARY_MODEL }}
           DOCUMENT_FALLBACK_MODEL: ${{ vars.DOCUMENT_FALLBACK_MODEL }}
+          MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
         run: npx tsx scripts/preflight_models.ts
       - name: Process discovery pipeline
+        timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -131,9 +142,12 @@ jobs:
           EMBEDDING_PRIMARY_DIMENSIONS: ${{ vars.EMBEDDING_PRIMARY_DIMENSIONS || '768' }}
           EMBEDDING_FALLBACK_DIMENSIONS: ${{ vars.EMBEDDING_FALLBACK_DIMENSIONS || '1536' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
+          REQUIREMENTS_PROVIDER_FAILURE_LIMIT: ${{ vars.REQUIREMENTS_PROVIDER_FAILURE_LIMIT || '1' }}
           REQUIREMENTS_ENABLE_QUOTED: 'true'
         run: npx tsx scripts/process_pipeline.ts
       - name: Run AI evaluation queue processor
+        timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -141,4 +155,5 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
         run: npx tsx scripts/evaluate_queue.ts
