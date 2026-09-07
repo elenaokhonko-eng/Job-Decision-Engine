@@ -68,4 +68,28 @@ describe('extractDeterministicRequirements', () => {
     const types = first.requirements.map((r) => r.requirement_type);
     expect(new Set(types).size).toBe(types.length);
   });
+
+  it('extracts broad technical leadership and delivery function families', () => {
+    const result = extractDeterministicRequirements({
+      canonical_job_id: '77777777-7777-4777-8777-777777777777',
+      job_version_id: '88888888-8888-4888-8888-888888888888',
+      description_text:
+        'Transformation Programme Director leading software development and data platform delivery. Own the technical roadmap and coordinate the project manager workstream.',
+    });
+
+    const functionReq = result.requirements.find((r) => r.requirement_type === 'FUNCTION');
+    expect(functionReq).toBeTruthy();
+    expect(functionReq?.structured_value).toEqual({ function_key: 'TRANSFORMATION_PROGRAMME_DIRECTOR' });
+  });
+
+  it('extracts a generic project manager function only when technical context is present', () => {
+    const result = extractDeterministicRequirements({
+      canonical_job_id: '99999999-9999-4999-8999-999999999999',
+      job_version_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      description_text:
+        'Project Manager responsible for software delivery, data platform milestones, and technical release management.',
+    });
+
+    expect(result.requirements.some((r) => r.requirement_type === 'FUNCTION')).toBe(true);
+  });
 });

@@ -55,7 +55,18 @@ describe("criteria gates regression coverage", () => {
 			"AI Researcher",
 			"Applied Scientist",
 			"Machine Learning Engineer",
-			"AI Architect"
+			"AI Architect",
+			"Technical Program Manager",
+			"Director of Engineering",
+			"Director of Data",
+			"Engineering Manager",
+			"Head of Data Science",
+			"Data Lead",
+			"Data Analyst",
+			"Analytics Engineer",
+			"Technical Product Manager",
+			"Lead Scientist",
+			"Transformation Programme Director",
 		];
 
 		for (const title of titles) {
@@ -65,6 +76,27 @@ describe("criteria gates regression coverage", () => {
 			});
 			expect(result.rejection_codes, `Unexpected rejection for ${title}`).not.toContain("NON_TECHNICAL_FUNCTION");
 		}
+	});
+
+	it("accepts broad project and program titles when the description proves technical scope", () => {
+		for (const title of ["Project Manager", "Program Director", "Transformation Manager"]) {
+			const result = runGate({
+				title,
+				description: "Lead software development and data platform delivery across the digital transformation roadmap."
+			});
+			expect(result.rejection_codes, `Unexpected rejection for ${title}`).not.toContain("NON_TECHNICAL_FUNCTION");
+			expect(result.rejection_codes, `Unexpected domain rejection for ${title}`).not.toContain("GATE_NOT_AI_DATA");
+		}
+	});
+
+	it("does not promote generic project management without technical evidence", () => {
+		const result = runGate({
+			title: "Project Manager",
+			description: "Coordinate event logistics, budgets, meeting schedules, and stakeholder updates."
+		});
+
+		expect(result.status).toBe("HARD_REJECT");
+		expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
 	});
 
 	it("rejects pure compliance language without technical building evidence", () => {

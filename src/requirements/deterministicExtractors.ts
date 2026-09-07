@@ -324,9 +324,18 @@ export function extractDeterministicRequirements(
     );
   }
 
-  const functionRequirement = findFirstMatch(description, [
-    /\b(machine\s+learning\s+engineer|ml\s+engineer|data\s+engineer|platform\s+engineer|software\s+engineer|ai\s+engineer|research\s+scientist|quant(?:itative)?\s+(?:engineer|developer)|bioinformatics\s+engineer|systems\s+architect|ai\s+architect)\b/i,
-  ]);
+  const technicalFunctionPatterns = [
+    /\b(?:director|head|vp|vice\s+president)\s+of\s+(?:engineering|technology|software|data(?:\s+(?:science|engineering|platform|analytics|architecture))?|analytics?|ai|ml|platform|cloud|systems?|digital|transformation|research|science)\b/i,
+    /\b(?:engineering|technology|software|data|analytics?|ai|ml|digital|transformation)\s+(?:program|programme|project|portfolio|delivery|transformation)\s+(?:manager|director|lead|head|officer|vp|vice\s+president)\b/i,
+    /\b(?:engineering|technology|software|data(?:\s+(?:science|engineering|platform|analytics|architecture))?|analytics?|ai|ml|platform|cloud|systems?|digital|transformation|research|science)\s+(?:manager|director|lead|head|officer|vp|vice\s+president)\b/i,
+    /\b(?:machine\s+learning\s+engineer|ml\s+engineer|data\s+engineer|platform\s+engineer|software\s+engineer|ai\s+engineer|research\s+scientist|(?:data|ai|ml|lead|principal|chief)\s+scientist|quant(?:itative)?\s+(?:engineer|developer|researcher)|bioinformatics\s+engineer|systems\s+architect|ai\s+architect|software\s+developer|full[\s-]stack\s+developer|backend\s+developer|frontend\s+developer|data\s+scientist|data\s+architect|research\s+engineer|research\s+software\s+engineer)\b/i,
+  ];
+  let functionRequirement = findFirstMatch(description, technicalFunctionPatterns);
+  if (!functionRequirement && /\b(?:project|program|programme|portfolio|delivery)\s+(?:manager|director|lead|head)\b/i.test(description) && /\b(?:software|data|analytics?|ai|ml|machine\s+learning|technology|technical|engineering|platform|cloud|digital|transformation|systems?)\b/i.test(description)) {
+    functionRequirement = findFirstMatch(description, [
+      /\b(?:project|program|programme|portfolio|delivery)\s+(?:manager|director|lead|head)\b/i,
+    ]);
+  }
   if (functionRequirement) {
     const normalized = functionRequirement.quote_text.toUpperCase().replace(/\s+/g, '_');
     requirements.push(

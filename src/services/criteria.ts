@@ -60,6 +60,9 @@ export const TECHNICAL_FUNCTION_KEYWORDS: RegExp[] = [
   /\b(software engineer|data engineer|ml engineer|machine learning engineer|ai engineer)\b/i,
   /\b(full[\s-]stack|backend engineer|distributed systems|platform engineer|cloud engineer)\b/i,
   /\b(research engineer|quantitative developer|quant engineer|system architect|ai architect)\b/i,
+  /\b(engineering|technology|technical|software|data|analytics?|ai|ml|digital|transformation|scientific)\s+(program|programme|project|portfolio|delivery|transformation)?\s*(manager|director|lead|head|officer|vp|vice president)\b/i,
+  /\b(manager|director|lead|head|officer|vp|vice president)\s+of\s+(engineering|technology|software|data|analytics?|ai|ml|platform|cloud|systems?|digital|transformation|research|science)\b/i,
+  /\b(software development|software delivery|application development|data science|data platform|data architecture|data analytics|technology transformation|digital transformation|data transformation|technical delivery|engineering delivery|engineering program|technical roadmap|product development|systems design|release management|cloud platform|platform engineering|software development lifecycle|sdlc)\b/i,
   /\b(python|typescript|go|c\+\+|rust|sql|postgres|fastapi|docker|kubernetes)\b/i,
   /\b(applied scientist|research scientist|bioinformatics|computational biolog(y|ist)|genomics?|biotech|drug discovery)\b/i,
   /\b(regtech|legaltech|compliance automation|contract analytics|knowledge engineer(ing)?|llm|agents?|rag|nlp|foundation models?|data pipeline)\b/i,
@@ -72,20 +75,22 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
   const t = (title || "").toLowerCase();
   const d = (description || "").toLowerCase();
 
-  // Lane-aware technical title families
-  const isTechnicalTitle = /\b(engineer|developer|architect|data scientist|machine learning|applied scientist|research scientist|quantitative researcher|quant researcher|quant developer|quantitative developer|quantitative engineer|ai researcher|software engineer|data engineer|ml platform|systems engineer|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?)\b/i.test(t);
+  // Lane-aware technical title families, including technical leadership and delivery roles.
+  const isTechnicalTitle = /\b(engineer|engineering|developer|architect|data scientist|data analyst|analytics engineer|business intelligence|machine learning|applied scientist|research scientist|scientist|quantitative researcher|quant researcher|quant developer|quantitative developer|quantitative engineer|ai researcher|software engineer|data engineer|ml platform|systems engineer|systems analyst|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?|test automation|automation engineer|qa automation)\b/i.test(t);
+  const hasTechnicalLeadershipTitle = /\b(manager|director|lead|head|officer|vp|vice president)\b/i.test(t) && /\b(engineer(?:ing)?|technology|technical|software|data|analytics?|ai|ml|machine learning|platform|cloud|systems?|digital|transformation|research|scientific|science)\b/i.test(t);
+  const hasTechnicalProgramTitle = /\b(technical|technology|engineering|software|data|ai|ml|digital|transformation)\s+(program|programme|project|portfolio|delivery|transformation)\s+(manager|director|lead|head|officer|vp|vice president)\b/i.test(t);
 
   // Technical building / engineering / data / modeling keywords
   const buildingKeywords = [
     "python", "typescript", "javascript", "go", "golang", "c++", "rust", "sql", "postgres",
     "pytorch", "tensorflow", "scikit-learn", "keras", "jax", "pandas", "numpy", "spark",
     "fastapi", "docker", "kubernetes", "aws", "gcp", "azure", "distributed systems",
-    "data pipeline", "etl", "data warehouse", "data lake", "lakehouse",
+    "data pipeline", "etl", "data warehouse", "data lake", "lakehouse", "data science", "data platform", "data architecture", "data analytics",
     "model training", "fine-tuning", "rag", "agents", "agentic", "llm", "nlp", "prompt engineering",
     "bioinformatics", "genomics", "cheminformatics", "computational biology", "drug discovery",
     "regtech", "legaltech", "compliance automation", "contract analytics", "document intelligence",
     "knowledge graphs", "time-series", "portfolio analytics", "algorithmic trading", "market microstructure",
-    "architecture", "software engineering", "mlops", "ci/cd"
+    "architecture", "software engineering", "software development", "software delivery", "application development", "technology transformation", "digital transformation", "data transformation", "technical delivery", "engineering delivery", "engineering program", "technical roadmap", "product development", "systems design", "release management", "cloud platform", "platform engineering", "software development lifecycle", "sdlc", "mlops", "ci/cd"
   ];
 
   const shortToken = /^[a-z0-9]{1,3}$/;
@@ -98,7 +103,7 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
   };
 
   const hasBuildingEvidence = buildingKeywords.some(kw => hasKeyword(t, kw) || hasKeyword(d, kw)) || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(d));
-  const isTechnical = isTechnicalTitle || hasBuildingEvidence;
+  const isTechnical = isTechnicalTitle || hasTechnicalLeadershipTitle || hasTechnicalProgramTitle || hasBuildingEvidence;
 
   return {
     isTechnical,
@@ -663,7 +668,7 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
     "cheminformatics", "genomics", "drug discovery", "clinical trial", "regtech",
     "legaltech", "fraud detection", "kyc", "aml", "compliance automation",
     "contract analytics", "digital trust", "deep learning", "agentic", "market data",
-    "trading infrastructure"
+    "trading infrastructure", "software development", "software platform", "data science", "data analytics", "business intelligence", "data platform", "data architecture", "technology transformation", "digital transformation", "data transformation", "technical program", "technical project"
   ];
   const hasDomainRelevance = aiDataShortRegex.test(t) || aiDataShortRegex.test(d) ||
     targetDomainPhrases.some(kw => t.includes(kw) || d.includes(kw));
