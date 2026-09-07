@@ -5,7 +5,7 @@ import { pgSslConfig } from '../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 
 dotenv.config();
-dotenv.config({ path: '.env.local' });
+dotenv.config({ path: '.env.local', override: true });
 
 const defaultPool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -149,7 +149,7 @@ export async function seedEmbeddingSpaces(
 
   const primaryProvider = process.env.EMBEDDING_PRIMARY_PROVIDER || 'gemini';
   const fallbackProvider = process.env.EMBEDDING_FALLBACK_PROVIDER || 'openai';
-  const primaryModel = process.env.EMBEDDING_PRIMARY_MODEL || 'text-embedding-004';
+  const primaryModel = process.env.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001';
   const fallbackModel = process.env.EMBEDDING_FALLBACK_MODEL || 'text-embedding-3-small';
   const primaryDimensions = Number(process.env.EMBEDDING_PRIMARY_DIMENSIONS || 768);
   const fallbackDimensions = Number(process.env.EMBEDDING_FALLBACK_DIMENSIONS || 1536);

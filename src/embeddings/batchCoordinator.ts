@@ -11,7 +11,7 @@ import { seedEmbeddingSpaces } from './spaceRegistry.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 
 dotenv.config();
-dotenv.config({ path: '.env.local' });
+dotenv.config({ path: '.env.local', override: true });
 
 const defaultPool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -400,6 +400,8 @@ export async function runEmbeddingBatchWithFallback(
 
     let fallback: EmbeddingBatchSummary | undefined;
     if (primary.failedInputIds.length > 0) {
+      // Re-embed every input attempted by the primary provider so the fallback
+      // embedding space remains homogeneous for matching and routing.
       fallback = await runEmbeddingBatch(
         seeded.fallbackSpaceId,
         `fallback-${Date.now()}`,

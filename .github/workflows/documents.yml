@@ -81,7 +81,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
-          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DOCUMENT_PRIMARY_PROVIDER: ${{ vars.DOCUMENT_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
@@ -101,7 +101,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
-          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DOCUMENT_PRIMARY_PROVIDER: ${{ vars.DOCUMENT_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}

@@ -64,7 +64,7 @@ npm run db:init
 - Validate your current provider/model routes before ingestion: `npx tsx scripts/preflight_models.ts`
 - If Gemini embeddings fail with `404 NOT_FOUND` / `embedContent` errors, list models visible to your key: `npm run gemini:models`
   - Set `EMBEDDING_PRIMARY_MODEL` to a model that supports `embedContent`
-  - Optionally set `GEMINI_API_VERSION` (examples: `v1`, `v1alpha`)
+  - Optionally set `GEMINI_API_VERSION` (examples: `v1beta`, `v1`, `v1alpha`)
   - To skip Gemini embeddings entirely: set `EMBEDDING_PRIMARY_PROVIDER="openai"`
 
 4. Run checks:
@@ -116,11 +116,16 @@ npm run docs:cover-letter
 ## Required Secrets
 
 1. `DATABASE_URL`
-2. `GMAIL_USER`
-3. `GMAIL_APP_PASSWORD`
-4. At least one of `GEMINI_API_KEY` or `OPENAI_API_KEY`
-5. `MASTER_PROFILE_JSON` for document workflows
-6. `DOCUMENT_CONTACT_JSON` (recommended) for document workflows
+2. `GMAIL_OAUTH_CLIENT_ID`
+3. `GMAIL_OAUTH_CLIENT_SECRET`
+4. `GMAIL_OAUTH_REFRESH_TOKEN`
+5. At least one of `GEMINI_API_KEY` or `OPENAI_API_KEY`
+6. `MASTER_PROFILE_JSON` for document workflows
+7. `DOCUMENT_CONTACT_JSON` (recommended) for document workflows
+
+Gmail ingestion uses the Gmail API over HTTPS rather than direct IMAP access. Create an OAuth 2.0 client, grant the account the minimum Gmail scope needed by the workflow, and store the resulting refresh token as `GMAIL_OAUTH_REFRESH_TOKEN`. The ingestion stage reads the configured `GMAIL_FOLDER` label first; after the raw message is committed to PostgreSQL it applies `GMAIL_PROCESSED_FOLDER`, unless `GMAIL_READ_ONLY=true` is set.
+
+Setup details: [docs/gmail-api-setup.md](docs/gmail-api-setup.md)
 
 ## Notes For Open-Source Usage
 

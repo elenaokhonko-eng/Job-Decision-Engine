@@ -57,4 +57,4 @@ streamlit run streamlit_app.py
 npm run gemini:models
 ```
 
-Then set `EMBEDDING_PRIMARY_MODEL` to a model supporting `embedContent`, and optionally set `GEMINI_API_VERSION` (e.g. `v1`).
+Then set `EMBEDDING_PRIMARY_MODEL` to a model supporting `embedContent` (the default is `gemini-embedding-001`), and optionally set `GEMINI_API_VERSION` (e.g. `v1beta`).

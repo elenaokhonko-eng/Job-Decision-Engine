@@ -11,7 +11,7 @@ npm run docs:compliance
 | source_key | display_name | kind | access_basis | terms_url | attribution_required | authenticated_scraping | reviewed_at | interval_minutes |
 |---|---|---|---|---|---:|---:|---|---:|
 | ashby | Ashby public job boards | ats | public_feed | https://ashbyhq.com/ | yes | no | 2026-09-06 | 1440 |
-| gmail_alert | User-provided Gmail alerts (IMAP) | email_alert | user_supplied | https://policies.google.com/terms | no | no | 2026-09-06 | 1440 |
+| gmail_alert | User-provided Gmail alerts (Gmail API) | email_alert | user_supplied | https://policies.google.com/terms | no | no | 2026-09-06 | 1440 |
 | greenhouse | Greenhouse public job boards | ats | official_api | https://developers.greenhouse.io/job-board.html | yes | no | 2026-09-06 | 1440 |
 | himalayas | Himalayas jobs feed | json_api | public_feed | https://himalayas.app/ | yes | no | 2026-09-06 | 60 |
 | jobicy | Jobicy remote jobs feed | json_api | public_feed | https://jobicy.com/ | yes | no | 2026-09-06 | 60 |

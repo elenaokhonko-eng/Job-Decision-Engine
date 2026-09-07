@@ -21,7 +21,7 @@ vi.mock('pg', () => {
 vi.mock('../../services/agent.js', () => ({
   generateEmbeddingWithProvider: vi.fn(),
   MODEL_REGISTRY: {
-    EMBEDDING_PRIMARY_MODEL: 'text-embedding-004',
+    EMBEDDING_PRIMARY_MODEL: 'gemini-embedding-001',
     EMBEDDING_FALLBACK_MODEL: 'text-embedding-3-small',
   },
 }));

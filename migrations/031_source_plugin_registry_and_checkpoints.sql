@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS source_connector_accounts (
   source_plugin_id UUID NOT NULL REFERENCES source_plugins(id) ON DELETE CASCADE,
   account_key TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DISABLED')),
-  -- e.g. ["GMAIL_APP_PASSWORD", "SOME_BEARER_TOKEN_ENV_KEY"] (never store secret values).
+  -- e.g. ["GMAIL_OAUTH_REFRESH_TOKEN", "SOME_BEARER_TOKEN_ENV_KEY"] (never store secret values).
   secret_key_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_by_user_id UUID REFERENCES workspace_users(id) ON DELETE SET NULL,

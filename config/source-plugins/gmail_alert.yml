@@ -1,6 +1,6 @@
 schema_version: "2.2.0"
 source_key: gmail_alert
-display_name: User-provided Gmail alerts (IMAP)
+display_name: User-provided Gmail alerts (Gmail API)
 kind: email_alert
 status: active
 capabilities:
@@ -22,7 +22,7 @@ schedule:
   interval_minutes: 1440
   jitter_seconds: 180
 request:
-  endpoint: https://gmail.example.invalid/imap
+  endpoint: https://gmail.googleapis.com/gmail/v1/users/me
   timeout_ms: 60000
   headers_from_secret_keys: []
   retry:
@@ -54,4 +54,3 @@ mapping:
   employment_type: $derive.employment_type_from_text
   posted_at: null
   updated_at: null
-

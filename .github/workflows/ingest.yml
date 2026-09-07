@@ -43,7 +43,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
-          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           DOCUMENT_PRIMARY_PROVIDER: ${{ vars.DOCUMENT_PRIMARY_PROVIDER || 'openai' }}
@@ -52,21 +52,25 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
           EVALUATION_PRIMARY_MODEL: ${{ vars.EVALUATION_PRIMARY_MODEL }}
           EVALUATION_FALLBACK_MODEL: ${{ vars.EVALUATION_FALLBACK_MODEL }}
-          EMBEDDING_PRIMARY_MODEL: ${{ vars.EMBEDDING_PRIMARY_MODEL }}
-          EMBEDDING_FALLBACK_MODEL: ${{ vars.EMBEDDING_FALLBACK_MODEL }}
-          EMBEDDING_PRIMARY_DIMENSIONS: ${{ vars.EMBEDDING_PRIMARY_DIMENSIONS }}
-          EMBEDDING_FALLBACK_DIMENSIONS: ${{ vars.EMBEDDING_FALLBACK_DIMENSIONS }}
+          EMBEDDING_PRIMARY_MODEL: ${{ vars.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001' }}
+          EMBEDDING_FALLBACK_MODEL: ${{ vars.EMBEDDING_FALLBACK_MODEL || 'text-embedding-3-small' }}
+          EMBEDDING_PRIMARY_DIMENSIONS: ${{ vars.EMBEDDING_PRIMARY_DIMENSIONS || '768' }}
+          EMBEDDING_FALLBACK_DIMENSIONS: ${{ vars.EMBEDDING_FALLBACK_DIMENSIONS || '1536' }}
           DOCUMENT_PRIMARY_MODEL: ${{ vars.DOCUMENT_PRIMARY_MODEL }}
           DOCUMENT_FALLBACK_MODEL: ${{ vars.DOCUMENT_FALLBACK_MODEL }}
         run: npx tsx scripts/preflight_models.ts
 
       # ── Source 1: Gmail alert ingestion ──────────────────────────────────────
 
-      - name: Run Native Gmail Alert Ingestion
+      - name: Run Gmail API Alert Ingestion (HTTPS)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_OAUTH_CLIENT_ID: ${{ secrets.GMAIL_OAUTH_CLIENT_ID }}
+          GMAIL_OAUTH_CLIENT_SECRET: ${{ secrets.GMAIL_OAUTH_CLIENT_SECRET }}
+          GMAIL_OAUTH_REFRESH_TOKEN: ${{ secrets.GMAIL_OAUTH_REFRESH_TOKEN }}
+          GMAIL_FOLDER: ${{ vars.GMAIL_FOLDER || 'Jobs-Alerts' }}
+          GMAIL_PROCESSED_FOLDER: ${{ vars.GMAIL_PROCESSED_FOLDER || 'Jobs-Alerts-Processed' }}
+          GMAIL_READ_ONLY: ${{ vars.GMAIL_READ_ONLY || 'false' }}
         run: npx tsx scripts/ingest_gmail.ts
 
       - name: Run LLM Email Parser
@@ -74,7 +78,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
-          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
@@ -94,15 +98,15 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           EMBEDDING_PRIMARY_PROVIDER: ${{ vars.EMBEDDING_PRIMARY_PROVIDER || 'gemini' }}
           EMBEDDING_FALLBACK_PROVIDER: ${{ vars.EMBEDDING_FALLBACK_PROVIDER || 'openai' }}
-          EMBEDDING_PRIMARY_MODEL: ${{ vars.EMBEDDING_PRIMARY_MODEL }}
-          EMBEDDING_FALLBACK_MODEL: ${{ vars.EMBEDDING_FALLBACK_MODEL }}
-          EMBEDDING_PRIMARY_DIMENSIONS: ${{ vars.EMBEDDING_PRIMARY_DIMENSIONS }}
-          EMBEDDING_FALLBACK_DIMENSIONS: ${{ vars.EMBEDDING_FALLBACK_DIMENSIONS }}
+          EMBEDDING_PRIMARY_MODEL: ${{ vars.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001' }}
+          EMBEDDING_FALLBACK_MODEL: ${{ vars.EMBEDDING_FALLBACK_MODEL || 'text-embedding-3-small' }}
+          EMBEDDING_PRIMARY_DIMENSIONS: ${{ vars.EMBEDDING_PRIMARY_DIMENSIONS || '768' }}
+          EMBEDDING_FALLBACK_DIMENSIONS: ${{ vars.EMBEDDING_FALLBACK_DIMENSIONS || '1536' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
         run: npx tsx scripts/process_pipeline.ts
 
@@ -110,7 +114,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}

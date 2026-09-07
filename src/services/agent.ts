@@ -23,12 +23,12 @@ import {
 } from "./criteria.ts";
 
 dotenv.config();
-dotenv.config({ path: ".env.local" });
+dotenv.config({ path: ".env.local", override: true });
 
 export const MODEL_REGISTRY = {
   EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash",
   EVALUATION_FALLBACK_MODEL: process.env.EVALUATION_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
-  EMBEDDING_PRIMARY_MODEL: process.env.EMBEDDING_PRIMARY_MODEL || "text-embedding-004",
+  EMBEDDING_PRIMARY_MODEL: process.env.EMBEDDING_PRIMARY_MODEL || "gemini-embedding-001",
   EMBEDDING_FALLBACK_MODEL: process.env.EMBEDDING_FALLBACK_MODEL || "text-embedding-3-small",
   DOCUMENT_PRIMARY_MODEL: process.env.DOCUMENT_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash",
   DOCUMENT_FALLBACK_MODEL: process.env.DOCUMENT_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
@@ -72,16 +72,19 @@ export function checkModelRegistryPreflight(): { ok: boolean; warnings: string[]
 
 // Helper function to lazily initialize the Gemini SDK and throw "loud-fail" error if API key is missing
 let aiClient: GoogleGenAI | null = null;
+let aiClientConfigKey: string | null = null;
 
 export function getGeminiClient(): GoogleGenAI {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  const apiVersionRaw = (process.env.GEMINI_API_VERSION || "").trim();
+  const configKey = `${apiKey || ""}\u0000${apiVersionRaw}`;
+
+  if (!aiClient || aiClientConfigKey !== configKey) {
     if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
       throw new Error(
-        "CRITICAL API KEY CONFLICT: GEMINI_API_KEY is not configured for Gemini 2.0 Flash."
+        "GEMINI_API_KEY is not configured for the requested Gemini model."
       );
     }
-    const apiVersionRaw = (process.env.GEMINI_API_VERSION || "").trim();
     aiClient = new GoogleGenAI({
       apiKey: apiKey,
       apiVersion: apiVersionRaw || undefined,
@@ -92,6 +95,7 @@ export function getGeminiClient(): GoogleGenAI {
         timeout: 45000,
       },
     });
+    aiClientConfigKey = configKey;
   }
   return aiClient;
 }
@@ -811,6 +815,11 @@ export type EmbeddingProvider = "gemini" | "openai";
 type GeminiEmbeddingDisableState = { reason: string; logged: boolean };
 const geminiEmbeddingDisableByModel = new Map<string, GeminiEmbeddingDisableState>();
 
+function geminiEmbeddingDisableKey(model: string): string {
+  const apiVersion = (process.env.GEMINI_API_VERSION || "default").trim() || "default";
+  return `${apiVersion}:${model}`;
+}
+
 function describeError(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -857,16 +866,21 @@ async function embedWithGeminiModel(text: string, model: string): Promise<number
     throw new Error("Gemini embedding requested but model is empty.");
   }
 
-  const disabled = geminiEmbeddingDisableByModel.get(normalizedModel);
+  const disabled = geminiEmbeddingDisableByModel.get(geminiEmbeddingDisableKey(normalizedModel));
   if (disabled?.reason) {
     throw new Error(`Gemini embedding disabled for ${normalizedModel}: ${disabled.reason}`);
   }
 
   const ai = getGeminiClient();
   try {
+    const configuredDimensions = Number(process.env.EMBEDDING_PRIMARY_DIMENSIONS || 768);
+    const outputDimensionality = Number.isInteger(configuredDimensions) && configuredDimensions > 0
+      ? configuredDimensions
+      : undefined;
     const response = await ai.models.embedContent({
       model: normalizedModel,
       contents: text,
+      ...(outputDimensionality ? { config: { outputDimensionality } } : {}),
     });
     const vals = response.embeddings?.[0]?.values;
     if (vals && vals.length > 0) return vals;
@@ -874,10 +888,11 @@ async function embedWithGeminiModel(text: string, model: string): Promise<number
   } catch (error: unknown) {
     if (isGeminiEmbeddingModelNotFound(error)) {
       const reason = `model not found/unsupported; set GEMINI_API_VERSION or configure EMBEDDING_PRIMARY_MODEL to one that supports embedContent`;
-      const prior = geminiEmbeddingDisableByModel.get(normalizedModel) || { reason: "", logged: false };
-      geminiEmbeddingDisableByModel.set(normalizedModel, { reason, logged: prior.logged });
+      const disableKey = geminiEmbeddingDisableKey(normalizedModel);
+      const prior = geminiEmbeddingDisableByModel.get(disableKey) || { reason: "", logged: false };
+      geminiEmbeddingDisableByModel.set(disableKey, { reason, logged: prior.logged });
       if (!prior.logged) {
-        geminiEmbeddingDisableByModel.set(normalizedModel, { reason, logged: true });
+        geminiEmbeddingDisableByModel.set(disableKey, { reason, logged: true });
         console.warn(`⚠️ Gemini embedding disabled for ${normalizedModel}: ${reason}`);
       }
     }
@@ -948,7 +963,7 @@ export async function generateEmbeddingWithProviderAndModel(
 
 /**
  * Generate a text embedding vector. Provider order:
- *  1. Gemini text-embedding-004 (if GEMINI_API_KEY present)
+ *  1. Gemini gemini-embedding-001 (if GEMINI_API_KEY present)
  *  2. OpenAI text-embedding-3-small (if OPENAI_API_KEY present)
  * THROWS if both fail or neither key is configured — never fabricates random
  * or zero vectors, which would produce silent mis-classifications in laneRouter.
@@ -965,7 +980,9 @@ export async function generateEmbedding(text: string): Promise<number[]> {
     if (provider === "gemini") {
       const disabled =
         MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL &&
-        geminiEmbeddingDisableByModel.get(MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL)?.reason;
+        geminiEmbeddingDisableByModel.get(
+          geminiEmbeddingDisableKey(MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL)
+        )?.reason;
       if (!geminiKey || disabled) {
         continue;
       }

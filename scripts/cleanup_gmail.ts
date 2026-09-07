@@ -1,98 +1,58 @@
-import { ImapFlow } from "imapflow";
 import pg from "pg";
 import dotenv from "dotenv";
+import { GmailApiClient, loadGmailApiCredentials } from "../src/services/gmailApi.js";
+import { pgSslConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
-dotenv.config({ path: ".env.local" });
+dotenv.config({ path: ".env.local", override: true });
 
 const databaseUrl = process.env.DATABASE_URL;
-const gmailUser = process.env.GMAIL_USER;
-const gmailPassword = process.env.GMAIL_APP_PASSWORD;
 const gmailFolder = process.env.GMAIL_FOLDER || "Jobs-Alerts";
 const gmailProcessedFolder = process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
 
-async function cleanupGmail() {
-  console.log("====================================================");
-  console.log("             GMAIL CLEANUP & ALIGNMENT UNIT         ");
-  console.log("====================================================");
-
-  if (!databaseUrl || !gmailUser || !gmailPassword) {
-    console.error("❌ ERROR: Missing DATABASE_URL, GMAIL_USER, or GMAIL_APP_PASSWORD.");
-    process.exit(1);
+async function cleanupGmail(): Promise<void> {
+  if (!databaseUrl) {
+    throw new Error("Missing required DATABASE_URL.");
   }
 
+  const gmailClient = new GmailApiClient(loadGmailApiCredentials());
   const pool = new pg.Pool({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false }
-  });
-
-  const client = new ImapFlow({
-    host: "imap.gmail.com",
-    port: 993,
-    secure: true,
-    auth: {
-      user: gmailUser,
-      pass: gmailPassword
-    },
-    logger: false
+    ssl: pgSslConfig(databaseUrl),
   });
 
   try {
-    // 1. Fetch all subjects of emails already stored in Postgres database
-    console.log("Connecting to Postgres to fetch ingested alert subjects...");
     const ctx = await resolveWorkspaceContext(pool as any);
-    const dbRes = await pool.query("SELECT subject FROM raw_email_alerts WHERE workspace_id = $1", [ctx.workspaceId]);
-    const ingestedSubjects = new Set(dbRes.rows.map(r => r.subject));
-    console.log(`Found ${ingestedSubjects.size} unique email subjects already in database.`);
+    const databaseResult = await pool.query(
+      "SELECT subject FROM raw_email_alerts WHERE workspace_id = $1",
+      [ctx.workspaceId]
+    );
+    const ingestedSubjects = new Set(databaseResult.rows.map((row) => row.subject));
+    const source = await gmailClient.readMessagesByLabel(gmailFolder);
 
-    // 2. Connect to Gmail
-    await client.connect();
-    
-    // 3. Clean up the Jobs-Alerts folder (remove label from already ingested emails)
-    console.log(`Opening mailbox "${gmailFolder}"...`);
-    const mainMailbox = await client.mailboxOpen(gmailFolder);
-    console.log(`Mailbox "${gmailFolder}" has ${mainMailbox.exists} messages.`);
-
-    if (mainMailbox.exists > 0) {
-      const messages: any[] = [];
-      for await (const message of client.fetch("1:*", { envelope: true, uid: true })) {
-        messages.push(message);
+    let relabeledCount = 0;
+    for (const message of source.messages) {
+      if (ingestedSubjects.has(message.subject)) {
+        await gmailClient.markProcessed(message.id, source.label.id, gmailProcessedFolder);
+        relabeledCount += 1;
       }
-
-      let movedCount = 0;
-      for (const msg of messages) {
-        const subject = msg.envelope?.subject || "No Subject";
-        if (ingestedSubjects.has(subject)) {
-          console.log(`Removing "${gmailFolder}" label from already ingested email: "${subject}"`);
-          // Add processed label, remove main label
-          await client.messageFlagsAdd(msg.uid, [gmailProcessedFolder], { uid: true, useLabels: true });
-          await client.messageFlagsRemove(msg.uid, [gmailFolder], { uid: true, useLabels: true });
-          movedCount++;
-        }
-      }
-      console.log(`✅ Cleared ${movedCount} already-ingested emails from "${gmailFolder}".`);
     }
+    console.log(`Applied the processed label to ${relabeledCount} already-staged messages.`);
 
-    // 4. Clean up the Jobs-Alerts-Processed folder (delete them to keep folder clean)
-    console.log(`Opening mailbox "${gmailProcessedFolder}"...`);
-    const processedMailbox = await client.mailboxOpen(gmailProcessedFolder);
-    console.log(`Mailbox "${gmailProcessedFolder}" has ${processedMailbox.exists} messages.`);
-
-    if (processedMailbox.exists > 0) {
-      console.log(`Deleting ${processedMailbox.exists} emails from "${gmailProcessedFolder}"...`);
-      await client.messageFlagsAdd("1:*", ["\\Deleted"]);
-      await client.mailboxClose();
-      console.log(`✅ Successfully emptied "${gmailProcessedFolder}".`);
+    const processed = await gmailClient.readMessagesByLabel(gmailProcessedFolder);
+    for (const message of processed.messages) {
+      await gmailClient.deleteMessage(message.id);
     }
-
-    await client.logout();
-    console.log("\n✅ Gmail cleanup completed successfully!");
-  } catch (err: any) {
-    console.error("❌ Cleanup error:", err.message || err);
+    console.log(`Deleted ${processed.messages.length} messages from "${gmailProcessedFolder}".`);
   } finally {
     await pool.end();
   }
 }
 
-cleanupGmail();
+if (process.argv[1] && process.argv[1].includes("cleanup_gmail")) {
+  cleanupGmail().catch((error) => {
+    console.error("Gmail cleanup failed:", error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
+}

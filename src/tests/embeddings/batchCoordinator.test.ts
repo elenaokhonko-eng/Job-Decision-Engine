@@ -176,7 +176,6 @@ describe('runEmbeddingBatch', () => {
     expect(second.fallback).toBeTruthy();
     expect(second.fallback?.runType).toBe('FALLBACK');
     expect(second.fallback?.processedInputIds).toEqual(['input-req-1', 'input-req-2']);
-
     const sqlCalls = query.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(sqlCalls.some((sql) => sql.includes('fallback_from_batch_id'))).toBe(true);
 

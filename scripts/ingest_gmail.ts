@@ -1,73 +1,47 @@
-import { ImapFlow } from "imapflow";
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { GmailApiClient, loadGmailApiCredentials } from "../src/services/gmailApi.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
 const databaseUrl = process.env.DATABASE_URL;
-const gmailUser = process.env.GMAIL_USER;
-const gmailPassword = process.env.GMAIL_APP_PASSWORD;
 const gmailFolder = process.env.GMAIL_FOLDER || "Jobs-Alerts";
 const gmailProcessedFolder = process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
+const gmailReadOnly = process.env.GMAIL_READ_ONLY === "true";
 
 export async function ingestGmail(): Promise<number> {
   console.log("====================================================");
-  console.log("       NATIVE GMAIL JOB ALERT INGESTION (TS)       ");
+  console.log("        GMAIL API JOB ALERT INGESTION (HTTPS)       ");
   console.log("====================================================");
 
-  if (!databaseUrl || !gmailUser || !gmailPassword) {
-    console.error("❌ ERROR: Missing DATABASE_URL, GMAIL_USER, or GMAIL_APP_PASSWORD.");
-    throw new Error("Missing required Gmail credentials or DATABASE_URL.");
+  if (!databaseUrl) {
+    throw new Error("Missing required DATABASE_URL.");
   }
 
+  const gmailClient = new GmailApiClient(loadGmailApiCredentials());
   const pool = new pg.Pool({
     connectionString: databaseUrl,
-    ssl: pgSslConfig(databaseUrl)
+    ssl: pgSslConfig(databaseUrl),
   });
-
-  const ctx = await resolveWorkspaceContext(pool as any);
-
-  const client = new ImapFlow({
-    host: "imap.gmail.com",
-    port: 993,
-    secure: true,
-    auth: {
-      user: gmailUser,
-      pass: gmailPassword
-    },
-    logger: false
-  });
-
   let ingestedCount = 0;
 
   try {
-    await client.connect();
-    console.log(`Connected to Gmail IMAP. Opening mailbox "${gmailFolder}"...`);
-    const mailbox = await client.mailboxOpen(gmailFolder);
-    console.log(`Mailbox "${gmailFolder}" opened. Total messages found: ${mailbox.exists}`);
+    const ctx = await resolveWorkspaceContext(pool as any);
+    console.log(`Reading Gmail label "${gmailFolder}" through the Gmail API over HTTPS...`);
+    const { label, messages } = await gmailClient.readMessagesByLabel(gmailFolder);
+    console.log(`Gmail label "${gmailFolder}" resolved to ${label.id}. Messages found: ${messages.length}`);
 
-    if (mailbox.exists === 0) {
+    if (messages.length === 0) {
       console.log("No messages to process.");
-      await client.logout();
       return 0;
     }
 
-    const messages: any[] = [];
-    for await (const message of client.fetch("1:*", { envelope: true, source: true, uid: true })) {
-      messages.push(message);
-    }
+    for (const message of messages) {
+      console.log(`Processing email #${ingestedCount + 1}: "${message.subject}"`);
 
-    console.log(`Found ${messages.length} email alerts in "${gmailFolder}".`);
-
-    for (const msg of messages) {
-      const subject = msg.envelope?.subject || "No Subject";
-      const body = msg.source?.toString("utf-8") || "";
-      console.log(`Processing email #${ingestedCount + 1}: "${subject}"`);
-
-      // Transactionally stage email alert before modifying IMAP state
       const dbClient = await pool.connect();
       try {
         await dbClient.query("BEGIN");
@@ -75,36 +49,34 @@ export async function ingestGmail(): Promise<number> {
           `INSERT INTO raw_email_alerts (workspace_id, subject, body, gmail_message_id, processed)
            VALUES ($1, $2, $3, $4, FALSE)
            ON CONFLICT (workspace_id, gmail_message_id) DO NOTHING`,
-          [ctx.workspaceId, subject, body, String(msg.uid)]
+          [ctx.workspaceId, message.subject, message.raw, message.id]
         );
         await dbClient.query("COMMIT");
-      } catch (txErr) {
+      } catch (transactionError) {
         await dbClient.query("ROLLBACK");
-        throw txErr;
+        throw transactionError;
       } finally {
         dbClient.release();
       }
 
-      // Non-destructive transition: Move email to processed folder (or mark seen), do not permanently delete
-      try {
-        await client.messageMove(msg.uid, gmailProcessedFolder, { uid: true }).catch(async () => {
-          // Fallback if folder move is unsupported: mark as Seen
-          await client.messageFlagsAdd(msg.uid, ["\\Seen"], { uid: true });
-        });
-      } catch (err) {
-        console.warn(`Warning: Could not move email UID ${msg.uid} to ${gmailProcessedFolder}:`, err);
+      // Gmail is changed only after the raw message is durably staged in Postgres.
+      if (!gmailReadOnly) {
+        try {
+          await gmailClient.markProcessed(message.id, label.id, gmailProcessedFolder);
+        } catch (labelError) {
+          console.warn(`Warning: Could not apply Gmail processed label to message ${message.id}:`, labelError);
+        }
       }
-      ingestedCount++;
+      ingestedCount += 1;
     }
 
-    console.log(`✅ Successfully staged ${ingestedCount} raw email alerts to Postgres.`);
-    try {
-      await client.mailboxClose();
-    } catch {}
-    await client.logout();
-  } catch (err: any) {
-    console.error("❌ Gmail ingestion error:", err.message || err);
-    throw err;
+    console.log(`Successfully staged ${ingestedCount} raw email alerts to Postgres.`);
+    if (gmailReadOnly) {
+      console.log("GMAIL_READ_ONLY=true: source messages were not relabeled or marked.");
+    }
+  } catch (error) {
+    console.error("Gmail API ingestion error:", error instanceof Error ? error.message : error);
+    throw error;
   } finally {
     await pool.end();
   }
