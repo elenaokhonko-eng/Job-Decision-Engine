@@ -198,6 +198,11 @@ function parsePositiveInt(value: unknown, fallback: number, max: number): number
   return Math.max(1, Math.min(max, parsed));
 }
 
+function truncateLogValue(value: string, maxLength = 500): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
 async function insertStageEvent(
   client: { query: pg.PoolClient['query'] },
   job: RequirementStageJob,
@@ -290,9 +295,21 @@ export async function runRequirementsExtraction(
     typeof (value as pg.Pool).connect === 'function' && !('release' in value);
 
   const ownsClient = isPool(pool);
+  console.log('[requirementsExtractor] acquiring database client');
   const client = ownsClient ? await pool.connect() : pool;
+  console.log('[requirementsExtractor] database client acquired');
 
+  const dbStatementTimeoutMs = parsePositiveInt(
+    process.env.REQUIREMENTS_DB_STATEMENT_TIMEOUT_MS,
+    60000,
+    300000
+  );
+  await client.query(`SELECT set_config('statement_timeout', $1, false)`, [`${dbStatementTimeoutMs}ms`]);
+  console.log(`[requirementsExtractor] statement_timeout=${dbStatementTimeoutMs}ms`);
+
+  console.log('[requirementsExtractor] resolving workspace context');
   const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
+  console.log(`[requirementsExtractor] workspace_id=${ctx.workspaceId}; loading target job versions`);
 
   // NOTE: requirements extraction is a *job-version* stage, but canonical job processing_state
   // can advance (e.g. RAW_STAGED -> PREQUALIFIED -> LANE_ROUTED) even when this stage fails.
@@ -346,6 +363,7 @@ export async function runRequirementsExtraction(
 
   const { rows } = await client.query(queryTargetJobs, [ctx.workspaceId]);
   const jobs = rows as RequirementStageJob[];
+  console.log(`[requirementsExtractor] loaded target job versions count=${jobs.length}`);
 
   const summary: RequirementExtractionSummary = {
     discovered: jobs.length,
@@ -381,8 +399,17 @@ export async function runRequirementsExtraction(
     ? `quoted_provider_${REQUIREMENTS_SCHEMA_VERSION}`
     : 'none';
 
+  console.log(
+    `[requirementsExtractor] discovered=${jobs.length} quoted_enabled=${Boolean(quotedExtractor)} fail_fast=${failFastOnQuotedProviderFailure} provider_failure_limit=${quotedProviderFailureLimit}`
+  );
+
   try {
-    for (const job of jobs) {
+    for (let jobIndex = 0; jobIndex < jobs.length; jobIndex += 1) {
+      const job = jobs[jobIndex] as RequirementStageJob;
+      const progress = `[requirementsExtractor] ${jobIndex + 1}/${jobs.length} canonical_job_id=${job.canonical_job_id} job_version_id=${job.job_version_id}`;
+      const jobStartedAt = Date.now();
+      console.log(`${progress} starting`);
+
       await client.query('BEGIN');
       try {
         await upsertPipelineState(client, job, 'IN_PROGRESS');
@@ -461,6 +488,9 @@ export async function runRequirementsExtraction(
               requirement_set_id: activeSetId,
             });
             await client.query('COMMIT');
+            console.log(
+              `${progress} completed cached=true requirement_set_id=${activeSetId} elapsed_ms=${Date.now() - jobStartedAt}`
+            );
             summary.processed += 1;
             summary.details.push({
               canonicalJobId: job.canonical_job_id,
@@ -612,6 +642,9 @@ export async function runRequirementsExtraction(
           detInserted = counts.get('DETERMINISTIC') || 0;
           quotedInserted = counts.get('LLM_QUOTED') || 0;
           warning = `cached_from_requirement_set:${templateSetId}`;
+          console.log(
+            `${progress} copied cached requirements deterministic_inserted=${detInserted} quoted_inserted=${quotedInserted} source_requirement_set_id=${templateSetId}`
+          );
 
           if (quotedExtractor && quotedInserted > 0) {
             const quotedRunStart = await client.query<{ id: string }>(
@@ -665,6 +698,7 @@ export async function runRequirementsExtraction(
             requirementSetId,
             deterministicRequirements
           );
+          console.log(`${progress} deterministic_inserted=${detInserted}`);
 
           if (quotedExtractor) {
             summary.metrics.quotedAttempted += 1;
@@ -686,6 +720,7 @@ export async function runRequirementsExtraction(
             );
 
             try {
+              console.log(`${progress} quoted provider starting`);
               const quotedResult = await quotedExtractor({
                 canonicalJobId: job.canonical_job_id,
                 jobVersionId: job.job_version_id,
@@ -711,6 +746,9 @@ export async function runRequirementsExtraction(
                   summary.metrics.quotedValidationFailures += 1;
                   bucket.validationFailures += 1;
                   warning = validated.issues.map((i) => `${i.requirement_key}: ${i.message}`).join('; ');
+                  console.warn(
+                    `${progress} quoted validation failed issues=${validated.issues.length} provider=${quotedResult.provider} model=${quotedResult.model}`
+                  );
 
                   await client.query(
                     `UPDATE requirement_extraction_runs
@@ -757,6 +795,9 @@ export async function runRequirementsExtraction(
                   );
                   summary.metrics.quotedSucceeded += 1;
                   bucket.successes += 1;
+                  console.log(
+                    `${progress} quoted provider completed provider=${quotedResult.provider} model=${quotedResult.model} inserted=${quotedInserted}`
+                  );
 
                   await client.query(
                     `UPDATE requirement_extraction_runs
@@ -777,6 +818,7 @@ export async function runRequirementsExtraction(
                   );
                 }
               } else {
+                console.log(`${progress} quoted provider returned no payload`);
                 await client.query(
                   `UPDATE requirement_extraction_runs
                    SET status = 'COMPLETED',
@@ -814,6 +856,9 @@ export async function runRequirementsExtraction(
               );
 
               quotedProviderFailures += 1;
+              console.warn(
+                `${progress} quoted provider failed failures=${quotedProviderFailures}/${quotedProviderFailureLimit} error=${truncateLogValue(warning)}`
+              );
               if (failFastOnQuotedProviderFailure && quotedProviderFailures >= quotedProviderFailureLimit) {
                 throw new RequirementsStageAbortError(
                   `Quoted requirements provider failed ${quotedProviderFailures} time(s); aborting requirements extraction after model retry budget was exhausted. Last error: ${warning}`
@@ -853,6 +898,9 @@ export async function runRequirementsExtraction(
         });
 
         await client.query('COMMIT');
+        console.log(
+          `${progress} completed deterministic_inserted=${detInserted} quoted_inserted=${quotedInserted} elapsed_ms=${Date.now() - jobStartedAt}`
+        );
 
         summary.processed += 1;
         summary.details.push({
@@ -868,6 +916,9 @@ export async function runRequirementsExtraction(
         summary.metrics.retryWaitTransitions += 1;
 
         const errorMessage = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `${progress} failed elapsed_ms=${Date.now() - jobStartedAt} error=${truncateLogValue(errorMessage)}`
+        );
         // Emit a small amount of context so CI logs show the true root-cause (missing columns,
         // drifted migrations, constraint violations, etc.) instead of only a summary count.
         if (summary.errors <= 5) {

@@ -7,6 +7,7 @@ const originalEnv = {
   GEMINI_FLASH_API_KEY: process.env.GEMINI_FLASH_API_KEY,
   EVALUATION_PRIMARY_PROVIDER: process.env.EVALUATION_PRIMARY_PROVIDER,
   MODEL_REQUEST_MAX_RETRIES: process.env.MODEL_REQUEST_MAX_RETRIES,
+  MODEL_REQUEST_TIMEOUT_MS: process.env.MODEL_REQUEST_TIMEOUT_MS,
 };
 
 function restoreEnv(): void {
@@ -30,9 +31,11 @@ describe('generateContentAudited retry policy', () => {
     process.env.OPENAI_API_KEY = 'test-openai-key';
     process.env.EVALUATION_PRIMARY_PROVIDER = 'openai';
     process.env.MODEL_REQUEST_MAX_RETRIES = '3';
+    process.env.MODEL_REQUEST_TIMEOUT_MS = '12000';
     delete process.env.GEMINI_API_KEY;
     delete process.env.GEMINI_FLASH_API_KEY;
 
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
     const fetchMock = vi.fn(async () =>
       new Response(
         JSON.stringify({
@@ -63,5 +66,6 @@ describe('generateContentAudited retry policy', () => {
     ).rejects.toThrow(/status 400/);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(timeoutSpy).toHaveBeenCalledWith(12000);
   });
 });

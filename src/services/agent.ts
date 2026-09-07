@@ -51,6 +51,12 @@ function modelRequestMaxRetries(): number {
   return Math.max(1, Math.min(5, parsed));
 }
 
+function modelRequestTimeoutMs(): number {
+  const parsed = Number.parseInt(String(process.env.MODEL_REQUEST_TIMEOUT_MS || "60000"), 10);
+  if (!Number.isFinite(parsed)) return 60000;
+  return Math.max(5000, Math.min(300000, parsed));
+}
+
 function isRetryableModelRequestError(error: any): boolean {
   const status = Number(error?.status);
   if (Number.isFinite(status)) {
@@ -331,18 +337,29 @@ export async function runAgentWithFallback<T>(
 async function tryGemini(geminiKey: string, options: any): Promise<string> {
   const ai = getGeminiClient();
   const maxRetries = modelRequestMaxRetries();
+  const timeoutMs = modelRequestTimeoutMs();
+  const model = options.model || MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const startedAt = Date.now();
     try {
+      console.log(
+        `[model:gemini] model=${model} attempt=${attempt}/${maxRetries} starting timeout=${Math.round(timeoutMs / 1000)}s`
+      );
       const response = await ai.models.generateContent({
-        model: options.model || MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
+        model,
         contents: options.contents,
         config: {
+          abortSignal: AbortSignal.timeout(timeoutMs),
+          httpOptions: { timeout: timeoutMs },
           responseMimeType: options.responseMimeType as any,
           responseSchema: options.responseSchema,
           systemInstruction: options.systemInstruction
         }
       });
+      console.log(
+        `[model:gemini] model=${model} attempt=${attempt}/${maxRetries} completed elapsed_ms=${Date.now() - startedAt}`
+      );
       return response.text || "";
     } catch (gErr: any) {
       const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests") || gErr.message?.includes("quota");
@@ -374,8 +391,14 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
   messages.push({ role: "user", content: options.contents });
 
   const maxRetries = modelRequestMaxRetries();
+  const timeoutMs = modelRequestTimeoutMs();
+  const providerLabel = isKimi ? "kimi" : "openai";
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const startedAt = Date.now();
     try {
+      console.log(
+        `[model:${providerLabel}] model=${model} attempt=${attempt}/${maxRetries} starting timeout=${Math.round(timeoutMs / 1000)}s`
+      );
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
@@ -391,7 +414,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
             ? { type: "json_schema", json_schema: { name: "extraction", strict: true, schema: options.responseSchema } }
             : (options.responseMimeType === "application/json" ? { type: "json_object" } : undefined)
         }),
-        signal: AbortSignal.timeout(300000)
+        signal: AbortSignal.timeout(timeoutMs)
       });
 
       if (!response.ok) {
@@ -410,6 +433,9 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
       }
 
       const data = await response.json();
+      console.log(
+        `[model:${providerLabel}] model=${model} attempt=${attempt}/${maxRetries} completed elapsed_ms=${Date.now() - startedAt}`
+      );
       return data.choices?.[0]?.message?.content || "";
     } catch (err: any) {
       if (attempt === maxRetries || !isRetryableModelRequestError(err)) throw err;
