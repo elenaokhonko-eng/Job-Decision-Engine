@@ -80,6 +80,9 @@ describe('runEmbeddingBatch', () => {
         return { rows: [{ id: spaceKey.includes('primary') ? 'space-primary' : 'space-fallback' }] };
       }
       if (sql.includes('FROM job_requirements jr')) {
+        if (sql.includes('SELECT DISTINCT ei.id')) {
+          return { rows: [] };
+        }
         return {
           rows: [
             {

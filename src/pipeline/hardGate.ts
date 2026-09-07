@@ -9,6 +9,8 @@ import {
 import { GATE_VERSION } from "../contracts/version.js";
 import { pgSslConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { calculateProfessionalExperienceYears, compareStructuredRequirement, type ComparableFact } from "./requirementComparators.js";
+import { loadWorkabilityPolicy } from "./workabilityPolicy.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -92,9 +94,12 @@ function quoteOrText(req: PersistedRequirement): string {
 }
 
 function detectOfficeDays(req: PersistedRequirement): number | null {
-  const raw = req.structured_value?.office_days_per_week;
-  if (typeof raw === "number" && Number.isFinite(raw)) {
-    return raw;
+  const structured = req.structured_value || {};
+  for (const key of ["office_days_per_week", "max_office_days_per_week", "office_days_max", "office_days_min"]) {
+    const raw = structured[key];
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      return raw;
+    }
   }
   const txt = quoteOrText(req);
   const m = txt.match(/([1-5])\s*days?/i);
@@ -102,24 +107,41 @@ function detectOfficeDays(req: PersistedRequirement): number | null {
 }
 
 function detectTravelPct(req: PersistedRequirement): number | null {
-  const raw = req.structured_value?.max_travel_pct;
-  if (typeof raw === "number" && Number.isFinite(raw)) {
-    return raw;
+  const structured = req.structured_value || {};
+  for (const key of ["max_travel_pct", "travel_pct_max", "travel_percentage", "maximum_travel_pct"]) {
+    const raw = structured[key];
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      return raw;
+    }
   }
   const txt = quoteOrText(req);
   const m = txt.match(/(\d{1,2})%/);
   return m ? Number(m[1]) : null;
 }
 
-function applyPersistedRequirementGates(
+function structuredNumber(req: PersistedRequirement, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = req.structured_value?.[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return null;
+}
+
+export function applyPersistedRequirementGates(
   job: {
     title: string;
     company_name: string;
     employment_type?: string;
+    description?: string;
   },
   deterministicRequirements: PersistedRequirement[]
 ): GateResult {
   const title = job.title || "";
+  const policy = loadWorkabilityPolicy();
+  let pendingVerification: { codes: string[]; evidence: string[]; facts?: Partial<GateResult["workability_facts"]> } | null = null;
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
     if (pattern.test(title)) {
       return makeReject(
@@ -139,6 +161,7 @@ function applyPersistedRequirementGates(
   const hasSemanticSignals = functionRequirements.length > 0 || domainRequirements.length > 0;
   const semanticCorpus = [...functionRequirements, ...domainRequirements]
     .map((r) => quoteOrText(r).toLowerCase())
+    .concat(job.description ? [job.description.toLowerCase()] : [])
     .join(" \n");
 
   let hasTechnicalEvidence = false;
@@ -149,6 +172,7 @@ function applyPersistedRequirementGates(
   } else {
     const textCorpus = deterministicRequirements
       .map((r) => quoteOrText(r).toLowerCase())
+      .concat(job.description ? [job.description.toLowerCase()] : [])
       .join(" \n");
     const techCheck = isTechnicalRole(title, textCorpus);
     hasTechnicalEvidence = techCheck.isTechnical;
@@ -165,9 +189,51 @@ function applyPersistedRequirementGates(
     );
   }
 
+  for (const requirement of deterministicRequirements) {
+    const buildingPct = structuredNumber(requirement, [
+      "building_research_pct",
+      "minimum_building_research_pct",
+      "hands_on_pct",
+      "implementation_pct",
+    ]);
+    if (buildingPct !== null && buildingPct < policy.minimumBuildingResearchPct) {
+      return makeReject(["GATE_BUILDING_RESEARCH_RATIO"], [quoteOrText(requirement)], {
+        office_days_min: null,
+        office_days_max: null,
+      });
+    }
+
+    const interactionPct = structuredNumber(requirement, [
+      "interaction_pct",
+      "maximum_interaction_pct",
+      "stakeholder_pct",
+      "client_facing_pct",
+    ]);
+    if (interactionPct !== null && interactionPct > policy.maximumInteractionPct) {
+      return makeReject(["GATE_HIGH_INTERACTION"], [quoteOrText(requirement)]);
+    }
+
+    const travelPct = structuredNumber(requirement, [
+      "max_travel_pct",
+      "travel_pct_max",
+      "travel_percentage",
+      "maximum_travel_pct",
+    ]);
+    if (travelPct !== null && travelPct > policy.maxTravelPct) {
+      return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(requirement)], {
+        travel_pct_max: travelPct,
+      });
+    }
+  }
+
   const employmentReq = deterministicRequirements.find((r) => r.requirement_type === "EMPLOYMENT_TYPE");
   const normalizedEmployment = (employmentReq ? quoteOrText(employmentReq) : (job.employment_type || "")).toLowerCase();
-  if (normalizedEmployment.includes("contract")) {
+  const employmentType = normalizedEmployment.includes("contract")
+    ? "CONTRACT" as const
+    : /\b(permanent|full[-_ ]?time|fte)\b/i.test(normalizedEmployment)
+      ? "PERMANENT" as const
+      : "UNKNOWN" as const;
+  if (employmentType === "CONTRACT") {
     return makeReject(
       ["GATE_CONTRACT_ROLE"],
       [employmentReq ? quoteOrText(employmentReq) : "Structured employment_type is CONTRACT"],
@@ -175,64 +241,66 @@ function applyPersistedRequirementGates(
     );
   }
 
-  const officeReq = deterministicRequirements.find((r) => r.requirement_type === "OFFICE_DAYS");
-  if (officeReq) {
-    const days = detectOfficeDays(officeReq);
-    if (days !== null && days >= 4) {
+  const officeRequirements = deterministicRequirements.filter((r) => r.requirement_type === "OFFICE_DAYS");
+  const officeReq = officeRequirements[0];
+  for (const requirement of officeRequirements) {
+    const days = detectOfficeDays(requirement);
+    if (days !== null && days >= policy.hardFailOfficeDaysPerWeek) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
-        [quoteOrText(officeReq)],
+        [quoteOrText(requirement)],
         { office_days_min: days, office_days_max: days }
       );
     }
     if (days === null) {
-      return makeVerification(
-        ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
-        [quoteOrText(officeReq)],
-        { office_days_min: null, office_days_max: null }
-      );
+      pendingVerification = {
+        codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+        evidence: [quoteOrText(requirement)],
+        facts: { office_days_min: null, office_days_max: null },
+      };
     }
   }
 
   const workModeReq = deterministicRequirements.find((r) => r.requirement_type === "WORK_MODE");
   if (workModeReq) {
     const mode = quoteOrText(workModeReq).toLowerCase();
-    if (
+    if (!policy.onsiteOnlyAllowed && (
       mode.includes("onsite only") ||
       mode.includes("on-site only") ||
       mode.includes("fully on-site") ||
       mode.includes("fully onsite") ||
       mode.includes("100% on-site") ||
       mode.includes("100% onsite")
-    ) {
+    )) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
         [quoteOrText(workModeReq)],
-        { office_days_min: 4, office_days_max: 5 }
+        { office_days_min: policy.hardFailOfficeDaysPerWeek, office_days_max: 5 }
       );
     }
   }
 
-  const travelReq = deterministicRequirements.find((r) => r.requirement_type === "TRAVEL");
-  if (travelReq) {
-    const travelPct = detectTravelPct(travelReq);
-    const txt = quoteOrText(travelReq).toLowerCase();
-    if ((travelPct !== null && travelPct >= 25) || txt.includes("frequent travel")) {
+  const travelRequirements = deterministicRequirements.filter((r) => r.requirement_type === "TRAVEL");
+  const travelReq = travelRequirements[0];
+  for (const requirement of travelRequirements) {
+    const travelPct = detectTravelPct(requirement);
+    const txt = quoteOrText(requirement).toLowerCase();
+    if ((travelPct !== null && travelPct > policy.maxTravelPct) || (txt.includes("frequent travel") && !policy.frequentTravelAllowed)) {
       return makeReject(
         ["GATE_LIFESTYLE_INCOMPATIBLE"],
-        [quoteOrText(travelReq)],
+        [quoteOrText(requirement)],
         { travel_pct_max: travelPct }
       );
     }
   }
 
   const onCallReq = deterministicRequirements.find((r) => r.requirement_type === "ON_CALL");
-  if (onCallReq) {
+  if (onCallReq && !policy.regularOnCallAllowed) {
     return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(onCallReq)]);
   }
 
   const shiftReq = deterministicRequirements.find((r) => r.requirement_type === "SHIFT_WORK");
-  if (shiftReq) {
+  if (shiftReq && !policy.shiftWorkAllowed) {
     return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(shiftReq)]);
   }
 
@@ -251,20 +319,78 @@ function applyPersistedRequirementGates(
     }
   }
 
-  if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && !officeReq) {
-    return makeVerification(
-      ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
-      [quoteOrText(workModeReq)],
-      { office_days_min: null, office_days_max: null }
-    );
+  if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {
+    pendingVerification = {
+      codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+      evidence: [quoteOrText(workModeReq)],
+      facts: { office_days_min: null, office_days_max: null },
+    };
+  }
+
+  if (pendingVerification) {
+    return makeVerification(pendingVerification.codes, pendingVerification.evidence, pendingVerification.facts);
   }
 
   return makePass({
     office_days_min: officeReq ? detectOfficeDays(officeReq) : null,
     office_days_max: officeReq ? detectOfficeDays(officeReq) : null,
     travel_pct_max: travelReq ? detectTravelPct(travelReq) : null,
-    employment_type: normalizedEmployment.includes("permanent") ? "PERMANENT" : "UNKNOWN",
+    employment_type: employmentType,
   });
+}
+
+function combineGateResults(results: GateResult[]): GateResult {
+  const hardReject = results.find((result) => result.status === "HARD_REJECT");
+  const verification = results.find((result) => result.status === "NEEDS_VERIFICATION");
+  const selected = hardReject || verification || results[0] || makePass();
+  const rejectionCodes = [...new Set(results.flatMap((result) => result.rejection_codes))];
+  const evidenceQuotes = [...new Set(results.flatMap((result) => result.evidence_quotes))];
+
+  const workabilityFacts = { ...makePass().workability_facts };
+  for (const result of results) {
+    for (const [key, value] of Object.entries(result.workability_facts)) {
+      if (value !== null && value !== undefined) {
+        (workabilityFacts as Record<string, unknown>)[key] = value;
+      }
+    }
+  }
+
+  return {
+    ...selected,
+    rejection_code: rejectionCodes[0],
+    rejection_codes: rejectionCodes,
+    evidence_quotes: evidenceQuotes,
+    workability_facts: workabilityFacts,
+  };
+}
+
+function applyExactProfileGates(
+  deterministicRequirements: PersistedRequirement[],
+  profileFacts: ComparableFact[]
+): GateResult {
+  const exactRequirements = deterministicRequirements.filter((requirement) =>
+    ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(requirement.requirement_type)
+  );
+  if (exactRequirements.length === 0) return makePass();
+
+  const mismatches: string[] = [];
+  const mismatchEvidence: string[] = [];
+  const unknowns: string[] = [];
+  const unknownEvidence: string[] = [];
+  for (const requirement of exactRequirements) {
+    const comparison = compareStructuredRequirement(requirement, profileFacts);
+    if (comparison.status === "MISMATCH") {
+      mismatches.push(`GATE_${requirement.requirement_type}_MISMATCH`);
+      mismatchEvidence.push(comparison.rationale);
+    } else if (comparison.status === "UNKNOWN") {
+      unknowns.push(`NEEDS_VERIFICATION_${requirement.requirement_type}`);
+      unknownEvidence.push(comparison.rationale);
+    }
+  }
+
+  if (mismatches.length > 0) return makeReject(mismatches, mismatchEvidence);
+  if (unknowns.length > 0) return makeVerification(unknowns, unknownEvidence);
+  return makePass();
 }
 
 export async function runHardGates(
@@ -335,25 +461,89 @@ export async function runHardGates(
             )
            WHERE jv.workspace_id = $1
              AND jv.id = $2
-             AND jr.extractor_type = 'DETERMINISTIC'
-             AND jr.status IN ('EXTRACTED', 'VALIDATED')
+             AND jr.status = 'VALIDATED'
            ORDER BY jr.requirement_key ASC`,
           [ctx.workspaceId, job.job_version_id]
         );
 
         const deterministicRequirements = requirementRows as PersistedRequirement[];
+        let profileFacts: ComparableFact[] = [];
+        if (deterministicRequirements.some((requirement) =>
+          ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(requirement.requirement_type)
+        )) {
+          const { rows: activeProfileRows } = await client.query<{ id: string }>(
+            `SELECT id
+             FROM profile_versions
+             WHERE workspace_id = $1
+               AND status = 'ACTIVE'
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [ctx.workspaceId]
+          );
+          const activeProfileVersionId = activeProfileRows[0]?.id ?? null;
+          const { rows: profileFactRows } = await client.query(
+            `SELECT pf.id, pf.statement, pf.structured_value
+             FROM profile_facts pf
+             WHERE pf.workspace_id = $1
+             ${activeProfileVersionId ? "AND pf.profile_version_id = $2" : "AND FALSE"}`,
+            activeProfileVersionId ? [ctx.workspaceId, activeProfileVersionId] : [ctx.workspaceId]
+          );
+          profileFacts = profileFactRows as ComparableFact[];
+          const { rows: credentialRows } = await client.query(
+            `SELECT pc.id, pc.credential_name, pc.issuer, pc.credential_type, pc.level
+             FROM profile_credentials pc
+             WHERE pc.workspace_id = $1
+               ${activeProfileVersionId ? "AND pc.profile_version_id = $2" : "AND FALSE"}
+             AND pc.status = 'ACTIVE'`,
+            activeProfileVersionId ? [ctx.workspaceId, activeProfileVersionId] : [ctx.workspaceId]
+          );
+          profileFacts = profileFacts.concat(
+            credentialRows.map((credential: any) => ({
+              id: credential.id,
+              statement: `${credential.credential_name} ${credential.issuer} ${credential.level || ""}`.trim(),
+              structured_value: { credential_type: credential.credential_type, level: credential.level },
+              source_type: "CREDENTIAL" as const,
+            }))
+          );
+          const { rows: engagementRows } = await client.query(
+            `SELECT start_date, end_date, is_current, experience_class
+             FROM profile_engagements
+             WHERE profile_version_id = $1`,
+            [activeProfileVersionId]
+          );
+          const experienceYears = calculateProfessionalExperienceYears(engagementRows);
+          if (experienceYears > 0) {
+            profileFacts.push({
+              id: `experience:${ctx.workspaceId}`,
+              statement: `${experienceYears.toFixed(1)} years of professional production experience`,
+              structured_value: { professional_years: experienceYears },
+              source_type: "CREDENTIAL",
+            });
+          }
+        }
         const requirementHints = deterministicRequirements
           .map((r) => r.quote_text || r.requirement_text)
           .filter(Boolean)
           .slice(0, 60)
           .join("\n");
 
-        const gateResult = applyGlobalGates({
+        const globalGateResult = applyGlobalGates({
           ...(rawJobAdapter as any),
           raw_description: requirementHints
             ? `${rawJobAdapter.raw_description}\n\n---\nExtracted requirements:\n${requirementHints}`
             : rawJobAdapter.raw_description,
         } as any);
+        const persistedGateResult = applyPersistedRequirementGates(
+          {
+            title: rawJobAdapter.title,
+            company_name: rawJobAdapter.company_name,
+            employment_type: rawJobAdapter.employment_type,
+            description: rawJobAdapter.raw_description,
+          },
+          deterministicRequirements
+        );
+        const exactProfileGateResult = applyExactProfileGates(deterministicRequirements, profileFacts);
+        const gateResult = combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult]);
 
         let processingStatus: string;
         switch (gateResult.status) {

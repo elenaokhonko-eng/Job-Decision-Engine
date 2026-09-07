@@ -84,8 +84,28 @@ export async function ingestGmail(): Promise<number> {
   return ingestedCount;
 }
 
+export async function ingestGmailWithRetry(): Promise<number> {
+  const configuredAttempts = Number(process.env.GMAIL_INGEST_MAX_ATTEMPTS || "3");
+  const maxAttempts = Number.isInteger(configuredAttempts) && configuredAttempts > 0 ? configuredAttempts : 3;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await ingestGmail();
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts) break;
+      const delayMs = Math.min(30_000, 1_000 * 2 ** (attempt - 1));
+      console.warn(`Gmail ingestion attempt ${attempt}/${maxAttempts} failed; retrying in ${delayMs}ms.`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 if (process.argv[1] && process.argv[1].includes("ingest_gmail")) {
-  ingestGmail()
+  ingestGmailWithRetry()
     .then(() => process.exit(0))
     .catch(() => process.exit(1));
 }

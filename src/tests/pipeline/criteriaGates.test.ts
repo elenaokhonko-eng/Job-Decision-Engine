@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { applyGlobalGates } from "../../services/criteria.js";
+import { applyPersistedRequirementGates } from "../../pipeline/hardGate.js";
 
 type GateInput = {
 	title: string;
@@ -140,5 +141,101 @@ describe("criteria gates regression coverage", () => {
 
 		expect(result.status).toBe("HARD_REJECT");
 		expect(result.rejection_codes).toContain("GATE_CONTRACT_ROLE");
+	});
+
+	it("enforces configured building, interaction, and travel ratios", () => {
+		const buildingResult = runGate({
+			title: "Technical Program Director",
+			description: "Only 40% building and research; the remainder is stakeholder coordination for an AI data platform."
+		});
+		expect(buildingResult.rejection_codes).toContain("GATE_BUILDING_RESEARCH_RATIO");
+
+		const interactionResult = runGate({
+			title: "Data Platform Lead",
+			description: "Build production data platforms with 60% client-facing interaction and 40% implementation."
+		});
+		expect(interactionResult.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+
+		const travelResult = runGate({
+			title: "Machine Learning Engineer",
+			description: "Build production ML systems with up to 25% travel."
+		});
+		expect(travelResult.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+	});
+
+	it("applies hard-reject precedence after an unknown workplace signal", () => {
+		const result = runGate({
+			title: "Forward Deployed AI Engineer",
+			description: "Forward deployed engineering for customer sites; workplace arrangement to be evaluated.",
+			workplace_type: "",
+		});
+		expect(result.status).toBe("HARD_REJECT");
+		expect(result.rejection_codes).toContain("GATE_OUT_OF_SCOPE_DOMAIN");
+	});
+
+	it("rejects four office days from the configured workability policy", () => {
+		const result = runGate({
+			title: "Data Platform Engineer",
+			description: "Build production data systems with 4 days per week in the office.",
+			workplace_type: "HYBRID",
+		});
+		expect(result.status).toBe("HARD_REJECT");
+		expect(result.rejection_codes).toContain("GATE_HIGH_OFFICE_DAYS");
+	});
+
+	it("enforces persisted structured workability requirements from the active policy", () => {
+		const result = applyPersistedRequirementGates(
+			{ title: "Machine Learning Engineer", company_name: "Example" },
+			[
+				{
+					requirement_key: "travel",
+					requirement_type: "TRAVEL",
+					requirement_text: "Travel up to 11 percent",
+					quote_text: null,
+					structured_value: { max_travel_pct: 11 },
+				},
+			]
+		);
+
+		expect(result.status).toBe("HARD_REJECT");
+		expect(result.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+	});
+
+	it("does not hide a structured interaction conflict behind office verification", () => {
+		const result = applyPersistedRequirementGates(
+			{ title: "Technical Program Manager", company_name: "Example" },
+			[
+				{
+					requirement_key: "office",
+					requirement_type: "OFFICE_DAYS",
+					requirement_text: "Hybrid workplace arrangement",
+					quote_text: null,
+					structured_value: null,
+				},
+				{
+					requirement_key: "interaction",
+					requirement_type: "CUSTOM",
+					requirement_text: "Client interaction requirement",
+					quote_text: null,
+					structured_value: { interaction_pct: 60 },
+				},
+			]
+		);
+
+		expect(result.status).toBe("HARD_REJECT");
+		expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+	});
+
+	it("uses the job description when persisted requirements do not contain function evidence", () => {
+		const result = applyPersistedRequirementGates(
+			{
+				title: "Project Manager",
+				company_name: "Example",
+				description: "Lead software development and data platform delivery across the transformation roadmap.",
+			},
+			[]
+		);
+
+		expect(result.status).toBe("PASS");
 	});
 });

@@ -12,7 +12,7 @@ npm run sources:sync
 
 ## Configured Sources
 
-`config/sources.yml` controls enablement, endpoints, polling intervals, query/lane filters, attribution, per-run limits, timeout, and retry policy.
+`config/source-plugins/*.yml` is the runtime source manifest. Sync it with `npm run sources:sync`; the active revision in PostgreSQL is what the source runner uses. `config/sources.yml` is retained only as a legacy config-registry import and is not read by the live adapter runner.
 
 - Greenhouse, Ashby, Lever: employer ATS boards.
 - Himalayas: public remote job API.
@@ -30,6 +30,6 @@ A source may return a successful empty result. HTTP errors, timeouts, rate limit
 1. Add its canonical uppercase ID to `SourceNameSchema`.
 2. Implement an adapter extending `BaseSourceAdapter`.
 3. Preserve source ID, canonical URL, attribution, and raw payload.
-4. Add the source to `config/sources.yml`.
+4. Add or update the source plugin manifest under `config/source-plugins/`.
 5. Wire it into `scripts/run_adapters.ts`.
-6. Add success, malformed, timeout, rate-limit, and empty-result tests.
+6. Add success, malformed, timeout, rate-limit, all-quarantined, and empty-result tests.

@@ -20,7 +20,7 @@ companies:
     target_lanes: 
       - CORE_AI_DATA
     remote_policy: hybrid_allowed
-    enabled: true
+    enabled: false
 
   - id: cohere
     name: Cohere
@@ -44,7 +44,7 @@ companies:
       - HEALTH_BIO_PHARMA
       - CORE_AI_DATA
     remote_policy: hybrid_allowed
-    enabled: true
+    enabled: false
 
   - id: isomorphic_labs
     name: Isomorphic Labs
@@ -69,7 +69,7 @@ companies:
       - LEGAL_REGTECH
       - CORE_AI_DATA
     remote_policy: remote_preferred
-    enabled: true
+    enabled: false
 
   - id: harvey
     name: Harvey
@@ -104,7 +104,7 @@ companies:
     target_lanes: 
       - INVESTMENT_MARKETS_FINTECH
     remote_policy: hybrid_allowed
-    enabled: true
+    enabled: false
 
   # ── Disabled Unverified Local Stubs (Preserved for manual portal routing) ──
   - id: govtech_sg

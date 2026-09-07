@@ -194,6 +194,10 @@ function pickFeedAdapter(plugin: SourcePlugin): BaseSourceAdapter | null {
   return null;
 }
 
+function isUnusableResult(result: AdapterResult): boolean {
+  return !result.success || (result.totalFetched > 0 && result.jobs.length === 0);
+}
+
 export async function runAdapters(): Promise<{
   totalDiscovered: number;
   totalStaged: number;
@@ -259,7 +263,7 @@ export async function runAdapters(): Promise<{
             continue;
           }
           const result = await runAdapter(adapter, { limit: itemsPerRun });
-          if (!result.success) {
+          if (isUnusableResult(result)) {
             const detail = `${result.error || "unknown failure"}${result.isRateLimited ? " [rate-limited]" : ""}`;
             broker.recordError(`${label}: ${detail}`);
             failedSources.push(label);
@@ -300,7 +304,7 @@ export async function runAdapters(): Promise<{
           continue;
         }
         const result = await runAdapter(adapter, { limit: itemsPerRun });
-        if (!result.success) {
+        if (isUnusableResult(result)) {
           const detail = `${result.error || "unknown failure"}${result.isRateLimited ? " [rate-limited]" : ""}`;
           broker.recordError(`${label}: ${detail}`);
           failedSources.push(label);

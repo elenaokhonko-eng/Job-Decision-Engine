@@ -10,6 +10,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { pgSslConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { loadWorkspaceLanesConfig } from "../src/pipeline/laneConfigLoader.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -46,6 +47,8 @@ export async function processPipeline(): Promise<void> {
 
     console.log("\n[2/8] Requirements Extraction...");
     const requirementsSummary = await runRequirementsExtraction(pool, { context: ctx });
+
+    await loadWorkspaceLanesConfig(pool, { context: ctx, seedIfEmpty: true });
 
     console.log("\n[3/8] Embedding Publication (requirements + profile facts)...");
     let embeddingTotalEmbedded = 0;

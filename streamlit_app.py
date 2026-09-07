@@ -203,7 +203,9 @@ def derive_deterministic_recommendation(job):
     employment_known = facts.get("employment_type") in ("PERMANENT", "CONTRACT")
     travel_known = facts.get("travel_pct_max") is not None
 
-    completeness_parts = [work_mode_known, office_days_known, employment_known, travel_known]
+    completeness_parts = [work_mode_known, office_days_known, employment_known]
+    if travel_known:
+        completeness_parts.append(True)
     evidence_completeness = sum(1 for x in completeness_parts if x) / float(len(completeness_parts))
 
     if eligibility == "INELIGIBLE":
@@ -853,21 +855,21 @@ with st.sidebar.expander("Accessibility & Preferences", expanded=False):
     consents = st.session_state.get("consents_mapping") or {}
     allow_docs = st.toggle(
         "Consent: AI-generated documents",
-        value=bool(consents.get("allow_documents", True)),
+        value=bool(consents.get("allow_documents", False)),
         help="Controls whether document generators are allowed to run.",
         key="consent_allow_docs",
     )
     allow_eval = st.toggle(
         "Consent: AI evaluation",
-        value=bool(consents.get("allow_ai_evaluation", True)),
+        value=bool(consents.get("allow_ai_evaluation", False)),
         help="Controls whether LLM-based job evaluation is allowed to run.",
         key="consent_allow_eval",
     )
 
     consent_patch = {}
-    if allow_docs != bool(consents.get("allow_documents", True)):
+    if allow_docs != bool(consents.get("allow_documents", False)):
         consent_patch["allow_documents"] = allow_docs
-    if allow_eval != bool(consents.get("allow_ai_evaluation", True)):
+    if allow_eval != bool(consents.get("allow_ai_evaluation", False)):
         consent_patch["allow_ai_evaluation"] = allow_eval
 
     if consent_patch:
@@ -884,8 +886,9 @@ st.sidebar.header("🎯 Navigation & Filters")
 # Metrics
 total_jobs = len(jobs_list)
 evaluated_count = sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED" and not j.get("version_mismatch"))
-priority_count = sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED" and j.get("decision_outcome") == "PRIORITY")
-review_count = sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED" and j.get("decision_outcome") == "REVIEW")
+recommendation_states = {"PREQUALIFIED", "LANE_ROUTED", "MATCHED", "QUEUED_FOR_AI", "AI_EVALUATED"}
+priority_count = sum(1 for j in jobs_list if j.get("processing_state") in recommendation_states and j.get("decision_outcome") == "PRIORITY")
+review_count = sum(1 for j in jobs_list if j.get("processing_state") in recommendation_states and j.get("decision_outcome") == "REVIEW")
 verify_count = sum(1 for j in jobs_list if j.get("gate_status") == "NEEDS_VERIFICATION")
 toxic_count = sum(1 for j in jobs_list if isinstance(j.get("politics_stress_score"), (int, float)) and j.get("politics_stress_score") >= 70)
 
@@ -1011,16 +1014,15 @@ with tab_dashboard:
     # Deterministic Top Recommended list (LLM next_action is displayed but not authoritative).
     top_recommended = [
         j for j in jobs_list
-        if j.get("processing_state") == "AI_EVALUATED"
+        if j.get("processing_state") in recommendation_states
         and not j.get("version_mismatch")
         and j.get("decision_outcome") in ("PRIORITY", "REVIEW")
-        and j.get("next_action") not in ("REJECTED", "LOW_STRATEGIC_VALUE")
     ]
     top_recommended = sorted(top_recommended, key=top_rec_sort_key)[:10]
 
     st.subheader("🏆 Top Recommended Opportunities")
     if not top_recommended:
-        st.info("No priority evaluated recommendations found yet. Run the discovery & evaluation pipeline.")
+        st.info("No deterministic priority or review recommendations found yet. Run the discovery & evaluation pipeline.")
     else:
         cols = st.columns(2)
         for idx, rjob in enumerate(top_recommended):
@@ -1647,9 +1649,9 @@ with tab_analytics:
 
 with tab_cv:
     st.subheader("📄 Canonical Documents")
-    st.write("Generate CV and cover letter from canonical job/version records and the single master_profile evidence ledger.")
+    st.write("Generate CV and cover letter from canonical job/version records and the active PostgreSQL evidence ledger.")
 
-    profile_source = None
+    profile_source = "PostgreSQL active profile (document generator)"
     profile_data = None
     if os.environ.get("MASTER_PROFILE_JSON"):
         try:
@@ -1665,14 +1667,14 @@ with tab_cv:
         except Exception as e:
             st.error(f"Failed to parse master_profile.json: {e}")
     else:
-        st.error("master_profile evidence ledger is missing. Provide MASTER_PROFILE_JSON or master_profile.json.")
+        st.info("Documents use the active PostgreSQL profile and match run; a local MASTER_PROFILE_JSON file is not required.")
 
     if profile_data:
         facts = profile_data.get("profile_facts") or profile_data.get("facts") or []
         fact_ids = [f.get("id") for f in facts if isinstance(f, dict) and f.get("id")]
         st.caption(f"Evidence source: {profile_source} | facts loaded: {len(fact_ids)}")
         if len(fact_ids) == 0:
-            st.error("No profile fact IDs found in the master profile ledger. Document generation is disabled.")
+            st.warning("The optional local profile ledger has no IDs; the document generator will use the active database profile.")
 
     eligible_jobs = [
         j
@@ -1680,13 +1682,12 @@ with tab_cv:
         if j.get("canonical_job_id")
         and j.get("job_version_id")
         and j.get("processing_state")
-        in ("AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION")
+        in ("AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED")
+        and j.get("decision_outcome") in ("PRIORITY", "REVIEW")
     ]
 
     if not eligible_jobs:
         st.info("No canonical shortlist jobs with version IDs are currently available.")
-    elif not profile_data or len((profile_data.get("profile_facts") or profile_data.get("facts") or [])) == 0:
-        st.info("Fix the master profile ledger first, then generate documents.")
     else:
         def _job_label(j):
             return f"{j.get('company')} - {j.get('title')} [{j.get('processing_state')}] ({str(j.get('job_version_id'))[:8]})"

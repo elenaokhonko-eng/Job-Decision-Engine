@@ -42,6 +42,20 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
 
     const ctx: WorkspaceContext = await resolveWorkspaceContext(client as any);
 
+    const consentResult = await client.query<{ granted: boolean }>(
+      `SELECT granted
+       FROM workspace_user_consents
+       WHERE workspace_id = $1
+         AND user_id = $2
+         AND consent_key = 'allow_ai_evaluation'
+       LIMIT 1`,
+      [ctx.workspaceId, ctx.userId]
+    );
+    if (consentResult.rows[0]?.granted !== true) {
+      console.log("AI evaluation consent is not granted; no queue items will be processed.");
+      return { processed: 0, failed: 0, manualReview: 0 };
+    }
+
     // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
     // Join strictly to evaluation_queue.job_version_id and gate_decisions for the same job_version_id (invariant: never substitute latest version during retry)
     const { rows: queueItems } = await client.query(
@@ -80,22 +94,32 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         console.warn(`⚠️ Maximum attempts (${item.max_attempts || 3}) exhausted for job ${item.canonical_job_id}. Moving to NEEDS_MANUAL_REVIEW.`);
         await client.query("BEGIN");
         try {
-          await client.query(
+          const manualReviewResult = await client.query<{ id: string }>(
             `UPDATE evaluation_queue
              SET status = 'NEEDS_MANUAL_REVIEW', updated_at = NOW()
-             WHERE workspace_id = $1 AND id = $2`,
+             WHERE workspace_id = $1 AND id = $2
+               AND (
+                 status IN ('PENDING', 'RETRY_WAIT')
+                 OR (status = 'EVALUATING' AND lease_expires_at < NOW())
+               )
+               AND attempt_count >= COALESCE(max_attempts, 3)
+             RETURNING id`,
             [ctx.workspaceId, item.id]
           );
-          await client.query(
-            `UPDATE canonical_jobs
-             SET processing_state = 'NEEDS_MANUAL_REVIEW',
-                 processing_status = 'NEEDS_MANUAL_REVIEW',
-                 updated_at = NOW()
-             WHERE workspace_id = $1 AND id = $2`,
-            [ctx.workspaceId, item.canonical_job_id]
-          );
+          if ((manualReviewResult.rowCount ?? 0) > 0) {
+            await client.query(
+              `UPDATE canonical_jobs
+               SET processing_state = 'NEEDS_MANUAL_REVIEW',
+                   processing_status = 'NEEDS_MANUAL_REVIEW',
+                   updated_at = NOW()
+               WHERE workspace_id = $1 AND id = $2`,
+              [ctx.workspaceId, item.canonical_job_id]
+            );
+            manualReviewCount++;
+          } else {
+            console.log(`Item ${item.id} changed state before manual-review fencing; skipping stale worker update.`);
+          }
           await client.query("COMMIT");
-          manualReviewCount++;
         } catch (mErr) {
           await client.query("ROLLBACK");
           throw mErr;
@@ -125,6 +149,21 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
 
       const activeLease = leaseRows[0];
       const attemptNum = activeLease.attempt_count;
+      const activeLeaseId = activeLease.lease_id;
+      const heartbeat = setInterval(() => {
+        void client.query(
+          `UPDATE evaluation_queue
+           SET lease_expires_at = NOW() + INTERVAL '5 minutes', updated_at = NOW()
+           WHERE workspace_id = $1 AND id = $2 AND lease_id = $3`,
+          [ctx.workspaceId, item.id, activeLeaseId]
+        ).then((result) => {
+          if ((result.rowCount ?? 0) === 0) {
+            console.warn(`Lease fence lost for evaluation queue item ${item.id}.`);
+          }
+        }).catch((error) => {
+          console.warn(`Lease heartbeat failed for evaluation queue item ${item.id}:`, error);
+        });
+      }, 60_000);
 
       // Strictly bound to the queue item's job_version_id
       const jobVersionId: string = item.job_version_id;
@@ -134,9 +173,10 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
         await client.query(
           `UPDATE evaluation_queue SET status = 'RETRY_WAIT', last_error = $1,
            available_at = ${nextAvailableAt(attemptNum)}, lease_id = NULL, lease_expires_at = NULL, updated_at = NOW()
-           WHERE workspace_id = $2 AND id = $3`,
-          ["No job_version found", ctx.workspaceId, item.id]
+           WHERE workspace_id = $2 AND id = $3 AND lease_id = $4`,
+          ["No job_version found", ctx.workspaceId, item.id, activeLeaseId]
         );
+        clearInterval(heartbeat);
         continue;
       }
 
@@ -236,27 +276,39 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
             ]
           );
 
-          await client.query(
+          const completionResult = await client.query<{ id: string }>(
             `UPDATE evaluation_queue
              SET status = 'COMPLETED', lease_id = NULL, lease_expires_at = NULL, available_at = NULL, updated_at = NOW()
-             WHERE workspace_id = $1 AND id = $2`,
-            [ctx.workspaceId, item.id]
+             WHERE workspace_id = $1 AND id = $2 AND lease_id = $3
+             RETURNING id`,
+            [ctx.workspaceId, item.id, activeLeaseId]
           );
+          if ((completionResult.rowCount ?? 0) === 0) {
+            throw new Error("Evaluation lease fence lost before completion.");
+          }
 
           await client.query("COMMIT");
           processedCount++;
+          clearInterval(heartbeat);
         } catch (txErr) {
           await client.query("ROLLBACK");
           throw txErr;
         }
       } catch (err: any) {
+        clearInterval(heartbeat);
         console.error(`❌ Evaluation failed for queue item ${item.id}:`, err.message || err);
         failedCount++;
 
         await client.query(
           `INSERT INTO evaluation_attempts (
              workspace_id, canonical_job_id, job_version_id, attempt_number, provider, model, status, error_message, latency_ms
-           ) VALUES ($1, $2, $3, $4, $5, $6, 'FAILED', $7, NULL)`,
+           )
+           SELECT $1, $2, $3, $4, $5, $6, 'FAILED', $7, NULL
+           WHERE EXISTS (
+             SELECT 1
+             FROM evaluation_queue
+             WHERE workspace_id = $1 AND id = $8 AND lease_id = $9
+           )`,
           [
             ctx.workspaceId,
             item.canonical_job_id,
@@ -264,13 +316,15 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
             attemptNum,
             item.attempt_count > 0 ? "fallback-chain" : "primary-chain",
             "unknown",
-            err.message || String(err)
+            err.message || String(err),
+            item.id,
+            activeLeaseId,
           ]
         );
 
         // Transition to RETRY_WAIT with exponential backoff (never career-rejects)
         const availableAtExpr = nextAvailableAt(attemptNum);
-        await client.query(
+        const retryTransition = await client.query<{ id: string }>(
           `UPDATE evaluation_queue
            SET status = 'RETRY_WAIT',
                last_error = $1,
@@ -278,9 +332,13 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
                lease_id = NULL,
                lease_expires_at = NULL,
                updated_at = NOW()
-           WHERE workspace_id = $2 AND id = $3`,
-          [err.message || String(err), ctx.workspaceId, item.id]
+           WHERE workspace_id = $2 AND id = $3 AND lease_id = $4
+           RETURNING id`,
+          [err.message || String(err), ctx.workspaceId, item.id, activeLeaseId]
         );
+        if ((retryTransition.rowCount ?? 0) === 0) {
+          console.warn(`Lease fence lost while scheduling retry for evaluation queue item ${item.id}.`);
+        }
       }
     }
   } finally {

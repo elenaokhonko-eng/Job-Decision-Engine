@@ -915,13 +915,20 @@ async function embedWithOpenAIModel(text: string, model: string): Promise<number
     throw new Error("OpenAI embedding requested but model is empty.");
   }
 
+  const configuredDimensions = Number(process.env.EMBEDDING_FALLBACK_DIMENSIONS || 0);
+  const supportsConfigurableDimensions = normalizedModel.startsWith("text-embedding-3-");
+  const requestBody: Record<string, unknown> = { input: text, model: normalizedModel };
+  if (supportsConfigurableDimensions && Number.isInteger(configuredDimensions) && configuredDimensions > 0) {
+    requestBody.dimensions = configuredDimensions;
+  }
+
   const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${openaiKey}`,
     },
-    body: JSON.stringify({ input: text, model: normalizedModel }),
+    body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(30000),
   });
   if (!oResponse.ok) {

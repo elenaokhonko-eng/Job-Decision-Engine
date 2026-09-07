@@ -13,6 +13,7 @@ export const DistanceMetricSchema = z.enum(['COSINE', 'DOT', 'L2']);
 export const EmbeddingInputSourceTypeSchema = z.enum([
   'PROFILE_FACT',
   'JOB_REQUIREMENT',
+  'JOB_VERSION',
   'LANE_PROTOTYPE',
 ]);
 export const EmbeddingBatchRunTypeSchema = z.enum(['PRIMARY', 'FALLBACK']);

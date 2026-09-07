@@ -52,11 +52,63 @@ function applyNegativeExclusion(description: string, laneDef: LaneDefinition): b
 
   const d = description.toLowerCase();
   for (const nc of laneDef.negative_concepts) {
-    if (d.includes(nc.toLowerCase())) {
+    if (containsConcept(d, nc)) {
       return true; // excluded
     }
   }
   return false;
+}
+function containsConcept(text: string, concept: string): boolean {
+  return conceptVariants(concept).some((variant) => {
+    const normalized = variant.toLowerCase().replace(/_/g, " ").trim();
+    if (!normalized) return false;
+    const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+    return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+  });
+}
+
+const CONCEPT_ALIASES: Record<string, string[]> = {
+  "ai engineering": ["ai engineer", "artificial intelligence engineer", "machine learning engineer", "ml engineer", "ai systems engineer"],
+  "ml engineering": ["ml engineer", "machine learning engineer", "machine learning engineering", "ml engineering"],
+  "data engineering": ["data engineer", "data engineering", "data pipeline", "data pipelines", "etl", "data platform"],
+  "ai data architecture": ["ai data architecture", "data architecture", "ai architecture", "data platform architecture"],
+  "ai systems architecture": ["ai systems architect", "ai systems architecture", "ai architecture", "ml systems architect"],
+  "llm infrastructure": ["llm infrastructure", "llm platform", "llm training", "llm inference", "foundation model infrastructure"],
+  "ai research": ["ai research", "machine learning research", "deep learning research", "ai researcher", "ml researcher", "ai scientist"],
+  "legal ai": ["legal ai", "legaltech", "legal technology", "legal nlp", "contract analytics"],
+  "compliance automation": ["compliance automation", "compliance engineering", "regtech", "regulatory technology"],
+  "fraud detection": ["fraud detection", "fraud analytics", "financial crime technology"],
+  "document intelligence": ["document intelligence", "document ai", "contract analytics", "intelligent document processing"],
+  "scientific ml": ["scientific ml", "scientific machine learning", "machine learning for science"],
+  "research engineering": ["research engineering", "research engineer", "research software engineer"],
+  "bioinformatics": ["bioinformatics", "bioinformatics scientist", "computational biology"],
+  "clinical informatics": ["clinical informatics", "clinical data science", "health data science"],
+  "quantitative research": ["quantitative research", "quant researcher", "quantitative researcher", "quant research"],
+  "investment data platform": ["investment data platform", "investment data engineering", "market data platform", "portfolio data platform"],
+  "time series modelling": ["time series modelling", "time-series modelling", "time series modeling", "time-series modeling", "forecasting"],
+  "ai": ["artificial intelligence", "machine learning", "ml", "deep learning", "llm", "nlp"],
+  "machine learning": ["machine learning", "ml", "deep learning"],
+  "data platform": ["data platform", "data warehouse", "data lake", "lakehouse", "data pipeline"],
+  "data science": ["data science", "data scientist", "applied statistics", "predictive modelling", "predictive modeling"],
+  "regtech": ["regtech", "regulatory technology", "compliance automation", "aml", "kyc"],
+  "legaltech": ["legaltech", "legal technology", "legal ai", "contract analytics"],
+  "healthcare": ["healthcare", "health data", "clinical", "medical"],
+  "biotech": ["biotech", "biotechnology", "drug discovery", "bioinformatics"],
+  "pharmaceutical": ["pharmaceutical", "pharma", "drug discovery"],
+  "investment management": ["investment management", "asset management", "fund management", "portfolio management"],
+  "asset management": ["asset management", "investment management", "fund management"],
+  "market data": ["market data", "financial data", "securities data", "order book"],
+  "trading infrastructure": ["trading infrastructure", "trading systems", "execution systems", "market data platform"],
+};
+
+function conceptVariants(concept: string): string[] {
+  const normalized = concept.toLowerCase().replace(/_/g, " ").trim();
+  return [normalized, ...(CONCEPT_ALIASES[normalized] || [])];
+}
+
+function conceptScopeScore(description: string, concepts: string[] | undefined): number {
+  if (!concepts || concepts.length === 0) return 1;
+  return concepts.some((concept) => containsConcept(description, concept)) ? 1 : 0;
 }
 
 function extractCoreJobText(title: string, description: string): string {
@@ -234,6 +286,88 @@ export async function runLaneRouter(
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
   try {
+    type PublishedEmbeddingSet = {
+      laneEmbeddings: Record<string, number[]>;
+      jobEmbeddings: Map<string, number[]>;
+      dimensions: number;
+      model: string;
+    };
+    const publishedEmbeddingSets = new Map<EmbeddingProvider, PublishedEmbeddingSet>();
+    const laneNodeIds = (configResult.activeLaneRevisions || [])
+      .map((revision) => ({ laneKey: revision.laneKey, nodeId: revision.laneRevisionId }));
+    if (laneNodeIds.length === Object.keys(config.lanes).length && laneNodeIds.length > 0) {
+      try {
+        const published = await client.query<{
+          embedding_space_id: string;
+          provider: EmbeddingProvider;
+          model: string;
+          node_type: string;
+          node_id: string;
+          vector_dimensions: number;
+          embedding_values: number[] | string;
+        }>(
+          `SELECT v.embedding_space_id,
+                  es.provider,
+                  es.model,
+                  v.node_type,
+                  v.node_id,
+                  v.vector_dimensions,
+                  v.embedding_values
+           FROM v_matchable_nodes v
+           JOIN embedding_spaces es ON es.id = v.embedding_space_id
+           WHERE v.workspace_id = $1
+             AND es.active = TRUE
+             AND ((v.node_type = 'JOB_VERSION' AND v.node_id = ANY($2::uuid[]))
+               OR (v.node_type = 'LANE_PROTOTYPE' AND v.node_id = ANY($3::uuid[])))
+           ORDER BY es.created_at DESC`,
+          [
+            ctx.workspaceId,
+            jobs.map((job) => job.latest_version_id),
+            laneNodeIds.map((revision) => revision.nodeId),
+          ]
+        );
+        const grouped = new Map<string, typeof published.rows>();
+        for (const row of published.rows) {
+          const rows = grouped.get(row.embedding_space_id) || [];
+          rows.push(row);
+          grouped.set(row.embedding_space_id, rows);
+        }
+        for (const rows of grouped.values()) {
+          const provider = rows[0]?.provider;
+          if (!provider) continue;
+          const parseVector = (value: number[] | string): number[] => {
+            if (Array.isArray(value)) return value.map(Number);
+            return String(value).replace(/[{}]/g, "").split(",").map(Number).filter(Number.isFinite);
+          };
+          const byNode = new Map(rows.map((row) => [`${row.node_type}:${row.node_id}`, parseVector(row.embedding_values)]));
+          const dimensions = Number(rows[0]?.vector_dimensions || 0);
+          const laneEmbeddings: Record<string, number[]> = {};
+          let complete = dimensions > 0;
+          for (const revision of laneNodeIds) {
+            const vector = byNode.get(`LANE_PROTOTYPE:${revision.nodeId}`);
+            if (!vector || vector.length !== dimensions) complete = false;
+            else laneEmbeddings[revision.laneKey] = vector;
+          }
+          const jobEmbeddings = new Map<string, number[]>();
+          for (const job of jobs) {
+            const vector = byNode.get(`JOB_VERSION:${job.latest_version_id}`);
+            if (!vector || vector.length !== dimensions) complete = false;
+            else jobEmbeddings.set(job.id, vector);
+          }
+          if (complete && Object.keys(laneEmbeddings).length === laneNodeIds.length && jobEmbeddings.size === jobs.length) {
+            publishedEmbeddingSets.set(provider, {
+              laneEmbeddings,
+              jobEmbeddings,
+              dimensions,
+              model: String(rows[0]?.model || "unknown"),
+            });
+          }
+        }
+      } catch (error: any) {
+        if (error?.code !== "42P01") throw error;
+      }
+    }
+
     const useWorkspaceLaneTables = configResult.source === "LANE_REGISTRY_DB";
     const pipelineRunId = crypto.randomUUID();
     const laneSnapshot = {
@@ -304,6 +438,7 @@ export async function runLaneRouter(
       canonicalJobId: string;
       jobVersionId: string;
       embeddingProvider: EmbeddingProvider;
+      embeddingModel?: string;
       embeddingDimensions: number;
       primaryLane: string;
       secondaryLanes: string[];
@@ -315,10 +450,11 @@ export async function runLaneRouter(
       if (!useWorkspaceLaneTables) {
         return null;
       }
-      const embeddingModel =
+      const embeddingModel = params.embeddingModel || (
         params.embeddingProvider === "gemini"
           ? MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL
-          : MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL;
+          : MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL
+      );
       const modelVersion = [
         "lane_router_v2.2.0",
         config.version ?? "lanes_unknown",
@@ -405,8 +541,14 @@ export async function runLaneRouter(
 
       const laneEmbeddings: Record<string, number[]> = {};
       let prototypeDimensions: number | null = null;
+      const publishedSet = publishedEmbeddingSets.get(provider);
+      if (publishedSet) {
+        Object.assign(laneEmbeddings, publishedSet.laneEmbeddings);
+        prototypeDimensions = publishedSet.dimensions;
+      }
 
       for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
+        if (publishedSet) break;
         let vector: number[];
         try {
           vector = await generateEmbeddingWithProvider(laneDef.prototype_query, provider);
@@ -434,19 +576,42 @@ export async function runLaneRouter(
         laneEmbeddings[laneKey] = vector;
       }
 
+      const jobEmbeddings = new Map<string, number[]>(publishedSet?.jobEmbeddings || []);
+      if (publishedSet) {
+        console.log(`Using published ${provider} embedding batch for lane routing.`);
+      }
+      for (const job of jobs) {
+        if (publishedSet) break;
+        const coreText = extractCoreJobText(job.normalized_title, job.description_text || "");
+        let jobEmbedding: number[];
+        try {
+          jobEmbedding = await generateEmbeddingWithProvider(coreText, provider);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new EmbeddingRunError(provider, `job embedding failed: ${message}`, job.id);
+        }
+        if (jobEmbedding.length === 0 || jobEmbedding.every((value) => value === 0)) {
+          throw new EmbeddingRunError(provider, "job embedding was empty or zero-valued", job.id);
+        }
+        if (prototypeDimensions !== null && jobEmbedding.length !== prototypeDimensions) {
+          throw new EmbeddingRunError(
+            provider,
+            `job embedding dimension mismatch: expected ${prototypeDimensions} got ${jobEmbedding.length}`,
+            job.id
+          );
+        }
+        jobEmbeddings.set(job.id, jobEmbedding);
+      }
+
       let routedCount = 0;
       let deferredCount = 0;
 
       for (const job of jobs) {
         await client.query("BEGIN");
         try {
-          const coreText = extractCoreJobText(job.normalized_title, job.description_text || "");
-          let jobEmbedding: number[];
-          try {
-            jobEmbedding = await generateEmbeddingWithProvider(coreText, provider);
-          } catch (error: unknown) {
-            const message = error instanceof Error ? error.message : String(error);
-            throw new EmbeddingRunError(provider, `job embedding failed: ${message}`, job.id);
+          const jobEmbedding = jobEmbeddings.get(job.id);
+          if (!jobEmbedding) {
+            throw new EmbeddingRunError(provider, "job embedding was not prepared", job.id);
           }
 
           // Strict zero-vector check — embedding failure must not produce a default lane
@@ -458,6 +623,7 @@ export async function runLaneRouter(
               canonicalJobId: job.id,
               jobVersionId: job.latest_version_id,
               embeddingProvider: provider,
+              embeddingModel: publishedSet?.model,
               embeddingDimensions: jobEmbedding.length,
               primaryLane: "UNCLASSIFIED",
               secondaryLanes: [],
@@ -502,6 +668,7 @@ export async function runLaneRouter(
               canonicalJobId: job.id,
               jobVersionId: job.latest_version_id,
               embeddingProvider: provider,
+              embeddingModel: publishedSet?.model,
               embeddingDimensions: jobEmbedding.length,
               primaryLane: "UNCLASSIFIED",
               secondaryLanes: [],
@@ -545,8 +712,13 @@ export async function runLaneRouter(
           let bestLane: string | null = null;
           let bestScore = -1;
           const scoreMap: Record<string, number> = {};
+          const domainScoreMap: Record<string, number> = {};
+          const functionScoreMap: Record<string, number> = {};
           const laneEvidence: string[] = [];
-          const descText = (job.description_text || "").toLowerCase();
+          const descText = extractCoreJobText(
+            job.normalized_title || "",
+            job.description_text || ""
+          ).toLowerCase();
 
           for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
             if (!preferenceEnabled(laneKey)) {
@@ -560,39 +732,44 @@ export async function runLaneRouter(
             }
             const score = cosineSimilarity(jobEmbedding, laneEmbeddings[laneKey]);
             scoreMap[laneKey] = score;
+            domainScoreMap[laneKey] = conceptScopeScore(descText, laneDef.included_domain_concepts);
+            functionScoreMap[laneKey] = conceptScopeScore(descText, laneDef.required_function_concepts);
             if (score > bestScore) {
               bestScore = score;
               bestLane = laneKey;
             }
           }
 
-          // Primary lane selection:
-          // - Only lanes meeting their own thresholds qualify.
-          // - User preference ordering (priority_rank) is applied as the first tie-breaker.
           const minSimilarityFloor = config.unclassified_policy.min_similarity_floor || 0.25;
           const qualifyingPrimary = Object.entries(config.lanes)
             .map(([laneKey, laneDef]) => {
               const threshold = laneDef.semantic_threshold ?? laneDef.threshold ?? minSimilarityFloor;
               const score = scoreMap[laneKey] ?? -1;
+              const domainScore = domainScoreMap[laneKey] ?? 0;
+              const functionScore = functionScoreMap[laneKey] ?? 0;
               return {
                 laneKey,
                 laneDef,
                 threshold,
                 score,
+                domainScore,
+                functionScore,
                 rank: preferenceRank(laneKey),
               };
             })
             .filter((c) => preferenceEnabled(c.laneKey))
             .filter((c) => c.score >= c.threshold)
+            .filter((c) => c.domainScore >= (c.laneDef.minimum_domain_score ?? 0))
+            .filter((c) => c.functionScore >= (c.laneDef.minimum_function_score ?? 0))
             .filter((c) => !applyNegativeExclusion(descText, c.laneDef));
 
           if (qualifyingPrimary.length === 0) {
             bestLane = "UNCLASSIFIED";
-            bestScore = Math.max(bestScore, 0);
+            bestScore = 0;
           } else {
             qualifyingPrimary.sort((a, b) => {
-              if (a.rank !== b.rank) return a.rank - b.rank;
-              return b.score - a.score;
+              if (Math.abs(a.score - b.score) > 1e-9) return b.score - a.score;
+              return a.rank - b.rank;
             });
             bestLane = qualifyingPrimary[0].laneKey;
             bestScore = qualifyingPrimary[0].score;
@@ -617,18 +794,26 @@ export async function runLaneRouter(
           for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
             if (laneKey === bestLane) continue;
             if (!preferenceEnabled(laneKey)) continue;
-            const threshold = laneDef.semantic_threshold ?? laneDef.threshold ?? minSimilarityFloor;
+            const threshold = laneDef.secondary_lane_threshold
+              ?? laneDef.semantic_threshold
+              ?? laneDef.threshold
+              ?? minSimilarityFloor;
             const score = scoreMap[laneKey] || 0;
-            if (score >= threshold && !applyNegativeExclusion(descText, laneDef)) {
+            const domainScore = domainScoreMap[laneKey] ?? 0;
+            const functionScore = functionScoreMap[laneKey] ?? 0;
+            if (
+              score >= threshold
+              && domainScore >= (laneDef.minimum_domain_score ?? 0)
+              && functionScore >= (laneDef.minimum_function_score ?? 0)
+              && !applyNegativeExclusion(descText, laneDef)
+            ) {
               // Require at least one positive concept match for secondary lane qualification
-              const hasPositiveEvidence = laneDef.positive_concepts?.some(pc =>
-                descText.includes(pc.toLowerCase())
-              );
+              const hasPositiveEvidence = laneDef.positive_concepts?.some((pc) => containsConcept(descText, pc));
               if (hasPositiveEvidence) {
                 secondaryCandidates.push({ laneKey, score, rank: preferenceRank(laneKey) });
                 if (laneDef.positive_concepts) {
                   for (const pc of laneDef.positive_concepts) {
-                    if (descText.includes(pc.toLowerCase())) {
+                    if (containsConcept(descText, pc)) {
                       laneEvidence.push(`${laneKey}: "${pc}"`);
                       break;
                     }
@@ -638,8 +823,8 @@ export async function runLaneRouter(
             }
           }
           secondaryCandidates.sort((a, b) => {
-            if (a.rank !== b.rank) return a.rank - b.rank;
-            return b.score - a.score;
+            if (Math.abs(a.score - b.score) > 1e-9) return b.score - a.score;
+            return a.rank - b.rank;
           });
           const secondaryLanes = secondaryCandidates.map((c) => c.laneKey);
 
@@ -652,12 +837,17 @@ export async function runLaneRouter(
             canonicalJobId: job.id,
             jobVersionId: job.latest_version_id,
             embeddingProvider: provider,
+            embeddingModel: publishedSet?.model,
             embeddingDimensions: jobEmbedding.length,
             primaryLane: bestLane,
             secondaryLanes,
             laneConfidence,
             semanticScores: scoreMap,
-            laneEvidence,
+            laneEvidence: [
+              ...laneEvidence,
+              `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
+              `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
+            ],
             evaluatedAt,
           });
 
@@ -712,6 +902,7 @@ export async function runLaneRouter(
             canonicalJobId: job.id,
             jobVersionId: job.latest_version_id,
             embeddingProvider: provider,
+            embeddingModel: publishedSet?.model,
             embeddingDimensions: prototypeDimensions ?? 0,
             primaryLane: "UNCLASSIFIED",
             secondaryLanes: [],
@@ -755,7 +946,14 @@ export async function runLaneRouter(
     };
 
     let lastError: unknown = null;
-    for (const provider of providerOrder) {
+    const publishedProviderOrder = providerOrder.filter((provider) => publishedEmbeddingSets.has(provider));
+    const routingProviderOrder = publishedProviderOrder.length > 0 ? publishedProviderOrder : providerOrder;
+    if (publishedProviderOrder.length > 0) {
+      console.log(
+        `Using complete published embedding space(s) for lane routing: ${publishedProviderOrder.join(", ")}`
+      );
+    }
+    for (const provider of routingProviderOrder) {
       try {
         const result = await routeWithProvider(provider);
         console.log(
@@ -811,71 +1009,4 @@ export async function runLaneRouter(
       client.release();
     }
   }
-}
-
-// ====================================================================
-// NEW: INDEPENDENT DOMAIN SCORING (Eliminates disproportionate clustering)
-// ====================================================================
-
-export type TargetLane = 'CORE_AI_DATA' | 'LEGAL_REGTECH' | 'HEALTH_BIO_PHARMA' | 'INVESTMENT_MARKETS_FINTECH';
-
-const DOMAIN_PATTERNS: Record<TargetLane, { positive: RegExp[]; negative: RegExp[] }> = {
-  CORE_AI_DATA: {
-    positive: [/\b(llm|generative ai|nlp|agentic|vector db|rag|search|data platform|pipeline|etl)\b/i],
-    negative: [/\b(wealth advisory|legal practice|clinical medicine)\b/i]
-  },
-  LEGAL_REGTECH: {
-    positive: [/\b(regtech|compliance tech|regulatory intelligence|contract analysis|legaltech|aml|kyc)\b/i],
-    negative: [/\b(m&a attorney|paralegal|courtroom|legal counsel)\b/i]
-  },
-  HEALTH_BIO_PHARMA: {
-    positive: [/\b(computational biology|bioinformatics|health data|biotech software|genomics|clinical data)\b/i],
-    negative: [/\b(wet lab|pipetting|nurse|clinical trial coordinator)\b/i]
-  },
-  INVESTMENT_MARKETS_FINTECH: {
-    positive: [/\b(quantitative|algorithmic trading|market microstructure|order book|risk engine|fintech|settlement|derivatives engine)\b/i],
-    negative: [/\b(wealth management advisor|private banking sales|financial advisor|hr manager)\b/i]
-  }
-};
-
-export function routeToLane(title: string, description: string): { primaryLane: TargetLane | null; secondaryLanes: TargetLane[] } {
-  const scores: Record<TargetLane, number> = {
-    CORE_AI_DATA: 0,
-    LEGAL_REGTECH: 0,
-    HEALTH_BIO_PHARMA: 0,
-    INVESTMENT_MARKETS_FINTECH: 0
-  };
-
-  const text = `${title} ${description}`;
-
-  for (const lane of Object.keys(DOMAIN_PATTERNS) as TargetLane[]) {
-    const { positive, negative } = DOMAIN_PATTERNS[lane];
-    
-    // Check negatives first
-    const hasNegative = negative.some(p => p.test(text));
-    if (hasNegative) {
-      scores[lane] = -100;
-      continue;
-    }
-
-    for (const pos of positive) {
-      const matches = text.match(new RegExp(pos, 'gi'));
-      if (matches) {
-        scores[lane] += matches.length;
-      }
-    }
-  }
-
-  const sorted = (Object.entries(scores) as [TargetLane, number][])
-    .filter(([_, score]) => score > 0)
-    .sort((a, b) => b[1] - a[1]);
-
-  if (sorted.length === 0) {
-    return { primaryLane: null, secondaryLanes: [] }; // No matched lane (never default)
-  }
-
-  const primaryLane = sorted[0][0];
-  const secondaryLanes = sorted.slice(1).map(s => s[0]);
-
-  return { primaryLane, secondaryLanes };
 }

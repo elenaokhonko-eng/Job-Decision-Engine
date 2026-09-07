@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { pgSslConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { computeEvidenceStrength, loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
+import { calculateProfessionalExperienceYears, compareStructuredRequirement } from "./requirementComparators.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -34,6 +35,8 @@ interface RequirementRow {
 
 interface FactRow {
   id: string;
+  source_type?: "PROFILE_FACT" | "CREDENTIAL";
+  embedding_node_id?: string;
   fact_type: string;
   statement: string;
   evidence_tier: string;
@@ -157,6 +160,8 @@ function scoreMatch(requirement: RequirementRow, fact: FactRow): number {
 
   return Math.min(1, score);
 }
+
+const SEMANTIC_MATCH_THRESHOLD = 0.45;
 
 type MatchableNodeType = "JOB_REQUIREMENT" | "PROFILE_FACT";
 
@@ -309,16 +314,76 @@ export async function runDeterministicMatcher(
     const profileVersionId = profileRes.rows[0].id;
 
     const factsRes = await client.query<FactRow>(
-      `SELECT pf.id, pf.fact_type, pf.statement, pf.evidence_tier, pf.verification_status, pf.structured_value
+      `SELECT pf.id, COALESCE(pf.fact_revision_id, pf.id) AS embedding_node_id,
+              pf.fact_type, pf.statement, pf.evidence_tier, pf.verification_status, pf.structured_value
        FROM profile_facts pf
        WHERE pf.workspace_id = $1
          AND pf.profile_version_id = $2`,
       [ctx.workspaceId, profileVersionId]
     );
 
-    if (factsRes.rows.length === 0) {
+    let credentialFacts: FactRow[] = [];
+    try {
+      const credentialRes = await client.query<{
+        id: string;
+        credential_name: string;
+        issuer: string;
+        credential_type: string;
+        level: string | null;
+      }>(
+        `SELECT pc.id, pc.credential_name, pc.issuer, pc.credential_type, pc.level
+         FROM profile_credentials pc
+         JOIN profile_versions pv
+           ON pv.workspace_id = pc.workspace_id
+          AND pv.id = pc.profile_version_id
+          AND pv.status = 'ACTIVE'
+         WHERE pc.workspace_id = $1
+           AND pc.status = 'ACTIVE'`,
+        [ctx.workspaceId]
+      );
+      credentialFacts = credentialRes.rows.map((credential) => ({
+        id: credential.id,
+        fact_type: credential.credential_type,
+        statement: `${credential.credential_name} ${credential.issuer} ${credential.level || ""}`.trim(),
+        evidence_tier: "PROFESSIONAL_PRODUCTION",
+        verification_status: "VERIFIED",
+        structured_value: { credential_type: credential.credential_type, level: credential.level },
+        source_type: "CREDENTIAL",
+      }));
+    } catch (error: any) {
+      if (error?.code !== "42P01") throw error;
+    }
+    try {
+      const engagementRes = await client.query<{
+        start_date: string;
+        end_date: string | null;
+        is_current: boolean;
+        experience_class: string;
+      }>(
+        `SELECT start_date, end_date, is_current, experience_class
+         FROM profile_engagements
+         WHERE profile_version_id = $1`,
+        [profileVersionId]
+      );
+      const experienceYears = calculateProfessionalExperienceYears(engagementRes.rows);
+      if (experienceYears > 0) {
+        credentialFacts.push({
+          id: `experience:${profileVersionId}`,
+          fact_type: "EXPERIENCE_YEARS",
+          statement: `${experienceYears.toFixed(1)} years of professional production experience`,
+          evidence_tier: "PROFESSIONAL_PRODUCTION",
+          verification_status: "VERIFIED",
+          structured_value: { professional_years: experienceYears },
+          source_type: "CREDENTIAL",
+        });
+      }
+    } catch (error: any) {
+      if (error?.code !== "42P01") throw error;
+    }
+    const comparisonFacts = [...factsRes.rows, ...credentialFacts];
+    if (comparisonFacts.length === 0) {
       throw new Error(
-        `No profile facts found for ACTIVE profile version ${profileVersionId}; deterministic matching cannot run.`
+        `No profile facts or credentials found for ACTIVE profile version ${profileVersionId}; deterministic matching cannot run.`
       );
     }
 
@@ -350,7 +415,7 @@ export async function runDeterministicMatcher(
         ? evidenceStrengthPolicy.configRevisionId ?? null
         : null;
 
-    const factIds = factsRes.rows.map((row) => row.id);
+    const factIds = [...new Set(factsRes.rows.map((row) => row.embedding_node_id || row.id))];
     const embeddingSpaceCandidates = await listSemanticEmbeddingSpaceCandidates(client as any, ctx);
     const semanticSpaceCandidates: string[] = [];
     for (const candidate of embeddingSpaceCandidates) {
@@ -493,7 +558,7 @@ export async function runDeterministicMatcher(
           const weight = requirementWeight(req.importance);
           weightSum += weight;
 
-          if (factsRes.rows.length === 0) {
+          if (comparisonFacts.length === 0) {
             await client.query(
               `INSERT INTO requirement_evidence_matches (
                  workspace_id,
@@ -523,16 +588,70 @@ export async function runDeterministicMatcher(
           let bestSemantic = 0;
           const reqEmbedding = usedEmbeddings ? requirementEmbeddings.get(req.id) ?? null : null;
 
+          const structuredComparison = compareStructuredRequirement(req, comparisonFacts);
+          const exactRequirementType = ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(req.requirement_type);
+          if (exactRequirementType && structuredComparison.status === "UNKNOWN") {
+            await client.query(
+              `INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, NULL, 'UNKNOWN', 0, $4, $5)`,
+              [
+                ctx.workspaceId,
+                matchRunId,
+                req.id,
+                structuredComparison.rationale,
+                JSON.stringify({
+                  requirement_key: req.requirement_key,
+                  requirement_type: req.requirement_type,
+                  comparator: "STRUCTURED_EXACT",
+                  semantic_ready: usedEmbeddings,
+                }),
+              ]
+            );
+            continue;
+          }
+          if (structuredComparison.status === "MISMATCH") {
+            await client.query(
+              `INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, $4, 'NO_MATCH', 0, $5, $6)`,
+              [
+                ctx.workspaceId,
+                matchRunId,
+                req.id,
+                structuredComparison.fact?.id || null,
+                structuredComparison.rationale,
+                JSON.stringify({
+                  requirement_key: req.requirement_key,
+                  requirement_type: req.requirement_type,
+                  comparator: "STRUCTURED_EXACT",
+                  semantic_ready: usedEmbeddings,
+                }),
+              ]
+            );
+            continue;
+          }
+
+          if (structuredComparison.status === "MATCH") {
+            bestFact = structuredComparison.fact as FactRow;
+            bestScore = 1;
+            bestLexical = 1;
+            bestSemantic = 1;
+          }
+
           for (const fact of factsRes.rows) {
+            if (structuredComparison.status === "MATCH") break;
             const lexicalScore = scoreMatch(req, fact);
             let semanticScore = 0;
             if (reqEmbedding) {
-              const factEmbedding = factEmbeddings.get(fact.id);
+              const factEmbedding = factEmbeddings.get(fact.embedding_node_id || fact.id);
               if (factEmbedding) {
                 semanticScore = Math.max(0, cosineSimilarity(reqEmbedding, factEmbedding));
               }
             }
-            const score = Math.max(lexicalScore, semanticScore);
+            const score = usedEmbeddings ? lexicalScore * 0.35 + semanticScore * 0.65 : lexicalScore;
             if (score > bestScore) {
               bestScore = score;
               bestLexical = lexicalScore;
@@ -551,9 +670,9 @@ export async function runDeterministicMatcher(
 
           let matchType: 'EXACT' | 'SEMANTIC' | 'NO_MATCH' | 'UNKNOWN' = 'NO_MATCH';
           if (usedEmbeddings) {
-            if (bestScore >= 0.85) {
+            if (structuredComparison.status === "MATCH") {
               matchType = 'EXACT';
-            } else if (bestScore >= 0.2) {
+            } else if (bestScore >= SEMANTIC_MATCH_THRESHOLD) {
               matchType = 'SEMANTIC';
             }
           } else if (bestScore >= 0.2) {
@@ -562,12 +681,14 @@ export async function runDeterministicMatcher(
             matchType = 'UNKNOWN';
           }
 
-          const isCountedMatch = matchType === 'EXACT' || matchType === 'SEMANTIC';
+          const isCountedMatch = matchType === 'EXACT' || (matchType === 'SEMANTIC' && evidenceStrength >= 0.4);
           const weightedScore = isCountedMatch ? bestScore * evidenceStrength : 0;
           weightedScoreSum += weightedScore * weight;
           if (isCountedMatch) {
             matchedCount += 1;
           }
+
+          const profileFactId = bestFact?.source_type === "CREDENTIAL" ? null : bestFact?.id || null;
 
           await client.query(
             `INSERT INTO requirement_evidence_matches (
@@ -585,12 +706,14 @@ export async function runDeterministicMatcher(
               ctx.workspaceId,
               matchRunId,
               req.id,
-              bestFact?.id || null,
+              profileFactId,
               matchType,
               bestScore,
               matchType === 'NO_MATCH'
                 ? 'No sufficient lexical/semantic overlap found.'
-                : `Matched against profile fact ${bestFact?.id}.`,
+                : bestFact?.source_type === "CREDENTIAL"
+                  ? `Matched against profile credential ${bestFact.id}.`
+                  : `Matched against profile fact ${bestFact?.id}.`,
                JSON.stringify({
                  requirement_key: req.requirement_key,
                  requirement_type: req.requirement_type,

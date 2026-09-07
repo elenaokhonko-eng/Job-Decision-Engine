@@ -53,10 +53,19 @@ export async function runExplanationQueueEnqueuer(
           LIMIT 1
         ) lv ON TRUE
         WHERE c.workspace_id = $1
+          AND EXISTS (
+            SELECT 1
+            FROM workspace_user_consents wuc
+            WHERE wuc.workspace_id = c.workspace_id
+              AND wuc.user_id = $2
+              AND wuc.consent_key = 'allow_ai_evaluation'
+              AND wuc.granted = TRUE
+          )
           AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI')
           AND c.primary_lane IS NOT NULL
           AND c.primary_lane <> 'UNCLASSIFIED'
           AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
+          AND COALESCE(c.recommendation_outcome, 'TRACK') IN ('PRIORITY', 'REVIEW')
           AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
           AND NOT EXISTS (
             SELECT 1
@@ -107,7 +116,7 @@ export async function runExplanationQueueEnqueuer(
         (SELECT COUNT(*)::int FROM inserted) AS enqueued,
         (SELECT COUNT(*)::int FROM updated_jobs) AS updated
     `,
-      [ctx.workspaceId]
+      [ctx.workspaceId, ctx.userId]
     );
 
     const summary = rows[0] ?? { enqueued: 0, updated: 0 };

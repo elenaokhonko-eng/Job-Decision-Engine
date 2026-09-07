@@ -79,9 +79,15 @@ function computeEvidenceCompleteness(workplaceTypeRaw: unknown, workabilityFacts
   const hasRemoteOrOfficeDays = workplaceType === "REMOTE" || officeDaysMax != null ? 1 : 0;
   const hasEmploymentType =
     employmentType === "PERMANENT" || employmentType === "CONTRACT" ? 1 : 0;
-  const hasTravel = travelPctMax != null ? 1 : 0;
-
-  const completeness = (hasWorkplaceType + hasRemoteOrOfficeDays + hasEmploymentType + hasTravel) / 4.0;
+  const dimensions = [
+    hasWorkplaceType,
+    hasRemoteOrOfficeDays,
+    hasEmploymentType,
+    travelPctMax != null ? 1 : null,
+  ].filter((value): value is number => value !== null);
+  const completeness = dimensions.length > 0
+    ? dimensions.reduce((total, value) => total + value, 0) / dimensions.length
+    : 0;
   return Number(completeness.toFixed(3));
 }
 

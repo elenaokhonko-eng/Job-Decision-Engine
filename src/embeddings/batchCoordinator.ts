@@ -39,6 +39,8 @@ export interface EmbeddingFallbackSummary {
     inserted: number;
     fromRequirements: number;
     fromProfileFacts: number;
+    fromJobVersions?: number;
+    fromLanePrototypes?: number;
   };
   primary: EmbeddingBatchSummary;
   fallback?: EmbeddingBatchSummary;
@@ -400,14 +402,70 @@ export async function runEmbeddingBatchWithFallback(
 
     let fallback: EmbeddingBatchSummary | undefined;
     if (primary.failedInputIds.length > 0) {
-      // Re-embed every input attempted by the primary provider so the fallback
-      // embedding space remains homogeneous for matching and routing.
+      let fallbackInputIds = primary.processedInputIds;
+      try {
+        const allRelevantInputs = await client.query<{ id: string }>(
+          `SELECT DISTINCT ei.id
+           FROM embedding_inputs ei
+           WHERE ei.workspace_id = $1
+             AND (
+               (ei.source_type = 'PROFILE_FACT' AND EXISTS (
+                 SELECT 1
+                 FROM profile_facts pf
+                 JOIN profile_versions pv
+                   ON pv.workspace_id = pf.workspace_id
+                  AND pv.id = pf.profile_version_id
+                  AND pv.status = 'ACTIVE'
+                 WHERE pf.workspace_id = ei.workspace_id
+                   AND COALESCE(pf.fact_revision_id, pf.id) = ei.source_id
+               ))
+               OR (ei.source_type = 'JOB_REQUIREMENT' AND EXISTS (
+                 SELECT 1
+                 FROM job_requirements jr
+                 JOIN job_versions jv
+                   ON jv.workspace_id = jr.workspace_id
+                  AND jv.id = jr.job_version_id
+                 WHERE jr.workspace_id = ei.workspace_id
+                   AND jr.id = ei.source_id
+                   AND jr.status = 'VALIDATED'
+                   AND (jv.active_requirement_set_id IS NULL OR jr.requirement_set_id = jv.active_requirement_set_id)
+               ))
+               OR (ei.source_type = 'JOB_VERSION' AND EXISTS (
+                 SELECT 1
+                 FROM canonical_jobs cj
+                 WHERE cj.workspace_id = ei.workspace_id
+                   AND cj.latest_job_version_id = ei.source_id
+                   AND COALESCE(cj.processing_state, cj.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'MATCHED')
+               ))
+               OR (ei.source_type = 'LANE_PROTOTYPE' AND EXISTS (
+                 SELECT 1
+                 FROM lane_revisions lr
+                 JOIN lane_active_revisions lar ON lar.lane_revision_id = lr.id
+                 JOIN lane_identities li ON li.id = lr.lane_identity_id
+                 WHERE li.workspace_id = ei.workspace_id
+                   AND lr.id = ei.source_id
+                   AND li.status = 'ACTIVE'
+               ))
+             )
+           ORDER BY ei.id` ,
+          [ctx.workspaceId]
+        );
+        if (allRelevantInputs.rows.length > 0) {
+          fallbackInputIds = allRelevantInputs.rows.map((row) => row.id);
+        }
+      } catch (error: any) {
+        if (error?.code !== '42P01') throw error;
+      }
+
+      // A failed primary batch is never a usable semantic space. Re-embed the
+      // complete active corpus in one fallback space, including inputs that
+      // succeeded in earlier primary cycles, so matching cannot mix providers.
       fallback = await runEmbeddingBatch(
         seeded.fallbackSpaceId,
         `fallback-${Date.now()}`,
         'FALLBACK',
         maxItems,
-        primary.processedInputIds,
+        fallbackInputIds,
         primary.batchId ?? undefined,
         primary.batchId ?? undefined,
         client as pg.PoolClient,

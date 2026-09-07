@@ -22,6 +22,11 @@ export interface LaneDefinition {
   keywords: string[];
   positive_concepts?: string[];
   negative_concepts?: string[];
+  included_domain_concepts?: string[];
+  required_function_concepts?: string[];
+  minimum_domain_score?: number;
+  minimum_function_score?: number;
+  secondary_lane_threshold?: number;
   prototype_query: string;
 }
 
@@ -82,13 +87,18 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
   return {
     title: laneConfig.display_name,
     description: laneConfig.description,
-    threshold: laneConfig.routing?.minimum_semantic_score ?? laneConfig.semantic_threshold ?? 0.35,
-    semantic_threshold: laneConfig.routing?.minimum_semantic_score ?? laneConfig.semantic_threshold ?? 0.35,
+    threshold: laneConfig.semantic_threshold ?? laneConfig.routing?.minimum_semantic_score ?? 0.35,
+    semantic_threshold: laneConfig.semantic_threshold ?? laneConfig.routing?.minimum_semantic_score ?? 0.35,
     enabled_sources: (laneConfig.sourcing?.enabled_sources || []).map((s) => s.toLowerCase()),
     title_families: dedupe(requiredFunctions.map(normalizeConcept)),
     keywords: dedupe(concepts.map(normalizeConcept)),
     positive_concepts: positiveConcepts,
     negative_concepts: negativeConcepts,
+    included_domain_concepts: concepts.map(normalizeConcept),
+    required_function_concepts: requiredFunctions.map(normalizeConcept),
+    minimum_domain_score: laneConfig.routing?.minimum_domain_score,
+    minimum_function_score: laneConfig.routing?.minimum_function_score,
+    secondary_lane_threshold: laneConfig.routing?.secondary_lane_threshold,
     prototype_query: prototypeTexts.join(" ") || laneConfig.description,
   };
 }

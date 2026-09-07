@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
+import { loadWorkabilityPolicy } from "../pipeline/workabilityPolicy.js";
 import { stripHtmlToText } from "../security/sanitize.js";
 
 /**
@@ -123,6 +124,7 @@ export function evaluateWorkability(
   const loc = (location || "").toLowerCase().trim();
   const d = (description || "").toLowerCase().trim();
   const emp = (employmentType || "").toUpperCase().trim();
+  const policy = loadWorkabilityPolicy();
 
   const removeNonEmploymentContractPhrases = (text: string): string =>
     text
@@ -168,10 +170,12 @@ export function evaluateWorkability(
   }
 
   // 1. Explicit ONSITE structured field or 100% onsite in text -> HARD REJECT
-  const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|mandatory\s*5\s*days|5\s*days\s*(a\s*week|per\s*week)?\s*in\s*the\s*office|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
-    || /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i.test(d);
+  const officeDaysMatch = d.match(/\b(\d+)\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
+    || d.match(/\b(\d+)\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
+  const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
+    || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= policy.hardFailOfficeDaysPerWeek);
 
-  if (wp === "ONSITE" || isExplicitOnsiteText) {
+  if ((!policy.onsiteOnlyAllowed && wp === "ONSITE") || (!policy.onsiteOnlyAllowed && isExplicitOnsiteText)) {
     return {
       workable: false,
       needsVerify: false,
@@ -209,7 +213,8 @@ export function evaluateWorkability(
 
   // 4. HYBRID checks
   if (wp === "HYBRID" || /\bhybrid\b/i.test(d) || /\bhybrid\b/i.test(loc)) {
-    if (/\b[45]\s*days?\b/i.test(d)) {
+    const hybridDaysMatch = d.match(/\b(\d+)\s*days?\b/i);
+    if (hybridDaysMatch && Number(hybridDaysMatch[1]) >= policy.hardFailOfficeDaysPerWeek) {
       return {
         workable: false,
         needsVerify: false,
@@ -429,6 +434,8 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   const loc = (job.location || "").toLowerCase();
   const wp = (job.workplace_type || "").toLowerCase();
   const emp = (job.employment_type || "").toUpperCase();
+  const policy = loadWorkabilityPolicy();
+  let pendingVerification: { reason: string; facts?: Partial<GateResult["workability_facts"]> } | null = null;
 
   // ── 0. Global Title Exclusions ──
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
@@ -456,7 +463,39 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   }
 
   if (workability.needsVerify) {
-    return makeVerification(["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"], [workability.reason || "Workplace model unspecified; needs manual verification"], workability.facts);
+    pendingVerification = {
+      reason: workability.reason || "Workplace model unspecified; needs manual verification",
+      facts: workability.facts,
+    };
+  }
+
+  if (policy.blacklistedCompanies.some((company) => c === company || c.includes(company))) {
+    return makeReject(["GATE_BLACKLISTED_COMPANY"], [`Company is configured as blacklisted: "${job.company_name}"`]);
+  }
+
+  const buildingMatch = d.match(/(?:building|research|hands-on|implementation)[^%]{0,50}(\d{1,3})\s*%/i)
+    || d.match(/(\d{1,3})\s*%[^.]{0,50}(?:building|research|hands-on|implementation)/i);
+  if (buildingMatch && Number(buildingMatch[1]) < policy.minimumBuildingResearchPct) {
+    return makeReject(["GATE_BUILDING_RESEARCH_RATIO"], [buildingMatch[0]]);
+  }
+
+  const interactionMatches = [
+    d.match(/(?:interaction|stakeholder|client-facing|client facing)[^%]{0,50}(\d{1,3})\s*%/i),
+    d.match(/(\d{1,3})\s*%[^.]{0,50}(?:interaction|stakeholder|client-facing|client facing)/i),
+  ].filter((match): match is RegExpMatchArray => match !== null);
+  const interactionMatch = interactionMatches.sort((left, right) => Number(right[1]) - Number(left[1]))[0];
+  if (interactionMatch && Number(interactionMatch[1]) > policy.maximumInteractionPct) {
+    return makeReject(["GATE_HIGH_INTERACTION"], [interactionMatch[0]]);
+  }
+
+  const travelMatch = d.match(/(?:travel|travelling|traveling)[^%]{0,35}(\d{1,3})\s*%/i)
+    || d.match(/(\d{1,3})\s*%[^.]{0,35}(?:travel|travelling|traveling)/i);
+  if (travelMatch && Number(travelMatch[1]) > policy.maxTravelPct) {
+    return makeReject(
+      ["GATE_LIFESTYLE_INCOMPATIBLE"],
+      [travelMatch[0]],
+      { travel_pct_max: Number(travelMatch[1]) }
+    );
   }
 
   // ── 1. Deterministic Non-Technical Title-Family Exclusions ──
@@ -513,6 +552,21 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
     "4 days on-site", "4 days onsite", "fully on-site", "fully onsite", "on-premises only"
   ];
   const hardOnsiteRegex = /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i;
+  const configuredOfficeDaysRegex = new RegExp(
+    `\\b(\\d+)\\s*days?\\s*(?:per\\s*week|a\\s*week|\\/week)?\\s*(?:in|at)?\\s*(?:the\\s*)?(?:office|on-?site)\\b`,
+    "i"
+  );
+  const configuredOfficeDaysMatch = d.match(configuredOfficeDaysRegex);
+  if (configuredOfficeDaysMatch && Number(configuredOfficeDaysMatch[1]) >= policy.hardFailOfficeDaysPerWeek) {
+    return makeReject(
+      ["GATE_HIGH_OFFICE_DAYS"],
+      [configuredOfficeDaysMatch[0]],
+      {
+        office_days_min: Number(configuredOfficeDaysMatch[1]),
+        office_days_max: Number(configuredOfficeDaysMatch[1]),
+      }
+    );
+  }
   for (const kw of hardOnsiteKw) {
     if (d.includes(kw) || hardOnsiteRegex.test(d)) {
       return makeReject(["GATE_HIGH_OFFICE_DAYS"], findEvidence(d, [kw]), { office_days_min: 4, office_days_max: 5 });
@@ -531,12 +585,11 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
     || d.includes("1 day/week") || d.includes("2 days/week") || d.includes("3 days/week")
     || d.includes("remote-first") || d.includes("fully remote") || d.includes("work from home");
 
-  if (!hasExplicitDays && ambiguousOfficeKw.some(k => d.includes(k))) {
-    return makeVerification(
-      ["NEEDS_VERIFICATION_OFFICE_DAYS"],
-      findEvidence(d, ambiguousOfficeKw.filter(k => d.includes(k))),
-      { office_days_min: null, office_days_max: null }
-    );
+  if (!hasExplicitDays && ambiguousOfficeKw.some(k => d.includes(k)) && !pendingVerification) {
+    pendingVerification = {
+      reason: "Workplace model ambiguous/unspecified; needs manual verification",
+      facts: { office_days_min: null, office_days_max: null },
+    };
   }
 
   // ── 4. Geographic restrictions ──
@@ -554,6 +607,10 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   const lifestyleKw = ["shift work", "on-call rotation", "regular on-call", "24/7 support", "travel extensively", "frequent travel", "up to 50% travel", "up to 25% travel"];
   for (const kw of lifestyleKw) {
     if (d.includes(kw)) {
+      const isShiftConflict = ["shift work"].includes(kw) && !policy.shiftWorkAllowed;
+      const isOnCallConflict = ["on-call rotation", "regular on-call", "24/7 support"].includes(kw) && !policy.regularOnCallAllowed;
+      const isTravelConflict = ["travel extensively", "frequent travel", "up to 50% travel", "up to 25% travel"].includes(kw) && !policy.frequentTravelAllowed;
+      if (!isShiftConflict && !isOnCallConflict && !isTravelConflict) continue;
       const travelPct = kw.includes("50%") ? 50 : kw.includes("25%") ? 25 : null;
       return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], findEvidence(d, [kw]), { travel_pct_max: travelPct });
     }
@@ -562,7 +619,7 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   // ── 6. Sales / Client-facing ──
   const highInteractionKw = ["sales engineering", "presales", "pre-sales", "client relationship management", "manage large teams", "escalations manager"];
   for (const kw of highInteractionKw) {
-    if (d.includes(kw)) {
+    if (d.includes(kw) && !policy.externalClientPrimaryAllowed) {
       return makeReject(["GATE_HIGH_INTERACTION"], findEvidence(d, [kw]));
     }
   }
@@ -624,7 +681,7 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   // ── 12. Heavy management / Kitchen-sink ──
   const mgmtKw = ["manage large teams", "manage client teams", "manage client expectations", "client relationship management"];
   for (const kw of mgmtKw) {
-    if (d.includes(kw)) {
+    if (d.includes(kw) && !policy.peopleManagementPrimaryAllowed) {
       return makeReject(["GATE_HEAVY_MANAGEMENT"], findEvidence(d, [kw]));
     }
   }
@@ -674,10 +731,25 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
     targetDomainPhrases.some(kw => t.includes(kw) || d.includes(kw));
 
   if (!hasDomainRelevance) {
+    if (pendingVerification) {
+      return makeVerification(
+        ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+        [pendingVerification.reason],
+        pendingVerification.facts
+      );
+    }
     return makeReject(["GATE_NOT_AI_DATA"], ["Axis 2 Failed: No signal found for target domains (AI/Data, RegTech, Bio/Pharma, Quant/FinTech)"]);
   }
 
   // ── All deterministic gates passed ──
+  if (pendingVerification) {
+    return makeVerification(
+      ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+      [pendingVerification.reason],
+      pendingVerification.facts
+    );
+  }
+
   return makePass();
 }
 

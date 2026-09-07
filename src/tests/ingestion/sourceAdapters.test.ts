@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobicyAdapter } from "../../ingestion/adapters/jobicyAdapter.js";
+import { HimalayasAdapter } from "../../ingestion/adapters/himalayasAdapter.js";
 import { RemotiveAdapter } from "../../ingestion/adapters/remotiveAdapter.js";
 import { createWeWorkRemotelyAdapter } from "../../ingestion/adapters/attributedRssAdapter.js";
 
@@ -21,7 +22,7 @@ describe("public source adapters", () => {
       companyName: "Example AI",
       jobTitle: "Staff ML Engineer",
       jobGeo: "Worldwide",
-      jobType: "full-time",
+      jobType: ["full-time", "permanent"],
       url: "https://jobicy.example/jobs/42",
       jobDescription: "<p>Build <strong>ML</strong> systems.</p>",
       pubDate: "2026-09-01T00:00:00Z"
@@ -31,6 +32,7 @@ describe("public source adapters", () => {
     expect(result.success).toBe(true);
     expect(result.jobs).toHaveLength(1);
     expect(result.jobs[0].source_external_id).toBe("42");
+    expect(result.jobs[0].employment_type_raw).toBe("full-time, permanent");
     expect(result.jobs[0].description_raw).toBe("Build ML systems.");
     expect(result.jobs[0].raw_payload).toMatchObject({ id: 42 });
     expect(result.jobs[0].source_attribution).toBe("Jobicy");
@@ -39,9 +41,24 @@ describe("public source adapters", () => {
   it("quarantines malformed Jobicy records", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [{ id: 1, companyName: "Bad" }] })));
     const result = await new JobicyAdapter("https://jobicy.example/api").fetchJobs();
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
     expect(result.jobs).toHaveLength(0);
     expect(result.quarantined).toBe(1);
+  });
+
+  it("keeps valid Jobicy records when the upstream id is blank", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [{
+      id: "",
+      companyName: "Example AI",
+      jobTitle: "Data Engineer",
+      url: "https://jobicy.example/jobs/data-engineer",
+      jobDescription: "Build production data pipelines remotely."
+    }] })));
+
+    const result = await new JobicyAdapter("https://jobicy.example/api").fetchJobs();
+    expect(result.success).toBe(true);
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0].source_external_id).toBe("https://jobicy.example/jobs/data-engineer");
   });
 
   it("reports Jobicy rate limiting", async () => {
@@ -60,6 +77,20 @@ describe("public source adapters", () => {
     const result = await adapter.fetchJobs();
     expect(result.success).toBe(false);
     expect(result.error).toContain("Timeout");
+  });
+
+  it("preserves Himalayas jobs when the feed omits an external id", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [{
+      companyName: "Himalayas AI",
+      title: "Data Platform Lead",
+      jobUrl: "https://himalayas.example/jobs/data-platform-lead",
+      description: "Build production data platforms remotely."
+    }] })));
+    const result = await new HimalayasAdapter("https://himalayas.example/api").fetchJobs();
+    expect(result.success).toBe(true);
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0].source_external_id).toBe("https://himalayas.example/jobs/data-platform-lead");
+    expect(result.totalFetched).toBe(1);
   });
 
   it("treats an empty Jobicy response as a successful zero-result run", async () => {

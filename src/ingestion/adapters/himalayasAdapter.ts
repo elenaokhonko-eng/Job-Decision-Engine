@@ -1,5 +1,6 @@
 import { BaseSourceAdapter, AdapterResult } from "./baseAdapter.js";
 import { ExtractedJob, SCHEMA_VERSION } from "../../contracts/index.js";
+import crypto from "node:crypto";
 
 export class HimalayasAdapter extends BaseSourceAdapter {
   sourceName = "HIMALAYAS" as const;
@@ -9,6 +10,17 @@ export class HimalayasAdapter extends BaseSourceAdapter {
     super();
     this.endpoint = endpoint;
     this.timeoutMs = 15_000;
+  }
+
+  private stableExternalId(item: any): string {
+    const candidates = [item?.id, item?.slug, item?.jobUrl, item?.applicationUrl, item?.url];
+    const usable = candidates.find((value) => value !== null && value !== undefined && String(value).trim().length > 0);
+    if (usable !== undefined) return String(usable).trim();
+    return crypto
+      .createHash("sha256")
+      .update(`${item?.companyName ?? item?.company_name ?? ""}|${item?.title ?? ""}|${item?.jobUrl ?? item?.applicationUrl ?? item?.url ?? ""}`)
+      .digest("hex")
+      .slice(0, 24);
   }
 
   async fetchJobs(options: { limit?: number; page?: number } = {}): Promise<AdapterResult> {
@@ -26,25 +38,38 @@ export class HimalayasAdapter extends BaseSourceAdapter {
       }
 
       const data = await response.json();
-      const rawJobs: any[] = data.jobs || [];
+      const rawJobs: any[] = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.jobs)
+          ? data.jobs
+          : Array.isArray(data?.data)
+            ? data.data
+            : [];
       const jobs: ExtractedJob[] = [];
       let quarantined = 0;
 
       for (const item of rawJobs.slice(0, limit)) {
+        const sourceExternalId = this.stableExternalId(item);
         const candidate = {
           schema_version: SCHEMA_VERSION,
-          source_external_id: String(item.id ?? ""),
-          company_name: item.companyName || "Unknown Company",
-          title: item.title || "Unknown Title",
-          location_raw: item.location || "Remote",
-          workplace_type_raw: typeof item.workplaceType === "string" ? item.workplaceType : "REMOTE",
-          employment_type_raw: typeof item.employmentType === "string" ? item.employmentType : "FULL_TIME",
-          compensation_raw: item.salary || "UNKNOWN",
-          canonical_apply_url: item.applicationUrl || item.jobUrl || url,
-          description_raw: item.description || item.title || "Remote position.",
+          source_external_id: sourceExternalId,
+          company_name: String(item.companyName ?? item.company_name ?? item.company ?? "Unknown Company").trim(),
+          title: String(item.title ?? item.jobTitle ?? "Unknown Title").trim(),
+          location_raw: Array.isArray(item.location ?? item.locationRaw)
+            ? (item.location ?? item.locationRaw).join(", ")
+            : String(item.location ?? item.locationRaw ?? "Remote"),
+          workplace_type_raw: typeof (item.workplaceType ?? item.work_mode) === "string" ? (item.workplaceType ?? item.work_mode) : "REMOTE",
+          employment_type_raw: Array.isArray(item.employmentType)
+            ? item.employmentType.join(", ")
+            : typeof item.employmentType === "string"
+              ? item.employmentType
+              : "FULL_TIME",
+          compensation_raw: item.salary ?? item.compensation ?? "UNKNOWN",
+          canonical_apply_url: item.applicationUrl || item.applicationUrlRaw || item.jobUrl || item.url || `https://himalayas.app/jobs/${encodeURIComponent(sourceExternalId)}`,
+          description_raw: item.description || item.jobDescription || item.title || "Remote position.",
         };
 
-        const validated = this.validateJob(candidate, item.id || item.title);
+        const validated = this.validateJob(candidate, sourceExternalId);
         if (validated) {
           jobs.push(validated);
         } else {
@@ -52,7 +77,14 @@ export class HimalayasAdapter extends BaseSourceAdapter {
         }
       }
 
-      return { sourceName: this.sourceName, success: true, jobs, totalFetched: jobs.length, quarantined };
+      return {
+        sourceName: this.sourceName,
+        success: rawJobs.length === 0 || jobs.length > 0,
+        jobs,
+        totalFetched: rawJobs.length,
+        quarantined,
+        error: rawJobs.length > 0 && jobs.length === 0 ? `All ${quarantined} fetched Himalayas records were quarantined.` : undefined,
+      };
     } catch (err: any) {
       const isTimeout = err?.name === "AbortError";
       return this.errorResult(

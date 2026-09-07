@@ -6,18 +6,22 @@ global_workability_gates:
   work_mode:
     onsite_only_allowed: false
     max_office_days_per_week: 3
-    max_office_days_hard_fail: 5
+    max_office_days_hard_fail: 4
 
   operations:
     regular_on_call_allowed: false
     shift_work_allowed: false
     frequent_travel_allowed: false
+  travel:
+    max_travel_pct: 10
 
   work_composition:
     minimum_building_research_pct: 60
     maximum_interaction_pct: 40
     external_client_primary_allowed: false
     people_management_primary_allowed: false
+
+blacklisted_companies: []
 
 decision_outcomes:
   HARD_REJECTED: "Deterministic conflict with work preferences"
