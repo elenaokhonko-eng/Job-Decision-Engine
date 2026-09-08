@@ -18,12 +18,34 @@ export interface DesktopReleaseValidationResult {
   failures: string[];
 }
 
+export interface ParsedDesktopVersion {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: string[];
+}
+
 function readJson(filePath: string): any {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
 function envHas(env: NodeJS.ProcessEnv, key: string): boolean {
   return typeof env[key] === "string" && env[key]!.trim().length > 0;
+}
+
+export function parseDesktopVersion(version: string): ParsedDesktopVersion | null {
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ? match[4].split(".") : [],
+  };
+}
+
+function expectedTag(version: string): string {
+  return `v${version}`;
 }
 
 function parseArgs(argv: string[]): DesktopReleaseValidationOptions {
@@ -56,6 +78,7 @@ export function validateDesktopRelease(
   const publish = String(options.publish || "never").trim();
   const strict = options.strict === true;
   const channels = Object.keys(policy.channels || {});
+  const parsedVersion = parseDesktopVersion(String(pkg.version));
 
   const requireCheck = (condition: boolean, label: string) => {
     checks.push(label);
@@ -70,6 +93,14 @@ export function validateDesktopRelease(
   requireCheck(policy.schema_version === "desktop-release-policy/v1", "desktop release policy schema is v1");
   requireCheck(channels.includes(channel), `desktop release channel is allowed: ${channel}`);
   requireCheck(["always", "never", "onTag", "onTagOrDraft"].includes(publish), `desktop publish mode is supported: ${publish}`);
+  requireCheck(parsedVersion !== null, "package version is valid semver");
+  if (parsedVersion) {
+    if (channel === "stable") {
+      requireCheck(parsedVersion.prerelease.length === 0, "stable desktop releases use a non-prerelease version");
+    } else {
+      requireCheck(parsedVersion.prerelease[0] === channel, `${channel} desktop releases use a ${channel} prerelease version`);
+    }
+  }
   requireCheck(pkg.build?.artifactName === "Job-Decision-Engine-Setup-${version}.${ext}", "desktop artifact name is update-feed safe");
   requireCheck(pkg.build?.win?.icon === "build/desktop/icon.ico", "Windows icon is configured");
   requireCheck(pkg.build?.icon === "build/desktop/icon.png", "generic app icon is configured");
@@ -87,18 +118,21 @@ export function validateDesktopRelease(
   requireCheck(mainSource.includes("autoUpdater.channel"), "Electron updater channel is configured");
   requireCheck(mainSource.includes("JDEC_DESKTOP_ENABLE_UPDATES"), "Electron updates require explicit enable flag");
 
-  if (channel !== "stable") {
-    warnCheck(String(pkg.version).includes("-"), "non-stable release versions should include a prerelease suffix");
+  if (channel !== "stable" && parsedVersion?.prerelease[0] === channel) {
+    warnCheck(parsedVersion.prerelease.length >= 2, "non-stable release versions should include an incrementing prerelease number");
   }
 
   if (strict || publish === "always") {
     requireCheck(envHas(env, "GH_TOKEN") || envHas(env, "GITHUB_TOKEN"), "GitHub release token is configured");
     requireCheck(
       (envHas(env, "CSC_LINK") && envHas(env, "CSC_KEY_PASSWORD")) ||
+        (envHas(env, "WIN_CSC_LINK") && envHas(env, "WIN_CSC_KEY_PASSWORD")) ||
         (envHas(env, "WINDOWS_CERTIFICATE_BASE64") && envHas(env, "WINDOWS_CERTIFICATE_PASSWORD")),
       "Windows code signing certificate and password are configured"
     );
     requireCheck(env.JDEC_DESKTOP_ENABLE_UPDATES === "true", "desktop auto-updates are explicitly enabled for publish");
+    requireCheck(env.GITHUB_REF_TYPE === "tag", "publish builds run from a git tag");
+    requireCheck(env.GITHUB_REF_NAME === expectedTag(String(pkg.version)), `publish tag matches package version: ${expectedTag(String(pkg.version))}`);
   }
 
   return {

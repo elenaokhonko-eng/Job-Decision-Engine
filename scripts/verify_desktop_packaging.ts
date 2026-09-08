@@ -29,6 +29,7 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   const packageScriptPath = path.join(rootDir, "scripts", "package_desktop.ts");
   const assetScriptPath = path.join(rootDir, "scripts", "prepare_desktop_assets.ts");
   const releaseValidationPath = path.join(rootDir, "scripts", "validate_desktop_release.ts");
+  const releaseEvidencePath = path.join(rootDir, "scripts", "desktop_release_evidence.ts");
   const releasePolicyPath = path.join(rootDir, "desktop", "release", "release-policy.json");
   const releaseWorkflowPath = path.join(rootDir, ".github", "workflows", "desktop-release.yml");
   const distIndex = path.join(rootDir, "dist", "index.html");
@@ -45,6 +46,7 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   requireCheck(fs.existsSync(packageScriptPath), "Desktop package script exists");
   requireCheck(fs.existsSync(assetScriptPath), "Desktop asset preparation script exists");
   requireCheck(fs.existsSync(releaseValidationPath), "Desktop release validation script exists");
+  requireCheck(fs.existsSync(releaseEvidencePath), "Desktop release evidence script exists");
   requireCheck(fs.existsSync(releasePolicyPath), "Desktop release policy exists");
   requireCheck(fs.existsSync(releaseWorkflowPath), "Desktop release workflow exists");
   requireCheck(hasScript(pkg, "desktop:dev"), "desktop:dev script exists");
@@ -52,6 +54,7 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   requireCheck(hasScript(pkg, "desktop:dist"), "desktop:dist script exists");
   requireCheck(hasScript(pkg, "desktop:assets"), "desktop:assets script exists");
   requireCheck(hasScript(pkg, "desktop:release:validate"), "desktop:release:validate script exists");
+  requireCheck(hasScript(pkg, "desktop:release:evidence"), "desktop:release:evidence script exists");
   requireCheck(hasScript(pkg, "desktop:verify"), "desktop:verify script exists");
   requireCheck(pkg.scripts?.["desktop:pack"]?.includes("scripts/package_desktop.ts"), "desktop:pack uses resilient package script");
   requireCheck(pkg.scripts?.["desktop:dist"]?.includes("scripts/package_desktop.ts"), "desktop:dist uses resilient package script");
@@ -77,6 +80,10 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   requireCheck(fileContains(packageScriptPath, "LOCALAPPDATA"), "package script defaults outside synced workspace on Windows");
   requireCheck(fileContains(packageScriptPath, "prepareDesktopAssets"), "package script prepares desktop assets");
   requireCheck(fileContains(packageScriptPath, "--publish"), "package script controls publish mode");
+  requireCheck(fileContains(releaseValidationPath, "publish builds run from a git tag"), "release validation requires tags for publish");
+  requireCheck(fileContains(releaseValidationPath, "stable desktop releases use a non-prerelease version"), "release validation guards stable version format");
+  requireCheck(fileContains(releaseEvidencePath, "Desktop Release Evidence"), "release evidence renders markdown");
+  requireCheck(fileContains(releaseWorkflowPath, "desktop:release:evidence"), "release workflow captures evidence");
 
   if (fs.existsSync(path.join(rootDir, "dist"))) {
     requireCheck(fs.existsSync(distIndex), "Vite dist has index.html");

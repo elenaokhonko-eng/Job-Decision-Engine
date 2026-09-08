@@ -75,6 +75,8 @@ jobs:
           [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
           "CSC_LINK=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CSC_KEY_PASSWORD=$env:WINDOWS_CERTIFICATE_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WIN_CSC_LINK=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WIN_CSC_KEY_PASSWORD=$env:WINDOWS_CERTIFICATE_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Strict publish readiness validation
         shell: pwsh
@@ -95,7 +97,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          JDEC_DESKTOP_OUTPUT_ROOT: ${{ runner.temp }}\jdec-desktop-builds
+          JDEC_DESKTOP_OUTPUT_DIR: ${{ runner.temp }}\jdec-desktop-builds\${{ inputs.channel }}-${{ github.sha }}
           JDEC_DESKTOP_RELEASE_CHANNEL: ${{ inputs.channel }}
           JDEC_DESKTOP_ENABLE_UPDATES: ${{ inputs.publish == true && 'true' || 'false' }}
         run: |
@@ -105,10 +107,24 @@ jobs:
           }
           npm run desktop:dist -- --channel=${{ inputs.channel }} $publishArg
 
+      - name: Capture desktop release evidence
+        shell: pwsh
+        env:
+          JDEC_DESKTOP_OUTPUT_DIR: ${{ runner.temp }}\jdec-desktop-builds\${{ inputs.channel }}-${{ github.sha }}
+          JDEC_DESKTOP_RELEASE_CHANNEL: ${{ inputs.channel }}
+        run: |
+          $publishArg = "never"
+          if ("${{ inputs.publish }}" -eq "true") {
+            $publishArg = "always"
+          }
+          npm run desktop:release:evidence -- --channel=${{ inputs.channel }} --publish=$publishArg --output-dir="$env:JDEC_DESKTOP_OUTPUT_DIR" --out="${{ runner.temp }}\desktop-release-evidence.md"
+
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ inputs.channel }}-${{ github.sha }}
-          path: ${{ runner.temp }}\jdec-desktop-builds\**
+          path: |
+            ${{ runner.temp }}\jdec-desktop-builds\**
+            ${{ runner.temp }}\desktop-release-evidence.md
           if-no-files-found: error
           retention-days: 7

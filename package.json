@@ -17,6 +17,7 @@
     "desktop:dist": "tsx scripts/package_desktop.ts --installer",
     "desktop:assets": "tsx scripts/prepare_desktop_assets.ts",
     "desktop:release:validate": "tsx scripts/validate_desktop_release.ts",
+    "desktop:release:evidence": "tsx scripts/desktop_release_evidence.ts",
     "desktop:verify": "tsx scripts/verify_desktop_packaging.ts",
     "dev:setup": "tsx scripts/dev_setup.ts",
     "db:init": "tsx scripts/db_init.ts",

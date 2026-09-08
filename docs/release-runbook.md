@@ -59,15 +59,18 @@ Local desktop checks:
 npm run desktop:assets
 npm run desktop:release:validate -- --channel=stable --publish=never
 npm run desktop:dist -- --channel=stable --publish=never
+npm run desktop:release:evidence -- --channel=stable --publish=never --output-dir=<desktop-output-dir>
 ```
 
 Strict publish validation:
 
 ```bash
-JDEC_DESKTOP_ENABLE_UPDATES=true npm run desktop:release:validate -- --strict --channel=stable --publish=always
+GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v1.0.0 JDEC_DESKTOP_ENABLE_UPDATES=true npm run desktop:release:validate -- --strict --channel=stable --publish=always
 ```
 
 Release channels are defined in `desktop/release/release-policy.json`. `stable` maps to the production update feed, while `alpha` and `beta` are prerelease channels for supervised testing. Do not enable desktop auto-updates for an unsigned or unpublished build.
+
+Version guardrails are enforced before packaging. `stable` requires a plain semver version such as `1.0.0`; `beta` requires a prerelease version such as `1.0.0-beta.1`; `alpha` requires a prerelease version such as `1.0.0-alpha.1`. Publish builds must run from a git tag that exactly matches `v<package.json version>`.
 
 ## Privacy And Security
 
