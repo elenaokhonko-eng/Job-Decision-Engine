@@ -13,7 +13,7 @@ const dbWipeBlocked =
   process.env.ALLOW_TEST_DB_WIPE !== "true";
 const skipDbTests = !databaseUrl || dbWipeBlocked;
 
-describe.sequential("Job Decision Engine Test Suite", () => {
+describe("Job Decision Engine Test Suite", () => {
   beforeEach(async () => {
     if (!process.env.DATABASE_URL) {
       return;
