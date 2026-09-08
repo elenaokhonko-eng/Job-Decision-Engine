@@ -4,6 +4,7 @@ import {
   RequirementTypeSchema,
   REQUIREMENTS_SCHEMA_VERSION,
 } from './contracts.js';
+import { validateQuotedRequirements } from './quotedRequirementExtractor.js';
 
 export interface QuotedProviderInput {
   canonicalJobId: string;
@@ -129,6 +130,45 @@ function buildPrompt(input: QuotedProviderInput): string {
   ].join('\n');
 }
 
+function cleanJsonResponseText(rawText: string): string {
+  let cleaned = rawText.trim();
+  if (cleaned.startsWith('```json')) {
+    cleaned = cleaned.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
+  } else if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```\s*/, '').replace(/\s*```$/, '');
+  }
+
+  const startIdx = cleaned.indexOf('{');
+  const endIdx = cleaned.lastIndexOf('}');
+  if (startIdx >= 0 && endIdx > startIdx) {
+    cleaned = cleaned.substring(startIdx, endIdx + 1);
+  }
+  return cleaned;
+}
+
+function parseAndValidateQuotedPayload(input: QuotedProviderInput, rawText: string): unknown {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(cleanJsonResponseText(rawText));
+  } catch (error: any) {
+    throw new Error(`Quoted requirement provider returned invalid JSON: ${error.message || String(error)}`);
+  }
+
+  const validated = validateQuotedRequirements(input.descriptionText, payload);
+  if (!validated.valid) {
+    throw new Error(
+      `Quoted requirement validation failed: ${validated.issues
+        .map((issue) => `${issue.requirement_key}: ${issue.message}`)
+        .join('; ')}`
+    );
+  }
+
+  return {
+    schema_version: REQUIREMENTS_SCHEMA_VERSION,
+    requirements: validated.requirements,
+  };
+}
+
 export async function runQuotedRequirementProvider(
   input: QuotedProviderInput
 ): Promise<QuotedProviderOutput> {
@@ -142,10 +182,11 @@ export async function runQuotedRequirementProvider(
     responseMimeType: 'application/json',
     responseSchema: quotedRequirementProviderSchema,
     systemInstruction: 'You are a strict requirement extractor. Return valid JSON only.',
+    validateResponseText: (text) => parseAndValidateQuotedPayload(input, text),
   });
 
   return {
-    payload: JSON.parse(response.text || '{}'),
+    payload: response.validatedPayload ?? parseAndValidateQuotedPayload(input, response.text),
     provider: response.provider,
     model: response.model,
     extractorVersion: `quoted_provider_${REQUIREMENTS_SCHEMA_VERSION}`,

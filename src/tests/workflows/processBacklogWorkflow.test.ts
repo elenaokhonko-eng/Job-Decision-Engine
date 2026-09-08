@@ -9,8 +9,13 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).toContain('workflow_run:');
     expect(workflow).toContain('- Job Discovery Ingestion');
-    expect(workflow).toContain('cancel-in-progress: false');
+    expect(workflow).toContain('cancel-in-progress: true');
+    expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(workflow).toContain('npx tsx scripts/process_pipeline_tasks.ts');
+    expect(workflow).toContain('timeout-minutes: 15');
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '40' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '720000' }}");
+    expect(workflow).toContain('PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS');
     expect(workflow).toContain('PIPELINE_TASK_WORKER_WALL_CLOCK_MS');
     expect(workflow).toContain('PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT');
     expect(workflow).not.toContain('scripts/ingest_gmail.ts');
@@ -41,7 +46,11 @@ describe('process backlog workflow', () => {
 
     expect(script).toContain('pg_try_advisory_lock');
     expect(script).toContain('runPipelineStageTaskWorker');
+    expect(script).toContain('process.once("SIGINT"');
+    expect(script).toContain('process.once("SIGTERM"');
+    expect(script).toContain('abortSignal: shutdownController.signal');
+    expect(script).toContain('PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS');
     expect(script).toContain('Pipeline task worker moved');
-    expect(script).toContain('process.exitCode = 1');
+    expect(script).toContain('process.exitCode = workerError instanceof PipelineWorkerCancelledError ? 130 : 1');
   });
 });

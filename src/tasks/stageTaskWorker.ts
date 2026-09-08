@@ -76,6 +76,7 @@ export interface PipelineStageWorkerOptions {
   heartbeatSeconds?: number;
   wallClockMs?: number;
   claimedBy?: string;
+  abortSignal?: AbortSignal;
 }
 
 type QueryClient = {
@@ -125,6 +126,26 @@ function incrementWorker(
 ): void {
   summary.byType[taskType] ??= { claimed: 0, completed: 0, failed: 0, deadLettered: 0 };
   summary.byType[taskType][field] += 1;
+}
+
+export class PipelineWorkerCancelledError extends Error {
+  constructor(message = "Pipeline task worker cancellation requested.") {
+    super(message);
+    this.name = "PipelineWorkerCancelledError";
+  }
+}
+
+function abortReasonMessage(signal: AbortSignal): string {
+  const reason = signal.reason;
+  if (reason instanceof Error) return reason.message;
+  if (typeof reason === "string" && reason.trim() !== "") return reason;
+  return "Pipeline task worker cancellation requested.";
+}
+
+function throwIfWorkerCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new PipelineWorkerCancelledError(abortReasonMessage(signal));
+  }
 }
 
 function requireStringPayload(task: ClaimedPipelineTask, field: string): string {
@@ -952,6 +973,8 @@ export async function runPipelineStageTaskWorker(
   };
 
   try {
+    throwIfWorkerCancelled(options.abortSignal);
+
     if (options.seed !== false) {
       summary.seeded = await seedRecoverablePipelineTasks(client as any, {
         context: ctx,
@@ -960,8 +983,10 @@ export async function runPipelineStageTaskWorker(
     }
 
     while (summary.claimed < maxTasks && Date.now() - startedAt < wallClockMs) {
+      throwIfWorkerCancelled(options.abortSignal);
       let madeProgress = false;
       for (const taskType of taskTypes) {
+        throwIfWorkerCancelled(options.abortSignal);
         if (summary.claimed >= maxTasks || Date.now() - startedAt >= wallClockMs) break;
         const claimLimit = Math.min(claimBatchSize, maxTasks - summary.claimed);
         const claimedTasks = await claimPipelineTasks(
@@ -979,6 +1004,7 @@ export async function runPipelineStageTaskWorker(
         madeProgress = true;
 
         for (const task of claimedTasks) {
+          throwIfWorkerCancelled(options.abortSignal);
           summary.claimed += 1;
           incrementWorker(summary, task.taskType, "claimed");
           try {
@@ -991,7 +1017,11 @@ export async function runPipelineStageTaskWorker(
             );
             summary.completed += 1;
             incrementWorker(summary, task.taskType, "completed");
+            throwIfWorkerCancelled(options.abortSignal);
           } catch (error) {
+            if (error instanceof PipelineWorkerCancelledError) {
+              throw error;
+            }
             const message = error instanceof Error ? error.message : String(error);
             const exhausted = task.attemptNumber >= task.maxAttempts;
             await failPipelineTask(task, message, client as any, { context: ctx });

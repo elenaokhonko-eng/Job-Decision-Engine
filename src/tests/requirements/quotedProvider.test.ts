@@ -72,6 +72,7 @@ describe('quotedRequirementProviderSchema', () => {
 
     mockedGenerateContentAudited.mockResolvedValueOnce({
       text: JSON.stringify(payload),
+      validatedPayload: payload,
       provider: 'openai',
       model: 'gpt-5.6-luna',
       fallbackUsed: false,
@@ -100,5 +101,46 @@ describe('quotedRequirementProviderSchema', () => {
     expect(result.provider).toBe('openai');
     expect(result.model).toBe('gpt-5.6-luna');
     expect(result.attempts).toBe(1);
+
+    const request = mockedGenerateContentAudited.mock.calls[0][0] as any;
+    expect(typeof request.validateResponseText).toBe('function');
+    expect(() =>
+      request.validateResponseText(
+        JSON.stringify({
+          schema_version: REQUIREMENTS_SCHEMA_VERSION,
+          requirements: [
+            {
+              requirement_key: 'R-001',
+              requirement_type: 'DOMAIN',
+              importance: 'MUST',
+              requirement_text: 'Invented AI requirement.',
+              quote_text: 'not present in description',
+              confidence: 0.92,
+            },
+          ],
+        })
+      )
+    ).toThrow(/Quote not found/);
+  });
+
+  it('rejects invalid provider JSON when no audited validated payload is supplied', async () => {
+    mockedGenerateContentAudited.mockResolvedValueOnce({
+      text: 'not json',
+      provider: 'openai',
+      model: 'gpt-5.6-luna',
+      fallbackUsed: false,
+      attempts: 1,
+      errors: [],
+      latencyMs: 42,
+      routeKey: 'requirements_extraction',
+    });
+
+    await expect(
+      runQuotedRequirementProvider({
+        canonicalJobId: 'job-1',
+        jobVersionId: 'version-1',
+        descriptionText: 'Experience with AI systems is required.',
+      })
+    ).rejects.toThrow(/invalid JSON/);
   });
 });

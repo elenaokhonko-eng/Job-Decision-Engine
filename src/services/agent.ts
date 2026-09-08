@@ -613,7 +613,20 @@ export interface GenerateContentAuditedResult {
   routeKey?: string;
   routeRevisionId?: string;
   invocationId?: string | null;
+  validatedPayload?: unknown;
 }
+
+export interface GenerateContentResponseValidationContext {
+  provider: "gemini" | "openai";
+  model: string;
+  purpose: ModelRoutePurpose;
+  routeKey: string;
+}
+
+export type GenerateContentResponseValidator<T = unknown> = (
+  text: string,
+  context: GenerateContentResponseValidationContext
+) => T | Promise<T>;
 
 function inferPurposeFromModel(model: string): ModelRoutePurpose {
   if (
@@ -668,6 +681,45 @@ function safeText(value: unknown): string {
   }
 }
 
+function cleanJsonResponseText(rawText: string): string {
+  let cleaned = rawText.trim();
+  if (cleaned.startsWith("```json")) {
+    cleaned = cleaned.replace(/^```json\s*/i, "").replace(/\s*```$/, "");
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+  }
+
+  const objectStart = cleaned.indexOf("{");
+  const arrayStart = cleaned.indexOf("[");
+  const startCandidates = [objectStart, arrayStart].filter((idx) => idx >= 0);
+  const startIdx = startCandidates.length > 0 ? Math.min(...startCandidates) : -1;
+  if (startIdx < 0) {
+    return cleaned;
+  }
+
+  const endIdx = cleaned[startIdx] === "{"
+    ? cleaned.lastIndexOf("}")
+    : cleaned.lastIndexOf("]");
+  if (endIdx > startIdx) {
+    return cleaned.substring(startIdx, endIdx + 1);
+  }
+  return cleaned;
+}
+
+async function validateGeneratedResponseText(
+  text: string,
+  context: GenerateContentResponseValidationContext,
+  validator?: GenerateContentResponseValidator
+): Promise<unknown> {
+  if (!text || text.trim().length === 0) {
+    throw new Error(`Model ${context.provider}:${context.model} returned empty response text.`);
+  }
+  if (!validator) {
+    return undefined;
+  }
+  return validator(text, context);
+}
+
 export async function generateContentAudited(options: {
   model: string;
   contents: any;
@@ -679,6 +731,7 @@ export async function generateContentAudited(options: {
   clientOrPool?: pg.Pool | pg.PoolClient;
   context?: WorkspaceContext;
   seedRoute?: boolean;
+  validateResponseText?: GenerateContentResponseValidator;
 }): Promise<GenerateContentAuditedResult> {
   const startedAt = Date.now();
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
@@ -770,6 +823,7 @@ export async function generateContentAudited(options: {
   };
 
   let successText: string | null = null;
+  let successValidatedPayload: unknown = undefined;
   let successProvider: "gemini" | "openai" = "gemini";
   let successModel = options.model;
   let attempts = 0;
@@ -789,7 +843,13 @@ export async function generateContentAudited(options: {
       try {
         attempts++;
         const text = await tryGemini(geminiKey, { ...options, model: modelForProvider });
+        const validatedPayload = await validateGeneratedResponseText(
+          text,
+          { provider, model: modelForProvider, purpose, routeKey },
+          options.validateResponseText
+        );
         successText = text;
+        successValidatedPayload = validatedPayload;
         successProvider = "gemini";
         successModel = modelForProvider;
         break;
@@ -808,7 +868,13 @@ export async function generateContentAudited(options: {
       try {
         attempts++;
         const text = await tryOpenAI(openaiKey, { ...options, model: modelForProvider });
+        const validatedPayload = await validateGeneratedResponseText(
+          text,
+          { provider, model: modelForProvider, purpose, routeKey },
+          options.validateResponseText
+        );
         successText = text;
+        successValidatedPayload = validatedPayload;
         successProvider = "openai";
         successModel = modelForProvider;
         break;
@@ -825,9 +891,9 @@ export async function generateContentAudited(options: {
   }
 
   const latencyMs = Date.now() - startedAt;
-  const fallbackUsed = successText != null && successProvider !== routeContent.primary_provider;
+  const fallbackUsed = successText !== null && successProvider !== routeContent.primary_provider;
 
-  if (!successText) {
+  if (successText === null) {
     const errorMessage = `All model API calls failed. Purpose=${purpose}, route=${routeKey}, errors=${attemptedErrors
       .map((e) => `${e.provider}:${e.model}:${e.error}`)
       .join(" | ")}`;
@@ -871,6 +937,7 @@ export async function generateContentAudited(options: {
         requestMetadata,
         responseMetadata: {
           response_length: successText.length,
+          validated_payload: successValidatedPayload !== undefined,
           errors: attemptedErrors,
         },
         latencyMs,
@@ -891,6 +958,7 @@ export async function generateContentAudited(options: {
     routeKey,
     routeRevisionId: routeRevisionId ?? undefined,
     invocationId,
+    validatedPayload: successValidatedPayload,
   };
 }
 
@@ -1563,13 +1631,166 @@ export interface SingleEvaluationExecutionResult {
   trace: string[];
 }
 
+interface ValidatedSingleEvaluationPayload {
+  root: Record<string, any>;
+  jobPayload: Record<string, any>;
+}
+
+function hasOwnField(value: Record<string, any>, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, field);
+}
+
+function requireStringField(value: Record<string, any>, field: string): string {
+  if (!hasOwnField(value, field) || typeof value[field] !== "string" || value[field].trim().length === 0) {
+    throw new Error(`Evaluation output missing required string field "${field}".`);
+  }
+  return value[field];
+}
+
+function requirePresentField(value: Record<string, any>, field: string): void {
+  if (!hasOwnField(value, field)) {
+    throw new Error(`Evaluation output missing required field "${field}".`);
+  }
+}
+
+function requireScoreField(value: Record<string, any>, field: string): void {
+  const score = value[field];
+  if (!Number.isInteger(score) || score < 0 || score > 100) {
+    throw new Error(`Evaluation output field "${field}" must be an integer from 0 to 100.`);
+  }
+}
+
+function parseStrictSingleEvaluationPayload(
+  rawText: string,
+  job: SingleEvaluationJobInput
+): ValidatedSingleEvaluationPayload {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleanJsonResponseText(rawText));
+  } catch (parseErr: any) {
+    throw new Error(`Failed to parse evaluation response JSON: ${parseErr.message}. Raw text: ${rawText.slice(0, 200)}`);
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Evaluation output must be a single JSON object.");
+  }
+
+  const root = parsed as Record<string, any>;
+  const jobPayload = Array.isArray(root.evaluated_jobs) ? root.evaluated_jobs[0] : root;
+  if (Array.isArray(root.evaluated_jobs) && root.evaluated_jobs.length !== 1) {
+    throw new Error(`Evaluation output must contain exactly one evaluated job; received ${root.evaluated_jobs.length}.`);
+  }
+  if (!jobPayload || typeof jobPayload !== "object" || Array.isArray(jobPayload)) {
+    throw new Error("Evaluation output contained no valid job payload.");
+  }
+
+  const reportedCanonicalJobId = requireStringField(jobPayload, "canonical_job_id");
+  if (reportedCanonicalJobId !== job.canonicalJobId) {
+    throw new Error(
+      `Evaluation identity mismatch: response canonical_job_id ${reportedCanonicalJobId} does not match request ${job.canonicalJobId}`
+    );
+  }
+
+  const reportedJobVersionId = requireStringField(jobPayload, "job_version_id");
+  if (reportedJobVersionId !== job.jobVersionId) {
+    throw new Error(
+      `Evaluation identity mismatch: response job_version_id ${reportedJobVersionId} does not match request ${job.jobVersionId}`
+    );
+  }
+
+  const summary =
+    typeof root.evaluation_summary === "string"
+      ? root.evaluation_summary
+      : typeof jobPayload.evaluation_summary === "string"
+        ? jobPayload.evaluation_summary
+        : "";
+  if (summary.trim().length === 0) {
+    throw new Error('Evaluation output missing required string field "evaluation_summary".');
+  }
+
+  for (const field of [
+    "primary_lane",
+    "secondary_lanes",
+    "lane_confidence",
+    "lane_evidence",
+    "rejection_codes",
+    "strategic_value",
+    "recommended_cv_version",
+    "next_action",
+  ]) {
+    requirePresentField(jobPayload, field);
+  }
+
+  if (!Array.isArray(jobPayload.secondary_lanes)) {
+    throw new Error('Evaluation output field "secondary_lanes" must be an array.');
+  }
+  if (!Array.isArray(jobPayload.rejection_codes)) {
+    throw new Error('Evaluation output field "rejection_codes" must be an array.');
+  }
+
+  for (const field of [
+    "nd_score",
+    "nd_friendly_score",
+    "politics_stress_score",
+    "sensory_overload_index",
+    "building_research_ratio",
+    "interaction_load",
+  ]) {
+    requireScoreField(jobPayload, field);
+  }
+
+  return { root, jobPayload: jobPayload as Record<string, any> };
+}
+
+function buildEvaluationResultFromValidatedPayload(
+  validated: ValidatedSingleEvaluationPayload,
+  job: SingleEvaluationJobInput,
+  pipelineRunId: string,
+  attemptNum: number,
+  response: Pick<GenerateContentAuditedResult, "provider" | "model" | "fallbackUsed">
+): EvaluationResult {
+  const { root, jobPayload } = validated;
+  const evaluationSummary =
+    typeof root.evaluation_summary === "string"
+      ? root.evaluation_summary
+      : jobPayload.evaluation_summary;
+
+  return EvaluationResultSchema.parse({
+    schema_version: SCHEMA_VERSION,
+    canonical_job_id: jobPayload.canonical_job_id,
+    job_version_id: jobPayload.job_version_id,
+    pipeline_run_id: pipelineRunId,
+    provider: response.provider,
+    model: response.model,
+    attempt: attemptNum,
+    is_fallback: response.fallbackUsed,
+    degraded_state: response.fallbackUsed,
+    evaluation_summary: evaluationSummary,
+    primary_lane: jobPayload.primary_lane,
+    secondary_lanes: jobPayload.secondary_lanes,
+    lane_confidence: jobPayload.lane_confidence,
+    lane_evidence: jobPayload.lane_evidence,
+    nd_score: jobPayload.nd_score,
+    nd_friendly_score: jobPayload.nd_friendly_score,
+    politics_stress_score: jobPayload.politics_stress_score,
+    sensory_overload_index: jobPayload.sensory_overload_index,
+    building_research_ratio: jobPayload.building_research_ratio,
+    interaction_load: jobPayload.interaction_load,
+    rejection_codes: jobPayload.rejection_codes,
+    strategic_value: jobPayload.strategic_value,
+    recommended_cv_version: jobPayload.recommended_cv_version,
+    next_action: jobPayload.next_action,
+    evaluated_at: new Date().toISOString()
+  });
+}
+
 /**
  * Pure evaluation function for a single canonical job version.
  * - No database-query tools
  * - No side-effect database writes
  * - Exactly one result returned
  * - Strict canonical_job_id and job_version_id identity validation
- * - Preserves explicit numerical 0 values using (val ?? 50)
+ * - Requires explicit score fields so missing model output cannot become synthetic defaults
  */
 export async function evaluateSingleCanonicalJob(
   job: SingleEvaluationJobInput,
@@ -1612,136 +1833,87 @@ ${job.descriptionText}
 1. Classify into primary_lane ("CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", or null).
 2. Score nd_score, nd_friendly_score, politics_stress_score, sensory_overload_index, building_research_ratio, interaction_load as integers (0-100).
 3. Set next_action to one of: "PRIORITY_APPLY", "APPLY_AFTER_VERIFICATION", "LOW_STRATEGIC_VALUE", "REJECTED".
-4. Output EXACTLY ONE JSON object conforming to the schema.
+4. Echo canonical_job_id and job_version_id exactly as supplied above.
+5. Output EXACTLY ONE JSON object conforming to this shape:
+{
+  "evaluation_summary": "Overall synthesis",
+  "evaluated_jobs": [
+    {
+      "canonical_job_id": "${job.canonicalJobId}",
+      "job_version_id": "${job.jobVersionId}",
+      "primary_lane": "CORE_AI_DATA | LEGAL_REGTECH | HEALTH_BIO_PHARMA | INVESTMENT_MARKETS_FINTECH | null",
+      "secondary_lanes": ["string"],
+      "lane_confidence": "High | Medium | Low",
+      "lane_evidence": "string",
+      "nd_score": 0,
+      "nd_friendly_score": 0,
+      "politics_stress_score": 0,
+      "sensory_overload_index": 0,
+      "building_research_ratio": 0,
+      "interaction_load": 0,
+      "rejection_codes": ["string"],
+      "strategic_value": "string",
+      "recommended_cv_version": "HEALTH_BIO_PHARMA | LEGAL_REGTECH | INVESTMENT_MARKETS_FINTECH | CORE_AI_DATA | None",
+      "next_action": "PRIORITY_APPLY | APPLY_AFTER_VERIFICATION | LOW_STRATEGIC_VALUE | REJECTED"
+    }
+  ]
+}
 `;
 
   const systemInstruction = `You are an AI decision engine evaluating a single canonical job. Return a single JSON object.`;
 
-  const order = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
-  const openaiEvalModel = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
-  const tried = new Set<string>();
-
-  let rawJsonText: string | null = null;
-  let successProvider: "gemini" | "openai" | "ollama" = "gemini";
-  let successModel: string = MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
-  let fallbackUsed = false;
-  let attempts = 0;
-  const errors: string[] = [];
-
-  for (const provider of order) {
-    if (provider === "gemini" && geminiKey && !tried.has("gemini")) {
-      tried.add("gemini");
-      attempts++;
-      try {
-        trace.push(`Attempting primary model evaluation via Gemini (${MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL})...`);
-        const ai = getGeminiClient();
-        const response = await ai.models.generateContent({
-          model: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          config: {
-            systemInstruction,
-            responseMimeType: "application/json"
-          }
-        });
-        rawJsonText = response.text || "{}";
-        successProvider = "gemini";
-        successModel = MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
-        fallbackUsed = false;
-        break;
-      } catch (geminiErr: any) {
-        const msg = geminiErr.message || String(geminiErr);
-        console.warn(`⚠️ Gemini single job evaluation failed: ${msg}`);
-        trace.push(`Gemini evaluation failed: ${msg}`);
-        errors.push(`Gemini: ${msg}`);
-      }
-    }
-    if (provider === "openai" && openaiKey && !tried.has("openai")) {
-      tried.add("openai");
-      attempts++;
-      try {
-        trace.push(`Attempting evaluation via OpenAI (${openaiEvalModel})...`);
-        rawJsonText = await tryOpenAI(openaiKey, {
-          model: openaiEvalModel,
-          contents: prompt,
-          responseMimeType: "application/json",
-          systemInstruction
-        });
-        successProvider = "openai";
-        successModel = openaiEvalModel;
-        fallbackUsed = tried.has("gemini");
-        break;
-      } catch (err: any) {
-        const msg = err.message || String(err);
-        console.warn(`⚠️ OpenAI single job evaluation failed: ${msg}`);
-        trace.push(`OpenAI evaluation failed: ${msg}`);
-        errors.push(`OpenAI: ${msg}`);
-      }
-    }
-  }
-
-  if (!rawJsonText) {
-    throw new Error(`All evaluation model attempts failed. Attempts: ${attempts}, Errors: ${errors.join("; ")}`);
-  }
-
-  // Parse and validate
-  let parsed: any;
-  try {
-    const cleaned = rawJsonText.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-    parsed = JSON.parse(cleaned);
-  } catch (parseErr: any) {
-    throw new Error(`Failed to parse evaluation response JSON: ${parseErr.message}. Raw text: ${rawJsonText.slice(0, 200)}`);
-  }
-
-  // If parsed object is wrapped in evaluated_jobs, extract single job
-  const jobPayload = Array.isArray(parsed.evaluated_jobs) ? parsed.evaluated_jobs[0] : parsed;
-  if (!jobPayload) {
-    throw new Error("Evaluation output contained no valid job payload.");
-  }
-
-  // Identity validation: if LLM returned canonical_job_id or job_id, verify it matches
-  const reportedJobId = jobPayload.canonical_job_id || jobPayload.job_id;
-  if (reportedJobId && reportedJobId !== job.canonicalJobId) {
-    throw new Error(`Evaluation identity mismatch: response job_id ${reportedJobId} does not match request ${job.canonicalJobId}`);
-  }
-
-  const validatedResult: EvaluationResult = EvaluationResultSchema.parse({
-    schema_version: SCHEMA_VERSION,
-    canonical_job_id: job.canonicalJobId,
-    job_version_id: job.jobVersionId,
-    pipeline_run_id: pipelineRunId,
-    provider: successProvider,
-    model: successModel,
-    attempt: attemptNum,
-    is_fallback: fallbackUsed,
-    degraded_state: fallbackUsed,
-    evaluation_summary: parsed.evaluation_summary || jobPayload.strategic_value || "Automated multi-lane AI evaluation",
-    primary_lane: jobPayload.primary_lane || null,
-    secondary_lanes: jobPayload.secondary_lanes || [],
-    lane_confidence: jobPayload.lane_confidence || "Medium",
-    lane_evidence: jobPayload.lane_evidence || "",
-    nd_score: jobPayload.nd_score ?? 50,
-    nd_friendly_score: jobPayload.nd_friendly_score ?? 50,
-    politics_stress_score: jobPayload.politics_stress_score ?? 50,
-    sensory_overload_index: jobPayload.sensory_overload_index ?? 50,
-    building_research_ratio: jobPayload.building_research_ratio ?? 50,
-    interaction_load: jobPayload.interaction_load ?? 50,
-    rejection_codes: jobPayload.rejection_codes || [],
-    strategic_value: jobPayload.strategic_value || "",
-    recommended_cv_version: jobPayload.recommended_cv_version || "CORE_AI_DATA",
-    next_action: jobPayload.next_action || "LOW_STRATEGIC_VALUE",
-    evaluated_at: new Date().toISOString()
+  const openaiEvalModelForRoute = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+  trace.push("Attempting strict single-job evaluation through audited model routing...");
+  const response = await generateContentAudited({
+    purpose: "EVALUATION",
+    routeKey: "single_job_evaluation",
+    model: openaiEvalModelForRoute,
+    contents: prompt,
+    responseMimeType: "application/json",
+    systemInstruction,
+    validateResponseText: (text, validationContext) => {
+      const validated = parseStrictSingleEvaluationPayload(text, job);
+      buildEvaluationResultFromValidatedPayload(
+        validated,
+        job,
+        pipelineRunId,
+        attemptNum,
+        {
+          provider: validationContext.provider,
+          model: validationContext.model,
+          fallbackUsed: false,
+        }
+      );
+      return validated;
+    },
   });
+
+  const validatedPayload =
+    (response.validatedPayload as ValidatedSingleEvaluationPayload | undefined) ??
+    parseStrictSingleEvaluationPayload(response.text, job);
+  const validatedResult = buildEvaluationResultFromValidatedPayload(
+    validatedPayload,
+    job,
+    pipelineRunId,
+    attemptNum,
+    response
+  );
+
+  trace.push(
+    `Strict single-job evaluation completed via ${response.provider} (${response.model}); fallback_used=${response.fallbackUsed}.`
+  );
 
   return {
     evaluatedJob: validatedResult,
-    provider: successProvider,
-    model: successModel,
-    fallbackUsed,
-    attempts,
-    errors,
-    degraded: fallbackUsed,
+    provider: response.provider,
+    model: response.model,
+    fallbackUsed: response.fallbackUsed,
+    attempts: response.attempts,
+    errors: response.errors.map((error) => `${error.provider}:${error.model}: ${error.error}`),
+    degraded: response.fallbackUsed,
     trace
   };
+
 }
 
 

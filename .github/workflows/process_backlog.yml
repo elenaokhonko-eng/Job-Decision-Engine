@@ -12,7 +12,7 @@ on:
 
 concurrency:
   group: process-discovery-backlog
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -21,8 +21,8 @@ jobs:
   process-backlog:
     name: Drain saved discovery backlog
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
-    timeout-minutes: 75
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
+    timeout-minutes: 25
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -70,7 +70,7 @@ jobs:
         run: npx tsx scripts/preflight_models.ts
 
       - name: Process saved discovery backlog
-        timeout-minutes: 60
+        timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -93,11 +93,12 @@ jobs:
           REQUIREMENTS_PROVIDER_FAILURE_LIMIT: ${{ vars.REQUIREMENTS_PROVIDER_FAILURE_LIMIT || '1' }}
           REQUIREMENTS_DB_STATEMENT_TIMEOUT_MS: ${{ vars.REQUIREMENTS_DB_STATEMENT_TIMEOUT_MS || '60000' }}
           REQUIREMENTS_ENABLE_QUOTED: 'true'
-          PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '100' }}
-          PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '3300000' }}
+          PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '40' }}
+          PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '720000' }}
           PIPELINE_TASK_WORKER_LEASE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_LEASE_SECONDS || '300' }}
           PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS || '60' }}
           PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE: ${{ vars.PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE || '1' }}
           PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '500' }}
           PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: ${{ vars.PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT || 'true' }}
+          PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '10000' }}
         run: npx tsx scripts/process_pipeline_tasks.ts

@@ -1,13 +1,19 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
-import { runPipelineStageTaskWorker } from "../src/tasks/stageTaskWorker.js";
+import {
+  PipelineWorkerCancelledError,
+  runPipelineStageTaskWorker,
+} from "../src/tasks/stageTaskWorker.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const LOCK_ID = 1001;
 const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
+const shutdownController = new AbortController();
+let shutdownSignal: NodeJS.Signals | null = null;
+let forcedShutdownTimer: NodeJS.Timeout | null = null;
 
 function parsePositiveIntEnv(name: string, fallback: number, max?: number): number {
   const raw = process.env[name];
@@ -21,6 +27,25 @@ function parseBooleanEnv(name: string, fallback: boolean): boolean {
   if (raw === undefined || raw.trim() === "") return fallback;
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
+
+function requestShutdown(signal: NodeJS.Signals): void {
+  if (shutdownController.signal.aborted) return;
+
+  shutdownSignal = signal;
+  const graceMs = parsePositiveIntEnv("PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS", 10000, 60000);
+  const message = `Pipeline task worker received ${signal}; stopping before claiming more work.`;
+  console.warn(message);
+  shutdownController.abort(new PipelineWorkerCancelledError(message));
+
+  forcedShutdownTimer = setTimeout(() => {
+    console.error(`Pipeline task worker did not stop within ${graceMs}ms after ${signal}; forcing exit.`);
+    process.exit(130);
+  }, graceMs);
+  forcedShutdownTimer.unref?.();
+}
+
+process.once("SIGINT", requestShutdown);
+process.once("SIGTERM", requestShutdown);
 
 export async function processPipelineTasks(): Promise<void> {
   console.log("====================================================");
@@ -48,9 +73,16 @@ export async function processPipelineTasks(): Promise<void> {
       wallClockMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_WALL_CLOCK_MS", 55 * 60 * 1000, 23 * 60 * 60 * 1000),
       maxSeedPerType: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE", 500, 5000),
       claimedBy: process.env.PIPELINE_TASK_WORKER_CLAIMED_BY || `gha-stage-worker:${process.pid}`,
+      abortSignal: shutdownController.signal,
     });
 
     console.log("Pipeline task worker summary:", JSON.stringify(summary, null, 2));
+
+    if (shutdownController.signal.aborted) {
+      throw new PipelineWorkerCancelledError(
+        `Pipeline task worker cancelled by ${shutdownSignal || "shutdown signal"}.`
+      );
+    }
 
     const failOnRetryWait = parseBooleanEnv("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT", true);
     if (summary.deadLettered > 0) {
@@ -65,6 +97,10 @@ export async function processPipelineTasks(): Promise<void> {
     workerError = err instanceof Error ? err : new Error(String(err));
     console.error("Pipeline task worker failed:", workerError.message);
   } finally {
+    if (forcedShutdownTimer) {
+      clearTimeout(forcedShutdownTimer);
+      forcedShutdownTimer = null;
+    }
     if (lockAcquired) {
       await client.query(`SELECT pg_advisory_unlock($1)`, [LOCK_ID]).catch(() => {});
     }
@@ -73,13 +109,13 @@ export async function processPipelineTasks(): Promise<void> {
   }
 
   if (workerError) {
-    process.exitCode = 1;
+    process.exitCode = workerError instanceof PipelineWorkerCancelledError ? 130 : 1;
     throw workerError;
   }
 }
 
 if (process.argv[1] && process.argv[1].includes("process_pipeline_tasks")) {
   processPipelineTasks().catch(() => {
-    process.exit(1);
+    process.exit(process.exitCode && process.exitCode !== 0 ? process.exitCode : 1);
   });
 }

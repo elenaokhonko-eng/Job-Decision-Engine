@@ -139,7 +139,7 @@ describe('runRequirementsExtraction', () => {
     expect(release).not.toHaveBeenCalled();
   });
 
-  it('records quoted extraction failures without failing deterministic completion', async () => {
+  it('records quoted extraction failures without failing deterministic completion when fail-fast is disabled', async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
         return {
@@ -192,6 +192,7 @@ describe('runRequirementsExtraction', () => {
 
     const summary = await runRequirementsExtraction(fakePool, {
       context,
+      failFastOnQuotedProviderFailure: false,
       quotedExtractor: async () => ({
         provider: 'gemini',
         model: 'gemini-2.5-flash',
@@ -219,6 +220,88 @@ describe('runRequirementsExtraction', () => {
     expect(summary.metrics.quotedValidationFailures).toBe(1);
     expect(summary.metrics.quotedSucceeded).toBe(0);
     expect(summary.metrics.quotedPassRate).toBe(0);
+  });
+
+  it('aborts and schedules retry when quoted validation fails in default fail-fast mode', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
+        return {
+          rows: [
+            {
+              workspace_id: context.workspaceId,
+              canonical_job_id: '11111111-1111-4111-8111-111111111111',
+              job_version_id: '22222222-2222-4222-8222-222222222222',
+              content_hash: 'content-hash-validation-abort',
+              description_text: 'Hybrid role with regular team collaboration.',
+            },
+          ],
+        };
+      }
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO requirement_set_identities')) {
+        return { rows: [{ id: 'req-ident-validation-abort' }] };
+      }
+      if (sql.includes('SELECT active_requirement_set_id') && sql.includes('FROM job_versions')) {
+        return { rows: [{ active_requirement_set_id: null }] };
+      }
+      if (sql.includes('SELECT (COALESCE(MAX(revision_number)')) {
+        return { rows: [{ next_revision: 1 }] };
+      }
+      if (sql.includes('INSERT INTO requirement_sets')) {
+        return { rows: [{ id: 'req-set-validation-abort' }] };
+      }
+      if (sql.includes('UPDATE job_versions') && sql.includes('active_requirement_set_id')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'DETERMINISTIC'")) {
+        return { rows: [{ id: 'det-run-validation-abort' }] };
+      }
+      if (sql.includes('SELECT rs.id') && sql.includes('FROM requirement_sets rs')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO job_requirements')) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'LLM_QUOTED'")) {
+        return { rows: [{ id: 'quoted-run-validation-abort' }] };
+      }
+      return { rows: [] };
+    });
+
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    await expect(
+      runRequirementsExtraction(fakePool, {
+        context,
+        quotedExtractor: async () => ({
+          provider: 'gemini',
+          model: 'gemini-3.6-flash',
+          payload: {
+            schema_version: '2.0',
+            requirements: [
+              {
+                requirement_key: 'R-001',
+                requirement_type: 'TRAVEL',
+                importance: 'MUST',
+                requirement_text: 'Role requires up to 25% travel.',
+                quote_text: 'up to 25% travel',
+                confidence: 0.8,
+              },
+            ],
+          },
+        }),
+      })
+    ).rejects.toThrow(/Quoted requirements validation failed/);
+
+    expect(
+      query.mock.calls.some(
+        (call: unknown[]) => String(call[0]).includes('job_version_pipeline_state') && String(call[0]).includes('RETRY_WAIT')
+      )
+    ).toBe(true);
+    expect(query.mock.calls.some((call: unknown[]) => String(call[0]) === 'ROLLBACK')).toBe(true);
   });
 
   it('tracks quoted provider/model retry metrics and pass-rate', async () => {
@@ -422,6 +505,107 @@ describe('runRequirementsExtraction', () => {
     await runRequirementsExtraction(fakePool, { context, quotedExtractor });
 
     expect(quotedExtractor).toHaveBeenCalledTimes(1);
+  });
+
+  it('rebuilds an active requirement set when quoted rows are missing in quoted mode', async () => {
+    let checkedActiveQuotedRows = false;
+
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
+        return {
+          rows: [
+            {
+              workspace_id: context.workspaceId,
+              canonical_job_id: '77777777-7777-4777-8777-777777777777',
+              job_version_id: '88888888-8888-4888-8888-888888888888',
+              content_hash: 'content-hash-active-shell',
+              description_text: 'Hybrid role. Work rights required.',
+            },
+          ],
+        };
+      }
+
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+
+      if (sql.includes('INSERT INTO requirement_set_identities')) {
+        return { rows: [{ id: 'req-ident-active-shell' }] };
+      }
+
+      if (sql.includes('SELECT active_requirement_set_id') && sql.includes('FROM job_versions')) {
+        return { rows: [{ active_requirement_set_id: 'req-set-active-shell' }] };
+      }
+
+      if (sql.includes('SELECT 1') && sql.includes('FROM requirement_sets rs') && sql.includes('rs.id = $2')) {
+        return { rows: [{ '?column?': 1 }] };
+      }
+
+      if (sql.includes('FROM job_requirements jr') && sql.includes("jr.extractor_type = 'LLM_QUOTED'")) {
+        checkedActiveQuotedRows = true;
+        return { rows: [] };
+      }
+
+      if (sql.includes('SELECT rs.id') && sql.includes('FROM requirement_sets rs')) {
+        return { rows: [] };
+      }
+
+      if (sql.includes('SELECT (COALESCE(MAX(revision_number)')) {
+        return { rows: [{ next_revision: 2 }] };
+      }
+
+      if (sql.includes('INSERT INTO requirement_sets')) {
+        return { rows: [{ id: 'req-set-rebuilt' }] };
+      }
+
+      if (sql.includes('UPDATE job_versions') && sql.includes('active_requirement_set_id')) {
+        return { rows: [] };
+      }
+
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'DETERMINISTIC'")) {
+        return { rows: [{ id: 'det-run-rebuilt' }] };
+      }
+
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'LLM_QUOTED'")) {
+        return { rows: [{ id: 'quoted-run-rebuilt' }] };
+      }
+
+      if (sql.includes('INSERT INTO job_requirements')) {
+        return { rows: [], rowCount: 1 };
+      }
+
+      return { rows: [] };
+    });
+
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+    const quotedExtractor = vi.fn(async () => ({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      attempts: 1,
+      errors: [],
+      payload: {
+        schema_version: '2.0',
+        requirements: [
+          {
+            requirement_key: 'R-001',
+            requirement_type: 'WORK_AUTH',
+            importance: 'MUST',
+            requirement_text: 'Work rights are required.',
+            quote_text: 'Work rights required',
+            confidence: 0.91,
+          },
+        ],
+      },
+    }));
+
+    const summary = await runRequirementsExtraction(fakePool, { context, quotedExtractor });
+
+    expect(checkedActiveQuotedRows).toBe(true);
+    expect(quotedExtractor).toHaveBeenCalledTimes(1);
+    expect(summary.processed).toBe(1);
+    expect(summary.quotedInserted).toBe(1);
+    expect(summary.details[0].warning ?? '').not.toContain('requirements already active');
   });
 
   it('aborts the requirements stage when quoted provider failures exhaust the failure budget', async () => {

@@ -534,7 +534,28 @@ export async function runRequirementsExtraction(
              LIMIT 1`,
             [ctx.workspaceId, activeSetId, requirementIdentityId]
           );
-          if (activeOk.rows.length > 0) {
+          let activeSetHasExpectedRows = activeOk.rows.length > 0;
+          if (activeSetHasExpectedRows && quotedExtractor) {
+            const activeQuotedOk = await client.query(
+              `SELECT 1
+               FROM job_requirements jr
+               WHERE jr.workspace_id = $1
+                 AND jr.requirement_set_id = $2
+                 AND jr.job_version_id = $3
+                 AND jr.extractor_type = 'LLM_QUOTED'
+                 AND jr.status = 'VALIDATED'
+               LIMIT 1`,
+              [ctx.workspaceId, activeSetId, job.job_version_id]
+            );
+            activeSetHasExpectedRows = activeQuotedOk.rows.length > 0;
+            if (!activeSetHasExpectedRows) {
+              console.warn(
+                `${progress} active requirement set ${activeSetId} has matching identity but no validated quoted rows; rebuilding`
+              );
+            }
+          }
+
+          if (activeSetHasExpectedRows) {
             await upsertPipelineState(client, job, 'COMPLETED', null);
             await insertStageEvent(client, job, 'COMPLETED', 'STAGE_COMPLETED', null, {
               cached: true,
@@ -820,6 +841,12 @@ export async function runRequirementsExtraction(
                       quotedResult.payload,
                     ]
                   );
+
+                  if (failFastOnQuotedProviderFailure) {
+                    throw new RequirementsStageAbortError(
+                      `Quoted requirements validation failed; aborting requirements extraction after model output failed strict quote validation. Last error: ${warning}`
+                    );
+                  }
                 } else {
                   const startIndex = deterministicRequirements.length + 1;
                   const quotedRequirements = validated.requirements.map((req, idx) =>
@@ -882,6 +909,10 @@ export async function runRequirementsExtraction(
                 );
               }
             } catch (quotedError) {
+              if (quotedError instanceof RequirementsStageAbortError) {
+                throw quotedError;
+              }
+
               summary.quotedFailed += 1;
               summary.metrics.quotedProviderFailures += 1;
               warning = quotedError instanceof Error ? quotedError.message : String(quotedError);
