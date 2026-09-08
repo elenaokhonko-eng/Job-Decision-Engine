@@ -1,4 +1,4 @@
-import { runAgentWithFallback } from '../services/agent.js';
+import { generateContentAudited, MODEL_REGISTRY } from '../services/agent.js';
 import {
   RequirementImportanceSchema,
   RequirementTypeSchema,
@@ -134,14 +134,18 @@ export async function runQuotedRequirementProvider(
 ): Promise<QuotedProviderOutput> {
   const prompt = buildPrompt(input);
 
-  const response = await runAgentWithFallback<any>(
-    prompt,
-    quotedRequirementProviderSchema,
-    'You are a strict requirement extractor. Return valid JSON only.'
-  );
+  const response = await generateContentAudited({
+    purpose: 'EXTRACTION',
+    routeKey: 'requirements_extraction',
+    model: MODEL_REGISTRY.EXTRACTION_OPENAI_MODEL,
+    contents: prompt,
+    responseMimeType: 'application/json',
+    responseSchema: quotedRequirementProviderSchema,
+    systemInstruction: 'You are a strict requirement extractor. Return valid JSON only.',
+  });
 
   return {
-    payload: response.payload,
+    payload: JSON.parse(response.text || '{}'),
     provider: response.provider,
     model: response.model,
     extractorVersion: `quoted_provider_${REQUIREMENTS_SCHEMA_VERSION}`,

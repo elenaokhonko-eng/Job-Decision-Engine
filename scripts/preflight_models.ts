@@ -10,8 +10,11 @@ async function main(): Promise<void> {
 
   const result = await preflightModelRoutes();
   console.log("Model preflight:", JSON.stringify(result, null, 2));
-  if (!result.evaluation || !result.embedding) {
-    throw new Error("No usable evaluation or embedding route. Source ingestion was not started.");
+  const quotedRequirementsEnabled = process.env.REQUIREMENTS_ENABLE_QUOTED === "true";
+  if (!result.evaluation || !result.embedding || (quotedRequirementsEnabled && !result.extraction)) {
+    throw new Error(
+      "No usable required model route. Source ingestion was not started."
+    );
   }
 }
 

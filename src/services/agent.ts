@@ -32,6 +32,8 @@ export const MODEL_REGISTRY = {
   EMBEDDING_FALLBACK_MODEL: process.env.EMBEDDING_FALLBACK_MODEL || "text-embedding-3-small",
   DOCUMENT_PRIMARY_MODEL: process.env.DOCUMENT_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-3.6-flash",
   DOCUMENT_FALLBACK_MODEL: process.env.DOCUMENT_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
+  EXTRACTION_GEMINI_MODEL: process.env.REQUIREMENTS_GEMINI_MODEL || process.env.EXTRACTION_GEMINI_MODEL || "gemini-3.5-flash-lite",
+  EXTRACTION_OPENAI_MODEL: process.env.REQUIREMENTS_OPENAI_MODEL || process.env.EXTRACTION_OPENAI_MODEL || "gpt-5.6-luna",
 } as const;
 
 type TextProvider = "gemini" | "openai";
@@ -43,6 +45,26 @@ function resolveProviderOrder(primaryProviderRaw: string | undefined): TextProvi
   // Backward compatibility with existing env behavior.
   if (process.env.FORCE_OPENAI === "true") return ["openai", "gemini"];
   return ["gemini", "openai"];
+}
+
+function extractionPrimaryProvider(): string {
+  return process.env.REQUIREMENTS_PRIMARY_PROVIDER || process.env.EXTRACTION_PRIMARY_PROVIDER || "openai";
+}
+
+function extractionGeminiModel(): string {
+  return (
+    process.env.REQUIREMENTS_GEMINI_MODEL ||
+    process.env.EXTRACTION_GEMINI_MODEL ||
+    MODEL_REGISTRY.EXTRACTION_GEMINI_MODEL
+  );
+}
+
+function extractionOpenAIModel(): string {
+  return (
+    process.env.REQUIREMENTS_OPENAI_MODEL ||
+    process.env.EXTRACTION_OPENAI_MODEL ||
+    MODEL_REGISTRY.EXTRACTION_OPENAI_MODEL
+  );
 }
 
 function modelRequestMaxRetries(): number {
@@ -616,9 +638,9 @@ function buildRouteDefaults(purpose: ModelRoutePurpose): {
   }
   if (purpose === "EXTRACTION") {
     return {
-      primaryProviderRaw: process.env.EXTRACTION_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER,
-      geminiModel: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
-      openaiModel: process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+      primaryProviderRaw: extractionPrimaryProvider(),
+      geminiModel: extractionGeminiModel(),
+      openaiModel: extractionOpenAIModel(),
     };
   }
   return {
@@ -741,6 +763,7 @@ export async function generateContentAudited(options: {
   let successText: string | null = null;
   let successProvider: "gemini" | "openai" = "gemini";
   let successModel = options.model;
+  let attempts = 0;
 
   for (const provider of providers) {
     const isFallbackAttempt = provider !== routeContent.primary_provider;
@@ -755,6 +778,7 @@ export async function generateContentAudited(options: {
         continue;
       }
       try {
+        attempts++;
         const text = await tryGemini(geminiKey, { ...options, model: modelForProvider });
         successText = text;
         successProvider = "gemini";
@@ -773,6 +797,7 @@ export async function generateContentAudited(options: {
         continue;
       }
       try {
+        attempts++;
         const text = await tryOpenAI(openaiKey, { ...options, model: modelForProvider });
         successText = text;
         successProvider = "openai";
@@ -851,7 +876,7 @@ export async function generateContentAudited(options: {
     provider: successProvider,
     model: successModel,
     fallbackUsed,
-    attempts: providers.length,
+    attempts,
     errors: attemptedErrors,
     latencyMs,
     routeKey,
@@ -1072,6 +1097,7 @@ export interface ModelRoutePreflight {
   evaluation: boolean;
   embedding: boolean;
   document: boolean;
+  extraction: boolean;
   errors: string[];
 }
 
@@ -1134,6 +1160,12 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
     process.env.OPENAI_MODEL || MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
     process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER
   );
+  const extraction = await checkTextRoute(
+    "extraction",
+    extractionGeminiModel(),
+    extractionOpenAIModel(),
+    extractionPrimaryProvider()
+  );
   let embedding = false;
   try {
     await generateEmbedding("preflight");
@@ -1142,7 +1174,7 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
     errors.push(`embedding: ${err.message || err}`);
   }
 
-  return { evaluation, embedding, document, errors };
+  return { evaluation, embedding, document, extraction, errors };
 }
 
 // Core execution loop

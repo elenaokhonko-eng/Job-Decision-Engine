@@ -115,9 +115,12 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           DOCUMENT_PRIMARY_PROVIDER: ${{ vars.DOCUMENT_PRIMARY_PROVIDER || 'openai' }}
+          REQUIREMENTS_PRIMARY_PROVIDER: ${{ vars.REQUIREMENTS_PRIMARY_PROVIDER || 'openai' }}
           EMBEDDING_PRIMARY_PROVIDER: ${{ vars.EMBEDDING_PRIMARY_PROVIDER || 'gemini' }}
           EMBEDDING_FALLBACK_PROVIDER: ${{ vars.EMBEDDING_FALLBACK_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          REQUIREMENTS_OPENAI_MODEL: ${{ vars.REQUIREMENTS_OPENAI_MODEL || 'gpt-5.6-luna' }}
+          REQUIREMENTS_GEMINI_MODEL: ${{ vars.REQUIREMENTS_GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
           EVALUATION_PRIMARY_MODEL: ${{ vars.EVALUATION_PRIMARY_MODEL }}
           EVALUATION_FALLBACK_MODEL: ${{ vars.EVALUATION_FALLBACK_MODEL }}
           EMBEDDING_PRIMARY_MODEL: ${{ vars.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001' }}
@@ -128,15 +131,18 @@ jobs:
           DOCUMENT_FALLBACK_MODEL: ${{ vars.DOCUMENT_FALLBACK_MODEL }}
           MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
+          REQUIREMENTS_ENABLE_QUOTED: 'true'
         run: npx tsx scripts/preflight_models.ts
       - name: Process discovery pipeline
         timeout-minutes: 60
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
           GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
+          REQUIREMENTS_PRIMARY_PROVIDER: ${{ vars.REQUIREMENTS_PRIMARY_PROVIDER || 'openai' }}
           EMBEDDING_PRIMARY_PROVIDER: ${{ vars.EMBEDDING_PRIMARY_PROVIDER || 'gemini' }}
           EMBEDDING_FALLBACK_PROVIDER: ${{ vars.EMBEDDING_FALLBACK_PROVIDER || 'openai' }}
           EMBEDDING_PRIMARY_MODEL: ${{ vars.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001' }}
@@ -144,6 +150,8 @@ jobs:
           EMBEDDING_PRIMARY_DIMENSIONS: ${{ vars.EMBEDDING_PRIMARY_DIMENSIONS || '768' }}
           EMBEDDING_FALLBACK_DIMENSIONS: ${{ vars.EMBEDDING_FALLBACK_DIMENSIONS || '1536' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          REQUIREMENTS_OPENAI_MODEL: ${{ vars.REQUIREMENTS_OPENAI_MODEL || 'gpt-5.6-luna' }}
+          REQUIREMENTS_GEMINI_MODEL: ${{ vars.REQUIREMENTS_GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
           MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
           REQUIREMENTS_PROVIDER_FAILURE_LIMIT: ${{ vars.REQUIREMENTS_PROVIDER_FAILURE_LIMIT || '1' }}

@@ -6,6 +6,13 @@ const originalEnv = {
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   GEMINI_FLASH_API_KEY: process.env.GEMINI_FLASH_API_KEY,
   EVALUATION_PRIMARY_PROVIDER: process.env.EVALUATION_PRIMARY_PROVIDER,
+  REQUIREMENTS_PRIMARY_PROVIDER: process.env.REQUIREMENTS_PRIMARY_PROVIDER,
+  REQUIREMENTS_OPENAI_MODEL: process.env.REQUIREMENTS_OPENAI_MODEL,
+  REQUIREMENTS_GEMINI_MODEL: process.env.REQUIREMENTS_GEMINI_MODEL,
+  EXTRACTION_PRIMARY_PROVIDER: process.env.EXTRACTION_PRIMARY_PROVIDER,
+  EXTRACTION_OPENAI_MODEL: process.env.EXTRACTION_OPENAI_MODEL,
+  EXTRACTION_GEMINI_MODEL: process.env.EXTRACTION_GEMINI_MODEL,
+  OPENAI_MODEL: process.env.OPENAI_MODEL,
   MODEL_REQUEST_MAX_RETRIES: process.env.MODEL_REQUEST_MAX_RETRIES,
   MODEL_REQUEST_TIMEOUT_MS: process.env.MODEL_REQUEST_TIMEOUT_MS,
 };
@@ -67,5 +74,47 @@ describe('generateContentAudited retry policy', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(timeoutSpy).toHaveBeenCalledWith(12000);
+  });
+
+  it('routes extraction through the requirements OpenAI model instead of the global evaluation model', async () => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    process.env.EVALUATION_PRIMARY_PROVIDER = 'openai';
+    process.env.REQUIREMENTS_PRIMARY_PROVIDER = 'openai';
+    process.env.OPENAI_MODEL = 'gpt-5.6-sol';
+    process.env.REQUIREMENTS_OPENAI_MODEL = 'gpt-5.6-luna';
+    process.env.MODEL_REQUEST_MAX_RETRIES = '3';
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_FLASH_API_KEY;
+
+    const fetchMock = vi.fn(async (..._args: Parameters<typeof fetch>) =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"ok":"yes"}' } }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await generateContentAudited({
+      purpose: 'EXTRACTION',
+      routeKey: 'requirements_extraction',
+      model: '',
+      contents: 'Return JSON.',
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['ok'],
+        properties: { ok: { type: 'string' } },
+      },
+    });
+
+    const requestBody = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+    expect(requestBody.model).toBe('gpt-5.6-luna');
+    expect(requestBody.model).not.toBe('gpt-5.6-sol');
+    expect(result.provider).toBe('openai');
+    expect(result.model).toBe('gpt-5.6-luna');
+    expect(result.attempts).toBe(1);
   });
 });
