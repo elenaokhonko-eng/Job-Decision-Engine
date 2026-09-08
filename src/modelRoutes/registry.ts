@@ -363,7 +363,7 @@ export async function recordModelRouteInvocation(
           error_message,
           created_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
         RETURNING id
       `,
       [
@@ -398,4 +398,3 @@ export async function recordModelRouteInvocation(
     }
   }
 }
-

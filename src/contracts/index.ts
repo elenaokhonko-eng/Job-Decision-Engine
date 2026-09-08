@@ -261,6 +261,66 @@ export const EvaluationResultSchema = z.object({
 });
 export type EvaluationResult = z.infer<typeof EvaluationResultSchema>;
 
+export const ApplicationStatusSchema = z.enum([
+  "INTENT",
+  "READY_TO_APPLY",
+  "SUBMITTED",
+  "FOLLOW_UP",
+  "INTERVIEW",
+  "OFFER",
+  "REJECTED",
+  "WITHDRAWN",
+  "CLOSED",
+]);
+export type ApplicationStatus = z.infer<typeof ApplicationStatusSchema>;
+
+export const ApplicationRecordSchema = z.object({
+  application_record_id: z.string().uuid(),
+  canonical_job_id: z.string().uuid(),
+  job_version_id: z.string().uuid(),
+  title: z.string().min(1),
+  company: z.string().min(1),
+  canonical_url: z.string().min(1).nullable().default(null),
+  processing_state: z.string().nullable().default(null),
+  processing_status: z.string().nullable().default(null),
+  recommendation_eligibility: z.enum(["ELIGIBLE", "VERIFY", "INELIGIBLE"]).nullable().default(null),
+  recommendation_outcome: z.enum(["PRIORITY", "REVIEW", "TRACK", "SKIP"]).nullable().default(null),
+  primary_lane: LaneKeySchema.nullable().default(null),
+  secondary_lanes: z.array(LaneKeySchema).nullable().default(null),
+  application_status: ApplicationStatusSchema,
+  submission_url: z.string().nullable().default(null),
+  cv_document_run_id: z.string().uuid().nullable().default(null),
+  cover_letter_document_run_id: z.string().uuid().nullable().default(null),
+  notes: z.string().nullable().default(null),
+  handoff_payload: z.record(z.unknown()).default({}),
+  target_submit_at: z.string().datetime().nullable().default(null),
+  submitted_at: z.string().datetime().nullable().default(null),
+  follow_up_at: z.string().datetime().nullable().default(null),
+  last_action_at: z.string().datetime(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+});
+export type ApplicationRecord = z.infer<typeof ApplicationRecordSchema>;
+
+export const ApplicationEventSchema = z.object({
+  id: z.string().uuid(),
+  application_record_id: z.string().uuid(),
+  event_type: z.enum([
+    "CREATED",
+    "STATUS_CHANGED",
+    "DOCUMENT_LINKED",
+    "NOTE_ADDED",
+    "SUBMISSION_HANDOFF",
+    "FOLLOW_UP_SCHEDULED",
+  ]),
+  from_status: ApplicationStatusSchema.nullable().default(null),
+  to_status: ApplicationStatusSchema.nullable().default(null),
+  note: z.string().nullable().default(null),
+  event_payload: z.record(z.unknown()).default({}),
+  created_at: z.string().datetime(),
+});
+export type ApplicationEvent = z.infer<typeof ApplicationEventSchema>;
+
 /**
  * 9. Shortlist Row
  * Stable read model for Streamlit UI and dashboard analytics.

@@ -9,6 +9,8 @@ import { validateEmbeddingVector } from './batchValidator.js';
 import { buildEmbeddingInputs } from './inputBuilder.js';
 import { seedEmbeddingSpaces } from './spaceRegistry.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { recordModelRouteInvocation } from '../modelRoutes/registry.js';
+import { sha256Hex, stableStringify } from '../config/structuredLoader.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local', override: true });
@@ -63,9 +65,84 @@ interface SpaceRow {
   dimensions: number;
 }
 
+interface EmbeddingInvocationRecord {
+  status: 'COMPLETED' | 'FAILED';
+  workspaceId: string;
+  embeddingSpaceId: string;
+  embeddingBatchId: string;
+  embeddingInputId: string;
+  provider: EmbeddingProvider;
+  model: string;
+  runType: 'PRIMARY' | 'FALLBACK';
+  contentText: string;
+  latencyMs: number;
+  vectorDimensions?: number | null;
+  vectorChecksum?: string | null;
+  errorMessage?: string | null;
+  validationIssues?: string[];
+}
+
 function describeEmbeddingError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.length > 500 ? `${message.slice(0, 500)}...` : message;
+}
+
+async function recordEmbeddingInvocation(
+  client: pg.PoolClient,
+  context: WorkspaceContext | undefined,
+  input: EmbeddingInvocationRecord
+): Promise<void> {
+  const contentHash = sha256Hex(input.contentText);
+  const requestHash = sha256Hex(
+    stableStringify({
+      purpose: 'EMBEDDING',
+      provider: input.provider,
+      model: input.model,
+      embedding_space_id: input.embeddingSpaceId,
+      embedding_input_id: input.embeddingInputId,
+      content_sha256: contentHash,
+    })
+  );
+
+  await recordModelRouteInvocation(
+    {
+      purpose: 'EMBEDDING',
+      provider: input.provider,
+      model: input.model,
+      status: input.status,
+      fallbackUsed: input.runType === 'FALLBACK',
+      requestHash,
+      requestMetadata: {
+        embedding_space_id: input.embeddingSpaceId,
+        embedding_batch_id: input.embeddingBatchId,
+        embedding_input_id: input.embeddingInputId,
+        run_type: input.runType,
+        content_sha256: contentHash,
+        content_length: input.contentText.length,
+      },
+      responseMetadata: {
+        provider_attempts: [
+          {
+            provider: input.provider,
+            model: input.model,
+            attempt: 1,
+            maxAttempts: 1,
+            status: input.status,
+            latencyMs: input.latencyMs,
+            error: input.errorMessage ?? undefined,
+          },
+        ],
+        internal_http_attempts: 1,
+        vector_dimensions: input.vectorDimensions ?? null,
+        vector_checksum: input.vectorChecksum ?? null,
+        validation_issues: input.validationIssues ?? [],
+      },
+      latencyMs: input.latencyMs,
+      errorMessage: input.errorMessage ?? null,
+    },
+    client,
+    context ? { context } : undefined
+  );
 }
 
 export async function runEmbeddingBatch(
@@ -262,6 +339,22 @@ export async function runEmbeddingBatch(
           console.warn(
             `${progressPrefix} validation_failed issues=${validation.issues.join('; ')} elapsed_ms=${Date.now() - itemStartedAt}`
           );
+          await recordEmbeddingInvocation(client as pg.PoolClient, options?.context, {
+            status: 'FAILED',
+            workspaceId,
+            embeddingSpaceId: space.id,
+            embeddingBatchId: batchId,
+            embeddingInputId: input.id,
+            provider,
+            model: spaceModel,
+            runType,
+            contentText: input.content_text,
+            latencyMs: Date.now() - itemStartedAt,
+            vectorDimensions: validation.dimensions,
+            vectorChecksum: validation.checksum,
+            errorMessage: validation.issues.join('; '),
+            validationIssues: validation.issues,
+          });
           await client.query(
             `UPDATE embedding_batch_items
              SET status = 'FAILED',
@@ -337,6 +430,20 @@ export async function runEmbeddingBatch(
         console.log(
           `${progressPrefix} completed dimensions=${validation.dimensions} elapsed_ms=${Date.now() - itemStartedAt}`
         );
+        await recordEmbeddingInvocation(client as pg.PoolClient, options?.context, {
+          status: 'COMPLETED',
+          workspaceId,
+          embeddingSpaceId: space.id,
+          embeddingBatchId: batchId,
+          embeddingInputId: input.id,
+          provider,
+          model: spaceModel,
+          runType,
+          contentText: input.content_text,
+          latencyMs: Date.now() - itemStartedAt,
+          vectorDimensions: validation.dimensions,
+          vectorChecksum: validation.checksum,
+        });
         await client.query(
           `UPDATE embedding_batch_items
            SET status = 'COMPLETED',
@@ -351,6 +458,19 @@ export async function runEmbeddingBatch(
         failedInputIds.push(input.id);
         errors.push(`input ${input.id}: ${message}`);
         console.warn(`${progressPrefix} failed elapsed_ms=${Date.now() - itemStartedAt} error=${message}`);
+        await recordEmbeddingInvocation(client as pg.PoolClient, options?.context, {
+          status: 'FAILED',
+          workspaceId,
+          embeddingSpaceId: space.id,
+          embeddingBatchId: batchId,
+          embeddingInputId: input.id,
+          provider,
+          model: spaceModel,
+          runType,
+          contentText: input.content_text,
+          latencyMs: Date.now() - itemStartedAt,
+          errorMessage: message,
+        });
         await client.query(
           `UPDATE embedding_batch_items
            SET status = 'FAILED',

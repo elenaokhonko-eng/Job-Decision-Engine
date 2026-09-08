@@ -1,0 +1,233 @@
+{
+  "$ref": "#/definitions/ApplicationRecord",
+  "definitions": {
+    "ApplicationRecord": {
+      "type": "object",
+      "properties": {
+        "application_record_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "processing_state": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "processing_status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "recommendation_eligibility": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "ELIGIBLE",
+                "VERIFY",
+                "INELIGIBLE"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recommendation_outcome": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "PRIORITY",
+                "REVIEW",
+                "TRACK",
+                "SKIP"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "primary_lane": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "secondary_lanes": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ApplicationRecord/properties/primary_lane/anyOf/0"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "application_status": {
+          "type": "string",
+          "enum": [
+            "INTENT",
+            "READY_TO_APPLY",
+            "SUBMITTED",
+            "FOLLOW_UP",
+            "INTERVIEW",
+            "OFFER",
+            "REJECTED",
+            "WITHDRAWN",
+            "CLOSED"
+          ]
+        },
+        "submission_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cv_document_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cover_letter_document_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "handoff_payload": {
+          "type": "object",
+          "additionalProperties": {},
+          "default": {}
+        },
+        "target_submit_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "submitted_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "follow_up_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "last_action_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "application_record_id",
+        "canonical_job_id",
+        "job_version_id",
+        "title",
+        "company",
+        "application_status",
+        "last_action_at",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

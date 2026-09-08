@@ -79,6 +79,116 @@ function modelRequestTimeoutMs(): number {
   return Math.max(5000, Math.min(300000, parsed));
 }
 
+interface ModelTokenUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}
+
+interface ModelProviderAttemptTelemetry extends ModelTokenUsage {
+  provider: TextProvider | "kimi";
+  model: string;
+  attempt: number;
+  maxAttempts: number;
+  status: "COMPLETED" | "FAILED";
+  httpStatus?: number | null;
+  retryable?: boolean;
+  latencyMs: number;
+  error?: string;
+}
+
+function finiteUsageNumber(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : undefined;
+}
+
+function finiteMoneyNumber(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function extractTokenUsage(value: any): ModelTokenUsage {
+  const usage = value?.usage || value?.usageMetadata || value?.response_metadata?.token_usage || {};
+  const promptTokens = finiteUsageNumber(
+    usage.prompt_tokens ?? usage.promptTokenCount ?? usage.input_tokens ?? usage.inputTokenCount
+  );
+  const completionTokens = finiteUsageNumber(
+    usage.completion_tokens ?? usage.candidatesTokenCount ?? usage.output_tokens ?? usage.outputTokenCount
+  );
+  const totalTokens = finiteUsageNumber(
+    usage.total_tokens ?? usage.totalTokenCount ?? usage.total_tokens_count
+  );
+  return { promptTokens, completionTokens, totalTokens };
+}
+
+function recordProviderAttempt(options: any, attempt: ModelProviderAttemptTelemetry): void {
+  if (Array.isArray(options?.__providerAttemptTelemetry)) {
+    options.__providerAttemptTelemetry.push(attempt);
+  }
+}
+
+function summarizeSuccessfulUsage(
+  attempts: ModelProviderAttemptTelemetry[],
+  provider: TextProvider,
+  model: string
+): Required<ModelTokenUsage> | null {
+  const success = [...attempts]
+    .reverse()
+    .find((attempt) =>
+      attempt.status === "COMPLETED" &&
+      attempt.provider === provider &&
+      attempt.model === model
+    );
+  if (!success) return null;
+  const promptTokens = success.promptTokens ?? 0;
+  const completionTokens = success.completionTokens ?? 0;
+  const totalTokens = success.totalTokens ?? promptTokens + completionTokens;
+  if (promptTokens === 0 && completionTokens === 0 && totalTokens === 0) return null;
+  return { promptTokens, completionTokens, totalTokens };
+}
+
+function configuredModelPricing(provider: string, model: string): { inputPer1M: number; outputPer1M: number } | null {
+  const raw = process.env.MODEL_PRICING_JSON;
+  if (!raw || raw.trim() === "") return null;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, any>;
+    const keys = [
+      `${provider}:${model}`,
+      model,
+      provider,
+    ];
+    for (const key of keys) {
+      const pricing = parsed[key];
+      const inputPer1M = finiteMoneyNumber(
+        pricing?.input_per_1m ?? pricing?.inputPer1M ?? pricing?.prompt_per_1m ?? pricing?.promptPer1M
+      );
+      const outputPer1M = finiteMoneyNumber(
+        pricing?.output_per_1m ?? pricing?.outputPer1M ?? pricing?.completion_per_1m ?? pricing?.completionPer1M
+      );
+      if (inputPer1M !== undefined && outputPer1M !== undefined) {
+        return { inputPer1M, outputPer1M };
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function estimateCostUsd(
+  provider: string,
+  model: string,
+  usage: Required<ModelTokenUsage> | null
+): number | null {
+  if (!usage) return null;
+  const pricing = configuredModelPricing(provider, model);
+  if (!pricing) return null;
+  const cost =
+    (usage.promptTokens / 1_000_000) * pricing.inputPer1M +
+    (usage.completionTokens / 1_000_000) * pricing.outputPer1M;
+  return Number(cost.toFixed(6));
+}
+
 function embeddingRequestTimeoutMs(): number {
   const parsed = Number.parseInt(
     String(process.env.EMBEDDING_REQUEST_TIMEOUT_MS || process.env.MODEL_REQUEST_TIMEOUT_MS || "30000"),
@@ -388,14 +498,36 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
           systemInstruction: options.systemInstruction
         }
       });
+      const usage = extractTokenUsage(response);
       console.log(
         `[model:gemini] model=${model} attempt=${attempt}/${maxRetries} completed elapsed_ms=${Date.now() - startedAt}`
       );
+      recordProviderAttempt(options, {
+        provider: "gemini",
+        model,
+        attempt,
+        maxAttempts: maxRetries,
+        status: "COMPLETED",
+        latencyMs: Date.now() - startedAt,
+        ...usage,
+      });
       return response.text || "";
     } catch (gErr: any) {
       const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests") || gErr.message?.includes("quota");
       const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
       const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
+      const retryable = !isDailyQuota && (isRateLimit || isTimeout);
+      recordProviderAttempt(options, {
+        provider: "gemini",
+        model,
+        attempt,
+        maxAttempts: maxRetries,
+        status: "FAILED",
+        httpStatus: finiteUsageNumber(gErr.status) ?? null,
+        retryable: retryable && attempt < maxRetries,
+        latencyMs: Date.now() - startedAt,
+        error: gErr.message || String(gErr),
+      });
       
       if (isDailyQuota) {
         throw gErr; // Daily quota exhausted, fallback immediately
@@ -464,12 +596,35 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
       }
 
       const data = await response.json();
+      const usage = extractTokenUsage(data);
       console.log(
         `[model:${providerLabel}] model=${model} attempt=${attempt}/${maxRetries} completed elapsed_ms=${Date.now() - startedAt}`
       );
+      recordProviderAttempt(options, {
+        provider: providerLabel,
+        model,
+        attempt,
+        maxAttempts: maxRetries,
+        status: "COMPLETED",
+        httpStatus: response.status,
+        latencyMs: Date.now() - startedAt,
+        ...usage,
+      });
       return data.choices?.[0]?.message?.content || "";
     } catch (err: any) {
-      if (attempt === maxRetries || !isRetryableModelRequestError(err)) throw err;
+      const retryable = isRetryableModelRequestError(err);
+      recordProviderAttempt(options, {
+        provider: providerLabel,
+        model,
+        attempt,
+        maxAttempts: maxRetries,
+        status: "FAILED",
+        httpStatus: finiteUsageNumber(err.status) ?? null,
+        retryable: retryable && attempt < maxRetries,
+        latencyMs: Date.now() - startedAt,
+        error: err.message || String(err),
+      });
+      if (attempt === maxRetries || !retryable) throw err;
       
       // Exponential backoff: 5s, 15s or explicitly requested Retry-After
       const baseBackoff = Math.pow(3, attempt - 1) * 5000;
@@ -820,6 +975,8 @@ export async function generateContentAudited(options: {
     has_schema: !!options.responseSchema,
     contents_length: contentsText.length,
     system_length: systemText.length,
+    model_request_max_retries: modelRequestMaxRetries(),
+    model_request_timeout_ms: modelRequestTimeoutMs(),
   };
 
   let successText: string | null = null;
@@ -827,6 +984,7 @@ export async function generateContentAudited(options: {
   let successProvider: "gemini" | "openai" = "gemini";
   let successModel = options.model;
   let attempts = 0;
+  const providerAttemptTelemetry: ModelProviderAttemptTelemetry[] = [];
 
   for (const provider of providers) {
     const isFallbackAttempt = provider !== routeContent.primary_provider;
@@ -842,7 +1000,11 @@ export async function generateContentAudited(options: {
       }
       try {
         attempts++;
-        const text = await tryGemini(geminiKey, { ...options, model: modelForProvider });
+        const text = await tryGemini(geminiKey, {
+          ...options,
+          model: modelForProvider,
+          __providerAttemptTelemetry: providerAttemptTelemetry,
+        });
         const validatedPayload = await validateGeneratedResponseText(
           text,
           { provider, model: modelForProvider, purpose, routeKey },
@@ -867,7 +1029,11 @@ export async function generateContentAudited(options: {
       }
       try {
         attempts++;
-        const text = await tryOpenAI(openaiKey, { ...options, model: modelForProvider });
+        const text = await tryOpenAI(openaiKey, {
+          ...options,
+          model: modelForProvider,
+          __providerAttemptTelemetry: providerAttemptTelemetry,
+        });
         const validatedPayload = await validateGeneratedResponseText(
           text,
           { provider, model: modelForProvider, purpose, routeKey },
@@ -892,6 +1058,8 @@ export async function generateContentAudited(options: {
 
   const latencyMs = Date.now() - startedAt;
   const fallbackUsed = successText !== null && successProvider !== routeContent.primary_provider;
+  const successfulUsage = summarizeSuccessfulUsage(providerAttemptTelemetry, successProvider, successModel);
+  const costUsd = estimateCostUsd(successProvider, successModel, successfulUsage);
 
   if (successText === null) {
     const errorMessage = `All model API calls failed. Purpose=${purpose}, route=${routeKey}, errors=${attemptedErrors
@@ -910,8 +1078,16 @@ export async function generateContentAudited(options: {
           fallbackUsed: attemptedErrors.length > 1,
           requestHash,
           requestMetadata,
-          responseMetadata: { errors: attemptedErrors },
+          responseMetadata: {
+            errors: attemptedErrors,
+            provider_attempts: providerAttemptTelemetry,
+            internal_http_attempts: providerAttemptTelemetry.length,
+          },
           latencyMs,
+          tokensPrompt: successfulUsage?.promptTokens ?? null,
+          tokensCompletion: successfulUsage?.completionTokens ?? null,
+          tokensTotal: successfulUsage?.totalTokens ?? null,
+          costUsd,
           errorMessage,
         },
         options.clientOrPool,
@@ -939,8 +1115,14 @@ export async function generateContentAudited(options: {
           response_length: successText.length,
           validated_payload: successValidatedPayload !== undefined,
           errors: attemptedErrors,
+          provider_attempts: providerAttemptTelemetry,
+          internal_http_attempts: providerAttemptTelemetry.length,
         },
         latencyMs,
+        tokensPrompt: successfulUsage?.promptTokens ?? null,
+        tokensCompletion: successfulUsage?.completionTokens ?? null,
+        tokensTotal: successfulUsage?.totalTokens ?? null,
+        costUsd,
       },
       options.clientOrPool,
       { context: options.context }
@@ -1182,6 +1364,18 @@ export interface ModelRoutePreflight {
   document: boolean;
   extraction: boolean;
   errors: string[];
+  checks: Array<{
+    route: "evaluation" | "document" | "extraction" | "embedding";
+    purpose: ModelRoutePurpose;
+    provider: "gemini" | "openai";
+    model: string;
+    role: "primary" | "fallback";
+    ok: boolean;
+    degraded: boolean;
+    latencyMs: number;
+    error?: string;
+  }>;
+  degradedRoutes: string[];
 }
 
 /** Perform minimal live calls so invalid configured model IDs fail before ingestion. */
@@ -1189,75 +1383,200 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
   const errors: string[] = [];
+  const checks: ModelRoutePreflight["checks"] = [];
+  const degradedRoutes: string[] = [];
+
+  const jsonOkSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["ok"],
+    properties: {
+      ok: { type: "string" },
+    },
+  };
 
   const checkTextRoute = async (
-    label: string,
+    label: "evaluation" | "document" | "extraction",
+    purpose: ModelRoutePurpose,
     geminiModel: string,
     openaiModel: string,
     primaryProviderRaw: string | undefined
   ): Promise<boolean> => {
     const order = resolveProviderOrder(primaryProviderRaw);
-    for (const provider of order) {
+    let routeOk = false;
+    for (const [providerIndex, provider] of order.entries()) {
+      const role = providerIndex === 0 ? "primary" : "fallback";
+      const startedAt = Date.now();
       if (provider === "gemini") {
         if (!geminiKey) {
-          errors.push(`${label} Gemini (${geminiModel}): GEMINI_API_KEY not configured`);
+          checks.push({
+            route: label,
+            purpose,
+            provider,
+            model: geminiModel,
+            role,
+            ok: false,
+            degraded: role === "primary",
+            latencyMs: 0,
+            error: "GEMINI_API_KEY not configured",
+          });
           continue;
         }
         try {
-          await tryGemini(geminiKey, { model: geminiModel, contents: "Reply with OK.", responseMimeType: "text/plain" });
-          return true;
+          await tryGemini(geminiKey, {
+            model: geminiModel,
+            contents: purpose === "EXTRACTION" ? 'Return {"ok":"OK"}.' : "Reply with OK.",
+            responseMimeType: purpose === "EXTRACTION" ? "application/json" : "text/plain",
+            responseSchema: purpose === "EXTRACTION" ? jsonOkSchema : undefined,
+          });
+          checks.push({
+            route: label,
+            purpose,
+            provider,
+            model: geminiModel,
+            role,
+            ok: true,
+            degraded: role === "fallback",
+            latencyMs: Date.now() - startedAt,
+          });
+          routeOk = true;
         } catch (err: any) {
-          errors.push(`${label} Gemini (${geminiModel}): ${err.message || err}`);
+          checks.push({
+            route: label,
+            purpose,
+            provider,
+            model: geminiModel,
+            role,
+            ok: false,
+            degraded: role === "primary",
+            latencyMs: Date.now() - startedAt,
+            error: err.message || String(err),
+          });
         }
       }
 
       if (provider === "openai") {
         if (!openaiKey) {
-          errors.push(`${label} OpenAI (${openaiModel}): OPENAI_API_KEY not configured`);
+          checks.push({
+            route: label,
+            purpose,
+            provider,
+            model: openaiModel,
+            role,
+            ok: false,
+            degraded: role === "primary",
+            latencyMs: 0,
+            error: "OPENAI_API_KEY not configured",
+          });
           continue;
         }
         try {
-          await tryOpenAI(openaiKey, { model: openaiModel, contents: "Reply with OK.", responseMimeType: "text/plain" });
-          return true;
+          await tryOpenAI(openaiKey, {
+            model: openaiModel,
+            contents: purpose === "EXTRACTION" ? 'Return {"ok":"OK"}.' : "Reply with OK.",
+            responseMimeType: purpose === "EXTRACTION" ? "application/json" : "text/plain",
+            responseSchema: purpose === "EXTRACTION" ? jsonOkSchema : undefined,
+          });
+          checks.push({
+            route: label,
+            purpose,
+            provider,
+            model: openaiModel,
+            role,
+            ok: true,
+            degraded: role === "fallback",
+            latencyMs: Date.now() - startedAt,
+          });
+          routeOk = true;
         } catch (err: any) {
-          errors.push(`${label} OpenAI (${openaiModel}): ${err.message || err}`);
+          checks.push({
+            route: label,
+            purpose,
+            provider,
+            model: openaiModel,
+            role,
+            ok: false,
+            degraded: role === "primary",
+            latencyMs: Date.now() - startedAt,
+            error: err.message || String(err),
+          });
         }
       }
     }
 
-    if (!geminiKey && !openaiKey) {
-      errors.push(`${label}: no Gemini or OpenAI API key configured`);
+    const routeChecks = checks.filter((check) => check.route === label);
+    const primaryCheck = routeChecks.find((check) => check.role === "primary");
+    const fallbackCheck = routeChecks.find((check) => check.role === "fallback");
+    if (!routeOk) {
+      errors.push(
+        `${label}: no usable provider. ${routeChecks
+          .map((check) => `${check.provider}(${check.model}): ${check.error || "failed"}`)
+          .join(" | ")}`
+      );
+    } else if (primaryCheck && !primaryCheck.ok && fallbackCheck?.ok) {
+      degradedRoutes.push(`${label}: primary ${primaryCheck.provider} failed; fallback ${fallbackCheck.provider} passed`);
+    } else if (primaryCheck?.ok && fallbackCheck && !fallbackCheck.ok) {
+      degradedRoutes.push(`${label}: fallback ${fallbackCheck.provider} unavailable`);
     }
-    return false;
+    return routeOk;
   };
 
   const evaluation = await checkTextRoute(
     "evaluation",
+    "EVALUATION",
     MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
     process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
     process.env.EVALUATION_PRIMARY_PROVIDER
   );
   const document = await checkTextRoute(
     "document",
+    "DOCUMENT",
     MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
     process.env.OPENAI_MODEL || MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
     process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER
   );
   const extraction = await checkTextRoute(
     "extraction",
+    "EXTRACTION",
     extractionGeminiModel(),
     extractionOpenAIModel(),
     extractionPrimaryProvider()
   );
   let embedding = false;
+  const embeddingStartedAt = Date.now();
   try {
     await generateEmbedding("preflight");
     embedding = true;
+    checks.push({
+      route: "embedding",
+      purpose: "EMBEDDING",
+      provider: resolveProviderOrder(process.env.EMBEDDING_PRIMARY_PROVIDER)[0],
+      model: resolveProviderOrder(process.env.EMBEDDING_PRIMARY_PROVIDER)[0] === "gemini"
+        ? MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL
+        : MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL,
+      role: "primary",
+      ok: true,
+      degraded: false,
+      latencyMs: Date.now() - embeddingStartedAt,
+    });
   } catch (err: any) {
     errors.push(`embedding: ${err.message || err}`);
+    checks.push({
+      route: "embedding",
+      purpose: "EMBEDDING",
+      provider: resolveProviderOrder(process.env.EMBEDDING_PRIMARY_PROVIDER)[0],
+      model: resolveProviderOrder(process.env.EMBEDDING_PRIMARY_PROVIDER)[0] === "gemini"
+        ? MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL
+        : MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL,
+      role: "primary",
+      ok: false,
+      degraded: false,
+      latencyMs: Date.now() - embeddingStartedAt,
+      error: err.message || String(err),
+    });
   }
 
-  return { evaluation, embedding, document, extraction, errors };
+  return { evaluation, embedding, document, extraction, errors, checks, degradedRoutes };
 }
 
 // Core execution loop

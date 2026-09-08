@@ -1,0 +1,86 @@
+{
+  "$ref": "#/definitions/ApplicationEvent",
+  "definitions": {
+    "ApplicationEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "application_record_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "event_type": {
+          "type": "string",
+          "enum": [
+            "CREATED",
+            "STATUS_CHANGED",
+            "DOCUMENT_LINKED",
+            "NOTE_ADDED",
+            "SUBMISSION_HANDOFF",
+            "FOLLOW_UP_SCHEDULED"
+          ]
+        },
+        "from_status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "INTENT",
+                "READY_TO_APPLY",
+                "SUBMITTED",
+                "FOLLOW_UP",
+                "INTERVIEW",
+                "OFFER",
+                "REJECTED",
+                "WITHDRAWN",
+                "CLOSED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "to_status": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApplicationEvent/properties/from_status/anyOf/0"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "event_payload": {
+          "type": "object",
+          "additionalProperties": {},
+          "default": {}
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "application_record_id",
+        "event_type",
+        "created_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

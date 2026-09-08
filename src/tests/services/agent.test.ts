@@ -3,6 +3,7 @@ import {
   evaluateSingleCanonicalJob,
   generateContentAudited,
   generateEmbeddingWithProviderAndModel,
+  preflightModelRoutes,
   type SingleEvaluationJobInput,
 } from '../../services/agent.js';
 
@@ -11,6 +12,7 @@ const originalEnv = {
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   GEMINI_FLASH_API_KEY: process.env.GEMINI_FLASH_API_KEY,
   EVALUATION_PRIMARY_PROVIDER: process.env.EVALUATION_PRIMARY_PROVIDER,
+  DOCUMENT_PRIMARY_PROVIDER: process.env.DOCUMENT_PRIMARY_PROVIDER,
   REQUIREMENTS_PRIMARY_PROVIDER: process.env.REQUIREMENTS_PRIMARY_PROVIDER,
   REQUIREMENTS_OPENAI_MODEL: process.env.REQUIREMENTS_OPENAI_MODEL,
   REQUIREMENTS_GEMINI_MODEL: process.env.REQUIREMENTS_GEMINI_MODEL,
@@ -21,7 +23,9 @@ const originalEnv = {
   MODEL_REQUEST_MAX_RETRIES: process.env.MODEL_REQUEST_MAX_RETRIES,
   MODEL_REQUEST_TIMEOUT_MS: process.env.MODEL_REQUEST_TIMEOUT_MS,
   EMBEDDING_REQUEST_TIMEOUT_MS: process.env.EMBEDDING_REQUEST_TIMEOUT_MS,
+  EMBEDDING_PRIMARY_PROVIDER: process.env.EMBEDDING_PRIMARY_PROVIDER,
   EMBEDDING_FALLBACK_DIMENSIONS: process.env.EMBEDDING_FALLBACK_DIMENSIONS,
+  MODEL_PRICING_JSON: process.env.MODEL_PRICING_JSON,
 };
 
 function restoreEnv(): void {
@@ -188,6 +192,123 @@ describe('generateContentAudited retry policy', () => {
     ).rejects.toThrow(/validated payload missing ok=yes/);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('records token usage, optional cost, and provider attempt telemetry', async () => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    process.env.EVALUATION_PRIMARY_PROVIDER = 'openai';
+    process.env.OPENAI_MODEL = 'gpt-4o-mini';
+    process.env.MODEL_REQUEST_MAX_RETRIES = '1';
+    process.env.MODEL_PRICING_JSON = JSON.stringify({
+      'openai:gpt-4o-mini': { input_per_1m: 0.1, output_per_1m: 0.2 },
+    });
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_FLASH_API_KEY;
+
+    const fetchMock = vi.fn(async (..._args: Parameters<typeof fetch>) =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"ok":"yes"}' } }],
+          usage: {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    let invocationParams: any[] | null = null;
+    const query = vi.fn(async (sql: string, params?: any[]) => {
+      if (sql.includes('FROM model_routes mr')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO model_route_invocations')) {
+        invocationParams = params || [];
+        return { rows: [{ id: 'invocation-1' }] };
+      }
+      return { rows: [] };
+    });
+    const context = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER' as const,
+    };
+
+    const result = await generateContentAudited({
+      purpose: 'EXTRACTION',
+      routeKey: 'requirements_extraction',
+      model: 'gpt-4o-mini',
+      contents: 'Return JSON.',
+      responseMimeType: 'application/json',
+      validateResponseText: (text) => JSON.parse(text),
+      clientOrPool: { query } as any,
+      context,
+    });
+
+    expect(result.invocationId).toBe('invocation-1');
+    const recordedParams = invocationParams as any[] | null;
+    expect(recordedParams).not.toBeNull();
+    if (!recordedParams) throw new Error('Expected model route invocation params to be recorded.');
+    const insertCall = query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO model_route_invocations'));
+    expect(insertCall?.[0].match(/\$\d+/g)).toHaveLength(recordedParams.length);
+    expect(recordedParams[12]).toBe(0.0002);
+    expect(recordedParams[13]).toBe(1000);
+    expect(recordedParams[14]).toBe(500);
+    expect(recordedParams[15]).toBe(1500);
+    expect(recordedParams[10].internal_http_attempts).toBe(1);
+    expect(recordedParams[10].provider_attempts[0]).toMatchObject({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      status: 'COMPLETED',
+      promptTokens: 1000,
+      completionTokens: 500,
+      totalTokens: 1500,
+    });
+  });
+
+  it('returns detailed preflight checks and degraded fallback notes', async () => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    process.env.EVALUATION_PRIMARY_PROVIDER = 'openai';
+    process.env.DOCUMENT_PRIMARY_PROVIDER = 'openai';
+    process.env.REQUIREMENTS_PRIMARY_PROVIDER = 'openai';
+    process.env.EMBEDDING_PRIMARY_PROVIDER = 'openai';
+    process.env.OPENAI_MODEL = 'gpt-4o-mini';
+    process.env.REQUIREMENTS_OPENAI_MODEL = 'gpt-4o-mini';
+    process.env.EMBEDDING_FALLBACK_DIMENSIONS = '4';
+    process.env.MODEL_REQUEST_MAX_RETRIES = '1';
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_FLASH_API_KEY;
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).includes('/embeddings')) {
+        return new Response(
+          JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      const body = JSON.parse(String(init?.body || '{}'));
+      const content = body.response_format?.type === 'json_schema' ? '{"ok":"OK"}' : 'OK';
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await preflightModelRoutes();
+
+    expect(result.evaluation).toBe(true);
+    expect(result.document).toBe(true);
+    expect(result.extraction).toBe(true);
+    expect(result.embedding).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.checks.some((check) => check.route === 'extraction' && check.ok)).toBe(true);
+    expect(result.degradedRoutes.some((route) => route.includes('fallback gemini unavailable'))).toBe(true);
   });
 });
 

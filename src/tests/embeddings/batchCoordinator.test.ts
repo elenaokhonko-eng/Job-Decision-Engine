@@ -4,6 +4,14 @@ import * as agent from '../../services/agent.js';
 import type { WorkspaceContext } from '../../workspace/context.js';
 
 describe('runEmbeddingBatch', () => {
+  const context: WorkspaceContext = {
+    workspaceId: 'workspace-id-1',
+    workspaceKey: 'default',
+    userId: 'user-id-1',
+    userKey: 'local_user',
+    role: 'OWNER',
+  };
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -31,6 +39,9 @@ describe('runEmbeddingBatch', () => {
       if (sql.includes('INSERT INTO embedding_batches') && sql.includes('RETURNING id')) {
         return { rows: [{ id: '33333333-3333-4333-8333-333333333333' }] };
       }
+      if (sql.includes('INSERT INTO model_route_invocations')) {
+        return { rows: [{ id: 'route-invocation-1' }] };
+      }
       if (sql.includes('FROM embedding_inputs ei')) {
         return {
           rows: [
@@ -55,7 +66,8 @@ describe('runEmbeddingBatch', () => {
       undefined,
       undefined,
       undefined,
-      fakePool
+      fakePool,
+      { context }
     );
 
     expect(result.batchId).toBe('33333333-3333-4333-8333-333333333333');
@@ -71,6 +83,7 @@ describe('runEmbeddingBatch', () => {
 
     const calls = query.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(calls.some((sql) => sql.includes('INSERT INTO semantic_embeddings'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('INSERT INTO model_route_invocations'))).toBe(true);
     expect(calls.some((sql) => sql.includes('UPDATE embedding_batches'))).toBe(true);
     expect(calls.some((sql) => sql.includes('INSERT INTO embedding_batch_items'))).toBe(true);
     expect(
@@ -179,6 +192,9 @@ describe('runEmbeddingBatch', () => {
         nextBatchId += 1;
         return { rows: [{ id: `batch-${nextBatchId}` }] };
       }
+      if (sql.includes('INSERT INTO model_route_invocations')) {
+        return { rows: [{ id: `route-invocation-${nextBatchId}` }] };
+      }
       if (sql.includes('WHERE ei.id = ANY')) {
         return {
           rows: [
@@ -205,14 +221,6 @@ describe('runEmbeddingBatch', () => {
     spy
       .mockResolvedValueOnce([0.1, 0.2, 0.3, 0.4])
       .mockResolvedValueOnce([0.2, 0.3, 0.4, 0.5]);
-
-    const context: WorkspaceContext = {
-      workspaceId: 'workspace-id-1',
-      workspaceKey: 'default',
-      userId: 'user-id-1',
-      userKey: 'local_user',
-      role: 'OWNER',
-    };
 
     const result = await runEmbeddingBatchWithFallback(10, fakePool, { context });
 

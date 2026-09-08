@@ -11,6 +11,8 @@ import {
   LaneDecisionSchema,
   EvaluationQueueItemSchema,
   EvaluationResultSchema,
+  ApplicationRecordSchema,
+  ApplicationEventSchema,
   ShortlistRowSchema,
   SourcePluginSchema,
 } from "../src/contracts/index.js";
@@ -32,6 +34,8 @@ const schemas = {
   LaneDecision: LaneDecisionSchema,
   EvaluationQueueItem: EvaluationQueueItemSchema,
   EvaluationResult: EvaluationResultSchema,
+  ApplicationRecord: ApplicationRecordSchema,
+  ApplicationEvent: ApplicationEventSchema,
   ShortlistRow: ShortlistRowSchema,
   SourcePlugin: SourcePluginSchema,
 };

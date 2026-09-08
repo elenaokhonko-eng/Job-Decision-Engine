@@ -56,6 +56,47 @@ function parsePositiveInt(value: unknown, fallback: number, options?: { min?: nu
   return Math.max(min, Math.min(max, candidate));
 }
 
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+const APPLICATION_STATUSES = [
+  "INTENT",
+  "READY_TO_APPLY",
+  "SUBMITTED",
+  "FOLLOW_UP",
+  "INTERVIEW",
+  "OFFER",
+  "REJECTED",
+  "WITHDRAWN",
+  "CLOSED",
+] as const;
+
+type ApplicationStatus = (typeof APPLICATION_STATUSES)[number];
+
+function parseApplicationStatus(value: unknown, fallback: ApplicationStatus = "INTENT"): ApplicationStatus | null {
+  const normalized = String(value ?? fallback).trim().toUpperCase();
+  return APPLICATION_STATUSES.includes(normalized as ApplicationStatus)
+    ? normalized as ApplicationStatus
+    : null;
+}
+
+function parseOptionalIsoDate(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const date = new Date(trimmed);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function jsonObjectOrEmpty(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
 async function withTransaction<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
@@ -608,6 +649,471 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
       );
 
       res.status(201).json({ ok: true, task_id: queued.taskId, inserted: queued.inserted });
+    })
+  );
+
+  router.get(
+    "/applications",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const limit = parsePositiveInt(req.query.limit, 100, { min: 1, max: 250 });
+      const status = req.query.status !== undefined
+        ? parseApplicationStatus(req.query.status)
+        : null;
+      if (req.query.status !== undefined && !status) {
+        res.status(400).json({ ok: false, error: `status must be one of: ${APPLICATION_STATUSES.join(", ")}.` });
+        return;
+      }
+
+      const { rows } = await pool.query(
+        `
+          SELECT
+            application_record_id,
+            canonical_job_id,
+            job_version_id,
+            title,
+            company,
+            canonical_url,
+            processing_state,
+            processing_status,
+            recommendation_eligibility,
+            recommendation_outcome,
+            primary_lane,
+            secondary_lanes,
+            application_status,
+            submission_url,
+            cv_document_run_id,
+            cover_letter_document_run_id,
+            notes,
+            handoff_payload,
+            target_submit_at,
+            submitted_at,
+            follow_up_at,
+            last_action_at,
+            created_at,
+            updated_at
+          FROM v_application_tracker
+          WHERE workspace_id = $1
+            AND user_id = $2
+            AND ($3::text IS NULL OR application_status = $3)
+          ORDER BY updated_at DESC, application_record_id DESC
+          LIMIT $4
+        `,
+        [ctx.workspaceId, ctx.userId, status, limit]
+      );
+
+      res.json({ ok: true, applications: rows });
+    })
+  );
+
+  router.post(
+    "/applications",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const canonicalJobId = String(req.body?.canonical_job_id || "").trim();
+      const requestedJobVersionId = String(req.body?.job_version_id || "").trim() || null;
+      const status = parseApplicationStatus(req.body?.status, "INTENT");
+      const hasTargetSubmitAt = Object.prototype.hasOwnProperty.call(req.body ?? {}, "target_submit_at");
+      const hasFollowUpAt = Object.prototype.hasOwnProperty.call(req.body ?? {}, "follow_up_at");
+      const targetSubmitAt = parseOptionalIsoDate(req.body?.target_submit_at);
+      const followUpAt = parseOptionalIsoDate(req.body?.follow_up_at);
+      const handoffPayload = jsonObjectOrEmpty(req.body?.handoff_payload);
+      const notes = req.body?.notes != null ? String(req.body.notes).trim() || null : null;
+      const submissionUrl = req.body?.submission_url != null ? String(req.body.submission_url).trim() || null : null;
+      const cvDocumentRunId = req.body?.cv_document_run_id != null ? String(req.body.cv_document_run_id).trim() || null : null;
+      const coverLetterDocumentRunId = req.body?.cover_letter_document_run_id != null
+        ? String(req.body.cover_letter_document_run_id).trim() || null
+        : null;
+
+      if (!canonicalJobId) {
+        res.status(400).json({ ok: false, error: "canonical_job_id is required." });
+        return;
+      }
+      if (!isUuid(canonicalJobId) || (requestedJobVersionId !== null && !isUuid(requestedJobVersionId))) {
+        res.status(400).json({ ok: false, error: "canonical_job_id and job_version_id must be UUID strings." });
+        return;
+      }
+      if (!status) {
+        res.status(400).json({ ok: false, error: `status must be one of: ${APPLICATION_STATUSES.join(", ")}.` });
+        return;
+      }
+      if ((hasTargetSubmitAt && targetSubmitAt === undefined) || (hasFollowUpAt && followUpAt === undefined)) {
+        res.status(400).json({ ok: false, error: "target_submit_at and follow_up_at must be ISO datetime strings when provided." });
+        return;
+      }
+
+      const record = await withTransaction(pool, async (client) => {
+        const jobRes = await client.query<{ canonical_job_id: string; job_version_id: string; canonical_url: string | null }>(
+          `
+            SELECT c.id AS canonical_job_id,
+                   jv.id AS job_version_id,
+                   c.canonical_url
+            FROM canonical_jobs c
+            JOIN job_versions jv
+              ON jv.workspace_id = c.workspace_id
+             AND jv.id = COALESCE(
+               $3::uuid,
+               c.latest_job_version_id,
+               (
+                 SELECT jv2.id
+                 FROM job_versions jv2
+                 WHERE jv2.workspace_id = c.workspace_id
+                   AND jv2.canonical_job_id = c.id
+                 ORDER BY jv2.observed_at DESC
+                 LIMIT 1
+               )
+             )
+            WHERE c.workspace_id = $1
+              AND c.id = $2::uuid
+            LIMIT 1
+          `,
+          [ctx.workspaceId, canonicalJobId, requestedJobVersionId]
+        );
+        const job = jobRes.rows[0];
+        if (!job) return null;
+
+        const existing = await client.query<{ id: string; status: ApplicationStatus }>(
+          `
+            SELECT id, status
+            FROM application_records
+            WHERE workspace_id = $1
+              AND user_id = $2
+              AND canonical_job_id = $3
+              AND job_version_id = $4
+            LIMIT 1
+          `,
+          [ctx.workspaceId, ctx.userId, job.canonical_job_id, job.job_version_id]
+        );
+        const previous = existing.rows[0] ?? null;
+
+        const upserted = await client.query<{ id: string }>(
+          `
+            INSERT INTO application_records (
+              workspace_id,
+              user_id,
+              canonical_job_id,
+              job_version_id,
+              status,
+              submission_url,
+              cv_document_run_id,
+              cover_letter_document_run_id,
+              notes,
+              handoff_payload,
+              target_submit_at,
+              submitted_at,
+              follow_up_at,
+              last_action_at,
+              updated_at
+            )
+            VALUES (
+              $1, $2, $3, $4, $5, COALESCE($6, $7), $8, $9, $10, $11::jsonb,
+              $12::timestamptz,
+              CASE WHEN $5 = 'SUBMITTED' THEN NOW() ELSE NULL END,
+              $13::timestamptz,
+              NOW(),
+              NOW()
+            )
+            ON CONFLICT (workspace_id, user_id, canonical_job_id, job_version_id)
+            DO UPDATE SET
+              status = EXCLUDED.status,
+              submission_url = EXCLUDED.submission_url,
+              cv_document_run_id = COALESCE(EXCLUDED.cv_document_run_id, application_records.cv_document_run_id),
+              cover_letter_document_run_id = COALESCE(EXCLUDED.cover_letter_document_run_id, application_records.cover_letter_document_run_id),
+              notes = COALESCE(EXCLUDED.notes, application_records.notes),
+              handoff_payload = CASE
+                WHEN EXCLUDED.handoff_payload = '{}'::jsonb THEN application_records.handoff_payload
+                ELSE EXCLUDED.handoff_payload
+              END,
+              target_submit_at = COALESCE(EXCLUDED.target_submit_at, application_records.target_submit_at),
+              submitted_at = CASE
+                WHEN EXCLUDED.status = 'SUBMITTED' THEN COALESCE(application_records.submitted_at, NOW())
+                ELSE application_records.submitted_at
+              END,
+              follow_up_at = COALESCE(EXCLUDED.follow_up_at, application_records.follow_up_at),
+              last_action_at = NOW(),
+              updated_at = NOW()
+            RETURNING id
+          `,
+          [
+            ctx.workspaceId,
+            ctx.userId,
+            job.canonical_job_id,
+            job.job_version_id,
+            status,
+            submissionUrl,
+            job.canonical_url,
+            cvDocumentRunId,
+            coverLetterDocumentRunId,
+            notes,
+            JSON.stringify(handoffPayload),
+            targetSubmitAt ?? null,
+            followUpAt ?? null,
+          ]
+        );
+
+        const applicationRecordId = upserted.rows[0].id;
+        await client.query(
+          `
+            INSERT INTO application_events (
+              workspace_id,
+              application_record_id,
+              event_type,
+              from_status,
+              to_status,
+              note,
+              event_payload,
+              created_by_user_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+          `,
+          [
+            ctx.workspaceId,
+            applicationRecordId,
+            previous ? "STATUS_CHANGED" : "CREATED",
+            previous?.status ?? null,
+            status,
+            notes,
+            JSON.stringify({
+              ...handoffPayload,
+              submission_url: submissionUrl ?? job.canonical_url,
+              cv_document_run_id: cvDocumentRunId,
+              cover_letter_document_run_id: coverLetterDocumentRunId,
+            }),
+            ctx.userId,
+          ]
+        );
+
+        const { rows } = await client.query(
+          `
+            SELECT
+              application_record_id,
+              canonical_job_id,
+              job_version_id,
+              title,
+              company,
+              canonical_url,
+              processing_state,
+              processing_status,
+              recommendation_eligibility,
+              recommendation_outcome,
+              primary_lane,
+              secondary_lanes,
+              application_status,
+              submission_url,
+              cv_document_run_id,
+              cover_letter_document_run_id,
+              notes,
+              handoff_payload,
+              target_submit_at,
+              submitted_at,
+              follow_up_at,
+              last_action_at,
+              created_at,
+              updated_at
+            FROM v_application_tracker
+            WHERE workspace_id = $1
+              AND user_id = $2
+              AND application_record_id = $3
+            LIMIT 1
+          `,
+          [ctx.workspaceId, ctx.userId, applicationRecordId]
+        );
+        return rows[0] ?? null;
+      });
+
+      if (!record) {
+        res.status(404).json({ ok: false, error: "Canonical job/version not found." });
+        return;
+      }
+
+      res.status(201).json({ ok: true, application: record });
+    })
+  );
+
+  router.patch(
+    "/applications/:id",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const applicationRecordId = String(req.params.id || "").trim();
+      const requestedStatus = req.body?.status !== undefined ? parseApplicationStatus(req.body.status) : undefined;
+      const notes = req.body?.notes !== undefined ? String(req.body.notes || "").trim() || null : undefined;
+      const followUpAt = parseOptionalIsoDate(req.body?.follow_up_at);
+      const eventPayload = jsonObjectOrEmpty(req.body?.event_payload);
+
+      if (!applicationRecordId) {
+        res.status(400).json({ ok: false, error: "application id is required." });
+        return;
+      }
+      if (!isUuid(applicationRecordId)) {
+        res.status(400).json({ ok: false, error: "application id must be a UUID string." });
+        return;
+      }
+      if (requestedStatus === null) {
+        res.status(400).json({ ok: false, error: `status must be one of: ${APPLICATION_STATUSES.join(", ")}.` });
+        return;
+      }
+      if (followUpAt === undefined && req.body?.follow_up_at !== undefined) {
+        res.status(400).json({ ok: false, error: "follow_up_at must be an ISO datetime string when provided." });
+        return;
+      }
+
+      const updated = await withTransaction(pool, async (client) => {
+        const existing = await client.query<{ id: string; status: ApplicationStatus }>(
+          `
+            SELECT id, status
+            FROM application_records
+            WHERE workspace_id = $1
+              AND user_id = $2
+              AND id = $3::uuid
+            LIMIT 1
+          `,
+          [ctx.workspaceId, ctx.userId, applicationRecordId]
+        );
+        const current = existing.rows[0];
+        if (!current) return null;
+        const nextStatus = requestedStatus ?? current.status;
+
+        await client.query(
+          `
+            UPDATE application_records
+            SET status = $4,
+                notes = COALESCE($5, notes),
+                follow_up_at = COALESCE($6::timestamptz, follow_up_at),
+                submitted_at = CASE
+                  WHEN $4 = 'SUBMITTED' THEN COALESCE(submitted_at, NOW())
+                  ELSE submitted_at
+                END,
+                last_action_at = NOW(),
+                updated_at = NOW()
+            WHERE workspace_id = $1
+              AND user_id = $2
+              AND id = $3::uuid
+          `,
+          [ctx.workspaceId, ctx.userId, applicationRecordId, nextStatus, notes ?? null, followUpAt ?? null]
+        );
+
+        await client.query(
+          `
+            INSERT INTO application_events (
+              workspace_id,
+              application_record_id,
+              event_type,
+              from_status,
+              to_status,
+              note,
+              event_payload,
+              created_by_user_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+          `,
+          [
+            ctx.workspaceId,
+            applicationRecordId,
+            current.status === nextStatus ? "NOTE_ADDED" : "STATUS_CHANGED",
+            current.status,
+            nextStatus,
+            notes ?? null,
+            JSON.stringify(eventPayload),
+            ctx.userId,
+          ]
+        );
+
+        const { rows } = await client.query(
+          `
+            SELECT
+              application_record_id,
+              canonical_job_id,
+              job_version_id,
+              title,
+              company,
+              canonical_url,
+              processing_state,
+              processing_status,
+              recommendation_eligibility,
+              recommendation_outcome,
+              primary_lane,
+              secondary_lanes,
+              application_status,
+              submission_url,
+              cv_document_run_id,
+              cover_letter_document_run_id,
+              notes,
+              handoff_payload,
+              target_submit_at,
+              submitted_at,
+              follow_up_at,
+              last_action_at,
+              created_at,
+              updated_at
+            FROM v_application_tracker
+            WHERE workspace_id = $1
+              AND user_id = $2
+              AND application_record_id = $3
+            LIMIT 1
+          `,
+          [ctx.workspaceId, ctx.userId, applicationRecordId]
+        );
+        return rows[0] ?? null;
+      });
+
+      if (!updated) {
+        res.status(404).json({ ok: false, error: "Application record not found." });
+        return;
+      }
+
+      res.json({ ok: true, application: updated });
+    })
+  );
+
+  router.get(
+    "/applications/:id/events",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const applicationRecordId = String(req.params.id || "").trim();
+      const limit = parsePositiveInt(req.query.limit, 100, { min: 1, max: 250 });
+
+      if (!isUuid(applicationRecordId)) {
+        res.status(400).json({ ok: false, error: "application id must be a UUID string." });
+        return;
+      }
+
+      const ownership = await pool.query(
+        `
+          SELECT id
+          FROM application_records
+          WHERE workspace_id = $1
+            AND user_id = $2
+            AND id = $3::uuid
+          LIMIT 1
+        `,
+        [ctx.workspaceId, ctx.userId, applicationRecordId]
+      );
+      if (ownership.rows.length === 0) {
+        res.status(404).json({ ok: false, error: "Application record not found." });
+        return;
+      }
+
+      const { rows } = await pool.query(
+        `
+          SELECT
+            id,
+            application_record_id,
+            event_type,
+            from_status,
+            to_status,
+            note,
+            event_payload,
+            created_at
+          FROM application_events
+          WHERE workspace_id = $1
+            AND application_record_id = $2::uuid
+          ORDER BY created_at DESC, id DESC
+          LIMIT $3
+        `,
+        [ctx.workspaceId, applicationRecordId, limit]
+      );
+
+      res.json({ ok: true, events: rows });
     })
   );
 
