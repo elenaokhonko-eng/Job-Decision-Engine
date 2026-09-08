@@ -110,7 +110,7 @@
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^22.14.0",
+    "@types/node": "^26.4.1",
     "@types/pg": "^8.11.5",
     "electron": "^44.2.0",
     "electron-builder": "^26.15.3",
