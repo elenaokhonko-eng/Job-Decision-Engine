@@ -14,6 +14,12 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function parseBooleanEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
 type CandidateRow = {
   canonical_job_id: string;
   job_version_id: string;
@@ -37,6 +43,7 @@ type DiagnosticsRow = {
 
 async function main(): Promise<void> {
   const databaseUrl = requireEnv("DATABASE_URL");
+  const allowEmptyAutoPick = parseBooleanEnv("PICK_DOCUMENTS_ALLOW_EMPTY", false);
   const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
@@ -190,12 +197,14 @@ async function main(): Promise<void> {
       console.log("- match_runs.profile_version_id must equal the ACTIVE profile_version");
       console.log("- VALIDATED job_requirements must exist");
       console.log("- >= 4 grounded matches to non-private profile facts must exist");
-      process.exitCode = 1;
+      console.log("documents_job_found: false");
+      process.exitCode = allowEmptyAutoPick ? 0 : 1;
       return;
     }
 
     const [best] = candidates.rows;
     console.log("Recommended Documents Generator inputs:");
+    console.log("documents_job_found: true");
     console.log(`canonical_job_id: ${best.canonical_job_id}`);
     console.log(`job_version_id:   ${best.job_version_id}`);
     console.log("");
@@ -205,7 +214,7 @@ async function main(): Promise<void> {
       const company = row.company_name || "Unknown Company";
       const observed = row.observed_at || "unknown";
       console.log(
-        `- ${row.canonical_job_id}  ${row.job_version_id}  (${row.grounded_match_facts} facts)  ${company} — ${title}  @ ${observed}`
+        `- ${row.canonical_job_id}  ${row.job_version_id}  (${row.grounded_match_facts} facts)  ${company} - ${title}  @ ${observed}`
       );
     }
   } finally {

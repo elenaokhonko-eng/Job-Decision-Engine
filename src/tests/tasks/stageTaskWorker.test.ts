@@ -311,6 +311,124 @@ describe("stageTaskWorker", () => {
     ).toBe(true);
   });
 
+  it("completes deterministic extraction tasks when no deterministic patterns are found", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [
+            {
+              id: "task-empty-requirements",
+              workspace_id: ctx.workspaceId,
+              task_type: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+              task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v1",
+              payload: { canonical_job_id: "job-empty", job_version_id: "version-empty" },
+              status: "RUNNING",
+              available_at: new Date().toISOString(),
+              lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+              heartbeat_at: new Date().toISOString(),
+              claimed_by: "worker:test",
+              attempt_count: 1,
+              max_attempts: 8,
+              last_error: null,
+              dead_letter_reason: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              completed_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN job_requirements jr")) {
+        return { rows: [{ exists: false }], rowCount: 1 };
+      }
+      if (sql.includes("FROM job_version_pipeline_state ps") && sql.includes("requirement_extraction_runs rer")) {
+        return { rows: [{ exists: true }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-empty-requirements" }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-gate" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies({
+      runRequirementsExtraction: vi.fn(async () => ({
+        discovered: 1,
+        processed: 1,
+        deterministicInserted: 0,
+        quotedInserted: 0,
+        quotedFailed: 0,
+        errors: 0,
+        metrics: {
+          quotedAttempted: 0,
+          quotedSucceeded: 0,
+          quotedValidationFailures: 0,
+          quotedProviderFailures: 0,
+          retryWaitTransitions: 0,
+          quotedPassRate: 0,
+          byProviderModel: {},
+        },
+        details: [
+          {
+            canonicalJobId: "job-empty",
+            jobVersionId: "version-empty",
+            deterministicInserted: 0,
+            quotedInserted: 0,
+            warning: "No deterministic requirements identified.",
+          },
+        ],
+      })),
+    });
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["EXTRACT_DETERMINISTIC_REQUIREMENTS"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(summary.errors).toEqual([]);
+    expect(deps.runRequirementsExtraction).toHaveBeenCalledWith(fakeClient, {
+      context: ctx,
+      jobVersionIds: ["version-empty"],
+      limit: 1,
+      quotedMode: "deterministic_only",
+      failFastOnQuotedProviderFailure: false,
+    });
+    expect(
+      calls.some(
+        (call) =>
+          call.sql.includes("INSERT INTO pipeline_tasks") &&
+          call.params?.[1] === "APPLY_HARD_GATES" &&
+          call.params?.[2] === "APPLY_HARD_GATES:version-empty:hard_gate_v1"
+      )
+    ).toBe(true);
+  });
+
   it("passes forced preference recalculation through hard-gate tasks", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {

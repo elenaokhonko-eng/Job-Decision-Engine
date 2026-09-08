@@ -141,6 +141,99 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         [jobVersionId]
       );
       expect(semanticDuplicates.rows).toHaveLength(0);
+
+      const sparseCanonicalJobId = '90000000-0000-4000-8000-000000000003';
+      const sparseJobVersionId = '90000000-0000-4000-8000-000000000004';
+      await client.query(
+        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status)
+         VALUES ($1, 'Sparse Integration Co', 'collaboration lead', 'https://integration.example.com/job/empty', 'RAW_STAGED')`,
+        [sparseCanonicalJobId]
+      );
+      await client.query(
+        `INSERT INTO job_versions (id, canonical_job_id, content_hash, description_text, observed_at)
+         VALUES ($1, $2, 'req-int-empty-hash-1', 'Collaborative team role with broad impact across programs.', NOW())`,
+        [sparseJobVersionId, sparseCanonicalJobId]
+      );
+      await client.query(
+        `UPDATE canonical_jobs SET latest_job_version_id = $1, updated_at = NOW() WHERE id = $2`,
+        [sparseJobVersionId, sparseCanonicalJobId]
+      );
+
+      const { resolveWorkspaceContext } = await import('../../workspace/context.js');
+      const { enqueuePipelineTask } = await import('../../tasks/pipelineTasks.js');
+      const { runPipelineStageTaskWorker } = await import('../../tasks/stageTaskWorker.js');
+      const context = await resolveWorkspaceContext(client as any);
+      const sparseTaskKey = `EXTRACT_DETERMINISTIC_REQUIREMENTS:${sparseJobVersionId}:deterministic_v1`;
+      await enqueuePipelineTask(
+        {
+          taskType: 'EXTRACT_DETERMINISTIC_REQUIREMENTS',
+          taskKey: sparseTaskKey,
+          payload: {
+            canonical_job_id: sparseCanonicalJobId,
+            job_version_id: sparseJobVersionId,
+          },
+          maxAttempts: 8,
+        },
+        client as any,
+        { context }
+      );
+
+      const workerSummary = await runPipelineStageTaskWorker(
+        client as any,
+        {
+          context,
+          seed: false,
+          taskTypes: ['EXTRACT_DETERMINISTIC_REQUIREMENTS'],
+          maxTasks: 1,
+          claimBatchSize: 1,
+          heartbeatSeconds: 0,
+          claimedBy: 'requirements-integration-empty',
+        }
+      );
+      expect(workerSummary.completed).toBe(1);
+      expect(workerSummary.failed).toBe(0);
+      expect(workerSummary.errors).toEqual([]);
+
+      const sparseRequirements = await client.query(
+        `SELECT COUNT(*)::int AS n
+         FROM job_requirements
+         WHERE job_version_id = $1
+           AND extractor_type = 'DETERMINISTIC'
+           AND status = 'VALIDATED'`,
+        [sparseJobVersionId]
+      );
+      expect(sparseRequirements.rows[0].n).toBe(0);
+
+      const sparseRun = await client.query(
+        `SELECT status, requirements_extracted
+         FROM requirement_extraction_runs
+         WHERE job_version_id = $1
+           AND run_type = 'DETERMINISTIC'
+         ORDER BY started_at DESC
+         LIMIT 1`,
+        [sparseJobVersionId]
+      );
+      expect(sparseRun.rows[0]).toEqual({
+        status: 'COMPLETED',
+        requirements_extracted: 0,
+      });
+
+      const sparseTask = await client.query(
+        `SELECT status
+         FROM pipeline_tasks
+         WHERE task_key = $1`,
+        [sparseTaskKey]
+      );
+      expect(sparseTask.rows[0].status).toBe('COMPLETED');
+
+      const nextTask = await client.query(
+        `SELECT COUNT(*)::int AS n
+         FROM pipeline_tasks
+         WHERE task_type = 'APPLY_HARD_GATES'
+           AND task_key = $1`,
+        [`APPLY_HARD_GATES:${sparseJobVersionId}:hard_gate_v1`]
+      );
+      expect(nextTask.rows[0].n).toBe(1);
     } finally {
       await client.query('RESET search_path').catch(() => undefined);
       await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);

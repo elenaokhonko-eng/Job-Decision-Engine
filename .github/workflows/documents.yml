@@ -41,12 +41,14 @@ jobs:
       - name: Resolve canonical_job_id/job_version_id (auto-pick if missing)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PICK_DOCUMENTS_ALLOW_EMPTY: "true"
         shell: bash
         run: |
           set -euo pipefail
 
           if [[ -n "${{ inputs.canonical_job_id }}" ]]; then
             echo "CANONICAL_JOB_ID=${{ inputs.canonical_job_id }}" >> "$GITHUB_ENV"
+            echo "DOCUMENTS_JOB_FOUND=true" >> "$GITHUB_ENV"
             if [[ -n "${{ inputs.job_version_id }}" ]]; then
               echo "JOB_VERSION_ID=${{ inputs.job_version_id }}" >> "$GITHUB_ENV"
             fi
@@ -64,6 +66,17 @@ jobs:
             exit $PICK_STATUS
           fi
 
+          FOUND="$(echo "$OUT" | sed -n 's/^documents_job_found: //p' | head -n 1 | tr -d '\r')"
+          if [[ "$FOUND" == "false" ]]; then
+            echo "DOCUMENTS_JOB_FOUND=false" >> "$GITHUB_ENV"
+            {
+              echo "### Documents Generator"
+              echo ""
+              echo "No eligible jobs found for document generation yet. Generation was skipped."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           CANONICAL="$(echo "$OUT" | sed -n 's/^canonical_job_id: //p' | head -n 1 | tr -d '\r')"
           VERSION="$(echo "$OUT" | sed -n 's/^job_version_id:[[:space:]]*//p' | head -n 1 | tr -d '\r')"
 
@@ -74,11 +87,14 @@ jobs:
 
           echo "CANONICAL_JOB_ID=$CANONICAL" >> "$GITHUB_ENV"
           echo "JOB_VERSION_ID=$VERSION" >> "$GITHUB_ENV"
+          echo "DOCUMENTS_JOB_FOUND=true" >> "$GITHUB_ENV"
 
       - name: Ensure exports directory exists
+        if: env.DOCUMENTS_JOB_FOUND == 'true'
         run: mkdir -p scripts/exports
 
       - name: Generate customized CV
+        if: env.DOCUMENTS_JOB_FOUND == 'true'
         timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -102,6 +118,7 @@ jobs:
           fi
 
       - name: Generate cover letter
+        if: env.DOCUMENTS_JOB_FOUND == 'true'
         timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -125,7 +142,7 @@ jobs:
           fi
 
       - name: Upload generated documents
-        if: always()
+        if: ${{ always() && env.DOCUMENTS_JOB_FOUND == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: application-documents-${{ inputs.canonical_job_id || 'auto' }}

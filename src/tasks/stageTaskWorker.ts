@@ -273,13 +273,31 @@ export async function seedRecoverablePipelineTasks(
         ))
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
-         AND NOT EXISTS (
-           SELECT 1
-           FROM job_requirements jr
-           WHERE jr.workspace_id = c.workspace_id
-             AND jr.job_version_id = jv.id
-             AND jr.extractor_type = 'DETERMINISTIC'
-             AND jr.status = 'VALIDATED'
+         AND NOT (
+           EXISTS (
+             SELECT 1
+             FROM job_requirements jr
+             WHERE jr.workspace_id = c.workspace_id
+               AND jr.job_version_id = jv.id
+               AND jr.extractor_type = 'DETERMINISTIC'
+               AND jr.status = 'VALIDATED'
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM job_version_pipeline_state ps
+             WHERE ps.workspace_id = c.workspace_id
+               AND ps.job_version_id = jv.id
+               AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+               AND ps.stage_status = 'COMPLETED'
+               AND EXISTS (
+                 SELECT 1
+                 FROM requirement_extraction_runs rer
+                 WHERE rer.workspace_id = ps.workspace_id
+                   AND rer.job_version_id = ps.job_version_id
+                   AND rer.run_type = 'DETERMINISTIC'
+                   AND rer.status = 'COMPLETED'
+               )
+           )
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
@@ -309,13 +327,31 @@ export async function seedRecoverablePipelineTasks(
         ))
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
-         AND EXISTS (
-           SELECT 1
-           FROM job_requirements jr
-           WHERE jr.workspace_id = c.workspace_id
-             AND jr.job_version_id = jv.id
-             AND jr.extractor_type = 'DETERMINISTIC'
-             AND jr.status = 'VALIDATED'
+         AND (
+           EXISTS (
+             SELECT 1
+             FROM job_requirements jr
+             WHERE jr.workspace_id = c.workspace_id
+               AND jr.job_version_id = jv.id
+               AND jr.extractor_type = 'DETERMINISTIC'
+               AND jr.status = 'VALIDATED'
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM job_version_pipeline_state ps
+             WHERE ps.workspace_id = c.workspace_id
+               AND ps.job_version_id = jv.id
+               AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+               AND ps.stage_status = 'COMPLETED'
+               AND EXISTS (
+                 SELECT 1
+                 FROM requirement_extraction_runs rer
+                 WHERE rer.workspace_id = ps.workspace_id
+                   AND rer.job_version_id = ps.job_version_id
+                   AND rer.run_type = 'DETERMINISTIC'
+                   AND rer.status = 'COMPLETED'
+               )
+           )
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
@@ -364,12 +400,30 @@ export async function seedRecoverablePipelineTasks(
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-         AND EXISTS (
-           SELECT 1
-           FROM job_requirements jr
-           WHERE jr.workspace_id = c.workspace_id
-             AND jr.job_version_id = jv.id
-             AND jr.status = 'VALIDATED'
+         AND (
+           EXISTS (
+             SELECT 1
+             FROM job_requirements jr
+             WHERE jr.workspace_id = c.workspace_id
+               AND jr.job_version_id = jv.id
+               AND jr.status = 'VALIDATED'
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM job_version_pipeline_state ps
+             WHERE ps.workspace_id = c.workspace_id
+               AND ps.job_version_id = jv.id
+               AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+               AND ps.stage_status = 'COMPLETED'
+               AND EXISTS (
+                 SELECT 1
+                 FROM requirement_extraction_runs rer
+                 WHERE rer.workspace_id = ps.workspace_id
+                   AND rer.job_version_id = ps.job_version_id
+                   AND rer.run_type = 'DETERMINISTIC'
+                   AND rer.status = 'COMPLETED'
+               )
+           )
          )
          AND NOT EXISTS (
            SELECT 1
@@ -639,6 +693,34 @@ async function jobVersionHasValidatedRequirements(
   return Boolean(rows[0]?.exists);
 }
 
+async function jobVersionHasCompletedRequirementsExtraction(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+  runType: "DETERMINISTIC" | "LLM_QUOTED"
+): Promise<boolean> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM job_version_pipeline_state ps
+       WHERE ps.workspace_id = $1
+         AND ps.job_version_id = $2
+         AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+         AND ps.stage_status = 'COMPLETED'
+         AND EXISTS (
+           SELECT 1
+           FROM requirement_extraction_runs rer
+           WHERE rer.workspace_id = ps.workspace_id
+             AND rer.job_version_id = ps.job_version_id
+             AND rer.run_type = $3
+             AND rer.status = 'COMPLETED'
+         )
+     ) AS exists`,
+    [ctx.workspaceId, jobVersionId, runType]
+  );
+  return Boolean(rows[0]?.exists);
+}
+
 function isTechnicalRoutingDeferral(state: {
   processingState: string | null;
   laneEvidence: string | null;
@@ -800,7 +882,13 @@ async function executeStageTask(
       jobVersionId,
       "DETERMINISTIC"
     );
-    if (!hasDeterministicRequirements) {
+    const hasCompletedDeterministicRun = await jobVersionHasCompletedRequirementsExtraction(
+      clientOrPool,
+      ctx,
+      jobVersionId,
+      "DETERMINISTIC"
+    );
+    if (!hasDeterministicRequirements && !hasCompletedDeterministicRun) {
       throw new Error(`No VALIDATED deterministic requirements found for job_version_id=${jobVersionId}.`);
     }
     return;
