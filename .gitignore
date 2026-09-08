@@ -1,6 +1,8 @@
 node_modules/
 build/
 dist/
+release/
+.desktop-release/
 
 coverage/
 .DS_Store

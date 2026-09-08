@@ -2,13 +2,20 @@
   "name": "job-decision-engine-cron",
   "private": true,
   "version": "1.0.0",
+  "description": "Local desktop console and decision pipeline for grounded job ranking.",
+  "author": "Elena Okhonko",
   "type": "module",
+  "main": "desktop/electron/main.cjs",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
     "preview": "vite preview",
-    "desktop:dev": "npm run dev",
-    "desktop:build": "npm run build",
+    "desktop:web": "npm run dev",
+    "desktop:dev": "npm run build && electron .",
+    "desktop:build": "npm run desktop:pack",
+    "desktop:pack": "tsx scripts/package_desktop.ts --dir",
+    "desktop:dist": "tsx scripts/package_desktop.ts --installer",
+    "desktop:verify": "tsx scripts/verify_desktop_packaging.ts",
     "dev:setup": "tsx scripts/dev_setup.ts",
     "db:init": "tsx scripts/db_init.ts",
     "eval:run": "tsx scripts/evaluate_jobs.ts",
@@ -30,6 +37,46 @@
     "lint": "tsc --noEmit",
     "gemini:models": "tsx scripts/list_gemini_models.ts"
   },
+  "build": {
+    "appId": "com.jobdecisionengine.desktop",
+    "productName": "Job Decision Engine",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/electron/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "desktop/electron/main.cjs"
+    },
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "elenaokhonko-eng",
+        "repo": "Job-Decision-Engine"
+      }
+    ]
+  },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@types/express": "^5.0.6",
@@ -40,6 +87,7 @@
     "ajv-formats": "^3.0.1",
     "docx": "^9.7.1",
     "dotenv": "^17.2.3",
+    "electron-updater": "^6.8.9",
     "express": "^5.2.1",
     "fast-xml-parser": "^5.11.1",
     "imapflow": "^1.4.7",
@@ -57,6 +105,8 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.14.0",
     "@types/pg": "^8.11.5",
+    "electron": "^44.2.0",
+    "electron-builder": "^26.15.3",
     "js-yaml": "^5.2.1",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

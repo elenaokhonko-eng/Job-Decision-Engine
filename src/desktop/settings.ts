@@ -11,6 +11,13 @@ export interface DesktopSettings {
   userKey: string;
 }
 
+export interface DesktopSecretStore {
+  isAvailable: () => Promise<boolean>;
+  getSecret: (key: "apiToken") => Promise<string | null>;
+  setSecret: (key: "apiToken", value: string) => Promise<{ ok: boolean }>;
+  deleteSecret: (key: "apiToken") => Promise<{ ok: boolean }>;
+}
+
 export const DESKTOP_SETTINGS_STORAGE_KEY = "jdec.desktop.settings.v1";
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -50,6 +57,56 @@ export function saveDesktopSettings(storage: KeyValueStorage | null | undefined,
   if (storage) {
     storage.setItem(DESKTOP_SETTINGS_STORAGE_KEY, JSON.stringify(normalized));
   }
+  return normalized;
+}
+
+export async function loadDesktopSettingsSecure(
+  storage: KeyValueStorage | null | undefined,
+  secretStore: DesktopSecretStore | null | undefined,
+  nativeDefaultApiBaseUrl?: string | null
+): Promise<DesktopSettings> {
+  const loaded = loadDesktopSettings(storage);
+  const base = nativeDefaultApiBaseUrl && loaded.apiBaseUrl === DEFAULT_DESKTOP_SETTINGS.apiBaseUrl
+    ? { ...loaded, apiBaseUrl: nativeDefaultApiBaseUrl }
+    : loaded;
+
+  if (!secretStore) return base;
+  const available = await secretStore.isAvailable().catch(() => false);
+  if (!available) return { ...base, apiToken: "" };
+  const apiToken = await secretStore.getSecret("apiToken").catch(() => null);
+  return normalizeDesktopSettings({ ...base, apiToken: apiToken ?? "" });
+}
+
+export async function saveDesktopSettingsSecure(
+  storage: KeyValueStorage | null | undefined,
+  secretStore: DesktopSecretStore | null | undefined,
+  settings: DesktopSettings
+): Promise<DesktopSettings> {
+  const normalized = normalizeDesktopSettings(settings);
+  if (!secretStore) {
+    return saveDesktopSettings(storage, normalized);
+  }
+
+  const available = await secretStore.isAvailable().catch(() => false);
+  if (!available && normalized.apiToken) {
+    throw new Error("Native OS secret storage is unavailable; API token was not saved.");
+  }
+
+  if (storage) {
+    storage.setItem(
+      DESKTOP_SETTINGS_STORAGE_KEY,
+      JSON.stringify({ ...normalized, apiToken: "" })
+    );
+  }
+
+  if (available) {
+    if (normalized.apiToken) {
+      await secretStore.setSecret("apiToken", normalized.apiToken);
+    } else {
+      await secretStore.deleteSecret("apiToken");
+    }
+  }
+
   return normalized;
 }
 

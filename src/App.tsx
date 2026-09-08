@@ -4,11 +4,18 @@ import type { ApplicationRecord, ShortlistRow } from "./contracts/index.js";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   loadDesktopSettings,
+  loadDesktopSettingsSecure,
   normalizeDesktopSettings,
   redactSecret,
-  saveDesktopSettings,
+  saveDesktopSettingsSecure,
   type DesktopSettings,
 } from "./desktop/settings.js";
+import {
+  getNativeRuntimeBridge,
+  getNativeSecretStore,
+  nativeDefaultApiBaseUrl,
+  type DesktopRuntimeStatus,
+} from "./desktop/nativeBridge.js";
 import {
   formatRelativeTime,
   jobOutcomeLabel,
@@ -55,6 +62,17 @@ function getBrowserStorage(): Storage | null {
   }
 }
 
+function getInitialDesktopSettings(): DesktopSettings {
+  const storage = getBrowserStorage();
+  const loaded = loadDesktopSettings(storage);
+  const nativeApiBaseUrl = nativeDefaultApiBaseUrl();
+  return normalizeDesktopSettings(
+    nativeApiBaseUrl && loaded.apiBaseUrl === DEFAULT_DESKTOP_SETTINGS.apiBaseUrl
+      ? { ...loaded, apiBaseUrl: nativeApiBaseUrl }
+      : loaded
+  );
+}
+
 function compactDate(value: string | null | undefined): string {
   if (!value) return "N/A";
   const date = new Date(value);
@@ -85,8 +103,9 @@ function uniqueApplicationJobIds(applications: ApplicationRecord[]): Set<string>
 }
 
 export default function App() {
-  const [settings, setSettings] = useState<DesktopSettings>(() => loadDesktopSettings(getBrowserStorage()));
+  const [settings, setSettings] = useState<DesktopSettings>(getInitialDesktopSettings);
   const [draftSettings, setDraftSettings] = useState<DesktopSettings>(settings);
+  const [nativeStatus, setNativeStatus] = useState<DesktopRuntimeStatus | null>(null);
   const [activeView, setActiveView] = useState<ViewKey>("overview");
   const [health, setHealth] = useState<HealthState | null>(null);
   const [jobs, setJobs] = useState<ShortlistRow[]>([]);
@@ -116,10 +135,18 @@ export default function App() {
   const applicationJobIds = useMemo(() => uniqueApplicationJobIds(applications), [applications]);
   const selectedJob = jobs.find((job) => job.canonical_job_id === selectedJobId) ?? jobs[0] ?? null;
 
+  const refreshNativeStatus = useCallback(async () => {
+    const runtime = getNativeRuntimeBridge();
+    if (!runtime) return;
+    const status = await runtime.getStatus().catch(() => null);
+    if (status) setNativeStatus(status);
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setToast(null);
     try {
+      await refreshNativeStatus();
       const healthRes = await client.getHealth();
       setHealth(healthRes);
 
@@ -164,11 +191,28 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [client, selectedJobId]);
+  }, [client, refreshNativeStatus, selectedJobId]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadDesktopSettingsSecure(
+      getBrowserStorage(),
+      getNativeSecretStore(),
+      nativeDefaultApiBaseUrl()
+    ).then((loaded) => {
+      if (cancelled) return;
+      setSettings(loaded);
+      setDraftSettings(loaded);
+    });
+    void refreshNativeStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshNativeStatus]);
 
   async function createApplicationHandoff(job: ShortlistRow): Promise<void> {
     setLoading(true);
@@ -242,12 +286,25 @@ export default function App() {
     }
   }
 
-  function submitSettings(event: FormEvent<HTMLFormElement>): void {
+  async function submitSettings(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    const normalized = saveDesktopSettings(getBrowserStorage(), normalizeDesktopSettings(draftSettings));
-    setSettings(normalized);
-    setDraftSettings(normalized);
-    setToast({ kind: "ok", message: "Settings saved." });
+    setLoading(true);
+    setToast(null);
+    try {
+      const normalized = await saveDesktopSettingsSecure(
+        getBrowserStorage(),
+        getNativeSecretStore(),
+        normalizeDesktopSettings(draftSettings)
+      );
+      setSettings(normalized);
+      setDraftSettings(normalized);
+      await refreshNativeStatus();
+      setToast({ kind: "ok", message: "Settings saved." });
+    } catch (error) {
+      setToast({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -383,7 +440,7 @@ export default function App() {
         {activeView === "settings" ? (
           <section className="panel settings-panel">
             <PanelHeader title="Local Settings" />
-            <form onSubmit={submitSettings} className="settings-form">
+            <form onSubmit={(event) => void submitSettings(event)} className="settings-form">
               <label>
                 <span>API base URL</span>
                 <input value={draftSettings.apiBaseUrl} onChange={(event) => setDraftSettings({ ...draftSettings, apiBaseUrl: event.target.value })} placeholder={DEFAULT_DESKTOP_SETTINGS.apiBaseUrl} />
@@ -405,6 +462,12 @@ export default function App() {
               <div className="settings-summary">
                 <span>Stored token</span>
                 <strong>{redactSecret(settings.apiToken) || "Not set"}</strong>
+              </div>
+              <div className="settings-summary-grid">
+                <Info label="Native Shell" value={nativeStatus ? (nativeStatus.isPackaged ? "Packaged" : "Development") : "Browser"} />
+                <Info label="Secret Storage" value={nativeStatus ? (nativeStatus.safeStorageAvailable ? "OS backed" : "Unavailable") : "Browser storage"} />
+                <Info label="Local API" value={nativeStatus?.apiRuntime.status ?? "External"} />
+                <Info label="Updates" value={nativeStatus?.updatesEnabled ? "Enabled" : "Disabled"} />
               </div>
               <button type="submit" className="button primary">Save Settings</button>
             </form>

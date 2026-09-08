@@ -3,9 +3,12 @@ import {
   DESKTOP_SETTINGS_STORAGE_KEY,
   clearDesktopSettings,
   loadDesktopSettings,
+  loadDesktopSettingsSecure,
   normalizeDesktopSettings,
   redactSecret,
   saveDesktopSettings,
+  saveDesktopSettingsSecure,
+  type DesktopSecretStore,
   type KeyValueStorage,
 } from "../../desktop/settings.js";
 
@@ -22,6 +25,29 @@ class MemoryStorage implements KeyValueStorage {
 
   removeItem(key: string): void {
     this.values.delete(key);
+  }
+}
+
+class MemorySecretStore implements DesktopSecretStore {
+  available = true;
+  readonly values = new Map<string, string>();
+
+  async isAvailable(): Promise<boolean> {
+    return this.available;
+  }
+
+  async getSecret(key: "apiToken"): Promise<string | null> {
+    return this.values.get(key) ?? null;
+  }
+
+  async setSecret(key: "apiToken", value: string): Promise<{ ok: boolean }> {
+    this.values.set(key, value);
+    return { ok: true };
+  }
+
+  async deleteSecret(key: "apiToken"): Promise<{ ok: boolean }> {
+    this.values.delete(key);
+    return { ok: true };
   }
 }
 
@@ -62,5 +88,37 @@ describe("desktop settings", () => {
     expect(redactSecret("")).toBe("");
     expect(redactSecret("short")).toBe("********");
     expect(redactSecret("abcd-1234-efgh")).toBe("abcd...efgh");
+  });
+
+  it("stores API tokens in native secret storage when available", async () => {
+    const storage = new MemoryStorage();
+    const secretStore = new MemorySecretStore();
+
+    await saveDesktopSettingsSecure(storage, secretStore, {
+      apiBaseUrl: "http://127.0.0.1:3217/api/v2",
+      apiToken: "native-token",
+      workspaceKey: "default",
+      userKey: "local_user",
+    });
+
+    expect(storage.getItem(DESKTOP_SETTINGS_STORAGE_KEY)).not.toContain("native-token");
+    expect(secretStore.values.get("apiToken")).toBe("native-token");
+    await expect(loadDesktopSettingsSecure(storage, secretStore)).resolves.toMatchObject({
+      apiBaseUrl: "http://127.0.0.1:3217/api/v2",
+      apiToken: "native-token",
+    });
+  });
+
+  it("refuses to persist native tokens when OS secret storage is unavailable", async () => {
+    const storage = new MemoryStorage();
+    const secretStore = new MemorySecretStore();
+    secretStore.available = false;
+
+    await expect(saveDesktopSettingsSecure(storage, secretStore, {
+      apiBaseUrl: "/api/v2",
+      apiToken: "native-token",
+      workspaceKey: "default",
+      userKey: "local_user",
+    })).rejects.toThrow(/secret storage is unavailable/);
   });
 });
