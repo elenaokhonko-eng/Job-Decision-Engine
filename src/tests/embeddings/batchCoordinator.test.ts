@@ -1,10 +1,16 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runEmbeddingBatch, runEmbeddingBatchWithFallback } from '../../embeddings/batchCoordinator.js';
 import * as agent from '../../services/agent.js';
 import type { WorkspaceContext } from '../../workspace/context.js';
 
 describe('runEmbeddingBatch', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('creates a batch and persists validated embeddings', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const query = vi.fn(async (sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
         return { rows: [] };
@@ -67,9 +73,20 @@ describe('runEmbeddingBatch', () => {
     expect(calls.some((sql) => sql.includes('INSERT INTO semantic_embeddings'))).toBe(true);
     expect(calls.some((sql) => sql.includes('UPDATE embedding_batches'))).toBe(true);
     expect(calls.some((sql) => sql.includes('INSERT INTO embedding_batch_items'))).toBe(true);
+    expect(
+      logSpy.mock.calls.some((call) => String(call[0]).includes('[embeddings:PRIMARY] provider=openai'))
+    ).toBe(true);
+    expect(
+      logSpy.mock.calls.some((call) => String(call[0]).includes('1/2 input_id=44444444-4444-4444-8444-444444444444'))
+    ).toBe(true);
+    expect(
+      logSpy.mock.calls.some((call) => String(call[0]).includes('completed processed=2 succeeded=2 failed=0'))
+    ).toBe(true);
   });
 
   it('runs fallback space batch for failed primary items', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     let nextBatchId = 0;
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {

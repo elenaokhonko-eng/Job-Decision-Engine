@@ -56,6 +56,11 @@ interface SpaceRow {
   dimensions: number;
 }
 
+function describeEmbeddingError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > 500 ? `${message.slice(0, 500)}...` : message;
+}
+
 export async function runEmbeddingBatch(
   embeddingSpaceId: string,
   batchKey: string,
@@ -136,6 +141,9 @@ export async function runEmbeddingBatch(
         );
 
     if (inputRes.rows.length === 0) {
+      console.log(
+        `[embeddings:${runType}] provider=${provider} model=${spaceModel} space=${space.id} no pending inputs`
+      );
       return {
         batchId: null,
         embeddingSpaceId: space.id,
@@ -150,6 +158,9 @@ export async function runEmbeddingBatch(
     }
 
     const processedInputIds = inputRes.rows.map((row) => row.id);
+    console.log(
+      `[embeddings:${runType}] provider=${provider} model=${spaceModel} space=${space.id} dimensions=${space.dimensions} selected=${inputRes.rows.length} max_items=${maxItems} input_filter=${inputIds && inputIds.length > 0 ? inputIds.length : 'none'}`
+    );
 
     let batchId: string;
 
@@ -176,6 +187,9 @@ export async function runEmbeddingBatch(
         [workspaceId, space.id, batchKey, runType, fallbackFromBatchId || null, rerunOfBatchId || null]
       );
       batchId = batchRes.rows[0].id;
+      console.log(
+        `[embeddings:${runType}] batch_id=${batchId} creating ${inputRes.rows.length} batch item(s)`
+      );
 
       for (const input of inputRes.rows) {
         await client.query(
@@ -205,7 +219,11 @@ export async function runEmbeddingBatch(
     let failed = 0;
     const failedInputIds: string[] = [];
 
-    for (const input of inputRes.rows) {
+    for (let inputIndex = 0; inputIndex < inputRes.rows.length; inputIndex += 1) {
+      const input = inputRes.rows[inputIndex];
+      const itemStartedAt = Date.now();
+      const progressPrefix = `[embeddings:${runType}] ${inputIndex + 1}/${inputRes.rows.length} input_id=${input.id} provider=${provider} model=${spaceModel}`;
+      console.log(`${progressPrefix} starting chars=${input.content_text.length}`);
       try {
         const vector = await generateEmbeddingWithProviderAndModel(
           input.content_text,
@@ -217,6 +235,9 @@ export async function runEmbeddingBatch(
           failed += 1;
           failedInputIds.push(input.id);
           errors.push(`input ${input.id}: ${validation.issues.join('; ')}`);
+          console.warn(
+            `${progressPrefix} validation_failed issues=${validation.issues.join('; ')} elapsed_ms=${Date.now() - itemStartedAt}`
+          );
           await client.query(
             `UPDATE embedding_batch_items
              SET status = 'FAILED',
@@ -289,6 +310,9 @@ export async function runEmbeddingBatch(
         }
 
         succeeded += 1;
+        console.log(
+          `${progressPrefix} completed dimensions=${validation.dimensions} elapsed_ms=${Date.now() - itemStartedAt}`
+        );
         await client.query(
           `UPDATE embedding_batch_items
            SET status = 'COMPLETED',
@@ -298,16 +322,18 @@ export async function runEmbeddingBatch(
           [workspaceId, batchId, input.id]
         );
       } catch (error) {
+        const message = describeEmbeddingError(error);
         failed += 1;
         failedInputIds.push(input.id);
-        errors.push(`input ${input.id}: ${error instanceof Error ? error.message : String(error)}`);
+        errors.push(`input ${input.id}: ${message}`);
+        console.warn(`${progressPrefix} failed elapsed_ms=${Date.now() - itemStartedAt} error=${message}`);
         await client.query(
           `UPDATE embedding_batch_items
            SET status = 'FAILED',
                error_message = $4,
                updated_at = NOW()
            WHERE workspace_id = $1 AND embedding_batch_id = $2 AND embedding_input_id = $3`,
-          [workspaceId, batchId, input.id, error instanceof Error ? error.message : String(error)]
+          [workspaceId, batchId, input.id, message]
         );
       }
     }
@@ -349,6 +375,10 @@ export async function runEmbeddingBatch(
       }
     }
 
+    console.log(
+      `[embeddings:${runType}] batch_id=${batchId} completed processed=${inputRes.rows.length} succeeded=${succeeded} failed=${failed}`
+    );
+
     return {
       batchId,
       embeddingSpaceId: space.id,
@@ -382,9 +412,18 @@ export async function runEmbeddingBatchWithFallback(
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    console.log(`[embeddings] seeding embedding spaces`);
     const seeded = await seedEmbeddingSpaces(client as pg.PoolClient, { context: ctx });
+    console.log(
+      `[embeddings] spaces primary=${seeded.primarySpaceId} fallback=${seeded.fallbackSpaceId}`
+    );
+    console.log(`[embeddings] building embedding inputs max_per_source=${maxItems}`);
     const inputBuild = await buildEmbeddingInputs(client as pg.PoolClient, maxItems, { context: ctx });
+    console.log(
+      `[embeddings] input_build inserted=${inputBuild.inserted} requirements=${inputBuild.fromRequirements} profile_facts=${inputBuild.fromProfileFacts} job_versions=${inputBuild.fromJobVersions ?? 0} lane_prototypes=${inputBuild.fromLanePrototypes ?? 0}`
+    );
 
+    console.log(`[embeddings] primary batch starting max_items=${maxItems}`);
     const primary = await runEmbeddingBatch(
       seeded.primarySpaceId,
       `primary-${Date.now()}`,
@@ -396,10 +435,16 @@ export async function runEmbeddingBatchWithFallback(
       client as pg.PoolClient,
       { context: ctx }
     );
+    console.log(
+      `[embeddings] primary batch finished processed=${primary.processed} succeeded=${primary.succeeded} failed=${primary.failed}`
+    );
 
     let fallback: EmbeddingBatchSummary | undefined;
     if (primary.failedInputIds.length > 0) {
       let fallbackInputIds = primary.processedInputIds;
+      console.log(
+        `[embeddings] primary had ${primary.failedInputIds.length} failed input(s); selecting active corpus for fallback`
+      );
       try {
         const allRelevantInputs = await client.query<{ id: string }>(
           `SELECT DISTINCT ei.id
@@ -457,6 +502,7 @@ export async function runEmbeddingBatchWithFallback(
       // A failed primary batch is never a usable semantic space. Re-embed the
       // complete active corpus in one fallback space, including inputs that
       // succeeded in earlier primary cycles, so matching cannot mix providers.
+      console.log(`[embeddings] fallback batch starting input_count=${fallbackInputIds.length}`);
       fallback = await runEmbeddingBatch(
         seeded.fallbackSpaceId,
         `fallback-${Date.now()}`,
@@ -467,6 +513,9 @@ export async function runEmbeddingBatchWithFallback(
         primary.batchId ?? undefined,
         client as pg.PoolClient,
         { context: ctx }
+      );
+      console.log(
+        `[embeddings] fallback batch finished processed=${fallback.processed} succeeded=${fallback.succeeded} failed=${fallback.failed}`
       );
     }
 

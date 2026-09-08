@@ -79,6 +79,15 @@ function modelRequestTimeoutMs(): number {
   return Math.max(5000, Math.min(300000, parsed));
 }
 
+function embeddingRequestTimeoutMs(): number {
+  const parsed = Number.parseInt(
+    String(process.env.EMBEDDING_REQUEST_TIMEOUT_MS || process.env.MODEL_REQUEST_TIMEOUT_MS || "30000"),
+    10
+  );
+  if (!Number.isFinite(parsed)) return 30000;
+  return Math.max(5000, Math.min(120000, parsed));
+}
+
 function isRetryableModelRequestError(error: any): boolean {
   const status = Number(error?.status);
   if (Number.isFinite(status)) {
@@ -948,6 +957,7 @@ async function embedWithGeminiModel(text: string, model: string): Promise<number
 
   const ai = getGeminiClient();
   try {
+    const timeoutMs = embeddingRequestTimeoutMs();
     const configuredDimensions = Number(process.env.EMBEDDING_PRIMARY_DIMENSIONS || 768);
     const outputDimensionality = Number.isInteger(configuredDimensions) && configuredDimensions > 0
       ? configuredDimensions
@@ -955,7 +965,11 @@ async function embedWithGeminiModel(text: string, model: string): Promise<number
     const response = await ai.models.embedContent({
       model: normalizedModel,
       contents: text,
-      ...(outputDimensionality ? { config: { outputDimensionality } } : {}),
+      config: {
+        ...(outputDimensionality ? { outputDimensionality } : {}),
+        abortSignal: AbortSignal.timeout(timeoutMs),
+        httpOptions: { timeout: timeoutMs },
+      },
     });
     const vals = response.embeddings?.[0]?.values;
     if (vals && vals.length > 0) return vals;
@@ -997,6 +1011,7 @@ async function embedWithOpenAIModel(text: string, model: string): Promise<number
     requestBody.dimensions = configuredDimensions;
   }
 
+  const timeoutMs = embeddingRequestTimeoutMs();
   const oResponse = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
     headers: {
@@ -1004,7 +1019,7 @@ async function embedWithOpenAIModel(text: string, model: string): Promise<number
       "Authorization": `Bearer ${openaiKey}`,
     },
     body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!oResponse.ok) {
     const errText = await oResponse.text();

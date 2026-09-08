@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { generateContentAudited } from '../../services/agent.js';
+import { generateContentAudited, generateEmbeddingWithProviderAndModel } from '../../services/agent.js';
 
 const originalEnv = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
@@ -15,6 +15,8 @@ const originalEnv = {
   OPENAI_MODEL: process.env.OPENAI_MODEL,
   MODEL_REQUEST_MAX_RETRIES: process.env.MODEL_REQUEST_MAX_RETRIES,
   MODEL_REQUEST_TIMEOUT_MS: process.env.MODEL_REQUEST_TIMEOUT_MS,
+  EMBEDDING_REQUEST_TIMEOUT_MS: process.env.EMBEDDING_REQUEST_TIMEOUT_MS,
+  EMBEDDING_FALLBACK_DIMENSIONS: process.env.EMBEDDING_FALLBACK_DIMENSIONS,
 };
 
 function restoreEnv(): void {
@@ -116,5 +118,33 @@ describe('generateContentAudited retry policy', () => {
     expect(result.provider).toBe('openai');
     expect(result.model).toBe('gpt-5.6-luna');
     expect(result.attempts).toBe(1);
+  });
+
+  it('uses the embedding-specific timeout for OpenAI embedding requests', async () => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    process.env.EMBEDDING_REQUEST_TIMEOUT_MS = '7000';
+    process.env.EMBEDDING_FALLBACK_DIMENSIONS = '4';
+
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.fn(async (..._args: Parameters<typeof fetch>) =>
+      new Response(
+        JSON.stringify({
+          data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const vector = await generateEmbeddingWithProviderAndModel(
+      'embedding input',
+      'openai',
+      'text-embedding-3-small'
+    );
+
+    expect(vector).toEqual([0.1, 0.2, 0.3, 0.4]);
+    expect(timeoutSpy).toHaveBeenCalledWith(7000);
+    const requestBody = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+    expect(requestBody.dimensions).toBe(4);
   });
 });
