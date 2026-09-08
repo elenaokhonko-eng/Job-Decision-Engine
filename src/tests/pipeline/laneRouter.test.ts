@@ -236,4 +236,106 @@ describe('Pipeline Stage: Lane Routing', () => {
     expect(updateCall?.[1][0]).toBe('INVESTMENT_MARKETS_FINTECH');
     expect(updateCall?.[1][2]).toBe('LANE_ROUTED');
   });
+
+  it('defers below-threshold jobs with blocker evidence and the raw best score', async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    (loadWorkspaceLanesConfig as any).mockResolvedValueOnce({
+      source: 'FILES',
+      config: {
+        version: 'no-match-diagnostics-test',
+        description: 'test config',
+        lanes: {
+          CORE_AI_DATA: {
+            title: 'Core AI',
+            description: 'Core AI lane',
+            threshold: 0.9,
+            semantic_threshold: 0.9,
+            keywords: [],
+            prototype_query: 'core prototype',
+            included_domain_concepts: ['MACHINE_LEARNING'],
+            required_function_concepts: ['ML_ENGINEERING'],
+            minimum_domain_score: 0.6,
+            minimum_function_score: 0.6,
+          },
+          LEGAL_REGTECH: {
+            title: 'Legal',
+            description: 'Legal lane',
+            threshold: 0.9,
+            semantic_threshold: 0.9,
+            keywords: [],
+            prototype_query: 'legal prototype',
+          },
+          HEALTH_BIO_PHARMA: {
+            title: 'Health',
+            description: 'Health lane',
+            threshold: 0.9,
+            semantic_threshold: 0.9,
+            keywords: [],
+            prototype_query: 'health prototype',
+          },
+          INVESTMENT_MARKETS_FINTECH: {
+            title: 'Fintech',
+            description: 'Fintech lane',
+            threshold: 0.9,
+            semantic_threshold: 0.9,
+            keywords: [],
+            prototype_query: 'fintech prototype',
+          },
+        },
+        unclassified_policy: {
+          label: 'UNCLASSIFIED',
+          fallback_behavior: 'DEFER_ROUTING',
+          min_similarity_floor: 0.25,
+        },
+      },
+    });
+
+    (mPool.query as any).mockResolvedValueOnce({
+      rows: [
+        {
+          id: 'canon-below-threshold',
+          latest_version_id: 'version-below-threshold',
+          normalized_title: 'Senior Machine Learning Engineer',
+          description_text: 'Build machine learning services and ML systems.',
+        },
+      ],
+    });
+
+    (agent.generateEmbeddingWithProvider as any).mockImplementation((text: string) => {
+      const t = text.toLowerCase();
+      if (t.includes('core prototype')) return Promise.resolve([1, 0, 0, 0]);
+      if (t.includes('legal prototype')) return Promise.resolve([0, 1, 0, 0]);
+      if (t.includes('health prototype')) return Promise.resolve([0, 0, 1, 0]);
+      if (t.includes('fintech prototype')) return Promise.resolve([0, 0, 0, 1]);
+      return Promise.resolve([0.5, 0.5, 0.5, 0.5]);
+    });
+
+    const result = await runLaneRouting(undefined, { context });
+
+    expect(result.routed).toBe(0);
+    expect(result.deferred).toBe(1);
+
+    const selectCall = (mPool.query as any).mock.calls[0];
+    expect(selectCall[0]).toContain("ROUTING_DEFERRED");
+    expect(selectCall[1][1]).toBe("lane_router_v2.2.1|no-match-diagnostics-test|");
+
+    const updateCall = (mPool.query as any).mock.calls.find(
+      (call: any) => typeof call[0] === 'string' && call[0].includes('UPDATE canonical_jobs')
+    );
+    expect(updateCall?.[1][0]).toBe('UNCLASSIFIED');
+    expect(updateCall?.[1][1]).toBeCloseTo(0.5);
+    expect(updateCall?.[1][2]).toBe('ROUTING_DEFERRED');
+    const evidence = JSON.parse(updateCall?.[1][5]);
+    expect(evidence[0]).toBe('ROUTING_POLICY_NO_MATCH');
+    expect(evidence).toContain(
+      'CORE_AI_DATA:blocked_by=semantic:0.500<0.900;score=0.500;threshold=0.900;domain=1.000/0.600;function=1.000/0.600'
+    );
+  });
 });

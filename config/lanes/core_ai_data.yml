@@ -13,6 +13,7 @@ scope:
       - AI_SYSTEMS_ARCHITECTURE
       - LLM_INFRASTRUCTURE
       - AI_RESEARCH
+      - DATA_SCIENCE
 
   included_domain_concepts:
     any:
@@ -74,4 +75,4 @@ negative_concepts:
   - technical account management
   - programme governance
   - people-management-heavy
-semantic_threshold: 0.68
+semantic_threshold: 0.35

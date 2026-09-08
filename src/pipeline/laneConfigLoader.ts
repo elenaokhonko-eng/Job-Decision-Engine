@@ -84,11 +84,14 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
       .map((c) => c.trim())
   );
 
+  const primarySemanticThreshold =
+    laneConfig.routing?.minimum_semantic_score ?? laneConfig.semantic_threshold ?? 0.35;
+
   return {
     title: laneConfig.display_name,
     description: laneConfig.description,
-    threshold: laneConfig.semantic_threshold ?? laneConfig.routing?.minimum_semantic_score ?? 0.35,
-    semantic_threshold: laneConfig.semantic_threshold ?? laneConfig.routing?.minimum_semantic_score ?? 0.35,
+    threshold: primarySemanticThreshold,
+    semantic_threshold: primarySemanticThreshold,
     enabled_sources: (laneConfig.sourcing?.enabled_sources || []).map((s) => s.toLowerCase()),
     title_families: dedupe(requiredFunctions.map(normalizeConcept)),
     keywords: dedupe(concepts.map(normalizeConcept)),

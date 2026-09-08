@@ -27,6 +27,8 @@ dotenv.config({ path: ".env.local" });
 
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
+const LANE_ROUTER_RULE_VERSION = "lane_router_v2.2.1";
+
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
 
@@ -65,8 +67,30 @@ function containsConcept(text: string, concept: string): boolean {
 }
 
 const CONCEPT_ALIASES: Record<string, string[]> = {
-  "ai engineering": ["ai engineer", "artificial intelligence engineer", "machine learning engineer", "ml engineer", "ai systems engineer"],
-  "ml engineering": ["ml engineer", "machine learning engineer", "machine learning engineering", "ml engineering"],
+  "ai engineering": [
+    "ai engineer",
+    "artificial intelligence engineer",
+    "machine learning engineer",
+    "ml engineer",
+    "ai systems engineer",
+    "applied ai",
+    "applied ai engineer",
+    "agentic ai",
+    "ai platform engineer",
+    "ai/ml engineer",
+  ],
+  "ml engineering": [
+    "ml",
+    "ml engineer",
+    "machine learning engineer",
+    "machine learning engineering",
+    "ml engineering",
+    "ml systems",
+    "applied ml",
+    "applied machine learning",
+    "machine learning scientist",
+    "ai/ml",
+  ],
   "data engineering": ["data engineer", "data engineering", "data pipeline", "data pipelines", "etl", "data platform"],
   "ai data architecture": ["ai data architecture", "data architecture", "ai architecture", "data platform architecture"],
   "ai systems architecture": ["ai systems architect", "ai systems architecture", "ai architecture", "ml systems architect"],
@@ -104,7 +128,14 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
   "ai": ["artificial intelligence", "machine learning", "ml", "deep learning", "llm", "nlp"],
   "machine learning": ["machine learning", "ml", "deep learning"],
   "data platform": ["data platform", "data warehouse", "data lake", "lakehouse", "data pipeline"],
-  "data science": ["data science", "data scientist", "applied statistics", "predictive modelling", "predictive modeling"],
+  "data science": [
+    "data science",
+    "data scientist",
+    "ai/ml data scientist",
+    "applied statistics",
+    "predictive modelling",
+    "predictive modeling",
+  ],
   "regtech": ["regtech", "regulatory technology", "compliance automation", "aml", "kyc"],
   "legaltech": ["legaltech", "legal technology", "legal ai", "contract analytics"],
   "healthcare": ["healthcare", "health data", "clinical", "medical"],
@@ -136,6 +167,63 @@ function conceptVariants(concept: string): string[] {
 function conceptScopeScore(description: string, concepts: string[] | undefined): number {
   if (!concepts || concepts.length === 0) return 1;
   return concepts.some((concept) => containsConcept(description, concept)) ? 1 : 0;
+}
+
+type LaneCandidateEvaluation = {
+  laneKey: string;
+  laneDef: LaneDefinition;
+  threshold: number;
+  score: number;
+  domainScore: number;
+  functionScore: number;
+  rank: number;
+  enabled: boolean;
+  negativeExcluded: boolean;
+};
+
+function formatRoutingScore(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(3) : "n/a";
+}
+
+function buildNoMatchEvidence(candidates: LaneCandidateEvaluation[]): string[] {
+  const evidence = ["ROUTING_POLICY_NO_MATCH"];
+  const sorted = [...candidates].sort((a, b) => {
+    if (Math.abs(a.score - b.score) > 1e-9) return b.score - a.score;
+    return a.rank - b.rank;
+  });
+
+  for (const candidate of sorted.slice(0, 4)) {
+    const minDomain = candidate.laneDef.minimum_domain_score ?? 0;
+    const minFunction = candidate.laneDef.minimum_function_score ?? 0;
+    const blockers: string[] = [];
+    if (!candidate.enabled) blockers.push("lane_disabled");
+    if (candidate.negativeExcluded) blockers.push("negative_concept");
+    if (candidate.score < candidate.threshold) {
+      blockers.push(
+        `semantic:${formatRoutingScore(candidate.score)}<${formatRoutingScore(candidate.threshold)}`
+      );
+    }
+    if (candidate.domainScore < minDomain) {
+      blockers.push(
+        `domain:${formatRoutingScore(candidate.domainScore)}<${formatRoutingScore(minDomain)}`
+      );
+    }
+    if (candidate.functionScore < minFunction) {
+      blockers.push(
+        `function:${formatRoutingScore(candidate.functionScore)}<${formatRoutingScore(minFunction)}`
+      );
+    }
+
+    evidence.push(
+      `${candidate.laneKey}:blocked_by=${blockers.join(",") || "not_selected"};` +
+        `score=${formatRoutingScore(candidate.score)};` +
+        `threshold=${formatRoutingScore(candidate.threshold)};` +
+        `domain=${formatRoutingScore(candidate.domainScore)}/${formatRoutingScore(minDomain)};` +
+        `function=${formatRoutingScore(candidate.functionScore)}/${formatRoutingScore(minFunction)}`
+    );
+  }
+
+  return evidence;
 }
 
 function extractCoreJobText(title: string, description: string): string {
@@ -233,24 +321,71 @@ export async function runLaneRouter(
     }`
   );
 
-  // Use LATERAL join to get only the latest version's description
-  const { rows: jobs } = await pool.query(
-    `
-      SELECT c.*, jv.description_text, jv.id AS latest_version_id
-      FROM canonical_jobs c
-      JOIN LATERAL (
-        SELECT id, description_text
-        FROM job_versions
-        WHERE workspace_id = $1
-          AND canonical_job_id = c.id
-        ORDER BY observed_at DESC
-        LIMIT 1
-      ) jv ON TRUE
-      WHERE c.workspace_id = $1
-        AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-    `,
-    [ctx.workspaceId]
-  );
+  const currentLaneRouterModelPrefix =
+    `${LANE_ROUTER_RULE_VERSION}|${config.version ?? "lanes_unknown"}|`;
+
+  let jobs: any[] = [];
+  try {
+    // Use LATERAL join to get only the latest version's description.
+    // Retry old ROUTING_DEFERRED/UNCLASSIFIED decisions when the router rules or
+    // lane snapshot version changes, otherwise a bad calibration run strands jobs.
+    const result = await pool.query(
+      `
+        SELECT c.*, jv.description_text, jv.id AS latest_version_id
+        FROM canonical_jobs c
+        JOIN LATERAL (
+          SELECT id, description_text
+          FROM job_versions
+          WHERE workspace_id = $1
+            AND canonical_job_id = c.id
+          ORDER BY observed_at DESC
+          LIMIT 1
+        ) jv ON TRUE
+        WHERE c.workspace_id = $1
+          AND (
+            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+            OR (
+              COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+              AND COALESCE(c.primary_lane, 'UNCLASSIFIED') = 'UNCLASSIFIED'
+              AND (
+                c.latest_lane_decision_id IS NULL
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM lane_decisions ld
+                  WHERE ld.workspace_id = c.workspace_id
+                    AND ld.id = c.latest_lane_decision_id
+                    AND LEFT(ld.model_version, LENGTH($2)) = $2
+                )
+              )
+            )
+          )
+      `,
+      [ctx.workspaceId, currentLaneRouterModelPrefix]
+    );
+    jobs = result.rows;
+  } catch (error: any) {
+    if (error?.code !== "42P01" && error?.code !== "42703") {
+      throw error;
+    }
+    const fallback = await pool.query(
+      `
+        SELECT c.*, jv.description_text, jv.id AS latest_version_id
+        FROM canonical_jobs c
+        JOIN LATERAL (
+          SELECT id, description_text
+          FROM job_versions
+          WHERE workspace_id = $1
+            AND canonical_job_id = c.id
+          ORDER BY observed_at DESC
+          LIMIT 1
+        ) jv ON TRUE
+        WHERE c.workspace_id = $1
+          AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+      `,
+      [ctx.workspaceId]
+    );
+    jobs = fallback.rows;
+  }
 
   console.log(`Found ${jobs.length} canonical jobs to route.`);
 
@@ -483,7 +618,7 @@ export async function runLaneRouter(
           : MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL
       );
       const modelVersion = [
-        "lane_router_v2.2.0",
+        LANE_ROUTER_RULE_VERSION,
         config.version ?? "lanes_unknown",
         `${params.embeddingProvider}:${embeddingModel}:${params.embeddingDimensions}`,
       ].join("|");
@@ -768,7 +903,7 @@ export async function runLaneRouter(
           }
 
           const minSimilarityFloor = config.unclassified_policy.min_similarity_floor || 0.25;
-          const qualifyingPrimary = Object.entries(config.lanes)
+          const primaryCandidates = Object.entries(config.lanes)
             .map(([laneKey, laneDef]) => {
               const threshold = laneDef.semantic_threshold ?? laneDef.threshold ?? minSimilarityFloor;
               const score = scoreMap[laneKey] ?? -1;
@@ -782,17 +917,21 @@ export async function runLaneRouter(
                 domainScore,
                 functionScore,
                 rank: preferenceRank(laneKey),
+                enabled: preferenceEnabled(laneKey),
+                negativeExcluded: applyNegativeExclusion(descText, laneDef),
               };
-            })
-            .filter((c) => preferenceEnabled(c.laneKey))
+            });
+          const qualifyingPrimary = primaryCandidates
+            .filter((c) => c.enabled)
             .filter((c) => c.score >= c.threshold)
             .filter((c) => c.domainScore >= (c.laneDef.minimum_domain_score ?? 0))
             .filter((c) => c.functionScore >= (c.laneDef.minimum_function_score ?? 0))
-            .filter((c) => !applyNegativeExclusion(descText, c.laneDef));
+            .filter((c) => !c.negativeExcluded);
 
           if (qualifyingPrimary.length === 0) {
+            laneEvidence.push(...buildNoMatchEvidence(primaryCandidates));
             bestLane = "UNCLASSIFIED";
-            bestScore = 0;
+            bestScore = Math.max(0, bestScore);
           } else {
             qualifyingPrimary.sort((a, b) => {
               if (Math.abs(a.score - b.score) > 1e-9) return b.score - a.score;
@@ -859,6 +998,15 @@ export async function runLaneRouter(
             bestLane === "UNCLASSIFIED" ? "ROUTING_DEFERRED" : "LANE_ROUTED";
           if (bestLane === "UNCLASSIFIED") deferredCount++; else routedCount++;
 
+          const finalLaneEvidence =
+            bestLane === "UNCLASSIFIED"
+              ? laneEvidence
+              : [
+                  ...laneEvidence,
+                  `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
+                  `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
+                ];
+
           const evaluatedAt = new Date().toISOString();
           const laneDecisionId = await persistLaneDecision({
             canonicalJobId: job.id,
@@ -870,11 +1018,7 @@ export async function runLaneRouter(
             secondaryLanes,
             laneConfidence,
             semanticScores: scoreMap,
-            laneEvidence: [
-              ...laneEvidence,
-              `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
-              `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
-            ],
+            laneEvidence: finalLaneEvidence,
             evaluatedAt,
           });
 
@@ -895,7 +1039,7 @@ export async function runLaneRouter(
               processingStatus,
               laneConfidence,
               JSON.stringify(secondaryLanes),
-              JSON.stringify(laneEvidence),
+              JSON.stringify(finalLaneEvidence),
               ctx.workspaceId,
               job.id,
             ]
@@ -912,8 +1056,13 @@ export async function runLaneRouter(
           }
 
           await client.query("COMMIT");
+          const scoreLabel = bestLane === "UNCLASSIFIED" ? "BestScore" : "Score";
+          const reasonLabel =
+            bestLane === "UNCLASSIFIED" && finalLaneEvidence.length > 0
+              ? `, Reason: ${finalLaneEvidence[0]}`
+              : "";
           console.log(
-            `  -> Job ${job.id} ("${job.normalized_title}"): ${bestLane} (Score: ${bestScore.toFixed(3)}, Status: ${processingStatus})`
+            `  -> Job ${job.id} ("${job.normalized_title}"): ${bestLane} (${scoreLabel}: ${bestScore.toFixed(3)}, Status: ${processingStatus}${reasonLabel})`
           );
         } catch (jobErr) {
           await client.query("ROLLBACK");
