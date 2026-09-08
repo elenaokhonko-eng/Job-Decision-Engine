@@ -42,6 +42,18 @@ export interface EnqueuePipelineTaskResult {
   inserted: boolean;
 }
 
+export interface ReplayDeadLetterPipelineTaskInput {
+  taskId?: string;
+  taskKey?: string;
+  resetAttempts?: boolean;
+  maxAttempts?: number;
+}
+
+export interface ReplayDeadLetterPipelineTaskResult {
+  taskId: string;
+  replayed: boolean;
+}
+
 export async function enqueuePipelineTask(
   input: EnqueuePipelineTaskInput,
   clientOrPool: pg.Pool | pg.PoolClient,
@@ -96,6 +108,65 @@ export async function enqueuePipelineTask(
       throw new Error(`Failed to enqueue task (no insert and no existing row): ${input.taskKey}`);
     }
     return { taskId: existing.rows[0].id, inserted: false };
+  } finally {
+    if (ownsClient && typeof (client as any).release === "function") {
+      (client as any).release();
+    }
+  }
+}
+
+export async function replayDeadLetterPipelineTask(
+  input: ReplayDeadLetterPipelineTaskInput,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
+): Promise<ReplayDeadLetterPipelineTaskResult> {
+  if (!input.taskId && !input.taskKey) {
+    throw new Error("Provide taskId or taskKey to replay a dead-letter pipeline task.");
+  }
+
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const ownsClient = isPool(clientOrPool);
+  const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
+
+  try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const maxAttempts = input.maxAttempts ? Math.max(1, Math.floor(input.maxAttempts)) : null;
+    const { rows } = await (client as QueryClient).query<{ id: string }>(
+      `
+        UPDATE pipeline_tasks
+        SET status = 'PENDING',
+            available_at = NOW(),
+            lease_id = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = NULL,
+            claimed_by = NULL,
+            attempt_count = CASE WHEN $4::boolean THEN 0 ELSE attempt_count END,
+            max_attempts = COALESCE($5::int, max_attempts),
+            last_error = NULL,
+            dead_letter_reason = NULL,
+            completed_at = NULL,
+            updated_at = NOW()
+        WHERE workspace_id = $1
+          AND ($2::uuid IS NULL OR id = $2::uuid)
+          AND ($3::text IS NULL OR task_key = $3)
+          AND status = 'DEAD_LETTER'
+        RETURNING id
+      `,
+      [
+        ctx.workspaceId,
+        input.taskId ?? null,
+        input.taskKey ?? null,
+        Boolean(input.resetAttempts),
+        maxAttempts,
+      ]
+    );
+
+    if (rows.length === 0) {
+      return { taskId: input.taskId ?? input.taskKey ?? "", replayed: false };
+    }
+
+    return { taskId: rows[0].id, replayed: true };
   } finally {
     if (ownsClient && typeof (client as any).release === "function") {
       (client as any).release();

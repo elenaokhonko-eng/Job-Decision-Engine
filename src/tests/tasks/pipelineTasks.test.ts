@@ -4,6 +4,7 @@ import {
   completePipelineTask,
   enqueuePipelineTask,
   failPipelineTask,
+  replayDeadLetterPipelineTask,
 } from "../../tasks/pipelineTasks.js";
 
 describe("pipelineTasks", () => {
@@ -187,5 +188,46 @@ describe("pipelineTasks", () => {
 
     expect(calls).toContain("ROLLBACK");
     expect(calls).not.toContain("COMMIT");
+  });
+
+  it("replayDeadLetterPipelineTask moves a dead-letter task back to pending", async () => {
+    const query = vi.fn(async (sql: string, params: unknown[]) => {
+      if (sql.includes("UPDATE pipeline_tasks") && sql.includes("status = 'DEAD_LETTER'")) {
+        expect(params).toEqual([
+          ctx.workspaceId,
+          "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          null,
+          true,
+          5,
+        ]);
+        return { rows: [{ id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    const res = await replayDeadLetterPipelineTask(
+      {
+        taskId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        resetAttempts: true,
+        maxAttempts: 5,
+      },
+      fakePool,
+      { context: ctx }
+    );
+
+    expect(res).toEqual({ taskId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", replayed: true });
+    expect(query.mock.calls[0][0]).toContain("attempt_count = CASE WHEN $4::boolean THEN 0");
+    expect(query.mock.calls[0][0]).toContain("last_error = NULL");
+    expect(query.mock.calls[0][0]).toContain("dead_letter_reason = NULL");
+  });
+
+  it("replayDeadLetterPipelineTask requires a task id or key", async () => {
+    const fakeClient = { query: vi.fn(), release: vi.fn() } as any;
+
+    await expect(
+      replayDeadLetterPipelineTask({}, fakeClient, { context: ctx })
+    ).rejects.toThrow(/Provide taskId or taskKey/);
   });
 });

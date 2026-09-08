@@ -42,6 +42,9 @@ export interface RequirementExtractionStageOptions {
   context?: WorkspaceContext;
   failFastOnQuotedProviderFailure?: boolean;
   quotedProviderFailureLimit?: number;
+  jobVersionIds?: string[];
+  limit?: number;
+  quotedMode?: 'env' | 'deterministic_only' | 'with_quoted';
 }
 
 export interface RequirementExtractionSummary {
@@ -315,6 +318,53 @@ export async function runRequirementsExtraction(
   // can advance (e.g. RAW_STAGED -> PREQUALIFIED -> LANE_ROUTED) even when this stage fails.
   // If we only target RAW_STAGED, retries become impossible and LANE_ROUTED jobs can get stuck
   // forever with zero VALIDATED job_requirements (breaking deterministic matching + documents).
+  const params: unknown[] = [ctx.workspaceId];
+  const jobVersionIds = options.jobVersionIds?.filter(Boolean) ?? [];
+  const jobVersionFilter = jobVersionIds.length > 0
+    ? `AND jv.id = ANY($${params.push(jobVersionIds)}::uuid[])`
+    : "";
+  const mode = options.quotedMode ?? 'env';
+  const quotedEnabledForSelection = mode === 'with_quoted'
+    ? true
+    : mode === 'deterministic_only'
+      ? false
+      : Boolean(options.quotedExtractor) || shouldRunQuotedExtractor();
+  const deterministicCompleteClause = `AND (
+        ps.stage_status IS DISTINCT FROM 'COMPLETED'
+        OR NOT EXISTS (
+          SELECT 1
+          FROM job_requirements deterministic_jr
+          WHERE deterministic_jr.workspace_id = c.workspace_id
+            AND deterministic_jr.job_version_id = jv.id
+            AND deterministic_jr.extractor_type = 'DETERMINISTIC'
+            AND deterministic_jr.status = 'VALIDATED'
+            AND (
+              jv.active_requirement_set_id IS NULL
+              OR deterministic_jr.requirement_set_id = jv.active_requirement_set_id
+            )
+        )
+      )`;
+  const completedRequirementClause = quotedEnabledForSelection
+    ? `AND (
+        ps.stage_status IS DISTINCT FROM 'COMPLETED'
+        OR NOT EXISTS (
+          SELECT 1
+          FROM job_requirements quoted_jr
+          WHERE quoted_jr.workspace_id = c.workspace_id
+            AND quoted_jr.job_version_id = jv.id
+            AND quoted_jr.extractor_type = 'LLM_QUOTED'
+            AND quoted_jr.status = 'VALIDATED'
+            AND (
+              jv.active_requirement_set_id IS NULL
+              OR quoted_jr.requirement_set_id = jv.active_requirement_set_id
+          )
+        )
+      )`
+    : deterministicCompleteClause;
+  const limit = Number.isInteger(options.limit) && Number(options.limit) > 0
+    ? Number(options.limit)
+    : 200;
+  const limitPlaceholder = params.push(limit);
   const queryTargetJobs = `
     SELECT
       c.workspace_id,
@@ -350,7 +400,8 @@ export async function runRequirementsExtraction(
           AND ps.stage_status <> 'COMPLETED'
         )
       )
-      AND ps.stage_status IS DISTINCT FROM 'COMPLETED'
+      ${jobVersionFilter}
+      ${completedRequirementClause}
       AND (
         ps.stage_status IS NULL
         OR ps.stage_status <> 'RETRY_WAIT'
@@ -358,10 +409,10 @@ export async function runRequirementsExtraction(
         OR ps.next_retry_at <= NOW()
       )
     ORDER BY jv.observed_at ASC
-    LIMIT 200
+    LIMIT $${limitPlaceholder}
   `;
 
-  const { rows } = await client.query(queryTargetJobs, [ctx.workspaceId]);
+  const { rows } = await client.query(queryTargetJobs, params);
   const jobs = rows as RequirementStageJob[];
   console.log(`[requirementsExtractor] loaded target job versions count=${jobs.length}`);
 
@@ -383,9 +434,11 @@ export async function runRequirementsExtraction(
     },
     details: [],
   };
-  const quotedExtractor = options.quotedExtractor
-    ? options.quotedExtractor
-    : shouldRunQuotedExtractor()
+  const quotedExtractor = mode === 'deterministic_only'
+    ? undefined
+    : options.quotedExtractor
+      ? options.quotedExtractor
+      : (mode === 'with_quoted' || shouldRunQuotedExtractor())
       ? async (input: QuotedExtractorInvocation) => runQuotedRequirementProvider(input)
       : undefined;
   const failFastOnQuotedProviderFailure =

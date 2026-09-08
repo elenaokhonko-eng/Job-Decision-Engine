@@ -392,7 +392,7 @@ function applyExactProfileGates(
 
 export async function runHardGates(
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: { context?: WorkspaceContext; jobVersionIds?: string[]; canonicalJobIds?: string[]; limit?: number }
 ): Promise<{ passed: number; hardRejected: number; needsVerification: number; errors: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
   const pool = clientOrPool || defaultPool;
@@ -408,6 +408,19 @@ export async function runHardGates(
   const client = ownsClient ? await pool.connect() : pool;
 
   const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+  const params: unknown[] = [ctx.workspaceId];
+  const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
+  const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
+  const jobVersionFilter = jobVersionIds.length > 0
+    ? `AND jv.id = ANY($${params.push(jobVersionIds)}::uuid[])`
+    : "";
+  const canonicalJobFilter = canonicalJobIds.length > 0
+    ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])`
+    : "";
+  const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
+    ? Number(options?.limit)
+    : null;
+  const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
 
   const { rows: stagedJobs } = await client.query(
     `
@@ -427,8 +440,12 @@ export async function runHardGates(
       WHERE c.workspace_id = $1
         AND jv.workspace_id = $1
         AND COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
+        ${jobVersionFilter}
+        ${canonicalJobFilter}
+      ORDER BY c.created_at ASC, c.id ASC
+      ${limitClause}
     `,
-    [ctx.workspaceId]
+    params
   );
 
   console.log(`Found ${stagedJobs.length} canonical jobs to gate.`);

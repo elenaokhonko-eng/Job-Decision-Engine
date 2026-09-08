@@ -25,7 +25,7 @@ export interface NormalizationSummary {
 
 export async function runNormalization(
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: { context?: WorkspaceContext; observationIds?: string[]; limit?: number }
 ): Promise<NormalizationSummary> {
   console.log("Starting normalization of raw_job_observations...");
   const pool = clientOrPool || defaultPool;
@@ -38,15 +38,27 @@ export async function runNormalization(
   const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
 
   // Explicit linkage is authoritative; hash-only inference strands duplicate observations.
+  const params: unknown[] = [ctx.workspaceId];
+  const observationIds = options?.observationIds?.filter(Boolean) ?? [];
+  const observationFilter = observationIds.length > 0
+    ? `AND obs.id = ANY($${params.push(observationIds)}::uuid[])`
+    : "";
+  const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
+    ? Number(options?.limit)
+    : null;
+  const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
   const query = `
     SELECT obs.*
     FROM raw_job_observations obs
     WHERE obs.workspace_id = $1
       AND obs.job_version_id IS NULL
       AND COALESCE(obs.processing_status, 'PENDING') = 'PENDING'
+      ${observationFilter}
+    ORDER BY obs.retrieved_at ASC, obs.id ASC
+    ${limitClause}
   `;
 
-  const { rows: pendingObservations } = await client.query(query, [ctx.workspaceId]);
+  const { rows: pendingObservations } = await client.query(query, params);
   console.log(`Found ${pendingObservations.length} pending observations.`);
 
   const summary: NormalizationSummary = {
