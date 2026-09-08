@@ -4,7 +4,6 @@ import crypto from 'crypto';
 import { pgPoolConfig } from '../db/pgSsl.js';
 import { extractDeterministicRequirements } from '../requirements/deterministicExtractors.js';
 import { validateQuotedRequirements } from '../requirements/quotedRequirementExtractor.js';
-import { runQuotedRequirementProvider } from '../requirements/quotedProvider.js';
 import { JobRequirementSchema, REQUIREMENTS_SCHEMA_VERSION } from '../requirements/contracts.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 
@@ -95,6 +94,13 @@ const QUOTED_PROMPT_HASH = crypto
 
 function shouldRunQuotedExtractor(): boolean {
   return process.env.REQUIREMENTS_ENABLE_QUOTED === 'true';
+}
+
+async function runDefaultQuotedRequirementProvider(
+  input: QuotedExtractorInvocation
+): Promise<QuotedExtractorResult> {
+  const { runQuotedRequirementProvider } = await import('../requirements/quotedProvider.js');
+  return runQuotedRequirementProvider(input);
 }
 
 function providerModelKey(provider: string, model: string): string {
@@ -439,7 +445,7 @@ export async function runRequirementsExtraction(
     : options.quotedExtractor
       ? options.quotedExtractor
       : (mode === 'with_quoted' || shouldRunQuotedExtractor())
-      ? async (input: QuotedExtractorInvocation) => runQuotedRequirementProvider(input)
+      ? runDefaultQuotedRequirementProvider
       : undefined;
   const failFastOnQuotedProviderFailure =
     options.failFastOnQuotedProviderFailure ?? Boolean(quotedExtractor);

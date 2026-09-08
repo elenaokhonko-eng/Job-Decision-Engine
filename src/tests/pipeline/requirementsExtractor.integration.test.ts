@@ -7,6 +7,7 @@ import { runRequirementsExtraction } from '../../pipeline/requirementsExtractor.
 const DB_URL = process.env.DATABASE_URL || '';
 const isCI = isLocalPostgresConnectionString(DB_URL);
 const skipReal = !DB_URL || !isCI;
+const REAL_DB_TEST_TIMEOUT_MS = 30_000;
 
 describe.skipIf(skipReal)('Requirements extraction integration (temporary schema)', () => {
   it('persists requirement rows, extraction runs, and stage events without duplicates on rerun', async () => {
@@ -146,5 +147,5 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
       client.release();
       await pool.end();
     }
-  });
+  }, REAL_DB_TEST_TIMEOUT_MS);
 });
