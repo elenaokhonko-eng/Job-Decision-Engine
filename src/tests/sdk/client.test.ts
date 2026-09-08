@@ -60,4 +60,26 @@ describe("JobDecisionClient", () => {
 
     await expect(client.listApplications()).rejects.toThrow(/bad request/);
   });
+
+  it("binds the default fetch implementation for browser runtimes", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(function (this: unknown) {
+      expect(this).toBe(globalThis);
+      return Promise.resolve(new Response(JSON.stringify({
+        ok: true,
+        timestamp: "2026-09-08T00:00:00.000Z",
+        workspace_key: "default",
+        user_key: "local_user",
+      })));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const client = new JobDecisionClient({ baseUrl: "https://api.test" });
+      await expect(client.getHealth()).resolves.toMatchObject({ ok: true });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.stubGlobal("fetch", originalFetch);
+    }
+  });
 });

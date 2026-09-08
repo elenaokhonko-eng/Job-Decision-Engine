@@ -48,6 +48,38 @@ export interface ManualObservationInput {
   careers_portal_url?: string;
 }
 
+export interface SourceHealthRow {
+  source_key: string;
+  display_name: string;
+  kind: string;
+  status: string;
+  active_revision_number: number | null;
+  access_basis: string | null;
+  terms_url: string | null;
+  attribution_required: string | null;
+  observation_count: number;
+  last_observed_at: string | null;
+}
+
+export interface PipelineTaskRow {
+  id: string;
+  task_type: string;
+  task_key: string;
+  status: string;
+  available_at: string;
+  lease_id: string | null;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  claimed_by: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  last_error: string | null;
+  dead_letter_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
 export class JobDecisionClient {
   private readonly baseUrl: string;
   private readonly token?: string;
@@ -64,7 +96,11 @@ export class JobDecisionClient {
     this.token = options.token;
     this.workspaceKey = options.workspaceKey;
     this.userKey = options.userKey;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    const fetchImpl = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
+    if (!fetchImpl) {
+      throw new Error("JobDecisionClient requires fetch or fetchImpl.");
+    }
+    this.fetchImpl = fetchImpl;
   }
 
   private headers(extra?: HeadersInit): Headers {
@@ -128,6 +164,10 @@ export class JobDecisionClient {
     return this.request(`/applications${params.size ? `?${params.toString()}` : ""}`);
   }
 
+  listSourceHealth(): Promise<{ ok: boolean; sources: SourceHealthRow[] }> {
+    return this.request("/sources/health");
+  }
+
   createApplication(input: CreateApplicationInput): Promise<{ ok: boolean; application: ApplicationRecord }> {
     return this.request("/applications", {
       method: "POST",
@@ -158,7 +198,11 @@ export class JobDecisionClient {
     );
   }
 
-  listTasks(options: { limit?: number; cursor?: string } = {}): Promise<ApiListResponse<unknown>> {
+  listTasks(options: { limit?: number; cursor?: string } = {}): Promise<{
+    ok: boolean;
+    tasks: PipelineTaskRow[];
+    next_cursor: string | null;
+  }> {
     const params = new URLSearchParams();
     if (options.limit) params.set("limit", String(options.limit));
     if (options.cursor) params.set("cursor", options.cursor);
