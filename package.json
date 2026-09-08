@@ -97,7 +97,7 @@
     "electron-updater": "^6.8.9",
     "express": "^5.2.1",
     "fast-xml-parser": "^5.11.1",
-    "imapflow": "^1.4.7",
+    "imapflow": "^1.7.8",
     "openai": "^4.30.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.11.5",
