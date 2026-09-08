@@ -393,13 +393,14 @@ function applyExactProfileGates(
 export async function runHardGates(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options?: { context?: WorkspaceContext }
-): Promise<{ passed: number; hardRejected: number; needsVerification: number }> {
+): Promise<{ passed: number; hardRejected: number; needsVerification: number; errors: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
   const pool = clientOrPool || defaultPool;
 
   let passedCount = 0;
   let rejectedCount = 0;
   let needsVerificationCount = 0;
+  let errorCount = 0;
 
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
     typeof (value as pg.Pool).connect === 'function' && !('release' in value);
@@ -605,6 +606,7 @@ export async function runHardGates(
         console.log(`-> ${job.company_name} - ${job.normalized_title} : ${gateResult.status}${codeStr}`);
       } catch (err) {
         await client.query("ROLLBACK");
+        errorCount++;
         console.error(`❌ Failed to gate job ${job.id}:`, err);
       }
     }
@@ -615,7 +617,12 @@ export async function runHardGates(
   }
 
   console.log(
-    `Hard Gates complete. Passed: ${passedCount}, Hard Rejected: ${rejectedCount}, Needs Verification: ${needsVerificationCount}`
+    `Hard Gates complete. Passed: ${passedCount}, Hard Rejected: ${rejectedCount}, Needs Verification: ${needsVerificationCount}, Errors: ${errorCount}`
   );
-  return { passed: passedCount, hardRejected: rejectedCount, needsVerification: needsVerificationCount };
+  return {
+    passed: passedCount,
+    hardRejected: rejectedCount,
+    needsVerification: needsVerificationCount,
+    errors: errorCount,
+  };
 }

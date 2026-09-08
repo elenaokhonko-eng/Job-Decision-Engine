@@ -146,9 +146,16 @@ export async function claimPipelineTasks(
             FROM pipeline_tasks
             WHERE workspace_id = $1
               AND task_type = $2
-              AND status IN ('PENDING', 'RETRY_WAIT')
-              AND available_at <= NOW()
-              AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+              AND (
+                (
+                  status IN ('PENDING', 'RETRY_WAIT')
+                  AND available_at <= NOW()
+                )
+                OR (
+                  status = 'RUNNING'
+                  AND lease_expires_at <= NOW()
+                )
+              )
             ORDER BY available_at ASC, created_at ASC
             LIMIT $3
             FOR UPDATE SKIP LOCKED
@@ -160,6 +167,10 @@ export async function claimPipelineTasks(
               heartbeat_at = NOW(),
               claimed_by = $5,
               attempt_count = attempt_count + 1,
+              last_error = CASE
+                WHEN t.status = 'RUNNING' THEN COALESCE(t.last_error, 'Previous task lease expired before completion; reclaiming.')
+                ELSE t.last_error
+              END,
               updated_at = NOW()
           FROM claimable
           WHERE t.id = claimable.id
@@ -272,7 +283,7 @@ export async function completePipelineTask(
         [ctx.workspaceId, task.taskId, task.attemptNumber]
       );
 
-      await (client as QueryClient).query(
+      const updatedTask = await (client as QueryClient).query<{ id: string }>(
         `
           UPDATE pipeline_tasks
           SET status = 'COMPLETED',
@@ -287,9 +298,13 @@ export async function completePipelineTask(
             AND id = $2
             AND status = 'RUNNING'
             AND lease_id = $3::uuid
+          RETURNING id
         `,
         [ctx.workspaceId, task.taskId, task.leaseId]
       );
+      if (updatedTask.rows.length === 0) {
+        throw new Error(`Lost lease while completing pipeline task ${task.taskId}.`);
+      }
 
       await client.query("COMMIT");
     } catch (err) {
@@ -335,7 +350,7 @@ export async function failPipelineTask(
       );
 
       const deadLetter = task.attemptNumber >= task.maxAttempts;
-      await (client as QueryClient).query(
+      const updatedTask = await (client as QueryClient).query<{ id: string }>(
         `
           UPDATE pipeline_tasks
           SET status = $4,
@@ -352,6 +367,7 @@ export async function failPipelineTask(
             AND id = $2
             AND status = 'RUNNING'
             AND lease_id = $3::uuid
+          RETURNING id
         `,
         [
           ctx.workspaceId,
@@ -362,6 +378,9 @@ export async function failPipelineTask(
           errorMessage,
         ]
       );
+      if (updatedTask.rows.length === 0) {
+        throw new Error(`Lost lease while failing pipeline task ${task.taskId}.`);
+      }
 
       await client.query("COMMIT");
     } catch (err) {
@@ -374,4 +393,3 @@ export async function failPipelineTask(
     }
   }
 }
-

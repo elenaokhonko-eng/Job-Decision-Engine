@@ -42,12 +42,20 @@ export async function processPipeline(): Promise<void> {
     console.log("\n[1/8] Normalization...");
     const normSummary = await runNormalization(pool, { context: ctx });
 
-    console.log("\n[2/8] Requirements Extraction...");
+    console.log("\n[2/8] Hard Gates...");
+    const gateSummary = await runHardGates(pool, { context: ctx });
+    if (gateSummary.errors > 0) {
+      throw new Error(
+        `Hard gates failed for ${gateSummary.errors} job(s); records remain recoverable for retry.`
+      );
+    }
+
+    console.log("\n[3/8] Requirements Extraction...");
     const requirementsSummary = await runRequirementsExtraction(pool, { context: ctx });
 
     await loadWorkspaceLanesConfig(pool, { context: ctx, seedIfEmpty: true });
 
-    console.log("\n[3/8] Embedding Publication (requirements + profile facts)...");
+    console.log("\n[4/8] Embedding Publication (requirements + profile facts)...");
     let embeddingTotalEmbedded = 0;
     let embeddingCycles = 0;
     for (let cycle = 0; cycle < 10; cycle += 1) {
@@ -63,9 +71,6 @@ export async function processPipeline(): Promise<void> {
     console.log(
       `Embedding publication cycles: ${embeddingCycles}; embedded vectors: ${embeddingTotalEmbedded}`
     );
-
-    console.log("\n[4/8] Hard Gates...");
-    const gateSummary = await runHardGates(pool, { context: ctx });
 
     console.log("\n[5/8] Semantic Lane Routing...");
     const routingSummary = await runLaneRouting(pool, { context: ctx });

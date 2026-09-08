@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { claimPipelineTasks, enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
+import {
+  claimPipelineTasks,
+  completePipelineTask,
+  enqueuePipelineTask,
+  failPipelineTask,
+} from "../../tasks/pipelineTasks.js";
 
 describe("pipelineTasks", () => {
   const ctx = {
@@ -100,7 +105,87 @@ describe("pipelineTasks", () => {
     expect(claimed).toHaveLength(1);
     expect(claimed[0].taskId).toBe("task-claimed");
     expect(claimed[0].attemptNumber).toBe(1);
+    expect(calls.some((c) => c.includes("status = 'RUNNING'"))).toBe(true);
+    expect(calls.some((c) => c.includes("lease_expires_at <= NOW()"))).toBe(true);
     expect(calls.some((c) => c.includes("INSERT INTO pipeline_task_attempts"))).toBe(true);
   });
-});
 
+  it("completePipelineTask rolls back when the lease is lost", async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [] };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [] };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    await expect(
+      completePipelineTask(
+        {
+          taskId: "task-claimed",
+          taskKey: "lane_route:1",
+          taskType: "LANE_ROUTE",
+          payload: {},
+          leaseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          leaseExpiresAt: new Date().toISOString(),
+          attemptNumber: 1,
+          maxAttempts: 8,
+        },
+        fakePool,
+        { context: ctx }
+      )
+    ).rejects.toThrow(/Lost lease while completing pipeline task/);
+
+    expect(calls).toContain("ROLLBACK");
+    expect(calls).not.toContain("COMMIT");
+  });
+
+  it("failPipelineTask rolls back when the lease is lost", async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [] };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [] };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    await expect(
+      failPipelineTask(
+        {
+          taskId: "task-claimed",
+          taskKey: "lane_route:1",
+          taskType: "LANE_ROUTE",
+          payload: {},
+          leaseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          leaseExpiresAt: new Date().toISOString(),
+          attemptNumber: 1,
+          maxAttempts: 8,
+        },
+        "boom",
+        fakePool,
+        { context: ctx }
+      )
+    ).rejects.toThrow(/Lost lease while failing pipeline task/);
+
+    expect(calls).toContain("ROLLBACK");
+    expect(calls).not.toContain("COMMIT");
+  });
+});

@@ -156,4 +156,48 @@ describe('Pipeline Stage: Hard Gates', () => {
     expect(updateCall[1][1]).toBe('HARD_REJECTED');
     expect(updateCall[1][2]).toBe('GATE_LOCATION_RESTRICTED');
   });
+
+  it('reports hard-gate technical failures instead of hiding them', async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    (mPool.query as any).mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM canonical_jobs c')) {
+        return {
+          rows: [
+            {
+              id: 'canon-error',
+              normalized_title: 'AI Eng',
+              company_name: 'Broken Corp',
+              description_text: 'Good job',
+              canonical_url: 'https://test.com/error',
+              job_version_id: 'ver-error',
+            },
+          ],
+        };
+      }
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      if (sql.includes('FROM job_versions jv') && sql.includes('JOIN job_requirements')) {
+        throw new Error('requirements table unavailable');
+      }
+      return { rows: [] };
+    });
+
+    const result = await runHardGates(undefined, { context });
+
+    expect(result).toEqual({
+      passed: 0,
+      hardRejected: 0,
+      needsVerification: 0,
+      errors: 1,
+    });
+    expect((mPool.query as any).mock.calls.some((call: any[]) => call[0] === 'ROLLBACK')).toBe(true);
+  });
 });
