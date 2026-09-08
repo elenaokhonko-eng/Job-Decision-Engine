@@ -1,0 +1,35 @@
+{
+  "schema_version": "desktop-release-policy/v1",
+  "default_channel": "stable",
+  "channels": {
+    "alpha": {
+      "description": "Internal smoke builds only.",
+      "github_prerelease": true,
+      "auto_updates_allowed": false
+    },
+    "beta": {
+      "description": "Signed supervised testing builds.",
+      "github_prerelease": true,
+      "auto_updates_allowed": true
+    },
+    "stable": {
+      "description": "Signed production candidate builds.",
+      "github_prerelease": false,
+      "auto_updates_allowed": true
+    }
+  },
+  "github": {
+    "owner": "elenaokhonko-eng",
+    "repo": "Job-Decision-Engine"
+  },
+  "required_publish_secrets": [
+    "GH_TOKEN",
+    "WINDOWS_CERTIFICATE_BASE64",
+    "WINDOWS_CERTIFICATE_PASSWORD"
+  ],
+  "artifacts": [
+    "nsis-installer",
+    "latest.yml",
+    "blockmap"
+  ]
+}
