@@ -15,6 +15,8 @@
     "desktop:build": "npm run desktop:pack",
     "desktop:pack": "tsx scripts/package_desktop.ts --dir",
     "desktop:dist": "tsx scripts/package_desktop.ts --installer",
+    "desktop:assets": "tsx scripts/prepare_desktop_assets.ts",
+    "desktop:release:validate": "tsx scripts/validate_desktop_release.ts",
     "desktop:verify": "tsx scripts/verify_desktop_packaging.ts",
     "dev:setup": "tsx scripts/dev_setup.ts",
     "db:init": "tsx scripts/db_init.ts",
@@ -40,9 +42,11 @@
   "build": {
     "appId": "com.jobdecisionengine.desktop",
     "productName": "Job Decision Engine",
+    "artifactName": "Job-Decision-Engine-Setup-${version}.${ext}",
     "directories": {
       "output": "release"
     },
+    "icon": "build/desktop/icon.png",
     "files": [
       "dist/**/*",
       "desktop/electron/**/*",
@@ -52,7 +56,9 @@
       "main": "desktop/electron/main.cjs"
     },
     "asar": true,
+    "generateUpdatesFilesForAllChannels": true,
     "win": {
+      "icon": "build/desktop/icon.ico",
       "target": [
         {
           "target": "nsis",

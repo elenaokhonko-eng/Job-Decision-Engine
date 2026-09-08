@@ -49,6 +49,26 @@ git tag -a v2.2.0 -m "Job Decision Engine v2.2.0"
 git push origin v2.2.0
 ```
 
+## Desktop Release
+
+Desktop releases are built by the manual `Desktop Release` workflow. Run it first with `publish=false`; this produces a Windows NSIS installer artifact without publishing an update feed. Use `publish=true` only after these repository secrets exist: `WINDOWS_CERTIFICATE_BASE64`, `WINDOWS_CERTIFICATE_PASSWORD`, and the workflow-provided `GITHUB_TOKEN` has contents write permission.
+
+Local desktop checks:
+
+```bash
+npm run desktop:assets
+npm run desktop:release:validate -- --channel=stable --publish=never
+npm run desktop:dist -- --channel=stable --publish=never
+```
+
+Strict publish validation:
+
+```bash
+JDEC_DESKTOP_ENABLE_UPDATES=true npm run desktop:release:validate -- --strict --channel=stable --publish=always
+```
+
+Release channels are defined in `desktop/release/release-policy.json`. `stable` maps to the production update feed, while `alpha` and `beta` are prerelease channels for supervised testing. Do not enable desktop auto-updates for an unsigned or unpublished build.
+
 ## Privacy And Security
 
 Do not commit `.env.local`, private profile ledgers, database exports, cookies, Gmail contents, or personal policy overrides. Run a full-history secret scanner before public release. Do not rewrite history without explicit approval.

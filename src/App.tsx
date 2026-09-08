@@ -465,6 +465,7 @@ export default function App() {
               </div>
               <div className="settings-summary-grid">
                 <Info label="Native Shell" value={nativeStatus ? (nativeStatus.isPackaged ? "Packaged" : "Development") : "Browser"} />
+                <Info label="Channel" value={nativeStatus?.releaseChannel ?? "Local"} />
                 <Info label="Secret Storage" value={nativeStatus ? (nativeStatus.safeStorageAvailable ? "OS backed" : "Unavailable") : "Browser storage"} />
                 <Info label="Local API" value={nativeStatus?.apiRuntime.status ?? "External"} />
                 <Info label="Updates" value={nativeStatus?.updatesEnabled ? "Enabled" : "Disabled"} />

@@ -1,0 +1,114 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Desktop release channel
+        required: true
+        type: choice
+        default: stable
+        options:
+          - stable
+          - beta
+          - alpha
+      publish:
+        description: Publish to GitHub Releases and enable update metadata
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ inputs.channel }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  desktop-release:
+    name: Build Windows desktop installer
+    runs-on: windows-latest
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate desktop release policy
+        shell: pwsh
+        run: npm run desktop:release:validate -- --channel=${{ inputs.channel }} --publish=never
+
+      - name: Run linter checks
+        run: npm run lint
+
+      - name: Run Vitest tests
+        run: npm test
+
+      - name: Verify desktop packaging configuration
+        run: npm run desktop:verify
+
+      - name: Prepare Windows signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            Write-Output "WINDOWS_CERTIFICATE_BASE64 is not configured; dry-run builds remain unsigned."
+            exit 0
+          }
+
+          $certPath = Join-Path $env:RUNNER_TEMP "jdec-codesign.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          "CSC_LINK=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CSC_KEY_PASSWORD=$env:WINDOWS_CERTIFICATE_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Strict publish readiness validation
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          JDEC_DESKTOP_ENABLE_UPDATES: true
+        run: |
+          if ("${{ inputs.publish }}" -ne "true") {
+            Write-Output "Publish disabled; skipping strict signing/token validation."
+            exit 0
+          }
+
+          npm run desktop:release:validate -- --strict --channel=${{ inputs.channel }} --publish=always
+
+      - name: Build desktop installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JDEC_DESKTOP_OUTPUT_ROOT: ${{ runner.temp }}\jdec-desktop-builds
+          JDEC_DESKTOP_RELEASE_CHANNEL: ${{ inputs.channel }}
+          JDEC_DESKTOP_ENABLE_UPDATES: ${{ inputs.publish == true && 'true' || 'false' }}
+        run: |
+          $publishArg = "--publish=never"
+          if ("${{ inputs.publish }}" -eq "true") {
+            $publishArg = "--publish=always"
+          }
+          npm run desktop:dist -- --channel=${{ inputs.channel }} $publishArg
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ inputs.channel }}-${{ github.sha }}
+          path: ${{ runner.temp }}\jdec-desktop-builds\**
+          if-no-files-found: error
+          retention-days: 7

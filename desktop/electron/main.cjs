@@ -6,6 +6,7 @@ const fsp = require("node:fs/promises");
 const path = require("node:path");
 
 const SECRET_KEYS = new Set(["apiToken"]);
+const RELEASE_CHANNELS = new Set(["alpha", "beta", "stable"]);
 const DEFAULT_API_PORT = 3217;
 
 let mainWindow = null;
@@ -41,6 +42,16 @@ function rendererUrl() {
 function shouldStartLocalApiRuntime() {
   if (process.env.JDEC_DESKTOP_START_API === "false") return false;
   return !app.isPackaged;
+}
+
+function releaseChannel() {
+  const configured = String(process.env.JDEC_DESKTOP_RELEASE_CHANNEL || "").trim().toLowerCase();
+  if (RELEASE_CHANNELS.has(configured)) return configured;
+  return app.isPackaged ? "stable" : "dev";
+}
+
+function updaterChannel(channel) {
+  return channel === "stable" ? "latest" : channel;
 }
 
 function apiPortFromBaseUrl(apiBaseUrl) {
@@ -176,7 +187,16 @@ function updatesEnabled() {
   return app.isPackaged && process.env.JDEC_DESKTOP_ENABLE_UPDATES === "true";
 }
 
+function configureAutoUpdater(channel) {
+  autoUpdater.autoDownload = false;
+  autoUpdater.allowPrerelease = channel !== "stable";
+  autoUpdater.channel = updaterChannel(channel);
+}
+
 function registerIpc(apiBaseUrl) {
+  const channel = releaseChannel();
+  configureAutoUpdater(channel);
+
   ipcMain.handle("jdec:secret:is-available", () => safeStorage.isEncryptionAvailable());
   ipcMain.handle("jdec:secret:get", async (_event, key) => getSecret(String(key || "")));
   ipcMain.handle("jdec:secret:set", async (_event, key, value) => {
@@ -190,6 +210,8 @@ function registerIpc(apiBaseUrl) {
   ipcMain.handle("jdec:runtime:get-status", () => ({
     appVersion: app.getVersion(),
     isPackaged: app.isPackaged,
+    releaseChannel: channel,
+    updaterChannel: updaterChannel(channel),
     apiBaseUrl,
     apiRuntime,
     safeStorageAvailable: safeStorage.isEncryptionAvailable(),
@@ -200,7 +222,7 @@ function registerIpc(apiBaseUrl) {
       return { ok: false, status: "disabled" };
     }
     try {
-      autoUpdater.autoDownload = false;
+      configureAutoUpdater(channel);
       const result = await autoUpdater.checkForUpdates();
       return { ok: true, status: "available", updateInfo: result ? result.updateInfo : null };
     } catch (error) {

@@ -3,6 +3,8 @@ import type { DesktopSecretStore } from "./settings.js";
 export interface DesktopRuntimeStatus {
   appVersion: string;
   isPackaged: boolean;
+  releaseChannel: string;
+  updaterChannel: string;
   apiBaseUrl: string;
   apiRuntime: {
     started: boolean;

@@ -20,6 +20,8 @@ describe("desktop native bridge", () => {
       getStatus: vi.fn(async () => ({
         appVersion: "1.0.0",
         isPackaged: false,
+        releaseChannel: "dev",
+        updaterChannel: "dev",
         apiBaseUrl: "http://127.0.0.1:3217/api/v2",
         apiRuntime: {
           started: true,
@@ -40,6 +42,7 @@ describe("desktop native bridge", () => {
     expect(getNativeRuntimeBridge(root)).toBe(runtime);
     expect(nativeDefaultApiBaseUrl(root)).toBe("http://127.0.0.1:3217/api/v2");
     await expect(getNativeRuntimeBridge(root)?.getStatus()).resolves.toMatchObject({
+      releaseChannel: "dev",
       safeStorageAvailable: true,
     });
   });
