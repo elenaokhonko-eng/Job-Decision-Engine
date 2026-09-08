@@ -15,7 +15,12 @@ export interface ExplanationQueueEnqueuerSummary {
 
 export async function runExplanationQueueEnqueuer(
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: {
+    context?: WorkspaceContext;
+    jobVersionIds?: string[];
+    canonicalJobIds?: string[];
+    limit?: number;
+  }
 ): Promise<ExplanationQueueEnqueuerSummary> {
   console.log("Starting Explanation Queue Enqueuer (unbounded eligibility)...");
   const pool = clientOrPool || defaultPool;
@@ -27,6 +32,20 @@ export async function runExplanationQueueEnqueuer(
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
+    const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
+    const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
+      ? Number(options?.limit)
+      : null;
+    const params: unknown[] = [ctx.workspaceId, ctx.userId];
+    const jobVersionFilter = jobVersionIds.length > 0
+      ? `AND COALESCE(c.latest_job_version_id, lv.id) = ANY($${params.push(jobVersionIds)}::uuid[])`
+      : "";
+    const canonicalJobFilter = canonicalJobIds.length > 0
+      ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])`
+      : "";
+    const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
+
     const { rows } = await client.query<{
       enqueued: number;
       updated: number;
@@ -46,6 +65,7 @@ export async function runExplanationQueueEnqueuer(
           SELECT id
           FROM job_versions
           WHERE canonical_job_id = c.id
+            AND workspace_id = $1
           ORDER BY observed_at DESC
           LIMIT 1
         ) lv ON TRUE
@@ -71,6 +91,10 @@ export async function runExplanationQueueEnqueuer(
               AND ae.canonical_job_id = c.id
               AND ae.job_version_id = COALESCE(c.latest_job_version_id, lv.id)
           )
+          ${jobVersionFilter}
+          ${canonicalJobFilter}
+        ORDER BY c.created_at ASC, c.id ASC
+        ${limitClause}
       ),
       inserted AS (
         INSERT INTO evaluation_queue (
@@ -113,7 +137,7 @@ export async function runExplanationQueueEnqueuer(
         (SELECT COUNT(*)::int FROM inserted) AS enqueued,
         (SELECT COUNT(*)::int FROM updated_jobs) AS updated
     `,
-      [ctx.workspaceId, ctx.userId]
+      params
     );
 
     const summary = rows[0] ?? { enqueued: 0, updated: 0 };

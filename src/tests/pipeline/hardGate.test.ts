@@ -69,6 +69,7 @@ describe('Pipeline Stage: Hard Gates', () => {
       role: 'OWNER',
     };
 
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // SELECT active preference mode
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -107,9 +108,9 @@ describe('Pipeline Stage: Hard Gates', () => {
     const gateCallArg = (criteria.applyGlobalGates as any).mock.calls[0]?.[0];
     expect(String(gateCallArg?.raw_description || "")).toContain("Extracted requirements");
     expect(String(gateCallArg?.raw_description || "")).toContain("2 days per week in office");
-    expect(mPool.query).toHaveBeenCalledTimes(6); // SELECT + BEGIN + SELECT requirements + UPDATE + INSERT + COMMIT
+    expect(mPool.query).toHaveBeenCalledTimes(7); // policy SELECT + jobs SELECT + BEGIN + requirements + UPDATE + INSERT + COMMIT
 
-    const updateCall = (mPool.query as any).mock.calls[3];
+    const updateCall = (mPool.query as any).mock.calls[4];
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCall[1][0]).toBe('PASS');
     expect(updateCall[1][1]).toBe('PREQUALIFIED');
@@ -125,6 +126,7 @@ describe('Pipeline Stage: Hard Gates', () => {
       role: 'OWNER',
     };
 
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // SELECT active preference mode
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -150,8 +152,8 @@ describe('Pipeline Stage: Hard Gates', () => {
     await runHardGates(undefined, { context });
 
     expect(criteria.applyGlobalGates).toHaveBeenCalledTimes(1);
-    expect(mPool.query).toHaveBeenCalledTimes(6);
-    const updateCall = (mPool.query as any).mock.calls[3];
+    expect(mPool.query).toHaveBeenCalledTimes(7);
+    const updateCall = (mPool.query as any).mock.calls[4];
     expect(updateCall[1][0]).toBe('HARD_REJECT');
     expect(updateCall[1][1]).toBe('HARD_REJECTED');
     expect(updateCall[1][2]).toBe('GATE_LOCATION_RESTRICTED');
@@ -167,6 +169,9 @@ describe('Pipeline Stage: Hard Gates', () => {
     };
 
     (mPool.query as any).mockImplementation(async (sql: string) => {
+      if (sql.includes('workspace_user_preference_modes')) {
+        return { rows: [] };
+      }
       if (sql.includes('FROM canonical_jobs c')) {
         return {
           rows: [

@@ -84,6 +84,43 @@ describe('runEmbeddingBatch', () => {
     ).toBe(true);
   });
 
+  it('does not widen an empty scoped input list into an unbounded batch', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM embedding_spaces')) {
+        return {
+          rows: [
+            {
+              id: '11111111-1111-4111-8111-111111111111',
+              workspace_id: 'workspace-id-1',
+              provider: 'openai',
+              model: agent.MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL,
+              dimensions: 4,
+            },
+          ],
+        };
+      }
+      if (sql.includes('FROM embedding_inputs ei')) {
+        throw new Error('unscoped embedding input query should not run');
+      }
+      return { rows: [] };
+    });
+
+    const result = await runEmbeddingBatch(
+      '11111111-1111-4111-8111-111111111111',
+      'batch-key-empty',
+      'PRIMARY',
+      50,
+      [],
+      undefined,
+      undefined,
+      { query } as any
+    );
+
+    expect(result.processed).toBe(0);
+    expect(result.processedInputIds).toEqual([]);
+  });
+
   it('runs fallback space batch for failed primary items', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});

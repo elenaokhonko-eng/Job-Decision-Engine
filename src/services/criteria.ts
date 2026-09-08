@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
-import { loadWorkabilityPolicy } from "../pipeline/workabilityPolicy.js";
+import { loadWorkabilityPolicy, type WorkabilityPolicy } from "../pipeline/workabilityPolicy.js";
 import { stripHtmlToText } from "../security/sanitize.js";
 
 /**
@@ -118,14 +118,13 @@ export function evaluateWorkability(
   location: string,
   workplaceType: string,
   description: string,
-  employmentType?: string
+  employmentType?: string,
+  policy: WorkabilityPolicy = loadWorkabilityPolicy()
 ): { workable: boolean; needsVerify: boolean; reason?: string; reasonCode?: string; facts?: Partial<GateResult["workability_facts"]> } {
   const wp = normalizeWorkMode(workplaceType);
   const loc = (location || "").toLowerCase().trim();
   const d = (description || "").toLowerCase().trim();
   const emp = (employmentType || "").toUpperCase().trim();
-  const policy = loadWorkabilityPolicy();
-
   const removeNonEmploymentContractPhrases = (text: string): string =>
     text
       .replace(/\bsmart contracts?\b/g, " ")
@@ -159,7 +158,7 @@ export function evaluateWorkability(
   };
 
   // Structured or strongly indicated contract employment is deterministic.
-  if (normalizedEmp === "CONTRACT") {
+  if (normalizedEmp === "CONTRACT" && !policy.contractAllowed) {
     return {
       workable: false,
       needsVerify: false,
@@ -427,14 +426,16 @@ function findEvidence(d: string, keywords: string[]): string[] {
   return quotes;
 }
 
-export function applyGlobalGates(job: RawJob & { location?: string; workplace_type?: string; employment_type?: string }): GateResult {
+export function applyGlobalGates(
+  job: RawJob & { location?: string; workplace_type?: string; employment_type?: string },
+  policy: WorkabilityPolicy = loadWorkabilityPolicy()
+): GateResult {
   const t = (job.title || "").toLowerCase();
   const c = (job.company_name || "").toLowerCase();
   const d = extractDescriptionText(job);
   const loc = (job.location || "").toLowerCase();
   const wp = (job.workplace_type || "").toLowerCase();
   const emp = (job.employment_type || "").toUpperCase();
-  const policy = loadWorkabilityPolicy();
   let pendingVerification: { reason: string; facts?: Partial<GateResult["workability_facts"]> } | null = null;
 
   // ── 0. Global Title Exclusions ──
@@ -445,7 +446,7 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
   }
 
   // ── 0a. Workability Check (location / workplace / employment type) ──
-  const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d, job.employment_type || "");
+  const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d, job.employment_type || "", policy);
   if (!workability.workable) {
     if (workability.reasonCode === "GATE_CONTRACT_ROLE") {
       return makeReject(["GATE_CONTRACT_ROLE"], [workability.reason || "Contract role is not eligible"], workability.facts);
@@ -750,7 +751,7 @@ export function applyGlobalGates(job: RawJob & { location?: string; workplace_ty
     );
   }
 
-  return makePass();
+  return makePass(workability.facts);
 }
 
 export const MULTI_LANE_SCORECARDS = {

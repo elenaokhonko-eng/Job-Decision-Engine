@@ -934,7 +934,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         return;
       }
 
-      const mode = await withTransaction(pool, async (client) => {
+      const activation = await withTransaction(pool, async (client) => {
         await client.query(
           `
             UPDATE workspace_user_preference_modes
@@ -959,15 +959,80 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
           [ctx.workspaceId, ctx.userId, modeKey]
         );
 
-        return rows[0] || null;
+        const mode = rows[0] || null;
+        if (!mode) {
+          return { mode: null, recalculationEnqueued: 0, recalculationExisting: 0 };
+        }
+
+        const recalculationCandidates = await client.query<{
+          canonical_job_id: string;
+          job_version_id: string;
+        }>(
+          `
+            SELECT
+              c.id AS canonical_job_id,
+              COALESCE(c.latest_job_version_id, lv.id) AS job_version_id
+            FROM canonical_jobs c
+            LEFT JOIN LATERAL (
+              SELECT id
+              FROM job_versions
+              WHERE workspace_id = c.workspace_id
+                AND canonical_job_id = c.id
+              ORDER BY observed_at DESC
+              LIMIT 1
+            ) lv ON TRUE
+            WHERE c.workspace_id = $1
+              AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+              AND COALESCE(c.latest_job_version_id, lv.id) IS NOT NULL
+            ORDER BY c.created_at ASC, c.id ASC
+          `,
+          [ctx.workspaceId]
+        );
+
+        let recalculationEnqueued = 0;
+        let recalculationExisting = 0;
+        const modeRevision = Number.isFinite(Date.parse(String(mode.updated_at)))
+          ? String(Date.parse(String(mode.updated_at)))
+          : crypto.randomUUID();
+
+        for (const candidate of recalculationCandidates.rows) {
+          const result = await enqueuePipelineTask(
+            {
+              taskType: "APPLY_HARD_GATES",
+              taskKey: `APPLY_HARD_GATES:${candidate.job_version_id}:preference:${mode.mode_key}:${modeRevision}`,
+              payload: {
+                canonical_job_id: candidate.canonical_job_id,
+                job_version_id: candidate.job_version_id,
+                force_policy_recalculation: true,
+                preference_mode_key: mode.mode_key,
+                preference_mode_updated_at: mode.updated_at,
+              },
+              maxAttempts: 8,
+            },
+            client,
+            { context: ctx }
+          );
+          if (result.inserted) {
+            recalculationEnqueued += 1;
+          } else {
+            recalculationExisting += 1;
+          }
+        }
+
+        return { mode, recalculationEnqueued, recalculationExisting };
       });
 
-      if (!mode) {
+      if (!activation.mode) {
         res.status(404).json({ ok: false, error: "Mode not found." });
         return;
       }
 
-      res.json({ ok: true, mode });
+      res.json({
+        ok: true,
+        mode: activation.mode,
+        recalculation_enqueued: activation.recalculationEnqueued,
+        recalculation_existing: activation.recalculationExisting,
+      });
     })
   );
 

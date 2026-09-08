@@ -311,6 +311,187 @@ describe("stageTaskWorker", () => {
     ).toBe(true);
   });
 
+  it("passes forced preference recalculation through hard-gate tasks", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [
+            {
+              id: "task-gate",
+              workspace_id: ctx.workspaceId,
+              task_type: "APPLY_HARD_GATES",
+              task_key: "APPLY_HARD_GATES:version-1:preference:focused:1",
+              payload: {
+                canonical_job_id: "job-1",
+                job_version_id: "version-1",
+                force_policy_recalculation: true,
+              },
+              status: "RUNNING",
+              available_at: new Date().toISOString(),
+              lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+              heartbeat_at: new Date().toISOString(),
+              claimed_by: "worker:test",
+              attempt_count: 1,
+              max_attempts: 8,
+              last_error: null,
+              dead_letter_reason: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              completed_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return {
+          rows: [
+            {
+              canonical_job_id: "job-1",
+              processing_state: "PREQUALIFIED",
+              primary_lane: null,
+              lane_evidence: null,
+              recommendation_eligibility: null,
+              recommendation_outcome: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-gate" }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-next" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["APPLY_HARD_GATES"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(deps.runHardGates).toHaveBeenCalledWith(fakeClient, {
+      context: ctx,
+      jobVersionIds: ["version-1"],
+      limit: 1,
+      reprocess: true,
+    });
+  });
+
+  it("runs embedding publication with a job-version scope", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [
+            {
+              id: "task-embed",
+              workspace_id: ctx.workspaceId,
+              task_type: "PUBLISH_EMBEDDING",
+              task_key: "PUBLISH_EMBEDDING:version-1:embedding_publication_v1",
+              payload: { canonical_job_id: "job-1", job_version_id: "version-1" },
+              status: "RUNNING",
+              available_at: new Date().toISOString(),
+              lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+              heartbeat_at: new Date().toISOString(),
+              claimed_by: "worker:test",
+              attempt_count: 1,
+              max_attempts: 3,
+              last_error: null,
+              dead_letter_reason: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              completed_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("SELECT EXISTS")) {
+        return { rows: [{ exists: true }], rowCount: 1 };
+      }
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return {
+          rows: [
+            {
+              canonical_job_id: "job-1",
+              processing_state: "PREQUALIFIED",
+              primary_lane: null,
+              lane_evidence: null,
+              recommendation_eligibility: null,
+              recommendation_outcome: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-embed" }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-next" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["PUBLISH_EMBEDDING"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(deps.runEmbeddingBatchWithFallback).toHaveBeenCalledWith(500, fakeClient, {
+      context: ctx,
+      jobVersionIds: ["version-1"],
+      includeProfileFacts: false,
+      includeLanePrototypes: true,
+    });
+  });
+
   it("dead-letters exhausted technical routing failures and marks the job for manual review", async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = [];
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
@@ -396,6 +577,11 @@ describe("stageTaskWorker", () => {
     expect(summary.failed).toBe(1);
     expect(summary.deadLettered).toBe(1);
     expect(summary.errors[0].error).toMatch(/Lane routing deferred due to technical evidence/);
+    expect(deps.runLaneRouting).toHaveBeenCalledWith(fakeClient, {
+      context: ctx,
+      jobVersionIds: ["version-1"],
+      limit: 1,
+    });
     expect(
       calls.some(
         (call) =>

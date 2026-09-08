@@ -333,6 +333,17 @@ export async function completePipelineTask(
   clientOrPool: pg.Pool | pg.PoolClient,
   options?: { context?: WorkspaceContext }
 ): Promise<void> {
+  await completePipelineTaskAndRun(task, clientOrPool, options);
+}
+
+export async function completePipelineTaskAndRun(
+  task: ClaimedPipelineTask,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  options?: {
+    context?: WorkspaceContext;
+    afterComplete?: (client: pg.PoolClient | pg.Pool) => Promise<void>;
+  }
+): Promise<void> {
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
     typeof (value as pg.Pool).connect === "function" && !("release" in value);
   const ownsClient = isPool(clientOrPool);
@@ -377,6 +388,7 @@ export async function completePipelineTask(
         throw new Error(`Lost lease while completing pipeline task ${task.taskId}.`);
       }
 
+      await options?.afterComplete?.(client);
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");

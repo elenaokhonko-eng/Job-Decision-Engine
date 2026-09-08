@@ -12,7 +12,7 @@ import { runRecommendationDecider as defaultRunRecommendationDecider } from "../
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
 import {
   claimPipelineTasks,
-  completePipelineTask,
+  completePipelineTaskAndRun,
   enqueuePipelineTask,
   failPipelineTask,
   heartbeatPipelineTask,
@@ -807,10 +807,13 @@ async function executeStageTask(
   }
 
   if (taskType === "APPLY_HARD_GATES") {
+    const payload = (task.payload || {}) as Record<string, unknown>;
+    const reprocess = payload.force_policy_recalculation === true || payload.reprocess === true;
     const summary = await dependencies.runHardGates(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
+      reprocess,
     });
     if (summary.errors > 0) {
       throw new Error(`Hard gate failed for job_version_id=${jobVersionId}.`);
@@ -854,7 +857,12 @@ async function executeStageTask(
     const summary = await dependencies.runEmbeddingBatchWithFallback(
       Number.isFinite(maxItems) && maxItems > 0 ? maxItems : 500,
       clientOrPool,
-      { context: ctx }
+      {
+        context: ctx,
+        jobVersionIds: [jobVersionId],
+        includeProfileFacts: false,
+        includeLanePrototypes: true,
+      }
     );
     const fallbackFailed = summary.fallback?.failed ?? 0;
     if (summary.primary.failed > 0 && fallbackFailed > 0) {
@@ -870,7 +878,11 @@ async function executeStageTask(
   }
 
   if (taskType === "ROUTE_LANE") {
-    const summary = await dependencies.runLaneRouting(clientOrPool, { context: ctx });
+    const summary = await dependencies.runLaneRouting(clientOrPool, {
+      context: ctx,
+      jobVersionIds: [jobVersionId],
+      limit: 1,
+    });
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (state.processingState === "LANE_ROUTED") return;
     if (isTechnicalRoutingDeferral(state)) {
@@ -881,7 +893,11 @@ async function executeStageTask(
   }
 
   if (taskType === "MATCH_PROFILE_EVIDENCE") {
-    const summary = await dependencies.runDeterministicMatcher(clientOrPool, { context: ctx });
+    const summary = await dependencies.runDeterministicMatcher(clientOrPool, {
+      context: ctx,
+      jobVersionIds: [jobVersionId],
+      limit: 1,
+    });
     if (summary.errors > 0) {
       throw new Error(`Deterministic matching reported ${summary.errors} error(s).`);
     }
@@ -893,7 +909,11 @@ async function executeStageTask(
   }
 
   if (taskType === "DECIDE_RECOMMENDATION") {
-    const summary = await dependencies.runRecommendationDecider(clientOrPool, { context: ctx });
+    const summary = await dependencies.runRecommendationDecider(clientOrPool, {
+      context: ctx,
+      jobVersionIds: [jobVersionId],
+      limit: 1,
+    });
     if (summary.errors > 0) {
       throw new Error(`Recommendation decider reported ${summary.errors} error(s).`);
     }
@@ -905,7 +925,11 @@ async function executeStageTask(
   }
 
   if (taskType === "ENQUEUE_EXPLANATION") {
-    await dependencies.runExplanationQueueEnqueuer(clientOrPool, { context: ctx });
+    await dependencies.runExplanationQueueEnqueuer(clientOrPool, {
+      context: ctx,
+      jobVersionIds: [jobVersionId],
+      limit: 1,
+    });
   }
 }
 
@@ -936,8 +960,12 @@ async function processClaimedTask(
 
   try {
     await executeStageTask(taskType, task, clientOrPool, ctx, dependencies);
-    await completePipelineTask(task, clientOrPool, { context: ctx });
-    await maybeEnqueueAfterTask(taskType, task, clientOrPool, ctx);
+    await completePipelineTaskAndRun(task, clientOrPool, {
+      context: ctx,
+      afterComplete: async (transactionClient) => {
+        await maybeEnqueueAfterTask(taskType, task, transactionClient, ctx);
+      },
+    });
   } finally {
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);

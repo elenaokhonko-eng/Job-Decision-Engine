@@ -10,7 +10,11 @@ import { GATE_VERSION } from "../contracts/version.js";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement, type ComparableFact } from "./requirementComparators.js";
-import { loadWorkabilityPolicy } from "./workabilityPolicy.js";
+import {
+  loadWorkabilityPolicy,
+  resolveWorkspaceWorkabilityPolicy,
+  type WorkabilityPolicy,
+} from "./workabilityPolicy.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -134,10 +138,10 @@ export function applyPersistedRequirementGates(
     employment_type?: string;
     description?: string;
   },
-  deterministicRequirements: PersistedRequirement[]
+  deterministicRequirements: PersistedRequirement[],
+  policy: WorkabilityPolicy = loadWorkabilityPolicy()
 ): GateResult {
   const title = job.title || "";
-  const policy = loadWorkabilityPolicy();
   let pendingVerification: { codes: string[]; evidence: string[]; facts?: Partial<GateResult["workability_facts"]> } | null = null;
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
     if (pattern.test(title)) {
@@ -230,7 +234,7 @@ export function applyPersistedRequirementGates(
     : /\b(permanent|full[-_ ]?time|fte)\b/i.test(normalizedEmployment)
       ? "PERMANENT" as const
       : "UNKNOWN" as const;
-  if (employmentType === "CONTRACT") {
+  if (employmentType === "CONTRACT" && !policy.contractAllowed) {
     return makeReject(
       ["GATE_CONTRACT_ROLE"],
       [employmentReq ? quoteOrText(employmentReq) : "Structured employment_type is CONTRACT"],
@@ -392,7 +396,13 @@ function applyExactProfileGates(
 
 export async function runHardGates(
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext; jobVersionIds?: string[]; canonicalJobIds?: string[]; limit?: number }
+  options?: {
+    context?: WorkspaceContext;
+    jobVersionIds?: string[];
+    canonicalJobIds?: string[];
+    limit?: number;
+    reprocess?: boolean;
+  }
 ): Promise<{ passed: number; hardRejected: number; needsVerification: number; errors: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
   const pool = clientOrPool || defaultPool;
@@ -408,7 +418,14 @@ export async function runHardGates(
   const client = ownsClient ? await pool.connect() : pool;
 
   const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
-  const params: unknown[] = [ctx.workspaceId];
+  const policyResolution = await resolveWorkspaceWorkabilityPolicy(client as any, { context: ctx });
+  console.log(
+    `Hard Gate workability policy: ${policyResolution.source}` +
+      `${policyResolution.modeKey ? ` mode=${policyResolution.modeKey}` : ""}` +
+      ` hash=${policyResolution.policyHash.slice(0, 12)}`
+  );
+  const reprocess = options?.reprocess === true;
+  const params: unknown[] = [ctx.workspaceId, reprocess];
   const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
   const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
   const jobVersionFilter = jobVersionIds.length > 0
@@ -439,7 +456,13 @@ export async function runHardGates(
       )
       WHERE c.workspace_id = $1
         AND jv.workspace_id = $1
-        AND COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
+        AND (
+          COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
+          OR (
+            $2::boolean = TRUE
+            AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+          )
+        )
         ${jobVersionFilter}
         ${canonicalJobFilter}
       ORDER BY c.created_at ASC, c.id ASC
@@ -547,7 +570,7 @@ export async function runHardGates(
           raw_description: requirementHints
             ? `${rawJobAdapter.raw_description}\n\n---\nExtracted requirements:\n${requirementHints}`
             : rawJobAdapter.raw_description,
-        } as any);
+        } as any, policyResolution.policy);
         const persistedGateResult = applyPersistedRequirementGates(
           {
             title: rawJobAdapter.title,
@@ -555,7 +578,8 @@ export async function runHardGates(
             employment_type: rawJobAdapter.employment_type,
             description: rawJobAdapter.raw_description,
           },
-          deterministicRequirements
+          deterministicRequirements,
+          policyResolution.policy
         );
         const exactProfileGateResult = applyExactProfileGates(deterministicRequirements, profileFacts);
         const gateResult = combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult]);
@@ -584,6 +608,22 @@ export async function runHardGates(
                rejection_reason   = $3,
                gate_evidence_quotes = $4,
                workability_facts  = $5,
+               primary_lane = CASE WHEN $8::boolean THEN NULL ELSE primary_lane END,
+               secondary_lanes = CASE WHEN $8::boolean THEN NULL ELSE secondary_lanes END,
+               lane_confidence = CASE WHEN $8::boolean THEN NULL ELSE lane_confidence END,
+               lane_evidence = CASE WHEN $8::boolean THEN NULL ELSE lane_evidence END,
+               semantic_score = CASE WHEN $8::boolean THEN 0.0 ELSE semantic_score END,
+               deterministic_match_score = CASE WHEN $8::boolean THEN NULL ELSE deterministic_match_score END,
+               deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE deterministic_match_coverage END,
+               latest_match_run_id = CASE WHEN $8::boolean THEN NULL ELSE latest_match_run_id END,
+               latest_lane_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_lane_decision_id END,
+               latest_deterministic_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_deterministic_decision_id END,
+               recommendation_eligibility = CASE WHEN $8::boolean THEN NULL ELSE recommendation_eligibility END,
+               recommendation_outcome = CASE WHEN $8::boolean THEN NULL ELSE recommendation_outcome END,
+               recommendation_requirement_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_requirement_score END,
+               recommendation_coverage_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_coverage_score END,
+               recommendation_evidence_completeness = CASE WHEN $8::boolean THEN NULL ELSE recommendation_evidence_completeness END,
+               recommendation_decided_at = CASE WHEN $8::boolean THEN NULL ELSE recommendation_decided_at END,
                updated_at         = NOW()
            WHERE workspace_id = $6
              AND id = $7`,
@@ -594,7 +634,8 @@ export async function runHardGates(
             JSON.stringify(gateResult.evidence_quotes),
             JSON.stringify(gateResult.workability_facts),
             ctx.workspaceId,
-            job.id
+            job.id,
+            reprocess
           ]
         );
 

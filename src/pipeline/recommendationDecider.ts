@@ -90,7 +90,12 @@ function computeEvidenceCompleteness(workplaceTypeRaw: unknown, workabilityFacts
 
 export async function runRecommendationDecider(
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: {
+    context?: WorkspaceContext;
+    jobVersionIds?: string[];
+    canonicalJobIds?: string[];
+    limit?: number;
+  }
 ): Promise<RecommendationDeciderSummary> {
   console.log("Starting Deterministic Recommendation Decider...");
   const pool = clientOrPool || defaultPool;
@@ -103,6 +108,20 @@ export async function runRecommendationDecider(
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
     const snapshot = await resolveWorkspacePolicySnapshot(client as any, { context: ctx });
+
+    const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
+    const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
+    const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
+      ? Number(options?.limit)
+      : null;
+    const jobParams: unknown[] = [ctx.workspaceId];
+    const jobVersionFilter = jobVersionIds.length > 0
+      ? `AND COALESCE(c.latest_job_version_id, lv.id) = ANY($${jobParams.push(jobVersionIds)}::uuid[])`
+      : "";
+    const canonicalJobFilter = canonicalJobIds.length > 0
+      ? `AND c.id = ANY($${jobParams.push(canonicalJobIds)}::uuid[])`
+      : "";
+    const limitClause = limit ? `LIMIT $${jobParams.push(limit)}` : "";
 
     const { rows: jobs } = await client.query<{
       canonical_job_id: string;
@@ -156,8 +175,12 @@ export async function runRecommendationDecider(
       ) lv ON TRUE
       WHERE c.workspace_id = $1
         AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+        ${jobVersionFilter}
+        ${canonicalJobFilter}
+      ORDER BY c.created_at ASC, c.id ASC
+      ${limitClause}
       `,
-      [ctx.workspaceId]
+      jobParams
     );
 
     let updated = 0;

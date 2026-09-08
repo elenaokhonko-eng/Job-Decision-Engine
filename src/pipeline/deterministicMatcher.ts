@@ -277,7 +277,12 @@ async function loadNodeEmbeddings(
 
 export async function runDeterministicMatcher(
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: {
+    context?: WorkspaceContext;
+    jobVersionIds?: string[];
+    canonicalJobIds?: string[];
+    limit?: number;
+  }
 ): Promise<DeterministicMatchSummary> {
   console.log("Starting Deterministic Matcher...");
 
@@ -384,6 +389,20 @@ export async function runDeterministicMatcher(
       );
     }
 
+    const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
+    const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
+    const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
+      ? Number(options?.limit)
+      : null;
+    const jobParams: unknown[] = [ctx.workspaceId];
+    const jobVersionFilter = jobVersionIds.length > 0
+      ? `AND COALESCE(c.latest_job_version_id, jv.id) = ANY($${jobParams.push(jobVersionIds)}::uuid[])`
+      : "";
+    const canonicalJobFilter = canonicalJobIds.length > 0
+      ? `AND c.id = ANY($${jobParams.push(canonicalJobIds)}::uuid[])`
+      : "";
+    const limitClause = limit ? `LIMIT $${jobParams.push(limit)}` : "";
+
     const { rows: jobs } = await client.query<RoutingCandidate>(
       `SELECT c.id,
               c.latest_job_version_id,
@@ -400,8 +419,12 @@ export async function runDeterministicMatcher(
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
          AND c.primary_lane IS NOT NULL
-         AND c.primary_lane != 'UNCLASSIFIED'`,
-      [ctx.workspaceId]
+         AND c.primary_lane != 'UNCLASSIFIED'
+         ${jobVersionFilter}
+         ${canonicalJobFilter}
+       ORDER BY c.created_at ASC, c.id ASC
+       ${limitClause}`,
+      jobParams
     );
 
     const evidenceStrengthPolicy = await loadActiveEvidenceStrengthPolicy(client as any, {

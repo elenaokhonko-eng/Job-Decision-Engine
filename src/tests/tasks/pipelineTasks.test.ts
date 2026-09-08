@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   claimPipelineTasks,
   completePipelineTask,
+  completePipelineTaskAndRun,
   enqueuePipelineTask,
   failPipelineTask,
   replayDeadLetterPipelineTask,
@@ -148,6 +149,56 @@ describe("pipelineTasks", () => {
 
     expect(calls).toContain("ROLLBACK");
     expect(calls).not.toContain("COMMIT");
+  });
+
+  it("completePipelineTaskAndRun rolls back completion when successor enqueue fails", async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [] };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-claimed" }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        throw new Error("successor enqueue failed");
+      }
+      return { rows: [] };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    await expect(
+      completePipelineTaskAndRun(
+        {
+          taskId: "task-claimed",
+          taskKey: "lane_route:1",
+          taskType: "LANE_ROUTE",
+          payload: {},
+          leaseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          leaseExpiresAt: new Date().toISOString(),
+          attemptNumber: 1,
+          maxAttempts: 8,
+        },
+        fakePool,
+        {
+          context: ctx,
+          afterComplete: async (transactionClient) => {
+            await (transactionClient as any).query("INSERT INTO pipeline_tasks", []);
+          },
+        }
+      )
+    ).rejects.toThrow(/successor enqueue failed/);
+
+    expect(calls).toContain("ROLLBACK");
+    expect(calls).not.toContain("COMMIT");
+    expect(calls.indexOf("INSERT INTO pipeline_tasks")).toBeGreaterThan(
+      calls.findIndex((sql) => sql.includes("UPDATE pipeline_tasks"))
+    );
   });
 
   it("failPipelineTask rolls back when the lease is lost", async () => {

@@ -58,7 +58,12 @@ function buildJobVersionInputText(row: { normalized_title: string; description_t
 export async function buildEmbeddingInputs(
   clientOrPool?: pg.Pool | pg.PoolClient,
   maxPerSource = 200,
-  options?: { context?: WorkspaceContext }
+  options?: {
+    context?: WorkspaceContext;
+    jobVersionIds?: string[];
+    includeProfileFacts?: boolean;
+    includeLanePrototypes?: boolean;
+  }
 ): Promise<EmbeddingInputBuildSummary> {
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
@@ -74,9 +79,17 @@ export async function buildEmbeddingInputs(
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
+    const scopedToJobVersions = jobVersionIds.length > 0;
+    const includeProfileFacts = options?.includeProfileFacts ?? !scopedToJobVersions;
+    const includeLanePrototypes = options?.includeLanePrototypes ?? true;
 
     await client.query('BEGIN');
 
+    const requirementParams: unknown[] = [ctx.workspaceId, maxPerSource];
+    const requirementScope = scopedToJobVersions
+      ? `AND jv.id = ANY($${requirementParams.push(jobVersionIds)}::uuid[])`
+      : '';
     const reqRows = await client.query<{
       id: string;
       requirement_type: string;
@@ -91,6 +104,7 @@ export async function buildEmbeddingInputs(
         AND jv.id = jr.job_version_id
        WHERE jr.workspace_id = $1
          AND jr.status = 'VALIDATED'
+         ${requirementScope}
          AND (
            jv.active_requirement_set_id IS NULL
            OR jr.requirement_set_id = jv.active_requirement_set_id
@@ -104,7 +118,7 @@ export async function buildEmbeddingInputs(
          )
        ORDER BY jr.created_at ASC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerSource]
+      requirementParams
     );
 
     for (const row of reqRows.rows) {
@@ -130,58 +144,64 @@ export async function buildEmbeddingInputs(
       fromRequirements += 1;
     }
 
-    const factRows = await client.query<{
-      id: string;
-      embedding_node_id?: string;
-      fact_type: string;
-      statement: string;
-      structured_value: unknown;
-      evidence_tier: string;
-    }>(
-      `SELECT pf.id, COALESCE(pf.fact_revision_id, pf.id) AS embedding_node_id,
-              pf.fact_type, pf.statement, pf.structured_value, pf.evidence_tier
-       FROM profile_facts pf
-       JOIN profile_versions pv
-         ON pv.workspace_id = pf.workspace_id
-        AND pv.id = pf.profile_version_id
-        AND pv.status = 'ACTIVE'
-       WHERE pf.workspace_id = $1
-         AND NOT EXISTS (
-           SELECT 1
-           FROM embedding_inputs ei
-           WHERE ei.workspace_id = $1
-             AND ei.source_type = 'PROFILE_FACT'
-             AND ei.source_id = COALESCE(pf.fact_revision_id, pf.id)
-       )
-       ORDER BY pf.created_at ASC
-       LIMIT $2`,
-      [ctx.workspaceId, maxPerSource]
-    );
-
-    for (const row of factRows.rows) {
-      const contentText = buildProfileFactInputText(row);
-      const contentHash = hashText(contentText);
-      const embeddingNodeId = row.embedding_node_id || row.id;
-      const inputKey = `fact:${embeddingNodeId}:${contentHash.slice(0, 16)}`;
-
-      await client.query(
-        `INSERT INTO embedding_inputs (
-           workspace_id,
-           input_key,
-           source_type,
-           source_id,
-           content_text,
-           content_hash
+    if (includeProfileFacts) {
+      const factRows = await client.query<{
+        id: string;
+        embedding_node_id?: string;
+        fact_type: string;
+        statement: string;
+        structured_value: unknown;
+        evidence_tier: string;
+      }>(
+        `SELECT pf.id, COALESCE(pf.fact_revision_id, pf.id) AS embedding_node_id,
+                pf.fact_type, pf.statement, pf.structured_value, pf.evidence_tier
+         FROM profile_facts pf
+         JOIN profile_versions pv
+           ON pv.workspace_id = pf.workspace_id
+          AND pv.id = pf.profile_version_id
+          AND pv.status = 'ACTIVE'
+         WHERE pf.workspace_id = $1
+           AND NOT EXISTS (
+             SELECT 1
+             FROM embedding_inputs ei
+             WHERE ei.workspace_id = $1
+               AND ei.source_type = 'PROFILE_FACT'
+               AND ei.source_id = COALESCE(pf.fact_revision_id, pf.id)
          )
-         VALUES ($1, $2, 'PROFILE_FACT', $3, $4, $5)
-         ON CONFLICT (workspace_id, input_key) DO NOTHING`,
-        [ctx.workspaceId, inputKey, embeddingNodeId, contentText, contentHash]
+         ORDER BY pf.created_at ASC
+         LIMIT $2`,
+        [ctx.workspaceId, maxPerSource]
       );
 
-      inserted += 1;
-      fromProfileFacts += 1;
+      for (const row of factRows.rows) {
+        const contentText = buildProfileFactInputText(row);
+        const contentHash = hashText(contentText);
+        const embeddingNodeId = row.embedding_node_id || row.id;
+        const inputKey = `fact:${embeddingNodeId}:${contentHash.slice(0, 16)}`;
+
+        await client.query(
+          `INSERT INTO embedding_inputs (
+             workspace_id,
+             input_key,
+             source_type,
+             source_id,
+             content_text,
+             content_hash
+           )
+           VALUES ($1, $2, 'PROFILE_FACT', $3, $4, $5)
+           ON CONFLICT (workspace_id, input_key) DO NOTHING`,
+          [ctx.workspaceId, inputKey, embeddingNodeId, contentText, contentHash]
+        );
+
+        inserted += 1;
+        fromProfileFacts += 1;
+      }
     }
 
+    const jobParams: unknown[] = [ctx.workspaceId, maxPerSource];
+    const jobScope = scopedToJobVersions
+      ? `AND jv.id = ANY($${jobParams.push(jobVersionIds)}::uuid[])`
+      : '';
     const jobRows = await client.query<{
       id: string;
       normalized_title: string;
@@ -205,9 +225,10 @@ export async function buildEmbeddingInputs(
             ORDER BY jv2.observed_at DESC
             LIMIT 1
           )
-        )
+       )
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'MATCHED')
+         ${jobScope}
          AND jv.description_text IS NOT NULL
          AND NOT EXISTS (
            SELECT 1
@@ -218,7 +239,7 @@ export async function buildEmbeddingInputs(
          )
        ORDER BY jv.observed_at DESC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerSource]
+      jobParams
     );
 
     for (const row of jobRows.rows) {
@@ -240,6 +261,16 @@ export async function buildEmbeddingInputs(
 
     // Lane prototypes are optional and depend on dynamic-lanes migrations.
     // Never let missing lane registry tables abort the entire embedding-input build.
+    if (!includeLanePrototypes) {
+      return {
+        inserted,
+        fromRequirements,
+        fromProfileFacts,
+        fromJobVersions,
+        fromLanePrototypes,
+      };
+    }
+
     try {
       const activeLanes = await listActiveLaneRevisions(client as any, { context: ctx });
       for (const lane of activeLanes) {

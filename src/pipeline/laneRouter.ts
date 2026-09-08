@@ -297,14 +297,24 @@ function extractCoreJobText(title: string, description: string): string {
 // Export under old name for backward-compat with tests
 export async function runLaneRouting(
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: {
+    context?: WorkspaceContext;
+    jobVersionIds?: string[];
+    canonicalJobIds?: string[];
+    limit?: number;
+  }
 ): Promise<{ routed: number; deferred: number }> {
   return runLaneRouter(clientOrPool, options);
 }
 
 export async function runLaneRouter(
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: {
+    context?: WorkspaceContext;
+    jobVersionIds?: string[];
+    canonicalJobIds?: string[];
+    limit?: number;
+  }
 ): Promise<{ routed: number; deferred: number }> {
   const pool = clientOrPool || defaultPool;
   const ctx = options?.context ?? (await resolveWorkspaceContext(pool as any));
@@ -323,6 +333,19 @@ export async function runLaneRouter(
 
   const currentLaneRouterModelPrefix =
     `${LANE_ROUTER_RULE_VERSION}|${config.version ?? "lanes_unknown"}|`;
+  const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
+  const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
+  const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
+    ? Number(options?.limit)
+    : null;
+  const params: unknown[] = [ctx.workspaceId, currentLaneRouterModelPrefix];
+  const jobVersionFilter = jobVersionIds.length > 0
+    ? `AND jv.id = ANY($${params.push(jobVersionIds)}::uuid[])`
+    : "";
+  const canonicalJobFilter = canonicalJobIds.length > 0
+    ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])`
+    : "";
+  const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
 
   let jobs: any[] = [];
   try {
@@ -359,14 +382,26 @@ export async function runLaneRouter(
               )
             )
           )
+          ${jobVersionFilter}
+          ${canonicalJobFilter}
+        ORDER BY c.created_at ASC, c.id ASC
+        ${limitClause}
       `,
-      [ctx.workspaceId, currentLaneRouterModelPrefix]
+      params
     );
     jobs = result.rows;
   } catch (error: any) {
     if (error?.code !== "42P01" && error?.code !== "42703") {
       throw error;
     }
+    const fallbackParams: unknown[] = [ctx.workspaceId];
+    const fallbackJobVersionFilter = jobVersionIds.length > 0
+      ? `AND jv.id = ANY($${fallbackParams.push(jobVersionIds)}::uuid[])`
+      : "";
+    const fallbackCanonicalJobFilter = canonicalJobIds.length > 0
+      ? `AND c.id = ANY($${fallbackParams.push(canonicalJobIds)}::uuid[])`
+      : "";
+    const fallbackLimitClause = limit ? `LIMIT $${fallbackParams.push(limit)}` : "";
     const fallback = await pool.query(
       `
         SELECT c.*, jv.description_text, jv.id AS latest_version_id
@@ -381,8 +416,12 @@ export async function runLaneRouter(
         ) jv ON TRUE
         WHERE c.workspace_id = $1
           AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+          ${fallbackJobVersionFilter}
+          ${fallbackCanonicalJobFilter}
+        ORDER BY c.created_at ASC, c.id ASC
+        ${fallbackLimitClause}
       `,
-      [ctx.workspaceId]
+      fallbackParams
     );
     jobs = fallback.rows;
   }

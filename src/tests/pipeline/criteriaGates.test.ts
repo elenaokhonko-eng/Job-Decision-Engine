@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { applyGlobalGates } from "../../services/criteria.js";
 import { applyPersistedRequirementGates } from "../../pipeline/hardGate.js";
+import { loadWorkabilityPolicy, type WorkabilityPolicy } from "../../pipeline/workabilityPolicy.js";
 
 type GateInput = {
 	title: string;
@@ -143,6 +144,28 @@ describe("criteria gates regression coverage", () => {
 		expect(result.rejection_codes).toContain("GATE_CONTRACT_ROLE");
 	});
 
+	it("allows contract roles when the resolved user policy permits contracts", () => {
+		const policy: WorkabilityPolicy = {
+			...loadWorkabilityPolicy(),
+			contractAllowed: true,
+		};
+		const result = applyGlobalGates({
+			id: "test-job",
+			source: "unit-test",
+			source_id: "unit-test-id",
+			company_name: "Test Company",
+			title: "Senior Data Engineer",
+			raw_description: technicalResponsibilities,
+			location: "Remote",
+			workplace_type: "REMOTE",
+			employment_type: "CONTRACT",
+		} as any, policy);
+
+		expect(result.status).toBe("PASS");
+		expect(result.rejection_codes).not.toContain("GATE_CONTRACT_ROLE");
+		expect(result.workability_facts.employment_type).toBe("CONTRACT");
+	});
+
 	it("enforces configured building, interaction, and travel ratios", () => {
 		const buildingResult = runGate({
 			title: "Technical Program Director",
@@ -199,6 +222,39 @@ describe("criteria gates regression coverage", () => {
 
 		expect(result.status).toBe("HARD_REJECT");
 		expect(result.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+	});
+
+	it("applies injected user policy to persisted requirements", () => {
+		const policy: WorkabilityPolicy = {
+			...loadWorkabilityPolicy(),
+			maxTravelPct: 25,
+			contractAllowed: true,
+		};
+
+		const result = applyPersistedRequirementGates(
+			{ title: "Machine Learning Engineer", company_name: "Example", employment_type: "CONTRACT" },
+			[
+				{
+					requirement_key: "employment",
+					requirement_type: "EMPLOYMENT_TYPE",
+					requirement_text: "This is a 12 month contract role.",
+					quote_text: null,
+					structured_value: { employment_type: "CONTRACT" },
+				},
+				{
+					requirement_key: "travel",
+					requirement_type: "TRAVEL",
+					requirement_text: "Travel up to 20 percent",
+					quote_text: null,
+					structured_value: { max_travel_pct: 20 },
+				},
+			],
+			policy
+		);
+
+		expect(result.status).toBe("PASS");
+		expect(result.rejection_codes).not.toContain("GATE_CONTRACT_ROLE");
+		expect(result.rejection_codes).not.toContain("GATE_LIFESTYLE_INCOMPATIBLE");
 	});
 
 	it("does not hide a structured interaction conflict behind office verification", () => {

@@ -43,6 +43,13 @@ export interface EmbeddingFallbackSummary {
   fallback?: EmbeddingBatchSummary;
 }
 
+export interface EmbeddingBatchCoordinatorOptions {
+  context?: WorkspaceContext;
+  jobVersionIds?: string[];
+  includeProfileFacts?: boolean;
+  includeLanePrototypes?: boolean;
+}
+
 interface InputRow {
   id: string;
   content_text: string;
@@ -108,7 +115,24 @@ export async function runEmbeddingBatch(
       );
     }
 
-    const inputRes = inputIds && inputIds.length > 0
+    if (Array.isArray(inputIds) && inputIds.length === 0) {
+      console.log(
+        `[embeddings:${runType}] provider=${provider} model=${spaceModel} space=${space.id} no pending scoped inputs`
+      );
+      return {
+        batchId: null,
+        embeddingSpaceId: space.id,
+        processed: 0,
+        processedInputIds: [],
+        succeeded: 0,
+        failed: 0,
+        failedInputIds: [],
+        runType,
+        errors: [],
+      };
+    }
+
+    const inputRes = Array.isArray(inputIds)
       ? await client.query<InputRow>(
           `SELECT ei.id, ei.content_text
            FROM embedding_inputs ei
@@ -402,7 +426,7 @@ export async function runEmbeddingBatch(
 export async function runEmbeddingBatchWithFallback(
   maxItems = 100,
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: EmbeddingBatchCoordinatorOptions
 ): Promise<EmbeddingFallbackSummary> {
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
@@ -412,16 +436,53 @@ export async function runEmbeddingBatchWithFallback(
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
+    const scopedToJobVersions = jobVersionIds.length > 0;
     console.log(`[embeddings] seeding embedding spaces`);
     const seeded = await seedEmbeddingSpaces(client as pg.PoolClient, { context: ctx });
     console.log(
       `[embeddings] spaces primary=${seeded.primarySpaceId} fallback=${seeded.fallbackSpaceId}`
     );
     console.log(`[embeddings] building embedding inputs max_per_source=${maxItems}`);
-    const inputBuild = await buildEmbeddingInputs(client as pg.PoolClient, maxItems, { context: ctx });
+    const inputBuild = await buildEmbeddingInputs(client as pg.PoolClient, maxItems, {
+      context: ctx,
+      jobVersionIds,
+      includeProfileFacts: options?.includeProfileFacts,
+      includeLanePrototypes: options?.includeLanePrototypes,
+    });
     console.log(
       `[embeddings] input_build inserted=${inputBuild.inserted} requirements=${inputBuild.fromRequirements} profile_facts=${inputBuild.fromProfileFacts} job_versions=${inputBuild.fromJobVersions ?? 0} lane_prototypes=${inputBuild.fromLanePrototypes ?? 0}`
     );
+
+    let scopedInputIds: string[] | undefined;
+    if (scopedToJobVersions) {
+      const { rows } = await client.query<{ id: string }>(
+        `SELECT DISTINCT ei.id
+         FROM embedding_inputs ei
+         WHERE ei.workspace_id = $1
+           AND (
+             (ei.source_type = 'JOB_VERSION' AND ei.source_id = ANY($2::uuid[]))
+             OR (ei.source_type = 'JOB_REQUIREMENT' AND EXISTS (
+               SELECT 1
+               FROM job_requirements jr
+               WHERE jr.workspace_id = ei.workspace_id
+                 AND jr.id = ei.source_id
+                 AND jr.job_version_id = ANY($2::uuid[])
+                 AND jr.status = 'VALIDATED'
+             ))
+             OR (
+               $3::boolean = TRUE
+               AND ei.source_type = 'LANE_PROTOTYPE'
+             )
+           )
+         ORDER BY ei.id`,
+        [ctx.workspaceId, jobVersionIds, options?.includeLanePrototypes ?? true]
+      );
+      scopedInputIds = rows.map((row) => row.id);
+      console.log(
+        `[embeddings] scoped input selection job_versions=${jobVersionIds.length} inputs=${scopedInputIds.length}`
+      );
+    }
 
     console.log(`[embeddings] primary batch starting max_items=${maxItems}`);
     const primary = await runEmbeddingBatch(
@@ -429,7 +490,7 @@ export async function runEmbeddingBatchWithFallback(
       `primary-${Date.now()}`,
       'PRIMARY',
       maxItems,
-      undefined,
+      scopedInputIds,
       undefined,
       undefined,
       client as pg.PoolClient,
@@ -441,67 +502,71 @@ export async function runEmbeddingBatchWithFallback(
 
     let fallback: EmbeddingBatchSummary | undefined;
     if (primary.failedInputIds.length > 0) {
-      let fallbackInputIds = primary.processedInputIds;
+      let fallbackInputIds = scopedInputIds && scopedInputIds.length > 0
+        ? scopedInputIds
+        : primary.processedInputIds;
       console.log(
         `[embeddings] primary had ${primary.failedInputIds.length} failed input(s); selecting active corpus for fallback`
       );
-      try {
-        const allRelevantInputs = await client.query<{ id: string }>(
-          `SELECT DISTINCT ei.id
-           FROM embedding_inputs ei
-           WHERE ei.workspace_id = $1
-             AND (
-               (ei.source_type = 'PROFILE_FACT' AND EXISTS (
-                 SELECT 1
-                 FROM profile_facts pf
-                 JOIN profile_versions pv
-                   ON pv.workspace_id = pf.workspace_id
-                  AND pv.id = pf.profile_version_id
-                  AND pv.status = 'ACTIVE'
-                 WHERE pf.workspace_id = ei.workspace_id
-                   AND COALESCE(pf.fact_revision_id, pf.id) = ei.source_id
-               ))
-               OR (ei.source_type = 'JOB_REQUIREMENT' AND EXISTS (
-                 SELECT 1
-                 FROM job_requirements jr
-                 JOIN job_versions jv
-                   ON jv.workspace_id = jr.workspace_id
-                  AND jv.id = jr.job_version_id
-                 WHERE jr.workspace_id = ei.workspace_id
-                   AND jr.id = ei.source_id
-                   AND jr.status = 'VALIDATED'
-                   AND (jv.active_requirement_set_id IS NULL OR jr.requirement_set_id = jv.active_requirement_set_id)
-               ))
-               OR (ei.source_type = 'JOB_VERSION' AND EXISTS (
-                 SELECT 1
-                 FROM canonical_jobs cj
-                 WHERE cj.workspace_id = ei.workspace_id
-                   AND cj.latest_job_version_id = ei.source_id
-                   AND COALESCE(cj.processing_state, cj.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'MATCHED')
-               ))
-               OR (ei.source_type = 'LANE_PROTOTYPE' AND EXISTS (
-                 SELECT 1
-                 FROM lane_revisions lr
-                 JOIN lane_active_revisions lar ON lar.lane_revision_id = lr.id
-                 JOIN lane_identities li ON li.id = lr.lane_identity_id
-                 WHERE li.workspace_id = ei.workspace_id
-                   AND lr.id = ei.source_id
-                   AND li.status = 'ACTIVE'
-               ))
-             )
-           ORDER BY ei.id` ,
-          [ctx.workspaceId]
-        );
-        if (allRelevantInputs.rows.length > 0) {
-          fallbackInputIds = allRelevantInputs.rows.map((row) => row.id);
+      if (!scopedInputIds || scopedInputIds.length === 0) {
+        try {
+          const allRelevantInputs = await client.query<{ id: string }>(
+            `SELECT DISTINCT ei.id
+             FROM embedding_inputs ei
+             WHERE ei.workspace_id = $1
+               AND (
+                 (ei.source_type = 'PROFILE_FACT' AND EXISTS (
+                   SELECT 1
+                   FROM profile_facts pf
+                   JOIN profile_versions pv
+                     ON pv.workspace_id = pf.workspace_id
+                    AND pv.id = pf.profile_version_id
+                    AND pv.status = 'ACTIVE'
+                   WHERE pf.workspace_id = ei.workspace_id
+                     AND COALESCE(pf.fact_revision_id, pf.id) = ei.source_id
+                 ))
+                 OR (ei.source_type = 'JOB_REQUIREMENT' AND EXISTS (
+                   SELECT 1
+                   FROM job_requirements jr
+                   JOIN job_versions jv
+                     ON jv.workspace_id = jr.workspace_id
+                    AND jv.id = jr.job_version_id
+                   WHERE jr.workspace_id = ei.workspace_id
+                     AND jr.id = ei.source_id
+                     AND jr.status = 'VALIDATED'
+                     AND (jv.active_requirement_set_id IS NULL OR jr.requirement_set_id = jv.active_requirement_set_id)
+                 ))
+                 OR (ei.source_type = 'JOB_VERSION' AND EXISTS (
+                   SELECT 1
+                   FROM canonical_jobs cj
+                   WHERE cj.workspace_id = ei.workspace_id
+                     AND cj.latest_job_version_id = ei.source_id
+                     AND COALESCE(cj.processing_state, cj.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'MATCHED')
+                 ))
+                 OR (ei.source_type = 'LANE_PROTOTYPE' AND EXISTS (
+                   SELECT 1
+                   FROM lane_revisions lr
+                   JOIN lane_active_revisions lar ON lar.lane_revision_id = lr.id
+                   JOIN lane_identities li ON li.id = lr.lane_identity_id
+                   WHERE li.workspace_id = ei.workspace_id
+                     AND lr.id = ei.source_id
+                     AND li.status = 'ACTIVE'
+                 ))
+               )
+             ORDER BY ei.id` ,
+            [ctx.workspaceId]
+          );
+          if (allRelevantInputs.rows.length > 0) {
+            fallbackInputIds = allRelevantInputs.rows.map((row) => row.id);
+          }
+        } catch (error: any) {
+          if (error?.code !== '42P01') throw error;
         }
-      } catch (error: any) {
-        if (error?.code !== '42P01') throw error;
       }
 
-      // A failed primary batch is never a usable semantic space. Re-embed the
-      // complete active corpus in one fallback space, including inputs that
-      // succeeded in earlier primary cycles, so matching cannot mix providers.
+      // A failed primary batch is never a usable semantic space. Full runs
+      // re-embed the active corpus; scoped stage tasks re-embed only their
+      // claimed job inputs so a single task cannot escape its budget.
       console.log(`[embeddings] fallback batch starting input_count=${fallbackInputIds.length}`);
       fallback = await runEmbeddingBatch(
         seeded.fallbackSpaceId,
