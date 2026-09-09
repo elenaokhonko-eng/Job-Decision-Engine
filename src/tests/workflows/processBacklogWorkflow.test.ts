@@ -41,6 +41,15 @@ describe('process backlog workflow', () => {
     expect(laneRouting).toBeGreaterThan(embeddings);
   });
 
+  it('requeues matching when the active profile version changed', () => {
+    const worker = readFileSync(resolve('src/tasks/stageTaskWorker.ts'), 'utf8');
+
+    expect(worker).toContain("active_profile.id AS profile_version_id");
+    expect(worker).toContain("FROM match_runs mr");
+    expect(worker).toContain("mr.profile_version_id = active_profile.id");
+    expect(worker).toContain(":profile:");
+  });
+
   it('uses a serialized worker entrypoint that fails loudly on retryable stage errors', () => {
     const script = readFileSync(resolve('scripts/process_pipeline_tasks.ts'), 'utf8');
 

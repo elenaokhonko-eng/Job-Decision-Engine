@@ -391,10 +391,12 @@ export async function runDeterministicMatcher(
 
     const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
     const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
+    const hasExplicitTargets = jobVersionIds.length > 0 || canonicalJobIds.length > 0;
     const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
       ? Number(options?.limit)
       : null;
     const jobParams: unknown[] = [ctx.workspaceId];
+    const explicitTargetsParam = jobParams.push(hasExplicitTargets);
     const jobVersionFilter = jobVersionIds.length > 0
       ? `AND COALESCE(c.latest_job_version_id, jv.id) = ANY($${jobParams.push(jobVersionIds)}::uuid[])`
       : "";
@@ -416,8 +418,16 @@ export async function runDeterministicMatcher(
          ORDER BY observed_at DESC
          LIMIT 1
        ) jv ON TRUE
-       WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+        WHERE c.workspace_id = $1
+         AND (
+           COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+           OR (
+             $${explicitTargetsParam}::boolean
+             AND COALESCE(c.processing_state, c.processing_status) IN (
+               'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
+             )
+           )
+         )
          AND c.primary_lane IS NOT NULL
          AND c.primary_lane != 'UNCLASSIFIED'
          ${jobVersionFilter}

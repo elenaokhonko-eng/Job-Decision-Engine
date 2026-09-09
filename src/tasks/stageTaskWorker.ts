@@ -157,8 +157,36 @@ function requireStringPayload(task: ClaimedPipelineTask, field: string): string 
   throw new Error(`Pipeline task ${task.taskKey} is missing string payload field ${field}.`);
 }
 
-function taskKey(taskType: PipelineStageTaskType, id: string, version: string): string {
-  return `${taskType}:${id}:${version}`;
+export function buildPipelineTaskKey(
+  taskType: PipelineStageTaskType,
+  id: string,
+  version: string,
+  profileVersionId?: string
+): string {
+  const profileSuffix = taskType === "MATCH_PROFILE_EVIDENCE" && profileVersionId
+    ? `:profile:${profileVersionId}`
+    : "";
+  return `${taskType}:${id}:${version}${profileSuffix}`;
+}
+
+async function resolveActiveProfileVersionId(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext
+): Promise<string> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ id: string }>(
+    `SELECT pv.id
+     FROM profile_versions pv
+     WHERE pv.workspace_id = $1
+       AND pv.status = 'ACTIVE'
+     ORDER BY pv.created_at DESC
+     LIMIT 1`,
+    [ctx.workspaceId]
+  );
+  const profileVersionId = rows[0]?.id;
+  if (!profileVersionId) {
+    throw new Error(`No ACTIVE profile version found for workspace_id=${ctx.workspaceId}.`);
+  }
+  return profileVersionId;
 }
 
 async function enqueueStageTask(
@@ -169,11 +197,19 @@ async function enqueueStageTask(
   context: WorkspaceContext
 ): Promise<boolean> {
   const maxAttempts = MODEL_BACKED_STAGE_TASK_TYPES.has(taskType) ? 3 : 8;
+  let taskPayload = payload;
+  let profileVersionId: string | undefined;
+  if (taskType === "MATCH_PROFILE_EVIDENCE") {
+    profileVersionId = typeof payload.profile_version_id === "string" && payload.profile_version_id.trim() !== ""
+      ? payload.profile_version_id
+      : await resolveActiveProfileVersionId(clientOrPool, context);
+    taskPayload = { ...payload, profile_version_id: profileVersionId };
+  }
   const result = await enqueuePipelineTask(
     {
       taskType,
-      taskKey: taskKey(taskType, id, stageVersion(taskType)),
-      payload,
+      taskKey: buildPipelineTaskKey(taskType, id, stageVersion(taskType), profileVersionId),
+      payload: taskPayload,
       maxAttempts,
     },
     clientOrPool,
@@ -497,8 +533,18 @@ export async function seedRecoverablePipelineTasks(
       ctx,
       summary,
       "MATCH_PROFILE_EVIDENCE",
-      `SELECT c.id AS canonical_job_id, COALESCE(c.latest_job_version_id, jv.id) AS job_version_id
+      `SELECT c.id AS canonical_job_id,
+              COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
+              active_profile.id AS profile_version_id
        FROM canonical_jobs c
+       CROSS JOIN LATERAL (
+         SELECT pv.id
+         FROM profile_versions pv
+         WHERE pv.workspace_id = c.workspace_id
+           AND pv.status = 'ACTIVE'
+         ORDER BY pv.created_at DESC
+         LIMIT 1
+       ) active_profile
        LEFT JOIN LATERAL (
          SELECT id
          FROM job_versions
@@ -507,16 +553,33 @@ export async function seedRecoverablePipelineTasks(
          LIMIT 1
        ) jv ON TRUE
        WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+         AND COALESCE(c.processing_state, c.processing_status) IN (
+           'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
+         )
          AND c.primary_lane IS NOT NULL
          AND c.primary_lane <> 'UNCLASSIFIED'
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
+         AND (
+           COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+           OR NOT EXISTS (
+             SELECT 1
+             FROM match_runs mr
+             WHERE mr.workspace_id = c.workspace_id
+               AND mr.id = c.latest_match_run_id
+               AND mr.profile_version_id = active_profile.id
+               AND mr.status = 'COMPLETED'
+           )
+         )
        ORDER BY c.updated_at ASC
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
         id: row.job_version_id,
-        payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
+        payload: {
+          canonical_job_id: row.canonical_job_id,
+          job_version_id: row.job_version_id,
+          profile_version_id: row.profile_version_id,
+        },
       })
     );
 

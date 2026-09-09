@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   PipelineWorkerCancelledError,
+  buildPipelineTaskKey,
   runPipelineStageTaskWorker,
   type PipelineStageWorkerDependencies,
 } from "../../tasks/stageTaskWorker.js";
@@ -83,6 +84,15 @@ describe("stageTaskWorker", () => {
       ...overrides,
     } as PipelineStageWorkerDependencies;
   }
+
+  it("versions profile matching task keys by active profile version", () => {
+    expect(
+      buildPipelineTaskKey("MATCH_PROFILE_EVIDENCE", "version-1", "deterministic_matcher_v1", "profile-2")
+    ).toBe("MATCH_PROFILE_EVIDENCE:version-1:deterministic_matcher_v1:profile:profile-2");
+    expect(buildPipelineTaskKey("ROUTE_LANE", "version-1", "lane_router_v1")).toBe(
+      "ROUTE_LANE:version-1:lane_router_v1"
+    );
+  });
 
   it("honors cancellation before seeding or claiming tasks", async () => {
     const controller = new AbortController();
