@@ -6,6 +6,10 @@ import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationW
 import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import {
+  shouldFailOnConsentMissing,
+  type EvaluationQueueStats,
+} from "../src/pipeline/evaluationQueuePolicy.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
@@ -18,7 +22,7 @@ function nextAvailableAt(attemptCount: number): string {
   return `NOW() + INTERVAL '${backoffSeconds} seconds'`;
 }
 
-export async function evaluateQueue(): Promise<{ processed: number; failed: number; manualReview: number }> {
+export async function evaluateQueue(): Promise<EvaluationQueueStats> {
   console.log("====================================================");
   console.log("         STAGE 0: AI EVALUATION PROCESSOR           ");
   console.log("====================================================");
@@ -30,6 +34,7 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
   let processedCount = 0;
   let failedCount = 0;
   let manualReviewCount = 0;
+  let eligibleCount = 0;
 
   try {
     const preflight = checkModelRegistryPreflight();
@@ -49,8 +54,18 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
       [ctx.workspaceId, ctx.userId]
     );
     if (consentResult.rows[0]?.granted !== true) {
-      console.log("AI evaluation consent is not granted; no queue items will be processed.");
-      return { processed: 0, failed: 0, manualReview: 0 };
+      const consentState = consentResult.rows.length === 0 ? "MISSING" : "REVOKED_OR_FALSE";
+      console.error(
+        `[evaluation-queue] BLOCKED reason=CONSENT_NOT_GRANTED ` +
+        `workspace_key=${ctx.workspaceKey} user_key=${ctx.userKey} consent_state=${consentState}`
+      );
+      return {
+        processed: 0,
+        failed: 0,
+        manualReview: 0,
+        eligible: 0,
+        blockedReason: "CONSENT_NOT_GRANTED",
+      };
     }
 
     // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
@@ -80,6 +95,7 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
        ORDER BY eq.priority_score DESC`,
       [ctx.workspaceId]
     );
+    eligibleCount = queueItems.length;
 
     console.log(`Found ${queueItems.length} items eligible for AI evaluation. Pipeline run: ${pipelineRunId}`);
 
@@ -345,12 +361,23 @@ export async function evaluateQueue(): Promise<{ processed: number; failed: numb
 
   const summary = `\n✅ Queue evaluation complete. Processed: ${processedCount}, Retrying: ${failedCount}, Manual Review: ${manualReviewCount}`;
   console.log(summary);
-  return { processed: processedCount, failed: failedCount, manualReview: manualReviewCount };
+  return {
+    processed: processedCount,
+    failed: failedCount,
+    manualReview: manualReviewCount,
+    eligible: eligibleCount,
+  };
 }
 
 if (process.argv[1] && process.argv[1].includes("evaluate_queue")) {
   evaluateQueue()
     .then((stats) => {
+      if (stats.blockedReason === "CONSENT_NOT_GRANTED" && shouldFailOnConsentMissing()) {
+        console.error(
+          "❌ Evaluation drain blocked because allow_ai_evaluation consent is not granted for the resolved workspace/user."
+        );
+        process.exit(2);
+      }
       const strictExitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
       if (stats.failed > 0 && strictExitOnRetryWait) {
         // Invariant 7: exit non-zero when any required stage fails
