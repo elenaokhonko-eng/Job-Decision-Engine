@@ -47,11 +47,13 @@ jobs:
           set -euo pipefail
 
           if [[ -n "${{ inputs.canonical_job_id }}" ]]; then
-            echo "CANONICAL_JOB_ID=${{ inputs.canonical_job_id }}" >> "$GITHUB_ENV"
-            echo "DOCUMENTS_JOB_FOUND=true" >> "$GITHUB_ENV"
-            if [[ -n "${{ inputs.job_version_id }}" ]]; then
-              echo "JOB_VERSION_ID=${{ inputs.job_version_id }}" >> "$GITHUB_ENV"
-            fi
+            {
+              echo "CANONICAL_JOB_ID=${{ inputs.canonical_job_id }}"
+              echo "DOCUMENTS_JOB_FOUND=true"
+              if [[ -n "${{ inputs.job_version_id }}" ]]; then
+                echo "JOB_VERSION_ID=${{ inputs.job_version_id }}"
+              fi
+            } >> "$GITHUB_ENV"
             exit 0
           fi
 
@@ -85,9 +87,11 @@ jobs:
             exit 1
           fi
 
-          echo "CANONICAL_JOB_ID=$CANONICAL" >> "$GITHUB_ENV"
-          echo "JOB_VERSION_ID=$VERSION" >> "$GITHUB_ENV"
-          echo "DOCUMENTS_JOB_FOUND=true" >> "$GITHUB_ENV"
+          {
+            echo "CANONICAL_JOB_ID=$CANONICAL"
+            echo "JOB_VERSION_ID=$VERSION"
+            echo "DOCUMENTS_JOB_FOUND=true"
+          } >> "$GITHUB_ENV"
 
       - name: Ensure exports directory exists
         if: env.DOCUMENTS_JOB_FOUND == 'true'
