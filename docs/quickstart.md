@@ -49,6 +49,10 @@ npm run sources:sync
 streamlit run streamlit_app.py
 ```
 
+### Hosted Streamlit
+
+For Streamlit Cloud, add `DATABASE_URL`, `WORKSPACE_KEY`, and `WORKSPACE_USER_KEY` to the app secrets. The app first uses `JDEC_API_BASE_URL` when it points to a reachable API; if that API is unavailable, shortlist and rejected-job reads fall back to the canonical PostgreSQL read models in read-only mode. Do not set `JDEC_API_BASE_URL` to `localhost`, `127.0.0.1`, or `0.0.0.0` unless the API is running inside the same process environment. API-backed mutations still require a reachable API endpoint.
+
 ## Troubleshooting
 
 - If Gemini embeddings fail with `404 NOT_FOUND` / `embedContent` errors, run:

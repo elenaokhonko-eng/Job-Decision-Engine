@@ -49,6 +49,163 @@ def get_api_token():
 def get_workspace_user_key():
     return (os.environ.get("WORKSPACE_USER_KEY") or os.environ.get("USER_KEY") or "local_user").strip()
 
+
+# The hosted Streamlit process is not the API process.  Keep the API as the
+# preferred boundary, but allow read-only rendering from the canonical read
+# models when the API is local-only, unavailable, or not separately deployed.
+# This fallback never writes to PostgreSQL and never joins legacy job tables.
+def _open_read_only_connection():
+    database_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not configured for the read-only Streamlit fallback.")
+
+    try:
+        import psycopg2
+    except ImportError as exc:
+        raise RuntimeError("psycopg2-binary is required for the Streamlit read-only fallback.") from exc
+
+    connection = psycopg2.connect(database_url, connect_timeout=10)
+    connection.set_session(readonly=True, autocommit=True)
+    return connection
+
+
+def _read_model_workspace_id(connection):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT w.id
+            FROM workspaces w
+            JOIN workspace_memberships m ON m.workspace_id = w.id
+            JOIN workspace_users u ON u.id = m.user_id
+            WHERE w.workspace_key = %s
+              AND u.user_key = %s
+              AND m.status = 'ACTIVE'
+            LIMIT 1
+            """,
+            (get_workspace_key(), get_workspace_user_key()),
+        )
+        row = cursor.fetchone()
+    if not row:
+        raise RuntimeError(
+            f"No active database membership for workspace_key={get_workspace_key()} "
+            f"and user_key={get_workspace_user_key()}"
+        )
+    return row[0]
+
+
+def _read_model_query(query, params):
+    try:
+        from psycopg2.extras import RealDictCursor
+    except ImportError as exc:
+        raise RuntimeError("psycopg2-binary is required for the Streamlit read-only fallback.") from exc
+
+    connection = _open_read_only_connection()
+    try:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+    finally:
+        connection.close()
+
+
+SHORTLIST_READ_MODEL_QUERY = """
+    SELECT
+      s.canonical_job_id,
+      s.job_version_id,
+      s.title,
+      s.company,
+      s.canonical_url,
+      s.source,
+      s.location,
+      s.workplace_type,
+      s.employment_type,
+      s.description,
+      s.gate_status,
+      s.rejection_codes,
+      s.gate_evidence_quotes,
+      s.primary_lane,
+      s.secondary_lanes,
+      s.lane_confidence,
+      s.priority_score,
+      s.deterministic_match_score,
+      s.deterministic_match_coverage,
+      s.processing_state,
+      s.processing_status,
+      s.recommendation_eligibility,
+      s.recommendation_outcome,
+      s.recommendation_requirement_score,
+      s.recommendation_coverage_score,
+      s.recommendation_evidence_completeness,
+      s.recommendation_decided_at,
+      s.nd_friendly_score,
+      s.politics_stress_score,
+      s.sensory_overload_index,
+      s.next_action,
+      s.strategic_value,
+      s.recommended_cv_version,
+      s.evaluation_summary,
+      s.eval_provider,
+      s.eval_is_fallback,
+      s.version_mismatch,
+      s.observed_at,
+      s.evaluated_at,
+      s.lane_matches,
+      s.workability_facts,
+      s.queue_status,
+      s.latest_match_run_id,
+      s.cv_document_run_id,
+      s.cover_letter_document_run_id,
+      s.document_ready
+    FROM v_canonical_shortlist s
+    JOIN canonical_jobs c ON c.id = s.canonical_job_id
+    WHERE c.workspace_id = %s
+    ORDER BY s.observed_at DESC NULLS LAST, s.canonical_job_id DESC
+    LIMIT %s
+"""
+
+REJECTED_READ_MODEL_QUERY = """
+    SELECT
+      a.id AS canonical_job_id,
+      a.job_version_id,
+      a.title,
+      a.company,
+      a.careers_portal_url AS canonical_url,
+      a.source,
+      a.status AS processing_state,
+      a.rejection_reason,
+      a.gate_status,
+      a.rejection_codes,
+      a.gate_evidence_quotes,
+      a.description,
+      a.nd_friendly_score,
+      a.politics_stress_score,
+      a.sensory_overload_index,
+      a."postedDate"::timestamptz AS observed_at
+    FROM v_rejected_jobs_audit a
+    JOIN canonical_jobs c ON c.id = a.id
+    WHERE c.workspace_id = %s
+    ORDER BY observed_at DESC NULLS LAST, a.id DESC
+    LIMIT %s
+"""
+
+
+def fetch_jobs_from_postgres_read_model():
+    workspace_connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(workspace_connection)
+    finally:
+        workspace_connection.close()
+    return _read_model_query(SHORTLIST_READ_MODEL_QUERY, (workspace_id, 5000))
+
+
+def fetch_rejected_jobs_from_postgres_read_model():
+    workspace_connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(workspace_connection)
+    finally:
+        workspace_connection.close()
+    return _read_model_query(REJECTED_READ_MODEL_QUERY, (workspace_id, 200))
+
 def api_request(method, path, params=None, body=None, timeout=30):
     import urllib.parse
 
@@ -343,7 +500,9 @@ def validate_shortlist_row_shape(row):
 
 def fetch_jobs_from_db():
     """
-    Fetch the canonical shortlist via /api/v2 (cursor-paginated).
+    Fetch the canonical shortlist via /api/v2 (cursor-paginated), with a
+    read-only PostgreSQL read-model fallback for hosted Streamlit deployments
+    that do not have a reachable API process.
     """
     try:
         all_rows = []
@@ -385,21 +544,55 @@ def fetch_jobs_from_db():
             st.warning(f"Filtered out {invalid_count} invalid shortlist rows due to schema mismatch.")
 
         return valid_rows
-    except Exception as e:
-        st.error(f"Failed to fetch jobs from API: {e}")
-        return []
+    except Exception as api_error:
+        try:
+            fallback_rows = fetch_jobs_from_postgres_read_model()
+            valid_rows = []
+            invalid_count = 0
+            for row in fallback_rows:
+                row_dict = dict(row) if isinstance(row, dict) else {}
+                ok, reason = validate_shortlist_row_shape(row_dict) if row_dict else (False, "Row is not a JSON object")
+                if ok:
+                    valid_rows.append(row_dict)
+                else:
+                    invalid_count += 1
+                    st.warning(f"Dropped invalid PostgreSQL read-model row: {reason}")
+            if invalid_count > 0:
+                st.warning(f"Filtered out {invalid_count} invalid PostgreSQL read-model rows.")
+            st.warning(
+                "API unavailable; displaying the canonical PostgreSQL read model in read-only mode. "
+                f"API error: {api_error}"
+            )
+            return valid_rows
+        except Exception as fallback_error:
+            st.error(
+                "Failed to fetch the canonical shortlist from both the API and PostgreSQL read model. "
+                f"API error: {api_error}; read-model error: {fallback_error}"
+            )
+            return []
 
 def fetch_rejected_jobs_from_db():
-    """Fetch hard-rejected and removed jobs from canonical audit view."""
+    """Fetch rejected jobs from the API, with a read-only view fallback."""
     try:
         resp = api_request("GET", "/api/v2/rejected", params={"limit": 50}, timeout=60)
         rows = resp.get("jobs") or []
         if not isinstance(rows, list):
             raise Exception("API returned invalid rejected-jobs payload (jobs is not a list).")
         return [dict(r) for r in rows if isinstance(r, dict)]
-    except Exception as e:
-        st.error(f"Failed to fetch rejected jobs from API: {e}")
-        return []
+    except Exception as api_error:
+        try:
+            rows = fetch_rejected_jobs_from_postgres_read_model()
+            st.warning(
+                "Rejected-job API unavailable; displaying the canonical PostgreSQL audit read model. "
+                f"API error: {api_error}"
+            )
+            return [dict(row) for row in rows if isinstance(row, dict)]
+        except Exception as fallback_error:
+            st.error(
+                "Failed to fetch rejected jobs from both the API and PostgreSQL read model. "
+                f"API error: {api_error}; read-model error: {fallback_error}"
+            )
+            return []
 
 def delete_job_from_db(job_id):
     """Soft-delete a canonical job by marking it MANUALLY_REMOVED (via /api/v2)."""
