@@ -992,6 +992,16 @@ async function executeStageTask(
   if (taskType === "APPLY_HARD_GATES") {
     const payload = (task.payload || {}) as Record<string, unknown>;
     const reprocess = payload.force_policy_recalculation === true || payload.reprocess === true;
+    const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
+
+    // A durable gate task can outlive the job state that created it. This is
+    // expected when a prior worker advanced the job before a duplicate/stale
+    // task was claimed. Do not turn that stale task into a retry storm. A
+    // forced policy recalculation is the explicit exception and must rerun.
+    if (!reprocess && currentState.processingState && currentState.processingState !== "RAW_STAGED") {
+      return;
+    }
+
     const summary = await dependencies.runHardGates(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],

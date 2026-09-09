@@ -667,6 +667,86 @@ describe("stageTaskWorker", () => {
     });
   });
 
+  it("completes stale hard-gate tasks after the job has advanced", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [
+            {
+              id: "task-stale-gate",
+              workspace_id: ctx.workspaceId,
+              task_type: "APPLY_HARD_GATES",
+              task_key: "APPLY_HARD_GATES:version-routed:hard_gate_v1",
+              payload: { canonical_job_id: "job-routed", job_version_id: "version-routed" },
+              status: "RUNNING",
+              available_at: new Date().toISOString(),
+              lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+              heartbeat_at: new Date().toISOString(),
+              claimed_by: "worker:test",
+              attempt_count: 1,
+              max_attempts: 8,
+              last_error: null,
+              dead_letter_reason: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              completed_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return {
+          rows: [
+            {
+              canonical_job_id: "job-routed",
+              processing_state: "ROUTING_DEFERRED",
+              primary_lane: "UNCLASSIFIED",
+              lane_evidence: "ROUTING_ERROR: embedding provider unavailable",
+              recommendation_eligibility: "VERIFY",
+              recommendation_outcome: "TRACK",
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-stale-gate" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["APPLY_HARD_GATES"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(deps.runHardGates).not.toHaveBeenCalled();
+  });
+
   it("runs embedding publication with a job-version scope", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
