@@ -296,6 +296,10 @@ export async function seedRecoverablePipelineTasks(
                    AND rer.job_version_id = ps.job_version_id
                    AND rer.run_type = 'DETERMINISTIC'
                    AND rer.status = 'COMPLETED'
+                   AND (
+                     jv.active_requirement_set_id IS NULL
+                     OR rer.requirement_set_id = jv.active_requirement_set_id
+                   )
                )
            )
          )
@@ -350,6 +354,10 @@ export async function seedRecoverablePipelineTasks(
                    AND rer.job_version_id = ps.job_version_id
                    AND rer.run_type = 'DETERMINISTIC'
                    AND rer.status = 'COMPLETED'
+                   AND (
+                     jv.active_requirement_set_id IS NULL
+                     OR rer.requirement_set_id = jv.active_requirement_set_id
+                   )
                )
            )
          )
@@ -372,14 +380,25 @@ export async function seedRecoverablePipelineTasks(
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-         AND NOT EXISTS (
-           SELECT 1
-           FROM job_requirements jr
-           WHERE jr.workspace_id = c.workspace_id
-             AND jr.job_version_id = jv.id
-             AND jr.extractor_type = 'LLM_QUOTED'
-             AND jr.status = 'VALIDATED'
-             AND (jv.active_requirement_set_id IS NULL OR jr.requirement_set_id = jv.active_requirement_set_id)
+         AND NOT (
+           EXISTS (
+             SELECT 1
+             FROM job_requirements jr
+             WHERE jr.workspace_id = c.workspace_id
+               AND jr.job_version_id = jv.id
+               AND jr.extractor_type = 'LLM_QUOTED'
+               AND jr.status = 'VALIDATED'
+               AND (jv.active_requirement_set_id IS NULL OR jr.requirement_set_id = jv.active_requirement_set_id)
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM requirement_extraction_runs rer
+             WHERE rer.workspace_id = c.workspace_id
+               AND rer.job_version_id = jv.id
+               AND rer.run_type = 'LLM_QUOTED'
+               AND rer.status = 'COMPLETED'
+               AND (jv.active_requirement_set_id IS NULL OR rer.requirement_set_id = jv.active_requirement_set_id)
+           )
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
@@ -703,19 +722,23 @@ async function jobVersionHasCompletedRequirementsExtraction(
     `SELECT EXISTS (
        SELECT 1
        FROM job_version_pipeline_state ps
-       WHERE ps.workspace_id = $1
-         AND ps.job_version_id = $2
+       JOIN job_versions jv
+         ON jv.workspace_id = ps.workspace_id
+        AND jv.id = ps.job_version_id
+       JOIN requirement_extraction_runs rer
+         ON rer.workspace_id = jv.workspace_id
+        AND rer.job_version_id = jv.id
+        AND rer.run_type = $3
+        AND rer.status = 'COMPLETED'
+        AND (
+          jv.active_requirement_set_id IS NULL
+          OR rer.requirement_set_id = jv.active_requirement_set_id
+        )
+       WHERE jv.workspace_id = $1
+         AND jv.id = $2
          AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
          AND ps.stage_status = 'COMPLETED'
-         AND EXISTS (
-           SELECT 1
-           FROM requirement_extraction_runs rer
-           WHERE rer.workspace_id = ps.workspace_id
-             AND rer.job_version_id = ps.job_version_id
-             AND rer.run_type = $3
-             AND rer.status = 'COMPLETED'
-         )
-     ) AS exists`,
+       ) AS exists`,
     [ctx.workspaceId, jobVersionId, runType]
   );
   return Boolean(rows[0]?.exists);
@@ -934,7 +957,13 @@ async function executeStageTask(
       jobVersionId,
       "LLM_QUOTED"
     );
-    if (!hasQuotedRequirements) {
+    const hasCompletedQuotedRun = await jobVersionHasCompletedRequirementsExtraction(
+      clientOrPool,
+      ctx,
+      jobVersionId,
+      "LLM_QUOTED"
+    );
+    if (!hasQuotedRequirements && !hasCompletedQuotedRun) {
       throw new Error(`No VALIDATED quoted requirements found for job_version_id=${jobVersionId}.`);
     }
     return;

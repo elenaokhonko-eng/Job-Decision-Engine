@@ -335,18 +335,22 @@ export async function runRequirementsExtraction(
     : mode === 'deterministic_only'
       ? false
       : Boolean(options.quotedExtractor) || shouldRunQuotedExtractor();
+  // A requirement stage is complete only when its audit run is COMPLETED for
+  // the active requirement set. A zero-row deterministic run is valid: it
+  // means the extractor found no deterministic patterns, not that the stage
+  // failed. Row presence alone cannot prove that the stage committed.
   const deterministicCompleteClause = `AND (
         ps.stage_status IS DISTINCT FROM 'COMPLETED'
         OR NOT EXISTS (
           SELECT 1
-          FROM job_requirements deterministic_jr
-          WHERE deterministic_jr.workspace_id = c.workspace_id
-            AND deterministic_jr.job_version_id = jv.id
-            AND deterministic_jr.extractor_type = 'DETERMINISTIC'
-            AND deterministic_jr.status = 'VALIDATED'
+          FROM requirement_extraction_runs deterministic_rer
+          WHERE deterministic_rer.workspace_id = c.workspace_id
+            AND deterministic_rer.job_version_id = jv.id
+            AND deterministic_rer.run_type = 'DETERMINISTIC'
+            AND deterministic_rer.status = 'COMPLETED'
             AND (
               jv.active_requirement_set_id IS NULL
-              OR deterministic_jr.requirement_set_id = jv.active_requirement_set_id
+              OR deterministic_rer.requirement_set_id = jv.active_requirement_set_id
             )
         )
       )`;
@@ -355,14 +359,14 @@ export async function runRequirementsExtraction(
         ps.stage_status IS DISTINCT FROM 'COMPLETED'
         OR NOT EXISTS (
           SELECT 1
-          FROM job_requirements quoted_jr
-          WHERE quoted_jr.workspace_id = c.workspace_id
-            AND quoted_jr.job_version_id = jv.id
-            AND quoted_jr.extractor_type = 'LLM_QUOTED'
-            AND quoted_jr.status = 'VALIDATED'
+          FROM requirement_extraction_runs quoted_rer
+          WHERE quoted_rer.workspace_id = c.workspace_id
+            AND quoted_rer.job_version_id = jv.id
+            AND quoted_rer.run_type = 'LLM_QUOTED'
+            AND quoted_rer.status = 'COMPLETED'
             AND (
               jv.active_requirement_set_id IS NULL
-              OR quoted_jr.requirement_set_id = jv.active_requirement_set_id
+              OR quoted_rer.requirement_set_id = jv.active_requirement_set_id
           )
         )
       )`
@@ -540,28 +544,44 @@ export async function runRequirementsExtraction(
              LIMIT 1`,
             [ctx.workspaceId, activeSetId, requirementIdentityId]
           );
-          let activeSetHasExpectedRows = activeOk.rows.length > 0;
-          if (activeSetHasExpectedRows && quotedExtractor) {
-            const activeQuotedOk = await client.query(
+          let activeSetIsComplete = false;
+          if (activeOk.rows.length > 0) {
+            const activeDeterministicRun = await client.query(
               `SELECT 1
-               FROM job_requirements jr
-               WHERE jr.workspace_id = $1
-                 AND jr.requirement_set_id = $2
-                 AND jr.job_version_id = $3
-                 AND jr.extractor_type = 'LLM_QUOTED'
-                 AND jr.status = 'VALIDATED'
+               FROM requirement_extraction_runs rer
+               WHERE rer.workspace_id = $1
+                 AND rer.requirement_set_id = $2
+                 AND rer.job_version_id = $3
+                 AND rer.run_type = 'DETERMINISTIC'
+                 AND rer.status = 'COMPLETED'
                LIMIT 1`,
               [ctx.workspaceId, activeSetId, job.job_version_id]
             );
-            activeSetHasExpectedRows = activeQuotedOk.rows.length > 0;
-            if (!activeSetHasExpectedRows) {
+            activeSetIsComplete = activeDeterministicRun.rows.length > 0;
+
+            if (activeSetIsComplete && quotedExtractor) {
+              const activeQuotedRun = await client.query(
+                `SELECT 1
+                 FROM requirement_extraction_runs rer
+                 WHERE rer.workspace_id = $1
+                   AND rer.requirement_set_id = $2
+                   AND rer.job_version_id = $3
+                   AND rer.run_type = 'LLM_QUOTED'
+                   AND rer.status = 'COMPLETED'
+                 LIMIT 1`,
+                [ctx.workspaceId, activeSetId, job.job_version_id]
+              );
+              activeSetIsComplete = activeQuotedRun.rows.length > 0;
+            }
+
+            if (!activeSetIsComplete) {
               console.warn(
-                `${progress} active requirement set ${activeSetId} has matching identity but no validated quoted rows; rebuilding`
+                `${progress} active requirement set ${activeSetId} has no completed requirement extraction run for the requested mode; rebuilding`
               );
             }
           }
 
-          if (activeSetHasExpectedRows) {
+          if (activeSetIsComplete) {
             await upsertPipelineState(client, job, 'COMPLETED', null);
             await insertStageEvent(client, job, 'COMPLETED', 'STAGE_COMPLETED', null, {
               cached: true,

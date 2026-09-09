@@ -507,8 +507,8 @@ describe('runRequirementsExtraction', () => {
     expect(quotedExtractor).toHaveBeenCalledTimes(1);
   });
 
-  it('rebuilds an active requirement set when quoted rows are missing in quoted mode', async () => {
-    let checkedActiveQuotedRows = false;
+  it('rebuilds an active requirement set when quoted extraction has no completed run', async () => {
+    let checkedActiveQuotedRun = false;
 
     const query = vi.fn(async (sql: string) => {
       if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
@@ -541,8 +541,12 @@ describe('runRequirementsExtraction', () => {
         return { rows: [{ '?column?': 1 }] };
       }
 
-      if (sql.includes('FROM job_requirements jr') && sql.includes("jr.extractor_type = 'LLM_QUOTED'")) {
-        checkedActiveQuotedRows = true;
+      if (sql.includes('FROM requirement_extraction_runs rer') && sql.includes("rer.run_type = 'DETERMINISTIC'")) {
+        return { rows: [{ '?column?': 1 }] };
+      }
+
+      if (sql.includes('FROM requirement_extraction_runs rer') && sql.includes("rer.run_type = 'LLM_QUOTED'")) {
+        checkedActiveQuotedRun = true;
         return { rows: [] };
       }
 
@@ -601,10 +605,78 @@ describe('runRequirementsExtraction', () => {
 
     const summary = await runRequirementsExtraction(fakePool, { context, quotedExtractor });
 
-    expect(checkedActiveQuotedRows).toBe(true);
+    expect(checkedActiveQuotedRun).toBe(true);
     expect(quotedExtractor).toHaveBeenCalledTimes(1);
     expect(summary.processed).toBe(1);
     expect(summary.quotedInserted).toBe(1);
+    expect(summary.details[0].warning ?? '').not.toContain('requirements already active');
+  });
+
+  it('rebuilds an active requirement-set shell when its deterministic run is missing', async () => {
+    const calls: string[] = [];
+
+    const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
+      if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
+        return {
+          rows: [
+            {
+              workspace_id: context.workspaceId,
+              canonical_job_id: '77777777-7777-4777-8777-777777777777',
+              job_version_id: '88888888-8888-4888-8888-888888888888',
+              content_hash: 'content-hash-deterministic-shell',
+              description_text: 'Must have work authorization and Python experience.',
+            },
+          ],
+        };
+      }
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO requirement_set_identities')) {
+        return { rows: [{ id: 'req-ident-deterministic-shell' }] };
+      }
+      if (sql.includes('SELECT active_requirement_set_id') && sql.includes('FROM job_versions')) {
+        return { rows: [{ active_requirement_set_id: 'req-set-active-shell' }] };
+      }
+      if (sql.includes('SELECT 1') && sql.includes('FROM requirement_sets rs') && sql.includes('rs.id = $2')) {
+        return { rows: [{ '?column?': 1 }] };
+      }
+      if (sql.includes('FROM requirement_extraction_runs rer') && sql.includes("rer.run_type = 'DETERMINISTIC'")) {
+        return { rows: [] };
+      }
+      if (sql.includes('SELECT rs.id') && sql.includes('FROM requirement_sets rs')) {
+        return { rows: [] };
+      }
+      if (sql.includes('SELECT (COALESCE(MAX(revision_number)')) {
+        return { rows: [{ next_revision: 2 }] };
+      }
+      if (sql.includes('INSERT INTO requirement_sets')) {
+        return { rows: [{ id: 'req-set-deterministic-rebuilt' }] };
+      }
+      if (sql.includes('UPDATE job_versions') && sql.includes('active_requirement_set_id')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'DETERMINISTIC'")) {
+        return { rows: [{ id: 'det-run-rebuilt' }] };
+      }
+      if (sql.includes('INSERT INTO job_requirements')) {
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [] };
+    });
+
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    const summary = await runRequirementsExtraction(fakePool, {
+      context,
+      quotedMode: 'deterministic_only',
+    });
+
+    expect(summary.processed).toBe(1);
+    expect(summary.errors).toBe(0);
+    expect(calls.some((sql) => sql.includes('INSERT INTO requirement_sets'))).toBe(true);
     expect(summary.details[0].warning ?? '').not.toContain('requirements already active');
   });
 
