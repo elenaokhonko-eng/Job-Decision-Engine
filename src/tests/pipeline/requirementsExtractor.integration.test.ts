@@ -238,8 +238,14 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
       const lateCanonicalJobId = '90000000-0000-4000-8000-000000000005';
       const lateJobVersionId = '90000000-0000-4000-8000-000000000006';
       await client.query(
-        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane)
-         VALUES ($1, 'Late State Integration Co', 'data platform engineer', 'https://integration.example.com/job/late', 'MATCHED', 'CORE_AI_DATA')`,
+        `INSERT INTO canonical_jobs (
+           id, company_name, normalized_title, canonical_url,
+           processing_state, processing_status, primary_lane
+         )
+         VALUES (
+           $1, 'Late State Integration Co', 'data platform engineer',
+           'https://integration.example.com/job/late', 'MATCHED', 'MATCHED', 'CORE_AI_DATA'
+         )`,
         [lateCanonicalJobId]
       );
       await client.query(
