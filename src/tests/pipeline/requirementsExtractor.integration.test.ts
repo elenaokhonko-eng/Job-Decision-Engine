@@ -234,6 +234,42 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         [`APPLY_HARD_GATES:${sparseJobVersionId}:hard_gate_v1`]
       );
       expect(nextTask.rows[0].n).toBe(1);
+
+      const lateCanonicalJobId = '90000000-0000-4000-8000-000000000005';
+      const lateJobVersionId = '90000000-0000-4000-8000-000000000006';
+      await client.query(
+        `INSERT INTO canonical_jobs (id, company_name, normalized_title, canonical_url, processing_status, primary_lane)
+         VALUES ($1, 'Late State Integration Co', 'data platform engineer', 'https://integration.example.com/job/late', 'MATCHED', 'CORE_AI_DATA')`,
+        [lateCanonicalJobId]
+      );
+      await client.query(
+        `INSERT INTO job_versions (id, canonical_job_id, content_hash, description_text, observed_at)
+         VALUES ($1, $2, 'req-int-late-hash-1', 'Must have Python experience and work authorization.', NOW())`,
+        [lateJobVersionId, lateCanonicalJobId]
+      );
+      await client.query(
+        `UPDATE canonical_jobs SET latest_job_version_id = $1, updated_at = NOW() WHERE id = $2`,
+        [lateJobVersionId, lateCanonicalJobId]
+      );
+
+      const { seedRecoverablePipelineTasks } = await import('../../tasks/stageTaskWorker.js');
+      const seededRepair = await seedRecoverablePipelineTasks(client as any, {
+        context,
+        maxSeedPerType: 10,
+      });
+      expect(seededRepair.byType.EXTRACT_DETERMINISTIC_REQUIREMENTS?.inserted).toBe(1);
+
+      const repairTask = await client.query(
+        `SELECT payload
+         FROM pipeline_tasks
+         WHERE task_key = $1`,
+        [`EXTRACT_DETERMINISTIC_REQUIREMENTS:${lateJobVersionId}:deterministic_v1:repair`]
+      );
+      expect(repairTask.rows[0].payload).toMatchObject({
+        canonical_job_id: lateCanonicalJobId,
+        job_version_id: lateJobVersionId,
+        repair_existing_state: true,
+      });
     } finally {
       await client.query('RESET search_path').catch(() => undefined);
       await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);

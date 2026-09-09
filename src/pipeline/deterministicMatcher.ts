@@ -275,6 +275,37 @@ async function loadNodeEmbeddings(
   }
 }
 
+async function hasCompletedDeterministicRequirements(
+  client: { query: pg.PoolClient["query"] },
+  ctx: WorkspaceContext,
+  jobVersionId: string
+): Promise<boolean> {
+  const { rows } = await client.query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM job_versions jv
+       JOIN job_version_pipeline_state ps
+         ON ps.workspace_id = jv.workspace_id
+        AND ps.job_version_id = jv.id
+        AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+        AND ps.stage_status = 'COMPLETED'
+       JOIN requirement_extraction_runs rer
+         ON rer.workspace_id = jv.workspace_id
+        AND rer.job_version_id = jv.id
+        AND rer.run_type = 'DETERMINISTIC'
+        AND rer.status = 'COMPLETED'
+        AND (
+          jv.active_requirement_set_id IS NULL
+          OR rer.requirement_set_id = jv.active_requirement_set_id
+        )
+       WHERE jv.workspace_id = $1
+         AND jv.id = $2
+     ) AS exists`,
+    [ctx.workspaceId, jobVersionId]
+  );
+  return Boolean(rows[0]?.exists);
+}
+
 export async function runDeterministicMatcher(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options?: {
@@ -518,13 +549,53 @@ export async function runDeterministicMatcher(
         );
 
         if (reqRes.rows.length === 0) {
+          const requirementsStageComplete = await hasCompletedDeterministicRequirements(
+            client as any,
+            ctx,
+            versionId
+          );
+          if (requirementsStageComplete) {
+            await client.query(
+              `UPDATE match_runs
+               SET status = 'COMPLETED',
+                   requirement_count = 0,
+                   matched_count = 0,
+                   coverage_score = 0,
+                   overall_match_score = 0,
+                   embedding_space_id = NULL,
+                   completed_at = NOW()
+               WHERE id = $1`,
+              [matchRunId]
+            );
+
+            await client.query(
+              `UPDATE canonical_jobs
+               SET deterministic_match_score = 0,
+                   deterministic_match_coverage = 0,
+                   latest_match_run_id = $2,
+                   processing_state = 'MATCHED',
+                   processing_status = 'MATCHED',
+                   updated_at = NOW()
+               WHERE workspace_id = $1
+                 AND id = $3`,
+              [ctx.workspaceId, matchRunId, job.id]
+            );
+
+            await client.query("COMMIT");
+            matchedJobs += 1;
+            continue;
+          }
+
           await client.query(
             `UPDATE match_runs
              SET status = 'FAILED',
                  error_message = $2,
                  completed_at = NOW()
              WHERE id = $1`,
-            [matchRunId, "No VALIDATED job_requirements found; deterministic matching skipped."]
+            [
+              matchRunId,
+              "No completed deterministic requirement extraction found; deterministic matching skipped.",
+            ]
           );
 
           await client.query("COMMIT");

@@ -3,6 +3,7 @@ import {
   PipelineWorkerCancelledError,
   buildPipelineTaskKey,
   runPipelineStageTaskWorker,
+  seedRecoverablePipelineTasks,
   type PipelineStageWorkerDependencies,
 } from "../../tasks/stageTaskWorker.js";
 
@@ -92,6 +93,9 @@ describe("stageTaskWorker", () => {
     expect(buildPipelineTaskKey("ROUTE_LANE", "version-1", "lane_router_v1")).toBe(
       "ROUTE_LANE:version-1:lane_router_v1"
     );
+    expect(
+      buildPipelineTaskKey("EXTRACT_DETERMINISTIC_REQUIREMENTS", "version-1", "deterministic_v1", undefined, "repair")
+    ).toBe("EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v1:repair");
   });
 
   it("honors cancellation before seeding or claiming tasks", async () => {
@@ -437,6 +441,139 @@ describe("stageTaskWorker", () => {
           call.params?.[2] === "APPLY_HARD_GATES:version-empty:hard_gate_v1"
       )
     ).toBe(true);
+  });
+
+  it("defers an old match task until deterministic requirements have been repaired", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [
+            {
+              id: "task-stale-match",
+              workspace_id: ctx.workspaceId,
+              task_type: "MATCH_PROFILE_EVIDENCE",
+              task_key: "MATCH_PROFILE_EVIDENCE:version-stale:deterministic_matcher_v1:profile:profile-1",
+              payload: { canonical_job_id: "job-stale", job_version_id: "version-stale" },
+              status: "RUNNING",
+              available_at: new Date().toISOString(),
+              lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+              heartbeat_at: new Date().toISOString(),
+              claimed_by: "worker:test",
+              attempt_count: 2,
+              max_attempts: 8,
+              last_error: "previous matcher prerequisite failure",
+              dead_letter_reason: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              completed_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("FROM job_version_pipeline_state ps") && sql.includes("requirement_extraction_runs rer")) {
+        return { rows: [{ exists: false }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-repair-requirements" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-stale-match" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(summary.errors).toEqual([]);
+    expect(deps.runDeterministicMatcher).not.toHaveBeenCalled();
+    expect(
+      calls.some(
+        (call) =>
+          call.sql.includes("INSERT INTO pipeline_tasks") &&
+          call.params?.[1] === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
+          (call.params?.[3] as Record<string, unknown>)?.repair_existing_state === true
+      )
+    ).toBe(true);
+  });
+
+  it("seeds deterministic repair before matching and requires a completed extraction audit", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (
+        sql.includes("SELECT c.id AS canonical_job_id") &&
+        sql.includes("AS repair_existing_state")
+      ) {
+        return {
+          rows: [
+            {
+              canonical_job_id: "job-stale",
+              job_version_id: "version-stale",
+              repair_existing_state: true,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("SELECT c.id AS canonical_job_id") && sql.includes("active_profile.id AS profile_version_id")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-repair" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+
+    const summary = await seedRecoverablePipelineTasks(fakeClient, {
+      context: ctx,
+      maxSeedPerType: 1,
+    });
+
+    expect(summary.byType.EXTRACT_DETERMINISTIC_REQUIREMENTS).toEqual({ inserted: 1, existing: 0 });
+    expect(summary.byType.MATCH_PROFILE_EVIDENCE ?? { inserted: 0, existing: 0 }).toEqual({
+      inserted: 0,
+      existing: 0,
+    });
+    const extractionSeed = calls.find(
+      (call) => call.sql.includes("AS repair_existing_state")
+    );
+    expect(extractionSeed?.sql).toContain("requirement_extraction_runs rer");
+    expect(extractionSeed?.sql).toContain("ps.stage_status = 'COMPLETED'");
+    const matchSeed = calls.find(
+      (call) => call.sql.includes("active_profile.id AS profile_version_id")
+    );
+    expect(matchSeed?.sql).toContain("target_jv.active_requirement_set_id");
+    expect(matchSeed?.sql).toContain("rer.run_type = 'DETERMINISTIC'");
   });
 
   it("passes forced preference recalculation through hard-gate tasks", async () => {

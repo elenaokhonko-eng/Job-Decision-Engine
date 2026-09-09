@@ -161,12 +161,14 @@ export function buildPipelineTaskKey(
   taskType: PipelineStageTaskType,
   id: string,
   version: string,
-  profileVersionId?: string
+  profileVersionId?: string,
+  taskVariant?: string
 ): string {
+  const variantSuffix = taskVariant ? `:${taskVariant}` : "";
   const profileSuffix = taskType === "MATCH_PROFILE_EVIDENCE" && profileVersionId
     ? `:profile:${profileVersionId}`
     : "";
-  return `${taskType}:${id}:${version}${profileSuffix}`;
+  return `${taskType}:${id}:${version}${variantSuffix}${profileSuffix}`;
 }
 
 async function resolveActiveProfileVersionId(
@@ -205,10 +207,20 @@ async function enqueueStageTask(
       : await resolveActiveProfileVersionId(clientOrPool, context);
     taskPayload = { ...payload, profile_version_id: profileVersionId };
   }
+  const taskVariant = taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
+      taskPayload.repair_existing_state === true
+    ? "repair"
+    : undefined;
   const result = await enqueuePipelineTask(
     {
       taskType,
-      taskKey: buildPipelineTaskKey(taskType, id, stageVersion(taskType), profileVersionId),
+      taskKey: buildPipelineTaskKey(
+        taskType,
+        id,
+        stageVersion(taskType),
+        profileVersionId,
+        taskVariant
+      ),
       payload: taskPayload,
       maxAttempts,
     },
@@ -295,7 +307,9 @@ export async function seedRecoverablePipelineTasks(
       ctx,
       summary,
       "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+      `SELECT c.id AS canonical_job_id,
+              jv.id AS job_version_id,
+              COALESCE(c.processing_state, c.processing_status) <> 'RAW_STAGED' AS repair_existing_state
        FROM canonical_jobs c
        JOIN job_versions jv
          ON jv.workspace_id = c.workspace_id
@@ -308,43 +322,37 @@ export async function seedRecoverablePipelineTasks(
           LIMIT 1
         ))
        WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
-         AND NOT (
-           EXISTS (
-             SELECT 1
-             FROM job_requirements jr
-             WHERE jr.workspace_id = c.workspace_id
-               AND jr.job_version_id = jv.id
-               AND jr.extractor_type = 'DETERMINISTIC'
-               AND jr.status = 'VALIDATED'
-           )
-           OR EXISTS (
-             SELECT 1
-             FROM job_version_pipeline_state ps
-             WHERE ps.workspace_id = c.workspace_id
-               AND ps.job_version_id = jv.id
-               AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
-               AND ps.stage_status = 'COMPLETED'
-               AND EXISTS (
-                 SELECT 1
-                 FROM requirement_extraction_runs rer
-                 WHERE rer.workspace_id = ps.workspace_id
-                   AND rer.job_version_id = ps.job_version_id
-                   AND rer.run_type = 'DETERMINISTIC'
-                   AND rer.status = 'COMPLETED'
-                   AND (
-                     jv.active_requirement_set_id IS NULL
-                     OR rer.requirement_set_id = jv.active_requirement_set_id
-                   )
-               )
-           )
+         AND COALESCE(c.processing_state, c.processing_status) IN (
+           'RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'MATCHED',
+           'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM job_version_pipeline_state ps
+           JOIN requirement_extraction_runs rer
+             ON rer.workspace_id = ps.workspace_id
+            AND rer.job_version_id = ps.job_version_id
+            AND rer.run_type = 'DETERMINISTIC'
+            AND rer.status = 'COMPLETED'
+            AND (
+              jv.active_requirement_set_id IS NULL
+              OR rer.requirement_set_id = jv.active_requirement_set_id
+            )
+           WHERE ps.workspace_id = c.workspace_id
+             AND ps.job_version_id = jv.id
+             AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+             AND ps.stage_status = 'COMPLETED'
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
         id: row.job_version_id,
-        payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
+        payload: {
+          canonical_job_id: row.canonical_job_id,
+          job_version_id: row.job_version_id,
+          ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
+        },
       })
     );
 
@@ -367,35 +375,22 @@ export async function seedRecoverablePipelineTasks(
         ))
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
-         AND (
-           EXISTS (
-             SELECT 1
-             FROM job_requirements jr
-             WHERE jr.workspace_id = c.workspace_id
-               AND jr.job_version_id = jv.id
-               AND jr.extractor_type = 'DETERMINISTIC'
-               AND jr.status = 'VALIDATED'
-           )
-           OR EXISTS (
-             SELECT 1
-             FROM job_version_pipeline_state ps
-             WHERE ps.workspace_id = c.workspace_id
-               AND ps.job_version_id = jv.id
-               AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
-               AND ps.stage_status = 'COMPLETED'
-               AND EXISTS (
-                 SELECT 1
-                 FROM requirement_extraction_runs rer
-                 WHERE rer.workspace_id = ps.workspace_id
-                   AND rer.job_version_id = ps.job_version_id
-                   AND rer.run_type = 'DETERMINISTIC'
-                   AND rer.status = 'COMPLETED'
-                   AND (
-                     jv.active_requirement_set_id IS NULL
-                     OR rer.requirement_set_id = jv.active_requirement_set_id
-                   )
-               )
-           )
+         AND EXISTS (
+           SELECT 1
+           FROM job_version_pipeline_state ps
+           JOIN requirement_extraction_runs rer
+             ON rer.workspace_id = ps.workspace_id
+            AND rer.job_version_id = ps.job_version_id
+            AND rer.run_type = 'DETERMINISTIC'
+            AND rer.status = 'COMPLETED'
+            AND (
+              jv.active_requirement_set_id IS NULL
+              OR rer.requirement_set_id = jv.active_requirement_set_id
+            )
+           WHERE ps.workspace_id = c.workspace_id
+             AND ps.job_version_id = jv.id
+             AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+             AND ps.stage_status = 'COMPLETED'
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
@@ -416,25 +411,19 @@ export async function seedRecoverablePipelineTasks(
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-         AND NOT (
-           EXISTS (
-             SELECT 1
-             FROM job_requirements jr
-             WHERE jr.workspace_id = c.workspace_id
-               AND jr.job_version_id = jv.id
-               AND jr.extractor_type = 'LLM_QUOTED'
-               AND jr.status = 'VALIDATED'
-               AND (jv.active_requirement_set_id IS NULL OR jr.requirement_set_id = jv.active_requirement_set_id)
-           )
-           OR EXISTS (
-             SELECT 1
-             FROM requirement_extraction_runs rer
-             WHERE rer.workspace_id = c.workspace_id
-               AND rer.job_version_id = jv.id
-               AND rer.run_type = 'LLM_QUOTED'
-               AND rer.status = 'COMPLETED'
-               AND (jv.active_requirement_set_id IS NULL OR rer.requirement_set_id = jv.active_requirement_set_id)
-           )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM job_version_pipeline_state ps
+           JOIN requirement_extraction_runs rer
+             ON rer.workspace_id = ps.workspace_id
+            AND rer.job_version_id = ps.job_version_id
+            AND rer.run_type = 'LLM_QUOTED'
+            AND rer.status = 'COMPLETED'
+            AND (jv.active_requirement_set_id IS NULL OR rer.requirement_set_id = jv.active_requirement_set_id)
+           WHERE ps.workspace_id = c.workspace_id
+             AND ps.job_version_id = jv.id
+             AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+             AND ps.stage_status = 'COMPLETED'
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
@@ -455,30 +444,19 @@ export async function seedRecoverablePipelineTasks(
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-         AND (
-           EXISTS (
-             SELECT 1
-             FROM job_requirements jr
-             WHERE jr.workspace_id = c.workspace_id
-               AND jr.job_version_id = jv.id
-               AND jr.status = 'VALIDATED'
-           )
-           OR EXISTS (
-             SELECT 1
-             FROM job_version_pipeline_state ps
-             WHERE ps.workspace_id = c.workspace_id
-               AND ps.job_version_id = jv.id
-               AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
-               AND ps.stage_status = 'COMPLETED'
-               AND EXISTS (
-                 SELECT 1
-                 FROM requirement_extraction_runs rer
-                 WHERE rer.workspace_id = ps.workspace_id
-                   AND rer.job_version_id = ps.job_version_id
-                   AND rer.run_type = 'DETERMINISTIC'
-                   AND rer.status = 'COMPLETED'
-               )
-           )
+         AND EXISTS (
+           SELECT 1
+           FROM job_version_pipeline_state ps
+           JOIN requirement_extraction_runs rer
+             ON rer.workspace_id = ps.workspace_id
+            AND rer.job_version_id = ps.job_version_id
+            AND rer.run_type = 'DETERMINISTIC'
+            AND rer.status = 'COMPLETED'
+            AND (jv.active_requirement_set_id IS NULL OR rer.requirement_set_id = jv.active_requirement_set_id)
+           WHERE ps.workspace_id = c.workspace_id
+             AND ps.job_version_id = jv.id
+             AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+             AND ps.stage_status = 'COMPLETED'
          )
          AND NOT EXISTS (
            SELECT 1
@@ -552,6 +530,9 @@ export async function seedRecoverablePipelineTasks(
          ORDER BY observed_at DESC
          LIMIT 1
        ) jv ON TRUE
+       JOIN job_versions target_jv
+         ON target_jv.workspace_id = c.workspace_id
+        AND target_jv.id = COALESCE(c.latest_job_version_id, jv.id)
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) IN (
            'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
@@ -559,6 +540,23 @@ export async function seedRecoverablePipelineTasks(
          AND c.primary_lane IS NOT NULL
          AND c.primary_lane <> 'UNCLASSIFIED'
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
+         AND EXISTS (
+           SELECT 1
+           FROM job_version_pipeline_state ps
+           JOIN requirement_extraction_runs rer
+             ON rer.workspace_id = ps.workspace_id
+            AND rer.job_version_id = ps.job_version_id
+            AND rer.run_type = 'DETERMINISTIC'
+            AND rer.status = 'COMPLETED'
+            AND (
+              target_jv.active_requirement_set_id IS NULL
+              OR rer.requirement_set_id = target_jv.active_requirement_set_id
+            )
+           WHERE ps.workspace_id = c.workspace_id
+             AND ps.job_version_id = target_jv.id
+             AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+             AND ps.stage_status = 'COMPLETED'
+         )
          AND (
            COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
            OR NOT EXISTS (
@@ -748,33 +746,6 @@ async function jobVersionHasEmbedding(
   return Boolean(rows[0]?.exists);
 }
 
-async function jobVersionHasValidatedRequirements(
-  clientOrPool: pg.Pool | pg.PoolClient,
-  ctx: WorkspaceContext,
-  jobVersionId: string,
-  extractorType: "DETERMINISTIC" | "LLM_QUOTED"
-): Promise<boolean> {
-  const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1
-       FROM job_versions jv
-       JOIN job_requirements jr
-         ON jr.workspace_id = jv.workspace_id
-        AND jr.job_version_id = jv.id
-        AND (
-          jv.active_requirement_set_id IS NULL
-          OR jr.requirement_set_id = jv.active_requirement_set_id
-        )
-       WHERE jv.workspace_id = $1
-         AND jv.id = $2
-         AND jr.extractor_type = $3
-         AND jr.status = 'VALIDATED'
-     ) AS exists`,
-    [ctx.workspaceId, jobVersionId, extractorType]
-  );
-  return Boolean(rows[0]?.exists);
-}
-
 async function jobVersionHasCompletedRequirementsExtraction(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
@@ -876,6 +847,47 @@ async function maybeEnqueueAfterTask(
   if (!jobVersionId) return;
 
   if (taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS") {
+    const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
+    const repairExistingState = payload.repair_existing_state === true;
+    const rematchableStates = new Set([
+      "LANE_ROUTED",
+      "MATCHED",
+      "QUEUED_FOR_AI",
+      "EVALUATING",
+      "AI_EVALUATED",
+      "EVALUATED",
+    ]);
+    if (
+      repairExistingState &&
+      rematchableStates.has(state.processingState || "") &&
+      state.primaryLane &&
+      state.primaryLane !== "UNCLASSIFIED"
+    ) {
+      await enqueueStageTask(
+        "MATCH_PROFILE_EVIDENCE",
+        jobVersionId,
+        {
+          canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
+          job_version_id: jobVersionId,
+        },
+        clientOrPool,
+        ctx
+      );
+      return;
+    }
+    if (repairExistingState && state.processingState === "PREQUALIFIED") {
+      await enqueueStageTask(
+        "EXTRACT_QUOTED_REQUIREMENTS",
+        jobVersionId,
+        {
+          canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
+          job_version_id: jobVersionId,
+        },
+        clientOrPool,
+        ctx
+      );
+      return;
+    }
     await enqueueStageTask("APPLY_HARD_GATES", jobVersionId, payload, clientOrPool, ctx);
     return;
   }
@@ -912,6 +924,9 @@ async function maybeEnqueueAfterTask(
   }
 
   if (taskType === "MATCH_PROFILE_EVIDENCE") {
+    if (payload.match_deferred_for_requirements === true) {
+      return;
+    }
     await enqueueStageTask("DECIDE_RECOMMENDATION", jobVersionId, stagePayload, clientOrPool, ctx);
     return;
   }
@@ -962,20 +977,14 @@ async function executeStageTask(
     if (summary.errors > 0) {
       throw new Error(`Deterministic requirement extraction failed for job_version_id=${jobVersionId}.`);
     }
-    const hasDeterministicRequirements = await jobVersionHasValidatedRequirements(
-      clientOrPool,
-      ctx,
-      jobVersionId,
-      "DETERMINISTIC"
-    );
     const hasCompletedDeterministicRun = await jobVersionHasCompletedRequirementsExtraction(
       clientOrPool,
       ctx,
       jobVersionId,
       "DETERMINISTIC"
     );
-    if (!hasDeterministicRequirements && !hasCompletedDeterministicRun) {
-      throw new Error(`No VALIDATED deterministic requirements found for job_version_id=${jobVersionId}.`);
+    if (!hasCompletedDeterministicRun) {
+      throw new Error(`No completed deterministic requirement extraction found for job_version_id=${jobVersionId}.`);
     }
     return;
   }
@@ -1014,20 +1023,14 @@ async function executeStageTask(
     ) {
       throw new Error(`Quoted requirement extraction failed for job_version_id=${jobVersionId}.`);
     }
-    const hasQuotedRequirements = await jobVersionHasValidatedRequirements(
-      clientOrPool,
-      ctx,
-      jobVersionId,
-      "LLM_QUOTED"
-    );
     const hasCompletedQuotedRun = await jobVersionHasCompletedRequirementsExtraction(
       clientOrPool,
       ctx,
       jobVersionId,
       "LLM_QUOTED"
     );
-    if (!hasQuotedRequirements && !hasCompletedQuotedRun) {
-      throw new Error(`No VALIDATED quoted requirements found for job_version_id=${jobVersionId}.`);
+    if (!hasCompletedQuotedRun) {
+      throw new Error(`No completed quoted requirement extraction found for job_version_id=${jobVersionId}.`);
     }
     return;
   }
@@ -1073,6 +1076,34 @@ async function executeStageTask(
   }
 
   if (taskType === "MATCH_PROFILE_EVIDENCE") {
+    const hasCompletedDeterministicRun = await jobVersionHasCompletedRequirementsExtraction(
+      clientOrPool,
+      ctx,
+      jobVersionId,
+      "DETERMINISTIC"
+    );
+    if (!hasCompletedDeterministicRun) {
+      await enqueueStageTask(
+        "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+        jobVersionId,
+        {
+          canonical_job_id: (task.payload as Record<string, unknown> | null)?.canonical_job_id,
+          job_version_id: jobVersionId,
+          repair_existing_state: true,
+        },
+        clientOrPool,
+        ctx
+      );
+      if (task.payload && typeof task.payload === "object") {
+        task.payload = {
+          ...(task.payload as Record<string, unknown>),
+          match_deferred_for_requirements: true,
+        };
+      } else {
+        task.payload = { job_version_id: jobVersionId, match_deferred_for_requirements: true };
+      }
+      return;
+    }
     const summary = await dependencies.runDeterministicMatcher(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],

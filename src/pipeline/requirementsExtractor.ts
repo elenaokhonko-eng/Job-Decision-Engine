@@ -322,8 +322,9 @@ export async function runRequirementsExtraction(
 
   // NOTE: requirements extraction is a *job-version* stage, but canonical job processing_state
   // can advance (e.g. RAW_STAGED -> PREQUALIFIED -> LANE_ROUTED) even when this stage fails.
-  // If we only target RAW_STAGED, retries become impossible and LANE_ROUTED jobs can get stuck
-  // forever with zero VALIDATED job_requirements (breaking deterministic matching + documents).
+  // If we only target early states, retries become impossible and jobs that advanced before
+  // this stage completed can get stuck forever without a durable requirement-stage audit.
+  // Those late-state records are repaired before profile matching is allowed to run.
   const params: unknown[] = [ctx.workspaceId];
   const jobVersionIds = options.jobVersionIds?.filter(Boolean) ?? [];
   const jobVersionFilter = jobVersionIds.length > 0
@@ -405,9 +406,10 @@ export async function runRequirementsExtraction(
       AND (
         COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED')
         OR (
-          COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
-          AND ps.stage_status IS NOT NULL
-          AND ps.stage_status <> 'COMPLETED'
+          COALESCE(c.processing_state, c.processing_status) IN (
+            'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
+          )
+          AND (ps.stage_status IS NULL OR ps.stage_status <> 'COMPLETED')
         )
       )
       ${jobVersionFilter}

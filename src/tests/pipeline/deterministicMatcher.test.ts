@@ -167,4 +167,76 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     expect(jobSelect?.[0]).toContain("'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'");
     expect(jobSelect?.[1]).toContain(true);
   });
+
+  it('records a completed zero-coverage match when deterministic extraction completed with no requirements', async () => {
+    (mPool.query as any).mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM profile_versions") && sql.includes("pv.status = 'ACTIVE'")) {
+        return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
+      }
+      if (sql.includes('FROM profile_facts pf')) {
+        return {
+          rows: [
+            {
+              id: '22222222-2222-4222-8222-222222222222',
+              fact_type: 'PROJECT',
+              statement: 'Built production machine learning pipelines for fraud detection',
+              evidence_tier: 'PROFESSIONAL_PRODUCTION',
+              verification_status: 'VERIFIED',
+              structured_value: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes('FROM canonical_jobs c')) {
+        return {
+          rows: [
+            {
+              id: '33333333-3333-4333-8333-333333333333',
+              latest_job_version_id: '44444444-4444-4444-8444-444444444444',
+              resolved_job_version_id: '44444444-4444-4444-8444-444444444444',
+            },
+          ],
+        };
+      }
+      if (sql.includes('INSERT INTO match_runs') && sql.includes('RETURNING id')) {
+        return { rows: [{ id: '55555555-5555-4555-8555-555555555555' }] };
+      }
+      if (sql.includes('JOIN job_requirements jr')) {
+        return { rows: [] };
+      }
+      if (sql.includes('FROM job_versions jv') && sql.includes('job_version_pipeline_state ps')) {
+        return { rows: [{ exists: true }] };
+      }
+      return { rows: [] };
+    });
+
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const summary = await runDeterministicMatcher(undefined, { context });
+
+    expect(summary.matchedJobs).toBe(1);
+    expect(summary.errors).toBe(0);
+    expect(
+      (mPool.query as any).mock.calls.some(
+        (call: any[]) =>
+          typeof call[0] === 'string' &&
+          call[0].includes("requirement_count = 0") &&
+          call[0].includes("status = 'COMPLETED'")
+      )
+    ).toBe(true);
+    expect(
+      (mPool.query as any).mock.calls.some(
+        (call: any[]) =>
+          typeof call[0] === 'string' &&
+          call[0].includes("processing_status = 'MATCHED'") &&
+          call[0].includes('deterministic_match_score = 0')
+      )
+    ).toBe(true);
+  });
 });

@@ -48,6 +48,9 @@ describe('process backlog workflow', () => {
     expect(worker).toContain("FROM match_runs mr");
     expect(worker).toContain("mr.profile_version_id = active_profile.id");
     expect(worker).toContain(":profile:");
+    expect(worker).toContain("target_jv.active_requirement_set_id");
+    expect(worker).toContain("repair_existing_state");
+    expect(worker).toContain("match_deferred_for_requirements");
   });
 
   it('uses a serialized worker entrypoint that fails loudly on retryable stage errors', () => {
