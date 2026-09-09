@@ -12,7 +12,11 @@ on:
 
 concurrency:
   group: process-discovery-backlog
-  cancel-in-progress: true
+  # A backlog drain owns leased database work. A scheduled run and the
+  # post-ingestion workflow_run trigger may overlap; queue the later run so
+  # it cannot terminate the active worker mid-stage and leave the drain
+  # dependent on lease expiry/recovery.
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

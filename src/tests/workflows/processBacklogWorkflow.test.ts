@@ -9,7 +9,8 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).toContain('workflow_run:');
     expect(workflow).toContain('- Job Discovery Ingestion');
-    expect(workflow).toContain('cancel-in-progress: true');
+    expect(workflow).toContain('cancel-in-progress: false');
+    expect(workflow).not.toContain('cancel-in-progress: true');
     expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(workflow).toContain('npx tsx scripts/process_pipeline_tasks.ts');
     expect(workflow).toContain('timeout-minutes: 15');
