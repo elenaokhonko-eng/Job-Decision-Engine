@@ -2,12 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 import {
   PipelineWorkerCancelledError,
   buildPipelineTaskKey,
+  parsePipelineTaskTypes,
   runPipelineStageTaskWorker,
   seedRecoverablePipelineTasks,
   type PipelineStageWorkerDependencies,
 } from "../../tasks/stageTaskWorker.js";
 
 describe("stageTaskWorker", () => {
+  it("parses a validated task allowlist for deterministic recovery", () => {
+    expect(parsePipelineTaskTypes("NORMALIZE_OBSERVATION, MATCH_PROFILE_EVIDENCE, NORMALIZE_OBSERVATION")).toEqual([
+      "NORMALIZE_OBSERVATION",
+      "MATCH_PROFILE_EVIDENCE",
+    ]);
+    expect(() => parsePipelineTaskTypes("NOT_A_STAGE")).toThrow("Unsupported PIPELINE_TASK_WORKER_TASK_TYPES");
+    expect(() => parsePipelineTaskTypes("  , ")).toThrow("must contain at least one task type");
+  });
+
   const ctx = {
     workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     workspaceKey: "default",
@@ -704,6 +714,7 @@ describe("stageTaskWorker", () => {
               processing_state: "PREQUALIFIED",
               primary_lane: null,
               lane_evidence: null,
+              gate_decision: null,
               recommendation_eligibility: null,
               recommendation_outcome: null,
             },
@@ -791,6 +802,7 @@ describe("stageTaskWorker", () => {
               processing_state: "ROUTING_DEFERRED",
               primary_lane: "UNCLASSIFIED",
               lane_evidence: "ROUTING_ERROR: embedding provider unavailable",
+              gate_decision: null,
               recommendation_eligibility: "VERIFY",
               recommendation_outcome: "TRACK",
             },
@@ -874,6 +886,7 @@ describe("stageTaskWorker", () => {
               processing_state: "PREQUALIFIED",
               primary_lane: null,
               lane_evidence: null,
+              gate_decision: null,
               recommendation_eligibility: null,
               recommendation_outcome: null,
             },
@@ -963,6 +976,7 @@ describe("stageTaskWorker", () => {
               processing_state: "ROUTING_DEFERRED",
               primary_lane: null,
               lane_evidence: "ROUTING_ERROR: embedding provider unavailable",
+              gate_decision: null,
               recommendation_eligibility: null,
               recommendation_outcome: null,
             },

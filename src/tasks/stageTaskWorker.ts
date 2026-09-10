@@ -41,6 +41,22 @@ export const PIPELINE_STAGE_TASK_TYPES = [
 
 export type PipelineStageTaskType = (typeof PIPELINE_STAGE_TASK_TYPES)[number];
 
+export function parsePipelineTaskTypes(raw: string | undefined): PipelineStageTaskType[] {
+  if (!raw || raw.trim() === "") return [...PIPELINE_STAGE_TASK_TYPES];
+
+  const requested = [...new Set(raw.split(",").map((value) => value.trim()).filter(Boolean))];
+  const unsupported = requested.filter(
+    (value): value is string => !PIPELINE_STAGE_TASK_TYPES.includes(value as PipelineStageTaskType)
+  );
+  if (unsupported.length > 0) {
+    throw new Error(`Unsupported PIPELINE_TASK_WORKER_TASK_TYPES value(s): ${unsupported.join(", ")}`);
+  }
+  if (requested.length === 0) {
+    throw new Error("PIPELINE_TASK_WORKER_TASK_TYPES must contain at least one task type when set.");
+  }
+  return requested as PipelineStageTaskType[];
+}
+
 export interface PipelineStageWorkerDependencies {
   runNormalization: typeof defaultRunNormalization;
   runRequirementsExtraction: typeof defaultRunRequirementsExtraction;
@@ -848,21 +864,27 @@ async function lookupJobState(
   laneEvidence: string | null;
   recommendationEligibility: string | null;
   recommendationOutcome: string | null;
+  gateDecision: string | null;
+  latestJobVersionId: string | null;
 }> {
   const { rows } = await (clientOrPool as QueryClient).query<{
     canonical_job_id: string | null;
     processing_state: string | null;
     primary_lane: string | null;
     lane_evidence: string | null;
+    gate_decision: string | null;
     recommendation_eligibility: string | null;
     recommendation_outcome: string | null;
+    latest_job_version_id: string | null;
   }>(
     `SELECT c.id AS canonical_job_id,
             COALESCE(c.processing_state, c.processing_status) AS processing_state,
             c.primary_lane,
             c.lane_evidence,
+            c.gate_decision,
             c.recommendation_eligibility,
-            c.recommendation_outcome
+            c.recommendation_outcome,
+            c.latest_job_version_id
      FROM job_versions jv
      JOIN canonical_jobs c
        ON c.workspace_id = jv.workspace_id
@@ -878,9 +900,44 @@ async function lookupJobState(
     processingState: row?.processing_state ?? null,
     primaryLane: row?.primary_lane ?? null,
     laneEvidence: row?.lane_evidence ?? null,
+    gateDecision: row?.gate_decision ?? null,
     recommendationEligibility: row?.recommendation_eligibility ?? null,
     recommendationOutcome: row?.recommendation_outcome ?? null,
+    latestJobVersionId: row?.latest_job_version_id ?? null,
   };
+}
+
+async function jobVersionHasCurrentMatch(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string
+): Promise<boolean> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM canonical_jobs c
+       JOIN job_versions jv
+         ON jv.workspace_id = c.workspace_id
+        AND jv.canonical_job_id = c.id
+        AND jv.id = $2
+       JOIN profile_versions pv
+         ON pv.workspace_id = c.workspace_id
+        AND pv.status = 'ACTIVE'
+       JOIN match_runs mr
+         ON mr.workspace_id = c.workspace_id
+        AND mr.canonical_job_id = c.id
+        AND mr.id = c.latest_match_run_id
+        AND mr.job_version_id = jv.id
+        AND mr.profile_version_id = pv.id
+        AND mr.requirement_set_id = jv.active_requirement_set_id
+        AND mr.job_content_hash = jv.content_hash
+        AND mr.context_fingerprint IS NOT NULL
+        AND mr.status = 'COMPLETED'
+       WHERE c.workspace_id = $1
+     ) AS exists`,
+    [ctx.workspaceId, jobVersionId]
+  );
+  return Boolean(rows[0]?.exists);
 }
 
 async function jobVersionHasEmbedding(
@@ -1279,6 +1336,42 @@ async function executeStageTask(
   }
 
   if (taskType === "DECIDE_RECOMMENDATION") {
+    const decisionState = await lookupJobState(clientOrPool, ctx, jobVersionId);
+    if (decisionState.latestJobVersionId && decisionState.latestJobVersionId !== jobVersionId) {
+      // The canonical job advanced after this task was enqueued. Complete the
+      // stale task without retrying obsolete work; the current version has its
+      // own context-specific task identity.
+      return;
+    }
+    const matchDependentStates = new Set([
+      "LANE_ROUTED",
+      "MATCHED",
+      "QUEUED_FOR_AI",
+      "EVALUATING",
+      "AI_EVALUATED",
+      "EVALUATED",
+    ]);
+    const requiresCurrentMatch =
+      decisionState.gateDecision === "PASS" || matchDependentStates.has(decisionState.processingState || "");
+    if (requiresCurrentMatch && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId))) {
+      const payload = (task.payload || {}) as Record<string, unknown>;
+      await enqueueStageTask(
+        "MATCH_PROFILE_EVIDENCE",
+        jobVersionId,
+        {
+          canonical_job_id: payload.canonical_job_id,
+          job_version_id: jobVersionId,
+        },
+        clientOrPool,
+        ctx
+      );
+      throw new PipelineTaskDependencyBlockedError(
+        `MATCH_PROFILE_EVIDENCE:${jobVersionId}`,
+        "Run a current profile match, then resume DECIDE_RECOMMENDATION.",
+        `Recommendation decision is blocked until a current match exists for job_version_id=${jobVersionId}.`
+      );
+    }
+
     const summary = await dependencies.runRecommendationDecider(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],

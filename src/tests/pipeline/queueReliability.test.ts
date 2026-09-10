@@ -15,6 +15,7 @@ import { describe, it, expect, afterAll, beforeAll, beforeEach } from "vitest";
 import pg from "pg";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { blockPipelineTask } from "../../tasks/pipelineTasks.js";
 
 // ── CI detection ──────────────────────────────────────────────────────────────
 
@@ -82,6 +83,7 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
   const Q_ID_1  = "40000000-0000-0000-0000-000000000001";
   const Q_ID_2  = "40000000-0000-0000-0000-000000000002";
   const Q_ID_3  = "40000000-0000-0000-0000-000000000003";
+  const TASK_ID = "50000000-0000-0000-0000-000000000001";
 
   const V_ID_1 = "60000000-0000-0000-0000-000000000001";
   const V_ID_2 = "60000000-0000-0000-0000-000000000002";
@@ -123,6 +125,7 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
   });
 
   afterAll(async () => {
+    await q(`DELETE FROM pipeline_tasks WHERE id = $1`, [TASK_ID]);
     await q(`DELETE FROM evaluation_queue WHERE id IN ($1, $2, $3)`, [Q_ID_1, Q_ID_2, Q_ID_3]);
     await q(`DELETE FROM job_versions WHERE canonical_job_id IN ($1, $2, $3)`, [JOB_ID, JOB_ID2, JOB_ID3]);
     await q(`DELETE FROM canonical_jobs WHERE id IN ($1, $2, $3)`, [JOB_ID, JOB_ID2, JOB_ID3]);
@@ -197,5 +200,62 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
     const pickupCount = await count("evaluation_queue",
       `id = '${Q_ID_1}' AND status = 'RETRY_WAIT' AND available_at <= NOW()`);
     expect(pickupCount).toBe(0);
+  });
+
+  it("dependency blocking preserves the pipeline_tasks available_at NOT NULL contract", async () => {
+    await q(`DELETE FROM pipeline_tasks WHERE id = $1`, [TASK_ID]);
+    const contextRows = await q(
+      `SELECT w.id AS workspace_id, u.id AS user_id
+       FROM workspaces w
+       JOIN workspace_memberships m ON m.workspace_id = w.id AND m.status = 'ACTIVE'
+       JOIN workspace_users u ON u.id = m.user_id
+       WHERE w.workspace_key = 'default' AND u.user_key = 'local_user'
+       LIMIT 1`
+    );
+    const context = {
+      workspaceId: contextRows.rows[0].workspace_id,
+      workspaceKey: "default",
+      userId: contextRows.rows[0].user_id,
+      userKey: "local_user",
+      role: "OWNER" as const,
+    };
+    await q(
+      `INSERT INTO pipeline_tasks (id, workspace_id, task_type, task_key, payload, status, available_at, max_attempts)
+       VALUES ($1, $2, 'MATCH_PROFILE_EVIDENCE', 'integration:blocking', '{}'::jsonb, 'RUNNING', NOW(), 8)`,
+      [TASK_ID, context.workspaceId]
+    );
+    await q(
+      `INSERT INTO pipeline_task_attempts (workspace_id, task_id, attempt_number, status)
+       VALUES ($1, $2, 1, 'STARTED')`,
+      [context.workspaceId, TASK_ID]
+    );
+
+    await blockPipelineTask(
+      {
+        taskId: TASK_ID,
+        taskKey: "integration:blocking",
+        taskType: "MATCH_PROFILE_EVIDENCE",
+        payload: { job_version_id: V_ID_1 },
+        leaseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        leaseExpiresAt: new Date().toISOString(),
+        attemptNumber: 1,
+        maxAttempts: 8,
+      },
+      {
+        blockedOn: `EXTRACT_DETERMINISTIC_REQUIREMENTS:${V_ID_1}`,
+        reason: "requirements are missing",
+        repairAction: "extract requirements and resume matching",
+      },
+      pool,
+      { context }
+    );
+
+    const blocked = await q(
+      `SELECT status, available_at IS NOT NULL AS has_available_at
+       FROM pipeline_tasks
+       WHERE id = $1`,
+      [TASK_ID]
+    );
+    expect(blocked.rows[0]).toEqual({ status: "BLOCKED_DEPENDENCY", has_available_at: true });
   });
 });

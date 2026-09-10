@@ -128,7 +128,7 @@ describe("pipelineTasks", () => {
 
     expect(calls).toContain("COMMIT");
     expect(calls.some((sql) => sql.includes("status = 'BLOCKED'") && sql.includes("pipeline_task_attempts"))).toBe(true);
-    expect(calls.some((sql) => sql.includes("status = 'BLOCKED_DEPENDENCY'") && sql.includes("completed_at = NULL"))).toBe(true);
+    expect(calls.some((sql) => sql.includes("status = 'BLOCKED_DEPENDENCY'") && sql.includes("available_at = NOW()") && sql.includes("completed_at = NULL"))).toBe(true);
   });
 
   it("claimPipelineTasks claims tasks and records attempt starts", async () => {

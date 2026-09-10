@@ -19,6 +19,8 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('timeout-minutes: 15');
     expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '40' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '720000' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_TASK_TYPES: ${{ vars.PIPELINE_TASK_WORKER_TASK_TYPES || '' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_SEED: ${{ vars.PIPELINE_TASK_WORKER_SEED || 'true' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '60000' }}");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_WALL_CLOCK_MS');
     expect(workflow).toContain('PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT');

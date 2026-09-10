@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import {
   PipelineWorkerCancelledError,
+  parsePipelineTaskTypes,
   runPipelineStageTaskWorker,
 } from "../src/tasks/stageTaskWorker.js";
 
@@ -66,6 +67,8 @@ export async function processPipelineTasks(): Promise<void> {
     }
 
     const summary = await runPipelineStageTaskWorker(pool, {
+      taskTypes: parsePipelineTaskTypes(process.env.PIPELINE_TASK_WORKER_TASK_TYPES),
+      seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
       maxTasks: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_TASKS", 100, 1000),
       claimBatchSize: parsePositiveIntEnv("PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE", 1, 25),
       leaseSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_LEASE_SECONDS", 300, 3600),

@@ -143,3 +143,24 @@ Assumptions and remaining owners:
 - Python/Streamlit syntax and browser E2E were not executable locally because the available Windows Python command is only the inaccessible Microsoft Store alias. `streamlit_e2e.yml` remains the validation owner for that boundary.
 - The `data-contract-checker`, `test-evals-specialist`, and `release-security-reviewer` still owe independent sign-off before a production `GO` is claimed.
 - Provider/embedding selection remains a calibration task after currentness recovery; no model switch is justified by the original failure logs alone.
+
+## Historical production execution checkpoint — 2026-09-10 (superseded below)
+
+- Read-only connectivity to the configured Neon database succeeded (`neondb`, `neondb_owner`).
+- The pre-migration reconciliation stopped as expected because `match_runs.requirement_set_id` is not yet present.
+- The workspace currently has only a pooled connection (`-pooler`) and no `DATABASE_URL_UNPOOLED`.
+- The local Neon CLI profile exists but its OAuth session refresh failed. Migrations are therefore intentionally paused until a direct connection string is supplied or Neon CLI authentication is renewed.
+- No production write has been performed in this execution pass.
+
+## Production execution checkpoint update — 2026-09-10
+
+- Direct Neon connectivity is now verified through `DATABASE_URL_UNPOOLED`; the database reports `neondb` and user `neondb_owner`.
+- Production migrations 039–044 were already present; additive migration 045 was applied successfully to remove the legacy four-column deterministic-decision uniqueness constraint. All 52 migrations also applied twice on disposable `pgvector/pgvector:pg16` (`52`, then `0`).
+- The worker now supports `PIPELINE_TASK_WORKER_TASK_TYPES` and `PIPELINE_TASK_WORKER_SEED`, allowing deterministic-only recovery without invoking provider-backed stages.
+- Production recovery exposed and fixed two lifecycle defects: dependency blocking no longer violates `pipeline_tasks.available_at NOT NULL`, and decision tasks now fence stale job versions and block when a current match is missing.
+- Production reconciliation after recovery: 1,144 canonical jobs; 326 current requirement sets; 16 current matches; 16 current deterministic decisions; 0 current evaluations; 0 active evaluation queue items; 30 dependency-blocked tasks; 7 retry-wait tasks; 2 historical dead-letter tasks.
+- Model route preflight passed for evaluation, extraction, document generation, and embedding. No provider-backed production recovery or AI evaluation was run from this workspace.
+- Production has no `allow_ai_evaluation` consent row, and the managed API endpoint/token are not configured locally. These are the remaining authorization and deployment gates before the full AI/API/desktop E2E test.
+- Latest validation: 67 Vitest files passed (256 tests), TypeScript lint passed, production build passed, desktop packaging verification passed (54 checks), actionlint passed, and `git diff --check` passed.
+
+Next authorized release steps: grant `allow_ai_evaluation` through the authenticated consent path, configure the managed HTTPS API endpoint and token, run the provider-backed embedding/quoted/lane stages in bounded batches, process the current evaluation queue, run two no-change reconciliations, then verify Streamlit and the authenticated desktop client against the same current read model. Do not claim E2E readiness until all of those checks pass and the three independent reviews sign off.

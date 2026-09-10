@@ -498,7 +498,10 @@ export async function blockPipelineTask(
         `
           UPDATE pipeline_tasks
           SET status = 'BLOCKED_DEPENDENCY',
-              available_at = NULL,
+              -- available_at is NOT NULL by schema contract. Blocked tasks are
+              -- excluded by status, so retain a valid timestamp rather than
+              -- turning dependency blocking into a database constraint error.
+              available_at = NOW(),
               lease_id = NULL,
               lease_expires_at = NULL,
               heartbeat_at = NULL,
