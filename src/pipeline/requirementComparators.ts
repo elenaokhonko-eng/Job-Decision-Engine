@@ -109,6 +109,55 @@ function factYears(fact: ComparableFact): number | null {
   return match ? Number(match[1]) : null;
 }
 
+function normalizedScope(value: unknown): string {
+  return normalizeComparableText(value)
+    .replace(/\b(roles?|positions?|jobs?|experience|years?|of|in|the)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function experienceScopes(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  const values = [
+    record.experience_scope,
+    record.experience_scopes,
+    record.scope,
+    record.domain,
+    record.domains,
+    record.role_family,
+  ];
+  return values.flatMap((item) => Array.isArray(item) ? item : [item])
+    .map(normalizedScope)
+    .filter(Boolean);
+}
+
+function requiredExperienceScope(requirement: ComparableRequirement): string | null {
+  const structured = experienceScopes(requirement.structured_value);
+  if (structured.length > 0) return structured.join(" ");
+  const text = textForRequirement(requirement);
+  const scoped = text.match(/\b\d+(?:\.\d+)?\+?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i)
+    || text.match(/\b\d+(?:\.\d+)?\+?\s*years?\s+of\s+experience\s+in\s+(.+)$/i);
+  return scoped?.[1] ? normalizedScope(scoped[1]) : null;
+}
+
+function scopesOverlap(requiredScope: string, factScope: string): boolean {
+  const requiredTokens = new Set(requiredScope.split(" ").filter((token) => token.length > 2));
+  const factTokens = new Set(factScope.split(" ").filter((token) => token.length > 2));
+  if ([...requiredTokens].some((token) => factScope.includes(token))) return true;
+  if ([...factTokens].some((token) => requiredScope.includes(token))) return true;
+  const aliases: Array<[string, string[]]> = [
+    ["ai", ["artificial intelligence", "machine learning", "ml"]],
+    ["software", ["software engineering", "software development", "application development", "coding"]],
+    ["data", ["data engineering", "data science", "analytics"]],
+  ];
+  return aliases.some(([canonical, variants]) => {
+    const requiredHas = requiredScope.includes(canonical) || variants.some((variant) => requiredScope.includes(variant));
+    const factHas = factScope.includes(canonical) || variants.some((variant) => factScope.includes(variant));
+    return requiredHas && factHas;
+  });
+}
+
 function degreeLevel(text: string): number | null {
   if (/\b(phd|doctorate|doctoral)\b/i.test(text)) return 3;
   if (/\b(master'?s?|msc|ma|mba)\b/i.test(text)) return 2;
@@ -198,14 +247,25 @@ export function compareStructuredRequirement(
   if (requirement.requirement_type === "EXPERIENCE_YEARS") {
     const required = requiredYears(requirement);
     if (required === null) return { status: "UNKNOWN", rationale: "Required experience duration is not structured.", fact: null };
+    const requiredScope = requiredExperienceScope(requirement);
     const candidates = facts
-      .map((fact) => ({ fact, years: factYears(fact) }))
-      .filter((candidate): candidate is { fact: ComparableFact; years: number } => candidate.years !== null);
+      .map((fact) => ({ fact, years: factYears(fact), scopes: experienceScopes(fact.structured_value) }))
+      .filter((candidate): candidate is { fact: ComparableFact; years: number; scopes: string[] } => candidate.years !== null);
     if (candidates.length === 0) return { status: "UNKNOWN", rationale: "No structured profile experience duration is available.", fact: null };
-    const best = candidates.sort((a, b) => b.years - a.years)[0];
+    const scopedCandidates = requiredScope
+      ? candidates.filter((candidate) => candidate.scopes.some((scope) => scopesOverlap(requiredScope, scope)))
+      : candidates;
+    if (requiredScope && scopedCandidates.length === 0) {
+      return {
+        status: "UNKNOWN",
+        rationale: `No structured profile experience duration is available for the required scope: ${requiredScope}.`,
+        fact: null,
+      };
+    }
+    const best = [...scopedCandidates].sort((a, b) => b.years - a.years)[0];
     return best.years >= required
-      ? { status: "MATCH", rationale: `Profile experience ${best.years.toFixed(1)} years meets the ${required}-year requirement.`, fact: best.fact }
-      : { status: "MISMATCH", rationale: `Profile experience ${best.years.toFixed(1)} years is below the ${required}-year requirement.`, fact: best.fact };
+      ? { status: "MATCH", rationale: `Profile experience ${best.years.toFixed(1)} years meets the ${required}-year requirement${requiredScope ? ` for ${requiredScope}` : ""}.`, fact: best.fact }
+      : { status: "MISMATCH", rationale: `Profile experience ${best.years.toFixed(1)} years is below the ${required}-year requirement${requiredScope ? ` for ${requiredScope}` : ""}.`, fact: best.fact };
   }
 
   if (requirement.requirement_type === "DEGREE") {

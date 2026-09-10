@@ -106,6 +106,18 @@ describe("stageTaskWorker", () => {
     expect(
       buildPipelineTaskKey("EXTRACT_DETERMINISTIC_REQUIREMENTS", "version-1", "deterministic_v1", undefined, "repair")
     ).toBe("EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v1:repair");
+    expect(
+      buildPipelineTaskKey("MATCH_PROFILE_EVIDENCE", "version-1", "deterministic_matcher_v1", "profile-2", "repair")
+    ).toBe("MATCH_PROFILE_EVIDENCE:version-1:deterministic_matcher_v1:repair:profile:profile-2");
+    expect(buildPipelineTaskKey("PUBLISH_EMBEDDING", "version-1", "embedding_publication_v1", undefined, "repair")).toBe(
+      "PUBLISH_EMBEDDING:version-1:embedding_publication_v1:repair"
+    );
+    expect(buildPipelineTaskKey("ROUTE_LANE", "version-1", "lane_router_v1", undefined, "repair")).toBe(
+      "ROUTE_LANE:version-1:lane_router_v1:repair"
+    );
+    expect(buildPipelineTaskKey("DECIDE_RECOMMENDATION", "version-1", "recommendation_decider_v1", undefined, "repair")).toBe(
+      "DECIDE_RECOMMENDATION:version-1:recommendation_decider_v1:repair"
+    );
   });
 
   it("honors cancellation before seeding or claiming tasks", async () => {
@@ -508,6 +520,7 @@ describe("stageTaskWorker", () => {
       limit: 1,
       quotedMode: "deterministic_only",
       failFastOnQuotedProviderFailure: false,
+      ignoreRetryWindow: true,
     });
     expect(
       calls.some(
@@ -550,6 +563,21 @@ describe("stageTaskWorker", () => {
               completed_at: null,
             },
           ],
+        };
+      }
+      if (sql.includes("SELECT c.id AS canonical_job_id") && sql.includes("c.latest_job_version_id")) {
+        return {
+          rows: [{
+            canonical_job_id: "job-stale",
+            processing_state: "LANE_ROUTED",
+            primary_lane: "CORE_AI_DATA",
+            lane_evidence: null,
+            gate_decision: "PASS",
+            recommendation_eligibility: null,
+            recommendation_outcome: null,
+            latest_job_version_id: "version-stale",
+          }],
+          rowCount: 1,
         };
       }
       if (sql.includes("FROM job_version_pipeline_state ps") && sql.includes("requirement_extraction_runs rer")) {
@@ -608,6 +636,74 @@ describe("stageTaskWorker", () => {
           call.params?.[4] === "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-stale"
       )
     ).toBe(true);
+  });
+
+  it("completes stale pre-lane decision tasks without creating a dependency block", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [{
+            id: "task-stale-decision",
+            workspace_id: ctx.workspaceId,
+            task_type: "DECIDE_RECOMMENDATION",
+            task_key: "DECIDE_RECOMMENDATION:version-prelane:recommendation_decider_v1",
+            payload: { canonical_job_id: "job-prelane", job_version_id: "version-prelane" },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 8,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return {
+          rows: [{
+            canonical_job_id: "job-prelane",
+            processing_state: "PREQUALIFIED",
+            primary_lane: null,
+            lane_evidence: null,
+            gate_decision: "PASS",
+            recommendation_eligibility: null,
+            recommendation_outcome: null,
+            latest_job_version_id: "version-prelane",
+          }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-stale-decision" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(fakeClient, {
+      context: ctx,
+      seed: false,
+      taskTypes: ["DECIDE_RECOMMENDATION"],
+      maxTasks: 1,
+      claimBatchSize: 1,
+      leaseSeconds: 300,
+      heartbeatSeconds: 0,
+      claimedBy: "worker:test",
+    }, deps);
+
+    expect(summary.completed).toBe(1);
+    expect(summary.blocked).toBe(0);
+    expect(deps.runRecommendationDecider).not.toHaveBeenCalled();
   });
 
   it("seeds deterministic repair before matching and requires a completed extraction audit", async () => {

@@ -1,7 +1,12 @@
 import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
-import { loadWorkabilityPolicy, type WorkabilityPolicy } from "../pipeline/workabilityPolicy.js";
+import {
+  extractTerritories,
+  hasExplicitTerritoryRestriction,
+  loadWorkabilityPolicy,
+  type WorkabilityPolicy,
+} from "../pipeline/workabilityPolicy.js";
 import { stripHtmlToText } from "../security/sanitize.js";
 
 /**
@@ -162,25 +167,40 @@ export function evaluateWorkability(
     };
   }
 
-  // 2. Geographic restrictions
-  const locationKw = [
-    "us only", "us-only", "united states only", "canada only", "eu only", "eu-only", "uk only", "uk-only", "remote - us",
-    "australia only", "australian work rights", "melbourne", "sydney"
-  ];
-  for (const kw of locationKw) {
-    if (loc.includes(kw) || d.includes(kw)) {
-      return {
-        workable: false,
-        needsVerify: false,
-        reason: `Geographic restriction detected: ${kw.toUpperCase()}`,
-        reasonCode: "GATE_LOCATION_RESTRICTED",
-        facts: { ...baseFacts, location_restriction: kw.toUpperCase() }
-      };
-    }
+  // 2. Geographic restrictions. The structured job location is authoritative;
+  // free-text territory mentions only count when the source sentence describes
+  // where the person must work or be authorized to work.
+  const authorizedRegions = new Set(policy.authorizedRegions);
+  const locationTerritories = extractTerritories(loc);
+  const descriptionTerritories = extractTerritories(d);
+  const explicitlyDisallowed = policy.rejectExplicitForeignTerritory
+    ? [
+        ...locationTerritories,
+        ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory)),
+      ].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory))
+    : [];
+  if (explicitlyDisallowed.length > 0) {
+    const territory = explicitlyDisallowed[0];
+    return {
+      workable: false,
+      needsVerify: false,
+      reason: `Geographic restriction detected: ${territory}`,
+      reasonCode: "GATE_LOCATION_RESTRICTED",
+      facts: { ...baseFacts, location_restriction: territory }
+    };
   }
 
   // 3. REMOTE structured field or remote in location / description -> PASS
   if (wp === "REMOTE" || /\bremote\b/i.test(loc) || /\b(remote-first|fully remote|work from home)\b/i.test(d)) {
+    const hasTerritory = locationTerritories.length > 0 || descriptionTerritories.length > 0;
+    if (!hasTerritory && !policy.remoteWithoutTerritoryAllowed) {
+      return {
+        workable: true,
+        needsVerify: true,
+        reason: "Remote territory is not stated and this preference mode requires it",
+        facts: { ...baseFacts, office_days_min: 0, office_days_max: 0 }
+      };
+    }
     return {
       workable: true,
       needsVerify: false,
@@ -202,6 +222,14 @@ export function evaluateWorkability(
     }
     const daysMatch = d.match(/\b([1-3])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i);
     if (!daysMatch && !d.includes("1 day/week") && !d.includes("2 days/week") && !d.includes("3 days/week")) {
+      if (policy.hybridWithoutOfficeDaysAllowed) {
+        return {
+          workable: true,
+          needsVerify: false,
+          reason: "Hybrid arrangement accepted without an exact office-day count by the active policy",
+          facts: { ...baseFacts, office_days_min: null, office_days_max: null }
+        };
+      }
       return {
         workable: true,
         needsVerify: true,
@@ -564,7 +592,16 @@ export function applyGlobalGates(
     || d.includes("1 day/week") || d.includes("2 days/week") || d.includes("3 days/week")
     || d.includes("remote-first") || d.includes("fully remote") || d.includes("work from home");
 
-  if (!hasExplicitDays && ambiguousOfficeKw.some(k => d.includes(k)) && !pendingVerification) {
+  // A hybrid posting without an exact office-day count is explicitly accepted
+  // by policy. Phrases such as "office expectations" commonly occur in those
+  // postings as context and must not override the hybrid policy. They remain
+  // verification clues only when the posting has no accepted remote/hybrid
+  // work-mode signal at all.
+  const hasAcceptedFlexibleWorkMode = /\bhybrid\b/i.test(d)
+    || /\b(remote|remote-first|fully remote|work from home)\b/i.test(d)
+    || wp === "REMOTE"
+    || wp === "HYBRID";
+  if (!hasExplicitDays && ambiguousOfficeKw.some(k => d.includes(k)) && !pendingVerification && !hasAcceptedFlexibleWorkMode) {
     pendingVerification = {
       reason: "Workplace model ambiguous/unspecified; needs manual verification",
       facts: { office_days_min: null, office_days_max: null },
@@ -572,14 +609,20 @@ export function applyGlobalGates(
   }
 
   // ── 4. Geographic restrictions ──
-  const locationKw = [
-    "us only", "us-only", "united states only", "canada only", "eu only", "eu-only", "uk only", "uk-only", "remote - us",
-    "australia only", "australian work rights", "melbourne", "sydney"
-  ];
-  for (const kw of locationKw) {
-    if (d.includes(kw)) {
-      return makeReject(["GATE_LOCATION_RESTRICTED"], findEvidence(d, [kw]), { location_restriction: kw.toUpperCase() });
-    }
+  const authorizedRegions = new Set(policy.authorizedRegions);
+  const locationTerritories = extractTerritories(String(job.location || ""));
+  const descriptionTerritories = extractTerritories(d);
+  const disallowedTerritories = policy.rejectExplicitForeignTerritory
+    ? [
+        ...locationTerritories,
+        ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory)),
+      ].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory))
+    : [];
+  if (disallowedTerritories.length > 0) {
+    const territory = disallowedTerritories[0];
+    return makeReject(["GATE_LOCATION_RESTRICTED"], [`Explicit work territory restriction: ${territory}`], {
+      location_restriction: territory,
+    });
   }
 
   // ── 5. Lifestyle incompatibilities ──

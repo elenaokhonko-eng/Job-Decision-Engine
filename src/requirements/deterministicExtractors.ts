@@ -195,6 +195,25 @@ function inferImportance(quoteText: string): z.infer<typeof RequirementImportanc
   return 'NICE_TO_HAVE';
 }
 
+function normalizeQuoteEvidence(quote: MatchInfo): {
+  quote_text: string | null;
+  quote_start_offset: number | null;
+  quote_end_offset: number | null;
+} {
+  // A structured deterministic requirement remains useful even when a
+  // provider/parser boundary hands us an unusably short evidence fragment.
+  // Never persist an invalid quote merely to make the requirement parse: a
+  // null quote explicitly means that there is no auditable evidence span.
+  if (quote.quote_text.trim().length < MIN_QUOTE_LENGTH) {
+    return { quote_text: null, quote_start_offset: null, quote_end_offset: null };
+  }
+  return {
+    quote_text: quote.quote_text,
+    quote_start_offset: quote.quote_start_offset,
+    quote_end_offset: quote.quote_end_offset,
+  };
+}
+
 function buildRequirement(
   input: DeterministicExtractorInput,
   sequence: number,
@@ -204,6 +223,7 @@ function buildRequirement(
   structuredValue: Record<string, unknown>,
   confidence = 0.98
 ): DeterministicRequirement {
+  const evidence = normalizeQuoteEvidence(quote);
   return JobRequirementSchema.parse({
     canonical_job_id: input.canonical_job_id,
     job_version_id: input.job_version_id,
@@ -211,9 +231,9 @@ function buildRequirement(
     requirement_type: type,
     importance: inferImportance(quote.quote_text),
     requirement_text: requirementText,
-    quote_text: quote.quote_text,
-    quote_start_offset: quote.quote_start_offset,
-    quote_end_offset: quote.quote_end_offset,
+    quote_text: evidence.quote_text,
+    quote_start_offset: evidence.quote_start_offset,
+    quote_end_offset: evidence.quote_end_offset,
     structured_value: structuredValue,
     extractor_type: 'DETERMINISTIC',
     extractor_version: EXTRACTOR_VERSION,
@@ -270,6 +290,12 @@ export function extractDeterministicRequirements(
   if (experienceYears) {
     const yearsMatch = experienceYears.quote_text.match(/(\d{1,2})/);
     const years = yearsMatch ? Number(yearsMatch[1]) : null;
+    const scopedExperience = experienceYears.quote_text.match(
+      /\b\d{1,2}\+?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i
+    ) || experienceYears.quote_text.match(
+      /\b\d{1,2}\+?\s*(?:years|yrs)\s+of\s+experience\s+in\s+(.+)$/i
+    );
+    const experienceScope = scopedExperience?.[1]?.trim().replace(/[,:;]+$/, "") || null;
     requirements.push(
       buildRequirement(
         input,
@@ -277,7 +303,10 @@ export function extractDeterministicRequirements(
         'EXPERIENCE_YEARS',
         'Role requires minimum years of experience.',
         experienceYears,
-        { minimum_years: years }
+        {
+          minimum_years: years,
+          ...(experienceScope ? { experience_scope: experienceScope } : {}),
+        }
       )
     );
   }

@@ -122,15 +122,55 @@ describe("criteria gates regression coverage", () => {
 		expect(result.rejection_codes).toContain("GATE_HIGH_OFFICE_DAYS");
 	});
 
-	it("requires verification for hybrid roles without day count", () => {
+	it("accepts hybrid roles without an exact day count under the active policy", () => {
 		const result = runGate({
 			title: "Applied Scientist",
 			description: `${technicalResponsibilities} This is a hybrid role with office attendance expectations.`,
 			workplace_type: "HYBRID"
 		});
 
+		expect(result.status).toBe("PASS");
+		expect(result.rejection_codes).not.toContain("NEEDS_VERIFICATION");
+	});
+
+	it("can restore strict hybrid verification through user policy", () => {
+		const policy: WorkabilityPolicy = {
+			...loadWorkabilityPolicy(),
+			hybridWithoutOfficeDaysAllowed: false,
+		};
+		const result = applyGlobalGates({
+			id: "test-job",
+			source: "unit-test",
+			source_id: "unit-test-id",
+			company_name: "Test Company",
+			title: "Applied Scientist",
+			raw_description: `${technicalResponsibilities} This is a hybrid role with office attendance expectations.`,
+			location: "Singapore",
+			workplace_type: "HYBRID",
+			employment_type: "PERMANENT",
+		} as any, policy);
+
 		expect(result.status).toBe("NEEDS_VERIFICATION");
-		expect(result.rejection_codes).toContain("NEEDS_VERIFICATION");
+		expect(result.rejection_codes).toContain("NEEDS_VERIFICATION_OFFICE_DAYS");
+	});
+
+	it("rejects explicit foreign work territory but accepts unqualified remote", () => {
+		const foreign = runGate({
+			title: "Applied Scientist",
+			description: `${technicalResponsibilities} Remote - United States only.`,
+			location: "Remote - United States",
+			workplace_type: "REMOTE",
+		});
+		const unqualified = runGate({
+			title: "Applied Scientist",
+			description: `${technicalResponsibilities} Remote role with no foreign territory restriction stated.`,
+			location: "Remote",
+			workplace_type: "REMOTE",
+		});
+
+		expect(foreign.status).toBe("HARD_REJECT");
+		expect(foreign.rejection_codes).toContain("GATE_LOCATION_RESTRICTED");
+		expect(unqualified.status).toBe("PASS");
 	});
 
 	it("hard rejects structured contract employment", () => {
@@ -222,6 +262,37 @@ describe("criteria gates regression coverage", () => {
 
 		expect(result.status).toBe("HARD_REJECT");
 		expect(result.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+	});
+
+	it("uses configured authorized regions for work authorization requirements", () => {
+		const foreign = applyPersistedRequirementGates(
+			{ title: "Machine Learning Engineer", company_name: "Example" },
+			[
+				{
+					requirement_key: "auth",
+					requirement_type: "WORK_AUTH",
+					requirement_text: "Must be authorized to work in the United States.",
+					quote_text: null,
+					structured_value: { jurisdiction: "United States" },
+				},
+			]
+		);
+		const unspecified = applyPersistedRequirementGates(
+			{ title: "Machine Learning Engineer", company_name: "Example" },
+			[
+				{
+					requirement_key: "auth",
+					requirement_type: "WORK_AUTH",
+					requirement_text: "Must be legally eligible to work.",
+					quote_text: null,
+					structured_value: null,
+				},
+			]
+		);
+
+		expect(foreign.status).toBe("HARD_REJECT");
+		expect(foreign.rejection_codes).toContain("GATE_LOCATION_RESTRICTED");
+		expect(unspecified.status).toBe("PASS");
 	});
 
 	it("applies injected user policy to persisted requirements", () => {

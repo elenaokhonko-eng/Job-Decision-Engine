@@ -12,15 +12,12 @@ cases:
       rejection_codes_include:
         - "GATE_HIGH_OFFICE_DAYS"
 
-  - case_id: hybrid_unknown_days_requires_verification
+  - case_id: hybrid_unknown_days_is_accepted_by_policy
     job:
       title: "Applied Scientist"
-      description: "This is a hybrid role with office attendance expectations."
+      description: "Build production machine learning systems. This is a hybrid role with office attendance expectations."
       location: "Singapore"
       workplace_type: "HYBRID"
       employment_type: "FULL_TIME"
     expected:
-      gate_status: "NEEDS_VERIFICATION"
-      rejection_codes_include:
-        - "NEEDS_VERIFICATION_OFFICE_DAYS"
-
+      gate_status: "PASS"

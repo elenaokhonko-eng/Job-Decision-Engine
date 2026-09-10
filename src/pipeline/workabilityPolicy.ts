@@ -9,6 +9,11 @@ export interface WorkabilityPolicy {
   onsiteOnlyAllowed: boolean;
   maxOfficeDaysPerWeek: number;
   hardFailOfficeDaysPerWeek: number;
+  hybridWithoutOfficeDaysAllowed: boolean;
+  authorizedRegions: string[];
+  remoteWithoutTerritoryAllowed: boolean;
+  rejectExplicitForeignTerritory: boolean;
+  unknownWorkAuthorizationNeedsVerification: boolean;
   maxTravelPct: number;
   contractAllowed: boolean;
   minimumBuildingResearchPct: number;
@@ -25,6 +30,11 @@ const defaults: WorkabilityPolicy = {
   onsiteOnlyAllowed: false,
   maxOfficeDaysPerWeek: 3,
   hardFailOfficeDaysPerWeek: 4,
+  hybridWithoutOfficeDaysAllowed: true,
+  authorizedRegions: ["SINGAPORE"],
+  remoteWithoutTerritoryAllowed: true,
+  rejectExplicitForeignTerritory: true,
+  unknownWorkAuthorizationNeedsVerification: false,
   maxTravelPct: 10,
   contractAllowed: false,
   minimumBuildingResearchPct: 60,
@@ -36,6 +46,67 @@ const defaults: WorkabilityPolicy = {
   peopleManagementPrimaryAllowed: false,
   blacklistedCompanies: [],
 };
+
+const TERRITORY_ALIASES: Array<[string, string[]]> = [
+  ["SINGAPORE", ["singapore", "sg"]],
+  ["UNITED_STATES", ["united states", "usa", "u.s.", "us"]],
+  ["CANADA", ["canada"]],
+  ["EUROPEAN_UNION", ["european union", "eu"]],
+  ["UNITED_KINGDOM", ["united kingdom", "uk", "great britain"]],
+  ["AUSTRALIA", ["australia", "australian"]],
+  ["NEW_ZEALAND", ["new zealand"]],
+];
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function normalizeTerritory(value: unknown): string | null {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ");
+  if (!normalized) return null;
+  const match = TERRITORY_ALIASES.find(([, aliases]) => aliases.includes(normalized));
+  return match?.[0] ?? normalized.toUpperCase().replace(/\s+/g, "_");
+}
+
+export function normalizeTerritories(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(normalizeTerritory).filter((item): item is string => Boolean(item)))];
+}
+
+export function extractTerritories(value: unknown): string[] {
+  const text = String(value ?? "").toLowerCase();
+  const found: string[] = [];
+  for (const [territory, aliases] of TERRITORY_ALIASES) {
+    if (aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(text))) {
+      found.push(territory);
+    }
+  }
+  return found;
+}
+
+/**
+ * A territory mention is only a work-location restriction when the source
+ * sentence also contains an employment/location qualifier. This prevents
+ * references such as "US clients" from becoming false location rejections.
+ */
+export function hasExplicitTerritoryRestriction(value: unknown, territory: string): boolean {
+  const canonical = normalizeTerritory(territory);
+  if (!canonical) return false;
+  const aliases = TERRITORY_ALIASES.find(([key]) => key === canonical)?.[1] ?? [canonical.toLowerCase()];
+  const sentences = String(value ?? "")
+    .toLowerCase()
+    .split(/[.!?;\n]+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  return sentences.some((sentence) => {
+    const hasTerritory = aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(sentence));
+    return hasTerritory && /\b(only|remote|work\s+(?:in|from)|working\s+(?:in|from)|based|located|location|office|on[- ]?site|authorization|authorised|authorized|eligible|rights|territory)\b/i.test(sentence);
+  });
+}
 
 function finiteNumber(value: unknown, fallback: number): number {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -83,6 +154,7 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
   const loadFn = (yaml as any).load || (yaml as any).default?.load || yaml;
   const document = loadFn(fs.readFileSync(filePath, "utf8")) as any;
   const workMode = document?.global_workability_gates?.work_mode ?? {};
+  const territory = document?.global_workability_gates?.territory ?? {};
   const operations = document?.global_workability_gates?.operations ?? {};
   const composition = document?.global_workability_gates?.work_composition ?? {};
   const configuredHardFail = finiteNumber(workMode.max_office_days_hard_fail, defaults.hardFailOfficeDaysPerWeek);
@@ -92,6 +164,25 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
     onsiteOnlyAllowed: workMode.onsite_only_allowed === true,
     maxOfficeDaysPerWeek: configuredMaxOffice,
     hardFailOfficeDaysPerWeek: normalizeHardFailDays(configuredMaxOffice, configuredHardFail),
+    hybridWithoutOfficeDaysAllowed: booleanValue(
+      firstDefined(workMode.hybrid_without_office_days_allowed),
+      defaults.hybridWithoutOfficeDaysAllowed
+    ),
+    authorizedRegions: normalizeTerritories(
+      firstDefined(territory.authorized_regions, document?.authorized_regions) ?? defaults.authorizedRegions
+    ),
+    remoteWithoutTerritoryAllowed: booleanValue(
+      firstDefined(territory.remote_without_territory_allowed),
+      defaults.remoteWithoutTerritoryAllowed
+    ),
+    rejectExplicitForeignTerritory: booleanValue(
+      firstDefined(territory.reject_explicit_foreign_territory),
+      defaults.rejectExplicitForeignTerritory
+    ),
+    unknownWorkAuthorizationNeedsVerification: booleanValue(
+      firstDefined(territory.unknown_work_authorization_needs_verification),
+      defaults.unknownWorkAuthorizationNeedsVerification
+    ),
     maxTravelPct: finiteNumber(document?.global_workability_gates?.travel?.max_travel_pct, defaults.maxTravelPct),
     contractAllowed: document?.global_workability_gates?.employment?.contract_allowed === true,
     minimumBuildingResearchPct: finiteNumber(composition.minimum_building_research_pct, defaults.minimumBuildingResearchPct),
@@ -124,6 +215,7 @@ export function mergeWorkabilityPreferenceContent(
   // `hard_constraints`. Older modes use `workability`; both are normalized
   // here so a preference cannot be silently ignored by deterministic gates.
   const workability = objectValue(firstDefined(root.workability, root.hard_constraints));
+  const territory = objectValue(firstDefined(workability.territory, root.territory));
   const operations = objectValue(firstDefined(workability.operations, root.operations));
   const composition = objectValue(firstDefined(workability.work_composition, root.work_composition));
 
@@ -170,6 +262,49 @@ export function mergeWorkabilityPreferenceContent(
         ),
     maxOfficeDaysPerWeek: maxOfficeDays,
     hardFailOfficeDaysPerWeek: normalizeHardFailDays(maxOfficeDays, hardFailDays),
+    hybridWithoutOfficeDaysAllowed: booleanValue(
+      firstDefined(
+        workability.hybrid_without_office_days_allowed,
+        workability.hybridWithoutOfficeDaysAllowed,
+        root.hybrid_without_office_days_allowed
+      ),
+      basePolicy.hybridWithoutOfficeDaysAllowed
+    ),
+    authorizedRegions: normalizeTerritories(
+      firstDefined(
+        workability.authorized_regions,
+        workability.authorizedRegions,
+        territory.authorized_regions,
+        root.authorized_regions
+      ) ?? basePolicy.authorizedRegions
+    ),
+    remoteWithoutTerritoryAllowed: booleanValue(
+      firstDefined(
+        workability.remote_without_territory_allowed,
+        workability.remoteWithoutTerritoryAllowed,
+        territory.remote_without_territory_allowed,
+        root.remote_without_territory_allowed
+      ),
+      basePolicy.remoteWithoutTerritoryAllowed
+    ),
+    rejectExplicitForeignTerritory: booleanValue(
+      firstDefined(
+        workability.reject_explicit_foreign_territory,
+        workability.rejectExplicitForeignTerritory,
+        territory.reject_explicit_foreign_territory,
+        root.reject_explicit_foreign_territory
+      ),
+      basePolicy.rejectExplicitForeignTerritory
+    ),
+    unknownWorkAuthorizationNeedsVerification: booleanValue(
+      firstDefined(
+        workability.unknown_work_authorization_needs_verification,
+        workability.unknownWorkAuthorizationNeedsVerification,
+        territory.unknown_work_authorization_needs_verification,
+        root.unknown_work_authorization_needs_verification
+      ),
+      basePolicy.unknownWorkAuthorizationNeedsVerification
+    ),
     maxTravelPct: finitePolicyNumber(
       firstDefined(workability.max_travel_pct, workability.maxTravelPct, root.max_travel_pct),
       basePolicy.maxTravelPct,

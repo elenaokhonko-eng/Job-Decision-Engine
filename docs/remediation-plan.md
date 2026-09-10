@@ -164,3 +164,21 @@ Assumptions and remaining owners:
 - Latest validation: 67 Vitest files passed (256 tests), TypeScript lint passed, production build passed, desktop packaging verification passed (54 checks), actionlint passed, and `git diff --check` passed.
 
 Next authorized release steps: grant `allow_ai_evaluation` through the authenticated consent path, configure the managed HTTPS API endpoint and token, run the provider-backed embedding/quoted/lane stages in bounded batches, process the current evaluation queue, run two no-change reconciliations, then verify Streamlit and the authenticated desktop client against the same current read model. Do not claim E2E readiness until all of those checks pass and the three independent reviews sign off.
+
+## Deterministic policy and recovery checkpoint — 2026-09-10
+
+The workability policy is now configurable through the YAML default and the active database preference mode. The current production profile resolves to Singapore authorization, accepts hybrid postings without an exact office-day count, accepts remote postings without a stated territory, rejects explicit foreign-only territory requirements, and treats unqualified work-authorization language as non-blocking. Experience, degree, credential, and authorization facts are persisted in the active profile ledger rather than inferred from free-form prose.
+
+The pre-AI recovery was executed against production after importing the active profile. It repaired the prior provider-failure, gate-null, legacy budget-cap, raw-staged hard-reject, and stale-task cases; replayed current review candidates; republished embeddings; rerouted deferred jobs; rematched current-profile lane results; and repaired missing deterministic outcomes. The final read-only reconciliation reported:
+
+- 1,333 canonical jobs: 745 `HARD_REJECTED`, 52 `MATCHED`, 103 `ROUTING_DEFERRED`, and 433 `NEEDS_VERIFICATION`.
+- Every hard rejection has a persisted reason and `SKIP` outcome; every verification and routing-deferred job has a persisted deterministic outcome.
+- 155 gate-passed jobs have current deterministic requirements and downstream deterministic outcomes: 52 current profile matches plus 103 intentional semantic routing deferrals.
+- No raw-staged jobs, canonical manual-review states, budget-cap remnants, missing hard-reject reasons, blocked tasks, retrying tasks, or dead-letter tasks remain.
+- 421 verification records are genuinely missing workplace/office-day evidence (`workplace_type=UNKNOWN` and no reliable work-mode text); they are not failed hybrid-without-day-count decisions. Nine are experience evidence mismatches, one is a credential mismatch, one is a degree mismatch, and one combines degree and experience mismatches.
+- 138 pending and one expired-running `EXTRACT_QUOTED_REQUIREMENTS` tasks remain as optional enrichment debt. They do not gate deterministic embeddings, routing, matching, decisions, or AI eligibility and were intentionally excluded from the final provider-backed E2E.
+- No provider-backed AI evaluation was enabled or run. The single historical evaluation-queue quarantine row remains inactive and has no current profile/match/decision context.
+
+Validation for this checkpoint: `npx tsc --noEmit`; `npx vitest run` (67 files passed, 7 skipped; 263 tests passed, 36 skipped); `git diff --check`; and production `scripts/reconcile_pipeline.ts --json` all passed. The local Python command remains unavailable because Windows exposes only an inaccessible Microsoft Store alias, so Streamlit browser/runtime validation remains a deployment workflow responsibility.
+
+Next owner: deploy the code and Streamlit changes, obtain the independent data-contract/evaluation/security reviews, configure the managed HTTPS API and authenticated desktop token path, grant `allow_ai_evaluation`, then run the provider-backed E2E. Until those steps are complete, the safe re-test is deterministic/pre-AI only; do not expect generated documents or provider-backed recommendations.

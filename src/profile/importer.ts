@@ -10,6 +10,8 @@ import {
   validateEvidenceSourceReferences,
 } from './evidenceValidator.js';
 import { seedRecoverablePipelineTasks } from '../tasks/stageTaskWorker.js';
+import { enqueuePipelineTask } from '../tasks/pipelineTasks.js';
+import { buildPipelineTaskContextFingerprint } from '../pipeline/artifactContext.js';
 
 type QueryClient = {
   query: pg.PoolClient['query'];
@@ -35,6 +37,27 @@ export interface ProfileImportSummary {
   refreshSeed?: {
     inserted: number;
     existing: number;
+  };
+  preferenceRefreshSeed?: {
+    inserted: number;
+    existing: number;
+    modeKey: string;
+    active: boolean;
+  };
+}
+
+function profileWorkPreferencesContent(loaded: LoadedProfile): Record<string, unknown> | null {
+  if (!loaded.workPreferences) return null;
+  const preferences = loaded.workPreferences;
+  return {
+    hard_constraints: {
+      ...(preferences.work_mode ?? {}),
+      ...(preferences.work_composition ?? {}),
+      ...(preferences.operations ?? {}),
+      ...(preferences.employment ?? {}),
+    },
+    source: 'private/profile/work_preferences.json',
+    profile_key: preferences.profile_key,
   };
 }
 
@@ -532,6 +555,49 @@ export async function importLoadedProfile(
       );
     }
 
+    const workPreferencesContent = profileWorkPreferencesContent(loaded);
+    let preferenceMode: { modeKey: string; active: boolean } | null = null;
+    if (profile.status === 'ACTIVE' && workPreferencesContent) {
+      const modeResult = await client.query<{ mode_key: string; is_active: boolean }>(
+        `INSERT INTO workspace_user_preference_modes (
+           workspace_id, user_id, mode_key, display_name, description, content, is_active
+         )
+         VALUES (
+           $1, $2, 'profile_defaults', 'Profile defaults',
+           'Imported from the versioned profile work-preferences ledger.',
+           $3::jsonb,
+           NOT EXISTS (
+             SELECT 1
+             FROM workspace_user_preference_modes
+             WHERE workspace_id = $1 AND user_id = $2 AND is_active = TRUE
+           )
+         )
+         ON CONFLICT (workspace_id, user_id, mode_key)
+         DO UPDATE SET
+           display_name = EXCLUDED.display_name,
+           description = EXCLUDED.description,
+           content = EXCLUDED.content,
+           is_active = CASE
+             WHEN workspace_user_preference_modes.is_active THEN TRUE
+             WHEN NOT EXISTS (
+               SELECT 1
+               FROM workspace_user_preference_modes active_mode
+               WHERE active_mode.workspace_id = EXCLUDED.workspace_id
+                 AND active_mode.user_id = EXCLUDED.user_id
+                 AND active_mode.is_active = TRUE
+                 AND active_mode.mode_key <> EXCLUDED.mode_key
+             ) THEN TRUE
+             ELSE FALSE
+           END,
+           updated_at = NOW()
+         RETURNING mode_key, is_active`,
+        [context.workspaceId, context.userId, JSON.stringify(workPreferencesContent)]
+      );
+      preferenceMode = modeResult.rows[0]
+        ? { modeKey: modeResult.rows[0].mode_key, active: modeResult.rows[0].is_active }
+        : null;
+    }
+
     await client.query('COMMIT');
     transactionCommitted = true;
 
@@ -541,6 +607,64 @@ export async function importLoadedProfile(
     const refreshSeed = profile.status === 'ACTIVE'
       ? await seedRecoverablePipelineTasks(client as any, { context })
       : undefined;
+
+    let preferenceRefreshSeed: ProfileImportSummary['preferenceRefreshSeed'];
+    if (profile.status === 'ACTIVE' && preferenceMode?.active) {
+      const candidates = await client.query<{ canonical_job_id: string; job_version_id: string }>(
+        `SELECT c.id AS canonical_job_id,
+                COALESCE(c.latest_job_version_id, lv.id) AS job_version_id
+         FROM canonical_jobs c
+         LEFT JOIN LATERAL (
+           SELECT id
+           FROM job_versions
+           WHERE workspace_id = c.workspace_id
+             AND canonical_job_id = c.id
+           ORDER BY observed_at DESC
+           LIMIT 1
+         ) lv ON TRUE
+         WHERE c.workspace_id = $1
+           AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+           AND COALESCE(c.latest_job_version_id, lv.id) IS NOT NULL
+         ORDER BY c.created_at ASC, c.id ASC`,
+        [context.workspaceId]
+      );
+      let inserted = 0;
+      let existing = 0;
+      const modeRevision = Date.now().toString();
+      for (const candidate of candidates.rows) {
+        const payload = {
+          canonical_job_id: candidate.canonical_job_id,
+          job_version_id: candidate.job_version_id,
+          force_policy_recalculation: true,
+          preference_mode_key: preferenceMode.modeKey,
+          preference_mode_revision: modeRevision,
+        };
+        const result = await enqueuePipelineTask(
+          {
+            taskType: 'APPLY_HARD_GATES',
+            taskKey: `APPLY_HARD_GATES:${candidate.job_version_id}:preference:${preferenceMode.modeKey}:${modeRevision}`,
+            payload,
+            maxAttempts: 8,
+            contextFingerprint: buildPipelineTaskContextFingerprint({
+              workspaceId: context.workspaceId,
+              taskType: 'APPLY_HARD_GATES',
+              taskVersion: 'hard_gate_v1',
+              payload,
+            }),
+          },
+          client as any,
+          { context }
+        );
+        if (result.inserted || result.reactivated) inserted += 1;
+        else existing += 1;
+      }
+      preferenceRefreshSeed = {
+        inserted,
+        existing,
+        modeKey: preferenceMode.modeKey,
+        active: true,
+      };
+    }
 
     return {
       candidateProfileId,
@@ -557,6 +681,7 @@ export async function importLoadedProfile(
       refreshSeed: refreshSeed
         ? { inserted: refreshSeed.inserted, existing: refreshSeed.existing }
         : undefined,
+      preferenceRefreshSeed,
     };
   } catch (error) {
     // Profile activation commits before downstream task seeding. Never issue

@@ -298,10 +298,17 @@ async function enqueueStageTask(
       };
     }
   }
-  const taskVariant = taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
-      taskPayload.repair_existing_state === true
-    ? "repair"
-    : undefined;
+  const taskVariant =
+    ((taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
+      taskPayload.repair_existing_state === true) ||
+      ((taskType === "PUBLISH_EMBEDDING" || taskType === "ROUTE_LANE") &&
+        taskPayload.reprocess_existing_state === true) ||
+      (taskType === "MATCH_PROFILE_EVIDENCE" &&
+        taskPayload.reprocess_existing_state === true) ||
+      (taskType === "DECIDE_RECOMMENDATION" &&
+        taskPayload.repair_existing_state === true))
+      ? "repair"
+      : undefined;
   const result = await enqueuePipelineTask(
     {
       taskType,
@@ -420,7 +427,7 @@ export async function seedRecoverablePipelineTasks(
         ))
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) IN (
-           'RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'MATCHED',
+           'RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'ROUTING_DEFERRED', 'MATCHED',
            'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
          )
          AND NOT EXISTS (
@@ -490,7 +497,11 @@ export async function seedRecoverablePipelineTasks(
       [ctx.workspaceId, maxPerType],
       (row) => ({
         id: row.job_version_id,
-        payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
+        payload: {
+          canonical_job_id: row.canonical_job_id,
+          job_version_id: row.job_version_id,
+          ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+        },
       })
     );
 
@@ -503,7 +514,7 @@ export async function seedRecoverablePipelineTasks(
        FROM canonical_jobs c
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+          AND COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED')
          AND NOT EXISTS (
            SELECT 1
            FROM job_version_pipeline_state ps
@@ -533,11 +544,12 @@ export async function seedRecoverablePipelineTasks(
       ctx,
       summary,
       "PUBLISH_EMBEDDING",
-      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id,
+              TRUE AS reprocess_existing_state
        FROM canonical_jobs c
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+          AND COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED')
          AND EXISTS (
            SELECT 1
            FROM job_version_pipeline_state ps
@@ -559,16 +571,31 @@ export async function seedRecoverablePipelineTasks(
            JOIN semantic_embeddings se
              ON se.workspace_id = ei.workspace_id
             AND se.embedding_input_id = ei.id
+           JOIN embedding_spaces es
+             ON es.workspace_id = se.workspace_id
+            AND es.id = se.embedding_space_id
            WHERE ei.workspace_id = c.workspace_id
              AND ei.source_type = 'JOB_VERSION'
              AND ei.source_id = jv.id
+             AND es.is_fallback_space = FALSE
+             AND LOWER(es.provider) = LOWER($3)
+             AND es.model = $4
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
-      [ctx.workspaceId, maxPerType],
+      [
+        ctx.workspaceId,
+        maxPerType,
+        process.env.EMBEDDING_PRIMARY_PROVIDER || 'gemini',
+        process.env.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001',
+      ],
       (row) => ({
         id: row.job_version_id,
-        payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
+        payload: {
+          canonical_job_id: row.canonical_job_id,
+          job_version_id: row.job_version_id,
+          ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+        },
       })
     );
 
@@ -577,7 +604,8 @@ export async function seedRecoverablePipelineTasks(
       ctx,
       summary,
       "ROUTE_LANE",
-      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id,
+              TRUE AS reprocess_existing_state
        FROM canonical_jobs c
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
@@ -597,7 +625,11 @@ export async function seedRecoverablePipelineTasks(
       [ctx.workspaceId, maxPerType],
       (row) => ({
         id: row.job_version_id,
-        payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
+        payload: {
+          canonical_job_id: row.canonical_job_id,
+          job_version_id: row.job_version_id,
+          ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+        },
       })
     );
 
@@ -608,7 +640,8 @@ export async function seedRecoverablePipelineTasks(
       "MATCH_PROFILE_EVIDENCE",
       `SELECT c.id AS canonical_job_id,
               COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
-              active_profile.id AS profile_version_id
+              active_profile.id AS profile_version_id,
+              TRUE AS reprocess_existing_state
        FROM canonical_jobs c
        CROSS JOIN LATERAL (
          SELECT pv.id
@@ -670,6 +703,7 @@ export async function seedRecoverablePipelineTasks(
           canonical_job_id: row.canonical_job_id,
           job_version_id: row.job_version_id,
           profile_version_id: row.profile_version_id,
+          ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
         },
       })
     );
@@ -681,7 +715,8 @@ export async function seedRecoverablePipelineTasks(
       "DECIDE_RECOMMENDATION",
       `SELECT c.id AS canonical_job_id,
               COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
-              active_profile.id AS profile_version_id
+              active_profile.id AS profile_version_id,
+              TRUE AS repair_existing_state
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
          SELECT pv.id
@@ -738,6 +773,7 @@ export async function seedRecoverablePipelineTasks(
           canonical_job_id: row.canonical_job_id,
           job_version_id: row.job_version_id,
           ...(row.profile_version_id ? { profile_version_id: row.profile_version_id } : {}),
+          ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
         },
       })
     );
@@ -943,7 +979,8 @@ async function jobVersionHasCurrentMatch(
 async function jobVersionHasEmbedding(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
-  jobVersionId: string
+  jobVersionId: string,
+  embeddingSpaceIds: string[]
 ): Promise<boolean> {
   const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
     `SELECT EXISTS (
@@ -955,8 +992,9 @@ async function jobVersionHasEmbedding(
        WHERE ei.workspace_id = $1
          AND ei.source_type = 'JOB_VERSION'
          AND ei.source_id = $2
+         AND se.embedding_space_id = ANY($3::uuid[])
      ) AS exists`,
-    [ctx.workspaceId, jobVersionId]
+    [ctx.workspaceId, jobVersionId, embeddingSpaceIds]
   );
   return Boolean(rows[0]?.exists);
 }
@@ -1099,6 +1137,10 @@ async function maybeEnqueueAfterTask(
         clientOrPool,
         ctx
       );
+      await enqueueStageTask("PUBLISH_EMBEDDING", jobVersionId, {
+        canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
+        job_version_id: jobVersionId,
+      }, clientOrPool, ctx);
       return;
     }
     await enqueueStageTask("APPLY_HARD_GATES", jobVersionId, payload, clientOrPool, ctx);
@@ -1106,11 +1148,19 @@ async function maybeEnqueueAfterTask(
   }
 
   const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
-  const stagePayload = { canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id, job_version_id: jobVersionId };
+  const stagePayload = {
+    canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
+    job_version_id: jobVersionId,
+    ...(payload.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+  };
 
   if (taskType === "APPLY_HARD_GATES") {
     if (state.processingState === "PREQUALIFIED") {
+      // Quoted requirements are advisory enrichment. Publish deterministic
+      // requirement embeddings immediately so quote-provider latency/failure
+      // cannot hold a gate-passed job before lane routing.
       await enqueueStageTask("EXTRACT_QUOTED_REQUIREMENTS", jobVersionId, stagePayload, clientOrPool, ctx);
+      await enqueueStageTask("PUBLISH_EMBEDDING", jobVersionId, stagePayload, clientOrPool, ctx);
     } else if (state.processingState === "HARD_REJECTED" || state.processingState === "NEEDS_VERIFICATION") {
       await enqueueStageTask("DECIDE_RECOMMENDATION", jobVersionId, stagePayload, clientOrPool, ctx);
     }
@@ -1137,6 +1187,22 @@ async function maybeEnqueueAfterTask(
   }
 
   if (taskType === "MATCH_PROFILE_EVIDENCE") {
+    if (
+      ![
+        "LANE_ROUTED",
+        "MATCHED",
+        "QUEUED_FOR_AI",
+        "EVALUATING",
+        "AI_EVALUATED",
+        "EVALUATED",
+      ].includes(state.processingState || "")
+    ) {
+      // A match is meaningful only after semantic lane routing has produced a
+      // lane. Deferred and gate-verification states are valid terminal/holding
+      // outcomes for this stage; stale matcher tasks must not retry or create
+      // manual review noise for them.
+      return;
+    }
     await enqueueStageTask("DECIDE_RECOMMENDATION", jobVersionId, stagePayload, clientOrPool, ctx);
     return;
   }
@@ -1177,12 +1243,28 @@ async function executeStageTask(
   const jobVersionId = requireStringPayload(task, "job_version_id");
 
   if (taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS") {
+    const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
+    if (currentState.latestJobVersionId && currentState.latestJobVersionId !== jobVersionId) {
+      // Requirement tasks are version-specific. A canonical job may have
+      // advanced since this task was seeded; completing the stale task keeps
+      // old versions from creating retry/manual-review noise or overwriting
+      // the current version's funnel state.
+      return;
+    }
+    if (["HARD_REJECTED", "MANUALLY_REMOVED"].includes(currentState.processingState || "")) {
+      // Deterministic requirements are not a prerequisite for a terminal
+      // hard rejection. Old extraction tasks can remain queued after a gate
+      // recalculation; complete them as harmless no-ops rather than creating
+      // retry/manual-review noise for a job that cannot advance.
+      return;
+    }
     const summary = await dependencies.runRequirementsExtraction(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
       quotedMode: "deterministic_only",
       failFastOnQuotedProviderFailure: false,
+      ignoreRetryWindow: true,
     });
     if (summary.errors > 0) {
       throw new Error(`Deterministic requirement extraction failed for job_version_id=${jobVersionId}.`);
@@ -1203,6 +1285,17 @@ async function executeStageTask(
     const payload = (task.payload || {}) as Record<string, unknown>;
     const reprocess = payload.force_policy_recalculation === true || payload.reprocess === true;
     const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
+
+    // A preference refresh can leave a task for a superseded job version in
+    // the queue. Hard-gate execution is version-specific; the gate runner
+    // intentionally selects the canonical latest version, so a stale task
+    // must complete as a no-op even when it carries force_policy_recalculation.
+    if (
+      currentState.latestJobVersionId &&
+      currentState.latestJobVersionId !== jobVersionId
+    ) {
+      return;
+    }
 
     // A durable gate task can outlive the job state that created it. This is
     // expected when a prior worker advanced the job before a duplicate/stale
@@ -1229,29 +1322,18 @@ async function executeStageTask(
   }
 
   if (taskType === "EXTRACT_QUOTED_REQUIREMENTS") {
-    const summary = await dependencies.runRequirementsExtraction(clientOrPool, {
+    await dependencies.runRequirementsExtraction(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
       quotedMode: "with_quoted",
+      ignoreRetryWindow: true,
     });
-    if (
-      summary.errors > 0 ||
-      summary.quotedFailed > 0 ||
-      summary.metrics.quotedProviderFailures > 0 ||
-      summary.metrics.quotedValidationFailures > 0
-    ) {
-      throw new Error(`Quoted requirement extraction failed for job_version_id=${jobVersionId}.`);
-    }
-    const hasCompletedQuotedRun = await jobVersionHasCompletedRequirementsExtraction(
-      clientOrPool,
-      ctx,
-      jobVersionId,
-      "LLM_QUOTED"
-    );
-    if (!hasCompletedQuotedRun) {
-      throw new Error(`No completed quoted requirement extraction found for job_version_id=${jobVersionId}.`);
-    }
+    // Quoted extraction is optional enrichment. The deterministic run is the
+    // gate for continuing the pipeline; quoted provider/validation failures
+    // remain in the extraction audit and do not create manual-review state.
+    // A missing/failed LLM_QUOTED run is expected to be recoverable enrichment
+    // debt, not a blocker for embeddings, lane routing, or deterministic match.
     return;
   }
 
@@ -1273,7 +1355,13 @@ async function executeStageTask(
         `Embedding publication failed for ${summary.primary.failed + fallbackFailed} input(s).`
       );
     }
-    const embedded = await jobVersionHasEmbedding(clientOrPool, ctx, jobVersionId);
+    const usableSpaceIds = [
+      summary.seededSpaces.primarySpaceId,
+      ...(summary.primary.failed > 0 && summary.fallback
+        ? [summary.seededSpaces.fallbackSpaceId]
+        : []),
+    ];
+    const embedded = await jobVersionHasEmbedding(clientOrPool, ctx, jobVersionId, usableSpaceIds);
     if (!embedded) {
       throw new Error(`No published JOB_VERSION embedding found for job_version_id=${jobVersionId}.`);
     }
@@ -1296,6 +1384,28 @@ async function executeStageTask(
   }
 
   if (taskType === "MATCH_PROFILE_EVIDENCE") {
+    const matchState = await lookupJobState(clientOrPool, ctx, jobVersionId);
+    if (
+      matchState.latestJobVersionId &&
+      matchState.latestJobVersionId !== jobVersionId
+    ) {
+      return;
+    }
+    if (
+      ![
+        "LANE_ROUTED",
+        "MATCHED",
+        "QUEUED_FOR_AI",
+        "EVALUATING",
+        "AI_EVALUATED",
+        "EVALUATED",
+      ].includes(matchState.processingState || "")
+    ) {
+      // ROUTING_DEFERRED and NEEDS_VERIFICATION intentionally have no profile
+      // match to perform. Complete stale tasks without converting a holding or
+      // verification state into a retry/manual-review failure.
+      return;
+    }
     const hasCompletedDeterministicRun = await jobVersionHasCompletedRequirementsExtraction(
       clientOrPool,
       ctx,
@@ -1343,6 +1453,13 @@ async function executeStageTask(
       // own context-specific task identity.
       return;
     }
+    if (["RAW_STAGED", "PREQUALIFIED"].includes(decisionState.processingState || "")) {
+      // Recommendation decisions are downstream of lane routing. A stale
+      // decision task can survive a retry or historical replay while the job
+      // is still in the pre-lane funnel; it is not a dependency failure and
+      // must not create a permanent blocked/manual-review record.
+      return;
+    }
     const matchDependentStates = new Set([
       "LANE_ROUTED",
       "MATCHED",
@@ -1351,8 +1468,10 @@ async function executeStageTask(
       "AI_EVALUATED",
       "EVALUATED",
     ]);
+    const isRoutingDeferred = decisionState.processingState === "ROUTING_DEFERRED";
     const requiresCurrentMatch =
-      decisionState.gateDecision === "PASS" || matchDependentStates.has(decisionState.processingState || "");
+      !isRoutingDeferred &&
+      (decisionState.gateDecision === "PASS" || matchDependentStates.has(decisionState.processingState || ""));
     if (requiresCurrentMatch && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId))) {
       const payload = (task.payload || {}) as Record<string, unknown>;
       await enqueueStageTask(

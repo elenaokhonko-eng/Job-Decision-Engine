@@ -222,7 +222,7 @@ describe('runRequirementsExtraction', () => {
     expect(summary.metrics.quotedPassRate).toBe(0);
   });
 
-  it('aborts and schedules retry when quoted validation fails in default fail-fast mode', async () => {
+  it('completes deterministic extraction when quoted validation fails', async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
         return {
@@ -273,35 +273,36 @@ describe('runRequirementsExtraction', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { query, connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    await expect(
-      runRequirementsExtraction(fakePool, {
-        context,
-        quotedExtractor: async () => ({
-          provider: 'gemini',
-          model: 'gemini-3.6-flash',
-          payload: {
-            schema_version: '2.0',
-            requirements: [
-              {
-                requirement_key: 'R-001',
-                requirement_type: 'TRAVEL',
-                importance: 'MUST',
-                requirement_text: 'Role requires up to 25% travel.',
-                quote_text: 'up to 25% travel',
-                confidence: 0.8,
-              },
-            ],
-          },
-        }),
-      })
-    ).rejects.toThrow(/Quoted requirements validation failed/);
+    const summary = await runRequirementsExtraction(fakePool, {
+      context,
+      quotedExtractor: async () => ({
+        provider: 'gemini',
+        model: 'gemini-3.6-flash',
+        payload: {
+          schema_version: '2.0',
+          requirements: [
+            {
+              requirement_key: 'R-001',
+              requirement_type: 'TRAVEL',
+              importance: 'MUST',
+              requirement_text: 'Role requires up to 25% travel.',
+              quote_text: 'up to 25% travel',
+              confidence: 0.8,
+            },
+          ],
+        },
+      }),
+    });
 
+    expect(summary.processed).toBe(1);
+    expect(summary.errors).toBe(0);
+    expect(summary.quotedFailed).toBe(1);
     expect(
       query.mock.calls.some(
-        (call: unknown[]) => String(call[0]).includes('job_version_pipeline_state') && String(call[0]).includes('RETRY_WAIT')
+        (call: unknown[]) => String(call[0]).includes('job_version_pipeline_state') && Array.isArray(call[1]) && call[1].includes('RETRY_WAIT')
       )
-    ).toBe(true);
-    expect(query.mock.calls.some((call: unknown[]) => String(call[0]) === 'ROLLBACK')).toBe(true);
+    ).toBe(false);
+    expect(query.mock.calls.some((call: unknown[]) => String(call[0]) === 'COMMIT')).toBe(true);
   });
 
   it('tracks quoted provider/model retry metrics and pass-rate', async () => {
@@ -680,7 +681,7 @@ describe('runRequirementsExtraction', () => {
     expect(summary.details[0].warning ?? '').not.toContain('requirements already active');
   });
 
-  it('aborts the requirements stage when quoted provider failures exhaust the failure budget', async () => {
+  it('keeps deterministic extraction complete when quoted providers fail', async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
         return {
@@ -740,20 +741,21 @@ describe('runRequirementsExtraction', () => {
       );
     });
 
-    await expect(
-      runRequirementsExtraction(fakePool, {
-        context,
-        quotedExtractor,
-        failFastOnQuotedProviderFailure: true,
-        quotedProviderFailureLimit: 1,
-      })
-    ).rejects.toThrow(/aborting requirements extraction/);
+    const summary = await runRequirementsExtraction(fakePool, {
+      context,
+      quotedExtractor,
+      failFastOnQuotedProviderFailure: true,
+      quotedProviderFailureLimit: 1,
+    });
 
-    expect(quotedExtractor).toHaveBeenCalledTimes(1);
+    expect(summary.processed).toBe(2);
+    expect(summary.errors).toBe(0);
+    expect(summary.quotedFailed).toBe(2);
+    expect(quotedExtractor).toHaveBeenCalledTimes(2);
     expect(
       query.mock.calls.some(
-        (call: unknown[]) => String(call[0]).includes('job_version_pipeline_state') && String(call[0]).includes('RETRY_WAIT')
+        (call: unknown[]) => String(call[0]).includes('job_version_pipeline_state') && Array.isArray(call[1]) && call[1].includes('RETRY_WAIT')
       )
-    ).toBe(true);
+    ).toBe(false);
   });
 });

@@ -338,7 +338,11 @@ export async function runLaneRouter(
   const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
     ? Number(options?.limit)
     : null;
-  const params: unknown[] = [ctx.workspaceId, currentLaneRouterModelPrefix];
+  // The explicit replay branch does not reference the router-model prefix.
+  // Do not pass an unreferenced $2 parameter: PostgreSQL cannot infer its type
+  // and targeted ROUTING_DEFERRED replays fail before routing starts.
+  const params: unknown[] = [ctx.workspaceId];
+  if (jobVersionIds.length === 0) params.push(currentLaneRouterModelPrefix);
   const jobVersionFilter = jobVersionIds.length > 0
     ? `AND jv.id = ANY($${params.push(jobVersionIds)}::uuid[])`
     : "";
@@ -367,20 +371,28 @@ export async function runLaneRouter(
         WHERE c.workspace_id = $1
           AND (
             COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-            OR (
-              COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
-              AND COALESCE(c.primary_lane, 'UNCLASSIFIED') = 'UNCLASSIFIED'
-              AND (
-                c.latest_lane_decision_id IS NULL
-                OR NOT EXISTS (
-                  SELECT 1
-                  FROM lane_decisions ld
-                  WHERE ld.workspace_id = c.workspace_id
-                    AND ld.id = c.latest_lane_decision_id
-                    AND LEFT(ld.model_version, LENGTH($2)) = $2
-                )
-              )
-            )
+           OR (
+             COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+             AND (
+               -- Explicit replay targets are allowed through even when a
+               -- previous lane decision exists. This is required to repair
+               -- technical/threshold deferrals after embedding or policy
+               -- changes without weakening the normal idempotent scan.
+               ${jobVersionIds.length > 0 ? "TRUE" : `
+                 COALESCE(c.primary_lane, 'UNCLASSIFIED') = 'UNCLASSIFIED'
+                 AND (
+                   c.latest_lane_decision_id IS NULL
+                   OR NOT EXISTS (
+                     SELECT 1
+                     FROM lane_decisions ld
+                     WHERE ld.workspace_id = c.workspace_id
+                       AND ld.id = c.latest_lane_decision_id
+                       AND LEFT(ld.model_version, LENGTH($2)) = $2
+                   )
+                 )
+               `}
+             )
+           )
           )
           ${jobVersionFilter}
           ${canonicalJobFilter}
@@ -414,8 +426,11 @@ export async function runLaneRouter(
           ORDER BY observed_at DESC
           LIMIT 1
         ) jv ON TRUE
-        WHERE c.workspace_id = $1
-          AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+         WHERE c.workspace_id = $1
+           AND (
+             COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+             OR (${jobVersionIds.length > 0 ? "COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'" : "FALSE"})
+           )
           ${fallbackJobVersionFilter}
           ${fallbackCanonicalJobFilter}
         ORDER BY c.created_at ASC, c.id ASC
@@ -487,6 +502,13 @@ export async function runLaneRouter(
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
   try {
+    // Route only with the currently configured primary/fallback provider-model
+    // pairs. Older spaces remain immutable audit history, but must not silently
+    // win just because they happen to have a complete vector corpus.
+    const configuredPrimaryProvider = (process.env.EMBEDDING_PRIMARY_PROVIDER || "gemini").trim().toLowerCase();
+    const configuredPrimaryModel = (process.env.EMBEDDING_PRIMARY_MODEL || MODEL_REGISTRY.EMBEDDING_PRIMARY_MODEL).trim();
+    const configuredFallbackProvider = (process.env.EMBEDDING_FALLBACK_PROVIDER || "openai").trim().toLowerCase();
+    const configuredFallbackModel = (process.env.EMBEDDING_FALLBACK_MODEL || MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL).trim();
     type PublishedEmbeddingSet = {
       laneEmbeddings: Record<string, number[]>;
       jobEmbeddings: Map<string, number[]>;
@@ -518,6 +540,10 @@ export async function runLaneRouter(
            JOIN embedding_spaces es ON es.id = v.embedding_space_id
            WHERE v.workspace_id = $1
              AND es.active = TRUE
+             AND (
+               (LOWER(es.provider) = $4 AND es.model = $5)
+               OR (LOWER(es.provider) = $6 AND es.model = $7)
+             )
              AND ((v.node_type = 'JOB_VERSION' AND v.node_id = ANY($2::uuid[]))
                OR (v.node_type = 'LANE_PROTOTYPE' AND v.node_id = ANY($3::uuid[])))
            ORDER BY es.created_at DESC`,
@@ -525,6 +551,10 @@ export async function runLaneRouter(
             ctx.workspaceId,
             jobs.map((job) => job.latest_version_id),
             laneNodeIds.map((revision) => revision.nodeId),
+            configuredPrimaryProvider,
+            configuredPrimaryModel,
+            configuredFallbackProvider,
+            configuredFallbackModel,
           ]
         );
         const grouped = new Map<string, typeof published.rows>();

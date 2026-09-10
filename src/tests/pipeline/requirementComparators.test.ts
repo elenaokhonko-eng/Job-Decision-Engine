@@ -8,13 +8,49 @@ const fact = (statement: string, structured_value: Record<string, unknown> | nul
 });
 
 describe("structured requirement comparators", () => {
-  it("does not treat insufficient experience as a semantic match", () => {
+	it("does not treat insufficient experience as a semantic match", () => {
     const result = compareStructuredRequirement(
       { requirement_type: "EXPERIENCE_YEARS", requirement_text: "At least 8 years experience", quote_text: null, structured_value: { minimum_years: 8 } },
       [fact("Five years of production experience", { professional_years: 5 })]
     );
-    expect(result.status).toBe("MISMATCH");
-  });
+		expect(result.status).toBe("MISMATCH");
+	});
+
+	it("does not use overall experience for a role-specific experience requirement", () => {
+		const result = compareStructuredRequirement(
+			{
+				requirement_type: "EXPERIENCE_YEARS",
+				requirement_text: "At least 10 years of AI engineering experience",
+				quote_text: null,
+				structured_value: { minimum_years: 10, experience_scope: "AI engineering" },
+			},
+			[
+				fact("20 years of overall professional experience", { professional_years: 20, experience_scope: "overall" }),
+				fact("15 years of software industry experience", { professional_years: 15, experience_scope: "software industry" }),
+				fact("2 years of AI software coding experience", { professional_years: 2, experience_scope: "AI software coding" }),
+			]
+		);
+
+		expect(result.status).toBe("MISMATCH");
+		expect(result.rationale).toContain("ai engineering");
+	});
+
+	it("uses scoped software experience when the requirement is role-specific", () => {
+		const result = compareStructuredRequirement(
+			{
+				requirement_type: "EXPERIENCE_YEARS",
+				requirement_text: "At least 10 years of software engineering experience",
+				quote_text: null,
+				structured_value: { minimum_years: 10, experience_scope: "software engineering" },
+			},
+			[
+				fact("15 years of software industry experience", { professional_years: 15, experience_scope: "software industry" }),
+				fact("2 years of AI software coding experience", { professional_years: 2, experience_scope: "AI software coding" }),
+			]
+		);
+
+		expect(result.status).toBe("MATCH");
+	});
 
   it("requires the explicit degree level", () => {
     const result = compareStructuredRequirement(

@@ -11,6 +11,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement, type ComparableFact } from "./requirementComparators.js";
 import {
+  extractTerritories,
   loadWorkabilityPolicy,
   resolveWorkspaceWorkabilityPolicy,
   type WorkabilityPolicy,
@@ -254,11 +255,13 @@ export function applyPersistedRequirementGates(
       );
     }
     if (days === null) {
-      pendingVerification = {
-        codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
-        evidence: [quoteOrText(requirement)],
-        facts: { office_days_min: null, office_days_max: null },
-      };
+      if (!policy.hybridWithoutOfficeDaysAllowed) {
+        pendingVerification = {
+          codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+          evidence: [quoteOrText(requirement)],
+          facts: { office_days_min: null, office_days_max: null },
+        };
+      }
     }
   }
 
@@ -308,24 +311,32 @@ export function applyPersistedRequirementGates(
   const workAuthReq = deterministicRequirements.find((r) => r.requirement_type === "WORK_AUTH");
   if (workAuthReq) {
     const authText = quoteOrText(workAuthReq).toLowerCase();
-    const blockedTerms = ["us only", "australian work rights", "canada only", "eu only", "uk only"];
-    for (const term of blockedTerms) {
-      if (authText.includes(term)) {
-        return makeReject(
-          ["GATE_LOCATION_RESTRICTED"],
-          [quoteOrText(workAuthReq)],
-          { location_restriction: term.toUpperCase() }
-        );
-      }
+    const requiredTerritories = extractTerritories(authText);
+    const authorizedRegions = new Set(policy.authorizedRegions);
+    const foreignRequired = requiredTerritories.filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory));
+    if (policy.rejectExplicitForeignTerritory && foreignRequired.length > 0) {
+      return makeReject(
+        ["GATE_LOCATION_RESTRICTED"],
+        [quoteOrText(workAuthReq)],
+        { location_restriction: foreignRequired[0] }
+      );
+    }
+    if (requiredTerritories.length === 0 && policy.unknownWorkAuthorizationNeedsVerification) {
+      pendingVerification = {
+        codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_WORK_AUTH"],
+        evidence: [quoteOrText(workAuthReq)],
+      };
     }
   }
 
   if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {
-    pendingVerification = {
-      codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
-      evidence: [quoteOrText(workModeReq)],
-      facts: { office_days_min: null, office_days_max: null },
-    };
+    if (!policy.hybridWithoutOfficeDaysAllowed) {
+      pendingVerification = {
+        codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+        evidence: [quoteOrText(workModeReq)],
+        facts: { office_days_min: null, office_days_max: null },
+      };
+    }
   }
 
   if (pendingVerification) {
@@ -370,7 +381,7 @@ function applyExactProfileGates(
   profileFacts: ComparableFact[]
 ): GateResult {
   const exactRequirements = deterministicRequirements.filter((requirement) =>
-    ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(requirement.requirement_type)
+    ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE"].includes(requirement.requirement_type)
   );
   if (exactRequirements.length === 0) return makePass();
 

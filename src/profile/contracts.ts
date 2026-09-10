@@ -324,6 +324,11 @@ export const WorkModePreferenceSchema = z.object({
   acceptable: z.enum(['REMOTE', 'REMOTE_FIRST', 'HYBRID', 'ONSITE']).array().optional(),
   max_office_days_per_week: z.number().int().min(0).max(5).optional(),
   onsite_only_allowed: z.boolean().optional(),
+  hybrid_without_office_days_allowed: z.boolean().optional(),
+  authorized_regions: z.string().min(2).array().max(20).optional(),
+  remote_without_territory_allowed: z.boolean().optional(),
+  reject_explicit_foreign_territory: z.boolean().optional(),
+  unknown_work_authorization_needs_verification: z.boolean().optional(),
 });
 
 export const WorkCompositionPreferenceSchema = z.object({

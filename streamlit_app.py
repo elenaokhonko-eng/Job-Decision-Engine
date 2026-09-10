@@ -1012,6 +1012,37 @@ with st.sidebar.expander("Accessibility & Preferences", expanded=False):
         )
         max_office_days = st.slider("Max office days/week", min_value=0, max_value=5, value=2, key="pref_office_days")
         max_travel = st.slider("Max travel (%)", min_value=0, max_value=100, value=10, key="pref_travel")
+        authorized_regions = st.multiselect(
+            "Authorized work regions",
+            options=["SINGAPORE", "UNITED_STATES", "CANADA", "EUROPEAN_UNION", "UNITED_KINGDOM", "AUSTRALIA", "NEW_ZEALAND"],
+            default=["SINGAPORE"],
+            help="Explicit foreign work-location or authorization requirements outside this list are rejected when the policy toggle is enabled.",
+            key="pref_authorized_regions",
+        )
+        hybrid_without_days = st.toggle(
+            "Accept hybrid roles without an exact office-day count",
+            value=True,
+            help="Hybrid is accepted unless the posting explicitly requires the configured hard-fail office-day threshold.",
+            key="pref_hybrid_without_days",
+        )
+        remote_without_territory = st.toggle(
+            "Accept remote roles without a stated territory",
+            value=True,
+            help="Do not require manual verification when the posting does not state a foreign territory.",
+            key="pref_remote_without_territory",
+        )
+        reject_foreign_territory = st.toggle(
+            "Reject explicit foreign-only territories",
+            value=True,
+            help="Reject explicit US-only, EU-only, Australia-only, or similar work-location restrictions outside the configured regions.",
+            key="pref_reject_foreign_territory",
+        )
+        unknown_work_auth = st.toggle(
+            "Verify unstated work-authorisation jurisdiction",
+            value=False,
+            help="When off, only explicit foreign authorisation requirements block the job.",
+            key="pref_unknown_work_auth",
+        )
 
         content = {
             "schema_version": "2.2.0",
@@ -1023,7 +1054,11 @@ with st.sidebar.expander("Accessibility & Preferences", expanded=False):
                 "max_travel_pct": int(max_travel),
                 "on_call_allowed": True,
                 "shift_work_allowed": True,
-                "authorized_regions": [],
+                "authorized_regions": authorized_regions,
+                "hybrid_without_office_days_allowed": hybrid_without_days,
+                "remote_without_territory_allowed": remote_without_territory,
+                "reject_explicit_foreign_territory": reject_foreign_territory,
+                "unknown_work_authorization_needs_verification": unknown_work_auth,
             },
             "soft_preferences": {},
             "unknown_handling": {

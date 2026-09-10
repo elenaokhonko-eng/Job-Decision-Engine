@@ -227,7 +227,10 @@ export async function buildEmbeddingInputs(
           )
        )
        WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'MATCHED')
+          AND (
+            $${jobParams.length + 1}::boolean = TRUE
+            OR COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'ROUTING_DEFERRED', 'MATCHED')
+          )
          ${jobScope}
          AND jv.description_text IS NOT NULL
          AND NOT EXISTS (
@@ -239,7 +242,7 @@ export async function buildEmbeddingInputs(
          )
        ORDER BY jv.observed_at DESC
        LIMIT $2`,
-      jobParams
+      [...jobParams, scopedToJobVersions]
     );
 
     for (const row of jobRows.rows) {

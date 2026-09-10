@@ -661,7 +661,7 @@ export async function runEmbeddingBatchWithFallback(
                    FROM canonical_jobs cj
                    WHERE cj.workspace_id = ei.workspace_id
                      AND cj.latest_job_version_id = ei.source_id
-                     AND COALESCE(cj.processing_state, cj.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'MATCHED')
+                      AND COALESCE(cj.processing_state, cj.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'ROUTING_DEFERRED', 'MATCHED')
                  ))
                  OR (ei.source_type = 'LANE_PROTOTYPE' AND EXISTS (
                    SELECT 1

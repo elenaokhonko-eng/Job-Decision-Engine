@@ -351,6 +351,7 @@ async function run(): Promise<void> {
            LEFT JOIN match_runs mr ON mr.workspace_id = $1 AND mr.id = c.latest_match_run_id
            WHERE c.workspace_id = $1
              AND c.gate_decision = 'PASS'
+             AND COALESCE(c.processing_state, c.processing_status) <> 'ROUTING_DEFERRED'
              AND NOT (
                mr.status = 'COMPLETED'
                AND mr.canonical_job_id = c.id

@@ -44,6 +44,8 @@ export interface RequirementExtractionStageOptions {
   jobVersionIds?: string[];
   limit?: number;
   quotedMode?: 'env' | 'deterministic_only' | 'with_quoted';
+  /** Durable task replay owns retry timing; do not let an old stage lease hide the target. */
+  ignoreRetryWindow?: boolean;
 }
 
 export interface RequirementExtractionSummary {
@@ -192,13 +194,6 @@ async function upsertPipelineState(
        updated_at = NOW()`,
     [job.workspace_id, job.canonical_job_id, job.job_version_id, stageStatus, lastError]
   );
-}
-
-class RequirementsStageAbortError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'RequirementsStageAbortError';
-  }
 }
 
 function parsePositiveInt(value: unknown, fallback: number, max: number): number {
@@ -403,9 +398,8 @@ export async function runRequirementsExtraction(
         COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED')
         OR (
           COALESCE(c.processing_state, c.processing_status) IN (
-            'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
+            'NEEDS_VERIFICATION', 'LANE_ROUTED', 'ROUTING_DEFERRED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
           )
-          AND (ps.stage_status IS NULL OR ps.stage_status <> 'COMPLETED')
         )
       )
       ${jobVersionFilter}
@@ -420,7 +414,14 @@ export async function runRequirementsExtraction(
     LIMIT $${limitPlaceholder}
   `;
 
-  const { rows } = await client.query(queryTargetJobs, params);
+  const retryWindowClause = options.ignoreRetryWindow
+    ? ""
+    : `AND (\n        ps.stage_status IS NULL\n        OR ps.stage_status <> 'RETRY_WAIT'\n        OR ps.next_retry_at IS NULL\n        OR ps.next_retry_at <= NOW()\n      )`;
+  const targetQuery = queryTargetJobs.replace(
+    `      AND (\n        ps.stage_status IS NULL\n        OR ps.stage_status <> 'RETRY_WAIT'\n        OR ps.next_retry_at IS NULL\n        OR ps.next_retry_at <= NOW()\n      )`,
+    retryWindowClause
+  );
+  const { rows } = await client.query(targetQuery, params);
   const jobs = rows as RequirementStageJob[];
   console.log(`[requirementsExtractor] loaded target job versions count=${jobs.length}`);
 
@@ -449,7 +450,11 @@ export async function runRequirementsExtraction(
       : (mode === 'with_quoted' || shouldRunQuotedExtractor())
       ? runDefaultQuotedRequirementProvider
       : undefined;
-  const failFastOnQuotedProviderFailure =
+  // Quoted extraction is an enrichment stage. A valid deterministic run is
+  // sufficient for the requirements stage to complete; provider/validation
+  // failures are persisted as warnings and must never roll back deterministic
+  // requirements or turn into a manual career decision.
+  const requestedFailFastOnQuotedProviderFailure =
     options.failFastOnQuotedProviderFailure ?? Boolean(quotedExtractor);
   const quotedProviderFailureLimit =
     options.quotedProviderFailureLimit ??
@@ -461,7 +466,7 @@ export async function runRequirementsExtraction(
     : 'none';
 
   console.log(
-    `[requirementsExtractor] discovered=${jobs.length} quoted_enabled=${Boolean(quotedExtractor)} fail_fast=${failFastOnQuotedProviderFailure} provider_failure_limit=${quotedProviderFailureLimit}`
+    `[requirementsExtractor] discovered=${jobs.length} quoted_enabled=${Boolean(quotedExtractor)} quoted_failure_policy=NON_BLOCKING requested_fail_fast=${requestedFailFastOnQuotedProviderFailure} provider_failure_limit=${quotedProviderFailureLimit}`
   );
 
   try {
@@ -866,11 +871,9 @@ export async function runRequirementsExtraction(
                     ]
                   );
 
-                  if (failFastOnQuotedProviderFailure) {
-                    throw new RequirementsStageAbortError(
-                      `Quoted requirements validation failed; aborting requirements extraction after model output failed strict quote validation. Last error: ${warning}`
-                    );
-                  }
+                  // Keep the deterministic requirement set usable. The failed
+                  // quoted run is retained above for audit/replay and the
+                  // warning is attached to the completed deterministic stage.
                 } else {
                   const startIndex = deterministicRequirements.length + 1;
                   const quotedRequirements = validated.requirements.map((req, idx) =>
@@ -933,10 +936,6 @@ export async function runRequirementsExtraction(
                 );
               }
             } catch (quotedError) {
-              if (quotedError instanceof RequirementsStageAbortError) {
-                throw quotedError;
-              }
-
               summary.quotedFailed += 1;
               summary.metrics.quotedProviderFailures += 1;
               warning = quotedError instanceof Error ? quotedError.message : String(quotedError);
@@ -967,11 +966,9 @@ export async function runRequirementsExtraction(
               console.warn(
                 `${progress} quoted provider failed failures=${quotedProviderFailures}/${quotedProviderFailureLimit} error=${truncateLogValue(warning)}`
               );
-              if (failFastOnQuotedProviderFailure && quotedProviderFailures >= quotedProviderFailureLimit) {
-                throw new RequirementsStageAbortError(
-                  `Quoted requirements provider failed ${quotedProviderFailures} time(s); aborting requirements extraction after model retry budget was exhausted. Last error: ${warning}`
-                );
-              }
+              // Provider failure is non-blocking once deterministic extraction
+              // has succeeded. Keep counting failures so operations can replay
+              // this optional enrichment independently.
             }
           }
 
@@ -1046,9 +1043,6 @@ export async function runRequirementsExtraction(
         await upsertPipelineState(client, job, 'RETRY_WAIT', errorMessage);
         await insertStageEvent(client, job, 'RETRY_WAIT', 'RETRY_SCHEDULED', errorMessage, null);
 
-        if (error instanceof RequirementsStageAbortError) {
-          throw error;
-        }
       }
     }
   } finally {

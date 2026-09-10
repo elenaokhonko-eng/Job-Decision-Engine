@@ -35,6 +35,23 @@
         },
         "onsite_only_allowed": {
           "type": "boolean"
+        },
+        "hybrid_without_office_days_allowed": {
+          "type": "boolean"
+        },
+        "authorized_regions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 2 },
+          "maxItems": 20
+        },
+        "remote_without_territory_allowed": {
+          "type": "boolean"
+        },
+        "reject_explicit_foreign_territory": {
+          "type": "boolean"
+        },
+        "unknown_work_authorization_needs_verification": {
+          "type": "boolean"
         }
       }
     },

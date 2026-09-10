@@ -139,4 +139,23 @@ describe('extractDeterministicRequirements', () => {
     const domainReq = result.requirements.find((r) => r.requirement_type === 'DOMAIN');
     expect(domainReq?.quote_text).toMatch(/AI Systems|LLM training|NLP systems/i);
   });
+
+  it('keeps structured deterministic requirements usable when evidence is too short to quote', () => {
+    const result = extractDeterministicRequirements({
+      canonical_job_id: '12121212-1212-4121-8121-121212121212',
+      job_version_id: '34343434-3434-4343-8343-343434343434',
+      description_text: 'Hybrid role with AI.',
+    });
+
+    // The extractor must never emit a schema-invalid short quote. If a future
+    // pattern produces one, it must be represented as missing evidence rather
+    // than failing the complete deterministic requirement stage.
+    for (const requirement of result.requirements) {
+      expect(requirement.quote_text == null || requirement.quote_text.length >= 5).toBe(true);
+      if (requirement.quote_text == null) {
+        expect(requirement.quote_start_offset).toBeNull();
+        expect(requirement.quote_end_offset).toBeNull();
+      }
+    }
+  });
 });

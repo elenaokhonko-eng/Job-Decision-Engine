@@ -26,6 +26,8 @@ describe("workspace workability policy", () => {
     expect(merged.contractAllowed).toBe(true);
     expect(merged.regularOnCallAllowed).toBe(true);
     expect(merged.shiftWorkAllowed).toBe(true);
+    expect(merged.authorizedRegions).toEqual(["SINGAPORE"]);
+    expect(merged.hybridWithoutOfficeDaysAllowed).toBe(true);
   });
 
   it("applies the actual UI hard_constraints payload, including zero and false values", () => {
@@ -38,6 +40,8 @@ describe("workspace workability policy", () => {
         employment_types: ["FULL_TIME"],
         on_call_allowed: false,
         shift_work_allowed: false,
+        authorized_regions: ["Australia"],
+        hybrid_without_office_days_allowed: false,
       },
     });
 
@@ -46,6 +50,8 @@ describe("workspace workability policy", () => {
     expect(merged.onsiteOnlyAllowed).toBe(false);
     expect(merged.contractAllowed).toBe(false);
     expect(merged.regularOnCallAllowed).toBe(false);
+    expect(merged.authorizedRegions).toEqual(["AUSTRALIA"]);
+    expect(merged.hybridWithoutOfficeDaysAllowed).toBe(false);
     expect(merged.shiftWorkAllowed).toBe(false);
   });
 
