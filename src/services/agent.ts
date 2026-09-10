@@ -16,7 +16,6 @@ import {
 } from "../modelRoutes/registry.js";
 import type { WorkspaceContext } from "../workspace/context.js";
 import {
-  CANDIDATE_PROFILE,
   MULTI_LANE_SCORECARDS,
   ND_FRIENDLY_DIMENSIONS,
   POLITICS_STRESS_RISK_DIMENSIONS
@@ -693,7 +692,11 @@ export async function callLLM(
       return data.choices?.[0]?.message?.content ?? "";
     }
     case "gemini": {
-      const result = await runAgent(prompt);
+      const result = await runAgent(prompt, {
+        candidateProfileContext: typeof extra?.candidateProfileContext === "string"
+          ? extra.candidateProfileContext
+          : "",
+      });
       // Return the result object as a JSON string for consistency
       return JSON.stringify(result.result);
     }
@@ -1725,8 +1728,16 @@ export interface AgentExecutionResult {
   toolsUsed: string[];
 }
 
+export interface LegacyAgentContext {
+  /** Serialized, immutable candidate context loaded from the active database profile. */
+  candidateProfileContext: string;
+}
+
 // Core execution loop
-export async function runAgent(userQuestion: string): Promise<AgentExecutionResult> {
+export async function runAgent(
+  userQuestion: string,
+  options: LegacyAgentContext
+): Promise<AgentExecutionResult> {
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
@@ -1736,16 +1747,20 @@ export async function runAgent(userQuestion: string): Promise<AgentExecutionResu
     );
   }
 
+  const candidateProfileContext = options?.candidateProfileContext?.trim();
+  if (!candidateProfileContext) {
+    throw new Error(
+      "Legacy agent evaluation requires an explicit database-backed candidateProfileContext; refusing the fixed in-code profile path."
+    );
+  }
+
   const trace: string[] = [];
   const toolsUsed: string[] = [];
 
   const systemInstruction = `You are an expert Executive Career Architect and AI Decision Engine. Your objective is to evaluate job descriptions for a highly specialized executive technologist.
 
-### CANDIDATE CORE PROFILE:
-- Name: ${CANDIDATE_PROFILE.name}
-- Experience: ${CANDIDATE_PROFILE.experienceYears}+ years
-- Workplace Preference: ${CANDIDATE_PROFILE.workplacePreference}
-- Target Minimum Base: SGD ${CANDIDATE_PROFILE.minAcceptableBaseSgdMonth}/month
+### ACTIVE DATABASE-BACKED CANDIDATE CONTEXT:
+${candidateProfileContext}
 
 ### EVALUATION WORKFLOW (3 STAGES)
 
@@ -1937,6 +1952,8 @@ export interface SingleEvaluationJobInput {
   candidateLane?: string;
   priorityScore?: number;
   workabilityFacts?: any;
+  /** Serialized active database-backed profile/policy context for this evaluation. */
+  candidateProfileContext: string;
 }
 
 export interface SingleEvaluationExecutionResult {
@@ -2116,6 +2133,11 @@ export async function evaluateSingleCanonicalJob(
   pipelineRunId: string = crypto.randomUUID(),
   attemptNum: number = 1
 ): Promise<SingleEvaluationExecutionResult> {
+  if (!job.candidateProfileContext || job.candidateProfileContext.trim().length === 0) {
+    throw new Error(
+      "AI evaluation requires an active database-backed candidateProfileContext; refusing fixed in-code profile fallback."
+    );
+  }
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
@@ -2130,11 +2152,8 @@ export async function evaluateSingleCanonicalJob(
 You are an expert Executive Career Architect and AI Decision Engine.
 Evaluate the single job below strictly against candidate fit, lane classifications, and neurodivergent-friendly metrics.
 
-### CANDIDATE CORE PROFILE:
-- Name: ${CANDIDATE_PROFILE.name}
-- Experience: ${CANDIDATE_PROFILE.experienceYears}+ years
-- Workplace Preference: ${CANDIDATE_PROFILE.workplacePreference}
-- Target Minimum Base: SGD ${CANDIDATE_PROFILE.minAcceptableBaseSgdMonth}/month
+### ACTIVE DATABASE-BACKED CANDIDATE CONTEXT:
+${job.candidateProfileContext}
 
 ### JOB DETAILS:
 - Canonical Job ID: ${job.canonicalJobId}

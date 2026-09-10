@@ -6,7 +6,13 @@ type QueryClient = {
   query: pg.PoolClient["query"];
 };
 
-export type PipelineTaskStatus = "PENDING" | "RUNNING" | "COMPLETED" | "RETRY_WAIT" | "DEAD_LETTER";
+export type PipelineTaskStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "COMPLETED"
+  | "RETRY_WAIT"
+  | "BLOCKED_DEPENDENCY"
+  | "DEAD_LETTER";
 
 export interface PipelineTaskRow {
   id: string;
@@ -27,6 +33,10 @@ export interface PipelineTaskRow {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  context_fingerprint?: string | null;
+  blocked_on?: string | null;
+  blocked_reason?: string | null;
+  repair_action?: string | null;
 }
 
 export interface EnqueuePipelineTaskInput {
@@ -35,11 +45,13 @@ export interface EnqueuePipelineTaskInput {
   payload: unknown;
   maxAttempts?: number;
   availableAt?: Date;
+  contextFingerprint?: string;
 }
 
 export interface EnqueuePipelineTaskResult {
   taskId: string;
   inserted: boolean;
+  reactivated?: boolean;
 }
 
 export interface ReplayDeadLetterPipelineTaskInput {
@@ -67,6 +79,7 @@ export async function enqueuePipelineTask(
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
     const availableAt = input.availableAt ? input.availableAt.toISOString() : null;
+    const contextFingerprint = input.contextFingerprint ?? "legacy_pipeline_context_v1";
     const maxAttempts = input.maxAttempts ?? 8;
 
     const inserted = await (client as QueryClient).query<{ id: string }>(
@@ -76,38 +89,78 @@ export async function enqueuePipelineTask(
           task_type,
           task_key,
           payload,
+          context_fingerprint,
           status,
           available_at,
           max_attempts,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, 'PENDING', COALESCE($5::timestamptz, NOW()), $6, NOW(), NOW())
-        ON CONFLICT (workspace_id, task_key)
+        VALUES ($1, $2, $3, $4, $5, 'PENDING', COALESCE($6::timestamptz, NOW()), $7, NOW(), NOW())
+        ON CONFLICT (workspace_id, task_key, context_fingerprint)
         DO NOTHING
         RETURNING id
       `,
-      [ctx.workspaceId, input.taskType, input.taskKey, input.payload as any, availableAt, maxAttempts]
+      [
+        ctx.workspaceId,
+        input.taskType,
+        input.taskKey,
+        input.payload as any,
+        contextFingerprint,
+        availableAt,
+        maxAttempts,
+      ]
     );
 
     if (inserted.rows.length > 0) {
-      return { taskId: inserted.rows[0].id, inserted: true };
+      return { taskId: inserted.rows[0].id, inserted: true, reactivated: false };
     }
 
-    const existing = await (client as QueryClient).query<{ id: string }>(
+    const existing = await (client as QueryClient).query<{ id: string; status: PipelineTaskStatus }>(
       `
-        SELECT id
+        SELECT id, status
         FROM pipeline_tasks
         WHERE workspace_id = $1
           AND task_key = $2
+          AND context_fingerprint = $3
         LIMIT 1
       `,
-      [ctx.workspaceId, input.taskKey]
+      [ctx.workspaceId, input.taskKey, contextFingerprint]
     );
     if (existing.rows.length === 0) {
       throw new Error(`Failed to enqueue task (no insert and no existing row): ${input.taskKey}`);
     }
-    return { taskId: existing.rows[0].id, inserted: false };
+    if (existing.rows[0].status === "BLOCKED_DEPENDENCY") {
+      const reactivated = await (client as QueryClient).query<{ id: string }>(
+        `
+          UPDATE pipeline_tasks
+          SET status = 'PENDING',
+              available_at = NOW(),
+              lease_id = NULL,
+              lease_expires_at = NULL,
+              heartbeat_at = NULL,
+              claimed_by = NULL,
+              last_error = NULL,
+              blocked_on = NULL,
+              blocked_reason = NULL,
+              repair_action = NULL,
+              completed_at = NULL,
+              updated_at = NOW()
+          WHERE workspace_id = $1
+            AND id = $2
+            AND status = 'BLOCKED_DEPENDENCY'
+          RETURNING id
+        `,
+        [ctx.workspaceId, existing.rows[0].id]
+      );
+      return {
+        taskId: existing.rows[0].id,
+        inserted: false,
+        reactivated: reactivated.rows.length > 0,
+      };
+    }
+
+    return { taskId: existing.rows[0].id, inserted: false, reactivated: false };
   } finally {
     if (ownsClient && typeof (client as any).release === "function") {
       (client as any).release();
@@ -145,6 +198,9 @@ export async function replayDeadLetterPipelineTask(
             max_attempts = COALESCE($5::int, max_attempts),
             last_error = NULL,
             dead_letter_reason = NULL,
+            blocked_on = NULL,
+            blocked_reason = NULL,
+            repair_action = NULL,
             completed_at = NULL,
             updated_at = NOW()
         WHERE workspace_id = $1
@@ -374,6 +430,9 @@ export async function completePipelineTaskAndRun(
               heartbeat_at = NULL,
               claimed_by = NULL,
               last_error = NULL,
+              blocked_on = NULL,
+              blocked_reason = NULL,
+              repair_action = NULL,
               completed_at = NOW(),
               updated_at = NOW()
           WHERE workspace_id = $1
@@ -389,6 +448,86 @@ export async function completePipelineTaskAndRun(
       }
 
       await options?.afterComplete?.(client);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    }
+  } finally {
+    if (ownsClient && typeof (client as any).release === "function") {
+      (client as any).release();
+    }
+  }
+}
+
+export interface BlockPipelineTaskInput {
+  blockedOn: string;
+  reason: string;
+  repairAction: string;
+}
+
+export async function blockPipelineTask(
+  task: ClaimedPipelineTask,
+  input: BlockPipelineTaskInput,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
+): Promise<void> {
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const ownsClient = isPool(clientOrPool);
+  const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
+
+  try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    await client.query("BEGIN");
+    try {
+      await (client as QueryClient).query(
+        `
+          UPDATE pipeline_task_attempts
+          SET status = 'BLOCKED',
+              finished_at = NOW(),
+              error_message = $4
+          WHERE workspace_id = $1
+            AND task_id = $2
+            AND attempt_number = $3
+        `,
+        [ctx.workspaceId, task.taskId, task.attemptNumber, input.reason]
+      );
+
+      const updatedTask = await (client as QueryClient).query<{ id: string }>(
+        `
+          UPDATE pipeline_tasks
+          SET status = 'BLOCKED_DEPENDENCY',
+              available_at = NULL,
+              lease_id = NULL,
+              lease_expires_at = NULL,
+              heartbeat_at = NULL,
+              claimed_by = NULL,
+              last_error = $4,
+              blocked_on = $5,
+              blocked_reason = $4,
+              repair_action = $6,
+              completed_at = NULL,
+              updated_at = NOW()
+          WHERE workspace_id = $1
+            AND id = $2
+            AND status = 'RUNNING'
+            AND lease_id = $3::uuid
+          RETURNING id
+        `,
+        [
+          ctx.workspaceId,
+          task.taskId,
+          task.leaseId,
+          input.reason,
+          input.blockedOn,
+          input.repairAction,
+        ]
+      );
+      if (updatedTask.rows.length === 0) {
+        throw new Error(`Lost lease while blocking pipeline task ${task.taskId}.`);
+      }
+
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");
@@ -444,6 +583,9 @@ export async function failPipelineTask(
               claimed_by = NULL,
               last_error = $6,
               dead_letter_reason = CASE WHEN $4 = 'DEAD_LETTER' THEN $6 ELSE dead_letter_reason END,
+              blocked_on = NULL,
+              blocked_reason = NULL,
+              repair_action = NULL,
               completed_at = CASE WHEN $4 = 'DEAD_LETTER' THEN NOW() ELSE completed_at END,
               updated_at = NOW()
           WHERE workspace_id = $1
@@ -473,6 +615,72 @@ export async function failPipelineTask(
   } finally {
     if (ownsClient && typeof (client as any).release === "function") {
       (client as any).release();
+    }
+  }
+}
+
+/** Release an unfinished lease after a worker cancellation without dead-lettering the task. */
+export async function releasePipelineTaskForRetry(
+  task: ClaimedPipelineTask,
+  reason: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
+): Promise<boolean> {
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const ownsClient = isPool(clientOrPool);
+  const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
+
+  try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    await client.query("BEGIN");
+    try {
+      const released = await client.query(
+        `
+          UPDATE pipeline_tasks
+          SET status = 'RETRY_WAIT',
+              available_at = NOW(),
+              lease_id = NULL,
+              lease_expires_at = NULL,
+              heartbeat_at = NULL,
+              claimed_by = NULL,
+              last_error = $4,
+              updated_at = NOW()
+          WHERE workspace_id = $1
+            AND id = $2::uuid
+            AND status = 'RUNNING'
+            AND lease_id = $3::uuid
+          RETURNING id
+        `,
+        [ctx.workspaceId, task.taskId, task.leaseId, reason]
+      );
+
+      if (released.rows.length > 0) {
+        await client.query(
+          `
+            UPDATE pipeline_task_attempts
+            SET status = 'FAILED',
+                finished_at = NOW(),
+                error_message = $3,
+                metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled', true)
+            WHERE workspace_id = $1
+              AND task_id = $2::uuid
+              AND attempt_number = $4
+              AND status = 'STARTED'
+          `,
+          [ctx.workspaceId, task.taskId, reason, task.attemptNumber]
+        );
+      }
+
+      await client.query("COMMIT");
+      return released.rows.length > 0;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    if (ownsClient && typeof (client as any).release === "function") {
+      (client as pg.PoolClient).release();
     }
   }
 }

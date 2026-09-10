@@ -13,9 +13,17 @@ export interface DesktopSettings {
 
 export interface DesktopSecretStore {
   isAvailable: () => Promise<boolean>;
-  getSecret: (key: "apiToken") => Promise<string | null>;
   setSecret: (key: "apiToken", value: string) => Promise<{ ok: boolean }>;
   deleteSecret: (key: "apiToken") => Promise<{ ok: boolean }>;
+}
+
+export interface DesktopSettingsSaveOptions {
+  /**
+   * Keep the existing OS-backed token when the password field is blank. A
+   * blank field is the normal native state because the renderer never reads
+   * the stored bearer token back.
+   */
+  preserveExistingToken?: boolean;
 }
 
 export const DESKTOP_SETTINGS_STORAGE_KEY = "jdec.desktop.settings.v1";
@@ -73,14 +81,16 @@ export async function loadDesktopSettingsSecure(
   if (!secretStore) return base;
   const available = await secretStore.isAvailable().catch(() => false);
   if (!available) return { ...base, apiToken: "" };
-  const apiToken = await secretStore.getSecret("apiToken").catch(() => null);
-  return normalizeDesktopSettings({ ...base, apiToken: apiToken ?? "" });
+  // Native clients never read the bearer token into the renderer. The main
+  // process attaches it to API requests after retrieving it from OS storage.
+  return normalizeDesktopSettings({ ...base, apiToken: "" });
 }
 
 export async function saveDesktopSettingsSecure(
   storage: KeyValueStorage | null | undefined,
   secretStore: DesktopSecretStore | null | undefined,
-  settings: DesktopSettings
+  settings: DesktopSettings,
+  options: DesktopSettingsSaveOptions = {}
 ): Promise<DesktopSettings> {
   const normalized = normalizeDesktopSettings(settings);
   if (!secretStore) {
@@ -102,12 +112,14 @@ export async function saveDesktopSettingsSecure(
   if (available) {
     if (normalized.apiToken) {
       await secretStore.setSecret("apiToken", normalized.apiToken);
-    } else {
+    } else if (!options.preserveExistingToken) {
       await secretStore.deleteSecret("apiToken");
     }
   }
 
-  return normalized;
+  // Do not retain the bearer token in renderer state after native storage
+  // succeeds. The Electron main process reads it only when making a request.
+  return available ? { ...normalized, apiToken: "" } : normalized;
 }
 
 export function clearDesktopSettings(storage: KeyValueStorage | null | undefined): void {

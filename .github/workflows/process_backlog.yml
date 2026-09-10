@@ -11,7 +11,9 @@ on:
       - completed
 
 concurrency:
-  group: process-discovery-backlog
+  # Use the same repository-wide group as ingestion because both workflows
+  # can invoke the pipeline task worker against the same database.
+  group: job-decision-pipeline
   # A backlog drain owns leased database work. A scheduled run and the
   # post-ingestion workflow_run trigger may overlap; queue the later run so
   # it cannot terminate the active worker mid-stage and leave the drain
@@ -73,6 +75,12 @@ jobs:
           REQUIREMENTS_ENABLE_QUOTED: 'true'
         run: npx tsx scripts/preflight_models.ts
 
+      - name: Reconcile pipeline before drain
+        timeout-minutes: 5
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json
+
       - name: Process saved discovery backlog
         timeout-minutes: 15
         env:
@@ -104,5 +112,20 @@ jobs:
           PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE: ${{ vars.PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE || '1' }}
           PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '500' }}
           PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: ${{ vars.PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT || 'true' }}
-          PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '10000' }}
+          PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '60000' }}
         run: npx tsx scripts/process_pipeline_tasks.ts
+
+      - name: Reconcile pipeline after drain
+        if: ${{ always() }}
+        timeout-minutes: 5
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json
+
+      - name: Upload pipeline reconciliation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-reconciliation-${{ github.run_id }}
+          path: pipeline-reconciliation-*.json
+          if-no-files-found: error

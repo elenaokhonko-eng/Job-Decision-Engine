@@ -28,6 +28,27 @@ describe("workspace workability policy", () => {
     expect(merged.shiftWorkAllowed).toBe(true);
   });
 
+  it("applies the actual UI hard_constraints payload, including zero and false values", () => {
+    const merged = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+      schema_version: "2.2.0",
+      hard_constraints: {
+        work_modes: ["REMOTE"],
+        max_office_days_per_week: 0,
+        max_travel_pct: 0,
+        employment_types: ["FULL_TIME"],
+        on_call_allowed: false,
+        shift_work_allowed: false,
+      },
+    });
+
+    expect(merged.maxOfficeDaysPerWeek).toBe(0);
+    expect(merged.maxTravelPct).toBe(0);
+    expect(merged.onsiteOnlyAllowed).toBe(false);
+    expect(merged.contractAllowed).toBe(false);
+    expect(merged.regularOnCallAllowed).toBe(false);
+    expect(merged.shiftWorkAllowed).toBe(false);
+  });
+
   it("resolves the active database preference mode for the current workspace user", async () => {
     const context: WorkspaceContext = {
       workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

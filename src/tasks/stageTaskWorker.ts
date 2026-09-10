@@ -10,12 +10,15 @@ import { runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
+import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import {
+  blockPipelineTask,
   claimPipelineTasks,
   completePipelineTaskAndRun,
   enqueuePipelineTask,
   failPipelineTask,
   heartbeatPipelineTask,
+  releasePipelineTaskForRetry,
   type ClaimedPipelineTask,
 } from "./pipelineTasks.js";
 
@@ -59,9 +62,10 @@ export interface PipelineStageWorkerSummary {
   seeded: SeedPipelineTasksSummary | null;
   claimed: number;
   completed: number;
+  blocked: number;
   failed: number;
   deadLettered: number;
-  byType: Record<string, { claimed: number; completed: number; failed: number; deadLettered: number }>;
+  byType: Record<string, { claimed: number; completed: number; blocked: number; failed: number; deadLettered: number }>;
   errors: Array<{ taskType: string; taskKey: string; error: string }>;
 }
 
@@ -122,9 +126,9 @@ function incrementSeed(
 function incrementWorker(
   summary: PipelineStageWorkerSummary,
   taskType: string,
-  field: "claimed" | "completed" | "failed" | "deadLettered"
+  field: "claimed" | "completed" | "blocked" | "failed" | "deadLettered"
 ): void {
-  summary.byType[taskType] ??= { claimed: 0, completed: 0, failed: 0, deadLettered: 0 };
+  summary.byType[taskType] ??= { claimed: 0, completed: 0, blocked: 0, failed: 0, deadLettered: 0 };
   summary.byType[taskType][field] += 1;
 }
 
@@ -132,6 +136,17 @@ export class PipelineWorkerCancelledError extends Error {
   constructor(message = "Pipeline task worker cancellation requested.") {
     super(message);
     this.name = "PipelineWorkerCancelledError";
+  }
+}
+
+export class PipelineTaskDependencyBlockedError extends Error {
+  constructor(
+    public readonly blockedOn: string,
+    public readonly repairAction: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "PipelineTaskDependencyBlockedError";
   }
 }
 
@@ -206,6 +221,66 @@ async function enqueueStageTask(
       ? payload.profile_version_id
       : await resolveActiveProfileVersionId(clientOrPool, context);
     taskPayload = { ...payload, profile_version_id: profileVersionId };
+  } else if (taskType === "DECIDE_RECOMMENDATION") {
+    const activeProfileRes = await clientOrPool.query<{ id: string }>(
+      `SELECT pv.id
+       FROM profile_versions pv
+       WHERE pv.workspace_id = $1
+         AND pv.status = 'ACTIVE'
+       ORDER BY pv.created_at DESC
+       LIMIT 1`,
+      [context.workspaceId]
+    );
+    profileVersionId = activeProfileRes.rows[0]?.id;
+    if (profileVersionId) {
+      taskPayload = { ...payload, profile_version_id: profileVersionId };
+    }
+  }
+
+  // Task identity must include the artifact context that the task is meant to
+  // consume. Otherwise a completed task created before a rematch/decision can
+  // suppress the successor task created after the current artifact exists.
+  const jobVersionId = typeof taskPayload.job_version_id === "string"
+    ? taskPayload.job_version_id
+    : null;
+  if (jobVersionId && [
+    "MATCH_PROFILE_EVIDENCE",
+    "DECIDE_RECOMMENDATION",
+    "ENQUEUE_EXPLANATION",
+  ].includes(taskType)) {
+    const currentContext = await clientOrPool.query<{
+      active_requirement_set_id: string | null;
+      content_hash: string | null;
+      latest_match_run_id: string | null;
+      latest_deterministic_decision_id: string | null;
+    }>(
+      `SELECT jv.active_requirement_set_id,
+              jv.content_hash,
+              c.latest_match_run_id,
+              c.latest_deterministic_decision_id
+       FROM job_versions jv
+       JOIN canonical_jobs c
+         ON c.workspace_id = jv.workspace_id
+        AND c.id = jv.canonical_job_id
+       WHERE jv.workspace_id = $1
+         AND jv.id = $2
+       LIMIT 1`,
+      [context.workspaceId, jobVersionId]
+    );
+    const row = currentContext.rows[0];
+    if (row) {
+      taskPayload = {
+        ...taskPayload,
+        content_hash: row.content_hash,
+        active_requirement_set_id: row.active_requirement_set_id,
+        ...(taskType === "DECIDE_RECOMMENDATION" || taskType === "ENQUEUE_EXPLANATION"
+          ? {
+              match_run_id: row.latest_match_run_id,
+              deterministic_decision_id: row.latest_deterministic_decision_id,
+            }
+          : {}),
+      };
+    }
   }
   const taskVariant = taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
       taskPayload.repair_existing_state === true
@@ -223,6 +298,12 @@ async function enqueueStageTask(
       ),
       payload: taskPayload,
       maxAttempts,
+      contextFingerprint: buildPipelineTaskContextFingerprint({
+        workspaceId: context.workspaceId,
+        taskType,
+        taskVersion: stageVersion(taskType),
+        payload: taskPayload,
+      }),
     },
     clientOrPool,
     { context }
@@ -334,10 +415,8 @@ export async function seedRecoverablePipelineTasks(
             AND rer.job_version_id = ps.job_version_id
             AND rer.run_type = 'DETERMINISTIC'
             AND rer.status = 'COMPLETED'
-            AND (
-              jv.active_requirement_set_id IS NULL
-              OR rer.requirement_set_id = jv.active_requirement_set_id
-            )
+            AND jv.active_requirement_set_id IS NOT NULL
+            AND rer.requirement_set_id = jv.active_requirement_set_id
            WHERE ps.workspace_id = c.workspace_id
              AND ps.job_version_id = jv.id
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
@@ -383,10 +462,8 @@ export async function seedRecoverablePipelineTasks(
             AND rer.job_version_id = ps.job_version_id
             AND rer.run_type = 'DETERMINISTIC'
             AND rer.status = 'COMPLETED'
-            AND (
-              jv.active_requirement_set_id IS NULL
-              OR rer.requirement_set_id = jv.active_requirement_set_id
-            )
+            AND jv.active_requirement_set_id IS NOT NULL
+            AND rer.requirement_set_id = jv.active_requirement_set_id
            WHERE ps.workspace_id = c.workspace_id
              AND ps.job_version_id = jv.id
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
@@ -419,7 +496,8 @@ export async function seedRecoverablePipelineTasks(
             AND rer.job_version_id = ps.job_version_id
             AND rer.run_type = 'LLM_QUOTED'
             AND rer.status = 'COMPLETED'
-            AND (jv.active_requirement_set_id IS NULL OR rer.requirement_set_id = jv.active_requirement_set_id)
+            AND jv.active_requirement_set_id IS NOT NULL
+            AND rer.requirement_set_id = jv.active_requirement_set_id
            WHERE ps.workspace_id = c.workspace_id
              AND ps.job_version_id = jv.id
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
@@ -452,7 +530,8 @@ export async function seedRecoverablePipelineTasks(
             AND rer.job_version_id = ps.job_version_id
             AND rer.run_type = 'DETERMINISTIC'
             AND rer.status = 'COMPLETED'
-            AND (jv.active_requirement_set_id IS NULL OR rer.requirement_set_id = jv.active_requirement_set_id)
+            AND jv.active_requirement_set_id IS NOT NULL
+            AND rer.requirement_set_id = jv.active_requirement_set_id
            WHERE ps.workspace_id = c.workspace_id
              AND ps.job_version_id = jv.id
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
@@ -548,10 +627,8 @@ export async function seedRecoverablePipelineTasks(
             AND rer.job_version_id = ps.job_version_id
             AND rer.run_type = 'DETERMINISTIC'
             AND rer.status = 'COMPLETED'
-            AND (
-              target_jv.active_requirement_set_id IS NULL
-              OR rer.requirement_set_id = target_jv.active_requirement_set_id
-            )
+            AND target_jv.active_requirement_set_id IS NOT NULL
+            AND rer.requirement_set_id = target_jv.active_requirement_set_id
            WHERE ps.workspace_id = c.workspace_id
              AND ps.job_version_id = target_jv.id
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
@@ -586,8 +663,18 @@ export async function seedRecoverablePipelineTasks(
       ctx,
       summary,
       "DECIDE_RECOMMENDATION",
-      `SELECT c.id AS canonical_job_id, COALESCE(c.latest_job_version_id, jv.id) AS job_version_id
+      `SELECT c.id AS canonical_job_id,
+              COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
+              active_profile.id AS profile_version_id
        FROM canonical_jobs c
+       LEFT JOIN LATERAL (
+         SELECT pv.id
+         FROM profile_versions pv
+         WHERE pv.workspace_id = c.workspace_id
+           AND pv.status = 'ACTIVE'
+         ORDER BY pv.created_at DESC
+         LIMIT 1
+       ) active_profile ON TRUE
        LEFT JOIN LATERAL (
          SELECT id
          FROM job_versions
@@ -598,16 +685,44 @@ export async function seedRecoverablePipelineTasks(
        WHERE c.workspace_id = $1
          AND COALESCE(c.processing_state, c.processing_status) IN (
            'HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED',
-           'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'NEEDS_MANUAL_REVIEW'
+           'MATCHED', 'QUEUED_FOR_AI', 'NEEDS_MANUAL_REVIEW'
          )
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND c.recommendation_outcome IS NULL
+         AND (
+           COALESCE(c.processing_state, c.processing_status) IN (
+             'HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED'
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM job_versions target_jv
+             JOIN profile_versions current_profile
+               ON current_profile.workspace_id = target_jv.workspace_id
+              AND current_profile.status = 'ACTIVE'
+             JOIN match_runs current_match
+               ON current_match.workspace_id = c.workspace_id
+              AND current_match.canonical_job_id = c.id
+              AND current_match.id = c.latest_match_run_id
+              AND current_match.job_version_id = target_jv.id
+              AND current_match.profile_version_id = current_profile.id
+              AND current_match.requirement_set_id = target_jv.active_requirement_set_id
+              AND current_match.job_content_hash = target_jv.content_hash
+              AND current_match.context_fingerprint IS NOT NULL
+              AND current_match.status = 'COMPLETED'
+             WHERE target_jv.workspace_id = c.workspace_id
+               AND target_jv.id = COALESCE(c.latest_job_version_id, jv.id)
+           )
+         )
        ORDER BY c.updated_at ASC
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
         id: row.job_version_id,
-        payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
+        payload: {
+          canonical_job_id: row.canonical_job_id,
+          job_version_id: row.job_version_id,
+          ...(row.profile_version_id ? { profile_version_id: row.profile_version_id } : {}),
+        },
       })
     );
 
@@ -630,12 +745,55 @@ export async function seedRecoverablePipelineTasks(
          AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
          AND COALESCE(c.recommendation_outcome, 'TRACK') IN ('PRIORITY', 'REVIEW')
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
+         AND EXISTS (
+           SELECT 1
+           FROM job_versions target_jv
+           JOIN profile_versions current_profile
+             ON current_profile.workspace_id = target_jv.workspace_id
+            AND current_profile.status = 'ACTIVE'
+           JOIN match_runs current_match
+             ON current_match.workspace_id = c.workspace_id
+            AND current_match.canonical_job_id = c.id
+            AND current_match.id = c.latest_match_run_id
+            AND current_match.job_version_id = target_jv.id
+            AND current_match.profile_version_id = current_profile.id
+            AND current_match.requirement_set_id = target_jv.active_requirement_set_id
+            AND current_match.job_content_hash = target_jv.content_hash
+            AND current_match.context_fingerprint IS NOT NULL
+            AND current_match.status = 'COMPLETED'
+           JOIN deterministic_decisions current_decision
+             ON current_decision.workspace_id = c.workspace_id
+            AND current_decision.id = c.latest_deterministic_decision_id
+            AND current_decision.canonical_job_id = c.id
+            AND current_decision.job_version_id = target_jv.id
+            AND current_decision.match_run_id = current_match.id
+            AND current_decision.context_fingerprint IS NOT NULL
+           WHERE target_jv.workspace_id = c.workspace_id
+             AND target_jv.id = COALESCE(c.latest_job_version_id, jv.id)
+         )
          AND NOT EXISTS (
            SELECT 1
            FROM ai_evaluations ae
            WHERE ae.workspace_id = c.workspace_id
              AND ae.canonical_job_id = c.id
              AND ae.job_version_id = COALESCE(c.latest_job_version_id, jv.id)
+             AND ae.profile_version_id IS NOT DISTINCT FROM (
+               SELECT pv.id
+               FROM profile_versions pv
+               WHERE pv.workspace_id = c.workspace_id
+                 AND pv.status = 'ACTIVE'
+               ORDER BY pv.created_at DESC
+               LIMIT 1
+             )
+             AND ae.match_run_id = c.latest_match_run_id
+             AND ae.deterministic_decision_id = c.latest_deterministic_decision_id
+             AND ae.job_content_hash IS NOT DISTINCT FROM (
+               SELECT target_jv.content_hash
+               FROM job_versions target_jv
+               WHERE target_jv.workspace_id = c.workspace_id
+                 AND target_jv.id = COALESCE(c.latest_job_version_id, jv.id)
+             )
+             AND ae.context_fingerprint IS NOT NULL
          )
        ORDER BY c.updated_at ASC
        LIMIT $2`,
@@ -764,10 +922,8 @@ async function jobVersionHasCompletedRequirementsExtraction(
         AND rer.job_version_id = jv.id
         AND rer.run_type = $3
         AND rer.status = 'COMPLETED'
-        AND (
-          jv.active_requirement_set_id IS NULL
-          OR rer.requirement_set_id = jv.active_requirement_set_id
-        )
+        AND jv.active_requirement_set_id IS NOT NULL
+        AND rer.requirement_set_id = jv.active_requirement_set_id
        WHERE jv.workspace_id = $1
          AND jv.id = $2
          AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
@@ -924,9 +1080,6 @@ async function maybeEnqueueAfterTask(
   }
 
   if (taskType === "MATCH_PROFILE_EVIDENCE") {
-    if (payload.match_deferred_for_requirements === true) {
-      return;
-    }
     await enqueueStageTask("DECIDE_RECOMMENDATION", jobVersionId, stagePayload, clientOrPool, ctx);
     return;
   }
@@ -1104,15 +1257,11 @@ async function executeStageTask(
         clientOrPool,
         ctx
       );
-      if (task.payload && typeof task.payload === "object") {
-        task.payload = {
-          ...(task.payload as Record<string, unknown>),
-          match_deferred_for_requirements: true,
-        };
-      } else {
-        task.payload = { job_version_id: jobVersionId, match_deferred_for_requirements: true };
-      }
-      return;
+      throw new PipelineTaskDependencyBlockedError(
+        `EXTRACT_DETERMINISTIC_REQUIREMENTS:${jobVersionId}`,
+        "Run deterministic requirement extraction, then resume MATCH_PROFILE_EVIDENCE.",
+        `Matching is blocked until deterministic requirements are current for job_version_id=${jobVersionId}.`
+      );
     }
     const summary = await dependencies.runDeterministicMatcher(clientOrPool, {
       context: ctx,
@@ -1215,6 +1364,7 @@ export async function runPipelineStageTaskWorker(
     seeded: null,
     claimed: 0,
     completed: 0,
+    blocked: 0,
     failed: 0,
     deadLettered: 0,
     byType: {},
@@ -1253,10 +1403,13 @@ export async function runPipelineStageTaskWorker(
         madeProgress = true;
 
         for (const task of claimedTasks) {
-          throwIfWorkerCancelled(options.abortSignal);
           summary.claimed += 1;
           incrementWorker(summary, task.taskType, "claimed");
           try {
+            // Keep the cancellation check inside the lease-release catch:
+            // aborting immediately after claim must never strand a RUNNING
+            // task until its lease expires.
+            throwIfWorkerCancelled(options.abortSignal);
             await processClaimedTask(
               task,
               client as any,
@@ -1269,7 +1422,34 @@ export async function runPipelineStageTaskWorker(
             throwIfWorkerCancelled(options.abortSignal);
           } catch (error) {
             if (error instanceof PipelineWorkerCancelledError) {
+              await releasePipelineTaskForRetry(
+                task,
+                error.message,
+                client as any,
+                { context: ctx }
+              ).catch((releaseError) => {
+                summary.errors.push({
+                  taskType: task.taskType,
+                  taskKey: task.taskKey,
+                  error: `Cancellation lease release failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+                });
+              });
               throw error;
+            }
+            if (error instanceof PipelineTaskDependencyBlockedError) {
+              await blockPipelineTask(
+                task,
+                {
+                  blockedOn: error.blockedOn,
+                  reason: error.message,
+                  repairAction: error.repairAction,
+                },
+                client as any,
+                { context: ctx }
+              );
+              summary.blocked += 1;
+              incrementWorker(summary, task.taskType, "blocked");
+              continue;
             }
             const message = error instanceof Error ? error.message : String(error);
             const exhausted = task.attemptNumber >= task.maxAttempts;

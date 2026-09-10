@@ -54,6 +54,9 @@ const baseJob: ShortlistRow = {
   cv_document_run_id: null,
   cover_letter_document_run_id: null,
   document_ready: false,
+  current_artifact_status: "CURRENT_OR_NOT_APPLICABLE",
+  current_artifact_reason: null,
+  blocked_task_count: 0,
 };
 
 const baseApplication: ApplicationRecord = {
@@ -125,6 +128,7 @@ describe("desktop view model", () => {
   it("labels jobs from persisted deterministic state", () => {
     expect(jobOutcomeLabel(baseJob)).toBe("PRIORITY");
     expect(jobOutcomeLabel({ ...baseJob, recommendation_outcome: null, gate_status: "NEEDS_VERIFICATION" })).toBe("VERIFY");
+    expect(jobOutcomeLabel({ ...baseJob, current_artifact_status: "MATCH_STALE" })).toBe("VERIFY");
   });
 
   it("summarizes desktop counters without fabricating records", () => {

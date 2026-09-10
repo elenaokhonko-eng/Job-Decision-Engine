@@ -9,6 +9,8 @@ import {
   type WorkspaceContext,
 } from "../../workspace/context.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
+import { loadWorkabilityPolicy, mergeWorkabilityPreferenceContent } from "../../pipeline/workabilityPolicy.js";
+import { stableStringify } from "../../config/structuredLoader.js";
 import { apiAuthMiddleware } from "./auth.js";
 import { decodeCursor, encodeCursor } from "./cursor.js";
 
@@ -46,6 +48,11 @@ function userKeyFromRequest(req: express.Request): string {
 
 function sha256Hex(payload: string): string {
   return crypto.createHash("sha256").update(payload).digest("hex");
+}
+
+function previewWorkabilityPolicy(content: unknown): { policy: unknown; policy_hash: string } {
+  const policy = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), content);
+  return { policy, policy_hash: sha256Hex(stableStringify(policy)) };
 }
 
 function parsePositiveInt(value: unknown, fallback: number, options?: { min?: number; max?: number }): number {
@@ -218,10 +225,12 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             s.latest_match_run_id,
             s.cv_document_run_id,
             s.cover_letter_document_run_id,
-            s.document_ready
-          FROM v_canonical_shortlist s
-          JOIN canonical_jobs c_ws ON c_ws.id = s.canonical_job_id
-          WHERE c_ws.workspace_id = $1
+            s.document_ready,
+            s.current_artifact_status,
+            s.current_artifact_reason,
+            s.blocked_task_count
+          FROM v_canonical_shortlist_scoped s
+          WHERE s.workspace_id = $1
           ${cursorClause}
           ORDER BY s.observed_at DESC, s.canonical_job_id DESC
           LIMIT $${params.length}
@@ -264,9 +273,8 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             a.politics_stress_score,
             a.sensory_overload_index,
             a."postedDate"::timestamptz AS observed_at
-          FROM v_rejected_jobs_audit a
-          JOIN canonical_jobs c_ws ON c_ws.id = a.id
-          WHERE c_ws.workspace_id = $1
+          FROM v_rejected_jobs_audit_scoped a
+          WHERE a.workspace_id = $1
           ORDER BY observed_at DESC, a.id DESC
           LIMIT $2
         `,
@@ -567,6 +575,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             t.id,
             t.task_type,
             t.task_key,
+            t.context_fingerprint,
             t.status,
             t.available_at,
             t.lease_id,
@@ -577,6 +586,9 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             t.max_attempts,
             t.last_error,
             t.dead_letter_reason,
+            t.blocked_on,
+            t.blocked_reason,
+            t.repair_action,
             t.created_at,
             t.updated_at,
             t.completed_at
@@ -743,11 +755,21 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
       }
 
       const record = await withTransaction(pool, async (client) => {
-        const jobRes = await client.query<{ canonical_job_id: string; job_version_id: string; canonical_url: string | null }>(
+        const jobRes = await client.query<{
+          canonical_job_id: string;
+          job_version_id: string;
+          canonical_url: string | null;
+          current_artifact_status: string | null;
+          current_artifact_reason: string | null;
+          recommendation_eligibility: string | null;
+        }>(
           `
             SELECT c.id AS canonical_job_id,
                    jv.id AS job_version_id,
-                   c.canonical_url
+                   c.canonical_url,
+                   current_shortlist.current_artifact_status,
+                   current_shortlist.current_artifact_reason,
+                   current_shortlist.recommendation_eligibility
             FROM canonical_jobs c
             JOIN job_versions jv
               ON jv.workspace_id = c.workspace_id
@@ -763,6 +785,10 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
                  LIMIT 1
                )
              )
+            LEFT JOIN v_canonical_shortlist_scoped current_shortlist
+              ON current_shortlist.workspace_id = c.workspace_id
+             AND current_shortlist.canonical_job_id = c.id
+             AND current_shortlist.job_version_id = jv.id
             WHERE c.workspace_id = $1
               AND c.id = $2::uuid
             LIMIT 1
@@ -771,6 +797,20 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         );
         const job = jobRes.rows[0];
         if (!job) return null;
+        if (job.current_artifact_status !== "CURRENT_OR_NOT_APPLICABLE") {
+          return {
+            handoffBlocked: true,
+            error: "The job does not have a current decision artifact. Re-run the pipeline before creating an application handoff.",
+            reason: job.current_artifact_reason ?? job.current_artifact_status ?? "CURRENT_ARTIFACT_UNAVAILABLE",
+          };
+        }
+        if (job.recommendation_eligibility !== "ELIGIBLE") {
+          return {
+            handoffBlocked: true,
+            error: "The job is not deterministically eligible for application handoff.",
+            reason: job.recommendation_eligibility ?? "RECOMMENDATION_NOT_ELIGIBLE",
+          };
+        }
 
         const existing = await client.query<{ id: string; status: ApplicationStatus }>(
           `
@@ -923,6 +963,10 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
 
       if (!record) {
         res.status(404).json({ ok: false, error: "Canonical job/version not found." });
+        return;
+      }
+      if ("handoffBlocked" in record && record.handoffBlocked) {
+        res.status(409).json({ ok: false, error: record.error, reason: record.reason });
         return;
       }
 
@@ -1427,6 +1471,19 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
       });
 
       res.status(201).json({ ok: true, mode });
+    })
+  );
+
+  router.post(
+    "/preference-modes/preview",
+    asyncHandler(async (req, res) => {
+      const content = req.body?.content ?? {};
+      if (!content || typeof content !== "object" || Array.isArray(content)) {
+        res.status(400).json({ ok: false, error: "content must be a JSON object." });
+        return;
+      }
+      const preview = previewWorkabilityPolicy(content);
+      res.json({ ok: true, ...preview });
     })
   );
 

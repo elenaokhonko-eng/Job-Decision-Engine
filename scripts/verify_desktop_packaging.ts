@@ -32,6 +32,7 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   const releaseEvidencePath = path.join(rootDir, "scripts", "desktop_release_evidence.ts");
   const releasePolicyPath = path.join(rootDir, "desktop", "release", "release-policy.json");
   const releaseWorkflowPath = path.join(rootDir, ".github", "workflows", "desktop-release.yml");
+  const viteConfigPath = path.join(rootDir, "vite.config.ts");
   const distIndex = path.join(rootDir, "dist", "index.html");
   const pkg = readJson(pkgPath);
 
@@ -49,6 +50,7 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   requireCheck(fs.existsSync(releaseEvidencePath), "Desktop release evidence script exists");
   requireCheck(fs.existsSync(releasePolicyPath), "Desktop release policy exists");
   requireCheck(fs.existsSync(releaseWorkflowPath), "Desktop release workflow exists");
+  requireCheck(fs.existsSync(viteConfigPath), "Vite renderer configuration exists");
   requireCheck(hasScript(pkg, "desktop:dev"), "desktop:dev script exists");
   requireCheck(hasScript(pkg, "desktop:pack"), "desktop:pack script exists");
   requireCheck(hasScript(pkg, "desktop:dist"), "desktop:dist script exists");
@@ -72,10 +74,18 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   requireCheck(pkg.build?.nsis?.oneClick === false, "NSIS assisted installer is configured");
   requireCheck(Array.isArray(pkg.build?.publish), "update publish provider is configured");
   requireCheck(fileContains(mainPath, "safeStorage"), "main process uses Electron safeStorage");
+  requireCheck(fileContains(mainPath, "jdec:api:request"), "main process owns the authenticated remote API bridge");
+  requireCheck(!fileContains(mainPath, 'ipcMain.handle("jdec:secret:get"'), "main process does not expose bearer-token reads over IPC");
+  requireCheck(fileContains(mainPath, "apiTokenConfigured"), "main process reports token configuration without exposing the token");
+  requireCheck(fileContains(mainPath, "Packaged desktop clients require an HTTPS managed remote API"), "packaged desktop API transport is HTTPS enforced");
+  requireCheck(fileContains(mainPath, "if (app.isPackaged) return \"\""), "packaged desktop has no implicit loopback API default");
   requireCheck(fileContains(mainPath, "JDEC_DESKTOP_START_API"), "main process has local API runtime guard");
   requireCheck(fileContains(mainPath, "JDEC_DESKTOP_RELEASE_CHANNEL"), "main process reads release channel");
   requireCheck(fileContains(mainPath, "autoUpdater.channel"), "main process configures updater channel");
   requireCheck(fileContains(preloadPath, "contextBridge.exposeInMainWorld"), "preload exposes isolated bridges");
+  requireCheck(fileContains(preloadPath, "jdecApi"), "preload exposes the remote API bridge");
+  requireCheck(!fileContains(preloadPath, "getSecret"), "preload does not expose bearer-token reads to the renderer");
+  requireCheck(fileContains(viteConfigPath, "base: './'"), "Vite uses relative packaged asset URLs");
   requireCheck(fileContains(packageScriptPath, "JDEC_DESKTOP_OUTPUT_DIR"), "package script supports explicit output directory");
   requireCheck(fileContains(packageScriptPath, "LOCALAPPDATA"), "package script defaults outside synced workspace on Windows");
   requireCheck(fileContains(packageScriptPath, "prepareDesktopAssets"), "package script prepares desktop assets");

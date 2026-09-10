@@ -4,6 +4,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { computeEvidenceStrength, loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement } from "./requirementComparators.js";
+import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -294,10 +295,8 @@ async function hasCompletedDeterministicRequirements(
         AND rer.job_version_id = jv.id
         AND rer.run_type = 'DETERMINISTIC'
         AND rer.status = 'COMPLETED'
-        AND (
-          jv.active_requirement_set_id IS NULL
-          OR rer.requirement_set_id = jv.active_requirement_set_id
-        )
+        AND jv.active_requirement_set_id IS NOT NULL
+        AND rer.requirement_set_id = jv.active_requirement_set_id
        WHERE jv.workspace_id = $1
          AND jv.id = $2
      ) AS exists`,
@@ -502,24 +501,57 @@ export async function runDeterministicMatcher(
 
       await client.query("BEGIN");
       try {
+        const jobContextRes = await client.query<{
+          active_requirement_set_id: string | null;
+          content_hash: string | null;
+        }>(
+          `SELECT active_requirement_set_id, content_hash
+           FROM job_versions
+           WHERE workspace_id = $1 AND id = $2
+           LIMIT 1`,
+          [ctx.workspaceId, versionId]
+        );
+        const activeRequirementSetId = jobContextRes.rows[0]?.active_requirement_set_id ?? null;
+        const jobContentHash = jobContextRes.rows[0]?.content_hash ?? null;
+        const matchContextFingerprint = buildPipelineTaskContextFingerprint({
+          workspaceId: ctx.workspaceId,
+          taskType: "MATCH_PROFILE_EVIDENCE",
+          taskVersion: "deterministic_matcher_v1",
+          payload: {
+            canonical_job_id: job.id,
+            job_version_id: versionId,
+            content_hash: jobContentHash,
+            active_requirement_set_id: activeRequirementSetId,
+            profile_version_id: profileVersionId,
+            matcher_version: "deterministic_matcher_v1",
+            evidence_strength_policy_hash: evidenceStrengthPolicy.policyHash,
+          },
+        });
+
         const runRes = await client.query<{ id: string }>(
           `INSERT INTO match_runs (
              workspace_id,
              canonical_job_id,
              job_version_id,
              profile_version_id,
+             requirement_set_id,
+             job_content_hash,
+             context_fingerprint,
              status,
              policy_version,
              evidence_strength_policy_config_revision_id,
              evidence_strength_policy_hash
            )
-           VALUES ($1, $2, $3, $4, 'STARTED', 'deterministic_v1', $5, $6)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'STARTED', 'deterministic_v1', $8, $9)
            RETURNING id`,
           [
             ctx.workspaceId,
             job.id,
             versionId,
             profileVersionId,
+            activeRequirementSetId,
+            jobContentHash,
+            matchContextFingerprint,
             evidencePolicyRevisionId,
             evidenceStrengthPolicy.policyHash,
           ]
@@ -538,8 +570,8 @@ export async function runDeterministicMatcher(
            JOIN job_requirements jr
              ON jr.workspace_id = jv.workspace_id
             AND (
-              (jv.active_requirement_set_id IS NOT NULL AND jr.requirement_set_id = jv.active_requirement_set_id)
-              OR (jv.active_requirement_set_id IS NULL AND jr.job_version_id = jv.id)
+              jv.active_requirement_set_id IS NOT NULL
+              AND jr.requirement_set_id = jv.active_requirement_set_id
             )
            WHERE jv.workspace_id = $1
              AND jv.id = $2

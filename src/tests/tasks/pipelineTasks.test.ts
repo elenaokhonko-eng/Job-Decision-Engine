@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  blockPipelineTask,
   claimPipelineTasks,
   completePipelineTask,
   completePipelineTaskAndRun,
   enqueuePipelineTask,
   failPipelineTask,
   replayDeadLetterPipelineTask,
+  releasePipelineTaskForRetry,
 } from "../../tasks/pipelineTasks.js";
 
 describe("pipelineTasks", () => {
@@ -58,6 +60,75 @@ describe("pipelineTasks", () => {
 
     expect(res.taskId).toBe("task-existing");
     expect(res.inserted).toBe(false);
+  });
+
+  it("reactivates a dependency-blocked task when its prerequisite is re-enqueued", async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
+      if (sql.includes("INSERT INTO pipeline_tasks")) return { rows: [] };
+      if (sql.includes("SELECT id, status")) {
+        return { rows: [{ id: "task-blocked", status: "BLOCKED_DEPENDENCY" }] };
+      }
+      if (sql.includes("status = 'BLOCKED_DEPENDENCY'")) {
+        return { rows: [{ id: "task-blocked" }] };
+      }
+      return { rows: [] };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    const result = await enqueuePipelineTask(
+      {
+        taskType: "MATCH_PROFILE_EVIDENCE",
+        taskKey: "match:version-1:profile-a",
+        payload: { job_version_id: "version-1" },
+      },
+      fakePool,
+      { context: ctx }
+    );
+
+    expect(result).toEqual({ taskId: "task-blocked", inserted: false, reactivated: true });
+    expect(calls.some((sql) => sql.includes("SET status = 'PENDING'") && sql.includes("blocked_on = NULL"))).toBe(true);
+  });
+
+  it("records dependency blocking without marking the task completed", async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks") && sql.includes("BLOCKED_DEPENDENCY")) {
+        return { rows: [{ id: "task-blocked" }], rowCount: 1 };
+      }
+      return { rows: [] };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    await blockPipelineTask(
+      {
+        taskId: "task-blocked",
+        taskKey: "match:version-1:profile-a",
+        taskType: "MATCH_PROFILE_EVIDENCE",
+        payload: { job_version_id: "version-1" },
+        leaseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        leaseExpiresAt: new Date().toISOString(),
+        attemptNumber: 2,
+        maxAttempts: 8,
+      },
+      {
+        blockedOn: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1",
+        reason: "requirements are missing",
+        repairAction: "extract requirements and resume matching",
+      },
+      fakePool,
+      { context: ctx }
+    );
+
+    expect(calls).toContain("COMMIT");
+    expect(calls.some((sql) => sql.includes("status = 'BLOCKED'") && sql.includes("pipeline_task_attempts"))).toBe(true);
+    expect(calls.some((sql) => sql.includes("status = 'BLOCKED_DEPENDENCY'") && sql.includes("completed_at = NULL"))).toBe(true);
   });
 
   it("claimPipelineTasks claims tasks and records attempt starts", async () => {
@@ -239,6 +310,42 @@ describe("pipelineTasks", () => {
 
     expect(calls).toContain("ROLLBACK");
     expect(calls).not.toContain("COMMIT");
+  });
+
+  it("releases a cancelled task lease for immediate retry without dead-lettering", async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("UPDATE pipeline_tasks") && sql.includes("status = 'RETRY_WAIT'")) {
+        return { rows: [{ id: "task-cancelled" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      return { rows: [] };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    const released = await releasePipelineTaskForRetry(
+      {
+        taskId: "task-cancelled",
+        taskKey: "lane_route:cancelled",
+        taskType: "LANE_ROUTE",
+        payload: {},
+        leaseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        leaseExpiresAt: new Date().toISOString(),
+        attemptNumber: 1,
+        maxAttempts: 8,
+      },
+      "worker cancelled before completion",
+      fakePool,
+      { context: ctx }
+    );
+
+    expect(released).toBe(true);
+    expect(calls.some((sql) => sql.includes("status = 'RETRY_WAIT'") && sql.includes("lease_id = NULL"))).toBe(true);
+    expect(calls.some((sql) => sql.includes("jsonb_build_object('cancelled', true)"))).toBe(true);
+    expect(calls).toContain("COMMIT");
   });
 
   it("replayDeadLetterPipelineTask moves a dead-letter task back to pending", async () => {

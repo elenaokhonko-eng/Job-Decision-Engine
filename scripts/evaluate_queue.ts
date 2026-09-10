@@ -82,6 +82,13 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
        JOIN job_versions jv
          ON jv.id = eq.job_version_id
         AND jv.workspace_id = eq.workspace_id
+       JOIN deterministic_decisions dd
+         ON dd.workspace_id = eq.workspace_id
+        AND dd.id = eq.deterministic_decision_id
+        AND dd.canonical_job_id = eq.canonical_job_id
+        AND dd.job_version_id = eq.job_version_id
+        AND dd.match_run_id = eq.match_run_id
+        AND dd.context_fingerprint = eq.context_fingerprint
        LEFT JOIN gate_decisions gd
          ON gd.workspace_id = eq.workspace_id
         AND gd.canonical_job_id = eq.canonical_job_id
@@ -92,12 +99,104 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
            OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
            OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
          )
+         AND eq.profile_version_id IS NOT NULL
+         AND eq.match_run_id = c.latest_match_run_id
+         AND eq.deterministic_decision_id = c.latest_deterministic_decision_id
+         AND eq.job_content_hash = jv.content_hash
+         AND eq.context_fingerprint IS NOT NULL
+         AND EXISTS (
+           SELECT 1
+           FROM profile_versions pv
+           WHERE pv.workspace_id = eq.workspace_id
+             AND pv.id = eq.profile_version_id
+             AND pv.status = 'ACTIVE'
+         )
+         AND EXISTS (
+           SELECT 1
+           FROM match_runs mr
+           WHERE mr.workspace_id = eq.workspace_id
+             AND mr.id = eq.match_run_id
+             AND mr.canonical_job_id = eq.canonical_job_id
+             AND mr.job_version_id = eq.job_version_id
+             AND mr.profile_version_id = eq.profile_version_id
+             AND mr.requirement_set_id = jv.active_requirement_set_id
+             AND mr.job_content_hash = jv.content_hash
+             AND mr.context_fingerprint IS NOT NULL
+             AND mr.status = 'COMPLETED'
+         )
        ORDER BY eq.priority_score DESC`,
       [ctx.workspaceId]
     );
     eligibleCount = queueItems.length;
 
     console.log(`Found ${queueItems.length} items eligible for AI evaluation. Pipeline run: ${pipelineRunId}`);
+
+    let candidateProfileContext = "";
+    if (queueItems.length > 0) {
+      const profileVersionRes = await client.query<{
+        id: string;
+        display_name: string;
+        source_hash: string;
+      }>(
+        `SELECT pv.id, cp.display_name, pv.source_hash
+         FROM profile_versions pv
+         JOIN candidate_profiles cp
+           ON cp.workspace_id = pv.workspace_id
+          AND cp.id = pv.candidate_profile_id
+         WHERE pv.workspace_id = $1
+           AND pv.status = 'ACTIVE'
+         ORDER BY pv.created_at DESC
+         LIMIT 1`,
+        [ctx.workspaceId]
+      );
+      const profileVersion = profileVersionRes.rows[0];
+      if (!profileVersion) {
+        throw new Error("AI evaluation requires an ACTIVE database-backed profile version.");
+      }
+
+      const [factsRes, credentialsRes, preferenceRes] = await Promise.all([
+        client.query(
+          `SELECT fact_key, fact_type, statement, structured_value,
+                  evidence_tier, verification_status, confidentiality
+           FROM profile_facts
+           WHERE workspace_id = $1
+             AND profile_version_id = $2
+             AND verification_status IN ('VERIFIED', 'SELF_ATTESTED')
+           ORDER BY fact_key`,
+          [ctx.workspaceId, profileVersion.id]
+        ),
+        client.query(
+          `SELECT credential_key, credential_name, issuer, credential_type,
+                  level, status, verification_status
+           FROM profile_credentials
+           WHERE workspace_id = $1
+             AND profile_version_id = $2
+             AND status = 'ACTIVE'
+             AND verification_status IN ('VERIFIED', 'SELF_ATTESTED')
+           ORDER BY credential_key`,
+          [ctx.workspaceId, profileVersion.id]
+        ),
+        client.query(
+          `SELECT mode_key, content
+           FROM workspace_user_preference_modes
+           WHERE workspace_id = $1
+             AND user_id = $2
+             AND is_active = TRUE
+           ORDER BY updated_at DESC
+           LIMIT 1`,
+          [ctx.workspaceId, ctx.userId]
+        ),
+      ]);
+
+      candidateProfileContext = JSON.stringify({
+        profile_version_id: profileVersion.id,
+        profile_display_name: profileVersion.display_name,
+        profile_source_hash: profileVersion.source_hash,
+        verified_profile_facts: factsRes.rows,
+        verified_credentials: credentialsRes.rows,
+        active_workability_preference_mode: preferenceRes.rows[0] ?? null,
+      });
+    }
 
     for (const item of queueItems) {
       console.log(`\nEvaluating: [${item.lane}] ${item.normalized_title} at ${item.company_name}`);
@@ -227,7 +326,8 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
             gateDecision: item.gate_decision || "PASS",
             candidateLane: item.lane,
             priorityScore: item.priority_score,
-            workabilityFacts: evalReq.workabilityFacts
+            workabilityFacts: evalReq.workabilityFacts,
+            candidateProfileContext,
           },
           pipelineRunId,
           attemptNum
@@ -253,8 +353,9 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
               workspace_id,
               canonical_job_id, job_version_id, gate_decision, gate_version,
               lane_matches, workability_facts, unknown_fields, profile_version, evaluation_schema_version,
+              profile_version_id, match_run_id, deterministic_decision_id, job_content_hash, context_fingerprint,
               provider, model, attempt, is_fallback, degraded_state, full_evaluation_payload, evaluated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())`,
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())`,
             [
               ctx.workspaceId,
               item.canonical_job_id,
@@ -266,6 +367,11 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
               JSON.stringify([]),
               PROFILE_SCHEMA_VERSION,
               SCHEMA_VERSION,
+              item.profile_version_id,
+              item.match_run_id,
+              item.deterministic_decision_id,
+              item.job_content_hash,
+              item.context_fingerprint,
               validatedResult.provider,
               validatedResult.model,
               validatedResult.attempt,

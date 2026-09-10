@@ -23,7 +23,10 @@ export function safeExternalHref(value: string | null | undefined): string | nul
   }
 }
 
-export function jobOutcomeLabel(job: Pick<ShortlistRow, "recommendation_outcome" | "gate_status" | "processing_state">): string {
+export function jobOutcomeLabel(job: Pick<ShortlistRow, "recommendation_outcome" | "gate_status" | "processing_state" | "current_artifact_status">): string {
+  if (job.current_artifact_status !== "CURRENT_OR_NOT_APPLICABLE") {
+    return "VERIFY";
+  }
   if (job.recommendation_outcome) return job.recommendation_outcome;
   if (job.gate_status === "NEEDS_VERIFICATION") return "VERIFY";
   if (job.gate_status === "HARD_REJECT") return "SKIP";
@@ -39,8 +42,12 @@ export function summarizeDesktopCounts(
   const activeApplicationStatuses = new Set(["INTENT", "READY_TO_APPLY", "FOLLOW_UP", "INTERVIEW", "OFFER"]);
   return {
     totalJobs: jobs.length,
-    priorityJobs: jobs.filter((job) => job.recommendation_outcome === "PRIORITY").length,
-    needsVerificationJobs: jobs.filter((job) => job.gate_status === "NEEDS_VERIFICATION").length,
+    priorityJobs: jobs.filter((job) =>
+      job.current_artifact_status === "CURRENT_OR_NOT_APPLICABLE" && job.recommendation_outcome === "PRIORITY"
+    ).length,
+    needsVerificationJobs: jobs.filter((job) =>
+      job.gate_status === "NEEDS_VERIFICATION" || job.current_artifact_status !== "CURRENT_OR_NOT_APPLICABLE"
+    ).length,
     activeApplications: applications.filter((application) =>
       activeApplicationStatuses.has(application.application_status)
     ).length,

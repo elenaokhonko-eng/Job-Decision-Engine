@@ -7,7 +7,9 @@ on:
 
 concurrency:
   group: evaluation-queue-worker
-  cancel-in-progress: true
+  # Evaluation rows carry leases. Queue a newer drain instead of cancelling
+  # the active worker and waiting for its EVALUATING leases to expire.
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

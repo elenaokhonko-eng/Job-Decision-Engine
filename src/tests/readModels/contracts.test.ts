@@ -56,6 +56,7 @@ describe('readModels contracts', () => {
 
     expect(parsed.document_ready).toBe(true);
     expect(parsed.deterministic_match_score).toBe(86);
+    expect(parsed.current_artifact_status).toBe("CURRENTNESS_UNKNOWN");
   });
 
   it('parses pipeline health and document status', () => {

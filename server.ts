@@ -3,7 +3,6 @@ import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { db } from "./src/db/db.ts";
-import { runAgent } from "./src/services/agent.ts";
 import { createApiV2Router } from "./src/api/v2/router.ts";
 import { apiAuthMiddleware } from "./src/api/v2/auth.ts";
 import { legacyApiGateMiddleware } from "./src/api/legacy/access.ts";
@@ -90,39 +89,14 @@ async function startServer() {
     res.json({ success });
   }));
 
-  // Ask the agent / evaluate question
-  app.post("/api/ask", legacyApiGate, legacyApiAuth, async (req, res) => {
-    try {
-      const { question } = req.body;
-      if (!question || question.trim() === "") {
-        res.status(400).json({ success: false, error: "Question query is required" });
-        return;
-      }
-
-      // Check if API Key is configured before invoking the agent
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
-        res.status(400).json({
-          success: false,
-          error: "CRITICAL CONFIGURATION ERROR: GEMINI_API_KEY environment variable is not configured. Please add GEMINI_API_KEY in the Secrets / Settings panel in the AI Studio UI to start using the Decision Engine."
-        });
-        return;
-      }
-
-      const { result, trace, toolsUsed } = await runAgent(question);
-      res.json({
-        success: true,
-        result,
-        trace,
-        toolsUsed
-      });
-    } catch (err: any) {
-      console.error("Agent execution error:", err);
-      res.status(500).json({
-        success: false,
-        error: err.message || "An unexpected error occurred during evaluation."
-      });
-    }
+  // The legacy prompt-driven evaluator is intentionally retired. It bypassed
+  // profile-versioned matching and could not prove the context behind a result.
+  // Use the authenticated /api/v2 pipeline and its current read models.
+  app.post("/api/ask", legacyApiGate, legacyApiAuth, (_req, res) => {
+    res.status(410).json({
+      success: false,
+      error: "The legacy prompt evaluator is retired. Use the authenticated /api/v2 pipeline with a current database-backed profile context.",
+    });
   });
 
   // Get interaction logs

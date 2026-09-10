@@ -54,7 +54,12 @@ export async function runExplanationQueueEnqueuer(
       WITH candidates AS (
         SELECT
           c.id AS canonical_job_id,
-          COALESCE(c.latest_job_version_id, lv.id) AS job_version_id,
+          target_jv.id AS job_version_id,
+          active_profile.id AS profile_version_id,
+          mr.id AS match_run_id,
+          dd.id AS deterministic_decision_id,
+          target_jv.content_hash AS job_content_hash,
+          dd.context_fingerprint,
           c.primary_lane AS lane,
           CASE
             WHEN COALESCE(c.deterministic_match_score, 0) > 0 THEN c.deterministic_match_score::float
@@ -62,13 +67,39 @@ export async function runExplanationQueueEnqueuer(
           END AS priority_score
         FROM canonical_jobs c
         LEFT JOIN LATERAL (
-          SELECT id
+          SELECT id, active_requirement_set_id, content_hash
           FROM job_versions
           WHERE canonical_job_id = c.id
             AND workspace_id = $1
           ORDER BY observed_at DESC
           LIMIT 1
         ) lv ON TRUE
+        JOIN job_versions target_jv
+          ON target_jv.workspace_id = c.workspace_id
+         AND target_jv.id = COALESCE(c.latest_job_version_id, lv.id)
+        CROSS JOIN LATERAL (
+          SELECT pv.id
+          FROM profile_versions pv
+          WHERE pv.workspace_id = c.workspace_id
+            AND pv.status = 'ACTIVE'
+          ORDER BY pv.created_at DESC
+          LIMIT 1
+        ) active_profile
+        JOIN match_runs mr
+          ON mr.workspace_id = c.workspace_id
+         AND mr.id = c.latest_match_run_id
+         AND mr.job_version_id = target_jv.id
+         AND mr.profile_version_id = active_profile.id
+         AND mr.requirement_set_id = target_jv.active_requirement_set_id
+         AND mr.job_content_hash = target_jv.content_hash
+         AND mr.status = 'COMPLETED'
+        JOIN deterministic_decisions dd
+          ON dd.workspace_id = c.workspace_id
+         AND dd.id = c.latest_deterministic_decision_id
+         AND dd.canonical_job_id = c.id
+         AND dd.job_version_id = target_jv.id
+         AND dd.match_run_id = mr.id
+         AND dd.context_fingerprint IS NOT NULL
         WHERE c.workspace_id = $1
           AND EXISTS (
             SELECT 1
@@ -89,7 +120,12 @@ export async function runExplanationQueueEnqueuer(
             FROM ai_evaluations ae
             WHERE ae.workspace_id = $1
               AND ae.canonical_job_id = c.id
-              AND ae.job_version_id = COALESCE(c.latest_job_version_id, lv.id)
+              AND ae.job_version_id = target_jv.id
+              AND ae.profile_version_id = active_profile.id
+              AND ae.match_run_id = mr.id
+              AND ae.deterministic_decision_id = dd.id
+              AND ae.job_content_hash = target_jv.content_hash
+              AND ae.context_fingerprint = dd.context_fingerprint
           )
           ${jobVersionFilter}
           ${canonicalJobFilter}
@@ -101,6 +137,11 @@ export async function runExplanationQueueEnqueuer(
           workspace_id,
           canonical_job_id,
           job_version_id,
+          profile_version_id,
+          match_run_id,
+          deterministic_decision_id,
+          job_content_hash,
+          context_fingerprint,
           lane,
           priority_score,
           status,
@@ -111,6 +152,11 @@ export async function runExplanationQueueEnqueuer(
           $1,
           canonical_job_id,
           job_version_id,
+          profile_version_id,
+          match_run_id,
+          deterministic_decision_id,
+          job_content_hash,
+          context_fingerprint,
           lane,
           priority_score,
           'PENDING',

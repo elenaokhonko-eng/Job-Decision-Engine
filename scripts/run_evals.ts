@@ -33,6 +33,13 @@ async function runEvals() {
     process.exit(1);
   }
 
+  const candidateProfileContext = (process.env.CANDIDATE_PROFILE_CONTEXT || "").trim();
+  if (!candidateProfileContext) {
+    throw new Error(
+      "CANDIDATE_PROFILE_CONTEXT is required for golden evaluations; fixed in-code candidate profile data is not permitted."
+    );
+  }
+
   // Load Golden Questions
   const yamlPath = path.join(process.cwd(), "golden_questions.yaml");
   if (!fs.existsSync(yamlPath)) {
@@ -62,7 +69,7 @@ async function runEvals() {
 
     try {
       // Call the live agent core loop
-      const response = await runAgent(q.input);
+      const response = await runAgent(q.input, { candidateProfileContext });
       const resultObj = response.result;
       const resultStr = JSON.stringify(resultObj);
 

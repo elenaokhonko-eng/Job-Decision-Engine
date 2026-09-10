@@ -349,10 +349,8 @@ export async function runRequirementsExtraction(
             AND deterministic_rer.job_version_id = jv.id
             AND deterministic_rer.run_type = 'DETERMINISTIC'
             AND deterministic_rer.status = 'COMPLETED'
-            AND (
-              jv.active_requirement_set_id IS NULL
-              OR deterministic_rer.requirement_set_id = jv.active_requirement_set_id
-            )
+            AND jv.active_requirement_set_id IS NOT NULL
+            AND deterministic_rer.requirement_set_id = jv.active_requirement_set_id
         )
       )`;
   const completedRequirementClause = quotedEnabledForSelection
@@ -365,10 +363,8 @@ export async function runRequirementsExtraction(
             AND quoted_rer.job_version_id = jv.id
             AND quoted_rer.run_type = 'LLM_QUOTED'
             AND quoted_rer.status = 'COMPLETED'
-            AND (
-              jv.active_requirement_set_id IS NULL
-              OR quoted_rer.requirement_set_id = jv.active_requirement_set_id
-          )
+            AND jv.active_requirement_set_id IS NOT NULL
+            AND quoted_rer.requirement_set_id = jv.active_requirement_set_id
         )
       )`
     : deterministicCompleteClause;

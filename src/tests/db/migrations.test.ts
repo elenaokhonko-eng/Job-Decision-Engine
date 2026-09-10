@@ -135,6 +135,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("016_document_provenance.sql");
     expect(versions).toContain("017_streamlit_read_model_integrity.sql");
     expect(versions).toContain("018_backfill_cutover.sql");
+    expect(versions).toContain("044_evaluation_queue_context_identity.sql");
   });
 
   it("canonical_jobs table has all required columns from migrations 001–004", async () => {
@@ -167,6 +168,19 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       WHERE table_name = 'evaluation_queue' AND column_name = 'available_at' AND table_schema = 'public'
     `);
     expect(rows).toHaveLength(1);
+  });
+
+  it("evaluation queue uniqueness is scoped to current context", async () => {
+    const { rows } = await realPool.query<{ indexname: string; indexdef: string }>(
+      `SELECT indexname, indexdef
+       FROM pg_indexes
+       WHERE schemaname = 'public'
+         AND tablename = 'evaluation_queue'
+         AND indexname IN ('idx_evaluation_queue_active_job', 'idx_evaluation_queue_active_context')`
+    );
+    expect(rows.some((row) => row.indexname === "idx_evaluation_queue_active_job")).toBe(false);
+    const currentIndex = rows.find((row) => row.indexname === "idx_evaluation_queue_active_context");
+    expect(currentIndex?.indexdef).toContain("context_fingerprint");
   });
 
   it("gate_decisions audit table exists from migration 004", async () => {

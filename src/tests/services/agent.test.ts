@@ -4,6 +4,7 @@ import {
   generateContentAudited,
   generateEmbeddingWithProviderAndModel,
   preflightModelRoutes,
+  runAgent,
   type SingleEvaluationJobInput,
 } from '../../services/agent.js';
 
@@ -43,6 +44,14 @@ describe('generateContentAudited retry policy', () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     restoreEnv();
+  });
+
+  it('refuses the legacy evaluator without database-backed candidate context', async () => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_FLASH_API_KEY;
+
+    await expect(runAgent('Evaluate this job', { candidateProfileContext: '' })).rejects.toThrow(/database-backed candidateProfileContext/);
   });
 
   it('does not retry non-retryable OpenAI 400 schema errors', async () => {
@@ -327,6 +336,11 @@ describe('evaluateSingleCanonicalJob output validation', () => {
     canonicalUrl: 'https://example.test/jobs/1',
     descriptionText: 'Build machine learning platform systems. Work rights required.',
     candidateLane: 'CORE_AI_DATA',
+    candidateProfileContext: JSON.stringify({
+      profile_version_id: 'profile-version-test',
+      facts: [{ statement: 'Built production machine learning systems.', verification_status: 'VERIFIED' }],
+      workability_preferences: { hard_constraints: { max_office_days_per_week: 3 } },
+    }),
   };
 
   function stubOpenAiEvaluationResponse(payload: unknown) {

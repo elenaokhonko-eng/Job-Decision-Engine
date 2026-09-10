@@ -144,7 +144,7 @@ describe("Job Decision Engine Test Suite", () => {
     delete process.env.OPENAI_API_KEY;
 
     // Expect the agent run to fail loud with a descriptive API error
-    await expect(runAgent("Analyze jobs")).rejects.toThrow(
+    await expect(runAgent("Analyze jobs", { candidateProfileContext: "test fixture context" })).rejects.toThrow(
       "CRITICAL API KEY CONFLICT"
     );
 

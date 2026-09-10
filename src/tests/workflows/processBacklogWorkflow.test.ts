@@ -13,15 +13,28 @@ describe('process backlog workflow', () => {
     expect(workflow).not.toContain('cancel-in-progress: true');
     expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(workflow).toContain('npx tsx scripts/process_pipeline_tasks.ts');
+    expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json');
+    expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json');
+    expect(workflow).toContain('actions/upload-artifact@v4');
     expect(workflow).toContain('timeout-minutes: 15');
     expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '40' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '720000' }}");
-    expect(workflow).toContain('PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS');
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '60000' }}");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_WALL_CLOCK_MS');
     expect(workflow).toContain('PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT');
     expect(workflow).not.toContain('scripts/ingest_gmail.ts');
     expect(workflow).not.toContain('scripts/run_adapters.ts');
     expect(workflow).not.toContain('scripts/parse_emails.ts');
+  });
+
+  it('shares a non-canceling concurrency group with discovery ingestion', () => {
+    const backlog = readFileSync(resolve('.github/workflows/process_backlog.yml'), 'utf8');
+    const ingestion = readFileSync(resolve('.github/workflows/ingest.yml'), 'utf8');
+
+    expect(backlog).toContain('group: job-decision-pipeline');
+    expect(ingestion).toContain('group: job-decision-pipeline');
+    expect(ingestion).toContain('cancel-in-progress: false');
+    expect(ingestion).not.toContain('cancel-in-progress: true');
   });
 
   it('keeps deterministic extraction and hard gates before quoted requirements and downstream work', () => {
@@ -51,7 +64,8 @@ describe('process backlog workflow', () => {
     expect(worker).toContain(":profile:");
     expect(worker).toContain("target_jv.active_requirement_set_id");
     expect(worker).toContain("repair_existing_state");
-    expect(worker).toContain("match_deferred_for_requirements");
+    expect(worker).toContain("blockPipelineTask");
+    expect(worker).toContain("PipelineTaskDependencyBlockedError");
   });
 
   it('uses a serialized worker entrypoint that fails loudly on retryable stage errors', () => {

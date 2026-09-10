@@ -71,6 +71,9 @@ describe("api/v2 application tracker", () => {
                 canonical_job_id: "22222222-2222-4222-8222-222222222222",
                 job_version_id: "33333333-3333-4333-8333-333333333333",
                 canonical_url: "https://example.test/apply",
+                current_artifact_status: "CURRENT_OR_NOT_APPLICABLE",
+                current_artifact_reason: null,
+                recommendation_eligibility: "ELIGIBLE",
               },
             ],
           };
@@ -115,6 +118,54 @@ describe("api/v2 application tracker", () => {
       const eventCall = txQueries.find((call) => call.sql.includes("INSERT INTO application_events"));
       expect(eventCall?.params?.[2]).toBe("CREATED");
       expect(eventCall?.params?.[4]).toBe("READY_TO_APPLY");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
+  it("rejects application handoff when the decision artifact is stale", async () => {
+    const txQueries: string[] = [];
+    const tx = {
+      query: vi.fn(async (sql: string) => {
+        txQueries.push(sql);
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+          return { rows: [] };
+        }
+        if (sql.includes("FROM canonical_jobs c") && sql.includes("JOIN job_versions jv")) {
+          return {
+            rows: [{
+              canonical_job_id: "22222222-2222-4222-8222-222222222222",
+              job_version_id: "33333333-3333-4333-8333-333333333333",
+              canonical_url: "https://example.test/apply",
+              current_artifact_status: "MATCH_STALE",
+              current_artifact_reason: "MATCH_PROFILE_VERSION_STALE",
+              recommendation_eligibility: "ELIGIBLE",
+            }],
+          };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const pool = {
+      connect: vi.fn(async () => tx),
+      query: vi.fn(async () => ({ rows: [] })),
+    };
+    const { baseUrl, server } = await startApp(pool);
+    try {
+      const response = await fetch(`${baseUrl}/applications`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          canonical_job_id: "22222222-2222-4222-8222-222222222222",
+          status: "READY_TO_APPLY",
+        }),
+      });
+      const body = await response.json() as any;
+
+      expect(response.status).toBe(409);
+      expect(body.reason).toBe("MATCH_PROFILE_VERSION_STALE");
+      expect(txQueries.some((sql) => sql.includes("INSERT INTO application_records"))).toBe(false);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
     }

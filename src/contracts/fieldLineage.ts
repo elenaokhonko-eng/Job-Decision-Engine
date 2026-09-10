@@ -380,6 +380,30 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     producerStage: "v_canonical_shortlist",
     transformation: "True when CV or cover letter provenance exists for displayed version",
     nullable: false
+  },
+  {
+    field: "current_artifact_status",
+    sourceTable: "v_canonical_shortlist_scoped",
+    sourceColumn: "current_artifact_status",
+    producerStage: "v_canonical_shortlist_scoped",
+    transformation: "Currentness classification across dependency, match, decision, and evaluation artifacts",
+    nullable: false
+  },
+  {
+    field: "current_artifact_reason",
+    sourceTable: "v_canonical_shortlist_scoped",
+    sourceColumn: "current_artifact_reason",
+    producerStage: "v_canonical_shortlist_scoped",
+    transformation: "Stable reason code for stale or blocked currentness",
+    nullable: true
+  },
+  {
+    field: "blocked_task_count",
+    sourceTable: "pipeline_tasks",
+    sourceColumn: "status/blocked_reason",
+    producerStage: "v_canonical_shortlist_scoped",
+    transformation: "Count of dependency-blocked tasks associated with the displayed job/version",
+    nullable: false
   }
 ];
 

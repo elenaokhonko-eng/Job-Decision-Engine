@@ -10,28 +10,6 @@ import { stripHtmlToText } from "../security/sanitize.js";
  * Forkers can simply edit this file to match their own profile and priorities.
  */
 
-export const CANDIDATE_PROFILE = {
-  name: "Candidate Alpha",
-  experienceYears: 10,
-  workplacePreference: "High-autonomy technical builder",
-  minAcceptableBaseSgdMonth: 0,
-  maxTravelPercentage: 10,
-  idealOfficeDaysPerWeek: 2,
-  maxOfficeDaysPerWeek: 3,
-  coreSkills: [
-    "Software engineering",
-    "Data systems",
-    "AI/ML systems",
-    "Python/TypeScript",
-    "PostgreSQL"
-  ],
-  nonNegotiables: [
-    "No contract roles (only permanent/FTE)",
-    "Travel <= 10%",
-    "Max 3 days in-office (100% on-premises is unacceptable)"
-  ]
-};
-
 // ====================================================================
 // NEW: HARD GATES EVALUATION (2-AXIS PREQUALIFICATION)
 // ====================================================================

@@ -36,10 +36,6 @@ class MemorySecretStore implements DesktopSecretStore {
     return this.available;
   }
 
-  async getSecret(key: "apiToken"): Promise<string | null> {
-    return this.values.get(key) ?? null;
-  }
-
   async setSecret(key: "apiToken", value: string): Promise<{ ok: boolean }> {
     this.values.set(key, value);
     return { ok: true };
@@ -103,10 +99,46 @@ describe("desktop settings", () => {
 
     expect(storage.getItem(DESKTOP_SETTINGS_STORAGE_KEY)).not.toContain("native-token");
     expect(secretStore.values.get("apiToken")).toBe("native-token");
-    await expect(loadDesktopSettingsSecure(storage, secretStore)).resolves.toMatchObject({
+    await expect(saveDesktopSettingsSecure(storage, secretStore, {
       apiBaseUrl: "http://127.0.0.1:3217/api/v2",
       apiToken: "native-token",
+      workspaceKey: "default",
+      userKey: "local_user",
+    })).resolves.toMatchObject({ apiToken: "" });
+    await expect(loadDesktopSettingsSecure(storage, secretStore)).resolves.toMatchObject({
+      apiBaseUrl: "http://127.0.0.1:3217/api/v2",
+      apiToken: "",
     });
+  });
+
+  it("preserves an OS-backed token when saving unrelated native settings", async () => {
+    const storage = new MemoryStorage();
+    const secretStore = new MemorySecretStore();
+    secretStore.values.set("apiToken", "existing-token");
+
+    await saveDesktopSettingsSecure(storage, secretStore, {
+      apiBaseUrl: "https://api.example.com/api/v2",
+      apiToken: "",
+      workspaceKey: "workspace-2",
+      userKey: "user-2",
+    }, { preserveExistingToken: true });
+
+    expect(secretStore.values.get("apiToken")).toBe("existing-token");
+  });
+
+  it("deletes an OS-backed token only when clearing is explicit", async () => {
+    const storage = new MemoryStorage();
+    const secretStore = new MemorySecretStore();
+    secretStore.values.set("apiToken", "existing-token");
+
+    await saveDesktopSettingsSecure(storage, secretStore, {
+      apiBaseUrl: "https://api.example.com/api/v2",
+      apiToken: "",
+      workspaceKey: "default",
+      userKey: "local_user",
+    });
+
+    expect(secretStore.values.has("apiToken")).toBe(false);
   });
 
   it("refuses to persist native tokens when OS secret storage is unavailable", async () => {

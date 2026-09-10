@@ -120,7 +120,10 @@ export function mergeWorkabilityPreferenceContent(
   content: unknown
 ): WorkabilityPolicy {
   const root = objectValue(content);
-  const workability = objectValue(root.workability);
+  // Streamlit and the API persist the user-facing contract under
+  // `hard_constraints`. Older modes use `workability`; both are normalized
+  // here so a preference cannot be silently ignored by deterministic gates.
+  const workability = objectValue(firstDefined(root.workability, root.hard_constraints));
   const operations = objectValue(firstDefined(workability.operations, root.operations));
   const composition = objectValue(firstDefined(workability.work_composition, root.work_composition));
 

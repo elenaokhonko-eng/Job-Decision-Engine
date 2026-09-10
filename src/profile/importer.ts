@@ -9,6 +9,7 @@ import {
   EvidenceSourceInput,
   validateEvidenceSourceReferences,
 } from './evidenceValidator.js';
+import { seedRecoverablePipelineTasks } from '../tasks/stageTaskWorker.js';
 
 type QueryClient = {
   query: pg.PoolClient['query'];
@@ -30,6 +31,10 @@ export interface ProfileImportSummary {
     factConceptLinks: number;
     factEvidenceLinks: number;
     credentials: number;
+  };
+  refreshSeed?: {
+    inserted: number;
+    existing: number;
   };
 }
 
@@ -122,6 +127,7 @@ export async function importLoadedProfile(
     typeof (value as pg.Pool).connect === 'function' && !('release' in value);
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
+  let transactionCommitted = false;
 
   try {
     const context = options?.context ?? (await resolveWorkspaceContext(client as any));
@@ -527,6 +533,14 @@ export async function importLoadedProfile(
     }
 
     await client.query('COMMIT');
+    transactionCommitted = true;
+
+    // Activation changes the identity of every profile-dependent match. Seed
+    // current-profile work immediately after the profile transaction commits;
+    // the durable task worker remains responsible for execution and retry.
+    const refreshSeed = profile.status === 'ACTIVE'
+      ? await seedRecoverablePipelineTasks(client as any, { context })
+      : undefined;
 
     return {
       candidateProfileId,
@@ -540,9 +554,17 @@ export async function importLoadedProfile(
         factEvidenceLinks: insertedFactEvidenceLinks,
         credentials: loaded.credentials.credentials.length,
       },
+      refreshSeed: refreshSeed
+        ? { inserted: refreshSeed.inserted, existing: refreshSeed.existing }
+        : undefined,
     };
   } catch (error) {
-    await client.query('ROLLBACK');
+    // Profile activation commits before downstream task seeding. Never issue
+    // a misleading rollback after that commit; the worker can retry seeding
+    // without undoing the durable profile version.
+    if (!transactionCommitted) {
+      await client.query('ROLLBACK');
+    }
     throw error;
   } finally {
     if (ownsClient && typeof client.release === 'function') {

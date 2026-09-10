@@ -6,6 +6,9 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react()],
+    // Electron loads the packaged renderer with file://; absolute asset URLs
+    // fail in that mode. Relative URLs also work for the hosted web build.
+    base: './',
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),

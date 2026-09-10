@@ -3,6 +3,10 @@ import { db } from '../db/db.ts';
 
 async function testAgent() {
   console.log("Running edge cases against the new evaluation schema...");
+  const candidateProfileContext = (process.env.CANDIDATE_PROFILE_CONTEXT || "").trim();
+  if (!candidateProfileContext) {
+    throw new Error("Set CANDIDATE_PROFILE_CONTEXT to an active database-backed profile context before running this harness.");
+  }
 
   const testCases = [
     {
@@ -30,7 +34,7 @@ async function testAgent() {
   for (const tc of testCases) {
     console.log(`\n\n--- Running Test: ${tc.name} ---`);
     try {
-      const result = await runAgent(tc.prompt);
+      const result = await runAgent(tc.prompt, { candidateProfileContext });
       console.log(JSON.stringify(result.result.evaluated_jobs[0], null, 2));
     } catch (e: any) {
       console.error(`Error in test ${tc.name}:`, e.message);

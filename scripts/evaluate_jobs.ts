@@ -48,6 +48,7 @@ dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const databaseUrl = process.env.DATABASE_URL;
+const candidateProfileContext = (process.env.CANDIDATE_PROFILE_CONTEXT || "").trim();
 
 const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
@@ -180,6 +181,11 @@ async function runPipeline() {
   if (!databaseUrl) {
     console.error("❌ ERROR: DATABASE_URL environment variable is missing.");
     process.exit(1);
+  }
+  if (!candidateProfileContext) {
+    throw new Error(
+      "CANDIDATE_PROFILE_CONTEXT is required for the legacy evaluator; load the active database-backed profile context before running it."
+    );
   }
 
   const evalSleepMs = parseInt(process.env.EVAL_SLEEP_MS || "15000", 10);
@@ -490,7 +496,7 @@ ${verifiedUrls.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
         Description: ${sj.descString}`;
         
         try {
-          const { result } = await runAgent(evalQuery);
+          const { result } = await runAgent(evalQuery, { candidateProfileContext });
           const evalResult = result.evaluated_jobs?.[0];
           if (evalResult) {
             console.log(`  -> LLM Complete: Confidence = ${evalResult.lane_confidence}, Next Action = ${evalResult.next_action}`);

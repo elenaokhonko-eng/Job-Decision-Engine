@@ -254,4 +254,50 @@ describe('importLoadedProfile', () => {
     const calls = query.mock.calls.map((call: unknown[]) => String(call[0]));
     expect(calls).toContain('ROLLBACK');
   });
+
+  it('does not attempt to roll back an already committed profile when refresh seeding fails', async () => {
+    let committed = false;
+    const query = vi.fn(async (sql: string, _params?: unknown[]) => {
+      if (sql === 'BEGIN') return { rows: [] };
+      if (sql === 'COMMIT') {
+        committed = true;
+        return { rows: [] };
+      }
+      if (committed && sql.trimStart().startsWith('SELECT')) {
+        throw new Error('refresh seed failure');
+      }
+      if (sql.includes('INSERT INTO candidate_profiles')) return { rows: [{ id: 'candidate-id-1' }] };
+      if (sql.includes('INSERT INTO evidence_sources')) return { rows: [{ id: 'source-id-1' }] };
+      if (sql.includes('INSERT INTO profile_versions')) return { rows: [{ id: 'profile-version-id-1' }] };
+      if (sql.includes('INSERT INTO profile_engagements')) return { rows: [{ id: 'engagement-id-1' }] };
+      if (sql.includes('INSERT INTO profile_fact_identities')) return { rows: [{ id: 'fact-identity-id-1' }] };
+      if (sql.includes('SELECT COALESCE(MAX(revision_number)')) return { rows: [{ next: 1 }] };
+      if (sql.includes('FROM profile_fact_revisions')) return { rows: [] };
+      if (sql.includes('INSERT INTO profile_fact_revisions')) return { rows: [{ id: 'fact-revision-id-1' }] };
+      if (sql.includes('INSERT INTO profile_facts')) return { rows: [{ id: 'fact-id-1' }] };
+      if (sql.includes('INSERT INTO profile_version_fact_snapshots')) return { rows: [] };
+      if (sql.includes('INSERT INTO profile_fact_active_revisions')) return { rows: [] };
+      if (sql.includes('INSERT INTO profile_fact_activation_events')) return { rows: [] };
+      if (sql.includes('FROM taxonomy_concepts')) return { rows: [{ id: 'concept-id-1' }] };
+      return { rows: [] };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+
+    await expect(
+      importLoadedProfile(createLoadedProfile(), createEvidenceSources(), fakePool, {
+        context: {
+          workspaceId: 'workspace-id-1',
+          workspaceKey: 'default',
+          userId: 'user-id-1',
+          userKey: 'local_user',
+          role: 'OWNER',
+        },
+      })
+    ).rejects.toThrow('refresh seed failure');
+
+    const calls = query.mock.calls.map((call: unknown[]) => String(call[0]));
+    expect(calls).toContain('COMMIT');
+    expect(calls).not.toContain('ROLLBACK');
+  });
 });

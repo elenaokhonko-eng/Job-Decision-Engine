@@ -6,6 +6,7 @@ import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { RecommendationDecisionSchema } from "../decision/contracts.js";
 import { evaluateDecisionPolicy } from "../policy/decisionPolicy.js";
 import { resolveWorkspacePolicySnapshot } from "../policy/policySnapshot.js";
+import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -133,6 +134,15 @@ export async function runRecommendationDecider(
       workplace_type: string | null;
       workability_facts: any;
       latest_match_run_id: string | null;
+      match_canonical_job_id: string | null;
+      match_status: string | null;
+      match_profile_version_id: string | null;
+      match_requirement_set_id: string | null;
+      match_job_content_hash: string | null;
+      match_context_fingerprint: string | null;
+      active_profile_version_id: string | null;
+      active_requirement_set_id: string | null;
+      job_content_hash: string | null;
       match_embedding_space_id: string | null;
       recommendation_eligibility: string | null;
       recommendation_outcome: string | null;
@@ -153,6 +163,15 @@ export async function runRecommendationDecider(
         c.workplace_type,
         c.workability_facts,
         c.latest_match_run_id,
+        mr.canonical_job_id AS match_canonical_job_id,
+        mr.status AS match_status,
+        mr.profile_version_id AS match_profile_version_id,
+        mr.requirement_set_id AS match_requirement_set_id,
+        mr.job_content_hash AS match_job_content_hash,
+        mr.context_fingerprint AS match_context_fingerprint,
+        active_profile.id AS active_profile_version_id,
+        lv.active_requirement_set_id,
+        lv.content_hash AS job_content_hash,
         mr.embedding_space_id AS match_embedding_space_id,
         c.recommendation_eligibility,
         c.recommendation_outcome,
@@ -166,7 +185,15 @@ export async function runRecommendationDecider(
         ON mr.workspace_id = c.workspace_id
        AND mr.id = c.latest_match_run_id
       LEFT JOIN LATERAL (
-        SELECT id
+        SELECT pv.id
+        FROM profile_versions pv
+        WHERE pv.workspace_id = c.workspace_id
+          AND pv.status = 'ACTIVE'
+        ORDER BY pv.created_at DESC
+        LIMIT 1
+      ) active_profile ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT id, active_requirement_set_id, content_hash
         FROM job_versions
         WHERE canonical_job_id = c.id
           AND workspace_id = $1
@@ -202,8 +229,21 @@ export async function runRecommendationDecider(
           normalizeGateDecision(job.gate_decision) ??
           inferGateDecisionFromProcessingState(job.processing_state);
 
-        const requirementScorePct = asNumber(job.deterministic_match_score);
-        const coverageScorePct = asNumber(job.deterministic_match_coverage);
+        const currentMatch =
+          job.match_status === "COMPLETED" &&
+          job.match_canonical_job_id === job.canonical_job_id &&
+          job.match_profile_version_id !== null &&
+          job.match_profile_version_id === job.active_profile_version_id &&
+          job.match_requirement_set_id !== null &&
+          job.match_requirement_set_id === job.active_requirement_set_id &&
+          job.match_job_content_hash !== null &&
+          job.match_job_content_hash === job.job_content_hash &&
+          job.match_context_fingerprint !== null;
+        const requiresCurrentMatch = normalizedGateDecision === "PASS";
+        const matchIsUsable = !requiresCurrentMatch || currentMatch;
+
+        const requirementScorePct = matchIsUsable ? asNumber(job.deterministic_match_score) : null;
+        const coverageScorePct = matchIsUsable ? asNumber(job.deterministic_match_coverage) : null;
 
         const requirementScore =
           requirementScorePct == null ? null : Number((requirementScorePct / 100).toFixed(3));
@@ -223,13 +263,17 @@ export async function runRecommendationDecider(
 
         const semanticReady = Boolean(job.match_embedding_space_id);
         const adjustedNotes = [...evaluation.notes];
+        if (requiresCurrentMatch && !currentMatch) {
+          adjustedNotes.push("current_match_required_but_missing_or_stale");
+        }
+        const adjustedSemanticReady = matchIsUsable && semanticReady;
         if (job.gate_decision && normalizedGateDecision !== job.gate_decision) {
           adjustedNotes.push(`legacy_gate_decision:${job.gate_decision}->${normalizedGateDecision ?? "null"}`);
         } else if (!job.gate_decision && normalizedGateDecision) {
           adjustedNotes.push(`gate_decision_inferred_from_state:${normalizedGateDecision}`);
         }
         let adjustedOutcome = evaluation.outcome;
-        if (!semanticReady && adjustedOutcome === "PRIORITY") {
+        if (!adjustedSemanticReady && adjustedOutcome === "PRIORITY") {
           adjustedOutcome = "REVIEW";
           adjustedNotes.push("priority_downgraded_semantic_pending");
         }
@@ -262,6 +306,21 @@ export async function runRecommendationDecider(
         });
 
         const decisionHash = sha256Hex(stableStringify(decisionJson));
+        const decisionContextFingerprint = buildPipelineTaskContextFingerprint({
+          workspaceId: ctx.workspaceId,
+          taskType: "DECIDE_RECOMMENDATION",
+          taskVersion: "recommendation_decider_v1",
+          payload: {
+            canonical_job_id: job.canonical_job_id,
+            job_version_id: job.job_version_id,
+            content_hash: job.job_content_hash,
+            active_requirement_set_id: job.active_requirement_set_id,
+            profile_version_id: job.active_profile_version_id,
+            match_run_id: job.latest_match_run_id,
+            policy_snapshot_id: snapshot.snapshotId,
+            policy_hash: snapshot.snapshotHash,
+          },
+        });
 
         const decisionRow = await client.query<{ id: string; inserted: boolean }>(
           `
@@ -272,14 +331,21 @@ export async function runRecommendationDecider(
               job_version_id,
               match_run_id,
               policy_snapshot_id,
+              context_fingerprint,
               decision_hash,
               decision_json,
               recommendation_eligibility,
               recommendation_outcome,
               created_by_user_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (workspace_id, canonical_job_id, job_version_id, policy_snapshot_id) DO NOTHING
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (
+              workspace_id,
+              canonical_job_id,
+              job_version_id,
+              policy_snapshot_id,
+              context_fingerprint
+            ) DO NOTHING
             RETURNING id, TRUE AS inserted
           )
           SELECT id, inserted FROM inserted
@@ -290,6 +356,7 @@ export async function runRecommendationDecider(
             AND canonical_job_id = $2
             AND job_version_id = $3
             AND policy_snapshot_id = $5
+            AND context_fingerprint = $6
           ORDER BY inserted DESC
           LIMIT 1
           `,
@@ -299,6 +366,7 @@ export async function runRecommendationDecider(
             job.job_version_id,
             job.latest_match_run_id,
             snapshot.snapshotId,
+            decisionContextFingerprint,
             decisionHash,
             JSON.stringify(decisionJson),
             evaluation.eligibility,

@@ -30,6 +30,10 @@ function normalizedUrl(value) {
 function desktopApiBaseUrl() {
   const configured = normalizedUrl(process.env.JDEC_DESKTOP_API_BASE_URL || process.env.JDEC_API_BASE_URL);
   if (configured) return configured;
+  // A packaged client is a remote client. It must be explicitly pointed at
+  // the managed API instead of silently trying to reach a developer's
+  // loopback process that is not shipped with the installer.
+  if (app.isPackaged) return "";
   const port = Number.parseInt(String(process.env.JDEC_DESKTOP_API_PORT || DEFAULT_API_PORT), 10);
   const safePort = Number.isFinite(port) && port > 0 && port <= 65535 ? port : DEFAULT_API_PORT;
   return `http://127.0.0.1:${safePort}/api/v2`;
@@ -183,6 +187,60 @@ async function deleteSecret(key) {
   await fsp.rm(filePath, { force: true });
 }
 
+function validateApiBaseUrl(apiBaseUrl) {
+  const normalized = normalizedUrl(apiBaseUrl);
+  if (!normalized) {
+    throw new Error("Configure the managed remote API base URL before connecting.");
+  }
+  let parsed;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error("The managed remote API base URL is not a valid URL.");
+  }
+  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+  if (app.isPackaged && parsed.protocol !== "https:" && !loopback) {
+    throw new Error("Packaged desktop clients require an HTTPS managed remote API.");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("The managed remote API must use HTTP or HTTPS.");
+  }
+  return normalized;
+}
+
+async function requestRemoteApi(input) {
+  if (!input || typeof input !== "object") {
+    throw new Error("Invalid desktop API request.");
+  }
+  const apiBaseUrl = validateApiBaseUrl(input.apiBaseUrl);
+  const requestPath = String(input.path || "");
+  if (!requestPath.startsWith("/") || requestPath.startsWith("//") || requestPath.includes("..")) {
+    throw new Error("Desktop API requests must use a safe relative API path.");
+  }
+
+  const base = new URL(apiBaseUrl);
+  const basePath = base.pathname.replace(/\/+$/, "");
+  const target = new URL(`${basePath}${requestPath}`, base.origin);
+  const headers = new Headers(input.headers || {});
+  headers.set("accept", "application/json");
+  // The renderer never supplies bearer credentials to the main process. The
+  // main process is the only layer allowed to read and attach the OS-stored token.
+  headers.delete("authorization");
+  const token = await getSecret("apiToken");
+  if (token) headers.set("authorization", `Bearer ${token}`);
+  if (input.workspaceKey) headers.set("x-workspace-key", String(input.workspaceKey));
+  if (input.userKey) headers.set("x-user-key", String(input.userKey));
+
+  const response = await fetch(target, {
+    method: String(input.method || "GET").toUpperCase(),
+    headers,
+    body: typeof input.body === "string" ? input.body : undefined,
+    redirect: "error",
+    signal: AbortSignal.timeout(30000),
+  });
+  return { status: response.status, body: await response.text() };
+}
+
 function updatesEnabled() {
   return app.isPackaged && process.env.JDEC_DESKTOP_ENABLE_UPDATES === "true";
 }
@@ -198,7 +256,6 @@ function registerIpc(apiBaseUrl) {
   configureAutoUpdater(channel);
 
   ipcMain.handle("jdec:secret:is-available", () => safeStorage.isEncryptionAvailable());
-  ipcMain.handle("jdec:secret:get", async (_event, key) => getSecret(String(key || "")));
   ipcMain.handle("jdec:secret:set", async (_event, key, value) => {
     await setSecret(String(key || ""), String(value || ""));
     return { ok: true };
@@ -207,7 +264,8 @@ function registerIpc(apiBaseUrl) {
     await deleteSecret(String(key || ""));
     return { ok: true };
   });
-  ipcMain.handle("jdec:runtime:get-status", () => ({
+  ipcMain.handle("jdec:api:request", async (_event, input) => requestRemoteApi(input));
+  ipcMain.handle("jdec:runtime:get-status", async () => ({
     appVersion: app.getVersion(),
     isPackaged: app.isPackaged,
     releaseChannel: channel,
@@ -215,6 +273,7 @@ function registerIpc(apiBaseUrl) {
     apiBaseUrl,
     apiRuntime,
     safeStorageAvailable: safeStorage.isEncryptionAvailable(),
+    apiTokenConfigured: Boolean(await getSecret("apiToken")),
     updatesEnabled: updatesEnabled(),
   }));
   ipcMain.handle("jdec:updates:check", async () => {

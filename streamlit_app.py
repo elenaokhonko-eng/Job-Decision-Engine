@@ -40,7 +40,10 @@ def load_dotenv():
 load_dotenv()
 
 def get_api_base_url():
-    base = (os.environ.get("JDEC_API_BASE_URL") or os.environ.get("API_BASE_URL") or "http://localhost:3000").strip()
+    # Hosted Streamlit cannot reach a developer machine's localhost. An empty
+    # value intentionally selects the read-only canonical PostgreSQL fallback
+    # for reads; API-backed mutations still require an explicit managed URL.
+    base = (os.environ.get("JDEC_API_BASE_URL") or os.environ.get("API_BASE_URL") or "").strip()
     return base.rstrip("/")
 
 def get_api_token():
@@ -155,10 +158,12 @@ SHORTLIST_READ_MODEL_QUERY = """
       s.latest_match_run_id,
       s.cv_document_run_id,
       s.cover_letter_document_run_id,
-      s.document_ready
-    FROM v_canonical_shortlist s
-    JOIN canonical_jobs c ON c.id = s.canonical_job_id
-    WHERE c.workspace_id = %s
+      s.document_ready,
+      s.current_artifact_status,
+      s.current_artifact_reason,
+      s.blocked_task_count
+    FROM v_canonical_shortlist_scoped s
+    WHERE s.workspace_id = %s
     ORDER BY s.observed_at DESC NULLS LAST, s.canonical_job_id DESC
     LIMIT %s
 """
@@ -181,9 +186,8 @@ REJECTED_READ_MODEL_QUERY = """
       a.politics_stress_score,
       a.sensory_overload_index,
       a."postedDate"::timestamptz AS observed_at
-    FROM v_rejected_jobs_audit a
-    JOIN canonical_jobs c ON c.id = a.id
-    WHERE c.workspace_id = %s
+    FROM v_rejected_jobs_audit_scoped a
+    WHERE a.workspace_id = %s
     ORDER BY observed_at DESC NULLS LAST, a.id DESC
     LIMIT %s
 """
@@ -210,6 +214,10 @@ def api_request(method, path, params=None, body=None, timeout=30):
     import urllib.parse
 
     base = get_api_base_url()
+    if not base:
+        raise RuntimeError(
+            "Managed API base URL is not configured. Set JDEC_API_BASE_URL for API operations."
+        )
     url = f"{base}{path}"
     if params:
         query = urllib.parse.urlencode(params)
@@ -276,6 +284,12 @@ def create_preference_mode(mode_key, display_name, description, content):
     resp = api_request("POST", "/api/v2/preference-modes", body=body, timeout=20)
     if isinstance(resp, dict) and resp.get("ok"):
         return resp.get("mode") or {}
+    raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
+
+def preview_preference_mode(content):
+    resp = api_request("POST", "/api/v2/preference-modes/preview", body={"content": content}, timeout=20)
+    if isinstance(resp, dict) and resp.get("ok"):
+        return resp.get("policy") or {}
     raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
 
 def activate_preference_mode(mode_key):
@@ -345,41 +359,28 @@ def normalize_workability_facts(raw):
     }
 
 def derive_deterministic_recommendation(job):
-    gate_status = job.get("gate_status")
-    eligibility = "ELIGIBLE" if gate_status == "PASS" else "VERIFY" if gate_status == "NEEDS_VERIFICATION" else "INELIGIBLE"
+    # The backend decision is authoritative. Streamlit must not recompute a
+    # recommendation from stale score columns or turn missing artifacts into a
+    # recommendation.
+    artifact_status = str(job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN")
+    if artifact_status != "CURRENT_OR_NOT_APPLICABLE":
+        return "VERIFY", "TRACK", None, None, job.get("recommendation_evidence_completeness")
 
-    match_score = job.get("deterministic_match_score")
-    coverage = job.get("deterministic_match_coverage")
+    eligibility = job.get("recommendation_eligibility")
+    outcome = job.get("recommendation_outcome")
+    if eligibility not in ("ELIGIBLE", "VERIFY", "INELIGIBLE"):
+        gate_status = job.get("gate_status")
+        eligibility = "ELIGIBLE" if gate_status == "PASS" else "VERIFY" if gate_status == "NEEDS_VERIFICATION" else "INELIGIBLE"
+    if outcome not in ("PRIORITY", "REVIEW", "TRACK", "SKIP"):
+        outcome = "SKIP" if eligibility == "INELIGIBLE" else "TRACK"
 
-    req_score = (float(match_score) / 100.0) if isinstance(match_score, (int, float)) else None
-    cov_score = (float(coverage) / 100.0) if isinstance(coverage, (int, float)) else None
-
-    facts = normalize_workability_facts(job.get("workability_facts") or {})
-    work_mode_known = str(job.get("workplace_type") or "").upper() in ("REMOTE", "HYBRID", "ONSITE")
-    office_days_known = facts.get("office_days_max") is not None or str(job.get("workplace_type") or "").upper() == "REMOTE"
-    employment_known = facts.get("employment_type") in ("PERMANENT", "CONTRACT")
-    travel_known = facts.get("travel_pct_max") is not None
-
-    completeness_parts = [work_mode_known, office_days_known, employment_known]
-    if travel_known:
-        completeness_parts.append(True)
-    evidence_completeness = sum(1 for x in completeness_parts if x) / float(len(completeness_parts))
-
-    if eligibility == "INELIGIBLE":
-        return eligibility, "SKIP", req_score, cov_score, evidence_completeness
-
-    # Deterministic PRIORITY/REVIEW/TRACK mapping (LLM next_action is displayed but not authoritative).
-    if req_score is None or cov_score is None:
-        outcome = "REVIEW" if eligibility == "VERIFY" else "TRACK"
-        return eligibility, outcome, req_score, cov_score, evidence_completeness
-
-    if eligibility == "ELIGIBLE" and req_score >= 0.75 and cov_score >= 0.55 and evidence_completeness >= 0.70:
-        return eligibility, "PRIORITY", req_score, cov_score, evidence_completeness
-
-    if req_score >= 0.50:
-        return eligibility, "REVIEW", req_score, cov_score, evidence_completeness
-
-    return eligibility, "TRACK", req_score, cov_score, evidence_completeness
+    return (
+        eligibility,
+        outcome,
+        job.get("recommendation_requirement_score"),
+        job.get("recommendation_coverage_score"),
+        job.get("recommendation_evidence_completeness"),
+    )
 
 
 # Configure the page setting with modern style
@@ -985,6 +986,12 @@ with st.sidebar.expander("Accessibility & Preferences", expanded=False):
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to activate mode: {e}")
+        if st.button("Preview resolved policy before activation", key="pref_preview_existing"):
+            selected_mode = next((m for m in modes if m.get("mode_key") == mode_key_by_label[chosen_label]), None)
+            try:
+                st.json(preview_preference_mode((selected_mode or {}).get("content") or {}))
+            except Exception as e:
+                st.error(f"Failed to preview resolved policy: {e}")
     else:
         st.info("No modes saved yet. Create one below.")
 
@@ -1034,6 +1041,11 @@ with st.sidebar.expander("Accessibility & Preferences", expanded=False):
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to save mode: {e}")
+        if st.button("Preview resolved policy", key="pref_preview_new"):
+            try:
+                st.json(preview_preference_mode(content))
+            except Exception as e:
+                st.error(f"Failed to preview resolved policy: {e}")
 
     st.markdown("---")
 
@@ -1344,6 +1356,15 @@ with tab_dashboard:
                     
                     with st.expander(f"{badge_style} {title} — {company} ({status})"):
                         st.markdown(f"**Decision:** `{outcome}` ({eligibility}) | **Gate:** `{gate_status}`")
+                        artifact_status = job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN"
+                        artifact_reason = job.get("current_artifact_reason")
+                        blocked_count = job.get("blocked_task_count") or 0
+                        if artifact_status != "CURRENT_OR_NOT_APPLICABLE":
+                            st.warning(
+                                f"Pipeline artifact status: `{artifact_status}`"
+                                + (f" — {artifact_reason}" if artifact_reason else "")
+                                + (f"; blocked tasks: {blocked_count}" if blocked_count else "")
+                            )
                         st.markdown(f"**Source:** `{job.get('source') or 'UNKNOWN'}`")
                         st.markdown(f"**Lane:** `{job.get('primary_lane') or 'UNCLASSIFIED'}` | **Lane confidence:** `{job.get('lane_confidence') or 'None'}`")
                         st.markdown(f"**Location:** {job.get('location') or 'Unknown'} ({job.get('workplace_type') or 'UNKNOWN'}) | **Employment:** `{job.get('employment_type') or 'UNKNOWN'}`")

@@ -372,5 +372,8 @@ export const ShortlistRowSchema = z.object({
   cv_document_run_id: z.string().uuid().nullable().default(null),
   cover_letter_document_run_id: z.string().uuid().nullable().default(null),
   document_ready: z.boolean().default(false),
+  current_artifact_status: z.string().default("CURRENTNESS_UNKNOWN"),
+  current_artifact_reason: z.string().nullable().default(null),
+  blocked_task_count: z.number().int().min(0).default(0),
 });
 export type ShortlistRow = z.infer<typeof ShortlistRowSchema>;

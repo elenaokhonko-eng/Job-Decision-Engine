@@ -90,6 +90,14 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     const calls = (mPool.query as any).mock.calls;
     const runInsert = calls.find((c: any) => typeof c[0] === 'string' && c[0].includes('INSERT INTO match_runs'));
     expect(runInsert).toBeDefined();
+    expect(runInsert?.[0]).toContain('requirement_set_id');
+    expect(runInsert?.[0]).toContain('context_fingerprint');
+
+    const requirementSelect = calls.find(
+      (c: any) => typeof c[0] === 'string' && c[0].includes('JOIN job_requirements jr')
+    );
+    expect(requirementSelect?.[0]).toContain('jv.active_requirement_set_id IS NOT NULL');
+    expect(requirementSelect?.[0]).not.toContain('jv.active_requirement_set_id IS NULL');
 
     const reqMatchInsert = calls.find(
       (c: any) => typeof c[0] === 'string' && c[0].includes('INSERT INTO requirement_evidence_matches')

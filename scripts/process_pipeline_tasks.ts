@@ -32,7 +32,7 @@ function requestShutdown(signal: NodeJS.Signals): void {
   if (shutdownController.signal.aborted) return;
 
   shutdownSignal = signal;
-  const graceMs = parsePositiveIntEnv("PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS", 10000, 60000);
+  const graceMs = parsePositiveIntEnv("PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS", 60000, 60000);
   const message = `Pipeline task worker received ${signal}; stopping before claiming more work.`;
   console.warn(message);
   shutdownController.abort(new PipelineWorkerCancelledError(message));

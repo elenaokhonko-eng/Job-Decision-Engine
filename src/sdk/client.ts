@@ -10,6 +10,11 @@ export interface JobDecisionClientOptions {
   workspaceKey?: string;
   userKey?: string;
   fetchImpl?: typeof fetch;
+  nativeApiRequest?: (
+    path: string,
+    init: { method?: string; headers?: Record<string, string>; body?: string },
+    context: { apiBaseUrl: string; workspaceKey?: string; userKey?: string }
+  ) => Promise<{ status: number; body: string }>;
 }
 
 export interface ApiListResponse<T> {
@@ -65,6 +70,7 @@ export interface PipelineTaskRow {
   id: string;
   task_type: string;
   task_key: string;
+  context_fingerprint?: string | null;
   status: string;
   available_at: string;
   lease_id: string | null;
@@ -75,6 +81,9 @@ export interface PipelineTaskRow {
   max_attempts: number;
   last_error: string | null;
   dead_letter_reason: string | null;
+  blocked_on?: string | null;
+  blocked_reason?: string | null;
+  repair_action?: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -86,6 +95,7 @@ export class JobDecisionClient {
   private readonly workspaceKey?: string;
   private readonly userKey?: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly nativeApiRequest?: JobDecisionClientOptions["nativeApiRequest"];
 
   constructor(options: JobDecisionClientOptions) {
     const baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -96,6 +106,7 @@ export class JobDecisionClient {
     this.token = options.token;
     this.workspaceKey = options.workspaceKey;
     this.userKey = options.userKey;
+    this.nativeApiRequest = options.nativeApiRequest;
     const fetchImpl = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
     if (!fetchImpl) {
       throw new Error("JobDecisionClient requires fetch or fetchImpl.");
@@ -112,16 +123,52 @@ export class JobDecisionClient {
     return headers;
   }
 
+  private nativeHeaders(extra?: HeadersInit): Record<string, string> {
+    const headers = new Headers(extra);
+    headers.set("accept", "application/json");
+    if (this.workspaceKey) headers.set("x-workspace-key", this.workspaceKey);
+    if (this.userKey) headers.set("x-user-key", this.userKey);
+    return Object.fromEntries(headers.entries());
+  }
+
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: this.headers(init.headers),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok || payload?.ok === false) {
+    let status: number;
+    let rawBody: string;
+    if (this.nativeApiRequest) {
+      const result = await this.nativeApiRequest(
+        path,
+        {
+          method: init.method,
+          headers: this.nativeHeaders(init.headers),
+          body: typeof init.body === "string" ? init.body : undefined,
+        },
+        {
+          apiBaseUrl: this.baseUrl,
+          workspaceKey: this.workspaceKey,
+          userKey: this.userKey,
+        }
+      );
+      status = result.status;
+      rawBody = result.body;
+    } else {
+      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        ...init,
+        headers: this.headers(init.headers),
+      });
+      status = response.status;
+      rawBody = await response.text();
+    }
+
+    let payload: any = {};
+    try {
+      payload = JSON.parse(rawBody || "{}");
+    } catch {
+      payload = {};
+    }
+    if (status < 200 || status >= 300 || payload?.ok === false) {
       const message = typeof payload?.error === "string"
         ? payload.error
-        : `Job Decision API request failed with status ${response.status}`;
+        : `Job Decision API request failed with status ${status}`;
       throw new Error(message);
     }
     return payload as T;

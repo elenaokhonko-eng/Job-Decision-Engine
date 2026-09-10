@@ -35,6 +35,7 @@ type DiagnosticsRow = {
   matched: number;
   canonical_with_match: number;
   match_runs_for_active_profile: number;
+  current_matches_for_active_profile: number;
   validated_requirements: number;
   active_profile_facts_total: number;
   active_profile_facts_public_long: number;
@@ -83,11 +84,14 @@ async function main(): Promise<void> {
           ) AS job_version_id,
           c.company_name,
           c.normalized_title,
-          c.latest_match_run_id
+          c.latest_match_run_id,
+          c.recommendation_eligibility,
+          c.recommendation_outcome
         FROM canonical_jobs c
         WHERE c.workspace_id = $1
           AND c.latest_match_run_id IS NOT NULL
-          AND COALESCE(c.recommendation_outcome, '') <> 'SKIP'
+          AND c.recommendation_eligibility = 'ELIGIBLE'
+          AND c.recommendation_outcome IN ('PRIORITY', 'REVIEW')
       )
       SELECT
         r.canonical_job_id,
@@ -101,14 +105,18 @@ async function main(): Promise<void> {
         ON mr.workspace_id = $1
        AND mr.id = r.latest_match_run_id
        AND mr.profile_version_id = $2
+       AND mr.job_version_id = r.job_version_id
+       AND mr.requirement_set_id = jv.active_requirement_set_id
+       AND mr.job_content_hash = jv.content_hash
+       AND mr.status = 'COMPLETED'
       JOIN job_versions jv
         ON jv.workspace_id = $1
        AND jv.id = r.job_version_id
       JOIN job_requirements jr
         ON jr.workspace_id = jv.workspace_id
        AND (
-         (jv.active_requirement_set_id IS NOT NULL AND jr.requirement_set_id = jv.active_requirement_set_id)
-         OR (jv.active_requirement_set_id IS NULL AND jr.job_version_id = jv.id)
+         jv.active_requirement_set_id IS NOT NULL
+         AND jr.requirement_set_id = jv.active_requirement_set_id
        )
        AND jr.status = 'VALIDATED'
       JOIN requirement_evidence_matches rem
@@ -148,6 +156,18 @@ async function main(): Promise<void> {
             (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1 AND COALESCE(c.processing_state, c.processing_status) = 'MATCHED') AS matched,
             (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1 AND c.latest_match_run_id IS NOT NULL) AS canonical_with_match,
             (SELECT COUNT(*)::int FROM match_runs mr WHERE mr.workspace_id = $1 AND mr.profile_version_id = $2) AS match_runs_for_active_profile,
+            (SELECT COUNT(*)::int
+             FROM canonical_jobs c
+             JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+             JOIN match_runs mr
+               ON mr.workspace_id = c.workspace_id
+              AND mr.id = c.latest_match_run_id
+              AND mr.profile_version_id = $2
+              AND mr.job_version_id = jv.id
+              AND mr.requirement_set_id = jv.active_requirement_set_id
+              AND mr.job_content_hash = jv.content_hash
+              AND mr.status = 'COMPLETED'
+             WHERE c.workspace_id = $1) AS current_matches_for_active_profile,
             (SELECT COUNT(*)::int FROM job_requirements jr WHERE jr.workspace_id = $1 AND jr.status = 'VALIDATED') AS validated_requirements,
             (SELECT COUNT(*)::int FROM profile_facts pf WHERE pf.workspace_id = $1 AND pf.profile_version_id = $2) AS active_profile_facts_total,
             (SELECT COUNT(*)::int FROM profile_facts pf WHERE pf.workspace_id = $1 AND pf.profile_version_id = $2 AND pf.confidentiality <> 'PRIVATE_INTERNAL' AND length(pf.statement) >= 40) AS active_profile_facts_public_long,
@@ -177,6 +197,7 @@ async function main(): Promise<void> {
               matched: row?.matched ?? 0,
               canonical_with_latest_match_run_id: row?.canonical_with_match ?? 0,
               match_runs_for_active_profile: row?.match_runs_for_active_profile ?? 0,
+              current_matches_for_active_profile: row?.current_matches_for_active_profile ?? 0,
               validated_job_requirements: row?.validated_requirements ?? 0,
               active_profile_facts_total: row?.active_profile_facts_total ?? 0,
               active_profile_facts_non_private_len_ge_40: row?.active_profile_facts_public_long ?? 0,
@@ -195,6 +216,7 @@ async function main(): Promise<void> {
       console.log("Requirements:");
       console.log("- canonical_jobs.latest_match_run_id must be set");
       console.log("- match_runs.profile_version_id must equal the ACTIVE profile_version");
+      console.log("- latest match run must use the current job version, active requirement set, and content hash");
       console.log("- VALIDATED job_requirements must exist");
       console.log("- >= 4 grounded matches to non-private profile facts must exist");
       console.log("documents_job_found: false");

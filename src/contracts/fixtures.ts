@@ -180,5 +180,8 @@ export const sampleEvaluatedShortlistRow: ShortlistRow = {
   latest_match_run_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
   cv_document_run_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
   cover_letter_document_run_id: null,
-  document_ready: true
+  document_ready: true,
+  current_artifact_status: "CURRENT_OR_NOT_APPLICABLE",
+  current_artifact_reason: null,
+  blocked_task_count: 0
 };

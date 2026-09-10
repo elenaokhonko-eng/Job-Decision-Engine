@@ -6,8 +6,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: job-discovery-pipeline
-  cancel-in-progress: true
+  # Ingestion and pipeline processing share durable leases and the same
+  # database-backed task worker. A newer dispatch must wait for the active
+  # run; cancelling it mid-stage can strand work in RUNNING until lease expiry.
+  group: job-decision-pipeline
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

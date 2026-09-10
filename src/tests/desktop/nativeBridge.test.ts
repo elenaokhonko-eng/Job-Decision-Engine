@@ -11,7 +11,6 @@ describe("desktop native bridge", () => {
   it("discovers native secret and runtime bridges from an injected root", async () => {
     const secrets: DesktopSecretStore = {
       isAvailable: vi.fn(async () => true),
-      getSecret: vi.fn(async () => "token"),
       setSecret: vi.fn(async () => ({ ok: true })),
       deleteSecret: vi.fn(async () => ({ ok: true })),
     };
@@ -31,6 +30,7 @@ describe("desktop native bridge", () => {
           reason: null,
         },
         safeStorageAvailable: true,
+        apiTokenConfigured: true,
         updatesEnabled: false,
       })),
       checkForUpdates: vi.fn(async () => ({ ok: false, status: "disabled" })),

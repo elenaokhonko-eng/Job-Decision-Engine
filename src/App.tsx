@@ -12,6 +12,7 @@ import {
 } from "./desktop/settings.js";
 import {
   getNativeRuntimeBridge,
+  getNativeApiBridge,
   getNativeSecretStore,
   nativeDefaultApiBaseUrl,
   type DesktopRuntimeStatus,
@@ -65,10 +66,19 @@ function getBrowserStorage(): Storage | null {
 function getInitialDesktopSettings(): DesktopSettings {
   const storage = getBrowserStorage();
   const loaded = loadDesktopSettings(storage);
+  const nativeSecretStore = getNativeSecretStore();
   const nativeApiBaseUrl = nativeDefaultApiBaseUrl();
   return normalizeDesktopSettings(
-    nativeApiBaseUrl && loaded.apiBaseUrl === DEFAULT_DESKTOP_SETTINGS.apiBaseUrl
-      ? { ...loaded, apiBaseUrl: nativeApiBaseUrl }
+    nativeSecretStore
+      ? {
+          ...loaded,
+          apiToken: "",
+          ...(nativeApiBaseUrl && loaded.apiBaseUrl === DEFAULT_DESKTOP_SETTINGS.apiBaseUrl
+            ? { apiBaseUrl: nativeApiBaseUrl }
+            : {}),
+        }
+      : nativeApiBaseUrl && loaded.apiBaseUrl === DEFAULT_DESKTOP_SETTINGS.apiBaseUrl
+        ? { ...loaded, apiBaseUrl: nativeApiBaseUrl }
       : loaded
   );
 }
@@ -93,7 +103,7 @@ function scorePercent(value: number | null | undefined): string {
 function statusTone(value: string | null | undefined): string {
   const status = (value || "").toUpperCase();
   if (["ACTIVE", "COMPLETED", "SUBMITTED", "PRIORITY", "PASS", "ELIGIBLE"].includes(status)) return "good";
-  if (["PENDING", "RUNNING", "RETRY_WAIT", "READY_TO_APPLY", "FOLLOW_UP", "VERIFY", "NEEDS_VERIFICATION"].includes(status)) return "warn";
+  if (["PENDING", "RUNNING", "RETRY_WAIT", "BLOCKED_DEPENDENCY", "MATCH_STALE", "DECISION_STALE", "EVALUATION_MISSING", "EVALUATION_STALE", "READY_TO_APPLY", "FOLLOW_UP", "VERIFY", "NEEDS_VERIFICATION"].includes(status)) return "warn";
   if (["FAILED", "DEAD_LETTER", "HARD_REJECT", "REJECTED", "WITHDRAWN"].includes(status)) return "bad";
   return "muted";
 }
@@ -106,6 +116,7 @@ export default function App() {
   const [settings, setSettings] = useState<DesktopSettings>(getInitialDesktopSettings);
   const [draftSettings, setDraftSettings] = useState<DesktopSettings>(settings);
   const [nativeStatus, setNativeStatus] = useState<DesktopRuntimeStatus | null>(null);
+  const [clearStoredToken, setClearStoredToken] = useState(false);
   const [activeView, setActiveView] = useState<ViewKey>("overview");
   const [health, setHealth] = useState<HealthState | null>(null);
   const [jobs, setJobs] = useState<ShortlistRow[]>([]);
@@ -116,6 +127,7 @@ export default function App() {
   const [manualObservation, setManualObservation] = useState(blankManualObservation);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const nativeApi = getNativeApiBridge();
 
   const client = useMemo(
     () =>
@@ -124,8 +136,11 @@ export default function App() {
         token: settings.apiToken || undefined,
         workspaceKey: settings.workspaceKey,
         userKey: settings.userKey,
+        nativeApiRequest: nativeApi?.request
+          ? (path, init, context) => nativeApi.request({ ...context, path, ...init })
+          : undefined,
       }),
-    [settings]
+    [settings, nativeApi]
   );
 
   const counts = useMemo(
@@ -294,10 +309,17 @@ export default function App() {
       const normalized = await saveDesktopSettingsSecure(
         getBrowserStorage(),
         getNativeSecretStore(),
-        normalizeDesktopSettings(draftSettings)
+        normalizeDesktopSettings(draftSettings),
+        {
+          preserveExistingToken: Boolean(
+            nativeApi &&
+            !clearStoredToken
+          ),
+        }
       );
       setSettings(normalized);
       setDraftSettings(normalized);
+      setClearStoredToken(false);
       await refreshNativeStatus();
       setToast({ kind: "ok", message: "Settings saved." });
     } catch (error) {
@@ -439,16 +461,31 @@ export default function App() {
 
         {activeView === "settings" ? (
           <section className="panel settings-panel">
-            <PanelHeader title="Local Settings" />
+            <PanelHeader title="Managed API Connection" />
             <form onSubmit={(event) => void submitSettings(event)} className="settings-form">
               <label>
-                <span>API base URL</span>
-                <input value={draftSettings.apiBaseUrl} onChange={(event) => setDraftSettings({ ...draftSettings, apiBaseUrl: event.target.value })} placeholder={DEFAULT_DESKTOP_SETTINGS.apiBaseUrl} />
+                <span>Managed API base URL</span>
+                <input value={draftSettings.apiBaseUrl} onChange={(event) => setDraftSettings({ ...draftSettings, apiBaseUrl: event.target.value })} placeholder="https://api.example.com/api/v2" />
               </label>
               <label>
                 <span>API token</span>
-                <input type="password" value={draftSettings.apiToken} onChange={(event) => setDraftSettings({ ...draftSettings, apiToken: event.target.value })} />
+                <input type="password" value={draftSettings.apiToken} onChange={(event) => {
+                  setClearStoredToken(false);
+                  setDraftSettings({ ...draftSettings, apiToken: event.target.value });
+                }} />
               </label>
+              {nativeApi && nativeStatus?.apiTokenConfigured ? (
+                <button
+                  type="button"
+                  className="button ghost"
+                  onClick={() => {
+                    setClearStoredToken(true);
+                    setDraftSettings({ ...draftSettings, apiToken: "" });
+                  }}
+                >
+                  Clear stored token
+                </button>
+              ) : null}
               <div className="form-grid">
                 <label>
                   <span>Workspace key</span>
@@ -461,13 +498,15 @@ export default function App() {
               </div>
               <div className="settings-summary">
                 <span>Stored token</span>
-                <strong>{redactSecret(settings.apiToken) || "Not set"}</strong>
+                <strong>{nativeApi
+                  ? (clearStoredToken ? "Will clear on save" : nativeStatus?.apiTokenConfigured ? "Configured" : "Not set")
+                  : (redactSecret(settings.apiToken) || "Not set")}</strong>
               </div>
               <div className="settings-summary-grid">
                 <Info label="Native Shell" value={nativeStatus ? (nativeStatus.isPackaged ? "Packaged" : "Development") : "Browser"} />
                 <Info label="Channel" value={nativeStatus?.releaseChannel ?? "Local"} />
                 <Info label="Secret Storage" value={nativeStatus ? (nativeStatus.safeStorageAvailable ? "OS backed" : "Unavailable") : "Browser storage"} />
-                <Info label="Local API" value={nativeStatus?.apiRuntime.status ?? "External"} />
+                <Info label="API transport" value={nativeApi ? "Authenticated main-process bridge" : "Browser fetch"} />
                 <Info label="Updates" value={nativeStatus?.updatesEnabled ? "Enabled" : "Disabled"} />
               </div>
               <button type="submit" className="button primary">Save Settings</button>
@@ -542,6 +581,7 @@ function JobDetail({
   onCreateApplication: () => void;
 }) {
   const href = safeExternalHref(job.canonical_url);
+  const artifactIsCurrent = job.current_artifact_status === "CURRENT_OR_NOT_APPLICABLE";
   return (
     <article className="job-detail">
       <div className="detail-title">
@@ -557,9 +597,16 @@ function JobDetail({
         <Info label="Coverage" value={scorePercent(job.recommendation_coverage_score)} />
         <Info label="Observed" value={compactDate(job.observed_at)} />
       </div>
+      {!artifactIsCurrent ? (
+        <div className="notice warning">
+          <strong>Verification required:</strong> {job.current_artifact_status}
+          {job.current_artifact_reason ? ` — ${job.current_artifact_reason}` : ""}.
+          This job is not treated as a current recommendation until the pipeline repairs its artifacts.
+        </div>
+      ) : null}
       <div className="action-strip">
-        <button type="button" className="button primary" onClick={onCreateApplication} disabled={hasApplication}>
-          {hasApplication ? "Handoff Ready" : "Create Handoff"}
+        <button type="button" className="button primary" onClick={onCreateApplication} disabled={hasApplication || !artifactIsCurrent}>
+          {hasApplication ? "Handoff Ready" : artifactIsCurrent ? "Create Handoff" : "Repair Required"}
         </button>
         {href ? (
           <a className="button secondary" href={href} target="_blank" rel="noreferrer">
@@ -677,7 +724,10 @@ function TaskTable({ tasks }: { tasks: PipelineTaskRow[] }) {
               <td><span className={`pill ${statusTone(task.status)}`}>{task.status}</span></td>
               <td>{task.attempt_count}/{task.max_attempts}</td>
               <td>{compactDate(task.updated_at)}</td>
-              <td className="error-cell">{task.last_error || task.dead_letter_reason || ""}</td>
+              <td className="error-cell">
+                {task.blocked_reason || task.last_error || task.dead_letter_reason || ""}
+                {task.repair_action ? ` (${task.repair_action})` : ""}
+              </td>
             </tr>
           ))}
         </tbody>

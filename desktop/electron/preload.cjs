@@ -8,7 +8,6 @@ function readArg(name) {
 
 contextBridge.exposeInMainWorld("jdecSecrets", {
   isAvailable: () => ipcRenderer.invoke("jdec:secret:is-available"),
-  getSecret: (key) => ipcRenderer.invoke("jdec:secret:get", key),
   setSecret: (key, value) => ipcRenderer.invoke("jdec:secret:set", key, value),
   deleteSecret: (key) => ipcRenderer.invoke("jdec:secret:delete", key),
 });
@@ -19,4 +18,8 @@ contextBridge.exposeInMainWorld("jdecRuntime", {
   },
   getStatus: () => ipcRenderer.invoke("jdec:runtime:get-status"),
   checkForUpdates: () => ipcRenderer.invoke("jdec:updates:check"),
+});
+
+contextBridge.exposeInMainWorld("jdecApi", {
+  request: (input) => ipcRenderer.invoke("jdec:api:request", input),
 });

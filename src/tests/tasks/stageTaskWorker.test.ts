@@ -225,6 +225,72 @@ describe("stageTaskWorker", () => {
     ).toBe(false);
   });
 
+  it("releases a task when cancellation arrives immediately after claim", async () => {
+    const controller = new AbortController();
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        controller.abort(new PipelineWorkerCancelledError("test cancellation immediately after claim"));
+        return {
+          rows: [{
+            id: "task-immediate-cancel",
+            workspace_id: ctx.workspaceId,
+            task_type: "NORMALIZE_OBSERVATION",
+            task_key: "NORMALIZE_OBSERVATION:obs-immediate:normalizer_v1",
+            payload: { observation_id: "obs-immediate" },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 8,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks") && sql.includes("SET status = 'RETRY_WAIT'")) {
+        return { rows: [{ id: "task-immediate-cancel" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    await expect(
+      runPipelineStageTaskWorker(
+        { query } as any,
+        {
+          context: ctx,
+          seed: false,
+          taskTypes: ["NORMALIZE_OBSERVATION"],
+          maxTasks: 1,
+          claimBatchSize: 1,
+          heartbeatSeconds: 0,
+          claimedBy: "worker:test",
+          abortSignal: controller.signal,
+        },
+        dependencies()
+      )
+    ).rejects.toThrow(/immediately after claim/);
+
+    expect(calls.some((call) => call.sql.includes("SET status = 'RETRY_WAIT'"))).toBe(true);
+    expect(calls.some((call) => call.sql.includes("metadata = COALESCE(metadata"))).toBe(true);
+  });
+
   it("runs a claimed normalization task, completes it, and enqueues the deterministic successor", async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = [];
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
@@ -511,7 +577,8 @@ describe("stageTaskWorker", () => {
       deps
     );
 
-    expect(summary.completed).toBe(1);
+    expect(summary.completed).toBe(0);
+    expect(summary.blocked).toBe(1);
     expect(summary.failed).toBe(0);
     expect(summary.errors).toEqual([]);
     expect(deps.runDeterministicMatcher).not.toHaveBeenCalled();
@@ -521,6 +588,14 @@ describe("stageTaskWorker", () => {
           call.sql.includes("INSERT INTO pipeline_tasks") &&
           call.params?.[1] === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
           (call.params?.[3] as Record<string, unknown>)?.repair_existing_state === true
+      )
+    ).toBe(true);
+    expect(
+      calls.some(
+        (call) =>
+          call.sql.includes("UPDATE pipeline_tasks") &&
+          call.sql.includes("BLOCKED_DEPENDENCY") &&
+          call.params?.[4] === "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-stale"
       )
     ).toBe(true);
   });
@@ -574,6 +649,13 @@ describe("stageTaskWorker", () => {
     );
     expect(matchSeed?.sql).toContain("target_jv.active_requirement_set_id");
     expect(matchSeed?.sql).toContain("rer.run_type = 'DETERMINISTIC'");
+
+    const decisionSeed = calls.find(
+      (call) => call.sql.includes("c.recommendation_outcome IS NULL")
+    );
+    expect(decisionSeed?.sql).not.toContain("'LANE_ROUTED', 'MATCHED'");
+    expect(decisionSeed?.sql).toContain("current_match.canonical_job_id = c.id");
+    expect(decisionSeed?.sql).toContain("current_match.context_fingerprint IS NOT NULL");
   });
 
   it("passes forced preference recalculation through hard-gate tasks", async () => {

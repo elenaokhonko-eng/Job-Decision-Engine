@@ -233,6 +233,15 @@ a {
   border: 1px solid #fecdca;
 }
 
+.notice.warning {
+  margin: 1rem 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid #a47722;
+  border-radius: 8px;
+  background: #3d3017;
+  color: #f5d889;
+}
+
 .overview-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(150px, 1fr));
