@@ -151,10 +151,16 @@ export function evaluateWorkability(
     };
   }
 
-  // 1. Explicit ONSITE structured field or 100% onsite in text -> HARD REJECT
+  // 1. Explicit ONSITE structured field or work-mode heading/text -> HARD REJECT.
+  // Source adapters frequently leave workplace_type UNKNOWN while the posting
+  // itself says "Full-time · Onsite" or "Location: On-site". Those are still
+  // explicit work-location evidence and must be evaluated here.
   const officeDaysMatch = d.match(/\b(\d+)\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
     || d.match(/\b(\d+)\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
   const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
+    || /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i.test(d)
+    || /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i.test(d)
+    || /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i.test(d)
     || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= policy.hardFailOfficeDaysPerWeek);
 
   if ((!policy.onsiteOnlyAllowed && wp === "ONSITE") || (!policy.onsiteOnlyAllowed && isExplicitOnsiteText)) {
@@ -190,8 +196,13 @@ export function evaluateWorkability(
     };
   }
 
-  // 3. REMOTE structured field or remote in location / description -> PASS
-  if (wp === "REMOTE" || /\bremote\b/i.test(loc) || /\b(remote-first|fully remote|work from home)\b/i.test(d)) {
+  // 3. REMOTE structured field or explicit remote work-mode text -> PASS.
+  // The description signal is intentionally contextual enough to avoid
+  // treating phrases such as "remote clients" as an employee location.
+  const isExplicitRemoteText = /\b(?:fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|remote\s+(?:from|in)\b|work\s+from\s+home|work\s+remotely)\b/i.test(d)
+    || /(?:^|[|·•:])\s*remote\b/i.test(d)
+    || /\b(?:location|workplace|work\s+location)\s*:\s*remote\b/i.test(d);
+  if (wp === "REMOTE" || /\bremote\b/i.test(loc) || isExplicitRemoteText) {
     const hasTerritory = locationTerritories.length > 0 || descriptionTerritories.length > 0;
     if (!hasTerritory && !policy.remoteWithoutTerritoryAllowed) {
       return {

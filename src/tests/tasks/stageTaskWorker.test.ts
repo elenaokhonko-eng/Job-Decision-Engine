@@ -755,6 +755,9 @@ describe("stageTaskWorker", () => {
     );
     expect(matchSeed?.sql).toContain("target_jv.active_requirement_set_id");
     expect(matchSeed?.sql).toContain("rer.run_type = 'DETERMINISTIC'");
+    expect(matchSeed?.sql).toContain("mr.job_version_id = target_jv.id");
+    expect(matchSeed?.sql).toContain("mr.job_content_hash = target_jv.content_hash");
+    expect(matchSeed?.sql).toContain("mr.context_fingerprint IS NOT NULL");
 
     const decisionSeed = calls.find(
       (call) => call.sql.includes("c.recommendation_outcome IS NULL")
@@ -762,6 +765,24 @@ describe("stageTaskWorker", () => {
     expect(decisionSeed?.sql).not.toContain("'LANE_ROUTED', 'MATCHED'");
     expect(decisionSeed?.sql).toContain("current_match.canonical_job_id = c.id");
     expect(decisionSeed?.sql).toContain("current_match.context_fingerprint IS NOT NULL");
+  });
+
+  it("does not seed unrelated provider stages during a stage-scoped recovery", async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
+      return { rows: [], rowCount: 0 };
+    });
+
+    await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+      maxSeedPerType: 1,
+    });
+
+    expect(calls.some((sql) => sql.includes("active_profile.id AS profile_version_id"))).toBe(true);
+    expect(calls.some((sql) => sql.includes("FROM embedding_inputs"))).toBe(false);
+    expect(calls.some((sql) => sql.includes("FROM raw_job_observations obs"))).toBe(false);
   });
 
   it("passes forced preference recalculation through hard-gate tasks", async () => {

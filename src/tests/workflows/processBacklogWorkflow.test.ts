@@ -13,6 +13,7 @@ describe('process backlog workflow', () => {
     expect(workflow).not.toContain('cancel-in-progress: true');
     expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(workflow).toContain('npx tsx scripts/process_pipeline_tasks.ts');
+    expect(workflow).toContain('DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}');
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json');
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json');
     expect(workflow).toContain('actions/upload-artifact@v4');
@@ -74,6 +75,9 @@ describe('process backlog workflow', () => {
     const script = readFileSync(resolve('scripts/process_pipeline_tasks.ts'), 'utf8');
 
     expect(script).toContain('pg_try_advisory_lock');
+    expect(script).toContain('DATABASE_URL_UNPOOLED');
+    expect(script).toContain('isPooledPostgresConnectionString');
+    expect(script).toContain('EXTRACT_QUOTED_REQUIREMENTS" ? 1002 : LOCK_ID');
     expect(script).toContain('runPipelineStageTaskWorker');
     expect(script).toContain('process.once("SIGINT"');
     expect(script).toContain('process.once("SIGTERM"');

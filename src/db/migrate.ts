@@ -1,8 +1,14 @@
 import pg from "pg";
+import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { pgPoolConfig } from "./pgSsl.js";
+import { isPooledPostgresConnectionString, pgPoolConfig } from "./pgSsl.js";
+
+// Keep local CLI execution consistent with the other database scripts while
+// preserving explicitly supplied CI/production environment variables.
+dotenv.config();
+dotenv.config({ path: ".env.local" });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -98,7 +104,13 @@ export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.C
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const pool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
+  const migrationDatabaseUrl = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+  if (isPooledPostgresConnectionString(migrationDatabaseUrl)) {
+    throw new Error(
+      "Migration runner requires DATABASE_URL_UNPOOLED when DATABASE_URL points to a pooled endpoint."
+    );
+  }
+  const pool = new pg.Pool(pgPoolConfig(migrationDatabaseUrl));
 
 
   runMigrations(pool)

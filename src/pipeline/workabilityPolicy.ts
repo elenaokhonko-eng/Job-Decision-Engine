@@ -49,16 +49,67 @@ const defaults: WorkabilityPolicy = {
 
 const TERRITORY_ALIASES: Array<[string, string[]]> = [
   ["SINGAPORE", ["singapore", "sg"]],
-  ["UNITED_STATES", ["united states", "usa", "u.s.", "us"]],
-  ["CANADA", ["canada"]],
-  ["EUROPEAN_UNION", ["european union", "eu"]],
-  ["UNITED_KINGDOM", ["united kingdom", "uk", "great britain"]],
-  ["AUSTRALIA", ["australia", "australian"]],
-  ["NEW_ZEALAND", ["new zealand"]],
+  ["UNITED_STATES", ["united states", "usa", "u.s.", "us", "new york", "boston", "chicago", "austin", "seattle", "san francisco", "los angeles"]],
+  ["CANADA", ["canada", "toronto", "vancouver", "montreal"]],
+  ["EUROPEAN_UNION", ["european union", "eu", "europe"]],
+  ["UNITED_KINGDOM", ["united kingdom", "uk", "great britain", "england", "london", "manchester", "edinburgh"]],
+  ["AUSTRALIA", ["australia", "australian", "sydney", "melbourne", "brisbane", "perth"]],
+  ["NEW_ZEALAND", ["new zealand", "auckland", "wellington"]],
+  ["ROMANIA", ["romania", "romanian", "bucharest"]],
+  ["GERMANY", ["germany", "german", "berlin", "munich", "frankfurt"]],
+  ["FRANCE", ["france", "french", "paris"]],
+  ["SPAIN", ["spain", "spanish", "madrid", "barcelona"]],
+  ["ITALY", ["italy", "italian", "rome", "milan"]],
+  ["NETHERLANDS", ["netherlands", "dutch", "amsterdam"]],
+  ["BELGIUM", ["belgium", "belgian", "brussels"]],
+  ["SWITZERLAND", ["switzerland", "swiss", "zurich", "geneva"]],
+  ["AUSTRIA", ["austria", "austrian", "vienna"]],
+  ["IRELAND", ["ireland", "irish", "dublin"]],
+  ["PORTUGAL", ["portugal", "portuguese", "lisbon"]],
+  ["POLAND", ["poland", "polish", "warsaw", "krakow"]],
+  ["CZECHIA", ["czechia", "czech republic", "prague"]],
+  ["GREECE", ["greece", "greek", "athens"]],
+  ["DENMARK", ["denmark", "danish", "copenhagen"]],
+  ["SWEDEN", ["sweden", "swedish", "stockholm"]],
+  ["NORWAY", ["norway", "norwegian", "oslo"]],
+  ["FINLAND", ["finland", "finnish", "helsinki"]],
+  ["INDIA", ["india", "indian", "bangalore", "bengaluru", "mumbai", "delhi", "hyderabad", "chennai"]],
+  ["MALAYSIA", ["malaysia", "malaysian", "kuala lumpur"]],
+  ["PHILIPPINES", ["philippines", "filipino", "manila"]],
+  ["INDONESIA", ["indonesia", "indonesian", "jakarta"]],
+  ["THAILAND", ["thailand", "thai", "bangkok"]],
+  ["VIETNAM", ["vietnam", "vietnamese", "hanoi", "ho chi minh"]],
+  ["JAPAN", ["japan", "japanese", "tokyo"]],
+  ["CHINA", ["china", "chinese", "beijing", "shanghai", "shenzhen"]],
+  ["HONG_KONG", ["hong kong"]],
+  ["TAIWAN", ["taiwan", "taiwanese", "taipei"]],
+  ["SOUTH_KOREA", ["south korea", "korean", "seoul"]],
+  ["ISRAEL", ["israel", "israeli", "tel aviv"]],
+  ["UNITED_ARAB_EMIRATES", ["united arab emirates", "uae", "dubai", "abu dhabi"]],
+  ["SOUTH_AFRICA", ["south africa", "south african", "johannesburg", "cape town"]],
+  ["BRAZIL", ["brazil", "brazilian", "sao paulo", "rio de janeiro"]],
+  ["MEXICO", ["mexico", "mexican", "mexico city"]],
+  ["ARGENTINA", ["argentina", "argentinian", "buenos aires"]],
+  ["CHILE", ["chile", "chilean", "santiago"]],
+  ["COLOMBIA", ["colombia", "colombian", "bogota"]],
 ];
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Normalize dotted country abbreviations before territory matching. Job
+ * boards commonly emit `U.S.`/`U.K.` in location labels; sentence splitting
+ * would otherwise turn those into unrelated one-letter fragments and hide an
+ * explicit work-territory restriction.
+ */
+function normalizeTerritorySearchText(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/\bu\s*\.\s*s\.?/g, "us")
+    .replace(/\bu\s*\.\s*k\.?/g, "uk")
+    .replace(/\be\s*\.\s*u\.?/g, "eu");
 }
 
 export function normalizeTerritory(value: unknown): string | null {
@@ -78,7 +129,7 @@ export function normalizeTerritories(value: unknown): string[] {
 }
 
 export function extractTerritories(value: unknown): string[] {
-  const text = String(value ?? "").toLowerCase();
+  const text = normalizeTerritorySearchText(value);
   const found: string[] = [];
   for (const [territory, aliases] of TERRITORY_ALIASES) {
     if (aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(text))) {
@@ -97,8 +148,7 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
   const canonical = normalizeTerritory(territory);
   if (!canonical) return false;
   const aliases = TERRITORY_ALIASES.find(([key]) => key === canonical)?.[1] ?? [canonical.toLowerCase()];
-  const sentences = String(value ?? "")
-    .toLowerCase()
+  const sentences = normalizeTerritorySearchText(value)
     .split(/[.!?;\n]+/)
     .map((sentence) => sentence.trim())
     .filter(Boolean);

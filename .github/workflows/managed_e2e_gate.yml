@@ -1,0 +1,41 @@
+name: Managed API Desktop E2E Retest Gate
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  managed-e2e-gate:
+    name: Verify managed API and desktop release prerequisites
+    runs-on: ubuntu-latest
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      JDEC_API_BASE_URL: ${{ secrets.JDEC_API_BASE_URL }}
+      JDEC_API_TOKEN: ${{ secrets.JDEC_API_TOKEN }}
+      WORKSPACE_KEY: ${{ secrets.WORKSPACE_KEY }}
+      WORKSPACE_USER_KEY: ${{ secrets.WORKSPACE_USER_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Run fail-closed managed API/desktop retest gate
+        run: npm run e2e:retest-gate
+
+      - name: Verify packaged desktop security contract
+        run: npm run desktop:verify

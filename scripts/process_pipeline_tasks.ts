@@ -1,6 +1,6 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { pgConnectionConfig } from "../src/db/pgSsl.js";
+import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
 import {
   PipelineWorkerCancelledError,
   parsePipelineTaskTypes,
@@ -11,7 +11,20 @@ dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const LOCK_ID = 1001;
-const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
+const databaseUrl = String(process.env.DATABASE_URL || "").trim();
+const lockDatabaseUrl = String(process.env.DATABASE_URL_UNPOOLED || databaseUrl).trim();
+
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required for the pipeline worker.");
+}
+if (isPooledPostgresConnectionString(lockDatabaseUrl)) {
+  throw new Error(
+    "Pipeline worker requires a direct/unpooled DATABASE_URL_UNPOOLED for its singleton advisory lock; pooled DATABASE_URL is reserved for task traffic."
+  );
+}
+
+const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
+const lockPool = new pg.Pool(pgConnectionConfig(lockDatabaseUrl));
 const shutdownController = new AbortController();
 let shutdownSignal: NodeJS.Signals | null = null;
 let forcedShutdownTimer: NodeJS.Timeout | null = null;
@@ -53,12 +66,17 @@ export async function processPipelineTasks(): Promise<void> {
   console.log("          PROCESS PIPELINE TASK WORKER              ");
   console.log("====================================================");
 
-  const client = await pool.connect();
+  const taskTypes = parsePipelineTaskTypes(process.env.PIPELINE_TASK_WORKER_TASK_TYPES);
+  // Quoted requirements are optional enrichment. Keep a quote-only drain from
+  // monopolizing the mandatory pipeline worker lock while preserving a single
+  // quote worker for idempotent enrichment.
+  const lockId = taskTypes.length === 1 && taskTypes[0] === "EXTRACT_QUOTED_REQUIREMENTS" ? 1002 : LOCK_ID;
+  const lockClient = await lockPool.connect();
   let lockAcquired = false;
   let workerError: Error | null = null;
 
   try {
-    const { rows } = await client.query(`SELECT pg_try_advisory_lock($1) AS locked`, [LOCK_ID]);
+    const { rows } = await lockClient.query(`SELECT pg_try_advisory_lock($1) AS locked`, [lockId]);
     lockAcquired = Boolean(rows[0]?.locked);
 
     if (!lockAcquired) {
@@ -67,7 +85,7 @@ export async function processPipelineTasks(): Promise<void> {
     }
 
     const summary = await runPipelineStageTaskWorker(pool, {
-      taskTypes: parsePipelineTaskTypes(process.env.PIPELINE_TASK_WORKER_TASK_TYPES),
+      taskTypes,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
       maxTasks: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_TASKS", 100, 1000),
       claimBatchSize: parsePositiveIntEnv("PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE", 1, 25),
@@ -105,10 +123,11 @@ export async function processPipelineTasks(): Promise<void> {
       forcedShutdownTimer = null;
     }
     if (lockAcquired) {
-      await client.query(`SELECT pg_advisory_unlock($1)`, [LOCK_ID]).catch(() => {});
+      await lockClient.query(`SELECT pg_advisory_unlock($1)`, [lockId]).catch(() => {});
     }
-    client.release();
+    lockClient.release();
     await pool.end();
+    await lockPool.end();
   }
 
   if (workerError) {

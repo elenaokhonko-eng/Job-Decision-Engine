@@ -133,6 +133,25 @@ describe("criteria gates regression coverage", () => {
 		expect(result.rejection_codes).not.toContain("NEEDS_VERIFICATION");
 	});
 
+	it("uses explicit description work-mode headings when structured workplace data is unknown", () => {
+		const remote = runGate({
+			title: "Machine Learning Engineer",
+			description: `${technicalResponsibilities} Full-time · Remote`,
+			location: "",
+			workplace_type: "",
+		});
+		const onsite = runGate({
+			title: "Machine Learning Engineer",
+			description: `${technicalResponsibilities} Full-time · Onsite`,
+			location: "",
+			workplace_type: "",
+		});
+
+		expect(remote.status).toBe("PASS");
+		expect(onsite.status).toBe("HARD_REJECT");
+		expect(onsite.rejection_codes).toContain("GATE_HIGH_OFFICE_DAYS");
+	});
+
 	it("can restore strict hybrid verification through user policy", () => {
 		const policy: WorkabilityPolicy = {
 			...loadWorkabilityPolicy(),
@@ -171,6 +190,38 @@ describe("criteria gates regression coverage", () => {
 		expect(foreign.status).toBe("HARD_REJECT");
 		expect(foreign.rejection_codes).toContain("GATE_LOCATION_RESTRICTED");
 		expect(unqualified.status).toBe("PASS");
+	});
+
+	it("rejects dotted foreign territory in a remote location label", () => {
+		const result = runGate({
+			title: "Applied Scientist",
+			description: `${technicalResponsibilities} Location: 100% Remote (U.S.)`,
+			location: "Remote",
+			workplace_type: "REMOTE",
+		});
+
+		expect(result.status).toBe("HARD_REJECT");
+		expect(result.rejection_codes).toContain("GATE_LOCATION_RESTRICTED");
+	});
+
+	it("recognizes country and city forms in explicit work-location evidence", () => {
+		const remoteRomania = runGate({
+			title: "Applied Scientist",
+			description: `${technicalResponsibilities} Remote from Romania.`,
+			location: "Remote from Romania",
+			workplace_type: "REMOTE",
+		});
+		const london = runGate({
+			title: "Applied Scientist",
+			description: technicalResponsibilities,
+			location: "London",
+			workplace_type: "HYBRID",
+		});
+
+		expect(remoteRomania.status).toBe("HARD_REJECT");
+		expect(remoteRomania.rejection_codes).toContain("GATE_LOCATION_RESTRICTED");
+		expect(london.status).toBe("HARD_REJECT");
+		expect(london.rejection_codes).toContain("GATE_LOCATION_RESTRICTED");
 	});
 
 	it("hard rejects structured contract employment", () => {

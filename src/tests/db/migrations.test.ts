@@ -44,6 +44,14 @@ async function applyMigrationFile(client: pg.PoolClient, file: string): Promise<
 // ── Tier 1: Mock tests (always run) ──────────────────────────────────────────
 
 describe("P0-03: Additive Migration Chain & Canonical Schema Integrity", () => {
+  it("loads local CLI configuration and prefers the direct migration connection", () => {
+    const source = fs.readFileSync(path.resolve(__dirname, "../../db/migrate.ts"), "utf8");
+
+    expect(source).toContain('dotenv.config({ path: ".env.local" });');
+    expect(source).toContain("process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL");
+    expect(source).toContain("isPooledPostgresConnectionString(migrationDatabaseUrl)");
+  });
+
   it("should track and apply migrations idempotently", async () => {
     const executedQueries: string[] = [];
     const appliedVersions: string[] = [];

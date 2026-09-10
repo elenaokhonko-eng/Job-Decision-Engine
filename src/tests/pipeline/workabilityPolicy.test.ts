@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  extractTerritories,
+  hasExplicitTerritoryRestriction,
   loadWorkabilityPolicy,
   mergeWorkabilityPreferenceContent,
   resolveWorkspaceWorkabilityPolicy,
@@ -7,6 +9,12 @@ import {
 import type { WorkspaceContext } from "../../workspace/context.js";
 
 describe("workspace workability policy", () => {
+  it("recognizes dotted territory abbreviations in work-location text", () => {
+    expect(extractTerritories("Location: 100% Remote (U.S.)")).toContain("UNITED_STATES");
+    expect(hasExplicitTerritoryRestriction("Location: 100% Remote (U.S.)", "UNITED_STATES")).toBe(true);
+    expect(hasExplicitTerritoryRestriction("Serve U.S. clients from anywhere", "UNITED_STATES")).toBe(false);
+  });
+
   it("merges active preference mode content into hard-gate policy fields", () => {
     const merged = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
       workability: {

@@ -364,8 +364,10 @@ async function selectAndEnqueue(
   taskType: PipelineStageTaskType,
   sql: string,
   params: unknown[],
-  build: (row: any) => { id: string; payload: Record<string, unknown> }
+  build: (row: any) => { id: string; payload: Record<string, unknown> },
+  enabledTypes?: Set<PipelineStageTaskType>
 ): Promise<void> {
+  if (enabledTypes && !enabledTypes.has(taskType)) return;
   const { rows } = await client.query(sql, params);
   for (const row of rows) {
     const task = build(row);
@@ -376,13 +378,20 @@ async function selectAndEnqueue(
 
 export async function seedRecoverablePipelineTasks(
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options: { context?: WorkspaceContext; maxSeedPerType?: number } = {}
+  options: {
+    context?: WorkspaceContext;
+    maxSeedPerType?: number;
+    taskTypes?: PipelineStageTaskType[];
+  } = {}
 ): Promise<SeedPipelineTasksSummary> {
   const pool = clientOrPool || defaultPool;
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
   const summary: SeedPipelineTasksSummary = { inserted: 0, existing: 0, byType: {} };
   const maxPerType = options.maxSeedPerType ?? 500;
+  const enabledTypes: Set<PipelineStageTaskType> | undefined = options.taskTypes
+    ? new Set<PipelineStageTaskType>(options.taskTypes)
+    : undefined;
 
   try {
     const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
@@ -403,7 +412,8 @@ export async function seedRecoverablePipelineTasks(
       (row) => ({
         id: row.observation_id,
         payload: { observation_id: row.observation_id },
-      })
+      }),
+      enabledTypes
     );
 
     await selectAndEnqueue(
@@ -455,7 +465,8 @@ export async function seedRecoverablePipelineTasks(
           job_version_id: row.job_version_id,
           ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
         },
-      })
+      }),
+      enabledTypes
     );
 
     await selectAndEnqueue(
@@ -502,7 +513,8 @@ export async function seedRecoverablePipelineTasks(
           job_version_id: row.job_version_id,
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
         },
-      })
+      }),
+      enabledTypes
     );
 
     await selectAndEnqueue(
@@ -536,7 +548,8 @@ export async function seedRecoverablePipelineTasks(
       (row) => ({
         id: row.job_version_id,
         payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
-      })
+      }),
+      enabledTypes
     );
 
     await selectAndEnqueue(
@@ -596,7 +609,8 @@ export async function seedRecoverablePipelineTasks(
           job_version_id: row.job_version_id,
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
         },
-      })
+      }),
+      enabledTypes
     );
 
     await selectAndEnqueue(
@@ -630,7 +644,8 @@ export async function seedRecoverablePipelineTasks(
           job_version_id: row.job_version_id,
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
         },
-      })
+      }),
+      enabledTypes
     );
 
     await selectAndEnqueue(
@@ -690,8 +705,13 @@ export async function seedRecoverablePipelineTasks(
              FROM match_runs mr
              WHERE mr.workspace_id = c.workspace_id
                AND mr.id = c.latest_match_run_id
+               AND mr.canonical_job_id = c.id
+               AND mr.job_version_id = target_jv.id
                AND mr.profile_version_id = active_profile.id
+               AND mr.requirement_set_id = target_jv.active_requirement_set_id
+               AND mr.job_content_hash = target_jv.content_hash
                AND mr.status = 'COMPLETED'
+               AND mr.context_fingerprint IS NOT NULL
            )
          )
        ORDER BY c.updated_at ASC
@@ -705,7 +725,8 @@ export async function seedRecoverablePipelineTasks(
           profile_version_id: row.profile_version_id,
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
         },
-      })
+      }),
+      enabledTypes
     );
 
     await selectAndEnqueue(
@@ -775,7 +796,8 @@ export async function seedRecoverablePipelineTasks(
           ...(row.profile_version_id ? { profile_version_id: row.profile_version_id } : {}),
           ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
         },
-      })
+      }),
+      enabledTypes
     );
 
     await selectAndEnqueue(
@@ -853,7 +875,8 @@ export async function seedRecoverablePipelineTasks(
       (row) => ({
         id: row.job_version_id,
         payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
-      })
+      }),
+      enabledTypes
     );
 
     return summary;
@@ -1589,6 +1612,7 @@ export async function runPipelineStageTaskWorker(
     if (options.seed !== false) {
       summary.seeded = await seedRecoverablePipelineTasks(client as any, {
         context: ctx,
+        taskTypes,
         maxSeedPerType: options.maxSeedPerType,
       });
     }

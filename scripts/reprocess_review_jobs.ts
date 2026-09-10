@@ -26,6 +26,10 @@ function parseArgs(argv: string[]): { apply: boolean; limit?: number } {
 }
 
 const args = parseArgs(process.argv.slice(2));
+// Bump this whenever the deterministic review policy or its evidence parser
+// changes. The replay is intentionally versioned so a completed historical
+// task cannot suppress re-evaluation under the corrected policy.
+const REVIEW_REPLAY_VERSION = "v4";
 const pool = new pg.Pool(pgPoolConfig(String(process.env.DATABASE_URL || "")));
 const client = await pool.connect();
 try {
@@ -85,12 +89,13 @@ try {
       force_policy_recalculation: true,
       reprocess: true,
       review_replay: true,
+      review_replay_version: REVIEW_REPLAY_VERSION,
       preference_mode_key: modeKey,
       preference_mode_revision: modeRevision,
     };
     const result = await enqueuePipelineTask({
       taskType: "APPLY_HARD_GATES",
-      taskKey: `APPLY_HARD_GATES:${candidate.job_version_id}:review-replay:${modeKey}:${modeRevision}`,
+      taskKey: `APPLY_HARD_GATES:${candidate.job_version_id}:review-replay-${REVIEW_REPLAY_VERSION}:${modeKey}:${modeRevision}`,
       payload,
       maxAttempts: 8,
       contextFingerprint: buildPipelineTaskContextFingerprint({

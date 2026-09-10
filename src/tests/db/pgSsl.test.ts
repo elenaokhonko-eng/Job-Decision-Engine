@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import pg from "pg";
 import {
   isLocalPostgresConnectionString,
+  isPooledPostgresConnectionString,
   normalizePgConnectionString,
   pgConnectionConfig,
   pgSslConfig,
@@ -47,6 +48,20 @@ describe("pg SSL connection configuration", () => {
   it("leaves non-URL connection strings unchanged", () => {
     expect(normalizePgConnectionString("postgres")).toBe("postgres");
     expect(pgConnectionConfig(undefined)).toEqual({ connectionString: undefined, ssl: false });
+  });
+
+  it("identifies pooled Neon endpoints that cannot safely own session locks", () => {
+    expect(
+      isPooledPostgresConnectionString(
+        "postgresql://user:pass@ep-example-pooler.c-3.ap-southeast-1.aws.neon.tech/app"
+      )
+    ).toBe(true);
+    expect(
+      isPooledPostgresConnectionString(
+        "postgresql://user:pass@ep-example.ap-southeast-1.aws.neon.tech/app"
+      )
+    ).toBe(false);
+    expect(isPooledPostgresConnectionString("postgresql://localhost/app")).toBe(false);
   });
 
   it("constructs pg clients without deprecated sslmode warnings", () => {

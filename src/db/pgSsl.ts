@@ -67,6 +67,22 @@ export function isLocalPostgresConnectionString(connectionString: string): boole
   }
 }
 
+/**
+ * Session-scoped advisory locks are not safe through a transaction pooler.
+ * Neon pooled endpoints conventionally contain "pooler" in their hostname.
+ */
+export function isPooledPostgresConnectionString(connectionString: string | undefined): boolean {
+  const trimmed = String(connectionString || "").trim();
+  if (!trimmed) return false;
+
+  try {
+    const parsed = new URL(trimmed);
+    return isPostgresUrl(parsed) && /(?:^|[-.])pooler(?:[.-]|$)/i.test(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function isPostgresUrl(parsed: URL): boolean {
   const protocol = parsed.protocol.toLowerCase();
   return protocol === "postgres:" || protocol === "postgresql:";
