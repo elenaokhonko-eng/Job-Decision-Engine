@@ -356,7 +356,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(gateRows).toBe(8);
   });
 
-  it("Stage 2.5 - deterministic requirements and published embeddings exist for PREQUALIFIED jobs", async () => {
+  it("Stage 2.5 - deterministic requirements and published embeddings exist for eligible and recoverable jobs", async () => {
     const { runRequirementsExtraction } = await import("../../pipeline/requirementsExtractor.js");
     const { runEmbeddingBatchWithFallback } = await import("../../embeddings/batchCoordinator.js");
     const { loadWorkspaceLanesConfig } = await import("../../pipeline/laneConfigLoader.js");
@@ -366,8 +366,21 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     await loadWorkspaceLanesConfig(getClient(), { context: getContext(), seedIfEmpty: true });
     const embeddings = await runEmbeddingBatchWithFallback(200, getClient(), { context: getContext() });
 
+    // Requirement extraction also repairs late-state records so that a job
+    // which advanced before this stage completed can be recovered. The fixture
+    // therefore includes the five PREQUALIFIED jobs and the one
+    // NEEDS_VERIFICATION job, while HARD_REJECTED jobs remain excluded.
+    const requirementTargetCount = await countWhere(
+      "canonical_jobs",
+      `COALESCE(processing_state, processing_status) IN (
+         'RAW_STAGED', 'PREQUALIFIED', 'NEEDS_VERIFICATION', 'LANE_ROUTED',
+         'ROUTING_DEFERRED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING',
+         'AI_EVALUATED', 'EVALUATED'
+       )`
+    );
+
     expect(requirements.errors).toBe(0);
-    expect(requirements.processed).toBe(5);
+    expect(requirements.processed).toBe(requirementTargetCount);
     expect(requirements.deterministicInserted).toBeGreaterThan(0);
     expect(embeddings.inputBuild.fromRequirements).toBeGreaterThan(0);
     expect(embeddings.inputBuild.fromProfileFacts).toBeGreaterThan(0);

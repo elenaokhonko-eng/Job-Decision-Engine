@@ -84,6 +84,7 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
   const Q_ID_2  = "40000000-0000-0000-0000-000000000002";
   const Q_ID_3  = "40000000-0000-0000-0000-000000000003";
   const TASK_ID = "50000000-0000-0000-0000-000000000001";
+  const TASK_LEASE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
   const V_ID_1 = "60000000-0000-0000-0000-000000000001";
   const V_ID_2 = "60000000-0000-0000-0000-000000000002";
@@ -220,9 +221,15 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
       role: "OWNER" as const,
     };
     await q(
-      `INSERT INTO pipeline_tasks (id, workspace_id, task_type, task_key, payload, status, available_at, max_attempts)
-       VALUES ($1, $2, 'MATCH_PROFILE_EVIDENCE', 'integration:blocking', '{}'::jsonb, 'RUNNING', NOW(), 8)`,
-      [TASK_ID, context.workspaceId]
+      `INSERT INTO pipeline_tasks (
+         id, workspace_id, task_type, task_key, payload, status,
+         available_at, lease_id, lease_expires_at, max_attempts
+       )
+       VALUES (
+         $1, $2, 'MATCH_PROFILE_EVIDENCE', 'integration:blocking', '{}'::jsonb,
+         'RUNNING', NOW(), $3::uuid, NOW() + INTERVAL '2 minutes', 8
+       )`,
+      [TASK_ID, context.workspaceId, TASK_LEASE_ID]
     );
     await q(
       `INSERT INTO pipeline_task_attempts (workspace_id, task_id, attempt_number, status)
@@ -236,7 +243,7 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
         taskKey: "integration:blocking",
         taskType: "MATCH_PROFILE_EVIDENCE",
         payload: { job_version_id: V_ID_1 },
-        leaseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        leaseId: TASK_LEASE_ID,
         leaseExpiresAt: new Date().toISOString(),
         attemptNumber: 1,
         maxAttempts: 8,
