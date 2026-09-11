@@ -1,0 +1,35 @@
+import { describe, expect, it } from "vitest";
+import {
+  resolveMigrationDatabaseUrl,
+} from "../../../scripts/preflight_database.js";
+
+describe("database preflight configuration", () => {
+  it("requires a direct URL when the application URL is a Neon pooler", () => {
+    expect(() =>
+      resolveMigrationDatabaseUrl({
+        DATABASE_URL: "postgresql://user:password@ep-example-pooler.ap-southeast-1.aws.neon.tech/db",
+      })
+    ).toThrow("DATABASE_URL_UNPOOLED is missing");
+  });
+
+  it("rejects a pooler URL supplied as the migration URL", () => {
+    expect(() =>
+      resolveMigrationDatabaseUrl({
+        DATABASE_URL: "postgresql://user:password@ep-example-pooler.ap-southeast-1.aws.neon.tech/db",
+        DATABASE_URL_UNPOOLED:
+          "postgresql://user:password@ep-example-pooler.ap-southeast-1.aws.neon.tech/db",
+      })
+    ).toThrow("DATABASE_URL_UNPOOLED points to a Neon pooler");
+  });
+
+  it("prefers the direct URL while keeping the application URL separate", () => {
+    const direct =
+      "postgresql://user:password@ep-example.ap-southeast-1.aws.neon.tech/db";
+    expect(
+      resolveMigrationDatabaseUrl({
+        DATABASE_URL: "postgresql://user:password@ep-example-pooler.ap-southeast-1.aws.neon.tech/db",
+        DATABASE_URL_UNPOOLED: direct,
+      })
+    ).toBe(direct);
+  });
+});

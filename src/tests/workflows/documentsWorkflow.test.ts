@@ -13,6 +13,7 @@ describe("documents workflow", () => {
     expect(workflow).toContain("No eligible jobs found for document generation yet. Generation was skipped.");
     expect(workflow).toContain("if: env.DOCUMENTS_JOB_FOUND == 'true'");
     expect(workflow).toContain("always() && env.DOCUMENTS_JOB_FOUND == 'true'");
+    expect(workflow).toContain("npx tsx scripts/preflight_database.ts");
 
     expect(picker).toContain("PICK_DOCUMENTS_ALLOW_EMPTY");
     expect(picker).toContain("documents_job_found: false");

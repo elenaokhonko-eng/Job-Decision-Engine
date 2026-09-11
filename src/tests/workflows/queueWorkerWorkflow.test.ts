@@ -10,6 +10,8 @@ describe("evaluation queue workflow", () => {
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).not.toContain("cancel-in-progress: true");
     expect(workflow).toContain("npx tsx scripts/evaluate_queue.ts");
+    expect(workflow).toContain("DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}");
+    expect(workflow).toContain("npx tsx scripts/preflight_database.ts");
   });
 
   it("requires queue context to match the current deterministic artifacts", () => {

@@ -37,7 +37,9 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
-        run: npx tsx src/db/migrate.ts
+        run: |
+          npx tsx scripts/preflight_database.ts
+          npx tsx src/db/migrate.ts
 
       - name: Resolve canonical_job_id/job_version_id (auto-pick if missing)
         env:

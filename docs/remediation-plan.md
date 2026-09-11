@@ -213,3 +213,14 @@ Remaining authorized production steps: explicitly authorize the bounded transfer
 - The 14 mandatory deterministic decision tasks were drained successfully. The remaining 112 pending tasks are optional quoted-requirement enrichment.
 - The Streamlit browser smoke path reached the production-backed canonical read model using the project virtualenv and produced an accessibility snapshot. The E2E launcher now loads dotenv configuration, prefers `PYTHON_BIN`/`.venv`, and handles Windows `.cmd` process launch correctly. Desktop packaging verification passed 54/54 checks.
 - The managed retest gate now has only the external deployment/authorization blockers: managed HTTPS API base URL/token/workspace credentials and authenticated `allow_ai_evaluation` consent. Provider-backed evaluation and document generation remain intentionally disabled until those gates and independent reviews are complete.
+
+## Workflow failure audit and database preflight checkpoint — 2026-09-11
+
+The post-release GitHub notifications were reviewed against the public Actions run history. The latest commit (`286e195`) is green for Job Decision Engine CI, CodeQL, and full-history secret scanning. The failures on the preceding release commit (`a43a486`) had two separate causes:
+
+- `Job Decision Engine CI` failed in the real-PostgreSQL queue reliability and nine-email E2E assertions. Those failures were corrected in `a43a486` and the following `286e195` CI run passed.
+- `Job Discovery Ingestion`, `Process Discovery Backlog`, and `Evaluation Queue Worker` all failed at their first database-migration step. Their ingestion, backlog, and evaluation work therefore never started. The common failure is the production migration connection contract: migrations require a direct Neon URL, while the application `DATABASE_URL` may be pooled. `queue_worker.yml` and the ingestion process job also failed to pass `DATABASE_URL_UNPOOLED` at all.
+
+The permanent code fix adds `scripts/preflight_database.ts`, which validates the direct/unpooled URL, rejects a pooler URL with an actionable message, and performs a TLS-verified `SELECT` identity check before migrations. All production migration steps now pass both database secrets and run this preflight. The preflight, workflow contract, TypeScript, full Vitest suite, build, contract export, and actionlint checks pass. The configured production connection currently passes the preflight and reports zero unapplied migrations.
+
+The remaining operational action is repository configuration, not a code workaround: configure GitHub Actions secret `DATABASE_URL` for the runtime pooler URL and `DATABASE_URL_UNPOOLED` for the direct Neon URL. Do not put Gemini/OpenAI keys in either field. Once those two secrets are present, rerun ingestion/backlog/evaluation workflows; the new preflight will identify any remaining endpoint or TLS issue before work is claimed.

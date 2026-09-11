@@ -36,7 +36,10 @@ jobs:
       - name: Run Database Migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npx tsx src/db/migrate.ts
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+        run: |
+          npx tsx scripts/preflight_database.ts
+          npx tsx src/db/migrate.ts
 
       - name: Run Evaluation Queue Worker
         timeout-minutes: 15

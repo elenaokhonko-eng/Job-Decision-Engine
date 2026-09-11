@@ -22,6 +22,7 @@ flowchart LR
 2. In your fork, open **Settings → Secrets and variables → Actions**.
 3. Set at least:
    - `DATABASE_URL`
+   - `DATABASE_URL_UNPOOLED` (the direct Neon connection string required by migrations and advisory-lock workers)
    - `OPENAI_API_KEY` or `GEMINI_API_KEY` (or both)
 4. Run **Actions → Job Discovery Ingestion → Run workflow**.
 5. Open Streamlit locally (optional) to browse results, or query the read model `v_canonical_shortlist`.
@@ -52,6 +53,14 @@ streamlit run streamlit_app.py
 ### Hosted Streamlit
 
 For Streamlit Cloud, add `DATABASE_URL`, `WORKSPACE_KEY`, and `WORKSPACE_USER_KEY` to the app secrets. The app first uses `JDEC_API_BASE_URL` when it points to a reachable API; if that API is unavailable, shortlist and rejected-job reads fall back to the canonical PostgreSQL read models in read-only mode. Do not set `JDEC_API_BASE_URL` to `localhost`, `127.0.0.1`, or `0.0.0.0` unless the API is running inside the same process environment. API-backed mutations still require a reachable API endpoint.
+
+### Managed API and desktop client
+
+The Gemini/OpenAI keys are provider credentials used by the server-side workers. `DATABASE_URL` is the application database connection; `DATABASE_URL_UNPOOLED` is the separate direct connection used only for migrations and session-scoped locks. Neither set of credentials is the managed API login.
+
+The managed API is this repository's `npm run api:v2` service deployed behind a public HTTPS host. Configure the service with `NODE_ENV=production`, `API_HOST=0.0.0.0`, the platform-provided `PORT`, `DATABASE_URL`, a newly generated server secret `JDEC_API_TOKEN`, and stable tenant identifiers `WORKSPACE_KEY` and `WORKSPACE_USER_KEY`.
+
+Set the client-facing `JDEC_API_BASE_URL` to the public service URL ending in `/api/v2`, for example `https://api.example.com/api/v2`. The desktop client and Streamlit send the bearer token plus workspace/user headers to that service; provider keys and the database password remain server-side and are never entered by end users into the desktop client. The authenticated consent screen or `PUT /api/v2/consents` endpoint must grant `allow_ai_evaluation` for the selected workspace/user before provider-backed evaluation is enabled.
 
 ## Troubleshooting
 
