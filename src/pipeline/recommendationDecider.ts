@@ -132,10 +132,12 @@ export async function runRecommendationDecider(
       deterministic_match_score: any;
       deterministic_match_coverage: any;
       workplace_type: string | null;
+      routing_disposition: string | null;
       workability_facts: any;
       latest_match_run_id: string | null;
       match_canonical_job_id: string | null;
       match_status: string | null;
+      match_matched_count: number | null;
       match_profile_version_id: string | null;
       match_requirement_set_id: string | null;
       match_job_content_hash: string | null;
@@ -161,10 +163,12 @@ export async function runRecommendationDecider(
         c.deterministic_match_score,
         c.deterministic_match_coverage,
         c.workplace_type,
+        c.routing_disposition,
         c.workability_facts,
         c.latest_match_run_id,
         mr.canonical_job_id AS match_canonical_job_id,
         mr.status AS match_status,
+        mr.matched_count AS match_matched_count,
         mr.profile_version_id AS match_profile_version_id,
         mr.requirement_set_id AS match_requirement_set_id,
         mr.job_content_hash AS match_job_content_hash,
@@ -273,6 +277,16 @@ export async function runRecommendationDecider(
           adjustedNotes.push(`gate_decision_inferred_from_state:${normalizedGateDecision}`);
         }
         let adjustedOutcome = evaluation.outcome;
+        const noPositiveProfileMatch =
+          requiresCurrentMatch && currentMatch && Number(job.match_matched_count ?? 0) === 0;
+        if (noPositiveProfileMatch) {
+          adjustedOutcome = "SKIP";
+          adjustedNotes.push("no_positive_grounded_profile_match");
+        }
+        if (job.routing_disposition === "POLICY_NO_MATCH") {
+          adjustedOutcome = "SKIP";
+          adjustedNotes.push("routing_policy_no_lane_match");
+        }
         if (!adjustedSemanticReady && adjustedOutcome === "PRIORITY") {
           adjustedOutcome = "REVIEW";
           adjustedNotes.push("priority_downgraded_semantic_pending");

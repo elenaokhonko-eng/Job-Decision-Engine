@@ -6,6 +6,7 @@ import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 
 export interface WorkabilityPolicy {
+  unknownWorkModeDisposition: "PASS" | "HARD_REJECT" | "NEEDS_VERIFICATION";
   onsiteOnlyAllowed: boolean;
   maxOfficeDaysPerWeek: number;
   hardFailOfficeDaysPerWeek: number;
@@ -27,6 +28,7 @@ export interface WorkabilityPolicy {
 }
 
 const defaults: WorkabilityPolicy = {
+  unknownWorkModeDisposition: "NEEDS_VERIFICATION",
   onsiteOnlyAllowed: false,
   maxOfficeDaysPerWeek: 3,
   hardFailOfficeDaysPerWeek: 4,
@@ -197,6 +199,14 @@ function normalizeHardFailDays(maxOfficeDays: number, hardFailDays: number): num
   return Math.min(5, Math.max(maxOfficeDays + 1, hardFailDays));
 }
 
+function normalizeUnknownWorkModeDisposition(value: unknown): WorkabilityPolicy["unknownWorkModeDisposition"] {
+  const normalized = String(value ?? "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (normalized === "PASS" || normalized === "HARD_REJECT" || normalized === "NEEDS_VERIFICATION") {
+    return normalized;
+  }
+  return defaults.unknownWorkModeDisposition;
+}
+
 export function loadWorkabilityPolicy(): WorkabilityPolicy {
   const filePath = path.resolve(process.cwd(), "config/policies/workability.yml");
   if (!fs.existsSync(filePath)) return defaults;
@@ -211,6 +221,9 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
   const configuredMaxOffice = finiteNumber(workMode.max_office_days_per_week, defaults.maxOfficeDaysPerWeek);
 
   return {
+    unknownWorkModeDisposition: normalizeUnknownWorkModeDisposition(
+      firstDefined(workMode.unknown_work_mode_policy, workMode.unknownWorkModePolicy)
+    ),
     onsiteOnlyAllowed: workMode.onsite_only_allowed === true,
     maxOfficeDaysPerWeek: configuredMaxOffice,
     hardFailOfficeDaysPerWeek: normalizeHardFailDays(configuredMaxOffice, configuredHardFail),
@@ -300,6 +313,14 @@ export function mergeWorkabilityPreferenceContent(
 
   const policy: WorkabilityPolicy = {
     ...basePolicy,
+    unknownWorkModeDisposition: normalizeUnknownWorkModeDisposition(
+      firstDefined(
+        workability.unknown_work_mode_policy,
+        workability.unknownWorkModePolicy,
+        root.unknown_work_mode_policy,
+        root.unknownWorkModePolicy
+      ) ?? basePolicy.unknownWorkModeDisposition
+    ),
     onsiteOnlyAllowed: allowedWorkModes.length > 0
       ? allowedWorkModes.some((mode) => mode === "ONSITE" || mode === "ON_SITE")
       : booleanValue(

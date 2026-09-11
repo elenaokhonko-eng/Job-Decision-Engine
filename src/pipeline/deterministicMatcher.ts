@@ -605,6 +605,7 @@ export async function runDeterministicMatcher(
                SET deterministic_match_score = 0,
                    deterministic_match_coverage = 0,
                    latest_match_run_id = $2,
+                   profile_match_status = 'NO_PROFILE_MATCH',
                    processing_state = 'MATCHED',
                    processing_status = 'MATCHED',
                    updated_at = NOW()
@@ -900,12 +901,13 @@ export async function runDeterministicMatcher(
            SET deterministic_match_score = $2,
                deterministic_match_coverage = $3,
                latest_match_run_id = $4,
+               profile_match_status = CASE WHEN $6::int > 0 THEN 'POSITIVE_MATCH' ELSE 'NO_PROFILE_MATCH' END,
                processing_state = 'MATCHED',
                processing_status = 'MATCHED',
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = $5`,
-          [ctx.workspaceId, overallScore, coverageScore, matchRunId, job.id]
+          [ctx.workspaceId, overallScore, coverageScore, matchRunId, job.id, matchedCount]
         );
 
         await client.query("COMMIT");

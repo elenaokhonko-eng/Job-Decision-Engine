@@ -173,6 +173,33 @@ describe("criteria gates regression coverage", () => {
 		expect(result.rejection_codes).toContain("NEEDS_VERIFICATION_OFFICE_DAYS");
 	});
 
+	it("uses the explicit unknown-work-mode policy instead of inventing evidence", () => {
+		const base = {
+			id: "test-job",
+			source: "unit-test",
+			source_id: "unit-test-id",
+			company_name: "Test Company",
+			title: "Applied Scientist",
+			raw_description: technicalResponsibilities,
+			location: "Singapore",
+			workplace_type: "UNKNOWN",
+			employment_type: "PERMANENT",
+		};
+
+		const accepted = applyGlobalGates(base as any, {
+			...loadWorkabilityPolicy(),
+			unknownWorkModeDisposition: "PASS",
+		});
+		const rejected = applyGlobalGates(base as any, {
+			...loadWorkabilityPolicy(),
+			unknownWorkModeDisposition: "HARD_REJECT",
+		});
+
+		expect(accepted.status).toBe("PASS");
+		expect(rejected.status).toBe("HARD_REJECT");
+		expect(rejected.rejection_codes).toContain("GATE_UNKNOWN_WORK_MODE");
+	});
+
 	it("rejects explicit foreign work territory but accepts unqualified remote", () => {
 		const foreign = runGate({
 			title: "Applied Scientist",

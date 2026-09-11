@@ -78,6 +78,9 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "agentic ai",
     "ai platform engineer",
     "ai/ml engineer",
+    "llm engineering",
+    "llm engineer",
+    "ai infrastructure engineer",
   ],
   "ml engineering": [
     "ml",
@@ -94,7 +97,16 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
   "data engineering": ["data engineer", "data engineering", "data pipeline", "data pipelines", "etl", "data platform"],
   "ai data architecture": ["ai data architecture", "data architecture", "ai architecture", "data platform architecture"],
   "ai systems architecture": ["ai systems architect", "ai systems architecture", "ai architecture", "ml systems architect"],
-  "llm infrastructure": ["llm infrastructure", "llm platform", "llm training", "llm inference", "foundation model infrastructure"],
+  "llm infrastructure": [
+    "llm infrastructure",
+    "llm platform",
+    "llm training",
+    "llm inference",
+    "llm engineering",
+    "inference platform",
+    "model serving",
+    "foundation model infrastructure",
+  ],
   "ai research": ["ai research", "machine learning research", "deep learning research", "ai researcher", "ml researcher", "ai scientist"],
   "legal ai": ["legal ai", "legaltech", "legal technology", "legal nlp", "contract analytics"],
   "compliance automation": ["compliance automation", "compliance engineering", "regtech", "regulatory technology"],
@@ -379,6 +391,8 @@ export async function runLaneRouter(
                -- technical/threshold deferrals after embedding or policy
                -- changes without weakening the normal idempotent scan.
                ${jobVersionIds.length > 0 ? "TRUE" : `
+                 COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'
+                 AND
                  COALESCE(c.primary_lane, 'UNCLASSIFIED') = 'UNCLASSIFIED'
                  AND (
                    c.latest_lane_decision_id IS NULL
@@ -429,7 +443,7 @@ export async function runLaneRouter(
          WHERE c.workspace_id = $1
            AND (
              COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-             OR (${jobVersionIds.length > 0 ? "COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'" : "FALSE"})
+             OR (${jobVersionIds.length > 0 ? "COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'" : "COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED' AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'"})
            )
           ${fallbackJobVersionFilter}
           ${fallbackCanonicalJobFilter}
@@ -870,6 +884,7 @@ export async function runLaneRouter(
                    lane_confidence = 'None',
                    secondary_lanes = $3,
                    lane_evidence = $4,
+                   routing_disposition = 'TECHNICAL_DEFERRED',
                    processing_state = 'ROUTING_DEFERRED',
                    processing_status = 'ROUTING_DEFERRED',
                    updated_at = NOW()
@@ -915,6 +930,7 @@ export async function runLaneRouter(
                    lane_confidence = 'None',
                    secondary_lanes = $3,
                    lane_evidence = $4,
+                   routing_disposition = 'TECHNICAL_DEFERRED',
                    processing_state = 'ROUTING_DEFERRED',
                    processing_status = 'ROUTING_DEFERRED',
                    updated_at = NOW()
@@ -1100,6 +1116,11 @@ export async function runLaneRouter(
                  lane_confidence    = $4,
                  secondary_lanes    = $5,
                  lane_evidence      = $6,
+                 routing_disposition = CASE
+                   WHEN $3 = 'LANE_ROUTED' THEN 'ROUTED'
+                   WHEN $6::jsonb @> '["ROUTING_POLICY_NO_MATCH"]'::jsonb THEN 'POLICY_NO_MATCH'
+                   ELSE 'TECHNICAL_DEFERRED'
+                 END,
                  updated_at         = NOW()
              WHERE workspace_id = $7 AND id = $8`,
             [
@@ -1163,6 +1184,7 @@ export async function runLaneRouter(
                  lane_confidence = 'None',
                  secondary_lanes = $3,
                  lane_evidence = $4,
+                 routing_disposition = 'TECHNICAL_DEFERRED',
                  processing_state = 'ROUTING_DEFERRED',
                  processing_status = 'ROUTING_DEFERRED',
                  updated_at = NOW()
@@ -1230,6 +1252,7 @@ export async function runLaneRouter(
              lane_confidence = 'None',
              secondary_lanes = $3,
              lane_evidence = $4,
+             routing_disposition = 'TECHNICAL_DEFERRED',
              processing_state = 'ROUTING_DEFERRED',
              processing_status = 'ROUTING_DEFERRED',
              updated_at = NOW()

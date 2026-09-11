@@ -109,6 +109,7 @@ async function main(): Promise<void> {
        AND mr.requirement_set_id = jv.active_requirement_set_id
        AND mr.job_content_hash = jv.content_hash
        AND mr.status = 'COMPLETED'
+       AND COALESCE(mr.matched_count, 0) > 0
       JOIN job_versions jv
         ON jv.workspace_id = $1
        AND jv.id = r.job_version_id
@@ -153,7 +154,12 @@ async function main(): Promise<void> {
           SELECT
             (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1) AS canonical_total,
             (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1 AND COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED') AS lane_routed,
-            (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1 AND COALESCE(c.processing_state, c.processing_status) = 'MATCHED') AS matched,
+            (SELECT COUNT(*)::int
+             FROM canonical_jobs c
+             JOIN match_runs mr ON mr.workspace_id = c.workspace_id AND mr.id = c.latest_match_run_id
+             WHERE c.workspace_id = $1
+               AND COALESCE(c.processing_state, c.processing_status) = 'MATCHED'
+               AND COALESCE(mr.matched_count, 0) > 0) AS matched,
             (SELECT COUNT(*)::int FROM canonical_jobs c WHERE c.workspace_id = $1 AND c.latest_match_run_id IS NOT NULL) AS canonical_with_match,
             (SELECT COUNT(*)::int FROM match_runs mr WHERE mr.workspace_id = $1 AND mr.profile_version_id = $2) AS match_runs_for_active_profile,
             (SELECT COUNT(*)::int
@@ -167,6 +173,7 @@ async function main(): Promise<void> {
               AND mr.requirement_set_id = jv.active_requirement_set_id
               AND mr.job_content_hash = jv.content_hash
               AND mr.status = 'COMPLETED'
+              AND COALESCE(mr.matched_count, 0) > 0
              WHERE c.workspace_id = $1) AS current_matches_for_active_profile,
             (SELECT COUNT(*)::int FROM job_requirements jr WHERE jr.workspace_id = $1 AND jr.status = 'VALIDATED') AS validated_requirements,
             (SELECT COUNT(*)::int FROM profile_facts pf WHERE pf.workspace_id = $1 AND pf.profile_version_id = $2) AS active_profile_facts_total,

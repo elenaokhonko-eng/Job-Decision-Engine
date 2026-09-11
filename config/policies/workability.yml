@@ -8,6 +8,9 @@ global_workability_gates:
     max_office_days_per_week: 3
     max_office_days_hard_fail: 4
     hybrid_without_office_days_allowed: true
+    # Safe default: an unstated work mode is not invented as a pass or reject.
+    # Set to PASS or HARD_REJECT only as an explicit user policy choice.
+    unknown_work_mode_policy: NEEDS_VERIFICATION
 
   territory:
     # Default profile policy. User preference modes can override this list.

@@ -137,6 +137,7 @@ export function applyPersistedRequirementGates(
     title: string;
     company_name: string;
     employment_type?: string;
+    workplace_type?: string;
     description?: string;
   },
   deterministicRequirements: PersistedRequirement[],
@@ -587,6 +588,7 @@ export async function runHardGates(
             title: rawJobAdapter.title,
             company_name: rawJobAdapter.company_name,
             employment_type: rawJobAdapter.employment_type,
+            workplace_type: rawJobAdapter.workplace_type,
             description: rawJobAdapter.raw_description,
           },
           deterministicRequirements,

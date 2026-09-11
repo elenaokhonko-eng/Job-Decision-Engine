@@ -66,10 +66,17 @@ export async function processPipelineTasks(): Promise<void> {
   console.log("          PROCESS PIPELINE TASK WORKER              ");
   console.log("====================================================");
 
-  const taskTypes = parsePipelineTaskTypes(process.env.PIPELINE_TASK_WORKER_TASK_TYPES);
-  // Quoted requirements are optional enrichment. Keep a quote-only drain from
-  // monopolizing the mandatory pipeline worker lock while preserving a single
-  // quote worker for idempotent enrichment.
+  const requestedTaskTypes = parsePipelineTaskTypes(process.env.PIPELINE_TASK_WORKER_TASK_TYPES);
+  const quotedExplicitlyRequested = requestedTaskTypes.includes("EXTRACT_QUOTED_REQUIREMENTS") &&
+    Boolean(process.env.PIPELINE_TASK_WORKER_TASK_TYPES?.trim());
+  const includeQuotedRequirements = quotedExplicitlyRequested ||
+    parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_QUOTED_REQUIREMENTS", false);
+  const taskTypes = includeQuotedRequirements
+    ? requestedTaskTypes
+    : requestedTaskTypes.filter((taskType) => taskType !== "EXTRACT_QUOTED_REQUIREMENTS");
+  // Quoted requirements are optional enrichment. The default worker excludes
+  // them; an explicit task-type selection or opt-in environment flag drains
+  // them after the mandatory pipeline without holding up routing/matching.
   const lockId = taskTypes.length === 1 && taskTypes[0] === "EXTRACT_QUOTED_REQUIREMENTS" ? 1002 : LOCK_ID;
   const lockClient = await lockPool.connect();
   let lockAcquired = false;

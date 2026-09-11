@@ -155,6 +155,7 @@ async function readProductionGate(pool: pg.Pool): Promise<{ consentGranted: bool
                 AND mr.job_content_hash = lv.content_hash
                 AND mr.status = 'COMPLETED'
                 AND mr.context_fingerprint IS NOT NULL
+                AND COALESCE(mr.matched_count, 0) > 0
               WHERE c.workspace_id = $1
            ), current_decisions AS (
              SELECT c.id AS canonical_job_id
@@ -193,6 +194,7 @@ async function readProductionGate(pool: pg.Pool): Promise<{ consentGranted: bool
              COUNT(*) FILTER (
                WHERE c.gate_decision = 'PASS'
                  AND c.processing_state <> 'ROUTING_DEFERRED'
+                 AND COALESCE(c.profile_match_status, 'UNKNOWN') <> 'NO_PROFILE_MATCH'
                  AND NOT EXISTS (SELECT 1 FROM current_matches cm WHERE cm.canonical_job_id = c.id)
              )::int AS "eligibleWithoutCurrentMatch",
              task_counts.mandatory_pending_tasks AS "mandatoryPendingTasks",

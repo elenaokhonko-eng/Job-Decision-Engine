@@ -79,7 +79,9 @@ describe('Pipeline Stage: Normalization', () => {
       'UNKNOWN',
       'UNKNOWN',
       'RAW_STAGED',
-      'RAW_STAGED'
+      'RAW_STAGED',
+      'INCOMPLETE',
+      'DESCRIPTION_BELOW_1000_CHAR_COMPLETENESS_FLOOR'
     ]);
     
     // Check job_versions insertion

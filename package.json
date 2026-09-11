@@ -35,6 +35,7 @@
     "sources:sync": "tsx scripts/load_source_plugins.ts",
     "pipeline:worker": "tsx scripts/process_pipeline_tasks.ts",
     "pipeline:reconcile": "tsx scripts/reconcile_pipeline.ts",
+    "source:enrich-incomplete": "tsx scripts/enrich_incomplete_descriptions.ts",
     "e2e:retest-gate": "tsx scripts/check_e2e_retest_gate.ts",
     "decisions:replay": "tsx scripts/replay_deterministic_decisions.ts",
     "test": "vitest run",

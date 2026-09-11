@@ -153,6 +153,7 @@ async function run(): Promise<void> {
           AND mr.job_content_hash = lv.content_hash
           AND mr.context_fingerprint IS NOT NULL
           AND mr.status = 'COMPLETED'
+          AND COALESCE(mr.matched_count, 0) > 0
          JOIN deterministic_decisions dd
            ON dd.workspace_id = c.workspace_id
           AND dd.id = c.latest_deterministic_decision_id
@@ -233,6 +234,7 @@ async function run(): Promise<void> {
           AND mr.job_content_hash = lv.content_hash
           AND mr.context_fingerprint IS NOT NULL
           AND mr.status = 'COMPLETED'
+          AND COALESCE(mr.matched_count, 0) > 0
          WHERE c.workspace_id = $1
        ),
        current_decisions AS (
@@ -275,6 +277,7 @@ async function run(): Promise<void> {
            ON mr.workspace_id = $1 AND mr.id = c.latest_match_run_id
          WHERE c.workspace_id = $1
            AND (mr.status = 'COMPLETED' OR mr.status IS NULL)
+           AND COALESCE(mr.matched_count, 0) > 0
            AND NOT EXISTS (SELECT 1 FROM current_matches cm WHERE cm.canonical_job_id = c.id)
        ),
        task_counts AS (
@@ -351,6 +354,7 @@ async function run(): Promise<void> {
            LEFT JOIN match_runs mr ON mr.workspace_id = $1 AND mr.id = c.latest_match_run_id
            WHERE c.workspace_id = $1
              AND c.gate_decision = 'PASS'
+             AND COALESCE(c.profile_match_status, 'UNKNOWN') <> 'NO_PROFILE_MATCH'
              AND COALESCE(c.processing_state, c.processing_status) <> 'ROUTING_DEFERRED'
              AND NOT (
                mr.status = 'COMPLETED'
@@ -360,6 +364,7 @@ async function run(): Promise<void> {
                AND mr.requirement_set_id = lv.active_requirement_set_id
                AND mr.job_content_hash = lv.content_hash
                AND mr.context_fingerprint IS NOT NULL
+               AND COALESCE(mr.matched_count, 0) > 0
              )
            LIMIT 20
          ) AS pass_missing_current_matches,

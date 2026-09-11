@@ -277,8 +277,26 @@ export function evaluateWorkability(
     };
   }
 
-  // 6. Unspecified workplace_type and no remote/hybrid clues -> NEEDS_VERIFICATION
+  // 6. Unspecified workplace_type and no remote/hybrid clues. This is a
+  // configurable source/workability policy, never an implicit career reject.
   if (wp === "UNKNOWN") {
+    if (policy.unknownWorkModeDisposition === "PASS") {
+      return {
+        workable: true,
+        needsVerify: false,
+        reason: "Workplace model unspecified; accepted by configured policy",
+        facts: { ...baseFacts, office_days_min: null, office_days_max: null },
+      };
+    }
+    if (policy.unknownWorkModeDisposition === "HARD_REJECT") {
+      return {
+        workable: false,
+        needsVerify: false,
+        reason: "Workplace model unspecified; rejected by configured policy",
+        reasonCode: "GATE_UNKNOWN_WORK_MODE",
+        facts: { ...baseFacts, office_days_min: null, office_days_max: null },
+      };
+    }
     return {
       workable: true,
       needsVerify: true,
@@ -470,6 +488,9 @@ export function applyGlobalGates(
     }
     if (workability.reasonCode === "GATE_LOCATION_RESTRICTED") {
       return makeReject(["GATE_LOCATION_RESTRICTED"], [workability.reason || "Geographic restriction detected"], workability.facts);
+    }
+    if (workability.reasonCode === "GATE_UNKNOWN_WORK_MODE") {
+      return makeReject(["GATE_UNKNOWN_WORK_MODE"], [workability.reason || "Workplace model is unspecified"], workability.facts);
     }
     return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], [workability.reason || "Unworkable location/workplace model"], workability.facts);
   }

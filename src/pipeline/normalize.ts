@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { generateContentHash } from "../services/criteria.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { classifyDescriptionQuality } from "./descriptionQuality.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -130,12 +131,14 @@ export async function runNormalization(
         
         if (!canonicalJobId) {
           // Create new canonical job
+          const descriptionQuality = classifyDescriptionQuality(obs.description_raw);
           const insertCanon = await client.query(
             `INSERT INTO canonical_jobs (
                workspace_id,
                company_name, normalized_title, canonical_url, location, 
-               workplace_type, employment_type, processing_state, processing_status, version_count
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1) RETURNING id`,
+               workplace_type, employment_type, processing_state, processing_status,
+               description_quality_status, description_quality_reason, version_count
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1) RETURNING id`,
             [
               ctx.workspaceId,
               obs.company_name,
@@ -145,7 +148,9 @@ export async function runNormalization(
               obs.workplace_type_raw || "UNKNOWN",
               obs.employment_type_raw || "UNKNOWN",
               "RAW_STAGED",
-              "RAW_STAGED"
+              "RAW_STAGED",
+              descriptionQuality.status,
+              descriptionQuality.reason,
             ]
           );
           canonicalJobId = insertCanon.rows[0].id;
@@ -179,6 +184,7 @@ export async function runNormalization(
 
         if (createdNewVersion) {
           // Preserve established facts when later source data is explicitly Unknown.
+          const descriptionQuality = classifyDescriptionQuality(obs.description_raw);
           await client.query(
             `UPDATE canonical_jobs
              SET latest_job_version_id = $1,
@@ -189,6 +195,8 @@ export async function runNormalization(
                  location = CASE WHEN NULLIF($3, 'Unknown') IS NULL THEN location ELSE $3 END,
                  workplace_type = CASE WHEN NULLIF($4, 'UNKNOWN') IS NULL THEN workplace_type ELSE $4 END,
                  employment_type = CASE WHEN NULLIF($5, 'UNKNOWN') IS NULL THEN employment_type ELSE $5 END,
+                 description_quality_status = $8,
+                 description_quality_reason = $9,
                  processing_state = 'RAW_STAGED',
                  processing_status = 'RAW_STAGED',
                  updated_at = NOW()
@@ -202,6 +210,8 @@ export async function runNormalization(
               obs.employment_type_raw || "UNKNOWN",
               ctx.workspaceId,
               canonicalJobId,
+              descriptionQuality.status,
+              descriptionQuality.reason,
             ]
           );
         }

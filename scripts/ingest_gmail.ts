@@ -104,5 +104,12 @@ export async function ingestGmailWithRetry(): Promise<number> {
 if (process.argv[1] && process.argv[1].includes("ingest_gmail")) {
   ingestGmailWithRetry()
     .then(() => process.exit(0))
-    .catch(() => process.exit(1));
+    .catch((error) => {
+      // Preserve the non-zero exit code, but do not discard the actionable
+      // OAuth/API/database diagnostic that CI operators need to remediate the
+      // source run. Error messages are already produced by the API client with
+      // credentials and message bodies excluded.
+      console.error("Gmail ingestion failed:", error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    });
 }

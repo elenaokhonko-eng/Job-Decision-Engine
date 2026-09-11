@@ -641,8 +641,9 @@ export async function seedRecoverablePipelineTasks(
          AND (
            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
            OR (
-             $2::boolean
+            $2::boolean
              AND COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+             AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'
              AND NOT EXISTS (
                SELECT 1
                  FROM pipeline_tasks replay_task
@@ -953,6 +954,7 @@ async function lookupJobState(
   processingState: string | null;
   primaryLane: string | null;
   laneEvidence: string | null;
+  routingDisposition: string | null;
   recommendationEligibility: string | null;
   recommendationOutcome: string | null;
   gateDecision: string | null;
@@ -963,6 +965,7 @@ async function lookupJobState(
     processing_state: string | null;
     primary_lane: string | null;
     lane_evidence: string | null;
+    routing_disposition: string | null;
     gate_decision: string | null;
     recommendation_eligibility: string | null;
     recommendation_outcome: string | null;
@@ -972,6 +975,7 @@ async function lookupJobState(
             COALESCE(c.processing_state, c.processing_status) AS processing_state,
             c.primary_lane,
             c.lane_evidence,
+            c.routing_disposition,
             c.gate_decision,
             c.recommendation_eligibility,
             c.recommendation_outcome,
@@ -991,6 +995,7 @@ async function lookupJobState(
     processingState: row?.processing_state ?? null,
     primaryLane: row?.primary_lane ?? null,
     laneEvidence: row?.lane_evidence ?? null,
+    routingDisposition: row?.routing_disposition ?? null,
     gateDecision: row?.gate_decision ?? null,
     recommendationEligibility: row?.recommendation_eligibility ?? null,
     recommendationOutcome: row?.recommendation_outcome ?? null,
@@ -1087,8 +1092,11 @@ async function jobVersionHasCompletedRequirementsExtraction(
 function isTechnicalRoutingDeferral(state: {
   processingState: string | null;
   laneEvidence: string | null;
+  routingDisposition?: string | null;
 }): boolean {
   if (state.processingState !== "ROUTING_DEFERRED") return false;
+  if (state.routingDisposition === "POLICY_NO_MATCH") return false;
+  if (state.routingDisposition === "TECHNICAL_DEFERRED") return true;
   const evidence = String(state.laneEvidence || "");
   return [
     "ROUTING_ERROR",
@@ -1182,16 +1190,6 @@ async function maybeEnqueueAfterTask(
       return;
     }
     if (repairExistingState && state.processingState === "PREQUALIFIED") {
-      await enqueueStageTask(
-        "EXTRACT_QUOTED_REQUIREMENTS",
-        jobVersionId,
-        {
-          canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
-          job_version_id: jobVersionId,
-        },
-        clientOrPool,
-        ctx
-      );
       await enqueueStageTask("PUBLISH_EMBEDDING", jobVersionId, {
         canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
         job_version_id: jobVersionId,
@@ -1211,10 +1209,10 @@ async function maybeEnqueueAfterTask(
 
   if (taskType === "APPLY_HARD_GATES") {
     if (state.processingState === "PREQUALIFIED") {
-      // Quoted requirements are advisory enrichment. Publish deterministic
+      // Quoted requirements are advisory enrichment and must be explicitly
+      // drained after the mandatory pipeline. Publish deterministic
       // requirement embeddings immediately so quote-provider latency/failure
       // cannot hold a gate-passed job before lane routing.
-      await enqueueStageTask("EXTRACT_QUOTED_REQUIREMENTS", jobVersionId, stagePayload, clientOrPool, ctx);
       await enqueueStageTask("PUBLISH_EMBEDDING", jobVersionId, stagePayload, clientOrPool, ctx);
     } else if (state.processingState === "HARD_REJECTED" || state.processingState === "NEEDS_VERIFICATION") {
       await enqueueStageTask("DECIDE_RECOMMENDATION", jobVersionId, stagePayload, clientOrPool, ctx);
