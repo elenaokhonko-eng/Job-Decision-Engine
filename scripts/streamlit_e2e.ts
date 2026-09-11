@@ -2,6 +2,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright";
+import dotenv from "dotenv";
+
+dotenv.config();
+dotenv.config({ path: ".env.local", override: true });
 
 type Spawned = {
   name: string;
@@ -12,7 +16,13 @@ function commandForPlatform(cmd: string): string {
   if (process.platform === "win32") {
     if (cmd === "npx") return "npx.cmd";
     if (cmd === "npm") return "npm.cmd";
-    if (cmd === "python") return "python.exe";
+    if (cmd === "python") {
+      const configured = String(process.env.PYTHON_BIN || "").trim();
+      if (configured) return configured;
+      const projectVenv = path.join(process.cwd(), ".venv", "Scripts", "python.exe");
+      if (fs.existsSync(projectVenv)) return projectVenv;
+      return "python.exe";
+    }
   }
   return cmd;
 }
@@ -41,6 +51,8 @@ function spawnProcess(name: string, cmd: string, args: string[], env: NodeJS.Pro
     env,
     stdio: "inherit",
     windowsHide: true,
+    // Windows .cmd launchers such as npx.cmd require shell dispatch.
+    shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd),
   });
   return { name, proc };
 }

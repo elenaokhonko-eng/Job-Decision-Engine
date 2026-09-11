@@ -89,6 +89,9 @@ export interface PipelineStageWorkerOptions {
   context?: WorkspaceContext;
   taskTypes?: PipelineStageTaskType[];
   seed?: boolean;
+  /** Explicitly opt into bounded replay of ROUTING_DEFERRED jobs. */
+  includeRoutingDeferred?: boolean;
+  routingDeferredReplayVersion?: string;
   maxSeedPerType?: number;
   maxTasks?: number;
   claimBatchSize?: number;
@@ -298,17 +301,24 @@ async function enqueueStageTask(
       };
     }
   }
-  const taskVariant =
-    ((taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
+  const routingReplayVersion =
+    taskType === "ROUTE_LANE" &&
+    typeof taskPayload.routing_deferred_replay_version === "string" &&
+    taskPayload.routing_deferred_replay_version.trim() !== ""
+      ? taskPayload.routing_deferred_replay_version.trim()
+      : null;
+  const isRepairTask =
+    (taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
       taskPayload.repair_existing_state === true) ||
-      ((taskType === "PUBLISH_EMBEDDING" || taskType === "ROUTE_LANE") &&
-        taskPayload.reprocess_existing_state === true) ||
-      (taskType === "MATCH_PROFILE_EVIDENCE" &&
-        taskPayload.reprocess_existing_state === true) ||
-      (taskType === "DECIDE_RECOMMENDATION" &&
-        taskPayload.repair_existing_state === true))
-      ? "repair"
-      : undefined;
+    ((taskType === "PUBLISH_EMBEDDING" || taskType === "ROUTE_LANE") &&
+      taskPayload.reprocess_existing_state === true) ||
+    (taskType === "MATCH_PROFILE_EVIDENCE" &&
+      taskPayload.reprocess_existing_state === true) ||
+    (taskType === "DECIDE_RECOMMENDATION" &&
+      taskPayload.repair_existing_state === true);
+  const taskVariant = routingReplayVersion
+    ? `repair-${routingReplayVersion}`
+    : isRepairTask ? "repair" : undefined;
   const result = await enqueuePipelineTask(
     {
       taskType,
@@ -382,6 +392,8 @@ export async function seedRecoverablePipelineTasks(
     context?: WorkspaceContext;
     maxSeedPerType?: number;
     taskTypes?: PipelineStageTaskType[];
+    includeRoutingDeferred?: boolean;
+    routingDeferredReplayVersion?: string;
   } = {}
 ): Promise<SeedPipelineTasksSummary> {
   const pool = clientOrPool || defaultPool;
@@ -389,6 +401,8 @@ export async function seedRecoverablePipelineTasks(
   const client = ownsClient ? await pool.connect() : pool;
   const summary: SeedPipelineTasksSummary = { inserted: 0, existing: 0, byType: {} };
   const maxPerType = options.maxSeedPerType ?? 500;
+  const includeRoutingDeferred = options.includeRoutingDeferred === true;
+  const routingDeferredReplayVersion = options.routingDeferredReplayVersion?.trim() || "routing_deferred_replay_v1";
   const enabledTypes: Set<PipelineStageTaskType> | undefined = options.taskTypes
     ? new Set<PipelineStageTaskType>(options.taskTypes)
     : undefined;
@@ -619,11 +633,26 @@ export async function seedRecoverablePipelineTasks(
       summary,
       "ROUTE_LANE",
       `SELECT c.id AS canonical_job_id, jv.id AS job_version_id,
+              COALESCE(c.processing_state, c.processing_status) AS processing_state,
               TRUE AS reprocess_existing_state
        FROM canonical_jobs c
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+         AND (
+           COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+           OR (
+             $2::boolean
+             AND COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM pipeline_tasks replay_task
+                WHERE replay_task.workspace_id = c.workspace_id
+                  AND replay_task.task_type = 'ROUTE_LANE'
+                  AND replay_task.task_key =
+                    'ROUTE_LANE:' || jv.id || ':lane_router_v1:repair-' || $3::text
+             )
+           )
+         )
          AND EXISTS (
            SELECT 1
            FROM embedding_inputs ei
@@ -635,14 +664,17 @@ export async function seedRecoverablePipelineTasks(
              AND ei.source_id = jv.id
          )
        ORDER BY jv.observed_at ASC
-       LIMIT $2`,
-      [ctx.workspaceId, maxPerType],
+       LIMIT $4`,
+      [ctx.workspaceId, includeRoutingDeferred, routingDeferredReplayVersion, maxPerType],
       (row) => ({
         id: row.job_version_id,
         payload: {
           canonical_job_id: row.canonical_job_id,
           job_version_id: row.job_version_id,
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+          ...(includeRoutingDeferred && row.processing_state === "ROUTING_DEFERRED"
+            ? { routing_deferred_replay_version: routingDeferredReplayVersion }
+            : {}),
         },
       }),
       enabledTypes
@@ -1613,6 +1645,8 @@ export async function runPipelineStageTaskWorker(
       summary.seeded = await seedRecoverablePipelineTasks(client as any, {
         context: ctx,
         taskTypes,
+        includeRoutingDeferred: options.includeRoutingDeferred,
+        routingDeferredReplayVersion: options.routingDeferredReplayVersion,
         maxSeedPerType: options.maxSeedPerType,
       });
     }

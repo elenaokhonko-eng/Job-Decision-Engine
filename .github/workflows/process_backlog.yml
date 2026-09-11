@@ -115,6 +115,9 @@ jobs:
           PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '500' }}
           PIPELINE_TASK_WORKER_TASK_TYPES: ${{ vars.PIPELINE_TASK_WORKER_TASK_TYPES || '' }}
           PIPELINE_TASK_WORKER_SEED: ${{ vars.PIPELINE_TASK_WORKER_SEED || 'true' }}
+          # Deferred routing replay is opt-in; keep normal scheduled drains conservative.
+          PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED: ${{ vars.PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED || 'false' }}
+          PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION: ${{ vars.PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION || 'routing_deferred_replay_v1' }}
           PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: ${{ vars.PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT || 'true' }}
           PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '60000' }}
         run: npx tsx scripts/process_pipeline_tasks.ts

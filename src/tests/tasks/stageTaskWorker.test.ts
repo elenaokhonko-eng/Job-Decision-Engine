@@ -785,6 +785,32 @@ describe("stageTaskWorker", () => {
     expect(calls.some((sql) => sql.includes("FROM raw_job_observations obs"))).toBe(false);
   });
 
+  it("requires explicit opt-in before seeding routing-deferred recovery tasks", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [], rowCount: 0 };
+    });
+
+    await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["ROUTE_LANE"],
+      maxSeedPerType: 103,
+      includeRoutingDeferred: true,
+    });
+
+    const routeSeed = calls.find(
+      (call) =>
+        call.sql.includes("SELECT c.id AS canonical_job_id") &&
+        call.sql.includes("COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'") &&
+        call.sql.includes("ROUTING_DEFERRED")
+    );
+    expect(routeSeed?.sql).toContain("$2::boolean");
+    expect(routeSeed?.params?.[1]).toBe(true);
+    expect(routeSeed?.params?.[2]).toBe("routing_deferred_replay_v1");
+    expect(routeSeed?.params?.[3]).toBe(103);
+  });
+
   it("passes forced preference recalculation through hard-gate tasks", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
