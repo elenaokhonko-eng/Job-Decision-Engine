@@ -115,7 +115,9 @@ jobs:
 
       - name: Upload unsigned installer for SignPath signing
         id: upload-unsigned-installer
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         uses: actions/upload-artifact@v4
         with:
           name: unsigned-installer-${{ inputs.channel }}-${{ github.sha }}
@@ -124,21 +126,27 @@ jobs:
 
       - name: Submit signing request to SignPath Foundation
         id: signpath-signing
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
         uses: signpath/github-action-submit-signing-request@v2
         with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '${{ secrets.SIGNPATH_ORGANIZATION_ID }}'
-          project-slug: '${{ secrets.SIGNPATH_PROJECT_SLUG || 'job-decision-engine' }}'
-          signing-policy-slug: '${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG || (inputs.channel == 'stable' && 'release-signing' || 'test-signing') }}'
-          github-artifact-id: '${{ steps.upload-unsigned-installer.outputs.artifact-id }}'
+          api-token: ${{ env.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG || 'job-decision-engine' }}
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG || (inputs.channel == 'stable' && 'release-signing' || 'test-signing') }}
+          github-artifact-id: ${{ steps.upload-unsigned-installer.outputs.artifact-id }}
           wait-for-completion: true
-          output-artifact-directory: '${{ runner.temp }}\signed-desktop-build'
+          output-artifact-directory: ${{ runner.temp }}\signed-desktop-build
 
       - name: Apply signed installer and verify SignPath signature
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
         shell: pwsh
         env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
           OUTPUT_DIR: ${{ runner.temp }}\jdec-desktop-builds\${{ inputs.channel }}-${{ github.sha }}
           SIGNED_DIR: ${{ runner.temp }}\signed-desktop-build
         run: |
@@ -174,10 +182,11 @@ jobs:
           npm run desktop:release:evidence -- --channel=${{ inputs.channel }} --publish=$publishArg --output-dir="$env:JDEC_DESKTOP_OUTPUT_DIR" --out="${{ runner.temp }}\desktop-release-evidence.md"
 
       - name: Publish release to GitHub (if SignPath and publish=true)
-        if: ${{ inputs.publish == true && secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ inputs.publish == true && env.SIGNPATH_API_TOKEN != '' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
           OUTPUT_DIR: ${{ runner.temp }}\jdec-desktop-builds\${{ inputs.channel }}-${{ github.sha }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
