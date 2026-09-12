@@ -461,6 +461,40 @@ function findEvidence(d: string, keywords: string[]): string[] {
   return quotes;
 }
 
+const NEGATION_PREFIX_REGEX = /(?:^|[\n.!?;,])\s*[^.!?;\n]{0,60}\b(?:no|not|never|without|zero|free\s+of|neither|nor|doesn't|does\s+not|don't|do\s+not|won't|will\s+not|isn't|is\s+not|aren't|are\s+not|optional|no\s+requirement\s+for|support\s+an)\s*$/i;
+
+const NEGATION_SUFFIX_REGEX = /^\s*(?:is|are|will\s+be)?\s*(?:not\s+required|optional|not\s+expected|not\s+needed|not\s+mandatory|not\s+a\s+requirement|not\s+necessary)\b/i;
+
+function isOccurrenceNegated(text: string, matchIndex: number, matchLength: number): boolean {
+  const prefix = text.substring(Math.max(0, matchIndex - 60), matchIndex);
+  if (NEGATION_PREFIX_REGEX.test(prefix)) {
+    return true;
+  }
+  const suffix = text.substring(matchIndex + matchLength, Math.min(text.length, matchIndex + matchLength + 40));
+  if (NEGATION_SUFFIX_REGEX.test(suffix)) {
+    return true;
+  }
+  return false;
+}
+
+function findNonNegatedEvidence(d: string, keywords: string[]): string[] {
+  const quotes: string[] = [];
+  for (const kw of keywords) {
+    let startPos = 0;
+    while (startPos < d.length) {
+      const idx = d.indexOf(kw, startPos);
+      if (idx === -1) break;
+      if (!isOccurrenceNegated(d, idx, kw.length)) {
+        const start = Math.max(0, idx - 20);
+        const end = Math.min(d.length, idx + kw.length + 40);
+        quotes.push(`"…${d.substring(start, end)}…"`);
+      }
+      startPos = idx + kw.length;
+    }
+  }
+  return quotes;
+}
+
 export function applyGlobalGates(
   job: RawJob & { location?: string; workplace_type?: string; employment_type?: string },
   policy: WorkabilityPolicy = loadWorkabilityPolicy()
@@ -665,8 +699,10 @@ export function applyGlobalGates(
       const isOnCallConflict = ["on-call rotation", "regular on-call", "24/7 support"].includes(kw) && !policy.regularOnCallAllowed;
       const isTravelConflict = ["travel extensively", "frequent travel", "up to 50% travel", "up to 25% travel"].includes(kw) && !policy.frequentTravelAllowed;
       if (!isShiftConflict && !isOnCallConflict && !isTravelConflict) continue;
+      const evidence = findNonNegatedEvidence(d, [kw]);
+      if (evidence.length === 0) continue; // Negated or optional occurrence
       const travelPct = kw.includes("50%") ? 50 : kw.includes("25%") ? 25 : null;
-      return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], findEvidence(d, [kw]), { travel_pct_max: travelPct });
+      return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], evidence, { travel_pct_max: travelPct });
     }
   }
 
@@ -674,7 +710,9 @@ export function applyGlobalGates(
   const highInteractionKw = ["sales engineering", "presales", "pre-sales", "client relationship management", "manage large teams", "escalations manager"];
   for (const kw of highInteractionKw) {
     if (d.includes(kw) && !policy.externalClientPrimaryAllowed) {
-      return makeReject(["GATE_HIGH_INTERACTION"], findEvidence(d, [kw]));
+      const evidence = findNonNegatedEvidence(d, [kw]);
+      if (evidence.length === 0) continue;
+      return makeReject(["GATE_HIGH_INTERACTION"], evidence);
     }
   }
 

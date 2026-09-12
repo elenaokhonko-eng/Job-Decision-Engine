@@ -197,6 +197,14 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          provider: preset,
+          routes: {
+            embedding: { provider: preset, model: embeddingModel },
+            routing: { provider: preset, model: evaluationModel },
+            evaluation: { provider: preset, model: evaluationModel },
+            document: { provider: preset, model: documentModel },
+            extraction: { provider: preset, model: extractionModel },
+          },
           embeddingModel,
           evaluationModel,
           documentModel,

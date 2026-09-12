@@ -160,6 +160,10 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         modelRoutes: {
           configured: modelRoutesConfigured,
           routes: activeRoutes,
+          embedding: activeRoutes.find((r) => r.purpose === "EMBEDDING")?.model ?? null,
+          evaluation: activeRoutes.find((r) => r.purpose === "EVALUATION")?.model ?? null,
+          document: activeRoutes.find((r) => r.purpose === "DOCUMENT")?.model ?? null,
+          extraction: activeRoutes.find((r) => r.purpose === "EXTRACTION")?.model ?? null,
         },
         isComplete,
       });
@@ -371,7 +375,24 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         return;
       }
 
-      const routes = req.body?.routes;
+      let routes = req.body?.routes;
+      if (!routes || typeof routes !== "object") {
+        const provider = String(req.body?.provider || "gemini").toLowerCase();
+        const embeddingModel = req.body?.embeddingModel;
+        const evaluationModel = req.body?.evaluationModel;
+        const documentModel = req.body?.documentModel;
+        const extractionModel = req.body?.extractionModel;
+
+        if (embeddingModel || evaluationModel || documentModel || extractionModel) {
+          routes = {
+            embedding: embeddingModel ? { provider, model: embeddingModel } : undefined,
+            evaluation: evaluationModel ? { provider, model: evaluationModel } : undefined,
+            document: documentModel ? { provider, model: documentModel } : undefined,
+            extraction: extractionModel ? { provider, model: extractionModel } : undefined,
+          };
+        }
+      }
+
       if (!routes || typeof routes !== "object") {
         res.status(400).json({ ok: false, error: "Invalid routes configuration." });
         return;
@@ -388,12 +409,13 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         const routeDefs: Array<{
           key: string;
           purpose: ModelRoutePurpose;
-          conf: { provider: string; model: string; fallbackProvider?: string; fallbackModel?: string };
+          conf?: { provider?: string; model?: string; fallbackProvider?: string; fallbackModel?: string };
         }> = [
           { key: "embedding_default", purpose: "EMBEDDING", conf: routes.embedding },
           { key: "routing_default", purpose: "EVALUATION", conf: routes.routing || routes.evaluation },
           { key: "evaluation_default", purpose: "EVALUATION", conf: routes.evaluation },
           { key: "document_default", purpose: "DOCUMENT", conf: routes.document || routes.evaluation },
+          { key: "extraction_default", purpose: "EXTRACTION", conf: routes.extraction || routes.evaluation },
         ];
 
         for (const def of routeDefs) {

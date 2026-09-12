@@ -81,7 +81,36 @@ function structuredStrings(value: Record<string, unknown> | null): string[] {
   });
 }
 
+const NUMBER_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  fifteen: 15,
+  twenty: 20,
+};
+
+function parseNumberWord(text: string): number | null {
+  const normalized = text.toLowerCase().trim();
+  if (/^\d+(?:\.\d+)?$/.test(normalized)) {
+    return Number(normalized);
+  }
+  return NUMBER_WORDS[normalized] ?? null;
+}
+
 function numberValue(value: unknown): number | null {
+  if (typeof value === "string") {
+    const parsedWord = parseNumberWord(value);
+    if (parsedWord !== null) return parsedWord;
+  }
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -92,9 +121,9 @@ function requiredYears(requirement: ComparableRequirement): number | null {
     const value = numberValue(structured[key]);
     if (value !== null) return value;
   }
-  const match = textForRequirement(requirement).match(/(?:at least|minimum of|min\.?|over|more than)\s*(\d+(?:\.\d+)?)\s*years?/i)
-    || textForRequirement(requirement).match(/(\d+(?:\.\d+)?)\+?\s*years?/i);
-  return match ? Number(match[1]) : null;
+  const match = textForRequirement(requirement).match(/(?:at least|minimum of|min\.?|over|more than)\s*(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\s*years?/i)
+    || textForRequirement(requirement).match(/(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\+?\s*years?/i);
+  return match ? parseNumberWord(match[1]) : null;
 }
 
 function factYears(fact: ComparableFact): number | null {
@@ -105,8 +134,8 @@ function factYears(fact: ComparableFact): number | null {
   }
   const months = numberValue(structured.professional_months ?? structured.experience_months);
   if (months !== null) return months / 12;
-  const match = textForFact(fact).match(/(\d+(?:\.\d+)?)\+?\s*years?/i);
-  return match ? Number(match[1]) : null;
+  const match = textForFact(fact).match(/(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\+?\s*years?/i);
+  return match ? parseNumberWord(match[1]) : null;
 }
 
 function normalizedScope(value: unknown): string {
@@ -136,20 +165,38 @@ function requiredExperienceScope(requirement: ComparableRequirement): string | n
   const structured = experienceScopes(requirement.structured_value);
   if (structured.length > 0) return structured.join(" ");
   const text = textForRequirement(requirement);
-  const scoped = text.match(/\b\d+(?:\.\d+)?\+?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i)
-    || text.match(/\b\d+(?:\.\d+)?\+?\s*years?\s+of\s+experience\s+in\s+(.+)$/i);
+  const scoped = text.match(/\b(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\+?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i)
+    || text.match(/\b(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\+?\s*years?\s+of\s+experience\s+in\s+(.+)$/i);
   return scoped?.[1] ? normalizedScope(scoped[1]) : null;
 }
 
+const SCOPE_STOP_WORDS = new Set([
+  "and", "the", "for", "with", "from", "that", "this", "all", "any", "our", "per",
+  "you", "non", "set", "use", "pro", "new", "role", "roles", "work", "team", "teams",
+  "such", "than", "more", "most", "each", "both", "must", "have", "plus", "years",
+  "year", "experience", "experienced", "skills", "skill", "level", "related", "field",
+  "fields", "equivalent", "environment", "environments", "building", "using"
+]);
+
+function tokenizeScope(scope: string): Set<string> {
+  return new Set(
+    scope
+      .toLowerCase()
+      .split(/[^a-z0-9+#]+/)
+      .filter((token) => token.length >= 3 && !SCOPE_STOP_WORDS.has(token))
+  );
+}
+
 function scopesOverlap(requiredScope: string, factScope: string): boolean {
-  const requiredTokens = new Set(requiredScope.split(" ").filter((token) => token.length > 2));
-  const factTokens = new Set(factScope.split(" ").filter((token) => token.length > 2));
-  if ([...requiredTokens].some((token) => factScope.includes(token))) return true;
-  if ([...factTokens].some((token) => requiredScope.includes(token))) return true;
+  const requiredTokens = tokenizeScope(requiredScope);
+  const factTokens = tokenizeScope(factScope);
+  for (const token of requiredTokens) {
+    if (factTokens.has(token)) return true;
+  }
   const aliases: Array<[string, string[]]> = [
-    ["ai", ["artificial intelligence", "machine learning", "ml"]],
-    ["software", ["software engineering", "software development", "application development", "coding"]],
-    ["data", ["data engineering", "data science", "analytics"]],
+    ["ai", ["artificial intelligence", "machine learning", "ml", "deep learning"]],
+    ["software", ["software engineering", "software development", "application development", "coding", "full stack", "backend"]],
+    ["data", ["data engineering", "data science", "analytics", "etl", "data pipeline"]],
   ];
   return aliases.some(([canonical, variants]) => {
     const requiredHas = requiredScope.includes(canonical) || variants.some((variant) => requiredScope.includes(variant));

@@ -594,9 +594,18 @@ export async function runEmbeddingBatchWithFallback(
                $3::boolean = TRUE
                AND ei.source_type = 'LANE_PROTOTYPE'
              )
+             OR (
+               $4::boolean = TRUE
+               AND ei.source_type = 'PROFILE_FACT'
+             )
            )
          ORDER BY ei.id`,
-        [ctx.workspaceId, jobVersionIds, options?.includeLanePrototypes ?? true]
+        [
+          ctx.workspaceId,
+          jobVersionIds,
+          options?.includeLanePrototypes ?? true,
+          options?.includeProfileFacts ?? false,
+        ]
       );
       scopedInputIds = rows.map((row) => row.id);
       console.log(

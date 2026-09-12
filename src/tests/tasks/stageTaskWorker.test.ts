@@ -1072,7 +1072,7 @@ describe("stageTaskWorker", () => {
     expect(deps.runEmbeddingBatchWithFallback).toHaveBeenCalledWith(500, fakeClient, {
       context: ctx,
       jobVersionIds: ["version-1"],
-      includeProfileFacts: false,
+      includeProfileFacts: true,
       includeLanePrototypes: true,
     });
   });
