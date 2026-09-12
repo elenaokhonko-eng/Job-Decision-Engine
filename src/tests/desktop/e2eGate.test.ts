@@ -10,6 +10,7 @@ describe("evaluateDesktopE2EGate", () => {
     schemaInitialized: true,
     migrationsPending: 0,
     aiProviderConfigured: true,
+    consentGranted: true,
     deadLetterTasks: 0,
     blockedTasks: 0,
   };

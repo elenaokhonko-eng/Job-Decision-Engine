@@ -92,6 +92,7 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
 
       let modelRoutesConfigured = false;
       let activeRoutes: Array<{ purpose: string; provider: string; model: string }> = [];
+      let consents = { allowAiEvaluation: false, allowDocuments: false };
 
       if (dbConnected && migrationStatus?.isInitialized) {
         try {
@@ -123,6 +124,23 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
             const configuredPurposes = new Set(activeRoutes.map((route) => route.purpose));
             modelRoutesConfigured = configuredPurposes.has("EMBEDDING") && configuredPurposes.has("EVALUATION");
 
+            // Check consents
+            const consentRes = await pool.query<{ consent_key: string; granted: boolean }>(
+              `SELECT consent_key, granted
+               FROM workspace_user_consents
+               WHERE workspace_id = $1
+                 AND user_id = $2
+                 AND consent_key IN ('allow_ai_evaluation', 'allow_documents')`,
+              [ctx.workspaceId, ctx.userId]
+            );
+            consents = {
+              allowAiEvaluation: consentRes.rows.some(
+                (row) => row.consent_key === "allow_ai_evaluation" && row.granted === true
+              ),
+              allowDocuments: consentRes.rows.some(
+                (row) => row.consent_key === "allow_documents" && row.granted === true
+              ),
+            };
           }
         } catch {
           // Soft failure if tables not fully migrated yet
@@ -134,7 +152,8 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         Boolean(migrationStatus?.isInitialized) &&
         (migrationStatus?.pendingCount ?? 1) === 0 &&
         (geminiConfigured || openaiConfigured) &&
-        modelRoutesConfigured;
+        modelRoutesConfigured &&
+        consents.allowAiEvaluation;
 
       res.json({
         ok: true,
@@ -160,6 +179,12 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         modelRoutes: {
           configured: modelRoutesConfigured,
           routes: activeRoutes,
+        },
+        consents: {
+          allow_ai_evaluation: consents.allowAiEvaluation,
+          allow_documents: consents.allowDocuments,
+          allowAiEvaluation: consents.allowAiEvaluation,
+          allowDocuments: consents.allowDocuments,
         },
         isComplete,
       });
@@ -422,6 +447,62 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         res.json({ ok: true, routes: configured });
       } catch (err: any) {
         res.status(500).json({ ok: false, error: `Failed to configure routes: ${sanitizeErrorMessage(err)}` });
+      } finally {
+        client.release();
+      }
+    })
+  );
+
+  // POST /api/v2/setup/consents
+  router.post(
+    "/consents",
+    asyncHandler(async (req, res) => {
+      const pool = getActivePool();
+      if (!pool) {
+        res.status(400).json({ ok: false, error: "Database is not connected." });
+        return;
+      }
+
+      const allowAiEvaluation = Boolean(req.body?.allowAiEvaluation);
+      const allowDocuments = Boolean(req.body?.allowDocuments);
+
+      const client = await pool.connect();
+      try {
+        const ctx = await resolveWorkspaceContext(client as any, {
+          workspaceKey: DEFAULT_WORKSPACE_KEY,
+          userKey: DEFAULT_USER_KEY,
+        });
+
+        await client.query(
+          `
+            INSERT INTO workspace_user_consents (
+              workspace_id,
+              user_id,
+              consent_key,
+              granted,
+              granted_at,
+              revoked_at,
+              updated_at
+            )
+            VALUES
+              ($1, $2, 'allow_ai_evaluation', $3, CASE WHEN $3 THEN NOW() ELSE NULL END, CASE WHEN $3 THEN NULL ELSE NOW() END, NOW()),
+              ($1, $2, 'allow_documents', $4, CASE WHEN $4 THEN NOW() ELSE NULL END, CASE WHEN $4 THEN NULL ELSE NOW() END, NOW())
+            ON CONFLICT (workspace_id, user_id, consent_key)
+            DO UPDATE SET
+              granted = EXCLUDED.granted,
+              granted_at = EXCLUDED.granted_at,
+              revoked_at = EXCLUDED.revoked_at,
+              updated_at = NOW()
+          `,
+          [ctx.workspaceId, ctx.userId, allowAiEvaluation, allowDocuments]
+        );
+
+        res.json({
+          ok: true,
+          consents: { allowAiEvaluation, allowDocuments },
+        });
+      } catch (err: any) {
+        res.status(500).json({ ok: false, error: `Failed to save consents: ${sanitizeErrorMessage(err)}` });
       } finally {
         client.release();
       }

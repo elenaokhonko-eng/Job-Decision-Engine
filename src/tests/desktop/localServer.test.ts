@@ -38,3 +38,4 @@ describe("desktop local companion server", () => {
     }
   });
 });
+

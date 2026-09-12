@@ -21,6 +21,10 @@ interface SetupStatus {
     document: string | null;
     extraction: string | null;
   };
+  consents: {
+    allow_ai_evaluation: boolean;
+    allow_documents: boolean;
+  };
 }
 
 interface SetupWizardProps {
@@ -52,6 +56,9 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
   const [documentModel, setDocumentModel] = useState<string>("gemini-1.5-flash");
   const [extractionModel, setExtractionModel] = useState<string>("gemini-1.5-flash");
 
+  const [allowAiEvaluation, setAllowAiEvaluation] = useState<boolean>(true);
+  const [allowDocuments, setAllowDocuments] = useState<boolean>(true);
+
   const [initProgress, setInitProgress] = useState<string | null>(null);
 
   const secretStore = getNativeSecretStore();
@@ -81,6 +88,10 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
       if (res.ok) {
         const data = (await res.json()) as SetupStatus;
         setStatus(data);
+        if (data.consents) {
+          setAllowAiEvaluation(data.consents.allow_ai_evaluation);
+          setAllowDocuments(data.consents.allow_documents);
+        }
       }
     } catch (err) {
       console.warn("Failed to query setup status:", err);
@@ -215,6 +226,31 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
     }
   };
 
+  const handleSaveConsents = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await apiFetch("/api/v2/setup/consents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          allow_ai_evaluation: allowAiEvaluation,
+          allow_documents: allowDocuments,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to update user consents.");
+      }
+      setStep(6);
+      void fetchStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleInitializeDatabase = async () => {
     setLoading(true);
     setError(null);
@@ -253,12 +289,13 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
           <div>
             <h2 className="text-xl font-bold tracking-tight">Setup Job Decision Engine</h2>
             <p className="text-xs text-slate-400 mt-1">
-              Step {step} of 5 &mdash;{" "}
+              Step {step} of 6 &mdash;{" "}
               {step === 1 && "Welcome & Privacy Guarantee"}
               {step === 2 && "Neon PostgreSQL Database"}
               {step === 3 && "AI Provider Credentials"}
               {step === 4 && "Model Routing"}
-              {step === 5 && "Database Initialization"}
+              {step === 5 && "Privacy & Evaluation Consents"}
+              {step === 6 && "Database Initialization"}
             </p>
           </div>
           {onCancel && (
@@ -275,7 +312,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
         <div className="w-full bg-slate-100 h-1.5">
           <div
             className="bg-indigo-600 h-1.5 transition-all duration-300"
-            style={{ width: `${(step / 5) * 100}%` }}
+            style={{ width: `${(step / 6) * 100}%` }}
           />
         </div>
 
@@ -612,8 +649,69 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
             </div>
           )}
 
-          {/* STEP 5: INITIALIZATION */}
+          {/* STEP 5: PRIVACY & CONSENT */}
           {step === 5 && (
+            <div className="space-y-4">
+              <p className="text-sm text-slate-600">
+                In compliance with non-negotiable architectural invariants, generative AI evaluation and document synthesis
+                require your explicit, auditable consent.
+              </p>
+
+              <div className="space-y-3">
+                <label className="flex items-start gap-3 p-3 border border-slate-200 rounded-lg cursor-pointer hover:bg-slate-50">
+                  <input
+                    type="checkbox"
+                    checked={allowAiEvaluation}
+                    onChange={(e) => setAllowAiEvaluation(e.target.checked)}
+                    className="mt-1 h-4 w-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                  />
+                  <div className="text-xs">
+                    <span className="font-bold text-slate-900 block">Allow Generative AI Job Evaluation</span>
+                    <span className="text-slate-600">
+                      Allows pre-qualified jobs (after passing deterministic hard gates) to be sent to your configured AI provider
+                      for synthesis, lane scoring, and match explanations.
+                    </span>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-3 p-3 border border-slate-200 rounded-lg cursor-pointer hover:bg-slate-50">
+                  <input
+                    type="checkbox"
+                    checked={allowDocuments}
+                    onChange={(e) => setAllowDocuments(e.target.checked)}
+                    className="mt-1 h-4 w-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                  />
+                  <div className="text-xs">
+                    <span className="font-bold text-slate-900 block">Allow Tailored Document Generation</span>
+                    <span className="text-slate-600">
+                      Allows generating grounded DOCX resumes and cover letters using strictly factual ledger evidence.
+                    </span>
+                  </div>
+                </label>
+              </div>
+
+              <div className="pt-4 flex justify-between items-center border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setStep(4)}
+                  className="px-4 py-2 text-sm text-slate-600 hover:text-slate-900"
+                >
+                  &larr; Back
+                </button>
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={handleSaveConsents}
+                  className="px-5 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 text-sm disabled:opacity-50"
+                >
+                  Save Consents & Continue &rarr;
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 6: INITIALIZATION */}
+          {step === 6 && (
             <div className="space-y-4">
               <p className="text-sm text-slate-600">
                 The final step is to prepare your Neon database schema. This creates the canonical job tables,
@@ -664,7 +762,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
               <div className="pt-4 flex justify-between items-center border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setStep(4)}
+                  onClick={() => setStep(5)}
                   className="px-4 py-2 text-sm text-slate-600 hover:text-slate-900"
                 >
                   &larr; Back
@@ -685,3 +783,4 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
     </div>
   );
 }
+
