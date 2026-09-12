@@ -1432,7 +1432,21 @@ async function executeStageTask(
       limit: 1,
     });
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
-    if (state.processingState === "LANE_ROUTED") return;
+    // A duplicate or late route task can arrive after a concurrent worker has
+    // already completed matching. Treat all downstream states as an
+    // idempotent no-op; retrying this task must not create a false failure or
+    // dead-letter an already-successful job.
+    const processingState = state.processingState;
+    if (
+      [
+        "LANE_ROUTED",
+        "MATCHED",
+        "QUEUED_FOR_AI",
+        "EVALUATING",
+        "AI_EVALUATED",
+        "EVALUATED",
+      ].includes(processingState ?? "")
+    ) return;
     if (isTechnicalRoutingDeferral(state)) {
       throw new Error(`Lane routing deferred due to technical evidence for job_version_id=${jobVersionId}.`);
     }

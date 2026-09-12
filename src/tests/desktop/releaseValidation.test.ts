@@ -32,7 +32,7 @@ describe("desktop release validation", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.failures).toContain("Windows code signing certificate and password are configured");
+    expect(result.failures).toContain("Windows code signing is configured (either SIGNPATH_API_TOKEN or Windows certificate PFX)");
   });
 
   it("passes strict publish validation with token and signing credentials", () => {
@@ -46,6 +46,19 @@ describe("desktop release validation", () => {
     });
 
     expect(result.failures).toEqual([]);
+  });
+
+  it("passes strict publish validation with SIGNPATH_API_TOKEN", () => {
+    const result = validateDesktopRelease({ channel: "stable", strict: true, publish: "always" }, process.cwd(), {
+      GH_TOKEN: "token",
+      SIGNPATH_API_TOKEN: "sp_token_secret_12345",
+      JDEC_DESKTOP_ENABLE_UPDATES: "true",
+      GITHUB_REF_TYPE: "tag",
+      GITHUB_REF_NAME: "v1.0.0",
+    });
+
+    expect(result.failures).toEqual([]);
+    expect(result.ok).toBe(true);
   });
 
   it("rejects publish validation from a non-matching tag", () => {

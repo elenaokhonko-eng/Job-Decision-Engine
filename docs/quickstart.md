@@ -40,8 +40,8 @@ On first launch, the app launches an interactive 6-step setup wizard:
    - Provide your **Google Gemini** API key (from Google AI Studio) or **OpenAI** API key.
    - Click "Test Credentials" to verify live model availability and quota.
 4. **Model Routing**: Select your preferred AI preset (Google Gemini 1.5 Flash or OpenAI GPT-4o-mini).
-5. **Privacy & Consents**: Explicitly grant consent for AI evaluation and tailored application document generation.
-6. **Schema Initialization**: Click "Initialize Database & Run Migrations". The app bundles and runs all 46 database migrations directly into your database and registers default vector embedding spaces.
+5. **Privacy & Consents**: Explicitly grant or review user consents for AI evaluation (`allow_ai_evaluation`) and tailored document generation (`allow_documents`).
+6. **Schema Initialization**: Click "Initialize Database & Run Migrations". The app bundles and runs all database migrations directly into your database and registers default vector embedding spaces.
 
 All credentials are saved locally in OS-backed secure storage (Windows Credential Manager / macOS Keychain / Linux Secret Service) and are never transmitted to third-party servers.
 
@@ -79,9 +79,10 @@ DATABASE_URL_UNPOOLED=postgresql://user:password@ep-xyz.us-east-2.aws.neon.tech/
 GEMINI_API_KEY=your_gemini_api_key_here
 # OPENAI_API_KEY=your_openai_api_key_here
 
-# User Consents
+# User Consents (required for AI evaluation and document synthesis)
 ALLOW_AI_EVALUATION=true
 ALLOW_DOCUMENTS=true
+
 ```
 
 ### 3. Initialize Database & Run Migrations

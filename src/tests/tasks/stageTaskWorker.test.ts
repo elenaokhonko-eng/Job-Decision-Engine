@@ -1183,4 +1183,85 @@ describe("stageTaskWorker", () => {
       )
     ).toBe(true);
   });
+
+  it("treats a route task that races with completed matching as an idempotent no-op", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [
+            {
+              id: "task-route",
+              workspace_id: ctx.workspaceId,
+              task_type: "ROUTE_LANE",
+              task_key: "ROUTE_LANE:version-1:lane_router_v1",
+              payload: { canonical_job_id: "job-1", job_version_id: "version-1" },
+              status: "RUNNING",
+              available_at: new Date().toISOString(),
+              lease_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+              heartbeat_at: new Date().toISOString(),
+              claimed_by: "worker:test",
+              attempt_count: 1,
+              max_attempts: 1,
+              last_error: null,
+              dead_letter_reason: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              completed_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return {
+          rows: [
+            {
+              canonical_job_id: "job-1",
+              processing_state: "MATCHED",
+              primary_lane: "CORE_AI_DATA",
+              lane_evidence: "matched by another worker",
+              gate_decision: "PASS",
+              recommendation_eligibility: true,
+              recommendation_outcome: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-route" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies({
+      runLaneRouting: vi.fn(async () => ({ routed: 0, deferred: 0 })),
+    });
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["ROUTE_LANE"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(summary.deadLettered).toBe(0);
+    expect(deps.runLaneRouting).toHaveBeenCalledWith(fakeClient, {
+      context: ctx,
+      jobVersionIds: ["version-1"],
+      limit: 1,
+    });
+  });
 });

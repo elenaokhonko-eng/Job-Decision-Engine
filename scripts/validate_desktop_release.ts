@@ -111,6 +111,13 @@ export function validateDesktopRelease(
   requireCheck(fs.existsSync(path.join(rootDir, "desktop", "assets", "app-icon.svg")), "source app icon asset exists");
   requireCheck(fs.existsSync(path.join(rootDir, "scripts", "prepare_desktop_assets.ts")), "desktop asset preparation script exists");
   requireCheck(fs.existsSync(path.join(rootDir, ".github", "workflows", "desktop-release.yml")), "desktop release workflow exists");
+  requireCheck(fs.existsSync(path.join(rootDir, "CODE_SIGNING_POLICY.md")), "code signing policy exists");
+  requireCheck(fs.existsSync(path.join(rootDir, "PRIVACY.md")), "privacy policy exists");
+  requireCheck(fs.existsSync(path.join(rootDir, "SECURITY.md")), "security policy exists");
+  requireCheck(fs.existsSync(path.join(rootDir, "THIRD_PARTY_NOTICES.md")), "third-party notices exist");
+
+  const readmeContent = fs.existsSync(path.join(rootDir, "README.md")) ? fs.readFileSync(path.join(rootDir, "README.md"), "utf8") : "";
+  requireCheck(readmeContent.includes("SignPath Foundation"), "README includes SignPath Foundation code-signing attribution");
 
   const mainPath = path.join(rootDir, "desktop", "electron", "main.cjs");
   const mainSource = fs.existsSync(mainPath) ? fs.readFileSync(mainPath, "utf8") : "";
@@ -124,11 +131,14 @@ export function validateDesktopRelease(
 
   if (strict || publish === "always") {
     requireCheck(envHas(env, "GH_TOKEN") || envHas(env, "GITHUB_TOKEN"), "GitHub release token is configured");
-    requireCheck(
+    const hasSignpath = envHas(env, "SIGNPATH_API_TOKEN");
+    const hasPfx =
       (envHas(env, "CSC_LINK") && envHas(env, "CSC_KEY_PASSWORD")) ||
-        (envHas(env, "WIN_CSC_LINK") && envHas(env, "WIN_CSC_KEY_PASSWORD")) ||
-        (envHas(env, "WINDOWS_CERTIFICATE_BASE64") && envHas(env, "WINDOWS_CERTIFICATE_PASSWORD")),
-      "Windows code signing certificate and password are configured"
+      (envHas(env, "WIN_CSC_LINK") && envHas(env, "WIN_CSC_KEY_PASSWORD")) ||
+      (envHas(env, "WINDOWS_CERTIFICATE_BASE64") && envHas(env, "WINDOWS_CERTIFICATE_PASSWORD"));
+    requireCheck(
+      hasSignpath || hasPfx,
+      "Windows code signing is configured (either SIGNPATH_API_TOKEN or Windows certificate PFX)"
     );
     requireCheck(env.JDEC_DESKTOP_ENABLE_UPDATES === "true", "desktop auto-updates are explicitly enabled for publish");
     requireCheck(env.GITHUB_REF_TYPE === "tag", "publish builds run from a git tag");

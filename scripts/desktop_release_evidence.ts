@@ -19,6 +19,8 @@ export interface DesktopReleaseEvidenceArtifact {
   name: string;
   relativePath: string;
   bytes: number;
+  signatureStatus?: string;
+  signatureSigner?: string;
 }
 
 export interface DesktopReleaseEvidence {
@@ -66,6 +68,22 @@ function gitValue(args: string[], rootDir: string): string | null {
   }
 }
 
+function inspectAuthenticode(filePath: string): { status: string; signer: string } | null {
+  if (process.platform !== "win32" || !filePath.toLowerCase().endsWith(".exe")) return null;
+  try {
+    const cmd = `try { $sig = Get-AuthenticodeSignature -LiteralPath '${filePath.replace(/'/g, "''")}'; $sig.Status.ToString() + ';' + ($sig.SignerCertificate.Subject ?? '') } catch { 'Error;' }`;
+    const output = execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10000,
+    }).trim();
+    const [status, signer] = output.split(";");
+    return { status: status || "Unknown", signer: signer || "" };
+  } catch {
+    return null;
+  }
+}
+
 function listArtifacts(outputDir: string | null): DesktopReleaseEvidenceArtifact[] {
   if (!outputDir || !fs.existsSync(outputDir)) return [];
   const found: DesktopReleaseEvidenceArtifact[] = [];
@@ -80,10 +98,12 @@ function listArtifacts(outputDir: string | null): DesktopReleaseEvidenceArtifact
       }
       if (!/\.(exe|blockmap|ya?ml)$/i.test(entry.name)) continue;
       const stat = fs.statSync(fullPath);
+      const sig = inspectAuthenticode(fullPath);
       found.push({
         name: entry.name,
         relativePath: path.relative(outputDir, fullPath),
         bytes: stat.size,
+        ...(sig ? { signatureStatus: sig.status, signatureSigner: sig.signer } : {}),
       });
     }
   }
@@ -158,9 +178,11 @@ export function renderDesktopReleaseEvidence(evidence: DesktopReleaseEvidence): 
   if (evidence.artifacts.length === 0) {
     lines.push("No release artifacts found.");
   } else {
-    lines.push("| Artifact | Bytes |", "|---|---:|");
+    lines.push("| Artifact | Bytes | Signature | Signer |", "|---|---:|---|---|");
     for (const artifact of evidence.artifacts) {
-      lines.push(`| ${artifact.relativePath.replace(/\\/g, "/")} | ${artifact.bytes} |`);
+      lines.push(
+        `| ${artifact.relativePath.replace(/\\/g, "/")} | ${artifact.bytes} | ${artifact.signatureStatus ?? "N/A"} | ${artifact.signatureSigner ?? "N/A"} |`
+      );
     }
   }
 

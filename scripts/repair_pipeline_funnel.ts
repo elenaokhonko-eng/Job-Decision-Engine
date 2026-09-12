@@ -2,13 +2,15 @@ import dotenv from "dotenv";
 import pg from "pg";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { buildPipelineTaskContextFingerprint } from "../src/pipeline/artifactContext.js";
+import {
+  classifyRepairCategory,
+  type RepairCategory,
+} from "../src/pipeline/repairClassification.js";
 import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
-
-type RepairCategory = "LEGACY_BUDGET_CAP" | "QUOTED_PROVIDER_FAILURE" | "GATE_NULL" | "RAW_STAGED_HARD_REJECT";
 
 interface RepairCandidate {
   canonical_job_id: string;
@@ -19,6 +21,8 @@ interface RepairCandidate {
   rejection_reason: string | null;
   category: RepairCategory;
 }
+
+type RepairCandidateRow = Omit<RepairCandidate, "category">;
 
 function parseArgs(argv: string[]): { apply: boolean; workspaceKey?: string; userKey?: string } {
   const args = { apply: false } as { apply: boolean; workspaceKey?: string; userKey?: string };
@@ -32,7 +36,7 @@ function parseArgs(argv: string[]): { apply: boolean; workspaceKey?: string; use
 }
 
 async function loadCandidates(client: pg.PoolClient, context: WorkspaceContext): Promise<RepairCandidate[]> {
-  const { rows } = await client.query<RepairCandidate>(
+  const { rows } = await client.query<RepairCandidateRow>(
     `
       WITH latest_versions AS (
         SELECT DISTINCT ON (jv.canonical_job_id)
@@ -42,56 +46,29 @@ async function loadCandidates(client: pg.PoolClient, context: WorkspaceContext):
         WHERE jv.workspace_id = $1
         ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
       )
-      SELECT
-        c.id AS canonical_job_id,
-        lv.job_version_id,
-        COALESCE(c.processing_state, c.processing_status) AS processing_state,
-        c.gate_decision,
-        c.primary_lane,
-        c.rejection_reason,
-        CASE
-          WHEN COALESCE(c.processing_state, c.processing_status) = 'NEEDS_MANUAL_REVIEW'
-           AND c.gate_decision = 'PASS'
-           AND COALESCE(c.rejection_reason, '') ILIKE '%BUDGET_CAP%'
-            THEN 'LEGACY_BUDGET_CAP'
-          WHEN COALESCE(c.processing_state, c.processing_status) = 'NEEDS_MANUAL_REVIEW'
-           AND c.gate_decision = 'PASS'
-           AND COALESCE(c.rejection_reason, '') ILIKE '%EXTRACT_QUOTED_REQUIREMENTS%'
-            THEN 'QUOTED_PROVIDER_FAILURE'
-          WHEN COALESCE(c.processing_state, c.processing_status) = 'HARD_REJECTED'
-           AND c.gate_decision IS NULL
-            THEN 'GATE_NULL'
-          WHEN COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
-           AND c.gate_decision = 'HARD_REJECT'
-            THEN 'RAW_STAGED_HARD_REJECT'
-          ELSE NULL
-        END AS category
+       SELECT
+         c.id AS canonical_job_id,
+         lv.job_version_id,
+         COALESCE(c.processing_state, c.processing_status) AS processing_state,
+         c.gate_decision,
+         c.primary_lane,
+         c.rejection_reason
       FROM canonical_jobs c
       JOIN latest_versions lv ON lv.canonical_job_id = c.id
       WHERE c.workspace_id = $1
         AND (
-          (
-            COALESCE(c.processing_state, c.processing_status) = 'NEEDS_MANUAL_REVIEW'
-            AND c.gate_decision = 'PASS'
-            AND (
-              COALESCE(c.rejection_reason, '') ILIKE '%BUDGET_CAP%'
-              OR COALESCE(c.rejection_reason, '') ILIKE '%EXTRACT_QUOTED_REQUIREMENTS%'
-            )
-          )
-          OR (
-            COALESCE(c.processing_state, c.processing_status) = 'HARD_REJECTED'
-            AND c.gate_decision IS NULL
-          )
-          OR (
-            COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
-            AND c.gate_decision = 'HARD_REJECT'
-          )
-        )
-      ORDER BY category, c.created_at, c.id
+           COALESCE(c.processing_state, c.processing_status) IN ('NEEDS_MANUAL_REVIEW', 'HARD_REJECTED', 'RAW_STAGED')
+         )
+       ORDER BY c.created_at, c.id
     `,
     [context.workspaceId]
   );
-  return rows.filter((row) => row.category);
+  return rows
+    .map((row): RepairCandidate | null => {
+      const category = classifyRepairCategory(row);
+      return category ? { ...row, category } : null;
+    })
+    .filter((row): row is RepairCandidate => row !== null);
 }
 
 async function activeProfileVersionId(client: pg.PoolClient, context: WorkspaceContext): Promise<string> {
@@ -168,8 +145,15 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
         repair_reason: category,
       };
 
-      if (category === "LEGACY_BUDGET_CAP" || category === "QUOTED_PROVIDER_FAILURE") {
-        const nextState = category === "LEGACY_BUDGET_CAP" && candidate.primary_lane && candidate.primary_lane !== "UNCLASSIFIED"
+      if (
+        category === "LEGACY_BUDGET_CAP" ||
+        category === "QUOTED_PROVIDER_FAILURE" ||
+        category === "ROUTING_TASK_IDEMPOTENCY_RACE"
+      ) {
+        const nextState =
+          (category === "LEGACY_BUDGET_CAP" || category === "ROUTING_TASK_IDEMPOTENCY_RACE") &&
+          candidate.primary_lane &&
+          candidate.primary_lane !== "UNCLASSIFIED"
           ? "LANE_ROUTED"
           : "PREQUALIFIED";
         await client.query(
@@ -240,7 +224,7 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
           "APPLY_HARD_GATES",
           "hard_gate_v1",
           { ...basePayload, force_policy_recalculation: true, reprocess: true },
-          category === "GATE_NULL" ? "gate-null" : "raw-hard-reject"
+            category === "GATE_NULL" ? "gate-null" : "raw-hard-reject"
         );
       }
     }

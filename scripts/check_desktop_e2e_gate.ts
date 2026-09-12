@@ -17,7 +17,6 @@ export interface DesktopE2EGateInput {
   schemaInitialized: boolean;
   migrationsPending: number;
   aiProviderConfigured: boolean;
-  consentGranted: boolean;
   deadLetterTasks: number;
   blockedTasks: number;
 }
@@ -79,7 +78,6 @@ export async function checkDesktopE2EGate(): Promise<{
   let dbConnected = false;
   let schemaInitialized = false;
   let pendingMigrations = 0;
-  let consentGranted = false;
   let deadLetters = 0;
   let blockedTasks = 0;
 
@@ -101,13 +99,6 @@ export async function checkDesktopE2EGate(): Promise<{
             workspaceKey: DEFAULT_WORKSPACE_KEY,
             userKey: DEFAULT_USER_KEY,
           });
-
-          // Check consents
-          const consentRes = await client.query(
-            `SELECT allow_ai_evaluation FROM workspace_user_consents WHERE workspace_id = $1 AND user_id = $2`,
-            [ctx.workspaceId, ctx.userId]
-          );
-          consentGranted = Boolean(consentRes.rows[0]?.allow_ai_evaluation);
 
           // Check tasks
           const taskRes = await client.query(
@@ -142,7 +133,6 @@ export async function checkDesktopE2EGate(): Promise<{
     schemaInitialized,
     migrationsPending: pendingMigrations,
     aiProviderConfigured: aiConfigured,
-    consentGranted,
     deadLetterTasks: deadLetters,
     blockedTasks,
   };

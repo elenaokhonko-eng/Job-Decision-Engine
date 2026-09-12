@@ -1,6 +1,8 @@
 {
   "schema_version": "desktop-release-policy/v1",
   "default_channel": "stable",
+  "signing_provider": "signpath",
+  "expected_publisher": "SignPath Foundation",
   "channels": {
     "alpha": {
       "description": "Internal smoke builds only.",
@@ -23,9 +25,16 @@
     "repo": "Job-Decision-Engine"
   },
   "required_publish_secrets": [
-    "GH_TOKEN",
-    "WINDOWS_CERTIFICATE_BASE64",
-    "WINDOWS_CERTIFICATE_PASSWORD"
+    "GH_TOKEN"
+  ],
+  "signing_secret_alternatives": [
+    [
+      "SIGNPATH_API_TOKEN"
+    ],
+    [
+      "WINDOWS_CERTIFICATE_BASE64",
+      "WINDOWS_CERTIFICATE_PASSWORD"
+    ]
   ],
   "artifacts": [
     "nsis-installer",

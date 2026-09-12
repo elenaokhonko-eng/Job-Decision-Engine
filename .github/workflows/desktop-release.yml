@@ -60,14 +60,19 @@ jobs:
       - name: Verify desktop packaging configuration
         run: npm run desktop:verify
 
-      - name: Prepare Windows signing certificate
+      - name: Prepare Windows direct PFX certificate (if configured)
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:SIGNPATH_API_TOKEN)) {
+            Write-Output "SIGNPATH_API_TOKEN is present; using SignPath Foundation signing pipeline."
+            exit 0
+          }
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
-            Write-Output "WINDOWS_CERTIFICATE_BASE64 is not configured; dry-run builds remain unsigned."
+            Write-Output "Neither SIGNPATH_API_TOKEN nor WINDOWS_CERTIFICATE_BASE64 configured; dry-run builds remain unsigned."
             exit 0
           }
 
@@ -82,6 +87,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           JDEC_DESKTOP_ENABLE_UPDATES: true
@@ -102,10 +108,58 @@ jobs:
           JDEC_DESKTOP_ENABLE_UPDATES: ${{ inputs.publish == true && 'true' || 'false' }}
         run: |
           $publishArg = "--publish=never"
-          if ("${{ inputs.publish }}" -eq "true") {
+          if ("${{ inputs.publish }}" -eq "true" -and [string]::IsNullOrWhiteSpace("${{ secrets.SIGNPATH_API_TOKEN }}")) {
             $publishArg = "--publish=always"
           }
           npm run desktop:dist -- --channel=${{ inputs.channel }} $publishArg
+
+      - name: Upload unsigned installer for SignPath signing
+        id: upload-unsigned-installer
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installer-${{ inputs.channel }}-${{ github.sha }}
+          path: ${{ runner.temp }}\jdec-desktop-builds\${{ inputs.channel }}-${{ github.sha }}\*.exe
+          if-no-files-found: error
+
+      - name: Submit signing request to SignPath Foundation
+        id: signpath-signing
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '${{ secrets.SIGNPATH_ORGANIZATION_ID }}'
+          project-slug: '${{ secrets.SIGNPATH_PROJECT_SLUG || 'job-decision-engine' }}'
+          signing-policy-slug: '${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG || (inputs.channel == 'stable' && 'release-signing' || 'test-signing') }}'
+          github-artifact-id: '${{ steps.upload-unsigned-installer.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: '${{ runner.temp }}\signed-desktop-build'
+
+      - name: Apply signed installer and verify SignPath signature
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        shell: pwsh
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}\jdec-desktop-builds\${{ inputs.channel }}-${{ github.sha }}
+          SIGNED_DIR: ${{ runner.temp }}\signed-desktop-build
+        run: |
+          $signedExe = Get-ChildItem -Path $env:SIGNED_DIR -Filter "*.exe" -Recurse | Select-Object -First 1
+          if (-not $signedExe) {
+            throw "No signed .exe found in $env:SIGNED_DIR"
+          }
+          $targetPath = Join-Path $env:OUTPUT_DIR $signedExe.Name
+          Copy-Item -Path $signedExe.FullName -Destination $targetPath -Force
+          Write-Output "Applied signed binary to $targetPath"
+
+          # Verify Authenticode Signature
+          $sig = Get-AuthenticodeSignature -LiteralPath $targetPath
+          Write-Output "Signature Status: $($sig.Status)"
+          Write-Output "Signer Subject: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne "Valid") {
+            throw "Authenticode signature is invalid: $($sig.StatusMessage)"
+          }
+          if ($sig.SignerCertificate.Subject -notmatch "SignPath Foundation") {
+            throw "Signer Subject does not match 'SignPath Foundation': $($sig.SignerCertificate.Subject)"
+          }
 
       - name: Capture desktop release evidence
         shell: pwsh
@@ -118,6 +172,18 @@ jobs:
             $publishArg = "always"
           }
           npm run desktop:release:evidence -- --channel=${{ inputs.channel }} --publish=$publishArg --output-dir="$env:JDEC_DESKTOP_OUTPUT_DIR" --out="${{ runner.temp }}\desktop-release-evidence.md"
+
+      - name: Publish release to GitHub (if SignPath and publish=true)
+        if: ${{ inputs.publish == true && secrets.SIGNPATH_API_TOKEN != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT_DIR: ${{ runner.temp }}\jdec-desktop-builds\${{ inputs.channel }}-${{ github.sha }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          $files = Get-ChildItem -Path $env:OUTPUT_DIR | Where-Object { -not $_.PSIsContainer } | ForEach-Object { $_.FullName }
+          Write-Output "Uploading signed release assets to GitHub release $env:TAG_NAME..."
+          gh release upload $env:TAG_NAME $files --clobber
 
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
