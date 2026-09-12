@@ -394,11 +394,31 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     const { runLaneRouter } = await import("../../pipeline/laneRouter.js");
     await runLaneRouter(getClient(), { context: getContext() });
 
-    const routed = await countWhere(
-      "canonical_jobs",
-      "primary_lane IS NOT NULL AND processing_status IN ('LANE_ROUTED', 'PREQUALIFIED')"
+    const routed = await q(
+      `SELECT primary_lane, secondary_lanes, routing_disposition,
+              processing_state, processing_status
+         FROM canonical_jobs
+        WHERE primary_lane IS NOT NULL
+          AND processing_status IN ('LANE_ROUTED', 'PREQUALIFIED')`
     );
-    expect(routed).toBe(5);
+    expect(routed.rows).toHaveLength(5);
+    for (const row of routed.rows) {
+      expect(row.primary_lane).not.toBe("UNCLASSIFIED");
+      expect(row.routing_disposition).toBe("ROUTED");
+      expect(row.processing_state).toBe("LANE_ROUTED");
+      expect(row.processing_status).toBe("LANE_ROUTED");
+      expect(row.secondary_lanes).toBeDefined();
+    }
+
+    // Regression guard for the real PostgreSQL parameter-type failure: a
+    // successful route must persist both JSONB lane fields and lifecycle
+    // disposition for every prequalified fixture job.
+    const laneDecisions = await q(
+      `SELECT COUNT(*)::int AS count
+         FROM lane_decisions
+        WHERE primary_lane <> 'UNCLASSIFIED'`
+    );
+    expect(Number(laneDecisions.rows[0].count)).toBe(5);
   });
 
   it("Stage 4 — deterministic decisions exist and eligible jobs are enqueueable (no DEFERRED_BUDGET)", async () => {
