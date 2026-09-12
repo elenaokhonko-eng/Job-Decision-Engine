@@ -2,57 +2,37 @@ name: Evaluation Queue Worker
 
 on:
   schedule:
-    - cron: '15 * * * *'
+    - cron: '0 * * * *' # Run hourly
   workflow_dispatch:
 
 concurrency:
-  group: evaluation-queue-worker
-  # Evaluation rows carry leases. Queue a newer drain instead of cancelling
-  # the active worker and waiting for its EVALUATING leases to expire.
+  group: queue-worker-pipeline
   cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  drain-queue:
-    name: Drain evaluation retries
+  evaluate-queue:
+    name: Process Pending & Retrying Evaluations
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
-    timeout-minutes: 20
     steps:
       - name: Checkout repository code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+          cache: 'npm'
 
       - name: Install Node.js dependencies
         run: npm ci
 
-      - name: Run Database Migrations
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
-        run: |
-          npx tsx scripts/preflight_database.ts
-          npx tsx src/db/migrate.ts
-
-      - name: Run Evaluation Queue Worker
-        timeout-minutes: 15
+      - name: Run AI Evaluation Queue Processor
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
-          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
-          MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
-          MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
-          EVALUATION_FAIL_ON_CONSENT_MISSING: "true"
-          EVALUATION_EXIT_ON_RETRY_WAIT: "false"
         run: npx tsx scripts/evaluate_queue.ts
+
