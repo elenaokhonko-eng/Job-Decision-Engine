@@ -416,7 +416,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     const laneDecisions = await q(
       `SELECT COUNT(*)::int AS count
          FROM lane_decisions
-        WHERE primary_lane <> 'UNCLASSIFIED'`
+        WHERE decision_json->>'primary_lane' <> 'UNCLASSIFIED'`
     );
     expect(Number(laneDecisions.rows[0].count)).toBe(5);
   });
