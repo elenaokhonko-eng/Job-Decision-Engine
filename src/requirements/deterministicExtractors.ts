@@ -5,7 +5,7 @@ import {
 } from './contracts.js';
 import { z } from 'zod';
 
-const EXTRACTOR_VERSION = 'deterministic_v1';
+const EXTRACTOR_VERSION = 'deterministic_v2';
 
 export interface DeterministicExtractorInput {
   canonical_job_id: string;
@@ -284,18 +284,39 @@ export function extractDeterministicRequirements(
     );
   }
 
-  const experienceYears = findFirstMatch(description, [
-    /\b(?:at\s+least\s+)?(\d{1,2})\+?\s*(?:years|yrs)\s+(?:of\s+)?experience\b/i,
+  const numericExperienceYears = findFirstMatch(description, [
+    /\b(?:(?:at\s+least|minimum(?:\s+of)?|a\s+minimum\s+of)\s+)?\d{1,2}(?:\s*[-–]\s*\d{1,2})?\+?(?:\s+additional)?\s*(?:years|yrs)\s+(?:of\s+)?(?:[a-z][\w/&.+-]*\s+){0,8}experience\b/i,
   ]);
+  const writtenExperienceYears = findFirstMatch(description, [
+    /\b(?:(?:at\s+least|minimum(?:\s+of)?|a\s+minimum\s+of)\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:years|yrs)\s+(?:of\s+)?(?:[a-z][\w/&.+-]*\s+){0,8}experience\b/i,
+  ]);
+  const experienceYears = numericExperienceYears ?? writtenExperienceYears;
   if (experienceYears) {
-    const yearsMatch = experienceYears.quote_text.match(/(\d{1,2})/);
-    const years = yearsMatch ? Number(yearsMatch[1]) : null;
+    const yearsMatch = experienceYears.quote_text.match(/\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b/i);
+    const numberWords: Record<string, number> = {
+      one: 1,
+      two: 2,
+      three: 3,
+      four: 4,
+      five: 5,
+      six: 6,
+      seven: 7,
+      eight: 8,
+      nine: 9,
+      ten: 10,
+    };
+    const years = yearsMatch
+      ? /^\d+$/.test(yearsMatch[1])
+        ? Number(yearsMatch[1])
+        : numberWords[yearsMatch[1].toLowerCase()] ?? null
+      : null;
     const scopedExperience = experienceYears.quote_text.match(
-      /\b\d{1,2}\+?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i
-    ) || experienceYears.quote_text.match(
-      /\b\d{1,2}\+?\s*(?:years|yrs)\s+of\s+experience\s+in\s+(.+)$/i
+      /\b\d{1,2}(?:\s*[-–]\s*\d{1,2})?\+?(?:\s+additional)?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i
     );
-    const experienceScope = scopedExperience?.[1]?.trim().replace(/[,:;]+$/, "") || null;
+    const experienceScope = scopedExperience?.[1]
+      ?.trim()
+      .replace(/[,:;]+$/, "")
+      .replace(/^of\s*$/i, "") || null;
     requirements.push(
       buildRequirement(
         input,
@@ -312,7 +333,8 @@ export function extractDeterministicRequirements(
   }
 
   const degree = findFirstMatch(description, [
-    /\b(bachelor(?:'s)?\s+degree|master(?:'s)?\s+degree|phd|doctorate)\b/i,
+    /\b(?:bachelor(?:'s)?|master(?:'s)?|phd|doctorate|doctoral)(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/i,
+    /\bdegree\s+in\s+[^.;\n]{1,100}/i,
   ]);
   if (degree) {
     requirements.push(

@@ -104,8 +104,8 @@ describe("stageTaskWorker", () => {
       "ROUTE_LANE:version-1:lane_router_v1"
     );
     expect(
-      buildPipelineTaskKey("EXTRACT_DETERMINISTIC_REQUIREMENTS", "version-1", "deterministic_v1", undefined, "repair")
-    ).toBe("EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v1:repair");
+      buildPipelineTaskKey("EXTRACT_DETERMINISTIC_REQUIREMENTS", "version-1", "deterministic_v2", undefined, "repair")
+    ).toBe("EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v2:repair");
     expect(
       buildPipelineTaskKey("MATCH_PROFILE_EVIDENCE", "version-1", "deterministic_matcher_v1", "profile-2", "repair")
     ).toBe("MATCH_PROFILE_EVIDENCE:version-1:deterministic_matcher_v1:repair:profile:profile-2");
@@ -408,7 +408,7 @@ describe("stageTaskWorker", () => {
         (call) =>
           call.sql.includes("INSERT INTO pipeline_tasks") &&
           call.params?.[1] === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
-          call.params?.[2] === "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v1"
+          call.params?.[2] === "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-1:deterministic_v2"
       )
     ).toBe(true);
   });
@@ -427,7 +427,7 @@ describe("stageTaskWorker", () => {
               id: "task-empty-requirements",
               workspace_id: ctx.workspaceId,
               task_type: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-              task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v1",
+              task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v2",
               payload: { canonical_job_id: "job-empty", job_version_id: "version-empty" },
               status: "RUNNING",
               available_at: new Date().toISOString(),
@@ -521,6 +521,7 @@ describe("stageTaskWorker", () => {
       quotedMode: "deterministic_only",
       failFastOnQuotedProviderFailure: false,
       ignoreRetryWindow: true,
+      reprocess: false,
     });
     expect(
       calls.some(

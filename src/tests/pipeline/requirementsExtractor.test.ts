@@ -73,6 +73,8 @@ describe('runRequirementsExtraction', () => {
     const calls = query.mock.calls.map((call: unknown[]) => String(call[0]));
     expect(calls).toContain('BEGIN');
     expect(calls).toContain('COMMIT');
+    const targetQuery = calls.find((sql) => sql.includes('FROM canonical_jobs c'));
+    expect(targetQuery).toContain("active_rsi.deterministic_extractor_version = 'deterministic_v2'");
     expect(calls.some((sql) => sql.includes('INSERT INTO job_requirements'))).toBe(true);
     expect(calls.some((sql) => sql.includes('INSERT INTO pipeline_stage_events'))).toBe(true);
   });
@@ -220,6 +222,50 @@ describe('runRequirementsExtraction', () => {
     expect(summary.metrics.quotedValidationFailures).toBe(1);
     expect(summary.metrics.quotedSucceeded).toBe(0);
     expect(summary.metrics.quotedPassRate).toBe(0);
+  });
+
+  it('does not use the completed-stage cache for an explicit reassessment', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM canonical_jobs c') && sql.includes('latest_job_version_id')) {
+        return {
+          rows: [{
+            workspace_id: context.workspaceId,
+            canonical_job_id: '11111111-1111-4111-8111-111111111111',
+            job_version_id: '22222222-2222-4222-8222-222222222222',
+            content_hash: 'content-hash-reprocess',
+            description_text: 'At least three years of relevant technology experience.',
+          }],
+        };
+      }
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('INSERT INTO requirement_set_identities')) return { rows: [{ id: 'req-ident-reprocess' }] };
+      if (sql.includes('SELECT active_requirement_set_id') && sql.includes('FROM job_versions')) {
+        return { rows: [{ active_requirement_set_id: 'old-set' }] };
+      }
+      if (sql.includes('SELECT 1') && sql.includes('FROM requirement_sets rs')) return { rows: [] };
+      if (sql.includes('SELECT (COALESCE(MAX(revision_number)')) return { rows: [{ next_revision: 2 }] };
+      if (sql.includes('INSERT INTO requirement_sets')) return { rows: [{ id: 'new-set' }] };
+      if (sql.includes('UPDATE job_versions') && sql.includes('active_requirement_set_id')) return { rows: [] };
+      if (sql.includes('INSERT INTO requirement_extraction_runs') && sql.includes("'DETERMINISTIC'")) {
+        return { rows: [{ id: 'det-run-reprocess' }] };
+      }
+      if (sql.includes('INSERT INTO job_requirements')) return { rows: [], rowCount: 1 };
+      if (sql.includes('UPDATE requirement_extraction_runs')) return { rows: [] };
+      return { rows: [] };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+
+    const summary = await runRequirementsExtraction(fakeClient, {
+      context,
+      reprocess: true,
+      quotedMode: 'deterministic_only',
+    });
+
+    expect(summary.processed).toBe(1);
+    const targetQuery = query.mock.calls
+      .map((call: unknown[]) => String(call[0]))
+      .find((sql) => sql.includes('FROM canonical_jobs c'));
+    expect(targetQuery).not.toContain('active_rsi.deterministic_extractor_version');
   });
 
   it('completes deterministic extraction when quoted validation fails', async () => {

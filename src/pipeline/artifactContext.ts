@@ -31,6 +31,7 @@ const CONTEXT_PAYLOAD_KEYS = [
   "force_policy_recalculation",
   "reprocess",
   "repair_existing_state",
+  "reassessment_reason",
 ] as const;
 
 function contextPayload(payload: Record<string, unknown>): Record<string, unknown> {

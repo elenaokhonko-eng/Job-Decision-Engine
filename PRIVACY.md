@@ -36,9 +36,7 @@ Job Decision Engine connects only to services that you explicitly configure:
 
 ### B. AI Providers (Google Gemini & OpenAI)
 - **Bring Your Own Keys (BYOK)**: All generative AI evaluations and document synthesis calls use your personal API keys provided during setup.
-- **Explicit User Consent**: Communication with AI providers occurs only when you have explicitly granted consent:
-  - `allow_ai_evaluation`: Required to send pre-qualified job descriptions to your AI provider for lane scoring, match synthesis, and decision explanations.
-  - `allow_documents`: Required to generate tailored DOCX resumes and cover letters using factual ledger claims.
+- **Configured-provider operation**: When you configure a Gemini or OpenAI API key, the application uses that provider as part of its normal pipeline and document-generation behavior. No separate evaluation or document-generation consent gate is required by the desktop setup flow.
 - **Strict Data Minimization**:
   - Deterministic hard gates run locally *before* any AI evaluation. Unqualified jobs and workability non-fits are rejected locally and never sent to an AI provider.
   - Only bounded, pre-screened job requirements and verified factual career claims are included in AI prompts.

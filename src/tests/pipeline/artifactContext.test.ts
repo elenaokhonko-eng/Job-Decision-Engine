@@ -38,5 +38,17 @@ describe("pipeline artifact context", () => {
 
     expect(first).not.toBe(second);
   });
-});
 
+  it("changes when an explicit reassessment reason changes", () => {
+    const first = buildPipelineTaskContextFingerprint({
+      ...base,
+      payload: { ...base.payload, reassessment_reason: "REASSESSMENT_V1" },
+    });
+    const second = buildPipelineTaskContextFingerprint({
+      ...base,
+      payload: { ...base.payload, reassessment_reason: "REASSESSMENT_V2" },
+    });
+
+    expect(first).not.toBe(second);
+  });
+});

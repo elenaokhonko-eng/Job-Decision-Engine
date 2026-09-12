@@ -349,7 +349,7 @@ function stageVersion(taskType: PipelineStageTaskType): string {
     case "NORMALIZE_OBSERVATION":
       return "normalizer_v1";
     case "EXTRACT_DETERMINISTIC_REQUIREMENTS":
-      return "deterministic_v1";
+      return "deterministic_v2";
     case "APPLY_HARD_GATES":
       return "hard_gate_v1";
     case "EXTRACT_QUOTED_REQUIREMENTS":
@@ -1300,6 +1300,8 @@ async function executeStageTask(
   const jobVersionId = requireStringPayload(task, "job_version_id");
 
   if (taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS") {
+    const payload = (task.payload || {}) as Record<string, unknown>;
+    const reprocess = payload.reprocess === true;
     const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (currentState.latestJobVersionId && currentState.latestJobVersionId !== jobVersionId) {
       // Requirement tasks are version-specific. A canonical job may have
@@ -1322,6 +1324,7 @@ async function executeStageTask(
       quotedMode: "deterministic_only",
       failFastOnQuotedProviderFailure: false,
       ignoreRetryWindow: true,
+      reprocess,
     });
     if (summary.errors > 0) {
       throw new Error(`Deterministic requirement extraction failed for job_version_id=${jobVersionId}.`);

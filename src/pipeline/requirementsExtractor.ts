@@ -44,6 +44,8 @@ export interface RequirementExtractionStageOptions {
   jobVersionIds?: string[];
   limit?: number;
   quotedMode?: 'env' | 'deterministic_only' | 'with_quoted';
+  /** Explicitly rebuild the active requirement set for a targeted reassessment. */
+  reprocess?: boolean;
   /** Durable task replay owns retry timing; do not let an old stage lease hide the target. */
   ignoreRetryWindow?: boolean;
 }
@@ -83,7 +85,7 @@ export interface RequirementExtractionSummary {
   }>;
 }
 
-const DETERMINISTIC_VERSION = 'deterministic_v1';
+const DETERMINISTIC_VERSION = 'deterministic_v2';
 const QUOTED_VERSION = 'quoted_v1';
 const NORMALIZER_HASH = crypto
   .createHash('sha256')
@@ -347,8 +349,20 @@ export async function runRequirementsExtraction(
             AND jv.active_requirement_set_id IS NOT NULL
             AND deterministic_rer.requirement_set_id = jv.active_requirement_set_id
         )
+        OR NOT EXISTS (
+          SELECT 1
+          FROM requirement_sets active_rs
+          JOIN requirement_set_identities active_rsi
+            ON active_rsi.id = active_rs.requirement_identity_id
+           AND active_rsi.workspace_id = active_rs.workspace_id
+          WHERE active_rs.workspace_id = c.workspace_id
+            AND active_rs.id = jv.active_requirement_set_id
+            AND active_rsi.deterministic_extractor_version = '${DETERMINISTIC_VERSION}'
+        )
       )`;
-  const completedRequirementClause = quotedEnabledForSelection
+  const completedRequirementClause = options.reprocess
+    ? ''
+    : quotedEnabledForSelection
     ? `AND (
         ps.stage_status IS DISTINCT FROM 'COMPLETED'
         OR NOT EXISTS (
@@ -360,6 +374,16 @@ export async function runRequirementsExtraction(
             AND quoted_rer.status = 'COMPLETED'
             AND jv.active_requirement_set_id IS NOT NULL
             AND quoted_rer.requirement_set_id = jv.active_requirement_set_id
+        )
+        OR NOT EXISTS (
+          SELECT 1
+          FROM requirement_sets active_rs
+          JOIN requirement_set_identities active_rsi
+            ON active_rsi.id = active_rs.requirement_identity_id
+           AND active_rsi.workspace_id = active_rs.workspace_id
+          WHERE active_rs.workspace_id = c.workspace_id
+            AND active_rs.id = jv.active_requirement_set_id
+            AND active_rsi.deterministic_extractor_version = '${DETERMINISTIC_VERSION}'
         )
       )`
     : deterministicCompleteClause;
@@ -584,7 +608,7 @@ export async function runRequirementsExtraction(
             }
           }
 
-          if (activeSetIsComplete) {
+          if (activeSetIsComplete && !options.reprocess) {
             await upsertPipelineState(client, job, 'COMPLETED', null);
             await insertStageEvent(client, job, 'COMPLETED', 'STAGE_COMPLETED', null, {
               cached: true,

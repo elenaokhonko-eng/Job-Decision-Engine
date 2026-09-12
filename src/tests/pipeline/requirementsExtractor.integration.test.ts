@@ -163,7 +163,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
       const { enqueuePipelineTask } = await import('../../tasks/pipelineTasks.js');
       const { runPipelineStageTaskWorker } = await import('../../tasks/stageTaskWorker.js');
       const context = await resolveWorkspaceContext(client as any);
-      const sparseTaskKey = `EXTRACT_DETERMINISTIC_REQUIREMENTS:${sparseJobVersionId}:deterministic_v1`;
+      const sparseTaskKey = `EXTRACT_DETERMINISTIC_REQUIREMENTS:${sparseJobVersionId}:deterministic_v2`;
       await enqueuePipelineTask(
         {
           taskType: 'EXTRACT_DETERMINISTIC_REQUIREMENTS',
@@ -269,7 +269,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         `SELECT payload
          FROM pipeline_tasks
          WHERE task_key = $1`,
-        [`EXTRACT_DETERMINISTIC_REQUIREMENTS:${lateJobVersionId}:deterministic_v1:repair`]
+        [`EXTRACT_DETERMINISTIC_REQUIREMENTS:${lateJobVersionId}:deterministic_v2:repair`]
       );
       expect(repairTask.rows[0].payload).toMatchObject({
         canonical_job_id: lateCanonicalJobId,

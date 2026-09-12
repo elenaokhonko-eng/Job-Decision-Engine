@@ -100,7 +100,7 @@ Job Decision Engine supports two distribution modes:
 3. Complete the interactive **Setup Wizard**:
    - Paste your private Neon PostgreSQL connection string.
    - Enter your personal Google Gemini or OpenAI API key.
-   - Select your preferred model preset and grant evaluation consents.
+   - Select your preferred model preset.
    - Click **Initialize Database & Run Migrations** (all 46 migrations install automatically into your database).
 4. No Node.js, terminal, or server configuration required!
 

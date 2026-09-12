@@ -31,7 +31,7 @@ This mode requires **no terminal, no Node.js installation, no server commands, a
 3. Run the installer and open **Job Decision Engine**.
 
 ### 2. Complete the Guided Setup Wizard
-On first launch, the app launches an interactive 6-step setup wizard:
+On first launch, the app launches an interactive 5-step setup wizard:
 1. **Welcome**: Overview of local privacy and architecture.
 2. **Neon Database**:
    - Create a free project at [neon.tech](https://neon.tech).
@@ -40,8 +40,7 @@ On first launch, the app launches an interactive 6-step setup wizard:
    - Provide your **Google Gemini** API key (from Google AI Studio) or **OpenAI** API key.
    - Click "Test Credentials" to verify live model availability and quota.
 4. **Model Routing**: Select your preferred AI preset (Google Gemini 1.5 Flash or OpenAI GPT-4o-mini).
-5. **Privacy & Consents**: Explicitly grant or review user consents for AI evaluation (`allow_ai_evaluation`) and tailored document generation (`allow_documents`).
-6. **Schema Initialization**: Click "Initialize Database & Run Migrations". The app bundles and runs all database migrations directly into your database and registers default vector embedding spaces.
+5. **Schema Initialization**: Click "Initialize Database & Run Migrations". The app bundles and runs all database migrations directly into your database and registers default vector embedding spaces.
 
 All credentials are saved locally in OS-backed secure storage (Windows Credential Manager / macOS Keychain / Linux Secret Service) and are never transmitted to third-party servers.
 

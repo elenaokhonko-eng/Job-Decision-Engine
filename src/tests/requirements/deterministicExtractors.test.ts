@@ -120,6 +120,46 @@ describe('extractDeterministicRequirements', () => {
     expect(officeReq?.structured_value).toEqual({ office_days_per_week: 1 });
   });
 
+  it('structures varied experience-year wording and degree subject evidence', () => {
+    const commercial = extractDeterministicRequirements({
+      canonical_job_id: 'abababab-abab-4aba-8aba-abababababab',
+      job_version_id: 'cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd',
+      description_text:
+        'At least 3 years of commercial experience with React.',
+    });
+
+    const commercialExperience = commercial.requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
+    expect(commercialExperience?.structured_value).toMatchObject({
+      minimum_years: 3,
+      experience_scope: 'commercial',
+    });
+
+    const additional = extractDeterministicRequirements({
+      canonical_job_id: 'efefefef-efef-4efe-8efe-efefefefefef',
+      job_version_id: '12121212-1212-4121-8121-121212121212',
+      description_text: 'Minimum of 2 additional years of experience related to the functional area.',
+    });
+    const additionalExperience = additional.requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
+    expect(additionalExperience?.structured_value).toEqual({ minimum_years: 2 });
+
+    const writtenNumber = extractDeterministicRequirements({
+      canonical_job_id: 'abababab-abab-4aba-8aba-abababababac',
+      job_version_id: 'cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdce',
+      description_text: 'At least three years of relevant technology experience in a related technical environment.',
+    }).requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
+    expect(writtenNumber?.structured_value).toMatchObject({ minimum_years: 3 });
+
+    const degree = extractDeterministicRequirements({
+      canonical_job_id: '34343434-3434-4343-8343-343434343434',
+      job_version_id: '56565656-5656-4565-8565-565656565656',
+      description_text: 'Degree in Computer Science, Software Engineering, or a related field.',
+    }).requirements.find((r) => r.requirement_type === 'DEGREE');
+    expect(degree?.quote_text).toMatch(/Degree in Computer Science/i);
+    expect(degree?.structured_value).toMatchObject({
+      degree_reference: expect.stringMatching(/Degree in Computer Science/i),
+    });
+  });
+
   it('expands short domain tokens into schema-valid evidence quotes', () => {
     const description =
       'Principal AI Systems Engineer building LLM training pipelines and NLP systems.';
