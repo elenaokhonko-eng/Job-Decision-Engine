@@ -32,4 +32,27 @@ describe("database preflight configuration", () => {
       })
     ).toBe(direct);
   });
+
+  it("keeps the underlying causes when PostgreSQL returns an aggregate connection error", async () => {
+    const { preflightDatabase } = await import("../../../scripts/preflight_database.js");
+    const originalConnect = (await import("pg")).default.Client.prototype.connect;
+    const originalEnd = (await import("pg")).default.Client.prototype.end;
+    (await import("pg")).default.Client.prototype.connect = async function connect() {
+      throw Object.assign(new Error("AggregateError"), {
+        errors: [new Error("getaddrinfo ENOTFOUND db.example"), new Error("ECONNREFUSED 127.0.0.1:5432")],
+      });
+    };
+    (await import("pg")).default.Client.prototype.end = async function end() {};
+
+    try {
+      await expect(
+        preflightDatabase({
+          DATABASE_URL: "postgresql://user:password@db.example/database",
+        })
+      ).rejects.toThrow("getaddrinfo ENOTFOUND db.example | ECONNREFUSED 127.0.0.1:5432");
+    } finally {
+      (await import("pg")).default.Client.prototype.connect = originalConnect;
+      (await import("pg")).default.Client.prototype.end = originalEnd;
+    }
+  });
 });

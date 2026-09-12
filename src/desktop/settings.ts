@@ -11,10 +11,19 @@ export interface DesktopSettings {
   userKey: string;
 }
 
+export type DesktopSecretKey =
+  | "databaseUrl"
+  | "databaseUrlDirect"
+  | "geminiApiKey"
+  | "openaiApiKey"
+  | "anthropicApiKey"
+  | "apiToken";
+
 export interface DesktopSecretStore {
   isAvailable: () => Promise<boolean>;
-  setSecret: (key: "apiToken", value: string) => Promise<{ ok: boolean }>;
-  deleteSecret: (key: "apiToken") => Promise<{ ok: boolean }>;
+  hasSecret?: (key: DesktopSecretKey) => Promise<boolean>;
+  setSecret: (key: DesktopSecretKey, value: string) => Promise<{ ok: boolean }>;
+  deleteSecret: (key: DesktopSecretKey) => Promise<{ ok: boolean }>;
 }
 
 export interface DesktopSettingsSaveOptions {

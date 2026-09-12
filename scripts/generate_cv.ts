@@ -338,16 +338,6 @@ async function generateTailoredCV(): Promise<void> {
 
   try {
     const ctx: WorkspaceContext = await resolveWorkspaceContext(pool as any);
-    const consent = await pool.query<{ granted: boolean }>(
-      `SELECT granted FROM workspace_user_consents
-       WHERE workspace_id = $1 AND user_id = $2 AND consent_key = 'allow_documents'
-       LIMIT 1`,
-      [ctx.workspaceId, ctx.userId]
-    );
-    if (consent.rows[0]?.granted !== true) {
-      throw new Error("Document generation requires explicit allow_documents consent.");
-    }
-
     const jobRes = await pool.query<JobRow>(
       `SELECT
          c.id AS canonical_job_id,

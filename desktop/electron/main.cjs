@@ -1,16 +1,28 @@
 const { app, BrowserWindow, ipcMain, safeStorage, session, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { spawn } = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
 
-const SECRET_KEYS = new Set(["apiToken"]);
+const SECRET_KEYS = new Set([
+  "databaseUrl",
+  "databaseUrlDirect",
+  "geminiApiKey",
+  "openaiApiKey",
+  "anthropicApiKey",
+  "apiToken",
+]);
 const RELEASE_CHANNELS = new Set(["alpha", "beta", "stable"]);
 const DEFAULT_API_PORT = 3217;
 
+let internalLoopbackToken = crypto.randomBytes(32).toString("hex");
+process.env.JDEC_API_TOKEN = internalLoopbackToken;
+
 let mainWindow = null;
 let apiProcess = null;
+let localServerInstance = null;
 let apiRuntime = {
   started: false,
   status: "not_started",
@@ -30,10 +42,10 @@ function normalizedUrl(value) {
 function desktopApiBaseUrl() {
   const configured = normalizedUrl(process.env.JDEC_DESKTOP_API_BASE_URL || process.env.JDEC_API_BASE_URL);
   if (configured) return configured;
-  // A packaged client is a remote client. It must be explicitly pointed at
-  // the managed API instead of silently trying to reach a developer's
-  // loopback process that is not shipped with the installer.
   if (app.isPackaged) return "";
+  if (localServerInstance && localServerInstance.apiBaseUrl) {
+    return localServerInstance.apiBaseUrl;
+  }
   const port = Number.parseInt(String(process.env.JDEC_DESKTOP_API_PORT || DEFAULT_API_PORT), 10);
   const safePort = Number.isFinite(port) && port > 0 && port <= 65535 ? port : DEFAULT_API_PORT;
   return `http://127.0.0.1:${safePort}/api/v2`;
@@ -44,8 +56,7 @@ function rendererUrl() {
 }
 
 function shouldStartLocalApiRuntime() {
-  if (process.env.JDEC_DESKTOP_START_API === "false") return false;
-  return !app.isPackaged;
+  return process.env.JDEC_DESKTOP_START_API !== "false";
 }
 
 function releaseChannel() {
@@ -76,14 +87,14 @@ async function appendRuntimeLog(chunk) {
   }
 }
 
-function startLocalApiRuntime(apiBaseUrl) {
+async function startLocalApiRuntime(apiBaseUrl) {
   if (!shouldStartLocalApiRuntime()) {
     apiRuntime = {
       started: false,
       status: "disabled",
       pid: null,
       logPath: null,
-      reason: app.isPackaged ? "packaged_runtime_external" : "disabled_by_env",
+      reason: "disabled_by_env",
     };
     return;
   }
@@ -91,58 +102,111 @@ function startLocalApiRuntime(apiBaseUrl) {
   const logsDir = path.join(app.getPath("userData"), "logs");
   fs.mkdirSync(logsDir, { recursive: true });
   const logPath = path.join(logsDir, "api-runtime.log");
-  const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
-  const port = apiPortFromBaseUrl(apiBaseUrl);
 
-  apiProcess = spawn(npmCommand, ["run", "api:v2"], {
-    cwd: appRoot(),
-    env: {
-      ...process.env,
-      PORT: port,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  let localServerModule = null;
+  const candidates = [
+    path.join(__dirname, "dist-backend", "localServer.cjs"),
+    path.join(appRoot(), "desktop", "electron", "dist-backend", "localServer.cjs"),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      try {
+        localServerModule = require(c);
+        break;
+      } catch (err) {
+        void appendRuntimeLog(`Failed to require bundled local server: ${err}\n`);
+      }
+    }
+  }
 
-  apiRuntime = {
-    started: true,
-    status: "running",
-    pid: apiProcess.pid ?? null,
-    logPath,
-    reason: null,
-  };
+  if (localServerModule && typeof localServerModule.startLocalServer === "function") {
+    try {
+      const port = Number.parseInt(apiPortFromBaseUrl(apiBaseUrl), 10) || DEFAULT_API_PORT;
+      localServerInstance = await localServerModule.startLocalServer({
+        port,
+        host: "127.0.0.1",
+        token: internalLoopbackToken,
+        databaseUrl: (await getSecret("databaseUrl")) || process.env.DATABASE_URL,
+        databaseUrlDirect: (await getSecret("databaseUrlDirect")) || process.env.DATABASE_URL_UNPOOLED,
+        geminiApiKey: (await getSecret("geminiApiKey")) || process.env.GEMINI_API_KEY,
+        openaiApiKey: (await getSecret("openaiApiKey")) || process.env.OPENAI_API_KEY,
+      });
+      apiRuntime = {
+        started: true,
+        status: "running",
+        pid: process.pid,
+        logPath,
+        reason: "in_process_companion",
+      };
+      void appendRuntimeLog(`In-process companion server running at ${localServerInstance.apiBaseUrl}\n`);
+      return;
+    } catch (err) {
+      void appendRuntimeLog(`Failed to start in-process companion server: ${err}\n`);
+    }
+  }
 
-  apiProcess.stdout.on("data", (data) => {
-    const text = data.toString();
-    process.stdout.write(text);
-    void appendRuntimeLog(text);
-  });
-  apiProcess.stderr.on("data", (data) => {
-    const text = data.toString();
-    process.stderr.write(text);
-    void appendRuntimeLog(text);
-  });
-  apiProcess.on("exit", (code, signal) => {
+  if (!app.isPackaged) {
+    const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+    const port = apiPortFromBaseUrl(apiBaseUrl);
+
+    apiProcess = spawn(npmCommand, ["run", "api:v2"], {
+      cwd: appRoot(),
+      env: {
+        ...process.env,
+        PORT: port,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
     apiRuntime = {
-      ...apiRuntime,
-      started: false,
-      status: "exited",
-      pid: null,
-      reason: `code=${code ?? "null"} signal=${signal ?? "null"}`,
+      started: true,
+      status: "running",
+      pid: apiProcess.pid ?? null,
+      logPath,
+      reason: null,
     };
-  });
-  apiProcess.on("error", (error) => {
-    apiRuntime = {
-      ...apiRuntime,
-      started: false,
-      status: "failed",
-      pid: null,
-      reason: error.message,
-    };
-  });
+
+    apiProcess.stdout.on("data", (data) => {
+      const text = data.toString();
+      process.stdout.write(text);
+      void appendRuntimeLog(text);
+    });
+    apiProcess.stderr.on("data", (data) => {
+      const text = data.toString();
+      process.stderr.write(text);
+      void appendRuntimeLog(text);
+    });
+    apiProcess.on("exit", (code, signal) => {
+      apiRuntime = {
+        ...apiRuntime,
+        started: false,
+        status: "exited",
+        pid: null,
+        reason: `code=${code ?? "null"} signal=${signal ?? "null"}`,
+      };
+    });
+    apiProcess.on("error", (error) => {
+      apiRuntime = {
+        ...apiRuntime,
+        started: false,
+        status: "failed",
+        pid: null,
+        reason: error.message,
+      };
+    });
+  }
 }
 
-function stopLocalApiRuntime() {
+async function stopLocalApiRuntime() {
+  if (localServerInstance) {
+    try {
+      await localServerInstance.close();
+    } catch {
+      // ignore
+    }
+    localServerInstance = null;
+  }
   if (apiProcess && !apiProcess.killed) {
     apiProcess.kill();
   }
@@ -190,20 +254,22 @@ async function deleteSecret(key) {
 function validateApiBaseUrl(apiBaseUrl) {
   const normalized = normalizedUrl(apiBaseUrl);
   if (!normalized) {
-    throw new Error("Configure the managed remote API base URL before connecting.");
+    return desktopApiBaseUrl();
   }
   let parsed;
   try {
     parsed = new URL(normalized);
   } catch {
-    throw new Error("The managed remote API base URL is not a valid URL.");
-  }
-  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
-  if (app.isPackaged && parsed.protocol !== "https:" && !loopback) {
-    throw new Error("Packaged desktop clients require an HTTPS managed remote API.");
+    throw new Error("The API base URL is not a valid URL.");
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error("The managed remote API must use HTTP or HTTPS.");
+    throw new Error("The API must use HTTP or HTTPS.");
+  }
+  const isLoopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+  // Packaged desktop clients require an HTTPS managed remote API; only the
+  // local companion server may use loopback HTTP.
+  if (app.isPackaged && !isLoopback && parsed.protocol !== "https:") {
+    throw new Error("Packaged desktop clients require an HTTPS managed remote API.");
   }
   return normalized;
 }
@@ -212,7 +278,7 @@ async function requestRemoteApi(input) {
   if (!input || typeof input !== "object") {
     throw new Error("Invalid desktop API request.");
   }
-  const apiBaseUrl = validateApiBaseUrl(input.apiBaseUrl);
+  const apiBaseUrl = input.apiBaseUrl ? validateApiBaseUrl(input.apiBaseUrl) : desktopApiBaseUrl();
   const requestPath = String(input.path || "");
   if (!requestPath.startsWith("/") || requestPath.startsWith("//") || requestPath.includes("..")) {
     throw new Error("Desktop API requests must use a safe relative API path.");
@@ -223,13 +289,23 @@ async function requestRemoteApi(input) {
   const target = new URL(`${basePath}${requestPath}`, base.origin);
   const headers = new Headers(input.headers || {});
   headers.set("accept", "application/json");
-  // The renderer never supplies bearer credentials to the main process. The
-  // main process is the only layer allowed to read and attach the OS-stored token.
+
+  // The renderer never supplies credentials to the main process.
   headers.delete("authorization");
-  const token = await getSecret("apiToken");
-  if (token) headers.set("authorization", `Bearer ${token}`);
-  if (input.workspaceKey) headers.set("x-workspace-key", String(input.workspaceKey));
-  if (input.userKey) headers.set("x-user-key", String(input.userKey));
+  const isLoopback = target.hostname === "127.0.0.1" || target.hostname === "localhost";
+  if (isLoopback) {
+    headers.set("authorization", `Bearer ${internalLoopbackToken}`);
+  } else {
+    const token = await getSecret("apiToken");
+    if (token) headers.set("authorization", `Bearer ${token}`);
+  }
+
+  if (!headers.has("x-workspace-key")) {
+    headers.set("x-workspace-key", String(input.workspaceKey || "default"));
+  }
+  if (!headers.has("x-user-key")) {
+    headers.set("x-user-key", String(input.userKey || "local_user"));
+  }
 
   const response = await fetch(target, {
     method: String(input.method || "GET").toUpperCase(),
@@ -256,12 +332,32 @@ function registerIpc(apiBaseUrl) {
   configureAutoUpdater(channel);
 
   ipcMain.handle("jdec:secret:is-available", () => safeStorage.isEncryptionAvailable());
+  ipcMain.handle("jdec:secret:has", async (_event, key) => {
+    const val = await getSecret(String(key || ""));
+    return Boolean(val);
+  });
   ipcMain.handle("jdec:secret:set", async (_event, key, value) => {
     await setSecret(String(key || ""), String(value || ""));
+    if (localServerInstance) {
+      localServerInstance.updateConfig({
+        databaseUrl: (await getSecret("databaseUrl")) || process.env.DATABASE_URL,
+        databaseUrlDirect: (await getSecret("databaseUrlDirect")) || process.env.DATABASE_URL_UNPOOLED,
+        geminiApiKey: (await getSecret("geminiApiKey")) || process.env.GEMINI_API_KEY,
+        openaiApiKey: (await getSecret("openaiApiKey")) || process.env.OPENAI_API_KEY,
+      });
+    }
     return { ok: true };
   });
   ipcMain.handle("jdec:secret:delete", async (_event, key) => {
     await deleteSecret(String(key || ""));
+    if (localServerInstance) {
+      localServerInstance.updateConfig({
+        databaseUrl: (await getSecret("databaseUrl")) || process.env.DATABASE_URL,
+        databaseUrlDirect: (await getSecret("databaseUrlDirect")) || process.env.DATABASE_URL_UNPOOLED,
+        geminiApiKey: (await getSecret("geminiApiKey")) || process.env.GEMINI_API_KEY,
+        openaiApiKey: (await getSecret("openaiApiKey")) || process.env.OPENAI_API_KEY,
+      });
+    }
     return { ok: true };
   });
   ipcMain.handle("jdec:api:request", async (_event, input) => requestRemoteApi(input));
@@ -270,9 +366,12 @@ function registerIpc(apiBaseUrl) {
     isPackaged: app.isPackaged,
     releaseChannel: channel,
     updaterChannel: updaterChannel(channel),
-    apiBaseUrl,
+    apiBaseUrl: localServerInstance?.apiBaseUrl || apiBaseUrl,
     apiRuntime,
     safeStorageAvailable: safeStorage.isEncryptionAvailable(),
+    hasDatabaseUrl: Boolean((await getSecret("databaseUrl")) || process.env.DATABASE_URL),
+    hasGeminiApiKey: Boolean((await getSecret("geminiApiKey")) || process.env.GEMINI_API_KEY),
+    hasOpenaiApiKey: Boolean((await getSecret("openaiApiKey")) || process.env.OPENAI_API_KEY),
     apiTokenConfigured: Boolean(await getSecret("apiToken")),
     updatesEnabled: updatesEnabled(),
   }));
@@ -366,15 +465,17 @@ if (!singleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
-    const apiBaseUrl = desktopApiBaseUrl();
+    let apiBaseUrl = desktopApiBaseUrl();
     installContentSecurityPolicy();
     registerIpc(apiBaseUrl);
-    startLocalApiRuntime(apiBaseUrl);
+    await startLocalApiRuntime(apiBaseUrl);
+    apiBaseUrl = desktopApiBaseUrl();
     await createMainWindow(apiBaseUrl);
   });
 }
 
 app.on("before-quit", stopLocalApiRuntime);
+app.on("will-quit", stopLocalApiRuntime);
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

@@ -8,6 +8,7 @@ function readArg(name) {
 
 contextBridge.exposeInMainWorld("jdecSecrets", {
   isAvailable: () => ipcRenderer.invoke("jdec:secret:is-available"),
+  hasSecret: (key) => ipcRenderer.invoke("jdec:secret:has", key),
   setSecret: (key, value) => ipcRenderer.invoke("jdec:secret:set", key, value),
   deleteSecret: (key) => ipcRenderer.invoke("jdec:secret:delete", key),
 });

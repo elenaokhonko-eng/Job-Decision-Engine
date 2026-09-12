@@ -14,6 +14,8 @@ export interface SeedEmbeddingSpacesResult {
   fallbackSpaceId: string;
 }
 
+type PgQueryable = pg.Pool | pg.PoolClient | pg.Client;
+
 function stableSpaceKey(prefix: string, parts: string[]): string {
   const fingerprint = crypto
     .createHash('sha256')
@@ -135,13 +137,21 @@ async function upsertSpace(
 }
 
 export async function seedEmbeddingSpaces(
-  clientOrPool?: pg.Pool | pg.PoolClient,
+  clientOrPool?: PgQueryable,
   options?: { context?: WorkspaceContext }
 ): Promise<SeedEmbeddingSpacesResult> {
   const pool = clientOrPool || defaultPool;
-  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
-    typeof (value as pg.Pool).connect === 'function' && !('release' in value);
-  const ownsClient = isPool(pool);
+  const maybe = pool as any;
+  const ownsClient =
+    pool instanceof pg.Pool ||
+    (typeof maybe?.connect === 'function' &&
+      typeof maybe?.query === 'function' &&
+      'totalCount' in maybe &&
+      'idleCount' in maybe &&
+      'waitingCount' in maybe) ||
+    (typeof maybe?.connect === 'function' &&
+      typeof maybe?.query !== 'function' &&
+      typeof maybe?.release !== 'function');
   const client = ownsClient ? await pool.connect() : pool;
 
   const primaryProvider = process.env.EMBEDDING_PRIMARY_PROVIDER || 'gemini';
@@ -205,8 +215,8 @@ export async function seedEmbeddingSpaces(
     await client.query('ROLLBACK');
     throw error;
   } finally {
-    if (ownsClient && typeof client.release === 'function') {
-      client.release();
+    if (ownsClient && typeof (client as pg.PoolClient).release === 'function') {
+      (client as pg.PoolClient).release();
     }
   }
 }

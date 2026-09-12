@@ -23,6 +23,7 @@ import {
   safeExternalHref,
   summarizeDesktopCounts,
 } from "./desktop/viewModel.js";
+import { SetupWizard } from "./desktop/SetupWizard.js";
 
 type ViewKey = "overview" | "jobs" | "applications" | "sources" | "tasks" | "settings";
 
@@ -127,6 +128,8 @@ export default function App() {
   const [manualObservation, setManualObservation] = useState(blankManualObservation);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const [setupStatus, setSetupStatus] = useState<any>(null);
   const nativeApi = getNativeApiBridge();
 
   const client = useMemo(
@@ -157,11 +160,37 @@ export default function App() {
     if (status) setNativeStatus(status);
   }, []);
 
+  const checkSetupStatus = useCallback(async () => {
+    try {
+      let data: any = null;
+      if (nativeApi) {
+        const res = await nativeApi.request({
+          apiBaseUrl: settings.apiBaseUrl,
+          path: "/setup/status",
+          method: "GET",
+        });
+        if (res.status === 200) data = JSON.parse(res.body);
+      } else {
+        const res = await fetch(`${settings.apiBaseUrl}/setup/status`);
+        if (res.ok) data = await res.json();
+      }
+      if (data) {
+        setSetupStatus(data);
+        if (!data.database?.isInitialized || (data.database?.pendingMigrations ?? 0) > 0) {
+          setShowSetupWizard(true);
+        }
+      }
+    } catch {
+      // setup status check is non-fatal
+    }
+  }, [nativeApi, settings.apiBaseUrl]);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setToast(null);
     try {
       await refreshNativeStatus();
+      await checkSetupStatus();
       const healthRes = await client.getHealth();
       setHealth(healthRes);
 
@@ -461,14 +490,64 @@ export default function App() {
 
         {activeView === "settings" ? (
           <section className="panel settings-panel">
-            <PanelHeader title="Managed API Connection" />
+            <PanelHeader title="Standalone Desktop Configuration" />
+            <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-4 mb-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="font-semibold text-slate-900 text-sm">Neon Database & Local Engine</h4>
+                  <p className="text-xs text-slate-500">
+                    Runs locally on your machine with direct connection to your private Neon PostgreSQL database.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="button primary text-xs"
+                  onClick={() => setShowSetupWizard(true)}
+                >
+                  Open Setup Wizard
+                </button>
+              </div>
+
+              <div className="settings-summary-grid">
+                <Info
+                  label="Database"
+                  value={setupStatus?.database?.connected ? "Connected" : "Not connected"}
+                />
+                <Info
+                  label="Schema Migrations"
+                  value={
+                    setupStatus?.database?.isInitialized
+                      ? `${setupStatus.database.appliedMigrations} applied`
+                      : "Uninitialized"
+                  }
+                />
+                <Info
+                  label="Gemini AI"
+                  value={
+                    setupStatus?.ai?.geminiConfigured || nativeStatus?.hasGeminiApiKey
+                      ? "Configured"
+                      : "Not set"
+                  }
+                />
+                <Info
+                  label="OpenAI"
+                  value={
+                    setupStatus?.ai?.openaiConfigured || nativeStatus?.hasOpenaiApiKey
+                      ? "Configured"
+                      : "Not set"
+                  }
+                />
+              </div>
+            </div>
+
+            <PanelHeader title="Advanced Connection Settings" />
             <form onSubmit={(event) => void submitSettings(event)} className="settings-form">
               <label>
-                <span>Managed API base URL</span>
-                <input value={draftSettings.apiBaseUrl} onChange={(event) => setDraftSettings({ ...draftSettings, apiBaseUrl: event.target.value })} placeholder="https://api.example.com/api/v2" />
+                <span>API base URL (Default: local companion runtime)</span>
+                <input value={draftSettings.apiBaseUrl} onChange={(event) => setDraftSettings({ ...draftSettings, apiBaseUrl: event.target.value })} placeholder="http://127.0.0.1:3210/api/v2" />
               </label>
               <label>
-                <span>API token</span>
+                <span>API token (Optional for local companion)</span>
                 <input type="password" value={draftSettings.apiToken} onChange={(event) => {
                   setClearStoredToken(false);
                   setDraftSettings({ ...draftSettings, apiToken: event.target.value });
@@ -496,12 +575,6 @@ export default function App() {
                   <input value={draftSettings.userKey} onChange={(event) => setDraftSettings({ ...draftSettings, userKey: event.target.value })} />
                 </label>
               </div>
-              <div className="settings-summary">
-                <span>Stored token</span>
-                <strong>{nativeApi
-                  ? (clearStoredToken ? "Will clear on save" : nativeStatus?.apiTokenConfigured ? "Configured" : "Not set")
-                  : (redactSecret(settings.apiToken) || "Not set")}</strong>
-              </div>
               <div className="settings-summary-grid">
                 <Info label="Native Shell" value={nativeStatus ? (nativeStatus.isPackaged ? "Packaged" : "Development") : "Browser"} />
                 <Info label="Channel" value={nativeStatus?.releaseChannel ?? "Local"} />
@@ -509,11 +582,22 @@ export default function App() {
                 <Info label="API transport" value={nativeApi ? "Authenticated main-process bridge" : "Browser fetch"} />
                 <Info label="Updates" value={nativeStatus?.updatesEnabled ? "Enabled" : "Disabled"} />
               </div>
-              <button type="submit" className="button primary">Save Settings</button>
+              <button type="submit" className="button primary">Save Advanced Settings</button>
             </form>
           </section>
         ) : null}
       </section>
+
+      {showSetupWizard ? (
+        <SetupWizard
+          onComplete={() => {
+            setShowSetupWizard(false);
+            void checkSetupStatus();
+            void refresh();
+          }}
+          onCancel={setupStatus?.database?.isInitialized ? () => setShowSetupWizard(false) : undefined}
+        />
+      ) : null}
     </main>
   );
 }

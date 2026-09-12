@@ -298,24 +298,6 @@ def activate_preference_mode(mode_key):
         return resp.get("mode") or {}
     raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
 
-def fetch_consents():
-    resp = api_request("GET", "/api/v2/consents", timeout=20)
-    if isinstance(resp, dict) and resp.get("ok"):
-        rows = resp.get("consents") or []
-        rows = rows if isinstance(rows, list) else []
-        mapping = {}
-        for row in rows:
-            if isinstance(row, dict) and row.get("consent_key"):
-                mapping[str(row.get("consent_key"))] = bool(row.get("granted"))
-        return mapping, rows
-    return {}, []
-
-def update_consents(consents_patch):
-    resp = api_request("PUT", "/api/v2/consents", body={"consents": consents_patch}, timeout=20)
-    if isinstance(resp, dict) and resp.get("ok"):
-        return resp.get("consents") or []
-    raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
-
 def escape_text(value):
     return html.escape(str(value if value is not None else ""))
 
@@ -1084,43 +1066,6 @@ with st.sidebar.expander("Accessibility & Preferences", expanded=False):
 
     st.markdown("---")
 
-    if "consents_mapping" not in st.session_state:
-        try:
-            mapping, _rows = fetch_consents()
-            st.session_state["consents_mapping"] = mapping
-        except Exception as e:
-            st.warning(f"Unable to load consent settings: {e}")
-            st.session_state["consents_mapping"] = {}
-
-    consents = st.session_state.get("consents_mapping") or {}
-    allow_docs = st.toggle(
-        "Consent: AI-generated documents",
-        value=bool(consents.get("allow_documents", False)),
-        help="Controls whether document generators are allowed to run.",
-        key="consent_allow_docs",
-    )
-    allow_eval = st.toggle(
-        "Consent: AI evaluation",
-        value=bool(consents.get("allow_ai_evaluation", False)),
-        help="Controls whether LLM-based job evaluation is allowed to run.",
-        key="consent_allow_eval",
-    )
-
-    consent_patch = {}
-    if allow_docs != bool(consents.get("allow_documents", False)):
-        consent_patch["allow_documents"] = allow_docs
-    if allow_eval != bool(consents.get("allow_ai_evaluation", False)):
-        consent_patch["allow_ai_evaluation"] = allow_eval
-
-    if consent_patch:
-        try:
-            update_consents(consent_patch)
-            mapping, _rows = fetch_consents()
-            st.session_state["consents_mapping"] = mapping
-            st.success("Saved consents.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Failed to save consents: {e}")
 st.sidebar.header("🎯 Navigation & Filters")
 
 # Metrics

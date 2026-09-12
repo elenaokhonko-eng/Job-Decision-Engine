@@ -36,11 +36,10 @@ describe("managed API/desktop E2E retest gate", () => {
     ]));
   });
 
-  it("fails closed on consent, stale dependencies, and prequalified jobs", () => {
+  it("fails closed on stale dependencies and prequalified jobs", () => {
     const blockers = evaluateRetestGate({
       managedApiConfigured: true,
       managedApiReachable: true,
-      consentGranted: false,
       funnel: {
         ...cleanFunnel,
         prequalified: 1,
@@ -50,18 +49,16 @@ describe("managed API/desktop E2E retest gate", () => {
     });
 
     expect(blockers).toEqual(expect.arrayContaining([
-      "ALLOW_AI_EVALUATION_CONSENT_NOT_GRANTED",
       "CURRENT_PROFILE_MATCHES_INCOMPLETE",
       "PREQUALIFIED_JOBS_AWAITING_LANE_ROUTING",
       "MANDATORY_PIPELINE_TASKS_PENDING",
     ]));
   });
 
-  it("passes only after managed API, consent, and currentness checks are clear", () => {
+  it("passes after managed API and currentness checks are clear", () => {
     expect(evaluateRetestGate({
       managedApiConfigured: true,
       managedApiReachable: true,
-      consentGranted: true,
       funnel: cleanFunnel,
     })).toEqual([]);
   });

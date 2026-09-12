@@ -9,6 +9,7 @@ import {
   saveDesktopSettings,
   saveDesktopSettingsSecure,
   type DesktopSecretStore,
+  type DesktopSecretKey,
   type KeyValueStorage,
 } from "../../desktop/settings.js";
 
@@ -36,12 +37,16 @@ class MemorySecretStore implements DesktopSecretStore {
     return this.available;
   }
 
-  async setSecret(key: "apiToken", value: string): Promise<{ ok: boolean }> {
+  async hasSecret(key: DesktopSecretKey): Promise<boolean> {
+    return this.values.has(key);
+  }
+
+  async setSecret(key: DesktopSecretKey, value: string): Promise<{ ok: boolean }> {
     this.values.set(key, value);
     return { ok: true };
   }
 
-  async deleteSecret(key: "apiToken"): Promise<{ ok: boolean }> {
+  async deleteSecret(key: DesktopSecretKey): Promise<{ ok: boolean }> {
     this.values.delete(key);
     return { ok: true };
   }

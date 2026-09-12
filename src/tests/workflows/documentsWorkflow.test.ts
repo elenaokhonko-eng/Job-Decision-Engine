@@ -14,6 +14,9 @@ describe("documents workflow", () => {
     expect(workflow).toContain("if: env.DOCUMENTS_JOB_FOUND == 'true'");
     expect(workflow).toContain("always() && env.DOCUMENTS_JOB_FOUND == 'true'");
     expect(workflow).toContain("npx tsx scripts/preflight_database.ts");
+    expect(workflow).toContain("INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}");
+    expect(workflow).toContain("canonical_job_id must be a UUID.");
+    expect(workflow).toContain("job_version_id must be a UUID when provided.");
 
     expect(picker).toContain("PICK_DOCUMENTS_ALLOW_EMPTY");
     expect(picker).toContain("documents_job_found: false");

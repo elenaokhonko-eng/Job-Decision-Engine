@@ -32,7 +32,6 @@ export interface RetestGateFunnel {
 export interface RetestGateInput {
   managedApiConfigured: boolean;
   managedApiReachable: boolean;
-  consentGranted: boolean;
   funnel: RetestGateFunnel;
 }
 
@@ -62,8 +61,6 @@ export function evaluateRetestGate(input: RetestGateInput): string[] {
   if (input.managedApiConfigured && !input.managedApiReachable) {
     blockers.push("MANAGED_API_HEALTH_CHECK_FAILED");
   }
-  if (!input.consentGranted) blockers.push("ALLOW_AI_EVALUATION_CONSENT_NOT_GRANTED");
-
   const funnel = input.funnel;
   if (funnel.currentRequirements < funnel.gatePassed) blockers.push("CURRENT_REQUIREMENTS_INCOMPLETE");
   if (funnel.eligibleWithoutCurrentMatch > 0) blockers.push("CURRENT_PROFILE_MATCHES_INCOMPLETE");
@@ -105,17 +102,10 @@ async function checkManagedApi(config: ManagedApiConfig): Promise<{ configured: 
   }
 }
 
-async function readProductionGate(pool: pg.Pool): Promise<{ consentGranted: boolean; funnel: RetestGateFunnel; workspaceId: string; userId: string }> {
+async function readProductionGate(pool: pg.Pool): Promise<{ funnel: RetestGateFunnel; workspaceId: string; userId: string }> {
   const client = await pool.connect();
   try {
     const context = await resolveWorkspaceContext(client as any);
-    const consent = await client.query<{ granted: boolean }>(
-      `SELECT granted
-         FROM workspace_user_consents
-        WHERE workspace_id = $1 AND user_id = $2 AND consent_key = 'allow_ai_evaluation'
-        LIMIT 1`,
-      [context.workspaceId, context.userId]
-    );
     const funnel = await client.query<RetestGateFunnel>(
       `WITH latest_versions AS (
              SELECT DISTINCT ON (jv.canonical_job_id)
@@ -214,7 +204,6 @@ async function readProductionGate(pool: pg.Pool): Promise<{ consentGranted: bool
     const row = funnel.rows[0];
     if (!row) throw new Error("Production funnel query returned no row.");
     return {
-      consentGranted: consent.rows[0]?.granted === true,
       funnel: row,
       workspaceId: context.workspaceId,
       userId: context.userId,
@@ -225,6 +214,13 @@ async function readProductionGate(pool: pg.Pool): Promise<{ consentGranted: bool
 }
 
 async function main(): Promise<void> {
+  if (process.env.JDEC_MANAGED_API_REQUIRED !== "true") {
+    const { checkDesktopE2EGate } = await import("./check_desktop_e2e_gate.js");
+    const res = await checkDesktopE2EGate();
+    if (!res.ok) process.exitCode = 1;
+    return;
+  }
+
   const config: ManagedApiConfig = {
     baseUrl: String(process.env.JDEC_API_BASE_URL || process.env.JDEC_DESKTOP_API_BASE_URL || "").trim().replace(/\/+$/, ""),
     token: String(process.env.JDEC_API_TOKEN || "").trim(),
@@ -246,7 +242,6 @@ async function main(): Promise<void> {
       ...evaluateRetestGate({
         managedApiConfigured: api.configured,
         managedApiReachable: api.reachable,
-        consentGranted: production.consentGranted,
         funnel: production.funnel,
       }),
     ].filter((value, index, all) => all.indexOf(value) === index);
@@ -256,7 +251,6 @@ async function main(): Promise<void> {
       workspace_id: production.workspaceId,
       user_id: production.userId,
       api: { configured: api.configured, reachable: api.reachable },
-      consent: { allow_ai_evaluation: production.consentGranted },
       funnel: production.funnel,
       blockers,
     };

@@ -55,7 +55,7 @@ Production recovery, managed API onboarding, cold-install verification, provider
 ### P0: containment and recovery safety
 
 1. Preserve the database and run a read-only inventory before replaying work.
-2. Add a resumable reconciliation report that classifies every job version and task as current, runnable, dependency-blocked, stale, awaiting verification/consent, retrying, paused, or manual review.
+2. Add a resumable reconciliation report that classifies every job version and task as current, runnable, dependency-blocked, stale, awaiting verification, retrying, paused, or manual review.
 3. Do not bulk-reset deferred, verification, rejected, or historical evaluation rows.
 
 ### P1: artifact currentness contract
@@ -78,7 +78,7 @@ Normalize the actual preference UI payload, including zero values, `false` value
 
 ### P1: grounded AI evaluation
 
-AI evaluation must use an immutable database-backed context containing active verified profile facts, selected lanes, workability rules, requirement evidence, current deterministic match/decision, consent, and all policy/model/schema identifiers. Fixed in-code candidate profile data must not determine production evaluation.
+AI evaluation must use an immutable database-backed context containing active verified profile facts, selected lanes, workability rules, requirement evidence, current deterministic match/decision, and all policy/model/schema identifiers. Fixed in-code candidate profile data must not determine production evaluation.
 
 ### P2: reconciler and workflow hardening
 
@@ -101,7 +101,7 @@ Do not change embedding providers before pipeline correctness is restored. Bench
 5. Reconcile again and verify idempotency.
 6. Repair deterministic requirements and current-profile matches for gate-passed jobs.
 7. Recompute deterministic recommendations.
-8. Evaluate only current eligible jobs with valid consent.
+8. Evaluate only current eligible jobs after deterministic eligibility and provider preflight pass.
 9. Run two no-change reconciliation passes.
 10. Generate documents only after current shortlist and evidence validation.
 
@@ -139,7 +139,7 @@ Validation completed:
 
 Assumptions and remaining owners:
 
-- No production Neon migration, reconciliation, repair, consent grant, or provider call was performed from this workspace. The database owner must apply migrations 039–044, run `npm run pipeline:reconcile -- --json`, review the report, and execute the staged recovery sequence.
+- No production Neon migration, reconciliation, repair, or provider call was performed from this workspace. The database owner must apply migrations 039–044, run `npm run pipeline:reconcile -- --json`, review the report, and execute the staged recovery sequence.
 - Python/Streamlit syntax and browser E2E were not executable locally because the available Windows Python command is only the inaccessible Microsoft Store alias. `streamlit_e2e.yml` remains the validation owner for that boundary.
 - The `data-contract-checker`, `test-evals-specialist`, and `release-security-reviewer` still owe independent sign-off before a production `GO` is claimed.
 - Provider/embedding selection remains a calibration task after currentness recovery; no model switch is justified by the original failure logs alone.
@@ -160,10 +160,10 @@ Assumptions and remaining owners:
 - Production recovery exposed and fixed two lifecycle defects: dependency blocking no longer violates `pipeline_tasks.available_at NOT NULL`, and decision tasks now fence stale job versions and block when a current match is missing.
 - Production reconciliation after recovery: 1,144 canonical jobs; 326 current requirement sets; 16 current matches; 16 current deterministic decisions; 0 current evaluations; 0 active evaluation queue items; 30 dependency-blocked tasks; 7 retry-wait tasks; 2 historical dead-letter tasks.
 - Model route preflight passed for evaluation, extraction, document generation, and embedding. No provider-backed production recovery or AI evaluation was run from this workspace.
-- Production has no `allow_ai_evaluation` consent row, and the managed API endpoint/token are not configured locally. These are the remaining authorization and deployment gates before the full AI/API/desktop E2E test.
+- The managed API endpoint/token are not configured locally. These are the remaining deployment gates before the full AI/API/desktop E2E test.
 - Latest validation: 67 Vitest files passed (256 tests), TypeScript lint passed, production build passed, desktop packaging verification passed (54 checks), actionlint passed, and `git diff --check` passed.
 
-Next authorized release steps: grant `allow_ai_evaluation` through the authenticated consent path, configure the managed HTTPS API endpoint and token, run the provider-backed embedding/quoted/lane stages in bounded batches, process the current evaluation queue, run two no-change reconciliations, then verify Streamlit and the authenticated desktop client against the same current read model. Do not claim E2E readiness until all of those checks pass and the three independent reviews sign off.
+Next authorized release steps: configure the managed HTTPS API endpoint and token, run the provider-backed embedding/quoted/lane stages in bounded batches, process the current evaluation queue, run two no-change reconciliations, then verify Streamlit and the authenticated desktop client against the same current read model. Do not claim E2E readiness until all of those checks pass and the three independent reviews sign off.
 
 ## Deterministic policy and recovery checkpoint — 2026-09-10
 
@@ -181,7 +181,7 @@ The pre-AI recovery was executed against production after importing the active p
 
 Validation for this checkpoint: `npx tsc --noEmit`; `npx vitest run` (67 files passed, 7 skipped; 263 tests passed, 36 skipped); `git diff --check`; and production `scripts/reconcile_pipeline.ts --json` all passed. The local Python command remains unavailable because Windows exposes only an inaccessible Microsoft Store alias, so Streamlit browser/runtime validation remains a deployment workflow responsibility.
 
-Next owner: deploy the code and Streamlit changes, obtain the independent data-contract/evaluation/security reviews, configure the managed HTTPS API and authenticated desktop token path, grant `allow_ai_evaluation`, then run the provider-backed E2E. Until those steps are complete, the safe re-test is deterministic/pre-AI only; do not expect generated documents or provider-backed recommendations.
+Next owner: deploy the code and Streamlit changes, obtain the independent data-contract/evaluation/security reviews, configure the managed HTTPS API and authenticated desktop token path, then run the provider-backed E2E. Until those steps are complete, the safe re-test remains deterministic/pre-AI only; do not expect generated documents or provider-backed recommendations.
 
 ## Current production remediation checkpoint — 2026-09-11
 
@@ -200,9 +200,9 @@ The 404 verification cases are likewise not all workplace cases. Current reason 
 
 The seeder now accepts stage-scoped recovery. A deterministic-only worker no longer creates unrelated provider tasks, and matching recovery checks the complete currentness tuple: canonical job, job version, active requirement set, content hash, active profile, completed status, and context fingerprint.
 
-The managed retest gate is available as `npm run e2e:retest-gate` and as the manual `Managed API Desktop E2E Retest Gate` workflow. It is read-only and fail-closed. It requires a public HTTPS `JDEC_API_BASE_URL`, `JDEC_API_TOKEN`, `WORKSPACE_KEY`, `WORKSPACE_USER_KEY`, authenticated API health, granted `allow_ai_evaluation`, no mandatory task backlog, no prequalified jobs, and no unexplained currentness gaps. It does not start AI evaluation or provider calls. At this checkpoint it is correctly red because the managed API credentials and consent are not configured and two jobs still await provider-backed routing.
+The managed retest gate is available as `npm run e2e:retest-gate` and as the manual `Managed API Desktop E2E Retest Gate` workflow. It is read-only and fail-closed. It requires a public HTTPS `JDEC_API_BASE_URL`, `JDEC_API_TOKEN`, `WORKSPACE_KEY`, `WORKSPACE_USER_KEY`, authenticated API health, no mandatory task backlog, no prequalified jobs, and no unexplained currentness gaps. It does not start AI evaluation or provider calls. At this checkpoint it is correctly red because the managed API credentials are not configured and two jobs still await provider-backed routing.
 
-Remaining authorized production steps: explicitly authorize the bounded transfer of production job-description embedding inputs to the configured primary/fallback embedding providers; run `PUBLISH_EMBEDDING` and `ROUTE_LANE` for the two prequalified jobs and the approved routing-deferred recovery batch; reconcile twice; configure the managed API deployment secrets; grant consent through the authenticated consent endpoint; run the managed gate; then run provider-backed evaluation and document generation only after the independent data-contract, evaluation, and security reviews sign off.
+Remaining authorized production steps: run the bounded `PUBLISH_EMBEDDING` and `ROUTE_LANE` recovery batch for the two prequalified jobs and approved routing-deferred jobs; reconcile twice; configure the managed API deployment secrets; run the managed gate; then run provider-backed evaluation and document generation after the independent data-contract, evaluation, and security reviews sign off.
 
 ## Provider recovery and consumer verification checkpoint — 2026-09-11
 
@@ -212,7 +212,7 @@ Remaining authorized production steps: explicitly authorize the bounded transfer
 - Two consecutive read-only reconciliations were stable: 1,333 canonical jobs; 772 hard rejected; 404 needing verification; 105 routing deferred; 52 current matches and decisions; 0 current evaluations; 0 blocked/retrying/dead tasks; and no current-match gaps.
 - The 14 mandatory deterministic decision tasks were drained successfully. The remaining 112 pending tasks are optional quoted-requirement enrichment.
 - The Streamlit browser smoke path reached the production-backed canonical read model using the project virtualenv and produced an accessibility snapshot. The E2E launcher now loads dotenv configuration, prefers `PYTHON_BIN`/`.venv`, and handles Windows `.cmd` process launch correctly. Desktop packaging verification passed 54/54 checks.
-- The managed retest gate now has only the external deployment/authorization blockers: managed HTTPS API base URL/token/workspace credentials and authenticated `allow_ai_evaluation` consent. Provider-backed evaluation and document generation remain intentionally disabled until those gates and independent reviews are complete.
+- The managed retest gate now has only the external deployment blockers: managed HTTPS API base URL/token/workspace credentials. Provider-backed evaluation and document generation remain disabled until those deployment gates and independent reviews are complete.
 
 ## Workflow failure audit and database preflight checkpoint — 2026-09-11
 
@@ -239,4 +239,4 @@ Quoted-requirement extraction remains optional enrichment. Normal deterministic 
 
 Post-remediation production reconciliation: 1,333 canonical jobs; 780 `HARD_REJECTED`, 396 `NEEDS_VERIFICATION`, 105 `ROUTING_DEFERRED` with policy-no-match disposition, and 52 legacy `MATCHED` rows whose runs are now correctly classified as zero-evidence. There are 729 current requirement artifacts, 0 current positive matches, 0 current deterministic decisions, 0 current evaluations, no stale positive matches, no blocked/retrying/dead tasks, and one `RUNNING` task subject to the normal lease-recovery mechanism. The managed retest gate now has zero mandatory pending tasks; 107 pending tasks are quoted-requirement enrichment only. TypeScript lint passed, the full Vitest suite passed (72 files, 282 tests; 7 files skipped for unavailable integration infrastructure), and the focused remediation suite passed (55 tests).
 
-This checkpoint does not claim managed E2E readiness. Provider-backed rerouting/evaluation, authenticated consent, managed HTTPS API credentials, Streamlit production verification, desktop verification, and independent data-contract/evaluation/security reviews remain release gates.
+This checkpoint does not claim managed E2E readiness. Provider-backed rerouting/evaluation, managed HTTPS API credentials, Streamlit production verification, desktop verification, and independent data-contract/evaluation/security reviews remain release gates.

@@ -27,12 +27,93 @@ function isPool(value: pg.Pool | pg.PoolClient | pg.Client): value is pg.Pool {
   );
 }
 
-export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.Client): Promise<string[]> {
-  const migrationsDir = path.resolve(__dirname, "../../migrations");
-  if (!fs.existsSync(migrationsDir)) {
-    throw new Error(`Migrations directory not found: ${migrationsDir}`);
-  }
+export function resolveMigrationsDir(): string {
+  const candidates = [
+    process.env.JDEC_MIGRATIONS_DIR,
+    path.resolve(process.cwd(), "migrations"),
+    path.resolve(__dirname, "../../migrations"),
+    path.resolve(__dirname, "../migrations"),
+    path.resolve(__dirname, "migrations"),
+    typeof (process as any).resourcesPath === "string"
+      ? path.join((process as any).resourcesPath, "migrations")
+      : null,
+    typeof (process as any).resourcesPath === "string"
+      ? path.join((process as any).resourcesPath, "app.asar", "migrations")
+      : null,
+  ].filter((p): p is string => typeof p === "string" && p.length > 0);
 
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(`Migrations directory not found in candidates: ${candidates.join(", ")}`);
+}
+
+export function getMigrationsList(): string[] {
+  const migrationsDir = resolveMigrationsDir();
+  return fs
+    .readdirSync(migrationsDir)
+    .filter((f) => f.endsWith(".sql") && !f.startsWith("."))
+    .sort();
+}
+
+export async function getMigrationStatus(clientOrPool: pg.Pool | pg.PoolClient | pg.Client): Promise<{
+  isInitialized: boolean;
+  total: number;
+  appliedCount: number;
+  pendingCount: number;
+  applied: string[];
+  pending: string[];
+}> {
+  const pool = clientOrPool;
+  const ownsClient = isPool(pool);
+  const client = ownsClient ? await pool.connect() : pool;
+
+  try {
+    const tableRes = await client.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_schema = current_schema()
+        AND table_name = 'schema_migrations'
+      ) as exists;
+    `);
+    const isInitialized = Boolean(tableRes.rows[0]?.exists);
+    const allMigrations = getMigrationsList();
+
+    if (!isInitialized) {
+      return {
+        isInitialized: false,
+        total: allMigrations.length,
+        appliedCount: 0,
+        pendingCount: allMigrations.length,
+        applied: [],
+        pending: allMigrations,
+      };
+    }
+
+    const { rows } = await client.query(`SELECT version FROM schema_migrations ORDER BY version ASC`);
+    const appliedSet = new Set(rows.map((r: { version: string }) => r.version));
+    const applied = allMigrations.filter((m) => appliedSet.has(m));
+    const pending = allMigrations.filter((m) => !appliedSet.has(m));
+
+    return {
+      isInitialized: true,
+      total: allMigrations.length,
+      appliedCount: applied.length,
+      pendingCount: pending.length,
+      applied,
+      pending,
+    };
+  } finally {
+    if (ownsClient && typeof (client as any).release === "function") {
+      (client as pg.PoolClient).release();
+    }
+  }
+}
+
+export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.Client): Promise<string[]> {
+  const migrationsDir = resolveMigrationsDir();
   const pool = clientOrPool;
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;

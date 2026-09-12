@@ -119,6 +119,8 @@ export async function packageDesktop(argv = process.argv.slice(2)): Promise<stri
       ? process.env.JDEC_DESKTOP_ENABLE_UPDATES || "true"
       : process.env.JDEC_DESKTOP_ENABLE_UPDATES || "false",
   };
+  const { buildDesktopBackend } = await import("./build_desktop_backend.js");
+  await buildDesktopBackend();
   await run(process.execPath, [path.join(rootDir, "node_modules", "vite", "bin", "vite.js"), "build"], childEnv);
 
   const builderArgs = mode === "dir" ? ["--dir"] : [];

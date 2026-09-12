@@ -14,6 +14,9 @@ export interface DesktopRuntimeStatus {
     reason: string | null;
   };
   safeStorageAvailable: boolean;
+  hasDatabaseUrl?: boolean;
+  hasGeminiApiKey?: boolean;
+  hasOpenaiApiKey?: boolean;
   apiTokenConfigured: boolean;
   updatesEnabled: boolean;
 }

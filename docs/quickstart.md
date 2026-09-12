@@ -1,73 +1,124 @@
-# Quickstart (Engineers + Non‑Engineers)
+# Quickstart & Distribution Modes
 
-This repo is meant for:
+Job Decision Engine is a **standalone desktop application** and local pipeline engine. Each user connects their own private [Neon PostgreSQL](https://neon.tech) database and supplies their own AI provider credentials (Google Gemini or OpenAI).
 
-- Engineers/builders who want a reliable, auditable job-scanning pipeline.
-- Neurodivergent/AuDHD users (including non-engineers) who want a predictable workflow that keeps *unknowns* visible and never turns operational failures into “career rejections”.
-
-## What It Does
+There is **no requirement** for a hosted SaaS backend, Render deployment, cloud account operated by the repository owner, or developer-supplied API tokens.
 
 ```mermaid
 flowchart LR
-  A[Sources] --> B[Job Vault]
-  B --> C[Deterministic gates]
-  C --> D[Lane routing + matching]
-  D --> E[AI evaluation (retry-safe)]
-  E --> F[Shortlist UI + documents]
+  subgraph Local Desktop [User Desktop Device]
+    App[Desktop App UI] <--> Loopback[Local Companion Engine\n127.0.0.1]
+    Loopback <--> Keychain[OS Secure Storage\nDPAPI / Keychain]
+  end
+  subgraph User Cloud [User's Own Cloud Accounts]
+    Loopback <--> Neon[(User's Neon Postgres)]
+    Loopback <--> AI[User's AI API\nGemini / OpenAI]
+  end
 ```
 
-## Non‑Engineer Path (GitHub Actions)
+---
 
-1. Fork the repository.
-2. In your fork, open **Settings → Secrets and variables → Actions**.
-3. Set at least:
-   - `DATABASE_URL`
-   - `DATABASE_URL_UNPOOLED` (the direct Neon connection string required by migrations and advisory-lock workers)
-   - `OPENAI_API_KEY` or `GEMINI_API_KEY` (or both)
-4. Run **Actions → Job Discovery Ingestion → Run workflow**.
-5. Open Streamlit locally (optional) to browse results, or query the read model `v_canonical_shortlist`.
+## Distribution Mode 1: Non-technical Users (Desktop Installer)
 
-## Engineer Path (Local)
+This mode requires **no terminal, no Node.js installation, no server commands, and no port configuration**.
 
-1. Install Node.js and dependencies:
+### 1. Download & Install
+1. Go to the [GitHub Releases](https://github.com/elenaokhonko-eng/Job-Decision-Engine/releases) page.
+2. Download the installer for your operating system:
+   - **Windows**: `Job-Decision-Engine-Setup-*.exe`
+   - **macOS**: `Job-Decision-Engine-*.dmg`
+   - **Linux**: `Job-Decision-Engine-*.AppImage` or `.deb`
+3. Run the installer and open **Job Decision Engine**.
 
+### 2. Complete the Guided Setup Wizard
+On first launch, the app launches an interactive 6-step setup wizard:
+1. **Welcome**: Overview of local privacy and architecture.
+2. **Neon Database**:
+   - Create a free project at [neon.tech](https://neon.tech).
+   - Paste your Neon connection string. The app tests connection latency and automatically derives the direct unpooled URL for migrations.
+3. **AI Provider Credentials**:
+   - Provide your **Google Gemini** API key (from Google AI Studio) or **OpenAI** API key.
+   - Click "Test Credentials" to verify live model availability and quota.
+4. **Model Routing**: Select your preferred AI preset (Google Gemini 1.5 Flash or OpenAI GPT-4o-mini).
+5. **Privacy & Consents**: Explicitly grant consent for AI evaluation and tailored application document generation.
+6. **Schema Initialization**: Click "Initialize Database & Run Migrations". The app bundles and runs all 46 database migrations directly into your database and registers default vector embedding spaces.
+
+All credentials are saved locally in OS-backed secure storage (Windows Credential Manager / macOS Keychain / Linux Secret Service) and are never transmitted to third-party servers.
+
+---
+
+## Distribution Mode 2: Technical Users (Developer / Local Clone)
+
+Developers and technical users can clone or fork the repository and run the engine locally.
+
+### 1. Prerequisites
+- Node.js 20+ or 22+
+- npm or pnpm
+- A Neon PostgreSQL database
+
+### 2. Setup Environment
 ```bash
+# 1. Clone repository
+git clone https://github.com/elenaokhonko-eng/Job-Decision-Engine.git
+cd Job-Decision-Engine
+
+# 2. Install dependencies
 npm ci
+
+# 3. Configure local environment
+cp .env.example .env.local
 ```
 
-2. Create `.env.local` from `.env.example` and set `DATABASE_URL`.
+Edit `.env.local` with your credentials:
+```env
+# Neon PostgreSQL database connections
+DATABASE_URL=postgresql://user:password@ep-xyz-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require
+DATABASE_URL_UNPOOLED=postgresql://user:password@ep-xyz.us-east-2.aws.neon.tech/neondb?sslmode=require
 
-3. Initialize schema + seed baseline:
+# AI Provider API Keys (at least one required)
+GEMINI_API_KEY=your_gemini_api_key_here
+# OPENAI_API_KEY=your_openai_api_key_here
 
+# User Consents
+ALLOW_AI_EVALUATION=true
+ALLOW_DOCUMENTS=true
+```
+
+### 3. Initialize Database & Run Migrations
 ```bash
-npm run dev:setup
-npm run sources:sync
+# Run schema migrations (001 through 046)
+npm run migrate
+
+# Initialize embedding spaces and model routes
+npm run embeddings:registry:init
 ```
 
-4. Run the Streamlit console:
-
+### 4. Run the Desktop Application
 ```bash
-streamlit run streamlit_app.py
+# Run Electron desktop app in development mode
+npm run desktop:dev
+
+# Or run the local web frontend + companion API server
+npm run dev
 ```
 
-### Hosted Streamlit
-
-For Streamlit Cloud, add `DATABASE_URL`, `WORKSPACE_KEY`, and `WORKSPACE_USER_KEY` to the app secrets. The app first uses `JDEC_API_BASE_URL` when it points to a reachable API; if that API is unavailable, shortlist and rejected-job reads fall back to the canonical PostgreSQL read models in read-only mode. Do not set `JDEC_API_BASE_URL` to `localhost`, `127.0.0.1`, or `0.0.0.0` unless the API is running inside the same process environment. API-backed mutations still require a reachable API endpoint.
-
-### Managed API and desktop client
-
-The Gemini/OpenAI keys are provider credentials used by the server-side workers. `DATABASE_URL` is the application database connection; `DATABASE_URL_UNPOOLED` is the separate direct connection used only for migrations and session-scoped locks. Neither set of credentials is the managed API login.
-
-The managed API is this repository's `npm run api:v2` service deployed behind a public HTTPS host. Configure the service with `NODE_ENV=production`, `API_HOST=0.0.0.0`, the platform-provided `PORT`, `DATABASE_URL`, a newly generated server secret `JDEC_API_TOKEN`, and stable tenant identifiers `WORKSPACE_KEY` and `WORKSPACE_USER_KEY`.
-
-Set the client-facing `JDEC_API_BASE_URL` to the public service URL ending in `/api/v2`, for example `https://api.example.com/api/v2`. The desktop client and Streamlit send the bearer token plus workspace/user headers to that service; provider keys and the database password remain server-side and are never entered by end users into the desktop client. The authenticated consent screen or `PUT /api/v2/consents` endpoint must grant `allow_ai_evaluation` for the selected workspace/user before provider-backed evaluation is enabled.
-
-## Troubleshooting
-
-- If Gemini embeddings fail with `404 NOT_FOUND` / `embedContent` errors, run:
-
+### 5. Verification & Testing
 ```bash
-npm run gemini:models
+# Run unit and integration tests
+npm test
+
+# Run desktop packaging verification (verifies local bundle, safeStorage, and packaged migrations)
+npm run desktop:verify
+
+# Run standalone desktop E2E gate check
+npm run desktop:e2e-gate
 ```
 
-Then set `EMBEDDING_PRIMARY_MODEL` to a model supporting `embedContent` (the default is `gemini-embedding-001`), and optionally set `GEMINI_API_VERSION` (e.g. `v1beta`).
+---
+
+## Security & Architecture Invariants
+
+1. **Local-First & Private**: The app connects directly from your local machine to your private Neon PostgreSQL database. There is no middleman SaaS or hosted intermediary.
+2. **Bring Your Own Keys (BYOK)**: All AI evaluation and embedding generation uses your personal API keys.
+3. **OS Secure Storage**: Desktop secrets (`DATABASE_URL`, `GEMINI_API_KEY`, `OPENAI_API_KEY`) are encrypted using Electron's `safeStorage` API backed by OS primitives.
+4. **Deterministic Invariants**: Infrastructure errors, timeouts, or API quota limits never become job rejections. Non-fits are eliminated by deterministic rules before AI evaluation.

@@ -8,9 +8,10 @@
   "main": "desktop/electron/main.cjs",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
+    "build": "npm run desktop:build:backend && vite build",
     "preview": "vite preview",
     "desktop:web": "npm run dev",
+    "desktop:build:backend": "tsx scripts/build_desktop_backend.ts",
     "desktop:dev": "npm run build && electron .",
     "desktop:build": "npm run desktop:pack",
     "desktop:pack": "tsx scripts/package_desktop.ts --dir",
@@ -19,6 +20,7 @@
     "desktop:release:validate": "tsx scripts/validate_desktop_release.ts",
     "desktop:release:evidence": "tsx scripts/desktop_release_evidence.ts",
     "desktop:verify": "tsx scripts/verify_desktop_packaging.ts",
+    "desktop:e2e-gate": "tsx scripts/check_desktop_e2e_gate.ts",
     "dev:setup": "tsx scripts/dev_setup.ts",
     "db:init": "tsx scripts/db_init.ts",
     "eval:run": "tsx scripts/evaluate_jobs.ts",
@@ -36,7 +38,7 @@
     "pipeline:worker": "tsx scripts/process_pipeline_tasks.ts",
     "pipeline:reconcile": "tsx scripts/reconcile_pipeline.ts",
     "source:enrich-incomplete": "tsx scripts/enrich_incomplete_descriptions.ts",
-    "e2e:retest-gate": "tsx scripts/check_e2e_retest_gate.ts",
+    "e2e:retest-gate": "tsx scripts/check_desktop_e2e_gate.ts",
     "decisions:replay": "tsx scripts/replay_deterministic_decisions.ts",
     "test": "vitest run",
     "eval:golden": "tsx scripts/run_evals.ts",
@@ -54,6 +56,7 @@
     "files": [
       "dist/**/*",
       "desktop/electron/**/*",
+      "migrations/**/*",
       "package.json"
     ],
     "extraMetadata": {

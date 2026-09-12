@@ -15,6 +15,10 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+concurrency:
+  group: documents-generator
+  cancel-in-progress: false
+
 jobs:
   generate-documents:
     runs-on: ubuntu-latest
@@ -45,16 +49,28 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PICK_DOCUMENTS_ALLOW_EMPTY: "true"
+          INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
+          INPUT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -n "${{ inputs.canonical_job_id }}" ]]; then
+          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+
+          if [[ -n "$INPUT_CANONICAL_JOB_ID" ]]; then
+            if [[ ! "$INPUT_CANONICAL_JOB_ID" =~ $uuid_re ]]; then
+              echo "canonical_job_id must be a UUID." >&2
+              exit 1
+            fi
+            if [[ -n "$INPUT_JOB_VERSION_ID" && ! "$INPUT_JOB_VERSION_ID" =~ $uuid_re ]]; then
+              echo "job_version_id must be a UUID when provided." >&2
+              exit 1
+            fi
             {
-              echo "CANONICAL_JOB_ID=${{ inputs.canonical_job_id }}"
+              echo "CANONICAL_JOB_ID=$INPUT_CANONICAL_JOB_ID"
               echo "DOCUMENTS_JOB_FOUND=true"
-              if [[ -n "${{ inputs.job_version_id }}" ]]; then
-                echo "JOB_VERSION_ID=${{ inputs.job_version_id }}"
+              if [[ -n "$INPUT_JOB_VERSION_ID" ]]; then
+                echo "JOB_VERSION_ID=$INPUT_JOB_VERSION_ID"
               fi
             } >> "$GITHUB_ENV"
             exit 0

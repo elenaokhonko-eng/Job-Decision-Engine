@@ -99,7 +99,9 @@ jobs:
     name: Run Job Decision Pipeline
     runs-on: ubuntu-latest
     needs: [gmail_ingestion, public_source_ingestion]
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && always() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success') }}
+    # Both discovery sources are required stages for a complete ingestion run.
+    # If either fails, fail the workflow instead of silently processing a partial funnel.
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && always() && needs.gmail_ingestion.result == 'success' && needs.public_source_ingestion.result == 'success' }}
     timeout-minutes: 35
     steps:
       - name: Checkout repository code
@@ -184,6 +186,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
           GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}

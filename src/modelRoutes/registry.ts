@@ -6,6 +6,8 @@ export type ModelRoutePurpose = "EVALUATION" | "EMBEDDING" | "DOCUMENT" | "EXTRA
 
 export type ModelRouteProvider = "gemini" | "openai";
 
+type PgQueryable = pg.Pool | pg.PoolClient | pg.Client;
+
 export interface ModelRouteRevisionContent {
   primary_provider: ModelRouteProvider;
   primary_model: string;
@@ -62,11 +64,25 @@ export async function ensureModelRouteActiveRevision(
     content: ModelRouteRevisionContent;
     note?: string;
   },
-  clientOrPool: pg.Pool | pg.PoolClient,
+  clientOrPool: PgQueryable,
   options?: { context?: WorkspaceContext }
 ): Promise<ActiveModelRouteRevision> {
-  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
-    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const isPool = (value: PgQueryable): value is pg.Pool => {
+    const maybe = value as any;
+    return (
+      value instanceof pg.Pool ||
+      (typeof maybe?.connect === "function" &&
+        typeof maybe?.query === "function" &&
+        "totalCount" in maybe &&
+        "idleCount" in maybe &&
+        "waitingCount" in maybe) ||
+      // Small pool-shaped test doubles expose connect but not query. A pg.Client
+      // has query and is therefore deliberately excluded here.
+      (typeof maybe?.connect === "function" &&
+        typeof maybe?.query !== "function" &&
+        typeof maybe?.release !== "function")
+    );
+  };
   const ownsClient = isPool(clientOrPool);
   const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
 
@@ -242,11 +258,23 @@ export async function ensureModelRouteActiveRevision(
 
 export async function getActiveModelRouteRevision(
   routeKey: string,
-  clientOrPool: pg.Pool | pg.PoolClient,
+  clientOrPool: PgQueryable,
   options?: { context?: WorkspaceContext }
 ): Promise<ActiveModelRouteRevision | null> {
-  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
-    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const isPool = (value: PgQueryable): value is pg.Pool => {
+    const maybe = value as any;
+    return (
+      value instanceof pg.Pool ||
+      (typeof maybe?.connect === "function" &&
+        typeof maybe?.query === "function" &&
+        "totalCount" in maybe &&
+        "idleCount" in maybe &&
+        "waitingCount" in maybe) ||
+      (typeof maybe?.connect === "function" &&
+        typeof maybe?.query !== "function" &&
+        typeof maybe?.release !== "function")
+    );
+  };
   const ownsClient = isPool(clientOrPool);
   const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
 
@@ -331,11 +359,23 @@ export async function recordModelRouteInvocation(
     tokensTotal?: number | null;
     errorMessage?: string | null;
   },
-  clientOrPool: pg.Pool | pg.PoolClient,
+  clientOrPool: PgQueryable,
   options?: { context?: WorkspaceContext }
 ): Promise<string | null> {
-  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
-    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const isPool = (value: PgQueryable): value is pg.Pool => {
+    const maybe = value as any;
+    return (
+      value instanceof pg.Pool ||
+      (typeof maybe?.connect === "function" &&
+        typeof maybe?.query === "function" &&
+        "totalCount" in maybe &&
+        "idleCount" in maybe &&
+        "waitingCount" in maybe) ||
+      (typeof maybe?.connect === "function" &&
+        typeof maybe?.query !== "function" &&
+        typeof maybe?.release !== "function")
+    );
+  };
   const ownsClient = isPool(clientOrPool);
   const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
 

@@ -32,6 +32,18 @@ export function resolveMigrationDatabaseUrl(env: NodeJS.ProcessEnv = process.env
   return directUrl || applicationUrl;
 }
 
+function describeConnectionError(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const candidate = error as { message?: unknown; errors?: unknown };
+  const message = typeof candidate.message === "string" ? candidate.message : String(error);
+  if (!Array.isArray(candidate.errors) || candidate.errors.length === 0) return message;
+
+  const causes = candidate.errors
+    .map((cause) => describeConnectionError(cause))
+    .filter((cause) => cause.trim().length > 0);
+  return causes.length > 0 ? `${message}: ${causes.join(" | ")}` : message;
+}
+
 export async function preflightDatabase(
   env: NodeJS.ProcessEnv = process.env
 ): Promise<{ database: string; schema: string; serverVersion: string }> {
@@ -59,7 +71,7 @@ export async function preflightDatabase(
       serverVersion: row.server_version,
     };
   } catch (error: any) {
-    const message = error?.message || String(error);
+    const message = describeConnectionError(error);
     throw new Error(`Database preflight failed: unable to connect to the configured PostgreSQL database: ${message}`);
   } finally {
     await client.end().catch(() => undefined);

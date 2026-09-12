@@ -187,18 +187,6 @@ async function seedFixtureProfile(context: WorkspaceContext): Promise<void> {
     );
   }
 
-  await q(
-    `INSERT INTO workspace_user_consents (
-       workspace_id, user_id, consent_key, granted, granted_at, revoked_at, updated_at
-     )
-     VALUES ($1, $2, 'allow_ai_evaluation', TRUE, NOW(), NULL, NOW())
-     ON CONFLICT (workspace_id, user_id, consent_key)
-     DO UPDATE SET granted = TRUE,
-                   granted_at = COALESCE(workspace_user_consents.granted_at, NOW()),
-                   revoked_at = NULL,
-                   updated_at = NOW()`,
-    [context.workspaceId, context.userId]
-  );
 }
 
 describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {

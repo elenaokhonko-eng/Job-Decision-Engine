@@ -13,6 +13,7 @@ import { loadWorkabilityPolicy, mergeWorkabilityPreferenceContent } from "../../
 import { stableStringify } from "../../config/structuredLoader.js";
 import { apiAuthMiddleware } from "./auth.js";
 import { decodeCursor, encodeCursor } from "./cursor.js";
+import { createSetupRouter } from "./setupRouter.js";
 
 type QueryClient = {
   query: pg.PoolClient["query"];
@@ -130,22 +131,56 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
   const router = express.Router();
   router.use(express.json({ limit: "1mb" }));
 
-  const pool =
-    deps.pool ??
-    new pg.Pool(pgPoolConfig(requiredDatabaseUrl()));
+  // Keep the pool strongly typed while the setup wizard is running before a
+  // database URL exists. Database-backed routes are guarded by this flag.
+  let databaseConfigured = Boolean(deps.pool || String(process.env.DATABASE_URL || "").trim());
+  let pool = deps.pool ?? new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
   const resolveContext: ResolveContextFn = deps.resolveContext ?? resolveWorkspaceContext;
 
   router.use(apiAuthMiddleware());
 
+  // Mount setup and onboarding router before workspace context resolution
   router.use(
-    asyncHandler(async (req, _res, next) => {
-      const ctx = await resolveContext(pool as unknown as QueryClient, {
-        workspaceKey: workspaceKeyFromRequest(req),
-        userKey: userKeyFromRequest(req),
-      });
-      (req as any).workspaceContext = ctx;
-      next();
+    "/setup",
+    createSetupRouter({
+      pool: databaseConfigured ? pool : undefined,
+      getPool: () => (databaseConfigured ? pool : null),
+      onDatabaseInitialized: ({ databaseUrl, databaseUrlDirect }) => {
+        process.env.DATABASE_URL = databaseUrl;
+        process.env.DATABASE_URL_UNPOOLED = databaseUrlDirect;
+        if (!deps.pool) {
+          pool = new pg.Pool(pgPoolConfig(databaseUrl));
+        }
+        databaseConfigured = true;
+      },
+    })
+  );
+
+  router.use(
+    asyncHandler(async (req, res, next) => {
+      if (!databaseConfigured) {
+        res.status(503).json({
+          ok: false,
+          error: "DATABASE_NOT_CONFIGURED",
+          message: "Database is not configured yet. Complete the desktop setup wizard to connect your database.",
+        });
+        return;
+      }
+      try {
+        const ctx = await resolveContext(pool as unknown as QueryClient, {
+          workspaceKey: workspaceKeyFromRequest(req),
+          userKey: userKeyFromRequest(req),
+        });
+        (req as any).workspaceContext = ctx;
+        next();
+      } catch (err: any) {
+        res.status(503).json({
+          ok: false,
+          error: "DATABASE_NOT_INITIALIZED",
+          message: "Database schema is not initialized yet. Complete the desktop setup wizard to install the schema.",
+        });
+      }
     })
   );
 
@@ -340,7 +375,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
       const rawPayloadHash = sha256Hex(rawPayload);
 
       try {
-        const insertedRow = await withTransaction(pool, async (tx) => {
+        const insertedRow = await withTransaction<{ id: string } | null>(pool, async (tx) => {
           const runRes = await tx.query<{ id: string }>(
             `INSERT INTO source_runs (workspace_id, status)
              VALUES ($1, 'MANUAL_STREAMLIT')
@@ -414,7 +449,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
       }
 
       try {
-        const result = await withTransaction(pool, async (tx) => {
+        const result = await withTransaction<{ inserted: number; skipped: number }>(pool, async (tx) => {
           const runRes = await tx.query<{ id: string }>(
             `INSERT INTO source_runs (workspace_id, status)
              VALUES ($1, 'LINKEDIN_IMPORT')
@@ -965,8 +1000,13 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         res.status(404).json({ ok: false, error: "Canonical job/version not found." });
         return;
       }
-      if ("handoffBlocked" in record && record.handoffBlocked) {
-        res.status(409).json({ ok: false, error: record.error, reason: record.reason });
+      if (
+        typeof record === "object" &&
+        record !== null &&
+        (record as { handoffBlocked?: unknown }).handoffBlocked === true
+      ) {
+        const blocked = record as { error: string; reason: string };
+        res.status(409).json({ ok: false, error: blocked.error, reason: blocked.reason });
         return;
       }
 
@@ -1312,93 +1352,6 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
   );
 
   router.get(
-    "/consents",
-    asyncHandler(async (req, res) => {
-      const ctx = (req as any).workspaceContext as WorkspaceContext;
-      const { rows } = await pool.query<{
-        consent_key: string;
-        granted: boolean;
-        granted_at: string | null;
-        revoked_at: string | null;
-        updated_at: string;
-      }>(
-        `
-          SELECT consent_key, granted, granted_at, revoked_at, updated_at
-          FROM workspace_user_consents
-          WHERE workspace_id = $1 AND user_id = $2
-          ORDER BY updated_at DESC
-        `,
-        [ctx.workspaceId, ctx.userId]
-      );
-      res.json({ ok: true, consents: rows });
-    })
-  );
-
-  router.put(
-    "/consents",
-    asyncHandler(async (req, res) => {
-      const ctx = (req as any).workspaceContext as WorkspaceContext;
-      const consents = req.body?.consents;
-      if (!consents || typeof consents !== "object" || Array.isArray(consents)) {
-        res.status(400).json({ ok: false, error: "Body must include consents object." });
-        return;
-      }
-
-      const entries = Object.entries(consents as Record<string, unknown>);
-      for (const [key, val] of entries) {
-        if (!key.trim()) {
-          res.status(400).json({ ok: false, error: "consent_key must be non-empty." });
-          return;
-        }
-        if (typeof val !== "boolean") {
-          res.status(400).json({ ok: false, error: `consents.${key} must be boolean.` });
-          return;
-        }
-      }
-
-      const updated = await withTransaction(pool, async (client) => {
-        for (const [key, val] of entries) {
-          const granted = Boolean(val);
-          await client.query(
-            `
-              INSERT INTO workspace_user_consents (
-                workspace_id,
-                user_id,
-                consent_key,
-                granted,
-                granted_at,
-                revoked_at,
-                updated_at
-              )
-              VALUES ($1, $2, $3, $4, CASE WHEN $4 THEN NOW() ELSE NULL END, CASE WHEN $4 THEN NULL ELSE NOW() END, NOW())
-              ON CONFLICT (workspace_id, user_id, consent_key)
-              DO UPDATE SET
-                granted = EXCLUDED.granted,
-                granted_at = EXCLUDED.granted_at,
-                revoked_at = EXCLUDED.revoked_at,
-                updated_at = NOW()
-            `,
-            [ctx.workspaceId, ctx.userId, key, granted]
-          );
-        }
-
-        const { rows } = await client.query(
-          `
-            SELECT consent_key, granted, granted_at, revoked_at, updated_at
-            FROM workspace_user_consents
-            WHERE workspace_id = $1 AND user_id = $2
-            ORDER BY updated_at DESC
-          `,
-          [ctx.workspaceId, ctx.userId]
-        );
-        return rows;
-      });
-
-      res.json({ ok: true, consents: updated });
-    })
-  );
-
-  router.get(
     "/preference-modes",
     asyncHandler(async (req, res) => {
       const ctx = (req as any).workspaceContext as WorkspaceContext;
@@ -1497,7 +1450,11 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         return;
       }
 
-      const activation = await withTransaction(pool, async (client) => {
+      const activation = await withTransaction<{
+        mode: Record<string, unknown> | null;
+        recalculationEnqueued: number;
+        recalculationExisting: number;
+      }>(pool, async (client) => {
         await client.query(
           `
             UPDATE workspace_user_preference_modes

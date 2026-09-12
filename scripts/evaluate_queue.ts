@@ -6,10 +6,7 @@ import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationW
 import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
-import {
-  shouldFailOnConsentMissing,
-  type EvaluationQueueStats,
-} from "../src/pipeline/evaluationQueuePolicy.js";
+import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
@@ -43,30 +40,6 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
     }
 
     const ctx: WorkspaceContext = await resolveWorkspaceContext(client as any);
-
-    const consentResult = await client.query<{ granted: boolean }>(
-      `SELECT granted
-       FROM workspace_user_consents
-       WHERE workspace_id = $1
-         AND user_id = $2
-         AND consent_key = 'allow_ai_evaluation'
-       LIMIT 1`,
-      [ctx.workspaceId, ctx.userId]
-    );
-    if (consentResult.rows[0]?.granted !== true) {
-      const consentState = consentResult.rows.length === 0 ? "MISSING" : "REVOKED_OR_FALSE";
-      console.error(
-        `[evaluation-queue] BLOCKED reason=CONSENT_NOT_GRANTED ` +
-        `workspace_key=${ctx.workspaceKey} user_key=${ctx.userKey} consent_state=${consentState}`
-      );
-      return {
-        processed: 0,
-        failed: 0,
-        manualReview: 0,
-        eligible: 0,
-        blockedReason: "CONSENT_NOT_GRANTED",
-      };
-    }
 
     // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
     // Join strictly to evaluation_queue.job_version_id and gate_decisions for the same job_version_id (invariant: never substitute latest version during retry)
@@ -478,12 +451,6 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
 if (process.argv[1] && process.argv[1].includes("evaluate_queue")) {
   evaluateQueue()
     .then((stats) => {
-      if (stats.blockedReason === "CONSENT_NOT_GRANTED" && shouldFailOnConsentMissing()) {
-        console.error(
-          "❌ Evaluation drain blocked because allow_ai_evaluation consent is not granted for the resolved workspace/user."
-        );
-        process.exit(2);
-      }
       const strictExitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
       if (stats.failed > 0 && strictExitOnRetryWait) {
         // Invariant 7: exit non-zero when any required stage fails

@@ -758,6 +758,7 @@ describe("stageTaskWorker", () => {
     expect(matchSeed?.sql).toContain("mr.job_version_id = target_jv.id");
     expect(matchSeed?.sql).toContain("mr.job_content_hash = target_jv.content_hash");
     expect(matchSeed?.sql).toContain("mr.context_fingerprint IS NOT NULL");
+    expect(matchSeed?.sql).toContain("mr.embedding_space_id IS NOT NULL");
 
     const decisionSeed = calls.find(
       (call) => call.sql.includes("c.recommendation_outcome IS NULL")

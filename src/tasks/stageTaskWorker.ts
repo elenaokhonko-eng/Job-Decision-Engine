@@ -745,6 +745,10 @@ export async function seedRecoverablePipelineTasks(
                AND mr.job_content_hash = target_jv.content_hash
                AND mr.status = 'COMPLETED'
                AND mr.context_fingerprint IS NOT NULL
+               AND (
+                 mr.requirement_count = 0
+                 OR mr.embedding_space_id IS NOT NULL
+               )
            )
          )
        ORDER BY c.updated_at ASC

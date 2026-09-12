@@ -76,9 +76,11 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   requireCheck(fileContains(mainPath, "safeStorage"), "main process uses Electron safeStorage");
   requireCheck(fileContains(mainPath, "jdec:api:request"), "main process owns the authenticated remote API bridge");
   requireCheck(!fileContains(mainPath, 'ipcMain.handle("jdec:secret:get"'), "main process does not expose bearer-token reads over IPC");
-  requireCheck(fileContains(mainPath, "apiTokenConfigured"), "main process reports token configuration without exposing the token");
-  requireCheck(fileContains(mainPath, "Packaged desktop clients require an HTTPS managed remote API"), "packaged desktop API transport is HTTPS enforced");
-  requireCheck(fileContains(mainPath, "if (app.isPackaged) return \"\""), "packaged desktop has no implicit loopback API default");
+  requireCheck(fileContains(mainPath, "localServerModule"), "main process loads standalone local companion server");
+  requireCheck(fileContains(mainPath, "http://127.0.0.1"), "main process configures local companion loopback transport");
+  requireCheck(fileContains(mainPath, "databaseUrl"), "main process manages database credentials via safeStorage");
+  requireCheck(fileContains(pkgPath, "migrations/**/*"), "package.json packages migrations for standalone initialization");
+  requireCheck(hasScript(pkg, "desktop:build:backend"), "desktop:build:backend script exists");
   requireCheck(fileContains(mainPath, "JDEC_DESKTOP_START_API"), "main process has local API runtime guard");
   requireCheck(fileContains(mainPath, "JDEC_DESKTOP_RELEASE_CHANNEL"), "main process reads release channel");
   requireCheck(fileContains(mainPath, "autoUpdater.channel"), "main process configures updater channel");
