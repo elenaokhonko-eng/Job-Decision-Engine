@@ -1,0 +1,136 @@
+{
+  "version": "1.3.0",
+  "platform": "CrewPilot — Your AI Engineering Crew",
+  "global": {
+    "confidence_threshold": 7,
+    "max_findings": 20,
+    "output_style": "concise",
+    "auto_chain": true
+  },
+  "board": {
+    "boards": [
+      {
+        "provider": "github",
+        "github": {},
+        "name": "github"
+      }
+    ],
+    "sync_on_commit": true,
+    "active": "github"
+  },
+  "worker": {
+    "enabled": true,
+    "max_retries": 3,
+    "human_gates": [
+      "approve-plan",
+      "approve-pr",
+      "approve-merge"
+    ],
+    "auto_assign_label": "digital-worker"
+  },
+  "notifications": {
+    "channel": "email",
+    "email_recipients": []
+  },
+  "pillars": {
+    "strategize": {
+      "enabled": true,
+      "skills": {
+        "solution-design": {
+          "enabled": true,
+          "max_options": 4
+        },
+        "architecture-planner": {
+          "enabled": true,
+          "require_adr": true
+        }
+      }
+    },
+    "assure": {
+      "enabled": true,
+      "skills": {
+        "code-quality": {
+          "enabled": true,
+          "severity_floor": "medium"
+        },
+        "vulnerability-scan": {
+          "enabled": true,
+          "owasp_top_10": true,
+          "cwe_top_25": true
+        },
+        "pr-intelligence": {
+          "enabled": true,
+          "auto_summarize": true
+        }
+      }
+    },
+    "engineer": {
+      "enabled": true,
+      "skills": {
+        "feature-builder": {
+          "enabled": true,
+          "scaffold_tests": true
+        },
+        "test-first": {
+          "enabled": true,
+          "enforcement": "strict",
+          "min_coverage": 80
+        },
+        "root-cause-analysis": {
+          "enabled": true,
+          "max_attempts": 5
+        },
+        "code-simplification": {
+          "enabled": true,
+          "require_baseline_tests": true
+        },
+        "doubt-driven-development": {
+          "enabled": true,
+          "high_stakes_only": true
+        },
+        "source-driven-development": {
+          "enabled": true,
+          "weak_source_warn": true
+        },
+        "incremental-implementation": {
+          "enabled": true,
+          "flag_default": "off"
+        }
+      }
+    },
+    "deliver": {
+      "enabled": true,
+      "skills": {
+        "change-management": {
+          "enabled": true,
+          "commit_format": "conventional"
+        },
+        "doc-governance": {
+          "enabled": true,
+          "drift_detection": true
+        },
+        "deploy-guard": {
+          "enabled": true,
+          "phase_gates": "strict"
+        },
+        "deprecation-migration": {
+          "enabled": true,
+          "require_consumer_inventory": true
+        }
+      }
+    },
+    "insights": {
+      "enabled": true,
+      "skills": {
+        "pattern-detection": {
+          "enabled": true,
+          "scan_depth": "full"
+        },
+        "knowledge-base": {
+          "enabled": true,
+          "retention_days": 90
+        }
+      }
+    }
+  }
+}
