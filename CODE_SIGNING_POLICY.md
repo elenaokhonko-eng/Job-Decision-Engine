@@ -95,3 +95,4 @@ If a security vulnerability or unauthorized binary is identified:
 1. The maintainer will immediately remove the compromised download from GitHub Releases.
 2. An advisory will be published via GitHub Security Advisories ([SECURITY.md](SECURITY.md)).
 3. The maintainer will immediately notify the SignPath Foundation to revoke the signature or certificate if an integrity breach is suspected.
+

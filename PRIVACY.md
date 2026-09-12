@@ -36,7 +36,9 @@ Job Decision Engine connects only to services that you explicitly configure:
 
 ### B. AI Providers (Google Gemini & OpenAI)
 - **Bring Your Own Keys (BYOK)**: All generative AI evaluations and document synthesis calls use your personal API keys provided during setup.
-- **Configured-provider execution**: Once a provider key is configured, bounded E2E processing sends only the stage-approved job requirements and verified factual career claims needed for evaluation or document generation.
+- **Explicit User Consent**: Communication with AI providers occurs only when you have explicitly granted consent:
+  - `allow_ai_evaluation`: Required to send pre-qualified job descriptions to your AI provider for lane scoring, match synthesis, and decision explanations.
+  - `allow_documents`: Required to generate tailored DOCX resumes and cover letters using factual ledger claims.
 - **Strict Data Minimization**:
   - Deterministic hard gates run locally *before* any AI evaluation. Unqualified jobs and workability non-fits are rejected locally and never sent to an AI provider.
   - Only bounded, pre-screened job requirements and verified factual career claims are included in AI prompts.
@@ -52,7 +54,7 @@ Job Decision Engine connects only to services that you explicitly configure:
 ## 4. User Controls & Data Deletion
 
 You retain absolute authority over your data at all times:
-- **Provider controls**: You can stop external AI processing by removing the configured provider keys from the application settings or local environment.
+- **Consent Revocation**: You can enable or disable AI evaluation or document generation at any time in the application Settings or Setup Wizard.
 - **Credential Removal**: You can clear stored API keys and database connections through the application settings or by clearing the local application storage directory.
 - **Database Wipe**: You can purge or drop your database tables directly in your Neon console or by running the local reset commands.
 
@@ -72,3 +74,4 @@ Windows desktop installers and updates are digitally signed using a free code-si
 If you have questions regarding this Privacy Policy or the security of the application, please open an issue or security advisory on the GitHub repository:
 - Repository: [https://github.com/elenaokhonko-eng/Job-Decision-Engine](https://github.com/elenaokhonko-eng/Job-Decision-Engine)
 - Security reporting: See [SECURITY.md](SECURITY.md)
+

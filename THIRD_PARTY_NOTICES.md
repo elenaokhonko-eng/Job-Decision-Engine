@@ -34,3 +34,4 @@ Below is a summary of the primary open-source packages utilized by Job Decision 
 ## License Texts
 
 Each third-party library is copyrighted by its respective authors. The complete license texts for these open-source dependencies are bundled with the packaged software and can be inspected in the `node_modules` directory of the source repository.
+

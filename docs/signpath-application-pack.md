@@ -59,7 +59,7 @@ Standard job search platforms create immense cognitive fatigue, sensory overload
 2. Operational Failures Never Become Career Rejections: Infrastructure hiccups, schema mismatches, network timeouts, or rate limits transition to retry states (RETRY_WAIT / NEEDS_MANUAL_REVIEW); they are never labeled as job or career rejections.
 3. Unknowns Remain Explicit: Missing requirements or ambiguity produce NEEDS_VERIFICATION rather than fabricated assumptions.
 4. Strategic Multi-Lane Discovery: Aggregates across four target domains: Core AI/Data, Legal/RegTech, Health/Bio/Pharma, and Investment/Fintech.
-5. Local-First & BYOK Privacy: Runs locally as a standalone Electron desktop app. User data is stored in their private PostgreSQL instance. Generative AI evaluation (Google Gemini or OpenAI) uses the configured personal API keys as part of the deterministic E2E pipeline.
+5. Local-First & BYOK Privacy: Runs locally as a standalone Electron desktop app. User data is stored in their private PostgreSQL instance. Generative AI evaluation (Google Gemini or OpenAI) uses personal API keys only with explicit user opt-in (allow_ai_evaluation).
 6. Evidence-Grounded Documents: Programmatically generates tailored DOCX resumes and cover letters strictly mapped to a factual career evidence ledger, eliminating hallucination.
 
 The software is 100% open-source under the MIT License with zero proprietary dependencies. Code signing via the SignPath Foundation will ensure our desktop installers carry verifiable provenance and cryptographic integrity on Windows.
@@ -173,3 +173,4 @@ Once your application is approved by the SignPath Foundation team:
    When prompted during the GitHub Actions run, log into the SignPath Foundation portal and click **Approve** on the pending signing request.
 7. **Verify Signed Release**:
    Download the published installer from GitHub Releases and verify that Windows displays `SignPath Foundation` as the verified publisher.
+
