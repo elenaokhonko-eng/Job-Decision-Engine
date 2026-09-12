@@ -25,9 +25,25 @@ const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 interface PersistedRequirement {
   requirement_key: string;
   requirement_type: string;
+  importance?: string;
   requirement_text: string;
   quote_text: string | null;
   structured_value: Record<string, unknown> | null;
+}
+
+export function isRequirementOptional(req: PersistedRequirement): boolean {
+  const importance = (req.importance || "").toUpperCase();
+  if (importance === "PREFERRED" || importance === "NICE_TO_HAVE" || importance === "OPTIONAL") {
+    return true;
+  }
+  const structuredImportance = String(req.structured_value?.importance || "").toUpperCase();
+  if (structuredImportance === "PREFERRED" || structuredImportance === "NICE_TO_HAVE" || structuredImportance === "OPTIONAL") {
+    return true;
+  }
+  if (req.structured_value?.is_required === false || req.structured_value?.required === false) {
+    return true;
+  }
+  return false;
 }
 
 function makePass(extraFacts?: Partial<GateResult["workability_facts"]>): GateResult {
@@ -391,6 +407,9 @@ function applyExactProfileGates(
   const unknowns: string[] = [];
   const unknownEvidence: string[] = [];
   for (const requirement of exactRequirements) {
+    if (isRequirementOptional(requirement)) {
+      continue;
+    }
     const comparison = compareStructuredRequirement(requirement, profileFacts);
     if (comparison.status === "MISMATCH") {
       mismatches.push(`GATE_${requirement.requirement_type}_MISMATCH`);
@@ -501,7 +520,7 @@ export async function runHardGates(
         };
 
         const { rows: requirementRows } = await client.query(
-          `SELECT requirement_key, requirement_type, requirement_text, quote_text, structured_value
+          `SELECT jr.requirement_key, jr.requirement_type, jr.importance, jr.requirement_text, jr.quote_text, jr.structured_value
            FROM job_versions jv
            JOIN job_requirements jr
              ON jr.workspace_id = jv.workspace_id

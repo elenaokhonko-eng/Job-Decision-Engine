@@ -1405,7 +1405,7 @@ async function executeStageTask(
       {
         context: ctx,
         jobVersionIds: [jobVersionId],
-        includeProfileFacts: false,
+        includeProfileFacts: true,
         includeLanePrototypes: true,
       }
     );

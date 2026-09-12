@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { generateContentHash } from "../services/criteria.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
-import { classifyDescriptionQuality } from "./descriptionQuality.js";
+import { classifyDescriptionQuality, MIN_COMPLETE_DESCRIPTION_CHARS } from "./descriptionQuality.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -185,6 +185,42 @@ export async function runNormalization(
         if (createdNewVersion) {
           // Preserve established facts when later source data is explicitly Unknown.
           const descriptionQuality = classifyDescriptionQuality(obs.description_raw);
+
+          const existingJobState = await client.query<{
+            latest_job_version_id: string | null;
+            description_quality_status: string | null;
+            existing_desc_len: number | null;
+          }>(
+            `SELECT c.latest_job_version_id,
+                    c.description_quality_status,
+                    LENGTH(COALESCE(jv.description_text, '')) AS existing_desc_len
+             FROM canonical_jobs c
+             LEFT JOIN job_versions jv
+               ON jv.workspace_id = c.workspace_id
+              AND jv.id = c.latest_job_version_id
+             WHERE c.workspace_id = $1
+               AND c.id = $2
+             LIMIT 1`,
+            [ctx.workspaceId, canonicalJobId]
+          );
+
+          const existingRow = existingJobState.rows[0];
+          const hasExistingComplete =
+            existingRow?.description_quality_status === 'COMPLETE' ||
+            (existingRow?.existing_desc_len ?? 0) >= MIN_COMPLETE_DESCRIPTION_CHARS;
+          const isNewVersionInferior = hasExistingComplete && descriptionQuality.status === 'INCOMPLETE';
+
+          const versionToSetAsLatest =
+            isNewVersionInferior && existingRow?.latest_job_version_id
+              ? existingRow.latest_job_version_id
+              : resolvedVersionId;
+          const statusToSet = isNewVersionInferior
+            ? 'COMPLETE'
+            : descriptionQuality.status;
+          const reasonToSet = isNewVersionInferior
+            ? null
+            : descriptionQuality.reason;
+
           await client.query(
             `UPDATE canonical_jobs
              SET latest_job_version_id = $1,
@@ -197,21 +233,28 @@ export async function runNormalization(
                  employment_type = CASE WHEN NULLIF($5, 'UNKNOWN') IS NULL THEN employment_type ELSE $5 END,
                  description_quality_status = $8,
                  description_quality_reason = $9,
-                 processing_state = 'RAW_STAGED',
-                 processing_status = 'RAW_STAGED',
+                 processing_state = CASE
+                   WHEN $10::boolean THEN processing_state
+                   ELSE 'RAW_STAGED'
+                 END,
+                 processing_status = CASE
+                   WHEN $10::boolean THEN processing_status
+                   ELSE 'RAW_STAGED'
+                 END,
                  updated_at = NOW()
              WHERE workspace_id = $6
                AND id = $7`,
             [
-              resolvedVersionId,
+              versionToSetAsLatest,
               isExistingJob,
               obs.location_raw || "Unknown",
               obs.workplace_type_raw || "UNKNOWN",
               obs.employment_type_raw || "UNKNOWN",
               ctx.workspaceId,
               canonicalJobId,
-              descriptionQuality.status,
-              descriptionQuality.reason,
+              statusToSet,
+              reasonToSet,
+              isNewVersionInferior,
             ]
           );
         }

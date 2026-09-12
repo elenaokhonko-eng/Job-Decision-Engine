@@ -8,6 +8,7 @@ import {
 } from "../src/pipeline/repairClassification.js";
 import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { aggregateVerificationQuestions } from "../src/services/verificationQuestionService.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -19,6 +20,11 @@ interface RepairCandidate {
   gate_decision: string | null;
   primary_lane: string | null;
   rejection_reason: string | null;
+  rejection_reason_codes?: string[] | null;
+  evidence_quotes?: string[] | null;
+  profile_match_status?: string | null;
+  has_complete_prior_version?: boolean;
+  complete_version_id?: string | null;
   category: RepairCategory;
 }
 
@@ -41,9 +47,19 @@ async function loadCandidates(client: pg.PoolClient, context: WorkspaceContext):
       WITH latest_versions AS (
         SELECT DISTINCT ON (jv.canonical_job_id)
                jv.canonical_job_id,
-               jv.id AS job_version_id
+               jv.id AS job_version_id,
+               LENGTH(COALESCE(jv.description, '')) as desc_len
         FROM job_versions jv
         WHERE jv.workspace_id = $1
+        ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
+      ),
+      prior_complete_versions AS (
+        SELECT DISTINCT ON (jv.canonical_job_id)
+               jv.canonical_job_id,
+               jv.id AS complete_version_id
+        FROM job_versions jv
+        WHERE jv.workspace_id = $1
+          AND LENGTH(COALESCE(jv.description, '')) >= 1000
         ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
       )
        SELECT
@@ -52,12 +68,19 @@ async function loadCandidates(client: pg.PoolClient, context: WorkspaceContext):
          COALESCE(c.processing_state, c.processing_status) AS processing_state,
          c.gate_decision,
          c.primary_lane,
-         c.rejection_reason
+         c.rejection_reason,
+         c.rejection_reason_codes,
+         c.gate_evidence_quotes AS evidence_quotes,
+         c.profile_match_status,
+         (lv.desc_len < 1000 AND pcv.complete_version_id IS NOT NULL AND pcv.complete_version_id <> lv.job_version_id) AS has_complete_prior_version,
+         pcv.complete_version_id
       FROM canonical_jobs c
       JOIN latest_versions lv ON lv.canonical_job_id = c.id
+      LEFT JOIN prior_complete_versions pcv ON pcv.canonical_job_id = c.id
       WHERE c.workspace_id = $1
         AND (
-           COALESCE(c.processing_state, c.processing_status) IN ('NEEDS_MANUAL_REVIEW', 'HARD_REJECTED', 'RAW_STAGED')
+           COALESCE(c.processing_state, c.processing_status) IN ('NEEDS_MANUAL_REVIEW', 'HARD_REJECTED', 'RAW_STAGED', 'MATCHED', 'DECIDED', 'LANE_ROUTED')
+           OR (lv.desc_len < 1000 AND pcv.complete_version_id IS NOT NULL AND pcv.complete_version_id <> lv.job_version_id)
          )
        ORDER BY c.created_at, c.id
     `,
@@ -104,7 +127,7 @@ async function enqueueRepairTask(
   client: pg.PoolClient,
   context: WorkspaceContext,
   candidate: RepairCandidate,
-  taskType: "APPLY_HARD_GATES" | "EXTRACT_QUOTED_REQUIREMENTS" | "PUBLISH_EMBEDDING" | "ROUTE_LANE" | "MATCH_PROFILE_EVIDENCE",
+  taskType: "APPLY_HARD_GATES" | "EXTRACT_DETERMINISTIC_REQUIREMENTS" | "EXTRACT_QUOTED_REQUIREMENTS" | "PUBLISH_EMBEDDING" | "ROUTE_LANE" | "MATCH_PROFILE_EVIDENCE",
   taskVersion: string,
   payload: Record<string, unknown>,
   variant: string
@@ -224,8 +247,103 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
           "APPLY_HARD_GATES",
           "hard_gate_v1",
           { ...basePayload, force_policy_recalculation: true, reprocess: true },
-            category === "GATE_NULL" ? "gate-null" : "raw-hard-reject"
+          category === "GATE_NULL" ? "gate-null" : "raw-hard-reject"
         );
+        continue;
+      }
+
+      if (category === "FALSE_NEGATIVE_NEGATED_LIFESTYLE") {
+        await client.query(
+          `UPDATE canonical_jobs
+           SET gate_decision = NULL,
+               rejection_reason = NULL,
+               rejection_reason_codes = NULL,
+               gate_evidence_quotes = NULL,
+               processing_state = 'NORMALIZED',
+               processing_status = 'NORMALIZED',
+               updated_at = NOW()
+           WHERE workspace_id = $1 AND id = $2`,
+          [context.workspaceId, candidate.canonical_job_id]
+        );
+        await insertRepairEvent(client, context, candidate, {
+          repair: category,
+          prior_state: candidate.processing_state,
+          prior_rejection_reason: candidate.rejection_reason,
+          next_state: "NORMALIZED",
+        });
+        await enqueueRepairTask(
+          client,
+          context,
+          candidate,
+          "APPLY_HARD_GATES",
+          "hard_gate_v1",
+          { ...basePayload, force_policy_recalculation: true, reprocess: true },
+          "negated-lifestyle"
+        );
+        continue;
+      }
+
+      if (category === "UNPROVABLE_MATCH_EMBEDDING_PENDING") {
+        await client.query(
+          `UPDATE canonical_jobs
+           SET profile_match_status = 'UNKNOWN',
+               latest_match_run_id = NULL,
+               latest_deterministic_decision_id = NULL,
+               recommendation_eligibility = NULL,
+               recommendation_outcome = NULL,
+               processing_state = 'LANE_ROUTED',
+               processing_status = 'LANE_ROUTED',
+               updated_at = NOW()
+           WHERE workspace_id = $1 AND id = $2`,
+          [context.workspaceId, candidate.canonical_job_id]
+        );
+        await insertRepairEvent(client, context, candidate, {
+          repair: category,
+          prior_state: candidate.processing_state,
+          prior_match_status: candidate.profile_match_status,
+          next_state: "LANE_ROUTED",
+        });
+        await enqueueRepairTask(
+          client,
+          context,
+          candidate,
+          "MATCH_PROFILE_EVIDENCE",
+          "deterministic_matcher_v1",
+          { ...basePayload, profile_version_id: profileVersionId },
+          "unprovable-match"
+        );
+        continue;
+      }
+
+      if (category === "TRUNCATED_VERSION_MASKING" && candidate.complete_version_id) {
+        await client.query(
+          `UPDATE canonical_jobs
+           SET latest_job_version_id = $3,
+               gate_decision = NULL,
+               rejection_reason = NULL,
+               rejection_reason_codes = NULL,
+               gate_evidence_quotes = NULL,
+               processing_state = 'NORMALIZED',
+               processing_status = 'NORMALIZED',
+               updated_at = NOW()
+           WHERE workspace_id = $1 AND id = $2`,
+          [context.workspaceId, candidate.canonical_job_id, candidate.complete_version_id]
+        );
+        await insertRepairEvent(client, context, candidate, {
+          repair: category,
+          restored_version_id: candidate.complete_version_id,
+          next_state: "NORMALIZED",
+        });
+        await enqueueRepairTask(
+          client,
+          context,
+          { ...candidate, job_version_id: candidate.complete_version_id },
+          "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+          "deterministic_requirements_v1",
+          { ...basePayload, job_version_id: candidate.complete_version_id },
+          "truncated-masking"
+        );
+        continue;
       }
     }
     await client.query("COMMIT");
@@ -267,7 +385,8 @@ async function main(): Promise<void> {
     }
 
     const applied = await applyRepair(client, context, candidates);
-    console.log(JSON.stringify({ applied }, null, 2));
+    const questionSummary = await aggregateVerificationQuestions(client, { context });
+    console.log(JSON.stringify({ applied, questionSummary }, null, 2));
   } finally {
     client.release();
     await pool.end();

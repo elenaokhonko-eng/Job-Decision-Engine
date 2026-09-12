@@ -803,15 +803,15 @@ export async function runDeterministicMatcher(
             : 0;
 
           let matchType: 'EXACT' | 'SEMANTIC' | 'NO_MATCH' | 'UNKNOWN' = 'NO_MATCH';
-          if (usedEmbeddings) {
-            if (structuredComparison.status === "MATCH") {
-              matchType = 'EXACT';
-            } else if (bestScore >= SEMANTIC_MATCH_THRESHOLD) {
+          if (structuredComparison.status === "MATCH") {
+            matchType = 'EXACT';
+          } else if (usedEmbeddings) {
+            if (bestScore >= SEMANTIC_MATCH_THRESHOLD) {
               matchType = 'SEMANTIC';
             }
-          } else if (bestScore >= 0.2) {
+          } else {
             // Embeddings are not fully published for this job+profile; preserve a pending record
-            // without treating lexical similarity as a semantic match.
+            // without treating lexical similarity as a definitive semantic match or non-match.
             matchType = 'UNKNOWN';
           }
 
@@ -845,9 +845,11 @@ export async function runDeterministicMatcher(
               bestScore,
               matchType === 'NO_MATCH'
                 ? 'No sufficient lexical/semantic overlap found.'
-                : bestFact?.source_type === "CREDENTIAL"
-                  ? `Matched against profile credential ${bestFact.id}.`
-                  : `Matched against profile fact ${bestFact?.id}.`,
+                : matchType === 'UNKNOWN'
+                  ? 'Semantic embedding prerequisites pending; match determination deferred.'
+                  : bestFact?.source_type === "CREDENTIAL"
+                    ? `Matched against profile credential ${bestFact.id}.`
+                    : `Matched against profile fact ${bestFact?.id}.`,
                JSON.stringify({
                  requirement_key: req.requirement_key,
                  requirement_type: req.requirement_type,
@@ -858,12 +860,16 @@ export async function runDeterministicMatcher(
                  lexical_score: bestFact ? Number(bestLexical.toFixed(6)) : null,
                  semantic_score: usedEmbeddings && bestFact ? Number(bestSemantic.toFixed(6)) : null,
                  match_method: bestFact
-                   ? usedEmbeddings
-                     ? bestSemantic > bestLexical
-                       ? "EMBEDDING"
-                       : "LEXICAL"
-                     : "PENDING_EMBEDDINGS"
-                   : null,
+                   ? structuredComparison.status === "MATCH"
+                     ? "EXACT"
+                     : usedEmbeddings
+                       ? bestSemantic > bestLexical
+                         ? "EMBEDDING"
+                         : "LEXICAL"
+                       : "PENDING_EMBEDDINGS"
+                   : usedEmbeddings
+                     ? null
+                     : "PENDING_EMBEDDINGS",
                  embedding_space_id: usedEmbeddings ? semanticEmbeddingSpaceId : null,
                  weighted_score: bestFact ? Number(weightedScore.toFixed(6)) : null,
                  semantic_ready: usedEmbeddings,
@@ -896,18 +902,25 @@ export async function runDeterministicMatcher(
           ]
         );
 
+        const profileMatchStatus =
+          matchedCount > 0
+            ? 'POSITIVE_MATCH'
+            : usedEmbeddings
+              ? 'NO_PROFILE_MATCH'
+              : 'UNKNOWN';
+
         await client.query(
           `UPDATE canonical_jobs
            SET deterministic_match_score = $2,
                deterministic_match_coverage = $3,
                latest_match_run_id = $4,
-               profile_match_status = CASE WHEN $6::int > 0 THEN 'POSITIVE_MATCH' ELSE 'NO_PROFILE_MATCH' END,
+               profile_match_status = $6,
                processing_state = 'MATCHED',
                processing_status = 'MATCHED',
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = $5`,
-          [ctx.workspaceId, overallScore, coverageScore, matchRunId, job.id, matchedCount]
+          [ctx.workspaceId, overallScore, coverageScore, matchRunId, job.id, profileMatchStatus]
         );
 
         await client.query("COMMIT");
