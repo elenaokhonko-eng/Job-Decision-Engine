@@ -92,6 +92,30 @@ try {
     [ctx.workspaceId],
   );
 
+  queries.incompleteSources = await client.query(
+    `SELECT COALESCE(obs.source_name, '<unknown>') AS source_name,
+            count(*)::int AS jobs,
+            count(*) FILTER (WHERE COALESCE(obs.canonical_apply_url, obs.source_url, c.canonical_url) IS NOT NULL)::int AS with_source_url,
+            count(*) FILTER (WHERE obs.canonical_apply_url IS NOT NULL)::int AS with_apply_url
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+       LEFT JOIN LATERAL (
+         SELECT source_name, source_url, canonical_apply_url
+           FROM raw_job_observations
+          WHERE workspace_id = c.workspace_id AND job_version_id = jv.id
+          ORDER BY retrieved_at DESC, id DESC
+          LIMIT 1
+       ) obs ON TRUE
+      WHERE c.workspace_id = $1
+        AND COALESCE(c.processing_state, c.processing_status) = 'NEEDS_VERIFICATION'
+        AND COALESCE(c.description_quality_status, CASE
+          WHEN length(BTRIM(jv.description_text)) >= 1000 THEN 'COMPLETE'
+          WHEN NULLIF(BTRIM(jv.description_text), '') IS NULL THEN 'UNKNOWN'
+          ELSE 'INCOMPLETE' END) = 'INCOMPLETE'
+      GROUP BY 1 ORDER BY jobs DESC`,
+    [ctx.workspaceId],
+  );
+
   queries.matchedCurrent = await client.query(
     `WITH active_profile AS (
       SELECT id FROM profile_versions
@@ -140,6 +164,40 @@ try {
     [ctx.workspaceId],
   );
 
+  queries.verificationTargets = await client.query(
+    `SELECT DISTINCT ON (c.id, jr.requirement_type)
+            c.id AS canonical_job_id,
+            c.company_name,
+            c.normalized_title,
+            length(jv.description_text)::int AS description_chars,
+            jr.requirement_type,
+            jr.requirement_text,
+            jr.structured_value,
+            COALESCE(obs.canonical_apply_url, obs.source_url, c.canonical_url) AS source_url
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
+       JOIN job_requirements jr
+         ON jr.workspace_id = jv.workspace_id AND jr.requirement_set_id = jv.active_requirement_set_id AND jr.status = 'VALIDATED'
+       LEFT JOIN LATERAL (
+         SELECT source_url, canonical_apply_url
+           FROM raw_job_observations
+          WHERE workspace_id = c.workspace_id AND job_version_id = jv.id
+          ORDER BY retrieved_at DESC, id DESC LIMIT 1
+       ) obs ON TRUE
+      WHERE c.workspace_id = $1
+        AND COALESCE(c.processing_state, c.processing_status) = 'NEEDS_VERIFICATION'
+        AND jr.requirement_type IN ('EXPERIENCE_YEARS', 'DEGREE')
+        AND (
+          EXISTS (
+            SELECT 1 FROM gate_decisions gd
+             WHERE gd.workspace_id = c.workspace_id AND gd.canonical_job_id = c.id AND gd.job_version_id = jv.id
+               AND gd.rejection_codes ? CASE WHEN jr.requirement_type = 'EXPERIENCE_YEARS' THEN 'NEEDS_VERIFICATION_EXPERIENCE_YEARS' ELSE 'NEEDS_VERIFICATION_DEGREE' END
+          )
+        )
+      ORDER BY c.id, jr.requirement_type, jr.id`,
+    [ctx.workspaceId],
+  );
+
   console.log(JSON.stringify({
     workspace_id: ctx.workspaceId,
     active_profile_version_id: (await client.query(`SELECT id FROM profile_versions WHERE workspace_id = $1 AND status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1`, [ctx.workspaceId])).rows[0]?.id,
@@ -148,8 +206,10 @@ try {
     verification_gate_reasons: queries.verificationReasons.rows,
     verification_requirement_types: queries.verificationRequirements.rows,
     routing_deferred: queries.routingDeferred.rows,
+    incomplete_description_sources: queries.incompleteSources.rows,
     matched_currentness: queries.matchedCurrent.rows,
     profile_embedding_coverage: queries.profileEmbeddingCoverage.rows,
+    verification_targets: queries.verificationTargets.rows,
   }, null, 2));
 } finally {
   client.release();
