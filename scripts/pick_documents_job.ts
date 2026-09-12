@@ -101,6 +101,9 @@ async function main(): Promise<void> {
         jv.observed_at::text AS observed_at,
         COUNT(DISTINCT pf.id)::int AS grounded_match_facts
       FROM resolved_jobs r
+      JOIN job_versions jv
+        ON jv.workspace_id = $1
+       AND jv.id = r.job_version_id
       JOIN match_runs mr
         ON mr.workspace_id = $1
        AND mr.id = r.latest_match_run_id
@@ -110,9 +113,6 @@ async function main(): Promise<void> {
        AND mr.job_content_hash = jv.content_hash
        AND mr.status = 'COMPLETED'
        AND COALESCE(mr.matched_count, 0) > 0
-      JOIN job_versions jv
-        ON jv.workspace_id = $1
-       AND jv.id = r.job_version_id
       JOIN job_requirements jr
         ON jr.workspace_id = jv.workspace_id
        AND (

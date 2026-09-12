@@ -19,5 +19,10 @@ describe("documents workflow", () => {
     expect(picker).toContain("documents_job_found: false");
     expect(picker).toContain("documents_job_found: true");
     expect(picker).toContain("process.exitCode = allowEmptyAutoPick ? 0 : 1");
+
+    const jobVersionJoin = picker.indexOf("JOIN job_versions jv");
+    const matchRunJoin = picker.indexOf("JOIN match_runs mr");
+    expect(jobVersionJoin).toBeGreaterThan(-1);
+    expect(matchRunJoin).toBeGreaterThan(jobVersionJoin);
   });
 });
