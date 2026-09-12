@@ -46,8 +46,10 @@ describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
     expect(summary.updated).toBe(100);
 
     const queryText = String((mPool.query as any).mock.calls[0]?.[0] || "");
+    const queryParams = (mPool.query as any).mock.calls[0]?.[1] || [];
     expect(queryText).toContain("INSERT INTO evaluation_queue");
     expect(queryText).not.toContain("DEFERRED_BUDGET");
     expect(queryText).not.toContain("ai_evaluation_limit");
+    expect(queryParams).toEqual([context.workspaceId]);
   });
 });

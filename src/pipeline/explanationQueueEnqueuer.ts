@@ -37,7 +37,11 @@ export async function runExplanationQueueEnqueuer(
     const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
       ? Number(options?.limit)
       : null;
-    const params: unknown[] = [ctx.workspaceId, ctx.userId];
+    // The queue query is workspace-scoped; user identity is not a SQL input
+    // for this stage. Keeping it out of the parameter array is important because
+    // PostgreSQL rejects unused, untyped parameters (the previous $2 caused the
+    // unfiltered worker path to fail before it could enqueue anything).
+    const params: unknown[] = [ctx.workspaceId];
     const jobVersionFilter = jobVersionIds.length > 0
       ? `AND COALESCE(c.latest_job_version_id, lv.id) = ANY($${params.push(jobVersionIds)}::uuid[])`
       : "";

@@ -14,6 +14,7 @@ const REPLAYABLE_TASK_TYPES = [
   "ROUTE_LANE",
   "MATCH_PROFILE_EVIDENCE",
   "DECIDE_RECOMMENDATION",
+  "ENQUEUE_EXPLANATION",
 ] as const;
 
 type ReplayableTaskType = (typeof REPLAYABLE_TASK_TYPES)[number];
