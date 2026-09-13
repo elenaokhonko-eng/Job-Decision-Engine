@@ -222,8 +222,9 @@ export async function runEmbeddingBatch(
                  AND se.embedding_space_id = $3
                  AND se.embedding_input_id = ei.id
              )
-           ORDER BY ei.created_at ASC`,
-          [workspaceId, inputIds, space.id]
+           ORDER BY ei.created_at ASC
+           LIMIT $4`,
+          [workspaceId, inputIds, space.id, maxItems]
         )
       : await client.query<InputRow>(
           `SELECT ei.id, ei.content_text
@@ -597,6 +598,16 @@ export async function runEmbeddingBatchWithFallback(
              OR (
                $4::boolean = TRUE
                AND ei.source_type = 'PROFILE_FACT'
+               AND EXISTS (
+                 SELECT 1
+                 FROM profile_facts pf
+                 JOIN profile_versions pv
+                   ON pv.workspace_id = pf.workspace_id
+                  AND pv.id = pf.profile_version_id
+                  AND pv.status = 'ACTIVE'
+                 WHERE pf.workspace_id = ei.workspace_id
+                   AND COALESCE(pf.fact_revision_id, pf.id) = ei.source_id
+               )
              )
            )
          ORDER BY ei.id`,

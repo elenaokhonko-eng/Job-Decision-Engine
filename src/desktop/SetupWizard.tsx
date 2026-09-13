@@ -47,10 +47,10 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
   const [aiTestResult, setAiTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const [preset, setPreset] = useState<"gemini" | "openai">("gemini");
-  const [embeddingModel, setEmbeddingModel] = useState<string>("text-embedding-004");
-  const [evaluationModel, setEvaluationModel] = useState<string>("gemini-1.5-flash");
-  const [documentModel, setDocumentModel] = useState<string>("gemini-1.5-flash");
-  const [extractionModel, setExtractionModel] = useState<string>("gemini-1.5-flash");
+  const [embeddingModel, setEmbeddingModel] = useState<string>("gemini-embedding-001");
+  const [evaluationModel, setEvaluationModel] = useState<string>("gemini-3.6-flash");
+  const [documentModel, setDocumentModel] = useState<string>("gemini-3.6-flash");
+  const [extractionModel, setExtractionModel] = useState<string>("gemini-3.5-flash-lite");
 
   const [initProgress, setInitProgress] = useState<string | null>(null);
 
@@ -94,15 +94,15 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
   // Update models when preset changes
   useEffect(() => {
     if (preset === "gemini") {
-      setEmbeddingModel("text-embedding-004");
-      setEvaluationModel("gemini-1.5-flash");
-      setDocumentModel("gemini-1.5-flash");
-      setExtractionModel("gemini-1.5-flash");
+      setEmbeddingModel("gemini-embedding-001");
+      setEvaluationModel("gemini-3.6-flash");
+      setDocumentModel("gemini-3.6-flash");
+      setExtractionModel("gemini-3.5-flash-lite");
     } else {
       setEmbeddingModel("text-embedding-3-small");
       setEvaluationModel("gpt-4o-mini");
       setDocumentModel("gpt-4o-mini");
-      setExtractionModel("gpt-4o-mini");
+      setExtractionModel("gpt-5.6-luna");
     }
   }, [preset]);
 
@@ -215,7 +215,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
         const data = await res.json();
         throw new Error(data.error || "Failed to configure model routes.");
       }
-      setStep(5);
+      onComplete();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -265,8 +265,8 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
               {step === 1 && "Welcome & Privacy Guarantee"}
               {step === 2 && "Neon PostgreSQL Database"}
               {step === 3 && "AI Provider Credentials"}
-              {step === 4 && "Model Routing"}
-              {step === 5 && "Database Initialization"}
+              {step === 4 && "Database Initialization"}
+              {step === 5 && "Model Routing & Engine Launch"}
             </p>
           </div>
           {onCancel && (
@@ -522,8 +522,77 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
             </div>
           )}
 
-          {/* STEP 4: MODEL ROUTING */}
+          {/* STEP 4: INITIALIZATION */}
           {step === 4 && (
+            <div className="space-y-4">
+              <p className="text-sm text-slate-600">
+                Prepare your Neon database schema. This creates the canonical job tables,
+                audit ledgers, and registers default workspaces and embedding spaces.
+              </p>
+
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-slate-600">Database Status:</span>
+                  <span className="font-semibold text-slate-900">
+                    {status?.database.connected ? "Connected" : "Not Connected"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-600">Schema Migrations:</span>
+                  <span className="font-semibold text-slate-900">
+                    {status?.database.isInitialized
+                      ? `${status.database.appliedMigrations} applied, ${status.database.pendingMigrations} pending`
+                      : "Uninitialized"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-600">Active AI Provider:</span>
+                  <span className="font-semibold text-slate-900">
+                    {status?.ai.geminiConfigured ? "Gemini" : status?.ai.openaiConfigured ? "OpenAI" : "None"}
+                  </span>
+                </div>
+              </div>
+
+              {initProgress && (
+                <div className="p-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-lg flex items-center gap-2">
+                  <span className="animate-spin inline-block w-4 h-4 border-2 border-amber-800 border-t-transparent rounded-full" />
+                  <span>{initProgress}</span>
+                </div>
+              )}
+
+              <div className="pt-2">
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={handleInitializeDatabase}
+                  className="w-full py-3 bg-slate-900 text-white rounded-lg font-medium hover:bg-slate-800 text-sm disabled:opacity-50"
+                >
+                  {loading ? "Running Schema Migrations..." : "Initialize / Migrate Database"}
+                </button>
+              </div>
+
+              <div className="pt-4 flex justify-between items-center border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setStep(3)}
+                  className="px-4 py-2 text-sm text-slate-600 hover:text-slate-900"
+                >
+                  &larr; Back
+                </button>
+                <button
+                  type="button"
+                  disabled={!status?.database.isInitialized || status.database.pendingMigrations > 0}
+                  onClick={() => setStep(5)}
+                  className="px-6 py-2.5 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700 text-sm disabled:opacity-50"
+                >
+                  Continue to Model Routing &rarr;
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* STEP 5: MODEL ROUTING */}
+          {step === 5 && (
             <div className="space-y-4">
               <p className="text-sm text-slate-600">
                 Select your preferred model stack. Invariants ensure that deterministic gates run first before any AI model is invoked.
@@ -541,7 +610,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
                 >
                   <span className="block font-bold">Gemini Preset (Recommended)</span>
                   <span className="text-xs text-slate-500">
-                    text-embedding-004 + gemini-1.5-flash
+                    gemini-embedding-001 + gemini-3.6-flash
                   </span>
                 </button>
 
@@ -603,7 +672,7 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
               <div className="pt-4 flex justify-between items-center border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setStep(3)}
+                  onClick={() => setStep(4)}
                   className="px-4 py-2 text-sm text-slate-600 hover:text-slate-900"
                 >
                   &larr; Back
@@ -612,78 +681,9 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
                   type="button"
                   disabled={loading}
                   onClick={handleSaveRoutes}
-                  className="px-5 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 text-sm disabled:opacity-50"
-                >
-                  Save Routes & Continue &rarr;
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* STEP 5: INITIALIZATION */}
-          {step === 5 && (
-            <div className="space-y-4">
-              <p className="text-sm text-slate-600">
-                The final step is to prepare your Neon database schema. This creates the canonical job tables,
-                audit ledgers, and registers embedding spaces.
-              </p>
-
-              <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-slate-600">Database Status:</span>
-                  <span className="font-semibold text-slate-900">
-                    {status?.database.connected ? "Connected" : "Not Connected"}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">Schema Migrations:</span>
-                  <span className="font-semibold text-slate-900">
-                    {status?.database.isInitialized
-                      ? `${status.database.appliedMigrations} applied, ${status.database.pendingMigrations} pending`
-                      : "Uninitialized"}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-600">Active AI Provider:</span>
-                  <span className="font-semibold text-slate-900">
-                    {status?.ai.geminiConfigured ? "Gemini" : status?.ai.openaiConfigured ? "OpenAI" : "None"}
-                  </span>
-                </div>
-              </div>
-
-              {initProgress && (
-                <div className="p-3 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-lg flex items-center gap-2">
-                  <span className="animate-spin inline-block w-4 h-4 border-2 border-amber-800 border-t-transparent rounded-full" />
-                  <span>{initProgress}</span>
-                </div>
-              )}
-
-              <div className="pt-2">
-                <button
-                  type="button"
-                  disabled={loading}
-                  onClick={handleInitializeDatabase}
-                  className="w-full py-3 bg-slate-900 text-white rounded-lg font-medium hover:bg-slate-800 text-sm disabled:opacity-50"
-                >
-                  {loading ? "Running Schema Migrations..." : "Initialize / Migrate Database"}
-                </button>
-              </div>
-
-              <div className="pt-4 flex justify-between items-center border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setStep(4)}
-                  className="px-4 py-2 text-sm text-slate-600 hover:text-slate-900"
-                >
-                  &larr; Back
-                </button>
-                <button
-                  type="button"
-                  disabled={!status?.database.isInitialized || status.database.pendingMigrations > 0}
-                  onClick={onComplete}
                   className="px-6 py-2.5 bg-emerald-600 text-white rounded-lg font-semibold hover:bg-emerald-700 text-sm disabled:opacity-50"
                 >
-                  Launch Engine &rarr;
+                  {loading ? "Saving & Launching..." : "Save Routes & Launch Engine \u2192"}
                 </button>
               </div>
             </div>

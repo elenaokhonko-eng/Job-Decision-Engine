@@ -203,6 +203,7 @@ export async function runRecommendationDecider(
         FROM job_versions
         WHERE canonical_job_id = c.id
           AND workspace_id = $1
+          AND (c.latest_job_version_id IS NULL OR id = c.latest_job_version_id)
         ORDER BY observed_at DESC
         LIMIT 1
       ) lv ON TRUE

@@ -123,14 +123,22 @@ async function run(): Promise<void> {
       current_evaluation_queue: number;
     }>(
       `WITH latest_versions AS (
-         SELECT DISTINCT ON (jv.canonical_job_id)
-                jv.canonical_job_id,
-                jv.id AS job_version_id,
-                jv.active_requirement_set_id,
-                jv.content_hash
-         FROM job_versions jv
-         WHERE jv.workspace_id = $1
-         ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
+         SELECT c.id AS canonical_job_id,
+                COALESCE(c.latest_job_version_id, lv.id) AS job_version_id,
+                target_jv.active_requirement_set_id,
+                target_jv.content_hash
+         FROM canonical_jobs c
+         LEFT JOIN LATERAL (
+           SELECT id
+           FROM job_versions
+           WHERE workspace_id = $1 AND canonical_job_id = c.id
+           ORDER BY observed_at DESC, id DESC
+           LIMIT 1
+         ) lv ON TRUE
+         LEFT JOIN job_versions target_jv
+           ON target_jv.workspace_id = $1
+          AND target_jv.id = COALESCE(c.latest_job_version_id, lv.id)
+         WHERE c.workspace_id = $1
        ),
        current_evaluation_queue AS (
          SELECT DISTINCT eq.id
@@ -195,14 +203,22 @@ async function run(): Promise<void> {
       dead_letter_tasks: number;
     }>(
       `WITH latest_versions AS (
-         SELECT DISTINCT ON (jv.canonical_job_id)
-                jv.canonical_job_id,
-                jv.id AS job_version_id,
-                jv.active_requirement_set_id,
-                jv.content_hash
-         FROM job_versions jv
-         WHERE jv.workspace_id = $1
-         ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
+         SELECT c.id AS canonical_job_id,
+                COALESCE(c.latest_job_version_id, lv.id) AS job_version_id,
+                target_jv.active_requirement_set_id,
+                target_jv.content_hash
+         FROM canonical_jobs c
+         LEFT JOIN LATERAL (
+           SELECT id
+           FROM job_versions
+           WHERE workspace_id = $1 AND canonical_job_id = c.id
+           ORDER BY observed_at DESC, id DESC
+           LIMIT 1
+         ) lv ON TRUE
+         LEFT JOIN job_versions target_jv
+           ON target_jv.workspace_id = $1
+          AND target_jv.id = COALESCE(c.latest_job_version_id, lv.id)
+         WHERE c.workspace_id = $1
        ),
        current_requirements AS (
          SELECT DISTINCT jv.job_version_id

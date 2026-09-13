@@ -4,8 +4,16 @@ import {
   RequirementTypeSchema,
 } from './contracts.js';
 import { z } from 'zod';
+import {
+  isOccurrenceNegated,
+  inferClauseImportance,
+  findFirstNonNegatedMatch,
+  findAllMatches,
+} from './clauseAnalysis.js';
 
-const EXTRACTOR_VERSION = 'deterministic_v2';
+export { isOccurrenceNegated };
+
+const EXTRACTOR_VERSION = 'deterministic_v3';
 
 export interface DeterministicExtractorInput {
   canonical_job_id: string;
@@ -30,22 +38,6 @@ interface MatchInfo {
 }
 
 const MIN_QUOTE_LENGTH = 5;
-
-const NEGATION_PREFIX_REGEX = /(?:^|[\n.!?;,])\s*[^.!?;\n]{0,60}\b(?:no|not|never|without|zero|free\s+of|neither|nor|doesn't|does\s+not|don't|do\s+not|won't|will\s+not|isn't|is\s+not|aren't|are\s+not|optional|no\s+requirement\s+for|support\s+an)\s*$/i;
-
-const NEGATION_SUFFIX_REGEX = /^\s*(?:is|are|will\s+be)?\s*(?:not\s+required|optional|not\s+expected|not\s+needed|not\s+mandatory|not\s+a\s+requirement|not\s+necessary)\b/i;
-
-export function isOccurrenceNegated(text: string, matchIndex: number, matchLength: number): boolean {
-  const prefix = text.substring(Math.max(0, matchIndex - 60), matchIndex);
-  if (NEGATION_PREFIX_REGEX.test(prefix)) {
-    return true;
-  }
-  const suffix = text.substring(matchIndex + matchLength, Math.min(text.length, matchIndex + matchLength + 40));
-  if (NEGATION_SUFFIX_REGEX.test(suffix)) {
-    return true;
-  }
-  return false;
-}
 
 function isQuoteBoundary(char: string): boolean {
   return /[\s<>"'.,;:()[\]{}]/.test(char);
@@ -200,23 +192,11 @@ function findEmploymentTypeMatch(description: string): { match: MatchInfo; emplo
   return null;
 }
 
-function inferImportance(quoteText: string, contextPrefix = ''): z.infer<typeof RequirementImportanceSchema> {
-  const combined = `${contextPrefix} ${quoteText}`.toLowerCase();
-  if (/\b(preferred|nice\s+to\s+have|bonus|plus|optional|desired|desirable|advantageous)\b/i.test(combined)) {
-    return 'PREFERRED';
-  }
-  return 'MUST';
-}
-
 function normalizeQuoteEvidence(quote: MatchInfo): {
   quote_text: string | null;
   quote_start_offset: number | null;
   quote_end_offset: number | null;
 } {
-  // A structured deterministic requirement remains useful even when a
-  // provider/parser boundary hands us an unusably short evidence fragment.
-  // Never persist an invalid quote merely to make the requirement parse: a
-  // null quote explicitly means that there is no auditable evidence span.
   if (quote.quote_text.trim().length < MIN_QUOTE_LENGTH) {
     return { quote_text: null, quote_start_offset: null, quote_end_offset: null };
   }
@@ -237,13 +217,17 @@ function buildRequirement(
   confidence = 0.98
 ): DeterministicRequirement {
   const evidence = normalizeQuoteEvidence(quote);
-  const prefix = input.description_text.slice(Math.max(0, quote.quote_start_offset - 120), quote.quote_start_offset);
+  const importance = inferClauseImportance(
+    input.description_text,
+    quote.quote_start_offset,
+    quote.quote_end_offset
+  );
   return JobRequirementSchema.parse({
     canonical_job_id: input.canonical_job_id,
     job_version_id: input.job_version_id,
     requirement_key: `R-${String(sequence).padStart(3, '0')}`,
     requirement_type: type,
-    importance: inferImportance(quote.quote_text, prefix),
+    importance,
     requirement_text: requirementText,
     quote_text: evidence.quote_text,
     quote_start_offset: evidence.quote_start_offset,
@@ -325,7 +309,7 @@ export function extractDeterministicRequirements(
         : numberWords[yearsMatch[1].toLowerCase()] ?? null
       : null;
     const scopedExperience = experienceYears.quote_text.match(
-      /\b\d{1,2}(?:\s*[-–]\s*\d{1,2})?\+?(?:\s+additional)?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i
+      /\b(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*[-–]\s*(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten))?\+?(?:\s+additional)?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i
     );
     const experienceScope = scopedExperience?.[1]
       ?.trim()
@@ -393,25 +377,22 @@ export function extractDeterministicRequirements(
     );
   }
 
-  const travel = findFirstMatch(description, [
+  const travel = findFirstNonNegatedMatch(description, [
     /\bup\s+to\s+(\d{1,2})%\s+travel\b/i,
     /\bfrequent\s+travel\b/i,
   ]);
   if (travel) {
-    const isNegated = isOccurrenceNegated(description, travel.quote_start_offset, travel.quote_text.length);
-    if (!isNegated) {
-      const pctMatch = travel.quote_text.match(/(\d{1,2})%/);
-      requirements.push(
-        buildRequirement(
-          input,
-          sequence++,
-          'TRAVEL',
-          'Role includes travel expectations.',
-          travel,
-          { max_travel_pct: pctMatch ? Number(pctMatch[1]) : null }
-        )
-      );
-    }
+    const pctMatch = travel.quote_text.match(/(\d{1,2})%/);
+    requirements.push(
+      buildRequirement(
+        input,
+        sequence++,
+        'TRAVEL',
+        'Role includes travel expectations.',
+        travel,
+        { max_travel_pct: pctMatch ? Number(pctMatch[1]) : null }
+      )
+    );
   }
 
   const workAuth = findFirstMatch(description, [
@@ -430,42 +411,36 @@ export function extractDeterministicRequirements(
     );
   }
 
-  const onCall = findFirstMatch(description, [
+  const onCall = findFirstNonNegatedMatch(description, [
     /\b(on[- ]?call\s+rotation|regular\s+on[- ]?call|24\/7\s+support)\b/i,
   ]);
   if (onCall) {
-    const isNegated = isOccurrenceNegated(description, onCall.quote_start_offset, onCall.quote_text.length);
-    if (!isNegated) {
-      requirements.push(
-        buildRequirement(
-          input,
-          sequence++,
-          'ON_CALL',
-          'Role includes on-call operations responsibility.',
-          onCall,
-          { on_call_required: true }
-        )
-      );
-    }
+    requirements.push(
+      buildRequirement(
+        input,
+        sequence++,
+        'ON_CALL',
+        'Role includes on-call operations responsibility.',
+        onCall,
+        { on_call_required: true }
+      )
+    );
   }
 
-  const shiftWork = findFirstMatch(description, [
+  const shiftWork = findFirstNonNegatedMatch(description, [
     /\b(shift\s+work|rotating\s+shifts|night\s+shift)\b/i,
   ]);
   if (shiftWork) {
-    const isNegated = isOccurrenceNegated(description, shiftWork.quote_start_offset, shiftWork.quote_text.length);
-    if (!isNegated) {
-      requirements.push(
-        buildRequirement(
-          input,
-          sequence++,
-          'SHIFT_WORK',
-          'Role includes shift-based scheduling requirements.',
-          shiftWork,
-          { shift_work_required: true }
-        )
-      );
-    }
+    requirements.push(
+      buildRequirement(
+        input,
+        sequence++,
+        'SHIFT_WORK',
+        'Role includes shift-based scheduling requirements.',
+        shiftWork,
+        { shift_work_required: true }
+      )
+    );
   }
 
   const technicalFunctionPatterns = [

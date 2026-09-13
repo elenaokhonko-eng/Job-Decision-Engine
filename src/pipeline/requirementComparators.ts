@@ -175,7 +175,14 @@ const SCOPE_STOP_WORDS = new Set([
   "you", "non", "set", "use", "pro", "new", "role", "roles", "work", "team", "teams",
   "such", "than", "more", "most", "each", "both", "must", "have", "plus", "years",
   "year", "experience", "experienced", "skills", "skill", "level", "related", "field",
-  "fields", "equivalent", "environment", "environments", "building", "using"
+  "fields", "equivalent", "environment", "environments", "building", "using",
+  // Generic qualifiers that do not distinguish specialized domains:
+  "engineering", "engineer", "engineers", "development", "developer", "developers",
+  "operations", "operator", "management", "manager", "systems", "system",
+  "lead", "senior", "junior", "staff", "principal", "architect", "architects",
+  "analyst", "analysts", "specialist", "specialists", "consultant", "consultants",
+  "technologies", "technology", "tech", "practices", "practice", "solutions", "solution",
+  "professional", "services", "service", "tools", "tool", "methods", "method", "processes", "process"
 ]);
 
 function tokenizeScope(scope: string): Set<string> {
@@ -183,26 +190,58 @@ function tokenizeScope(scope: string): Set<string> {
     scope
       .toLowerCase()
       .split(/[^a-z0-9+#]+/)
-      .filter((token) => token.length >= 3 && !SCOPE_STOP_WORDS.has(token))
+      .filter((token) => token.length >= 2 && !SCOPE_STOP_WORDS.has(token))
   );
 }
 
+const DOMAIN_FAMILY_PATTERNS: Array<{ domain: string; regex: RegExp }> = [
+  { domain: "ai", regex: /\b(ai|artificial intelligence|machine learning|ml|deep learning|nlp|llm|llms|generative ai|genai|computer vision)\b/i },
+  { domain: "software", regex: /\b(software|software engineering|software development|application development|coding|full stack|backend|frontend|web development)\b/i },
+  { domain: "data", regex: /\b(data|data engineering|data science|analytics|etl|data pipeline|data warehousing|big data|bi|business intelligence)\b/i },
+  { domain: "security", regex: /\b(cybersecurity|security|infosec|information security|appsec|soc|penetration testing|threat)\b/i },
+  { domain: "cloud_devops", regex: /\b(devops|cloud|site reliability|sre|infrastructure|platform|kubernetes|terraform|aws|gcp|azure)\b/i },
+  { domain: "civil", regex: /\b(civil|civil engineering|structural|construction)\b/i },
+  { domain: "mechanical", regex: /\b(mechanical|aerospace|automotive)\b/i },
+  { domain: "electrical", regex: /\b(electrical|electronics|hardware|semiconductor)\b/i },
+  { domain: "supply_chain", regex: /\b(supply chain|logistics|procurement|inventory)\b/i },
+  { domain: "finance", regex: /\b(finance|financial|quantitative|trading|accounting|fintech|banking|investment)\b/i },
+  { domain: "legal", regex: /\b(legal|regulatory|compliance|regtech|contract law|attorney|lawyer)\b/i },
+  { domain: "health", regex: /\b(biomedical|biotech|pharma|healthcare|clinical|medical)\b/i },
+];
+
+function detectDomainFamilies(scope: string): Set<string> {
+  const families = new Set<string>();
+  for (const { domain, regex } of DOMAIN_FAMILY_PATTERNS) {
+    if (regex.test(scope)) {
+      families.add(domain);
+    }
+  }
+  return families;
+}
+
 function scopesOverlap(requiredScope: string, factScope: string): boolean {
-  const requiredTokens = tokenizeScope(requiredScope);
-  const factTokens = tokenizeScope(factScope);
+  const reqLower = requiredScope.toLowerCase().trim();
+  const factLower = factScope.toLowerCase().trim();
+  if (!reqLower || !factLower) return true;
+
+  const reqDomains = detectDomainFamilies(reqLower);
+  const factDomains = detectDomainFamilies(factLower);
+
+  if (reqDomains.size > 0) {
+    for (const d of reqDomains) {
+      if (factDomains.has(d)) return true;
+    }
+    return false;
+  }
+
+  const requiredTokens = tokenizeScope(reqLower);
+  const factTokens = tokenizeScope(factLower);
+  if (requiredTokens.size === 0) return true;
+
   for (const token of requiredTokens) {
     if (factTokens.has(token)) return true;
   }
-  const aliases: Array<[string, string[]]> = [
-    ["ai", ["artificial intelligence", "machine learning", "ml", "deep learning"]],
-    ["software", ["software engineering", "software development", "application development", "coding", "full stack", "backend"]],
-    ["data", ["data engineering", "data science", "analytics", "etl", "data pipeline"]],
-  ];
-  return aliases.some(([canonical, variants]) => {
-    const requiredHas = requiredScope.includes(canonical) || variants.some((variant) => requiredScope.includes(variant));
-    const factHas = factScope.includes(canonical) || variants.some((variant) => factScope.includes(variant));
-    return requiredHas && factHas;
-  });
+  return false;
 }
 
 function degreeLevel(text: string): number | null {
@@ -296,7 +335,20 @@ export function compareStructuredRequirement(
     if (required === null) return { status: "UNKNOWN", rationale: "Required experience duration is not structured.", fact: null };
     const requiredScope = requiredExperienceScope(requirement);
     const candidates = facts
-      .map((fact) => ({ fact, years: factYears(fact), scopes: experienceScopes(fact.structured_value) }))
+      .map((fact) => {
+        const scopes = experienceScopes(fact.structured_value);
+        if (scopes.length === 0) {
+          const text = textForFact(fact);
+          const scoped = text.match(/\b(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\+?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i)
+            || text.match(/\b(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\+?\s*years?\s+of\s+experience\s+in\s+(.+)$/i);
+          if (scoped?.[1]) {
+            scopes.push(normalizedScope(scoped[1]));
+          } else {
+            scopes.push(normalizedScope(text));
+          }
+        }
+        return { fact, years: factYears(fact), scopes };
+      })
       .filter((candidate): candidate is { fact: ComparableFact; years: number; scopes: string[] } => candidate.years !== null);
     if (candidates.length === 0) return { status: "UNKNOWN", rationale: "No structured profile experience duration is available.", fact: null };
     const scopedCandidates = requiredScope

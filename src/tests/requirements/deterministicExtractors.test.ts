@@ -149,6 +149,17 @@ describe('extractDeterministicRequirements', () => {
     }).requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
     expect(writtenNumber?.structured_value).toMatchObject({ minimum_years: 3 });
 
+    const writtenScope = extractDeterministicRequirements({
+      canonical_job_id: 'abababab-abab-4aba-8aba-abababababad',
+      job_version_id: 'cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcf',
+      description_text: 'At least four years of AI engineering experience required.',
+    }).requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
+    expect(writtenScope?.structured_value).toEqual({
+      minimum_years: 4,
+      experience_scope: 'AI engineering',
+    });
+    expect(writtenScope?.importance).toBe('MUST');
+
     const degree = extractDeterministicRequirements({
       canonical_job_id: '34343434-3434-4343-8343-343434343434',
       job_version_id: '56565656-5656-4565-8565-565656565656',
@@ -197,5 +208,53 @@ describe('extractDeterministicRequirements', () => {
         expect(requirement.quote_end_offset).toBeNull();
       }
     }
+  });
+
+  it('correctly handles polarity and optionality without cross-sentence bleed', () => {
+    // 1. Negated on-call with intervening modifier
+    const noRegularOnCall = extractDeterministicRequirements({
+      canonical_job_id: '11111111-1111-4111-8111-111111111111',
+      job_version_id: '22222222-2222-4222-8222-222222222222',
+      description_text: 'Remote role. No regular on-call rotation expected.',
+    });
+    expect(noRegularOnCall.requirements.some((r) => r.requirement_type === 'ON_CALL')).toBe(false);
+
+    // 2. Affirmative "support an" on-call
+    const supportOnCall = extractDeterministicRequirements({
+      canonical_job_id: '11111111-1111-4111-8111-111111111112',
+      job_version_id: '22222222-2222-4222-8222-222222222223',
+      description_text: 'We support an on-call rotation for production escalations.',
+    });
+    expect(supportOnCall.requirements.some((r) => r.requirement_type === 'ON_CALL')).toBe(true);
+
+    // 3. Suffix optionality for degree
+    const preferredDegree = extractDeterministicRequirements({
+      canonical_job_id: '11111111-1111-4111-8111-111111111113',
+      job_version_id: '22222222-2222-4222-8222-222222222224',
+      description_text: "A bachelor's degree is preferred.",
+    });
+    const degReq = preferredDegree.requirements.find((r) => r.requirement_type === 'DEGREE');
+    expect(degReq).toBeTruthy();
+    expect(degReq?.importance).toBe('PREFERRED');
+
+    // 4. Suffix optionality for credential
+    const optionalCert = extractDeterministicRequirements({
+      canonical_job_id: '11111111-1111-4111-8111-111111111114',
+      job_version_id: '22222222-2222-4222-8222-222222222225',
+      description_text: 'CISSP certification is optional.',
+    });
+    const credReq = optionalCert.requirements.find((r) => r.requirement_type === 'CREDENTIAL');
+    expect(credReq).toBeTruthy();
+    expect(credReq?.importance).toBe('PREFERRED');
+
+    // 5. Adjacent sentence isolation: Python preferred. CISSP certification required.
+    const mixedSentences = extractDeterministicRequirements({
+      canonical_job_id: '11111111-1111-4111-8111-111111111115',
+      job_version_id: '22222222-2222-4222-8222-222222222226',
+      description_text: 'Python preferred. CISSP certification required.',
+    });
+    const cisspReq = mixedSentences.requirements.find((r) => r.requirement_type === 'CREDENTIAL');
+    expect(cisspReq).toBeTruthy();
+    expect(cisspReq?.importance).toBe('MUST');
   });
 });

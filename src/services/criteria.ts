@@ -447,6 +447,8 @@ export function extractDescriptionText(job: RawJob): string {
   return "";
 }
 
+import { isOccurrenceNegated } from "../requirements/clauseAnalysis.js";
+
 /** Find the first matching snippet from the description text for an evidence quote. */
 function findEvidence(d: string, keywords: string[]): string[] {
   const quotes: string[] = [];
@@ -459,22 +461,6 @@ function findEvidence(d: string, keywords: string[]): string[] {
     }
   }
   return quotes;
-}
-
-const NEGATION_PREFIX_REGEX = /(?:^|[\n.!?;,])\s*[^.!?;\n]{0,60}\b(?:no|not|never|without|zero|free\s+of|neither|nor|doesn't|does\s+not|don't|do\s+not|won't|will\s+not|isn't|is\s+not|aren't|are\s+not|optional|no\s+requirement\s+for|support\s+an)\s*$/i;
-
-const NEGATION_SUFFIX_REGEX = /^\s*(?:is|are|will\s+be)?\s*(?:not\s+required|optional|not\s+expected|not\s+needed|not\s+mandatory|not\s+a\s+requirement|not\s+necessary)\b/i;
-
-function isOccurrenceNegated(text: string, matchIndex: number, matchLength: number): boolean {
-  const prefix = text.substring(Math.max(0, matchIndex - 60), matchIndex);
-  if (NEGATION_PREFIX_REGEX.test(prefix)) {
-    return true;
-  }
-  const suffix = text.substring(matchIndex + matchLength, Math.min(text.length, matchIndex + matchLength + 40));
-  if (NEGATION_SUFFIX_REGEX.test(suffix)) {
-    return true;
-  }
-  return false;
 }
 
 function findNonNegatedEvidence(d: string, keywords: string[]): string[] {
