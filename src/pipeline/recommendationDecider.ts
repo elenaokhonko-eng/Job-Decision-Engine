@@ -293,7 +293,14 @@ export async function runRecommendationDecider(
           adjustedOutcome = "SKIP";
           adjustedNotes.push("routing_policy_no_lane_match");
         }
+        const exactFullySatisfied =
+          job.profile_match_status === "POSITIVE_MATCH" &&
+          coverageScore !== null &&
+          coverageScore >= 1.0 &&
+          requirementScore !== null &&
+          requirementScore >= 0.9;
         if (
+          !exactFullySatisfied &&
           (!adjustedSemanticReady || job.profile_match_status === "UNKNOWN") &&
           adjustedOutcome === "PRIORITY"
         ) {
