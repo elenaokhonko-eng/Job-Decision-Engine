@@ -414,8 +414,11 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
           { key: "embedding_default", purpose: "EMBEDDING", conf: routes.embedding },
           { key: "routing_default", purpose: "EVALUATION", conf: routes.routing || routes.evaluation },
           { key: "evaluation_default", purpose: "EVALUATION", conf: routes.evaluation },
+          { key: "single_job_evaluation", purpose: "EVALUATION", conf: routes.evaluation },
+          { key: "batch_evaluation", purpose: "EVALUATION", conf: routes.evaluation },
           { key: "document_default", purpose: "DOCUMENT", conf: routes.document || routes.evaluation },
           { key: "extraction_default", purpose: "EXTRACTION", conf: routes.extraction || routes.evaluation },
+          { key: "requirements_extraction", purpose: "EXTRACTION", conf: routes.extraction || routes.evaluation },
         ];
 
         for (const def of routeDefs) {

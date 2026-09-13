@@ -78,6 +78,33 @@ export async function processPipelineTasks(): Promise<void> {
   // them; an explicit task-type selection or opt-in environment flag drains
   // them after the mandatory pipeline without holding up routing/matching.
   const lockId = taskTypes.length === 1 && taskTypes[0] === "EXTRACT_QUOTED_REQUIREMENTS" ? 1002 : LOCK_ID;
+
+  const checkAiPreflight = parseBooleanEnv("PIPELINE_TASK_WORKER_PREFLIGHT_MODELS", true);
+  const hasAiTasks = taskTypes.some((t) =>
+    (["ENQUEUE_EXPLANATION", "EXTRACT_QUOTED_REQUIREMENTS"] as string[]).includes(t)
+  );
+
+  if (checkAiPreflight && hasAiTasks) {
+    const { preflightModelRoutes } = await import("../src/services/agent.js");
+    const preflight = await preflightModelRoutes();
+    console.log("Model route preflight status:", {
+      evaluation: preflight.evaluation,
+      extraction: preflight.extraction,
+      embedding: preflight.embedding,
+      document: preflight.document,
+    });
+    if (taskTypes.includes("ENQUEUE_EXPLANATION") && !preflight.evaluation) {
+      throw new Error(
+        "Pipeline task worker configured for ENQUEUE_EXPLANATION, but evaluation model routes are unavailable."
+      );
+    }
+    if (taskTypes.includes("EXTRACT_QUOTED_REQUIREMENTS") && !preflight.extraction) {
+      throw new Error(
+        "Pipeline task worker configured for EXTRACT_QUOTED_REQUIREMENTS, but extraction model routes are unavailable."
+      );
+    }
+  }
+
   const lockClient = await lockPool.connect();
   let lockAcquired = false;
   let workerError: Error | null = null;

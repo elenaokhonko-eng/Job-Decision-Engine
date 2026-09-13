@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS verification_questions (
   question_text TEXT NOT NULL,
   impact_job_count INTEGER NOT NULL DEFAULT 0,
   suggested_options JSONB DEFAULT '[]'::jsonb,
+  linked_job_ids JSONB DEFAULT '[]'::jsonb,
   status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
   answer_value JSONB,
   answered_at TIMESTAMPTZ,

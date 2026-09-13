@@ -14,6 +14,11 @@ import { stableStringify } from "../../config/structuredLoader.js";
 import { apiAuthMiddleware } from "./auth.js";
 import { decodeCursor, encodeCursor } from "./cursor.js";
 import { createSetupRouter } from "./setupRouter.js";
+import {
+  getPendingVerificationQuestions,
+  answerVerificationQuestion,
+  dismissVerificationQuestion,
+} from "../../services/verificationQuestionService.js";
 
 type QueryClient = {
   query: pg.PoolClient["query"];
@@ -1553,6 +1558,60 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         recalculation_enqueued: activation.recalculationEnqueued,
         recalculation_existing: activation.recalculationExisting,
       });
+    })
+  );
+
+  router.get(
+    "/verification-questions",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const questions = await getPendingVerificationQuestions(pool, { context: ctx });
+      res.json({ ok: true, questions });
+    })
+  );
+
+  router.post(
+    "/verification-questions/:key/answer",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const questionKey = String(req.params.key || "").trim();
+      const answer = req.body?.answer;
+
+      if (!questionKey) {
+        res.status(400).json({ ok: false, error: "question key is required." });
+        return;
+      }
+      if (answer === undefined || answer === null || answer === "") {
+        res.status(400).json({ ok: false, error: "answer is required." });
+        return;
+      }
+
+      try {
+        const result = await answerVerificationQuestion(pool, questionKey, answer, { context: ctx });
+        res.json({ ok: true, resumedJobCount: result.resumedJobCount });
+      } catch (err: any) {
+        res.status(400).json({ ok: false, error: err.message || String(err) });
+      }
+    })
+  );
+
+  router.post(
+    "/verification-questions/:key/dismiss",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const questionKey = String(req.params.key || "").trim();
+
+      if (!questionKey) {
+        res.status(400).json({ ok: false, error: "question key is required." });
+        return;
+      }
+
+      try {
+        const result = await dismissVerificationQuestion(pool, questionKey, { context: ctx });
+        res.json({ ok: true, dismissed: result.ok });
+      } catch (err: any) {
+        res.status(400).json({ ok: false, error: err.message || String(err) });
+      }
     })
   );
 

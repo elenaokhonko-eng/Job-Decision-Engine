@@ -26,10 +26,16 @@ export function evaluateDesktopE2EGate(input: DesktopE2EGateInput): string[] {
   if (!input.packagingPassed) blockers.push("DESKTOP_PACKAGING_VERIFICATION_FAILED");
   if (!input.localApiReachable) blockers.push("LOCAL_COMPANION_API_UNREACHABLE");
 
-  if (input.databaseConfigured) {
+  if (!input.databaseConfigured) {
+    blockers.push("DATABASE_NOT_CONFIGURED");
+  } else {
     if (!input.databaseConnected) blockers.push("DATABASE_CONNECTION_FAILED");
     if (!input.schemaInitialized) blockers.push("SCHEMA_NOT_INITIALIZED");
     if (input.migrationsPending > 0) blockers.push("SCHEMA_MIGRATIONS_PENDING");
+  }
+
+  if (!input.aiProviderConfigured) {
+    blockers.push("AI_PROVIDER_NOT_CONFIGURED");
   }
 
   if (input.deadLetterTasks > 0) blockers.push("PIPELINE_TASKS_DEAD_LETTERED");

@@ -48,7 +48,7 @@ async function loadCandidates(client: pg.PoolClient, context: WorkspaceContext):
         SELECT DISTINCT ON (jv.canonical_job_id)
                jv.canonical_job_id,
                jv.id AS job_version_id,
-               LENGTH(COALESCE(jv.description, '')) as desc_len
+               LENGTH(COALESCE(jv.description_text, '')) as desc_len
         FROM job_versions jv
         WHERE jv.workspace_id = $1
         ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
@@ -59,28 +59,37 @@ async function loadCandidates(client: pg.PoolClient, context: WorkspaceContext):
                jv.id AS complete_version_id
         FROM job_versions jv
         WHERE jv.workspace_id = $1
-          AND LENGTH(COALESCE(jv.description, '')) >= 1000
+          AND LENGTH(COALESCE(jv.description_text, '')) >= 1000
         ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
+      ),
+      latest_gate_decisions AS (
+        SELECT DISTINCT ON (gd.canonical_job_id)
+               gd.canonical_job_id,
+               gd.rejection_codes
+        FROM gate_decisions gd
+        JOIN canonical_jobs c ON c.id = gd.canonical_job_id AND c.workspace_id = $1
+        ORDER BY gd.canonical_job_id, gd.created_at DESC, gd.id DESC
       )
        SELECT
          c.id AS canonical_job_id,
-         lv.job_version_id,
+         COALESCE(c.latest_job_version_id, lv.job_version_id) AS job_version_id,
          COALESCE(c.processing_state, c.processing_status) AS processing_state,
          c.gate_decision,
          c.primary_lane,
          c.rejection_reason,
-         c.rejection_reason_codes,
+         COALESCE(lgd.rejection_codes, '[]'::jsonb) AS rejection_reason_codes,
          c.gate_evidence_quotes AS evidence_quotes,
          c.profile_match_status,
-         (lv.desc_len < 1000 AND pcv.complete_version_id IS NOT NULL AND pcv.complete_version_id <> lv.job_version_id) AS has_complete_prior_version,
+         (lv.desc_len < 1000 AND pcv.complete_version_id IS NOT NULL AND pcv.complete_version_id <> COALESCE(c.latest_job_version_id, lv.job_version_id)) AS has_complete_prior_version,
          pcv.complete_version_id
       FROM canonical_jobs c
       JOIN latest_versions lv ON lv.canonical_job_id = c.id
       LEFT JOIN prior_complete_versions pcv ON pcv.canonical_job_id = c.id
+      LEFT JOIN latest_gate_decisions lgd ON lgd.canonical_job_id = c.id
       WHERE c.workspace_id = $1
         AND (
            COALESCE(c.processing_state, c.processing_status) IN ('NEEDS_MANUAL_REVIEW', 'HARD_REJECTED', 'RAW_STAGED', 'MATCHED', 'DECIDED', 'LANE_ROUTED')
-           OR (lv.desc_len < 1000 AND pcv.complete_version_id IS NOT NULL AND pcv.complete_version_id <> lv.job_version_id)
+           OR (lv.desc_len < 1000 AND pcv.complete_version_id IS NOT NULL AND pcv.complete_version_id <> COALESCE(c.latest_job_version_id, lv.job_version_id))
          )
        ORDER BY c.created_at, c.id
     `,
@@ -257,10 +266,9 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
           `UPDATE canonical_jobs
            SET gate_decision = NULL,
                rejection_reason = NULL,
-               rejection_reason_codes = NULL,
                gate_evidence_quotes = NULL,
-               processing_state = 'NORMALIZED',
-               processing_status = 'NORMALIZED',
+               processing_state = 'RAW_STAGED',
+               processing_status = 'RAW_STAGED',
                updated_at = NOW()
            WHERE workspace_id = $1 AND id = $2`,
           [context.workspaceId, candidate.canonical_job_id]
@@ -269,8 +277,17 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
           repair: category,
           prior_state: candidate.processing_state,
           prior_rejection_reason: candidate.rejection_reason,
-          next_state: "NORMALIZED",
+          next_state: "RAW_STAGED",
         });
+        await enqueueRepairTask(
+          client,
+          context,
+          candidate,
+          "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+          "deterministic_requirements_v1",
+          { ...basePayload, reprocess: true },
+          "negated-lifestyle-reextract"
+        );
         await enqueueRepairTask(
           client,
           context,
@@ -278,7 +295,7 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
           "APPLY_HARD_GATES",
           "hard_gate_v1",
           { ...basePayload, force_policy_recalculation: true, reprocess: true },
-          "negated-lifestyle"
+          "negated-lifestyle-gate"
         );
         continue;
       }
@@ -307,6 +324,15 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
           client,
           context,
           candidate,
+          "PUBLISH_EMBEDDING",
+          "embedding_publication_v1",
+          basePayload,
+          "unprovable-match-publish"
+        );
+        await enqueueRepairTask(
+          client,
+          context,
+          candidate,
           "MATCH_PROFILE_EVIDENCE",
           "deterministic_matcher_v1",
           { ...basePayload, profile_version_id: profileVersionId },
@@ -321,10 +347,9 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
            SET latest_job_version_id = $3,
                gate_decision = NULL,
                rejection_reason = NULL,
-               rejection_reason_codes = NULL,
                gate_evidence_quotes = NULL,
-               processing_state = 'NORMALIZED',
-               processing_status = 'NORMALIZED',
+               processing_state = 'RAW_STAGED',
+               processing_status = 'RAW_STAGED',
                updated_at = NOW()
            WHERE workspace_id = $1 AND id = $2`,
           [context.workspaceId, candidate.canonical_job_id, candidate.complete_version_id]
@@ -332,7 +357,7 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
         await insertRepairEvent(client, context, candidate, {
           repair: category,
           restored_version_id: candidate.complete_version_id,
-          next_state: "NORMALIZED",
+          next_state: "RAW_STAGED",
         });
         await enqueueRepairTask(
           client,
@@ -340,7 +365,7 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
           { ...candidate, job_version_id: candidate.complete_version_id },
           "EXTRACT_DETERMINISTIC_REQUIREMENTS",
           "deterministic_requirements_v1",
-          { ...basePayload, job_version_id: candidate.complete_version_id },
+          { ...basePayload, job_version_id: candidate.complete_version_id, reprocess: true },
           "truncated-masking"
         );
         continue;
@@ -385,7 +410,12 @@ async function main(): Promise<void> {
     }
 
     const applied = await applyRepair(client, context, candidates);
-    const questionSummary = await aggregateVerificationQuestions(client, { context });
+    let questionSummary: any = null;
+    try {
+      questionSummary = await aggregateVerificationQuestions(client, { context });
+    } catch (aggError) {
+      console.warn("Verification question aggregation encountered an issue:", aggError instanceof Error ? aggError.message : String(aggError));
+    }
     console.log(JSON.stringify({ applied, questionSummary }, null, 2));
   } finally {
     client.release();

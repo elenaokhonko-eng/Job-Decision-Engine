@@ -119,4 +119,35 @@ describe("structured requirement comparators", () => {
     );
     expect(result.status).toBe("MATCH");
   });
+
+  it("does not match unrelated engineering or supply-chain domains to AI engineering experience", () => {
+    const aiRequirement = {
+      requirement_type: "EXPERIENCE_YEARS" as const,
+      requirement_text: "At least 4 years of AI engineering experience required",
+      quote_text: "4 years of AI engineering experience",
+      structured_value: { minimum_years: 4, experience_scope: "AI engineering" },
+    };
+
+    // Civil engineering has 'engineering' token, but different domain family
+    const civilResult = compareStructuredRequirement(
+      aiRequirement,
+      [fact("Ten years of civil engineering", { professional_years: 10, experience_scope: "civil engineering" })]
+    );
+    expect(civilResult.status).toBe("UNKNOWN");
+    expect(civilResult.rationale).toContain("No structured profile experience duration is available for the required scope: ai engineering");
+
+    // Supply-chain operations has 'chain' containing substring 'ai', but different domain family
+    const supplyChainResult = compareStructuredRequirement(
+      aiRequirement,
+      [fact("Ten years of supply-chain operations", { professional_years: 10, experience_scope: "supply-chain operations" })]
+    );
+    expect(supplyChainResult.status).toBe("UNKNOWN");
+
+    // Relevant machine learning / deep learning experience correctly matches
+    const mlResult = compareStructuredRequirement(
+      aiRequirement,
+      [fact("Five years of machine learning engineering", { professional_years: 5, experience_scope: "machine learning engineering" })]
+    );
+    expect(mlResult.status).toBe("MATCH");
+  });
 });

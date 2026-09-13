@@ -258,7 +258,11 @@ function validateApiBaseUrl(apiBaseUrl) {
   }
   let parsed;
   try {
-    parsed = new URL(normalized);
+    if (normalized.startsWith("/")) {
+      parsed = new URL(normalized, desktopApiBaseUrl());
+    } else {
+      parsed = new URL(normalized);
+    }
   } catch {
     throw new Error("The API base URL is not a valid URL.");
   }
@@ -271,7 +275,7 @@ function validateApiBaseUrl(apiBaseUrl) {
   if (app.isPackaged && !isLoopback && parsed.protocol !== "https:") {
     throw new Error("Packaged desktop clients require an HTTPS managed remote API.");
   }
-  return normalized;
+  return parsed.toString().replace(/\/+$/, "");
 }
 
 async function requestRemoteApi(input) {
