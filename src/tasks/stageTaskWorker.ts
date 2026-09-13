@@ -1429,6 +1429,13 @@ async function executeStageTask(
   }
 
   if (taskType === "ROUTE_LANE") {
+    const routeState = await lookupJobState(clientOrPool, ctx, jobVersionId);
+    if (
+      routeState.latestJobVersionId &&
+      routeState.latestJobVersionId !== jobVersionId
+    ) {
+      return;
+    }
     const summary = await dependencies.runLaneRouting(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],

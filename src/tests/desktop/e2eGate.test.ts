@@ -51,6 +51,22 @@ describe("evaluateDesktopE2EGate", () => {
     expect(blockers).toContain("SCHEMA_MIGRATIONS_PENDING");
   });
 
+  it("flags unconfigured database when databaseConfigured is false", () => {
+    const blockers = evaluateDesktopE2EGate({
+      ...basePassingInput,
+      databaseConfigured: false,
+    });
+    expect(blockers).toContain("DATABASE_NOT_CONFIGURED");
+  });
+
+  it("flags unconfigured AI provider when aiProviderConfigured is false", () => {
+    const blockers = evaluateDesktopE2EGate({
+      ...basePassingInput,
+      aiProviderConfigured: false,
+    });
+    expect(blockers).toContain("AI_PROVIDER_NOT_CONFIGURED");
+  });
+
   it("flags dead-lettered and blocked tasks", () => {
     const blockers = evaluateDesktopE2EGate({
       ...basePassingInput,
