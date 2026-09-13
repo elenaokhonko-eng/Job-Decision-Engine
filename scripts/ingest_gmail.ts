@@ -11,6 +11,14 @@ const databaseUrl = process.env.DATABASE_URL;
 const gmailFolder = process.env.GMAIL_FOLDER || "Jobs-Alerts";
 const gmailProcessedFolder = process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
 const gmailReadOnly = process.env.GMAIL_READ_ONLY === "true";
+const rawMaxMessages = process.env.GMAIL_MAX_MESSAGES_PER_RUN;
+const maxMessagesPerRun = rawMaxMessages && Number.isInteger(Number(rawMaxMessages)) && Number(rawMaxMessages) > 0
+  ? Number(rawMaxMessages)
+  : 250;
+const rawPacing = process.env.GMAIL_PACING_DELAY_MS;
+const pacingDelayMs = rawPacing && Number.isInteger(Number(rawPacing)) && Number(rawPacing) >= 0
+  ? Number(rawPacing)
+  : 25;
 
 export async function ingestGmail(): Promise<number> {
   console.log("====================================================");
@@ -21,14 +29,18 @@ export async function ingestGmail(): Promise<number> {
     throw new Error("Missing required DATABASE_URL.");
   }
 
-  const gmailClient = new GmailApiClient(loadGmailApiCredentials());
+  const gmailClient = new GmailApiClient(loadGmailApiCredentials(), {
+    pacingDelayMs,
+  });
   const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
   let ingestedCount = 0;
 
   try {
     const ctx = await resolveWorkspaceContext(pool as any);
-    console.log(`Reading Gmail label "${gmailFolder}" through the Gmail API over HTTPS...`);
-    const { label, messages } = await gmailClient.readMessagesByLabel(gmailFolder);
+    console.log(
+      `Reading Gmail label "${gmailFolder}" (max ${maxMessagesPerRun} messages) through the Gmail API over HTTPS...`
+    );
+    const { label, messages } = await gmailClient.readMessagesByLabel(gmailFolder, maxMessagesPerRun);
     console.log(`Gmail label "${gmailFolder}" resolved to ${label.id}. Messages found: ${messages.length}`);
 
     if (messages.length === 0) {
@@ -37,6 +49,9 @@ export async function ingestGmail(): Promise<number> {
     }
 
     for (const message of messages) {
+      if (ingestedCount > 0 && pacingDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, pacingDelayMs));
+      }
       console.log(`Processing email #${ingestedCount + 1}: "${message.subject}"`);
 
       const dbClient = await pool.connect();
@@ -92,8 +107,17 @@ export async function ingestGmailWithRetry(): Promise<number> {
     } catch (error) {
       lastError = error;
       if (attempt === maxAttempts) break;
-      const delayMs = Math.min(30_000, 1_000 * 2 ** (attempt - 1));
-      console.warn(`Gmail ingestion attempt ${attempt}/${maxAttempts} failed; retrying in ${delayMs}ms.`);
+      const isRateLimit = /rate limit|ratelimit|quota exceeded|429|rateLimitExceeded|RATE_LIMIT_EXCEEDED|totalQueryCost|total_query_cost|Units per minute/i.test(
+        error instanceof Error ? error.message : String(error)
+      );
+      const delayMs = isRateLimit
+        ? Math.min(180_000, 60_000 * 2 ** (attempt - 1))
+        : Math.min(30_000, 1_000 * 2 ** (attempt - 1));
+      console.warn(
+        `Gmail ingestion attempt ${attempt}/${maxAttempts} failed (${
+          isRateLimit ? "rate limit/quota exceeded" : "transient error"
+        }); retrying in ${delayMs}ms.`
+      );
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }

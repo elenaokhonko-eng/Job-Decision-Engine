@@ -20,12 +20,14 @@ export interface GmailRawMessage {
   internalDate: string | null;
 }
 
-interface GmailApiOptions {
+export interface GmailApiOptions {
   fetchImpl?: typeof fetch;
   apiRoot?: string;
   tokenEndpoint?: string;
   maxAttempts?: number;
   retryBaseDelayMs?: number;
+  rateLimitDelayMs?: number;
+  pacingDelayMs?: number;
 }
 
 interface GmailMessageListResponse {
@@ -56,6 +58,16 @@ function decodeBase64Url(value: string): string {
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
   const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
   return Buffer.from(padded, "base64").toString("utf8");
+}
+
+export function isGoogleRateLimitError(status: number, bodyText: string): boolean {
+  if (status === 429) return true;
+  if (status === 403) {
+    return /rateLimitExceeded|userRateLimitExceeded|quotaExceeded|dailyLimitExceeded|RATE_LIMIT_EXCEEDED|quota_limit|totalQueryCost|total_query_cost|Units per minute|quota exceeded|rate limit/i.test(
+      bodyText
+    );
+  }
+  return false;
 }
 
 export function extractEmailSubject(rawMessage: string): string {
@@ -100,6 +112,8 @@ export class GmailApiClient {
   private readonly tokenEndpoint: string;
   private readonly maxAttempts: number;
   private readonly retryBaseDelayMs: number;
+  private readonly rateLimitDelayMs: number;
+  private readonly pacingDelayMs: number;
   private accessToken: string | null = null;
   private accessTokenExpiresAt = 0;
   private readonly labelCache = new Map<string, GmailLabel>();
@@ -113,6 +127,14 @@ export class GmailApiClient {
     this.tokenEndpoint = options.tokenEndpoint || GOOGLE_OAUTH_TOKEN_ENDPOINT;
     this.maxAttempts = Math.max(1, options.maxAttempts ?? 3);
     this.retryBaseDelayMs = Math.max(0, options.retryBaseDelayMs ?? 1000);
+    this.rateLimitDelayMs = Math.max(
+      0,
+      options.rateLimitDelayMs ?? (options.retryBaseDelayMs === 0 ? 0 : 60_000)
+    );
+    this.pacingDelayMs = Math.max(
+      0,
+      options.pacingDelayMs ?? (options.retryBaseDelayMs === 0 ? 0 : 25)
+    );
   }
 
   async listLabels(): Promise<GmailLabel[]> {
@@ -154,14 +176,18 @@ export class GmailApiClient {
     return created;
   }
 
-  async listMessageIdsByLabel(labelId: string): Promise<string[]> {
+  async listMessageIdsByLabel(labelId: string, maxMessages?: number): Promise<string[]> {
     const messageIds: string[] = [];
     let pageToken: string | undefined;
 
     do {
+      const remaining = maxMessages !== undefined && maxMessages > 0 ? maxMessages - messageIds.length : 500;
+      if (remaining <= 0) break;
+
+      const pageSize = Math.min(500, Math.max(1, remaining));
       const query = new URLSearchParams({
         labelIds: labelId,
-        maxResults: "500",
+        maxResults: String(pageSize),
       });
       if (pageToken) query.set("pageToken", pageToken);
 
@@ -169,12 +195,17 @@ export class GmailApiClient {
         method: "GET",
       });
       for (const message of response.messages || []) {
-        if (message.id) messageIds.push(message.id);
+        if (message.id) {
+          messageIds.push(message.id);
+          if (maxMessages !== undefined && maxMessages > 0 && messageIds.length >= maxMessages) {
+            break;
+          }
+        }
       }
       pageToken = response.nextPageToken;
-    } while (pageToken);
+    } while (pageToken && (maxMessages === undefined || maxMessages <= 0 || messageIds.length < maxMessages));
 
-    return messageIds;
+    return maxMessages !== undefined && maxMessages > 0 ? messageIds.slice(0, maxMessages) : messageIds;
   }
 
   async getRawMessage(messageId: string): Promise<GmailRawMessage> {
@@ -195,12 +226,19 @@ export class GmailApiClient {
     };
   }
 
-  async readMessagesByLabel(labelName: string): Promise<{ label: GmailLabel; messages: GmailRawMessage[] }> {
+  async readMessagesByLabel(
+    labelName: string,
+    maxMessages?: number
+  ): Promise<{ label: GmailLabel; messages: GmailRawMessage[] }> {
     const label = await this.resolveLabel(labelName);
-    const messageIds = await this.listMessageIdsByLabel(label.id);
+    const messageIds = await this.listMessageIdsByLabel(label.id, maxMessages);
     const messages: GmailRawMessage[] = [];
 
-    for (const messageId of messageIds) {
+    for (let i = 0; i < messageIds.length; i += 1) {
+      const messageId = messageIds[i];
+      if (i > 0 && this.pacingDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.pacingDelayMs));
+      }
       messages.push(await this.getRawMessage(messageId));
     }
 
@@ -283,7 +321,8 @@ export class GmailApiClient {
         }
 
         const detail = bodyText || `HTTP ${response.status}`;
-        const retryable = response.status === 401 || response.status === 429 || response.status >= 500;
+        const isRateLimit = isGoogleRateLimitError(response.status, bodyText);
+        const retryable = response.status === 401 || response.status === 429 || response.status >= 500 || isRateLimit;
         const requestError = Object.assign(
           new Error(`Gmail API request failed (${response.status}): ${detail}`),
           { retryable }
@@ -293,15 +332,23 @@ export class GmailApiClient {
 
         const retryAfterHeader = response.headers.get("retry-after");
         const retryAfter = retryAfterHeader === null ? Number.NaN : Number(retryAfterHeader);
+        const baseDelay = isRateLimit
+          ? Math.max(this.rateLimitDelayMs, this.retryBaseDelayMs)
+          : this.retryBaseDelayMs;
         const delayMs = Number.isFinite(retryAfter)
           ? Math.max(0, retryAfter * 1000)
-          : this.retryBaseDelayMs * 2 ** (attempt - 1);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+          : baseDelay * 2 ** (attempt - 1);
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
         if ((lastError as RetryAwareError).retryable === false) throw lastError;
         if (attempt === this.maxAttempts) throw lastError;
-        await new Promise((resolve) => setTimeout(resolve, this.retryBaseDelayMs * 2 ** (attempt - 1)));
+        const delayMs = this.retryBaseDelayMs * 2 ** (attempt - 1);
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
       }
     }
 

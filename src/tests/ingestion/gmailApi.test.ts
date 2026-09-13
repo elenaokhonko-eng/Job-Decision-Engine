@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GmailApiClient,
   extractEmailSubject,
+  isGoogleRateLimitError,
   loadGmailApiCredentials,
 } from "../../services/gmailApi.js";
 
@@ -87,5 +88,164 @@ describe("Gmail API client", () => {
     expect(() => loadGmailApiCredentials({ GMAIL_OAUTH_CLIENT_ID: "only-id" })).toThrow(
       "GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN"
     );
+  });
+
+  it("identifies Google quota and rate limit errors properly", () => {
+    expect(isGoogleRateLimitError(429, "Too Many Requests")).toBe(true);
+    expect(
+      isGoogleRateLimitError(
+        403,
+        JSON.stringify({
+          error: {
+            code: 403,
+            message: "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'",
+            errors: [{ reason: "rateLimitExceeded" }],
+          },
+        })
+      )
+    ).toBe(true);
+    expect(
+      isGoogleRateLimitError(
+        403,
+        JSON.stringify({
+          error: {
+            code: 403,
+            details: [{ reason: "RATE_LIMIT_EXCEEDED" }],
+          },
+        })
+      )
+    ).toBe(true);
+    expect(
+      isGoogleRateLimitError(
+        403,
+        JSON.stringify({
+          error: {
+            code: 403,
+            message: "The caller does not have permission",
+            errors: [{ reason: "forbidden" }],
+          },
+        })
+      )
+    ).toBe(false);
+  });
+
+  it("retries on HTTP 403 rateLimitExceeded error and succeeds on subsequent attempt", async () => {
+    let attemptCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://oauth.test/token") {
+        return jsonResponse({ access_token: "access-token", expires_in: 3600 });
+      }
+      if (url.endsWith("/labels") && init?.method === "GET") {
+        attemptCount += 1;
+        if (attemptCount === 1) {
+          return jsonResponse(
+            {
+              error: {
+                code: 403,
+                message: "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'",
+                errors: [{ reason: "rateLimitExceeded" }],
+              },
+            },
+            403
+          );
+        }
+        return jsonResponse({ labels: [{ id: "label-1", name: "Jobs-Alerts" }] });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const client = new GmailApiClient(
+      { clientId: "cid", clientSecret: "csec", refreshToken: "rtoken" },
+      {
+        fetchImpl: fetchMock,
+        apiRoot: "https://gmail.test/gmail/v1/users/me",
+        tokenEndpoint: "https://oauth.test/token",
+        maxAttempts: 3,
+        retryBaseDelayMs: 0,
+        rateLimitDelayMs: 0,
+      }
+    );
+
+    const labels = await client.listLabels();
+    expect(labels).toEqual([{ id: "label-1", name: "Jobs-Alerts" }]);
+    expect(attemptCount).toBe(2);
+  });
+
+  it("does not retry on standard non-rate-limit 403 permission errors", async () => {
+    let attemptCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://oauth.test/token") {
+        return jsonResponse({ access_token: "access-token", expires_in: 3600 });
+      }
+      if (url.endsWith("/labels") && init?.method === "GET") {
+        attemptCount += 1;
+        return jsonResponse(
+          {
+            error: {
+              code: 403,
+              message: "The caller does not have permission",
+              errors: [{ reason: "forbidden" }],
+            },
+          },
+          403
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const client = new GmailApiClient(
+      { clientId: "cid", clientSecret: "csec", refreshToken: "rtoken" },
+      {
+        fetchImpl: fetchMock,
+        apiRoot: "https://gmail.test/gmail/v1/users/me",
+        tokenEndpoint: "https://oauth.test/token",
+        maxAttempts: 3,
+        retryBaseDelayMs: 0,
+      }
+    );
+
+    await expect(client.listLabels()).rejects.toThrow("Gmail API request failed (403)");
+    expect(attemptCount).toBe(1);
+  });
+
+  it("respects maxMessages parameter when listing message IDs across pages", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://oauth.test/token") {
+        return jsonResponse({ access_token: "access-token", expires_in: 3600 });
+      }
+      if (url.includes("/messages?")) {
+        const parsedUrl = new URL(url);
+        const pageToken = parsedUrl.searchParams.get("pageToken");
+        if (!pageToken) {
+          return jsonResponse({
+            messages: [{ id: "m1" }, { id: "m2" }],
+            nextPageToken: "page-2",
+          });
+        }
+        if (pageToken === "page-2") {
+          return jsonResponse({
+            messages: [{ id: "m3" }, { id: "m4" }],
+            nextPageToken: "page-3",
+          });
+        }
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const client = new GmailApiClient(
+      { clientId: "cid", clientSecret: "csec", refreshToken: "rtoken" },
+      {
+        fetchImpl: fetchMock,
+        apiRoot: "https://gmail.test/gmail/v1/users/me",
+        tokenEndpoint: "https://oauth.test/token",
+        retryBaseDelayMs: 0,
+      }
+    );
+
+    const ids = await client.listMessageIdsByLabel("label-jobs", 3);
+    expect(ids).toEqual(["m1", "m2", "m3"]);
   });
 });

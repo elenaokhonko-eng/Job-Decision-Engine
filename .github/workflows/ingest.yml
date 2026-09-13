@@ -48,6 +48,8 @@ jobs:
           GMAIL_PROCESSED_FOLDER: ${{ vars.GMAIL_PROCESSED_FOLDER || 'Jobs-Alerts-Processed' }}
           GMAIL_READ_ONLY: ${{ vars.GMAIL_READ_ONLY || 'false' }}
           GMAIL_INGEST_MAX_ATTEMPTS: ${{ vars.GMAIL_INGEST_MAX_ATTEMPTS || '3' }}
+          GMAIL_MAX_MESSAGES_PER_RUN: ${{ vars.GMAIL_MAX_MESSAGES_PER_RUN || '250' }}
+          GMAIL_PACING_DELAY_MS: ${{ vars.GMAIL_PACING_DELAY_MS || '25' }}
         run: npx tsx scripts/ingest_gmail.ts
       - name: Run LLM email parser
         timeout-minutes: 10

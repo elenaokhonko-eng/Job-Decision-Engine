@@ -29,6 +29,17 @@ Optional repository variables:
 - `GMAIL_FOLDER` — source label, default `Jobs-Alerts`.
 - `GMAIL_PROCESSED_FOLDER` — destination label, default `Jobs-Alerts-Processed`.
 - `GMAIL_READ_ONLY` — set to `true` to prevent Gmail label changes.
+- `GMAIL_MAX_MESSAGES_PER_RUN` — maximum messages ingested per workflow run, default `250`.
+- `GMAIL_PACING_DELAY_MS` — delay between message fetches/updates in milliseconds to respect burst limits, default `25`.
+- `GMAIL_INGEST_MAX_ATTEMPTS` — outer retry attempts for ingestion, default `3`.
+
+## Quota & rate-limiting architecture
+
+Google enforces a quota of 6,000 cost units per minute per user. `messages.list`, `messages.get(format=raw)`, and `messages.modify` cost 5 units each:
+
+1. **403 Rate Limit Backoff**: Google returns HTTP 403 with `rateLimitExceeded` / `RATE_LIMIT_EXCEEDED` on quota exhaustion. The client detects this and backs off for at least 60 seconds to allow the rolling 1-minute quota bucket to replenish.
+2. **Pacing**: A 25ms delay between message requests ensures burst throughput stays below Google's 250 units/second burst ceiling.
+3. **Batching**: Capping messages at `GMAIL_MAX_MESSAGES_PER_RUN=250` ensures that backlogged mailboxes are drained gracefully across scheduled runs rather than exceeding quota in a single execution.
 
 ## Processing guarantee
 
