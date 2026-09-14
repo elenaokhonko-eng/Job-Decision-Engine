@@ -42,7 +42,6 @@ function normalizedUrl(value) {
 function desktopApiBaseUrl() {
   const configured = normalizedUrl(process.env.JDEC_DESKTOP_API_BASE_URL || process.env.JDEC_API_BASE_URL);
   if (configured) return configured;
-  if (app.isPackaged) return "";
   if (localServerInstance && localServerInstance.apiBaseUrl) {
     return localServerInstance.apiBaseUrl;
   }

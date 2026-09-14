@@ -23,6 +23,7 @@ interface RepairCandidate {
   rejection_reason_codes?: string[] | null;
   evidence_quotes?: string[] | null;
   profile_match_status?: string | null;
+  has_missing_embeddings?: boolean;
   has_complete_prior_version?: boolean;
   complete_version_id?: string | null;
   category: RepairCategory;
@@ -80,6 +81,11 @@ async function loadCandidates(client: pg.PoolClient, context: WorkspaceContext):
          COALESCE(lgd.rejection_codes, '[]'::jsonb) AS rejection_reason_codes,
          c.gate_evidence_quotes AS evidence_quotes,
          c.profile_match_status,
+         NOT EXISTS (
+           SELECT 1 FROM job_version_embeddings jve
+           WHERE jve.workspace_id = $1
+             AND jve.job_version_id = COALESCE(c.latest_job_version_id, lv.job_version_id)
+         ) AS has_missing_embeddings,
          (lv.desc_len < 1000 AND pcv.complete_version_id IS NOT NULL AND pcv.complete_version_id <> COALESCE(c.latest_job_version_id, lv.job_version_id)) AS has_complete_prior_version,
          pcv.complete_version_id
       FROM canonical_jobs c
@@ -284,7 +290,7 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
           context,
           candidate,
           "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-          "deterministic_requirements_v1",
+          "deterministic_v3",
           { ...basePayload, reprocess: true },
           "negated-lifestyle-reextract"
         );
@@ -364,7 +370,7 @@ async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, can
           context,
           { ...candidate, job_version_id: candidate.complete_version_id },
           "EXTRACT_DETERMINISTIC_REQUIREMENTS",
-          "deterministic_requirements_v1",
+          "deterministic_v3",
           { ...basePayload, job_version_id: candidate.complete_version_id, reprocess: true },
           "truncated-masking"
         );
@@ -411,12 +417,18 @@ async function main(): Promise<void> {
 
     const applied = await applyRepair(client, context, candidates);
     let questionSummary: any = null;
+    let questionAggregationError: string | null = null;
     try {
       questionSummary = await aggregateVerificationQuestions(client, { context });
     } catch (aggError) {
-      console.warn("Verification question aggregation encountered an issue:", aggError instanceof Error ? aggError.message : String(aggError));
+      questionAggregationError = aggError instanceof Error ? aggError.message : String(aggError);
+      console.warn("Verification question aggregation encountered an issue:", questionAggregationError);
     }
-    console.log(JSON.stringify({ applied, questionSummary }, null, 2));
+    console.log(JSON.stringify({ applied, questionSummary, questionAggregationError }, null, 2));
+    if (questionAggregationError) {
+      console.error(`Repair completed pipeline tasks but verification question aggregation failed: ${questionAggregationError}`);
+      process.exit(1);
+    }
   } finally {
     client.release();
     await pool.end();

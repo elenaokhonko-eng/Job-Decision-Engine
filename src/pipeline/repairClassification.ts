@@ -17,6 +17,7 @@ export interface RepairClassificationInput {
   rejection_reason_codes?: string[] | null;
   profile_match_status?: string | null;
   has_complete_prior_version?: boolean;
+  has_missing_embeddings?: boolean;
 }
 
 /**
@@ -70,7 +71,7 @@ export function classifyRepairCategory(
     return "RAW_STAGED_HARD_REJECT";
   }
 
-  // Detect false-negative lifestyle rejection caused by negated keywords ("no on-call", "zero travel", etc.)
+  // Detect false-negative lifestyle rejection caused by negated keywords ("no on-call", "no regular on-call", "zero travel", etc.)
   const evidenceText = (row.evidence_quotes || []).join(" ").toLowerCase();
   const codes = (row.rejection_reason_codes || []).map((c) => c.toUpperCase());
   const isLifestyleRejection =
@@ -80,8 +81,8 @@ export function classifyRepairCategory(
   if (
     (row.processing_state === "HARD_REJECTED" || row.gate_decision === "HARD_REJECT") &&
     isLifestyleRejection &&
-    (/\b(?:no|not|never|without|zero|0)\s+(?:on-?call|travel|weekend|overtime|shift)\b/i.test(evidenceText) ||
-     /\b(?:on-?call|travel|weekend|overtime|shift)\s+(?:is\s+)?(?:not|never|optional|zero)\b/i.test(evidenceText))
+    (/\b(?:no|not|never|without|zero|0|free\s+of)\s+(?:[\w'-]+\s+){0,3}(?:on-?call|travel|weekend|overtime|shift|rotation)\b/i.test(evidenceText) ||
+     /\b(?:on-?call|travel|weekend|overtime|shift|rotation)\s+(?:is\s+|are\s+|will\s+be\s+)?(?:not\s+required|not|never|optional|zero|not\s+expected|not\s+needed|not\s+mandatory)\b/i.test(evidenceText))
   ) {
     return "FALSE_NEGATIVE_NEGATED_LIFESTYLE";
   }
@@ -90,6 +91,7 @@ export function classifyRepairCategory(
   if (
     row.gate_decision === "PASS" &&
     row.profile_match_status === "NO_PROFILE_MATCH" &&
+    row.has_missing_embeddings === true &&
     (row.processing_state === "MATCHED" || row.processing_state === "DECIDED" || row.processing_state === "LANE_ROUTED")
   ) {
     return "UNPROVABLE_MATCH_EMBEDDING_PENDING";

@@ -839,7 +839,7 @@ dotenv.default.config({
 	path: ".env.local",
 	override: true
 });
-var defaultPool = new pg.default.Pool(pgPoolConfig(process.env.DATABASE_URL));
+var defaultPool$1 = new pg.default.Pool(pgPoolConfig(process.env.DATABASE_URL));
 function stableSpaceKey(prefix, parts) {
 	return `${prefix}_${crypto.default.createHash("sha256").update(parts.map((p) => p.trim()).join("|")).digest("hex").slice(0, 12)}`;
 }
@@ -892,7 +892,7 @@ async function upsertSpace(client, params) {
 	return row.id;
 }
 async function seedEmbeddingSpaces(clientOrPool, options) {
-	const pool = clientOrPool || defaultPool;
+	const pool = clientOrPool || defaultPool$1;
 	const maybe = pool;
 	const ownsClient = pool instanceof pg.default.Pool || typeof maybe?.connect === "function" && typeof maybe?.query === "function" && "totalCount" in maybe && "idleCount" in maybe && "waitingCount" in maybe || typeof maybe?.connect === "function" && typeof maybe?.query !== "function" && typeof maybe?.release !== "function";
 	const client = ownsClient ? await pool.connect() : pool;
@@ -1290,7 +1290,11 @@ function createSetupRouter(deps = {}) {
 			},
 			modelRoutes: {
 				configured: modelRoutesConfigured,
-				routes: activeRoutes
+				routes: activeRoutes,
+				embedding: activeRoutes.find((r) => r.purpose === "EMBEDDING")?.model ?? null,
+				evaluation: activeRoutes.find((r) => r.purpose === "EVALUATION")?.model ?? null,
+				document: activeRoutes.find((r) => r.purpose === "DOCUMENT")?.model ?? null,
+				extraction: activeRoutes.find((r) => r.purpose === "EXTRACTION")?.model ?? null
 			},
 			isComplete
 		});
@@ -1465,7 +1469,32 @@ function createSetupRouter(deps = {}) {
 			});
 			return;
 		}
-		const routes = req.body?.routes;
+		let routes = req.body?.routes;
+		if (!routes || typeof routes !== "object") {
+			const provider = String(req.body?.provider || "gemini").toLowerCase();
+			const embeddingModel = req.body?.embeddingModel;
+			const evaluationModel = req.body?.evaluationModel;
+			const documentModel = req.body?.documentModel;
+			const extractionModel = req.body?.extractionModel;
+			if (embeddingModel || evaluationModel || documentModel || extractionModel) routes = {
+				embedding: embeddingModel ? {
+					provider,
+					model: embeddingModel
+				} : void 0,
+				evaluation: evaluationModel ? {
+					provider,
+					model: evaluationModel
+				} : void 0,
+				document: documentModel ? {
+					provider,
+					model: documentModel
+				} : void 0,
+				extraction: extractionModel ? {
+					provider,
+					model: extractionModel
+				} : void 0
+			};
+		}
 		if (!routes || typeof routes !== "object") {
 			res.status(400).json({
 				ok: false,
@@ -1497,9 +1526,29 @@ function createSetupRouter(deps = {}) {
 					conf: routes.evaluation
 				},
 				{
+					key: "single_job_evaluation",
+					purpose: "EVALUATION",
+					conf: routes.evaluation
+				},
+				{
+					key: "batch_evaluation",
+					purpose: "EVALUATION",
+					conf: routes.evaluation
+				},
+				{
 					key: "document_default",
 					purpose: "DOCUMENT",
 					conf: routes.document || routes.evaluation
+				},
+				{
+					key: "extraction_default",
+					purpose: "EXTRACTION",
+					conf: routes.extraction || routes.evaluation
+				},
+				{
+					key: "requirements_extraction",
+					purpose: "EXTRACTION",
+					conf: routes.extraction || routes.evaluation
 				}
 			];
 			for (const def of routeDefs) {
@@ -1533,6 +1582,191 @@ function createSetupRouter(deps = {}) {
 		}
 	}));
 	return router;
+}
+//#endregion
+//#region src/services/verificationQuestionService.ts
+dotenv.default.config();
+dotenv.default.config({ path: ".env.local" });
+var defaultPool = new pg.default.Pool(pgPoolConfig(process.env.DATABASE_URL));
+async function getPendingVerificationQuestions(clientOrPool, options) {
+	const pool = clientOrPool || defaultPool;
+	const ctx = options?.context ?? await resolveWorkspaceContext(pool);
+	const { rows } = await pool.query(`SELECT *
+     FROM verification_questions
+     WHERE workspace_id = $1
+       AND status = 'PENDING'
+     ORDER BY impact_job_count DESC, created_at ASC`, [ctx.workspaceId]);
+	return rows;
+}
+async function answerVerificationQuestion(clientOrPool, questionKey, answer, options) {
+	const pool = clientOrPool || defaultPool;
+	const isPool = (value) => typeof value.connect === "function" && !("release" in value);
+	const ownsClient = isPool(pool);
+	const client = ownsClient ? await pool.connect() : pool;
+	try {
+		const ctx = options?.context ?? await resolveWorkspaceContext(client);
+		const normalizedKey = String(questionKey || "").trim();
+		await client.query("BEGIN");
+		try {
+			const qRes = await client.query(`SELECT *
+         FROM verification_questions
+         WHERE workspace_id = $1 AND question_key = $2
+         FOR UPDATE`, [ctx.workspaceId, normalizedKey]);
+			if (qRes.rows.length === 0) throw new Error(`Verification question '${normalizedKey}' not found.`);
+			const question = qRes.rows[0];
+			const linkedIds = Array.isArray(question.linked_job_ids) ? question.linked_job_ids : [];
+			await client.query(`UPDATE verification_questions
+         SET status = 'ANSWERED',
+             answer_value = $3::jsonb,
+             answered_at = NOW(),
+             updated_at = NOW()
+         WHERE workspace_id = $1 AND question_key = $2`, [
+				ctx.workspaceId,
+				normalizedKey,
+				JSON.stringify(answer)
+			]);
+			const defId = (await client.query(`INSERT INTO config_definitions (
+           workspace_id,
+           config_key,
+           config_type,
+           description,
+           created_by_user_id
+         )
+         VALUES ($1, 'verification_answers', 'verification_preferences', 'User verification answers for hard gates', $2)
+         ON CONFLICT (workspace_id, config_key)
+         DO UPDATE SET updated_at = NOW()
+         RETURNING id`, [ctx.workspaceId, ctx.userId])).rows[0]?.id;
+			if (defId) {
+				const activeRes = await client.query(`SELECT cr.content
+           FROM config_active_revisions car
+           JOIN config_revisions cr ON cr.id = car.config_revision_id
+           WHERE car.config_definition_id = $1`, [defId]);
+				const canonicalJson = stableStringify({
+					...activeRes.rows[0]?.content && typeof activeRes.rows[0].content === "object" ? activeRes.rows[0].content : {},
+					[normalizedKey]: answer
+				});
+				const contentHash = sha256Hex$1(canonicalJson);
+				const revisionId = (await client.query(`INSERT INTO config_revisions (
+             config_definition_id,
+             revision_number,
+             schema_version,
+             content_hash,
+             content,
+             change_summary,
+             created_by_user_id
+           )
+           VALUES (
+             $1,
+             (SELECT COALESCE(MAX(revision_number), 0) + 1 FROM config_revisions WHERE config_definition_id = $1),
+             '1.0.0',
+             $2,
+             $3::jsonb,
+             $4,
+             $5
+           )
+           ON CONFLICT (config_definition_id, content_hash)
+           DO UPDATE SET updated_at = NOW()
+           RETURNING id`, [
+					defId,
+					contentHash,
+					canonicalJson,
+					`Updated answer for ${normalizedKey}`,
+					ctx.userId
+				])).rows[0]?.id;
+				if (revisionId) await client.query(`INSERT INTO config_active_revisions (
+               config_definition_id,
+               config_revision_id,
+               activated_by_user_id
+             )
+             VALUES ($1, $2, $3)
+             ON CONFLICT (config_definition_id)
+             DO UPDATE SET
+               config_revision_id = EXCLUDED.config_revision_id,
+               activated_by_user_id = EXCLUDED.activated_by_user_id,
+               activated_at = NOW()`, [
+					defId,
+					revisionId,
+					ctx.userId
+				]);
+			}
+			let resumedCount = 0;
+			if (linkedIds.length > 0) {
+				resumedCount = (await client.query(`UPDATE canonical_jobs
+           SET processing_state = 'RAW_STAGED',
+               processing_status = 'RAW_STAGED',
+               gate_decision = NULL,
+               rejection_reason = NULL,
+               gate_evidence_quotes = NULL,
+               updated_at = NOW()
+           WHERE workspace_id = $1
+             AND id = ANY($2::uuid[])
+             AND COALESCE(processing_state, processing_status) = 'NEEDS_VERIFICATION'`, [ctx.workspaceId, linkedIds])).rowCount ?? 0;
+				const { rows: resumedJobs } = await client.query(`SELECT c.id AS canonical_job_id,
+                  COALESCE(c.latest_job_version_id, (
+                    SELECT jv.id FROM job_versions jv
+                    WHERE jv.workspace_id = c.workspace_id AND jv.canonical_job_id = c.id
+                    ORDER BY jv.observed_at DESC LIMIT 1
+                  )) AS job_version_id
+           FROM canonical_jobs c
+           WHERE c.workspace_id = $1
+             AND c.id = ANY($2::uuid[])`, [ctx.workspaceId, linkedIds]);
+				for (const rj of resumedJobs) if (rj.job_version_id) {
+					const taskKey = `APPLY_HARD_GATES:${rj.job_version_id}:hard_gate_v2`;
+					await client.query(`INSERT INTO pipeline_tasks (
+                 workspace_id,
+                 task_type,
+                 task_key,
+                 payload,
+                 context_fingerprint,
+                 status,
+                 available_at,
+                 max_attempts,
+                 created_at,
+                 updated_at
+               )
+               VALUES ($1, 'APPLY_HARD_GATES', $2, $3::jsonb, 'verification_resumed_v1', 'PENDING', NOW(), 8, NOW(), NOW())
+               ON CONFLICT (workspace_id, task_key, context_fingerprint)
+               DO UPDATE SET
+                 status = 'PENDING',
+                 available_at = NOW(),
+                 lease_id = NULL,
+                 lease_expires_at = NULL,
+                 attempt_count = 0,
+                 last_error = NULL,
+                 dead_letter_reason = NULL,
+                 completed_at = NULL,
+                 updated_at = NOW()`, [
+						ctx.workspaceId,
+						taskKey,
+						JSON.stringify({
+							canonical_job_id: rj.canonical_job_id,
+							job_version_id: rj.job_version_id
+						})
+					]);
+				}
+			}
+			await client.query("COMMIT");
+			return {
+				ok: true,
+				resumedJobCount: resumedCount
+			};
+		} catch (err) {
+			await client.query("ROLLBACK");
+			throw err;
+		}
+	} finally {
+		if (ownsClient && typeof client.release === "function") client.release();
+	}
+}
+async function dismissVerificationQuestion(clientOrPool, questionKey, options) {
+	const pool = clientOrPool || defaultPool;
+	const ctx = options?.context ?? await resolveWorkspaceContext(pool);
+	const normalizedKey = String(questionKey || "").trim();
+	await pool.query(`UPDATE verification_questions
+     SET status = 'DISMISSED',
+         updated_at = NOW()
+     WHERE workspace_id = $1 AND question_key = $2`, [ctx.workspaceId, normalizedKey]);
+	return { ok: true };
 }
 //#endregion
 //#region src/api/v2/router.ts
@@ -2945,6 +3179,68 @@ function createApiV2Router(deps = {}) {
 			recalculation_enqueued: activation.recalculationEnqueued,
 			recalculation_existing: activation.recalculationExisting
 		});
+	}));
+	router.get("/verification-questions", asyncHandler(async (req, res) => {
+		const ctx = req.workspaceContext;
+		const questions = await getPendingVerificationQuestions(pool, { context: ctx });
+		res.json({
+			ok: true,
+			questions
+		});
+	}));
+	router.post("/verification-questions/:key/answer", asyncHandler(async (req, res) => {
+		const ctx = req.workspaceContext;
+		const questionKey = String(req.params.key || "").trim();
+		const answer = req.body?.answer;
+		if (!questionKey) {
+			res.status(400).json({
+				ok: false,
+				error: "question key is required."
+			});
+			return;
+		}
+		if (answer === void 0 || answer === null || answer === "") {
+			res.status(400).json({
+				ok: false,
+				error: "answer is required."
+			});
+			return;
+		}
+		try {
+			const result = await answerVerificationQuestion(pool, questionKey, answer, { context: ctx });
+			res.json({
+				ok: true,
+				resumedJobCount: result.resumedJobCount
+			});
+		} catch (err) {
+			res.status(400).json({
+				ok: false,
+				error: err.message || String(err)
+			});
+		}
+	}));
+	router.post("/verification-questions/:key/dismiss", asyncHandler(async (req, res) => {
+		const ctx = req.workspaceContext;
+		const questionKey = String(req.params.key || "").trim();
+		if (!questionKey) {
+			res.status(400).json({
+				ok: false,
+				error: "question key is required."
+			});
+			return;
+		}
+		try {
+			const result = await dismissVerificationQuestion(pool, questionKey, { context: ctx });
+			res.json({
+				ok: true,
+				dismissed: result.ok
+			});
+		} catch (err) {
+			res.status(400).json({
+				ok: false,
+				error: err.message || String(err)
+			});
+		}
 	}));
 	router.use((err, _req, res, _next) => {
 		console.error("Unhandled /api/v2 error:", err);

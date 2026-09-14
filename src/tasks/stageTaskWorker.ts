@@ -349,7 +349,7 @@ function stageVersion(taskType: PipelineStageTaskType): string {
     case "NORMALIZE_OBSERVATION":
       return "normalizer_v1";
     case "EXTRACT_DETERMINISTIC_REQUIREMENTS":
-      return "deterministic_v2";
+      return "deterministic_v3";
     case "APPLY_HARD_GATES":
       return "hard_gate_v1";
     case "EXTRACT_QUOTED_REQUIREMENTS":

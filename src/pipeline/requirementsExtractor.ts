@@ -24,6 +24,9 @@ export interface QuotedExtractorInvocation {
   canonicalJobId: string;
   jobVersionId: string;
   descriptionText: string;
+  clientOrPool?: pg.Pool | pg.PoolClient;
+  workspaceContext?: WorkspaceContext;
+  workspaceId?: string;
 }
 
 export interface QuotedExtractorResult {
@@ -85,7 +88,7 @@ export interface RequirementExtractionSummary {
   }>;
 }
 
-const DETERMINISTIC_VERSION = 'deterministic_v2';
+const DETERMINISTIC_VERSION = 'deterministic_v3';
 const QUOTED_VERSION = 'quoted_v1';
 const NORMALIZER_HASH = crypto
   .createHash('sha256')
@@ -852,6 +855,9 @@ export async function runRequirementsExtraction(
                 canonicalJobId: job.canonical_job_id,
                 jobVersionId: job.job_version_id,
                 descriptionText: job.description_text,
+                clientOrPool: client,
+                workspaceContext: ctx,
+                workspaceId: ctx.workspaceId,
               });
 
               if (quotedResult?.payload) {

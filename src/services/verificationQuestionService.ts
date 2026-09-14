@@ -2,6 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -295,6 +296,82 @@ export async function answerVerificationQuestion(
         [ctx.workspaceId, normalizedKey, JSON.stringify(answer)]
       );
 
+      // Persist active answer into config_definitions & config_revisions
+      const defRes = await client.query<{ id: string }>(
+        `INSERT INTO config_definitions (
+           workspace_id,
+           config_key,
+           config_type,
+           description,
+           created_by_user_id
+         )
+         VALUES ($1, 'verification_answers', 'verification_preferences', 'User verification answers for hard gates', $2)
+         ON CONFLICT (workspace_id, config_key)
+         DO UPDATE SET updated_at = NOW()
+         RETURNING id`,
+        [ctx.workspaceId, ctx.userId]
+      );
+
+      const defId = defRes.rows[0]?.id;
+      if (defId) {
+        const activeRes = await client.query<{ content: Record<string, unknown> }>(
+          `SELECT cr.content
+           FROM config_active_revisions car
+           JOIN config_revisions cr ON cr.id = car.config_revision_id
+           WHERE car.config_definition_id = $1`,
+          [defId]
+        );
+        const currentContent =
+          activeRes.rows[0]?.content && typeof activeRes.rows[0].content === "object"
+            ? activeRes.rows[0].content
+            : {};
+        const updatedContent = { ...currentContent, [normalizedKey]: answer };
+        const canonicalJson = stableStringify(updatedContent);
+        const contentHash = sha256Hex(canonicalJson);
+
+        const revRes = await client.query<{ id: string }>(
+          `INSERT INTO config_revisions (
+             config_definition_id,
+             revision_number,
+             schema_version,
+             content_hash,
+             content,
+             change_summary,
+             created_by_user_id
+           )
+           VALUES (
+             $1,
+             (SELECT COALESCE(MAX(revision_number), 0) + 1 FROM config_revisions WHERE config_definition_id = $1),
+             '1.0.0',
+             $2,
+             $3::jsonb,
+             $4,
+             $5
+           )
+           ON CONFLICT (config_definition_id, content_hash)
+           DO UPDATE SET updated_at = NOW()
+           RETURNING id`,
+          [defId, contentHash, canonicalJson, `Updated answer for ${normalizedKey}`, ctx.userId]
+        );
+        const revisionId = revRes.rows[0]?.id;
+        if (revisionId) {
+          await client.query(
+            `INSERT INTO config_active_revisions (
+               config_definition_id,
+               config_revision_id,
+               activated_by_user_id
+             )
+             VALUES ($1, $2, $3)
+             ON CONFLICT (config_definition_id)
+             DO UPDATE SET
+               config_revision_id = EXCLUDED.config_revision_id,
+               activated_by_user_id = EXCLUDED.activated_by_user_id,
+               activated_at = NOW()`,
+            [defId, revisionId, ctx.userId]
+          );
+        }
+      }
+
       let resumedCount = 0;
       if (linkedIds.length > 0) {
         const updateRes = await client.query(
@@ -311,6 +388,63 @@ export async function answerVerificationQuestion(
           [ctx.workspaceId, linkedIds]
         );
         resumedCount = updateRes.rowCount ?? 0;
+
+        // Schedule stage tasks for resumed jobs
+        const { rows: resumedJobs } = await client.query<{
+          canonical_job_id: string;
+          job_version_id: string;
+        }>(
+          `SELECT c.id AS canonical_job_id,
+                  COALESCE(c.latest_job_version_id, (
+                    SELECT jv.id FROM job_versions jv
+                    WHERE jv.workspace_id = c.workspace_id AND jv.canonical_job_id = c.id
+                    ORDER BY jv.observed_at DESC LIMIT 1
+                  )) AS job_version_id
+           FROM canonical_jobs c
+           WHERE c.workspace_id = $1
+             AND c.id = ANY($2::uuid[])`,
+          [ctx.workspaceId, linkedIds]
+        );
+
+        for (const rj of resumedJobs) {
+          if (rj.job_version_id) {
+            const taskKey = `APPLY_HARD_GATES:${rj.job_version_id}:hard_gate_v2`;
+            await client.query(
+              `INSERT INTO pipeline_tasks (
+                 workspace_id,
+                 task_type,
+                 task_key,
+                 payload,
+                 context_fingerprint,
+                 status,
+                 available_at,
+                 max_attempts,
+                 created_at,
+                 updated_at
+               )
+               VALUES ($1, 'APPLY_HARD_GATES', $2, $3::jsonb, 'verification_resumed_v1', 'PENDING', NOW(), 8, NOW(), NOW())
+               ON CONFLICT (workspace_id, task_key, context_fingerprint)
+               DO UPDATE SET
+                 status = 'PENDING',
+                 available_at = NOW(),
+                 lease_id = NULL,
+                 lease_expires_at = NULL,
+                 attempt_count = 0,
+                 last_error = NULL,
+                 dead_letter_reason = NULL,
+                 completed_at = NULL,
+                 updated_at = NOW()`,
+              [
+                ctx.workspaceId,
+                taskKey,
+                JSON.stringify({
+                  canonical_job_id: rj.canonical_job_id,
+                  job_version_id: rj.job_version_id,
+                }),
+              ]
+            );
+          }
+        }
       }
 
       await client.query("COMMIT");

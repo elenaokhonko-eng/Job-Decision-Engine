@@ -1,3 +1,4 @@
+import pg from 'pg';
 import { generateContentAudited, MODEL_REGISTRY } from '../services/agent.js';
 import {
   RequirementImportanceSchema,
@@ -5,11 +6,15 @@ import {
   REQUIREMENTS_SCHEMA_VERSION,
 } from './contracts.js';
 import { validateQuotedRequirements } from './quotedRequirementExtractor.js';
+import type { WorkspaceContext } from '../workspace/context.js';
 
 export interface QuotedProviderInput {
   canonicalJobId: string;
   jobVersionId: string;
   descriptionText: string;
+  clientOrPool?: pg.Pool | pg.PoolClient;
+  workspaceContext?: WorkspaceContext;
+  workspaceId?: string;
 }
 
 export interface QuotedProviderOutput {
@@ -183,6 +188,8 @@ export async function runQuotedRequirementProvider(
     responseSchema: quotedRequirementProviderSchema,
     systemInstruction: 'You are a strict requirement extractor. Return valid JSON only.',
     validateResponseText: (text) => parseAndValidateQuotedPayload(input, text),
+    clientOrPool: input.clientOrPool,
+    context: input.workspaceContext,
   });
 
   return {

@@ -610,8 +610,9 @@ export async function runDeterministicMatcher(
                    processing_status = 'MATCHED',
                    updated_at = NOW()
                WHERE workspace_id = $1
-                 AND id = $3`,
-              [ctx.workspaceId, matchRunId, job.id]
+                 AND id = $3
+                 AND (latest_job_version_id IS NULL OR latest_job_version_id = $4)`,
+              [ctx.workspaceId, matchRunId, job.id, versionId]
             );
 
             await client.query("COMMIT");
@@ -919,8 +920,9 @@ export async function runDeterministicMatcher(
                processing_status = 'MATCHED',
                updated_at = NOW()
            WHERE workspace_id = $1
-             AND id = $5`,
-          [ctx.workspaceId, overallScore, coverageScore, matchRunId, job.id, profileMatchStatus]
+             AND id = $5
+             AND (latest_job_version_id IS NULL OR latest_job_version_id = $7)`,
+          [ctx.workspaceId, overallScore, coverageScore, matchRunId, job.id, profileMatchStatus, versionId]
         );
 
         await client.query("COMMIT");

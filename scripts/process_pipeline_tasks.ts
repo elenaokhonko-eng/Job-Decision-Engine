@@ -80,11 +80,11 @@ export async function processPipelineTasks(): Promise<void> {
   const lockId = taskTypes.length === 1 && taskTypes[0] === "EXTRACT_QUOTED_REQUIREMENTS" ? 1002 : LOCK_ID;
 
   const checkAiPreflight = parseBooleanEnv("PIPELINE_TASK_WORKER_PREFLIGHT_MODELS", true);
-  const hasAiTasks = taskTypes.some((t) =>
-    (["ENQUEUE_EXPLANATION", "EXTRACT_QUOTED_REQUIREMENTS"] as string[]).includes(t)
-  );
+  const requiresExtractionRoute = taskTypes.includes("EXTRACT_QUOTED_REQUIREMENTS");
 
-  if (checkAiPreflight && hasAiTasks) {
+  let activeTaskTypes = [...taskTypes];
+
+  if (checkAiPreflight && requiresExtractionRoute) {
     const { preflightModelRoutes } = await import("../src/services/agent.js");
     const preflight = await preflightModelRoutes();
     console.log("Model route preflight status:", {
@@ -93,15 +93,16 @@ export async function processPipelineTasks(): Promise<void> {
       embedding: preflight.embedding,
       document: preflight.document,
     });
-    if (taskTypes.includes("ENQUEUE_EXPLANATION") && !preflight.evaluation) {
-      throw new Error(
-        "Pipeline task worker configured for ENQUEUE_EXPLANATION, but evaluation model routes are unavailable."
+    if (!preflight.extraction) {
+      if (activeTaskTypes.length === 1 && activeTaskTypes[0] === "EXTRACT_QUOTED_REQUIREMENTS") {
+        throw new Error(
+          "Pipeline task worker configured exclusively for EXTRACT_QUOTED_REQUIREMENTS, but extraction model routes are unavailable."
+        );
+      }
+      console.warn(
+        "Extraction model routes unavailable; excluding EXTRACT_QUOTED_REQUIREMENTS from active run so deterministic tasks proceed."
       );
-    }
-    if (taskTypes.includes("EXTRACT_QUOTED_REQUIREMENTS") && !preflight.extraction) {
-      throw new Error(
-        "Pipeline task worker configured for EXTRACT_QUOTED_REQUIREMENTS, but extraction model routes are unavailable."
-      );
+      activeTaskTypes = activeTaskTypes.filter((t) => t !== "EXTRACT_QUOTED_REQUIREMENTS");
     }
   }
 
@@ -119,7 +120,7 @@ export async function processPipelineTasks(): Promise<void> {
     }
 
     const summary = await runPipelineStageTaskWorker(pool, {
-      taskTypes,
+      taskTypes: activeTaskTypes,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
       includeRoutingDeferred: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED", false),
       routingDeferredReplayVersion: process.env.PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION || "routing_deferred_replay_v1",
