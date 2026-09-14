@@ -11,7 +11,7 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('- Job Discovery Ingestion');
     expect(workflow).toContain('cancel-in-progress: false');
     expect(workflow).not.toContain('cancel-in-progress: true');
-    expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(workflow).toContain("github.event.workflow_run.conclusion != 'cancelled'");
     expect(workflow).toContain('npx tsx scripts/process_pipeline_tasks.ts');
     expect(workflow).toContain('DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}');
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json');

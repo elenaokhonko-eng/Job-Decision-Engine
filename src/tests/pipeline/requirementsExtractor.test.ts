@@ -74,7 +74,7 @@ describe('runRequirementsExtraction', () => {
     expect(calls).toContain('BEGIN');
     expect(calls).toContain('COMMIT');
     const targetQuery = calls.find((sql) => sql.includes('FROM canonical_jobs c'));
-    expect(targetQuery).toContain("active_rsi.deterministic_extractor_version = 'deterministic_v2'");
+    expect(targetQuery).toContain("active_rsi.deterministic_extractor_version = 'deterministic_v3'");
     expect(calls.some((sql) => sql.includes('INSERT INTO job_requirements'))).toBe(true);
     expect(calls.some((sql) => sql.includes('INSERT INTO pipeline_stage_events'))).toBe(true);
   });

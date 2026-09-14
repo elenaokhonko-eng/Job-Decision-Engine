@@ -256,5 +256,25 @@ describe('extractDeterministicRequirements', () => {
     const cisspReq = mixedSentences.requirements.find((r) => r.requirement_type === 'CREDENTIAL');
     expect(cisspReq).toBeTruthy();
     expect(cisspReq?.importance).toBe('MUST');
+
+    // 6. Conjunction subclause isolation within a single sentence: Python preferred, but CISSP certification required.
+    const conjunctionMixed = extractDeterministicRequirements({
+      canonical_job_id: '11111111-1111-4111-8111-111111111116',
+      job_version_id: '22222222-2222-4222-8222-222222222227',
+      description_text: 'Python preferred, but CISSP certification required.',
+    });
+    const conjunctionCissp = conjunctionMixed.requirements.find((r) => r.requirement_type === 'CREDENTIAL');
+    expect(conjunctionCissp).toBeTruthy();
+    expect(conjunctionCissp?.importance).toBe('MUST');
+
+    // 7. Reversed conjunction subclause: CISSP certification required, but Python preferred.
+    const reversedConjunction = extractDeterministicRequirements({
+      canonical_job_id: '11111111-1111-4111-8111-111111111117',
+      job_version_id: '22222222-2222-4222-8222-222222222228',
+      description_text: 'CISSP certification required, but Python preferred.',
+    });
+    const reversedCissp = reversedConjunction.requirements.find((r) => r.requirement_type === 'CREDENTIAL');
+    expect(reversedCissp).toBeTruthy();
+    expect(reversedCissp?.importance).toBe('MUST');
   });
 });

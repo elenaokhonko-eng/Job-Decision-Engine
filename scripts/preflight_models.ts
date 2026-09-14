@@ -31,10 +31,15 @@ async function main(): Promise<void> {
     throw new Error("Evaluation route is required for evaluation stage but unavailable.");
   }
 
-  // Backlog and deterministic drains require at least one operational model route if evaluation is scheduled
+  // Backlog and deterministic drains can proceed with deterministic stages even if external models are temporarily down
   if (stageArg === "all" && !result.evaluation && !result.embedding) {
-    throw new Error(
-      "No usable model routes available (evaluation and embedding routes failed). Operational models required."
+    if (process.argv.includes("--strict")) {
+      throw new Error(
+        "No usable model routes available (evaluation and embedding routes failed). Operational models required."
+      );
+    }
+    console.warn(
+      "No usable model routes available (evaluation and embedding routes failed). Proceeding with deterministic pipeline stages only."
     );
   }
 }

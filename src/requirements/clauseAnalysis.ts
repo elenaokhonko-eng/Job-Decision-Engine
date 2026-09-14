@@ -109,33 +109,92 @@ export function isOccurrenceNegated(
 const PREFERENCE_REGEX = /\b(preferred|preference|preferable|nice\s+to\s+have|bonus|plus|optional|desired|desirable|advantageous)\b/i;
 const MANDATORY_OVERRIDE_REGEX = /\b(required|mandatory|must\s+have|essential|strictly\s+required)\b/i;
 
+const SUBCLAUSE_BOUNDARY_REGEX = /(?:;\s*|\(\s*|\)\s*|,\s*(?:but|however|although|whereas|while|yet|though|except|and|or)\s+|\b(?:but|however|although|whereas|while|yet|though|except)\s+)/gi;
+
 /**
- * Infers requirement importance (MUST vs PREFERRED) strictly within the enclosing clause / bullet.
- * Avoids cross-sentence or cross-bullet bleed.
+ * Finds the enclosing subclause delimited by conjunctions, semicolons, or parentheses
+ * within a sentence/bullet.
+ */
+export function findEnclosingSubclause(
+  text: string,
+  matchStart: number,
+  matchEnd: number
+): ClauseInfo {
+  const clause = findEnclosingClause(text, matchStart, matchEnd);
+  const safeStart = Math.max(clause.startOffset, Math.min(matchStart, clause.endOffset));
+  const safeEnd = Math.max(safeStart, Math.min(matchEnd, clause.endOffset));
+
+  let subclauseStart = clause.startOffset;
+  let subclauseEnd = clause.endOffset;
+
+  // Scan backwards from safeStart within clause
+  const prefixText = text.slice(clause.startOffset, safeStart);
+  const prefixMatches = [...prefixText.matchAll(SUBCLAUSE_BOUNDARY_REGEX)];
+  if (prefixMatches.length > 0) {
+    const lastMatch = prefixMatches[prefixMatches.length - 1];
+    subclauseStart = clause.startOffset + (lastMatch.index ?? 0) + lastMatch[0].length;
+  }
+
+  // Scan forwards from safeEnd within clause
+  const suffixText = text.slice(safeEnd, clause.endOffset);
+  const suffixMatches = [...suffixText.matchAll(SUBCLAUSE_BOUNDARY_REGEX)];
+  if (suffixMatches.length > 0) {
+    const firstMatch = suffixMatches[0];
+    if (firstMatch.index !== undefined) {
+      subclauseEnd = safeEnd + firstMatch.index;
+    }
+  }
+
+  const clauseText = text.slice(subclauseStart, subclauseEnd).trim();
+  const clausePrefix = text.slice(subclauseStart, safeStart);
+  const clauseSuffix = text.slice(safeEnd, subclauseEnd);
+
+  return {
+    clauseText,
+    clausePrefix,
+    clauseSuffix,
+    startOffset: subclauseStart,
+    endOffset: subclauseEnd,
+  };
+}
+
+/**
+ * Infers requirement importance (MUST vs PREFERRED) strictly within the enclosing subclause / bullet.
+ * Avoids cross-sentence, cross-bullet, or cross-conjunction clause bleed.
  */
 export function inferClauseImportance(
   text: string,
   matchStart: number,
   matchEnd: number
 ): 'MUST' | 'PREFERRED' {
-  const clause = findEnclosingClause(text, matchStart, matchEnd);
-  const clauseLower = clause.clauseText.toLowerCase();
+  const subclause = findEnclosingSubclause(text, matchStart, matchEnd);
+  const subclauseLower = subclause.clauseText.toLowerCase();
 
-  // If the clause explicitly indicates preference or optionality
-  if (PREFERENCE_REGEX.test(clauseLower)) {
-    // If the clause also has mandatory wording, check whether the match is in the preferred or mandatory sub-span
-    if (MANDATORY_OVERRIDE_REGEX.test(clauseLower)) {
-      const matchInPrefix = PREFERENCE_REGEX.test(clause.clausePrefix) || PREFERENCE_REGEX.test(text.slice(matchStart, matchEnd));
-      const suffixHasMandatory = MANDATORY_OVERRIDE_REGEX.test(clause.clauseSuffix);
-      if (matchInPrefix && suffixHasMandatory) {
-        // e.g. "Python preferred, but Go is required" -> when examining Python, it is preferred
-        return 'PREFERRED';
-      }
-      const matchInSuffixMandatory = MANDATORY_OVERRIDE_REGEX.test(clause.clauseSuffix) || MANDATORY_OVERRIDE_REGEX.test(text.slice(matchStart, matchEnd));
-      if (matchInSuffixMandatory) {
+  // If subclause explicitly indicates preference or optionality
+  if (PREFERENCE_REGEX.test(subclauseLower)) {
+    // If the subclause also has mandatory wording, check whether the match is in the preferred or mandatory sub-span
+    if (MANDATORY_OVERRIDE_REGEX.test(subclauseLower)) {
+      const suffixHasMandatory = MANDATORY_OVERRIDE_REGEX.test(subclause.clauseSuffix);
+      const prefixHasMandatory = MANDATORY_OVERRIDE_REGEX.test(subclause.clausePrefix);
+      const suffixHasPref = PREFERENCE_REGEX.test(subclause.clauseSuffix);
+      const prefixHasPref = PREFERENCE_REGEX.test(subclause.clausePrefix);
+
+      if (suffixHasMandatory && !suffixHasPref) {
         return 'MUST';
       }
+      if (prefixHasMandatory && !prefixHasPref) {
+        return 'MUST';
+      }
+      return 'PREFERRED';
     }
+    return 'PREFERRED';
+  }
+
+  // If subclause doesn't have preference indicators, check whether the enclosing sentence is a pure preference header
+  // (e.g. "Preferred qualifications: Python, CISSP, AWS") without any mandatory wording anywhere in the clause
+  const clause = findEnclosingClause(text, matchStart, matchEnd);
+  const clauseLower = clause.clauseText.toLowerCase();
+  if (PREFERENCE_REGEX.test(clauseLower) && !MANDATORY_OVERRIDE_REGEX.test(clauseLower)) {
     return 'PREFERRED';
   }
 

@@ -27,7 +27,7 @@ jobs:
   process-backlog:
     name: Drain saved discovery backlog
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled') }}
     timeout-minutes: 25
     steps:
       - name: Checkout repository code

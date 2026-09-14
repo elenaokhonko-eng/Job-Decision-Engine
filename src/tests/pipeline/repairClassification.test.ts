@@ -35,8 +35,22 @@ describe("classifyRepairCategory", () => {
         primary_lane: "CORE_AI_DATA",
         rejection_reason: null,
         profile_match_status: "NO_PROFILE_MATCH",
+        has_missing_embeddings: true,
       }),
     ).toBe("UNPROVABLE_MATCH_EMBEDDING_PENDING");
+  });
+
+  it("does not classify as UNPROVABLE_MATCH_EMBEDDING_PENDING when embeddings are not missing", () => {
+    expect(
+      classifyRepairCategory({
+        processing_state: "LANE_ROUTED",
+        gate_decision: "PASS",
+        primary_lane: "CORE_AI_DATA",
+        rejection_reason: null,
+        profile_match_status: "NO_PROFILE_MATCH",
+        has_missing_embeddings: false,
+      }),
+    ).toBeNull();
   });
 
   it("recognizes truncated version masking when a complete prior version exists", () => {
