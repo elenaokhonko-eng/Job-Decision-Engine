@@ -144,6 +144,43 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("017_streamlit_read_model_integrity.sql");
     expect(versions).toContain("018_backfill_cutover.sql");
     expect(versions).toContain("044_evaluation_queue_context_identity.sql");
+    expect(versions).toContain("049_embedding_input_history.sql");
+  });
+
+  it("embedding inputs preserve history with current-row uniqueness and current-only views", async () => {
+    const { rows: columns } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'embedding_inputs'
+        AND column_name IN ('is_current', 'superseded_at')
+    `);
+    expect(columns.map((row) => row.column_name)).toEqual(
+      expect.arrayContaining(['is_current', 'superseded_at'])
+    );
+
+    const { rows: indexes } = await realPool.query<{ indexname: string; indexdef: string }>(`
+      SELECT indexname, indexdef
+      FROM pg_indexes
+      WHERE schemaname = 'public'
+        AND tablename = 'embedding_inputs'
+        AND indexname IN ('idx_embedding_inputs_workspace_source', 'idx_embedding_inputs_workspace_source_current')
+    `);
+    expect(indexes.some((row) => row.indexname === 'idx_embedding_inputs_workspace_source')).toBe(false);
+    const currentIndex = indexes.find(
+      (row) => row.indexname === 'idx_embedding_inputs_workspace_source_current'
+    );
+    expect(currentIndex?.indexdef).toContain('is_current');
+
+    const { rows: views } = await realPool.query<{ view_name: string; definition: string }>(`
+      SELECT c.relname AS view_name, pg_get_viewdef(c.oid) AS definition
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND c.relname IN ('v_published_semantic_embeddings', 'v_matchable_nodes')
+    `);
+    expect(views).toHaveLength(2);
+    expect(views.every((view) => view.definition.includes('is_current'))).toBe(true);
   });
 
   it("canonical_jobs table has all required columns from migrations 001–004", async () => {

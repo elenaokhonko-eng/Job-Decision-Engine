@@ -191,6 +191,15 @@ function requireStringPayload(task: ClaimedPipelineTask, field: string): string 
   throw new Error(`Pipeline task ${task.taskKey} is missing string payload field ${field}.`);
 }
 
+function optionalStringPayload(task: ClaimedPipelineTask, field: string): string | undefined {
+  const payload = task.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return undefined;
+  }
+  const value = (payload as Record<string, unknown>)[field];
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
 export function buildPipelineTaskKey(
   taskType: PipelineStageTaskType,
   id: string,
@@ -595,7 +604,7 @@ export async function seedRecoverablePipelineTasks(
          AND NOT EXISTS (
            SELECT 1
            FROM embedding_inputs ei
-           JOIN semantic_embeddings se
+           JOIN v_published_semantic_embeddings se
              ON se.workspace_id = ei.workspace_id
             AND se.embedding_input_id = ei.id
            JOIN embedding_spaces es
@@ -657,7 +666,7 @@ export async function seedRecoverablePipelineTasks(
          AND EXISTS (
            SELECT 1
            FROM embedding_inputs ei
-           JOIN semantic_embeddings se
+           JOIN v_published_semantic_embeddings se
              ON se.workspace_id = ei.workspace_id
             AND se.embedding_input_id = ei.id
            WHERE ei.workspace_id = c.workspace_id
@@ -1050,7 +1059,7 @@ async function jobVersionHasEmbedding(
     `SELECT EXISTS (
        SELECT 1
        FROM embedding_inputs ei
-       JOIN semantic_embeddings se
+       JOIN v_published_semantic_embeddings se
          ON se.workspace_id = ei.workspace_id
         AND se.embedding_input_id = ei.id
        WHERE ei.workspace_id = $1
@@ -1365,11 +1374,19 @@ async function executeStageTask(
       return;
     }
 
+    const verificationAnswerRevisionId = optionalStringPayload(
+      task,
+      "verification_answer_revision_id"
+    );
     const summary = await dependencies.runHardGates(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
       reprocess,
+      verificationJobVersionId: jobVersionId,
+      ...(verificationAnswerRevisionId
+        ? { verificationAnswerRevisionId }
+        : {}),
     });
     if (summary.errors > 0) {
       throw new Error(`Hard gate failed for job_version_id=${jobVersionId}.`);

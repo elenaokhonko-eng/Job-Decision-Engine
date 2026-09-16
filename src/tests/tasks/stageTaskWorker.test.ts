@@ -830,6 +830,7 @@ describe("stageTaskWorker", () => {
                 canonical_job_id: "job-1",
                 job_version_id: "version-1",
                 force_policy_recalculation: true,
+                verification_answer_revision_id: "answer-revision-1",
               },
               status: "RUNNING",
               available_at: new Date().toISOString(),
@@ -902,6 +903,103 @@ describe("stageTaskWorker", () => {
       jobVersionIds: ["version-1"],
       limit: 1,
       reprocess: true,
+      verificationAnswerRevisionId: "answer-revision-1",
+      verificationJobVersionId: "version-1",
+    });
+  });
+
+  it("does not attach an answer revision to a repair/replay gate task", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [
+            {
+              id: "task-repair-gate",
+              workspace_id: ctx.workspaceId,
+              task_type: "APPLY_HARD_GATES",
+              task_key: "APPLY_HARD_GATES:version-repair:hard_gate_v1:repair",
+              payload: {
+                canonical_job_id: "job-repair",
+                job_version_id: "version-repair",
+                force_policy_recalculation: true,
+                reprocess: true,
+                repair_reason: "gate-null",
+              },
+              status: "RUNNING",
+              available_at: new Date().toISOString(),
+              lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+              heartbeat_at: new Date().toISOString(),
+              claimed_by: "worker:test",
+              attempt_count: 1,
+              max_attempts: 8,
+              last_error: null,
+              dead_letter_reason: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              completed_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return {
+          rows: [
+            {
+              canonical_job_id: "job-repair",
+              processing_state: "PREQUALIFIED",
+              primary_lane: null,
+              lane_evidence: null,
+              gate_decision: null,
+              recommendation_eligibility: null,
+              recommendation_outcome: null,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-repair-gate" }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-next" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["APPLY_HARD_GATES"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(deps.runHardGates).toHaveBeenCalledWith(fakeClient, {
+      context: ctx,
+      jobVersionIds: ["version-repair"],
+      limit: 1,
+      reprocess: true,
+      verificationJobVersionId: "version-repair",
     });
   });
 

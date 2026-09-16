@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePackageOptions, resolveDesktopOutputDir } from "../../../scripts/package_desktop.js";
@@ -37,5 +38,13 @@ describe("desktop packaging verifier", () => {
       channel: "beta",
       publish: "always",
     });
+  });
+
+  it("builds separate packaged entrypoints for every managed worker", () => {
+    const buildScript = fs.readFileSync(path.resolve("scripts/build_desktop_backend.ts"), "utf8");
+
+    expect(buildScript).toContain("process_pipeline_tasks.cjs");
+    expect(buildScript).toContain("evaluate_queue.cjs");
+    expect(buildScript).toContain("reconcile_pipeline.cjs");
   });
 });

@@ -2,7 +2,8 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
-import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
+import { upsertConfigRevision } from "../config/registry.js";
+import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -296,81 +297,39 @@ export async function answerVerificationQuestion(
         [ctx.workspaceId, normalizedKey, JSON.stringify(answer)]
       );
 
-      // Persist active answer into config_definitions & config_revisions
-      const defRes = await client.query<{ id: string }>(
-        `INSERT INTO config_definitions (
-           workspace_id,
-           config_key,
-           config_type,
-           description,
-           created_by_user_id
-         )
-         VALUES ($1, 'verification_answers', 'verification_preferences', 'User verification answers for hard gates', $2)
-         ON CONFLICT (workspace_id, config_key)
-         DO UPDATE SET updated_at = NOW()
-         RETURNING id`,
-        [ctx.workspaceId, ctx.userId]
+      // Persist the answer through the immutable configuration registry while
+      // keeping it inside this transaction with the question/job/task updates.
+      const activeAnswer = await client.query<{ content: Record<string, unknown> }>(
+        `SELECT cr.content
+         FROM config_definitions cd
+         JOIN config_active_revisions car ON car.config_definition_id = cd.id
+         JOIN config_revisions cr ON cr.id = car.config_revision_id
+         WHERE cd.workspace_id = $1
+           AND cd.config_key = 'verification_answers'
+         LIMIT 1`,
+        [ctx.workspaceId]
       );
-
-      const defId = defRes.rows[0]?.id;
-      if (defId) {
-        const activeRes = await client.query<{ content: Record<string, unknown> }>(
-          `SELECT cr.content
-           FROM config_active_revisions car
-           JOIN config_revisions cr ON cr.id = car.config_revision_id
-           WHERE car.config_definition_id = $1`,
-          [defId]
-        );
-        const currentContent =
-          activeRes.rows[0]?.content && typeof activeRes.rows[0].content === "object"
-            ? activeRes.rows[0].content
-            : {};
-        const updatedContent = { ...currentContent, [normalizedKey]: answer };
-        const canonicalJson = stableStringify(updatedContent);
-        const contentHash = sha256Hex(canonicalJson);
-
-        const revRes = await client.query<{ id: string }>(
-          `INSERT INTO config_revisions (
-             config_definition_id,
-             revision_number,
-             schema_version,
-             content_hash,
-             content,
-             change_summary,
-             created_by_user_id
-           )
-           VALUES (
-             $1,
-             (SELECT COALESCE(MAX(revision_number), 0) + 1 FROM config_revisions WHERE config_definition_id = $1),
-             '1.0.0',
-             $2,
-             $3::jsonb,
-             $4,
-             $5
-           )
-           ON CONFLICT (config_definition_id, content_hash)
-           DO UPDATE SET updated_at = NOW()
-           RETURNING id`,
-          [defId, contentHash, canonicalJson, `Updated answer for ${normalizedKey}`, ctx.userId]
-        );
-        const revisionId = revRes.rows[0]?.id;
-        if (revisionId) {
-          await client.query(
-            `INSERT INTO config_active_revisions (
-               config_definition_id,
-               config_revision_id,
-               activated_by_user_id
-             )
-             VALUES ($1, $2, $3)
-             ON CONFLICT (config_definition_id)
-             DO UPDATE SET
-               config_revision_id = EXCLUDED.config_revision_id,
-               activated_by_user_id = EXCLUDED.activated_by_user_id,
-               activated_at = NOW()`,
-            [defId, revisionId, ctx.userId]
-          );
+      const currentContent =
+        activeAnswer.rows[0]?.content && typeof activeAnswer.rows[0].content === "object"
+          ? activeAnswer.rows[0].content
+          : {};
+      const updatedContent = { ...currentContent, [normalizedKey]: answer };
+      const answerRevision = await upsertConfigRevision(
+        {
+          configKey: "verification_answers",
+          configType: "verification_preferences",
+          description: "User verification answers for hard gates",
+          schemaVersion: "1.0.0",
+          content: updatedContent,
+        },
+        client,
+        {
+          context: ctx,
+          activate: true,
+          note: `Updated answer for ${normalizedKey}`,
+          manageTransaction: false,
         }
-      }
+      );
 
       let resumedCount = 0;
       if (linkedIds.length > 0) {
@@ -409,6 +368,17 @@ export async function answerVerificationQuestion(
         for (const rj of resumedJobs) {
           if (rj.job_version_id) {
             const taskKey = `APPLY_HARD_GATES:${rj.job_version_id}:hard_gate_v2`;
+            const taskPayload = {
+              canonical_job_id: rj.canonical_job_id,
+              job_version_id: rj.job_version_id,
+              verification_answer_revision_id: answerRevision.configRevisionId,
+            };
+            const contextFingerprint = buildPipelineTaskContextFingerprint({
+              workspaceId: ctx.workspaceId,
+              taskType: "APPLY_HARD_GATES",
+              taskVersion: "hard_gate_v2",
+              payload: taskPayload,
+            });
             await client.query(
               `INSERT INTO pipeline_tasks (
                  workspace_id,
@@ -422,7 +392,7 @@ export async function answerVerificationQuestion(
                  created_at,
                  updated_at
                )
-               VALUES ($1, 'APPLY_HARD_GATES', $2, $3::jsonb, 'verification_resumed_v1', 'PENDING', NOW(), 8, NOW(), NOW())
+               VALUES ($1, 'APPLY_HARD_GATES', $2, $3::jsonb, $4, 'PENDING', NOW(), 8, NOW(), NOW())
                ON CONFLICT (workspace_id, task_key, context_fingerprint)
                DO UPDATE SET
                  status = 'PENDING',
@@ -437,10 +407,8 @@ export async function answerVerificationQuestion(
               [
                 ctx.workspaceId,
                 taskKey,
-                JSON.stringify({
-                  canonical_job_id: rj.canonical_job_id,
-                  job_version_id: rj.job_version_id,
-                }),
+                JSON.stringify(taskPayload),
+                contextFingerprint,
               ]
             );
           }

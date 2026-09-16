@@ -34,6 +34,9 @@ describe('buildEmbeddingInputs', () => {
           ],
         };
       }
+      if (sql.includes('INSERT INTO embedding_inputs')) {
+        return { rows: [{ id: 'new-embedding-input' }], rowCount: 1 };
+      }
       return { rows: [] };
     });
 
@@ -95,6 +98,9 @@ describe('buildEmbeddingInputs', () => {
           ],
         };
       }
+      if (sql.includes('INSERT INTO embedding_inputs')) {
+        return { rows: [{ id: 'new-embedding-input' }], rowCount: 1 };
+      }
       return { rows: [] };
     });
 
@@ -115,5 +121,57 @@ describe('buildEmbeddingInputs', () => {
     expect(summary.fromRequirements).toBe(1);
     expect(summary.fromProfileFacts).toBe(0);
     expect(summary.fromJobVersions).toBe(1);
+  });
+
+  it('supersedes changed source content without deleting the prior embedding input', async () => {
+    const requirementId = '44444444-4444-4444-8444-444444444444';
+    const previousHash = 'previous-content-hash';
+    const query = vi.fn(async (sql: string) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        return { rows: [] };
+      }
+      if (sql.includes('FROM job_requirements jr')) {
+        return {
+          rows: [
+            {
+              id: requirementId,
+              requirement_type: 'MUST_HAVE',
+              requirement_text: 'TypeScript and PostgreSQL',
+              quote_text: null,
+              structured_value: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes('SELECT content_hash')) {
+        return { rows: [{ content_hash: previousHash }] };
+      }
+      if (sql.includes('INSERT INTO embedding_inputs')) {
+        return { rows: [{ id: '55555555-5555-4555-8555-555555555555' }], rowCount: 1 };
+      }
+      return { rows: [] };
+    });
+
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const summary = await buildEmbeddingInputs({ query } as any, 20, {
+      context,
+      includeProfileFacts: false,
+      includeLanePrototypes: false,
+    });
+
+    expect(summary.inserted).toBe(1);
+    expect(summary.fromRequirements).toBe(1);
+
+    const calls = query.mock.calls.map((call) => String(call[0]));
+    expect(calls.some((sql) => sql.includes('SET is_current = FALSE'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('DELETE FROM embedding_inputs'))).toBe(false);
+    expect(calls.filter((sql) => sql.includes('INSERT INTO embedding_inputs')).length).toBe(1);
   });
 });

@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("jdecRuntime", {
     apiBaseUrl: readArg("jdec-api-base-url"),
   },
   getStatus: () => ipcRenderer.invoke("jdec:runtime:get-status"),
+  getWorkerStatus: () => ipcRenderer.invoke("jdec:runtime:get-worker-status"),
   checkForUpdates: () => ipcRenderer.invoke("jdec:updates:check"),
 });
 

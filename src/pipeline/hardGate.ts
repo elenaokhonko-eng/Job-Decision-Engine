@@ -11,9 +11,17 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement, type ComparableFact } from "./requirementComparators.js";
 import {
+  applyVerificationAnswerOverrides,
   extractTerritories,
+  isVerificationAnswerContextApplicable,
+  isVerificationAnswerProvided,
+  loadVerificationAnswerContext,
   loadWorkabilityPolicy,
+  normalizeVerificationDegreeSubjects,
+  VERIFICATION_ANSWER_KEYS,
+  normalizeVerificationExperienceDomains,
   resolveWorkspaceWorkabilityPolicy,
+  type VerificationAnswerContext,
   type WorkabilityPolicy,
 } from "./workabilityPolicy.js";
 
@@ -157,8 +165,22 @@ export function applyPersistedRequirementGates(
     description?: string;
   },
   deterministicRequirements: PersistedRequirement[],
-  policy: WorkabilityPolicy = loadWorkabilityPolicy()
+  policy: WorkabilityPolicy = loadWorkabilityPolicy(),
+  answerContext?: VerificationAnswerContext | null,
 ): GateResult {
+  const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
+  const officeDaysAnswerUnknown = isVerificationAnswerProvided(
+    answerContext,
+    VERIFICATION_ANSWER_KEYS.workplaceOfficeDays,
+  ) && answerContext?.overrides.workplaceOfficeDaysCap === null;
+  const travelAnswerUnknown = isVerificationAnswerProvided(
+    answerContext,
+    VERIFICATION_ANSWER_KEYS.travelPercentage,
+  ) && answerContext?.overrides.travelPercentageCap === null;
+  const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(
+    answerContext,
+    VERIFICATION_ANSWER_KEYS.workAuthorization,
+  ) && answerContext?.overrides.workAuthorizationRegions.length === 0;
   const title = job.title || "";
   let pendingVerification: { codes: string[]; evidence: string[]; facts?: Partial<GateResult["workability_facts"]> } | null = null;
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
@@ -215,7 +237,7 @@ export function applyPersistedRequirementGates(
       "hands_on_pct",
       "implementation_pct",
     ]);
-    if (buildingPct !== null && buildingPct < policy.minimumBuildingResearchPct) {
+    if (buildingPct !== null && buildingPct < effectivePolicy.minimumBuildingResearchPct) {
       return makeReject(["GATE_BUILDING_RESEARCH_RATIO"], [quoteOrText(requirement)], {
         office_days_min: null,
         office_days_max: null,
@@ -228,7 +250,7 @@ export function applyPersistedRequirementGates(
       "stakeholder_pct",
       "client_facing_pct",
     ]);
-    if (interactionPct !== null && interactionPct > policy.maximumInteractionPct) {
+    if (interactionPct !== null && interactionPct > effectivePolicy.maximumInteractionPct) {
       return makeReject(["GATE_HIGH_INTERACTION"], [quoteOrText(requirement)]);
     }
 
@@ -238,7 +260,7 @@ export function applyPersistedRequirementGates(
       "travel_percentage",
       "maximum_travel_pct",
     ]);
-    if (travelPct !== null && travelPct > policy.maxTravelPct) {
+    if (travelPct !== null && travelPct > effectivePolicy.maxTravelPct) {
       return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(requirement)], {
         travel_pct_max: travelPct,
       });
@@ -252,7 +274,7 @@ export function applyPersistedRequirementGates(
     : /\b(permanent|full[-_ ]?time|fte)\b/i.test(normalizedEmployment)
       ? "PERMANENT" as const
       : "UNKNOWN" as const;
-  if (employmentType === "CONTRACT" && !policy.contractAllowed) {
+  if (employmentType === "CONTRACT" && !effectivePolicy.contractAllowed) {
     return makeReject(
       ["GATE_CONTRACT_ROLE"],
       [employmentReq ? quoteOrText(employmentReq) : "Structured employment_type is CONTRACT"],
@@ -264,7 +286,22 @@ export function applyPersistedRequirementGates(
   const officeReq = officeRequirements[0];
   for (const requirement of officeRequirements) {
     const days = detectOfficeDays(requirement);
-    if (days !== null && days >= policy.hardFailOfficeDaysPerWeek) {
+    if (days !== null && days >= effectivePolicy.hardFailOfficeDaysPerWeek) {
+      return makeReject(
+        ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
+        [quoteOrText(requirement)],
+        { office_days_min: days, office_days_max: days }
+      );
+    }
+    if (days !== null && officeDaysAnswerUnknown) {
+      pendingVerification = {
+        codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+        evidence: [quoteOrText(requirement)],
+        facts: { office_days_min: days, office_days_max: days },
+      };
+      continue;
+    }
+    if (days !== null && days > effectivePolicy.maxOfficeDaysPerWeek) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
         [quoteOrText(requirement)],
@@ -272,7 +309,7 @@ export function applyPersistedRequirementGates(
       );
     }
     if (days === null) {
-      if (!policy.hybridWithoutOfficeDaysAllowed) {
+      if (!effectivePolicy.hybridWithoutOfficeDaysAllowed) {
         pendingVerification = {
           codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
           evidence: [quoteOrText(requirement)],
@@ -285,7 +322,7 @@ export function applyPersistedRequirementGates(
   const workModeReq = deterministicRequirements.find((r) => r.requirement_type === "WORK_MODE");
   if (workModeReq) {
     const mode = quoteOrText(workModeReq).toLowerCase();
-    if (!policy.onsiteOnlyAllowed && (
+    if (!effectivePolicy.onsiteOnlyAllowed && (
       mode.includes("onsite only") ||
       mode.includes("on-site only") ||
       mode.includes("fully on-site") ||
@@ -296,7 +333,7 @@ export function applyPersistedRequirementGates(
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
         [quoteOrText(workModeReq)],
-        { office_days_min: policy.hardFailOfficeDaysPerWeek, office_days_max: 5 }
+        { office_days_min: effectivePolicy.hardFailOfficeDaysPerWeek, office_days_max: 5 }
       );
     }
   }
@@ -306,7 +343,31 @@ export function applyPersistedRequirementGates(
   for (const requirement of travelRequirements) {
     const travelPct = detectTravelPct(requirement);
     const txt = quoteOrText(requirement).toLowerCase();
-    if ((travelPct !== null && travelPct > policy.maxTravelPct) || (txt.includes("frequent travel") && !policy.frequentTravelAllowed)) {
+    const hasTravelAnswer = answerContext?.overrides.travelPercentageCap !== null
+      && answerContext?.overrides.travelPercentageCap !== undefined
+      || isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.travelPercentage);
+    if (travelPct !== null && travelAnswerUnknown) {
+      pendingVerification = {
+        codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_TRAVEL"],
+        evidence: [quoteOrText(requirement)],
+        facts: { travel_pct_max: travelPct },
+      };
+      continue;
+    }
+    if (travelPct !== null && travelPct > effectivePolicy.maxTravelPct) {
+      return makeReject(
+        ["GATE_LIFESTYLE_INCOMPATIBLE"],
+        [quoteOrText(requirement)],
+        { travel_pct_max: travelPct }
+      );
+    }
+    if (hasTravelAnswer && travelPct === null) {
+      pendingVerification = {
+        codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_TRAVEL"],
+        evidence: [quoteOrText(requirement)],
+        facts: { travel_pct_max: null },
+      };
+    } else if (!hasTravelAnswer && txt.includes("frequent travel") && !effectivePolicy.frequentTravelAllowed) {
       return makeReject(
         ["GATE_LIFESTYLE_INCOMPATIBLE"],
         [quoteOrText(requirement)],
@@ -316,12 +377,12 @@ export function applyPersistedRequirementGates(
   }
 
   const onCallReq = deterministicRequirements.find((r) => r.requirement_type === "ON_CALL");
-  if (onCallReq && !policy.regularOnCallAllowed) {
+  if (onCallReq && !effectivePolicy.regularOnCallAllowed) {
     return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(onCallReq)]);
   }
 
   const shiftReq = deterministicRequirements.find((r) => r.requirement_type === "SHIFT_WORK");
-  if (shiftReq && !policy.shiftWorkAllowed) {
+  if (shiftReq && !effectivePolicy.shiftWorkAllowed) {
     return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(shiftReq)]);
   }
 
@@ -329,16 +390,19 @@ export function applyPersistedRequirementGates(
   if (workAuthReq) {
     const authText = quoteOrText(workAuthReq).toLowerCase();
     const requiredTerritories = extractTerritories(authText);
-    const authorizedRegions = new Set(policy.authorizedRegions);
+    const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
     const foreignRequired = requiredTerritories.filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory));
-    if (policy.rejectExplicitForeignTerritory && foreignRequired.length > 0) {
+    if (effectivePolicy.rejectExplicitForeignTerritory && foreignRequired.length > 0 && !workAuthorizationAnswerUnknown) {
       return makeReject(
         ["GATE_LOCATION_RESTRICTED"],
         [quoteOrText(workAuthReq)],
         { location_restriction: foreignRequired[0] }
       );
     }
-    if (requiredTerritories.length === 0 && policy.unknownWorkAuthorizationNeedsVerification) {
+    if (
+      (requiredTerritories.length === 0 || (workAuthorizationAnswerUnknown && foreignRequired.length > 0))
+      && effectivePolicy.unknownWorkAuthorizationNeedsVerification
+    ) {
       pendingVerification = {
         codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_WORK_AUTH"],
         evidence: [quoteOrText(workAuthReq)],
@@ -347,7 +411,7 @@ export function applyPersistedRequirementGates(
   }
 
   if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {
-    if (!policy.hybridWithoutOfficeDaysAllowed) {
+    if (!effectivePolicy.hybridWithoutOfficeDaysAllowed) {
       pendingVerification = {
         codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
         evidence: [quoteOrText(workModeReq)],
@@ -393,12 +457,61 @@ function combineGateResults(results: GateResult[]): GateResult {
   };
 }
 
-function applyExactProfileGates(
+function verificationDegreeSubject(value: string): string | null {
+  const text = value.toLowerCase().replace(/[_-]+/g, " ");
+  if (/\b(computer\s+science|computing|informatics|software\s+engineering)\b/i.test(text)) return "computer_science";
+  if (/\b(data\s+science|analytics?|statistics?)\b/i.test(text)) return "data_science";
+  if (/\b(mathematics?|mathematical|quantitative)\b/i.test(text)) return "mathematics";
+  if (/\b(electrical|systems?)\s+engineering\b|\bengineering\b/i.test(text) && !/software\s+engineering/i.test(text)) return "engineering";
+  if (/\bphysics?|computational\s+science\b/i.test(text)) return "physics";
+  if (/\b(biology|biological|biomedical|biochemistry)\b/i.test(text)) return "biology";
+  if (/\b(finance|financial|economics?)\b/i.test(text)) return "finance";
+  if (/\b(business|management)\b/i.test(text)) return "business";
+  if (/\b(law|legal\s+studies|jurisprudence)\b/i.test(text)) return "law";
+  return null;
+}
+
+function degreeRequirementSubject(requirement: PersistedRequirement): string | null {
+  return verificationDegreeSubject([
+    requirement.requirement_text,
+    requirement.quote_text || "",
+    JSON.stringify(requirement.structured_value || {}),
+  ].join(" "));
+}
+
+function removeDegreeSubject(requirement: PersistedRequirement): PersistedRequirement {
+  const structured = Object.fromEntries(
+    Object.entries(requirement.structured_value || {})
+      .filter(([key]) => !/(subject|major|discipline|field)/i.test(key)),
+  );
+  const source = requirement.requirement_text || requirement.quote_text || "";
+  const level = source.match(/\b(phd|doctorate|doctoral|master'?s?|msc|ma|mba|bachelor'?s?|undergraduate|bsc|ba)\b/i)?.[0];
+  return {
+    ...requirement,
+    requirement_text: level ? `${level} degree` : requirement.requirement_text,
+    quote_text: level ? `${level} degree` : requirement.quote_text,
+    structured_value: structured,
+  };
+}
+
+function expandExperienceScope(
+  requirement: PersistedRequirement,
+  domains: string[],
+): PersistedRequirement {
+  const structured = { ...(requirement.structured_value || {}) };
+  const existing = structured.experience_scope ?? structured.experience_scopes ?? structured.scope ?? structured.domain;
+  const existingValues = Array.isArray(existing) ? existing : existing ? [existing] : [];
+  structured.experience_scope = [...existingValues, ...domains];
+  return { ...requirement, structured_value: structured };
+}
+
+export function applyExactProfileGates(
   deterministicRequirements: PersistedRequirement[],
-  profileFacts: ComparableFact[]
+  profileFacts: ComparableFact[],
+  answerContext?: VerificationAnswerContext | null,
 ): GateResult {
   const exactRequirements = deterministicRequirements.filter((requirement) =>
-    ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE"].includes(requirement.requirement_type)
+    ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(requirement.requirement_type)
   );
   if (exactRequirements.length === 0) return makePass();
 
@@ -410,7 +523,38 @@ function applyExactProfileGates(
     if (isRequirementOptional(requirement)) {
       continue;
     }
-    const comparison = compareStructuredRequirement(requirement, profileFacts);
+
+    let comparison = compareStructuredRequirement(requirement, profileFacts);
+    if (comparison.status === "UNKNOWN" && answerContext) {
+      if (requirement.requirement_type === "DEGREE" && answerContext.overrides.degreeSubjects.length > 0) {
+        const subject = degreeRequirementSubject(requirement);
+        if (subject && !answerContext.overrides.degreeSubjects.includes(subject)) {
+          comparison = {
+            status: "MISMATCH",
+            rationale: `Verification answer does not accept the required ${subject.replace(/_/g, " ")} degree subject.`,
+            fact: null,
+          };
+        } else if (subject) {
+          comparison = compareStructuredRequirement(removeDegreeSubject(requirement), profileFacts);
+        }
+      } else if (requirement.requirement_type === "EXPERIENCE_YEARS"
+        && answerContext.overrides.experienceDomains.length > 0) {
+        comparison = compareStructuredRequirement(
+          expandExperienceScope(requirement, answerContext.overrides.experienceDomains),
+          profileFacts,
+        );
+      } else if (requirement.requirement_type === "WORK_AUTH"
+        && answerContext.overrides.workAuthorizationRegions.length > 0) {
+        const answerFact: ComparableFact = {
+          id: `verification-answer:${answerContext.answerRevisionId || "unversioned"}`,
+          statement: `Verification answer explicitly authorizes work in ${answerContext.overrides.workAuthorizationRegions.join(", ")}.`,
+          structured_value: { authorized_regions: answerContext.overrides.workAuthorizationRegions },
+          source_type: "PROFILE_FACT",
+        };
+        comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact]);
+      }
+    }
+
     if (comparison.status === "MISMATCH") {
       mismatches.push(`GATE_${requirement.requirement_type}_MISMATCH`);
       mismatchEvidence.push(comparison.rationale);
@@ -433,6 +577,16 @@ export async function runHardGates(
     canonicalJobIds?: string[];
     limit?: number;
     reprocess?: boolean;
+    /** Optional immutable answer context supplied by a task caller. */
+    verificationAnswerContext?: VerificationAnswerContext | null;
+    /** Answer revision identity from the task payload; stale revisions are ignored. */
+    verificationAnswerRevisionId?: string | null;
+    /** Current job-version identity for a revision loaded for one task. */
+    verificationJobVersionId?: string | null;
+    /** Short alias for callers that already use the jobVersionId name. */
+    jobVersionId?: string | null;
+    /** Alias retained for direct callers that already use the shorter name. */
+    answerContext?: VerificationAnswerContext | null;
   }
 ): Promise<{ passed: number; hardRejected: number; needsVerification: number; errors: number }> {
   console.log("Starting Hard Gate engine on RAW_STAGED canonical jobs...");
@@ -455,6 +609,24 @@ export async function runHardGates(
       `${policyResolution.modeKey ? ` mode=${policyResolution.modeKey}` : ""}` +
       ` hash=${policyResolution.policyHash.slice(0, 12)}`
   );
+
+  const requestedAnswerJobVersionId = options?.verificationJobVersionId
+    ?? options?.jobVersionId
+    ?? (options?.jobVersionIds?.length === 1 ? options.jobVersionIds[0] : null);
+  let answerContext = options?.verificationAnswerContext ?? options?.answerContext ?? null;
+  if (!answerContext && options?.verificationAnswerRevisionId) {
+    answerContext = await loadVerificationAnswerContext(client as any, {
+      context: ctx,
+      answerRevisionId: options.verificationAnswerRevisionId,
+      jobVersionId: requestedAnswerJobVersionId,
+    });
+  }
+  if (answerContext && !isVerificationAnswerContextApplicable(answerContext, {
+    answerRevisionId: options?.verificationAnswerRevisionId,
+  })) {
+    answerContext = null;
+  }
+
   const reprocess = options?.reprocess === true;
   const params: unknown[] = [ctx.workspaceId, reprocess];
   const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
@@ -518,6 +690,11 @@ export async function runHardGates(
           workplace_type: job.workplace_type,
           employment_type: job.employment_type
         };
+        const jobAnswerContext = answerContext && isVerificationAnswerContextApplicable(answerContext, {
+          jobVersionId: job.job_version_id,
+        })
+          ? answerContext
+          : null;
 
         const { rows: requirementRows } = await client.query(
           `SELECT jr.requirement_key, jr.requirement_type, jr.importance, jr.requirement_text, jr.quote_text, jr.structured_value
@@ -601,7 +778,7 @@ export async function runHardGates(
           raw_description: requirementHints
             ? `${rawJobAdapter.raw_description}\n\n---\nExtracted requirements:\n${requirementHints}`
             : rawJobAdapter.raw_description,
-        } as any, policyResolution.policy);
+        } as any, policyResolution.policy, jobAnswerContext);
         const persistedGateResult = applyPersistedRequirementGates(
           {
             title: rawJobAdapter.title,
@@ -611,9 +788,14 @@ export async function runHardGates(
             description: rawJobAdapter.raw_description,
           },
           deterministicRequirements,
-          policyResolution.policy
+          policyResolution.policy,
+          jobAnswerContext
         );
-        const exactProfileGateResult = applyExactProfileGates(deterministicRequirements, profileFacts);
+        const exactProfileGateResult = applyExactProfileGates(
+          deterministicRequirements,
+          profileFacts,
+          jobAnswerContext,
+        );
         const gateResult = combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult]);
 
         let processingStatus: string;

@@ -3,6 +3,12 @@ import express from "express";
 import http from "http";
 import net from "net";
 import { createApiV2Router } from "../api/v2/router.js";
+import {
+  createWorkerSupervisor,
+  type WorkerSupervisor,
+  type WorkerSupervisorOptions,
+  type WorkerSupervisorStatus,
+} from "./workerSupervisor.js";
 
 export interface LocalServerOptions {
   port?: number;
@@ -12,6 +18,22 @@ export interface LocalServerOptions {
   databaseUrlDirect?: string;
   geminiApiKey?: string;
   openaiApiKey?: string;
+  workerBundleDir?: string;
+  workerProjectRoot?: string;
+  workerPackaged?: boolean;
+  workerSupervisor?: WorkerSupervisor;
+}
+
+export interface LocalServerStatus {
+  ok: true;
+  timestamp: string;
+  api: {
+    state: "running";
+    host: string;
+    port: number;
+    apiBaseUrl: string;
+  };
+  workers: WorkerSupervisorStatus;
 }
 
 export interface LocalServerInstance {
@@ -20,6 +42,8 @@ export interface LocalServerInstance {
   host: string;
   token: string;
   apiBaseUrl: string;
+  workerSupervisor: WorkerSupervisor;
+  getStatus: () => LocalServerStatus;
   close: () => Promise<void>;
   updateConfig: (config: {
     databaseUrl?: string;
@@ -70,6 +94,12 @@ export async function startLocalServer(options: LocalServerOptions = {}): Promis
   }
 
   const app = express();
+  const workerSupervisor = options.workerSupervisor ?? createWorkerSupervisor({
+    env: process.env,
+    isPackaged: options.workerPackaged ?? false,
+    bundledDir: options.workerBundleDir,
+    projectRoot: options.workerProjectRoot,
+  } satisfies WorkerSupervisorOptions);
 
   // Defense-in-depth: Reject non-loopback Host header
   app.use((req, res, next) => {
@@ -78,6 +108,31 @@ export async function startLocalServer(options: LocalServerOptions = {}): Promis
       res.status(403).json({ ok: false, error: "Loopback access only" });
       return;
     }
+    next();
+  });
+
+  const getStatus = (): LocalServerStatus => ({
+    ok: true,
+    timestamp: new Date().toISOString(),
+    api: {
+      state: "running",
+      host,
+      port: actualPort,
+      apiBaseUrl: `http://${host}:${actualPort}/api/v2`,
+    },
+    workers: workerSupervisor.getStatus(),
+  });
+
+  // The native shell uses these loopback endpoints before workspace/database
+  // setup is complete, so they intentionally do not depend on API v2 context.
+  app.get(["/health", "/status", "/api/v2/status"], (_req, res) => {
+    res.json(getStatus());
+  });
+
+  // Setup routes can establish DATABASE_URL during the first-run wizard. A
+  // lightweight refresh lets workers begin without requiring an app restart.
+  app.use((_req, _res, next) => {
+    void workerSupervisor.refresh();
     next();
   });
 
@@ -101,13 +156,17 @@ export async function startLocalServer(options: LocalServerOptions = {}): Promis
     host,
     token,
     apiBaseUrl,
-    close: () =>
-      new Promise<void>((resolve, reject) => {
+    workerSupervisor,
+    getStatus,
+    close: async () => {
+      await workerSupervisor.stop();
+      await new Promise<void>((resolve, reject) => {
         server.close((err) => {
           if (err) reject(err);
           else resolve();
         });
-      }),
+      });
+    },
     updateConfig: (config) => {
       if (config.databaseUrl !== undefined) {
         process.env.DATABASE_URL = config.databaseUrl;
@@ -121,9 +180,11 @@ export async function startLocalServer(options: LocalServerOptions = {}): Promis
       if (config.openaiApiKey !== undefined) {
         process.env.OPENAI_API_KEY = config.openaiApiKey;
       }
+      void workerSupervisor.refresh();
     },
   };
 
+  await workerSupervisor.start();
   return instance;
 }
 

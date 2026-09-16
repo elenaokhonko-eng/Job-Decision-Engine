@@ -86,6 +86,22 @@ async function appendRuntimeLog(chunk) {
   }
 }
 
+function configurePackagedNodePath() {
+  if (!app.isPackaged || !process.resourcesPath) return;
+  const packagedNodeModules = path.join(process.resourcesPath, "app.asar", "node_modules");
+  const unpackedNodeModules = path.join(process.resourcesPath, "app.asar.unpacked", "node_modules");
+  const existingNodePath = String(process.env.NODE_PATH || "").trim();
+  process.env.NODE_PATH = [packagedNodeModules, unpackedNodeModules, existingNodePath]
+    .filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .join(path.delimiter);
+}
+
+function packagedBackendDir() {
+  if (!app.isPackaged || !process.resourcesPath) return null;
+  return path.join(process.resourcesPath, "app.asar.unpacked", "desktop", "electron", "dist-backend");
+}
+
 async function startLocalApiRuntime(apiBaseUrl) {
   if (!shouldStartLocalApiRuntime()) {
     apiRuntime = {
@@ -102,8 +118,12 @@ async function startLocalApiRuntime(apiBaseUrl) {
   fs.mkdirSync(logsDir, { recursive: true });
   const logPath = path.join(logsDir, "api-runtime.log");
 
+  configurePackagedNodePath();
   let localServerModule = null;
+  let localServerBundleDir = null;
+  const unpackedBackendDir = packagedBackendDir();
   const candidates = [
+    ...(unpackedBackendDir ? [path.join(unpackedBackendDir, "localServer.cjs")] : []),
     path.join(__dirname, "dist-backend", "localServer.cjs"),
     path.join(appRoot(), "desktop", "electron", "dist-backend", "localServer.cjs"),
   ];
@@ -111,6 +131,7 @@ async function startLocalApiRuntime(apiBaseUrl) {
     if (fs.existsSync(c)) {
       try {
         localServerModule = require(c);
+        localServerBundleDir = path.dirname(c);
         break;
       } catch (err) {
         void appendRuntimeLog(`Failed to require bundled local server: ${err}\n`);
@@ -129,6 +150,9 @@ async function startLocalApiRuntime(apiBaseUrl) {
         databaseUrlDirect: (await getSecret("databaseUrlDirect")) || process.env.DATABASE_URL_UNPOOLED,
         geminiApiKey: (await getSecret("geminiApiKey")) || process.env.GEMINI_API_KEY,
         openaiApiKey: (await getSecret("openaiApiKey")) || process.env.OPENAI_API_KEY,
+        workerBundleDir: localServerBundleDir || path.join(__dirname, "dist-backend"),
+        workerProjectRoot: appRoot(),
+        workerPackaged: app.isPackaged,
       });
       apiRuntime = {
         started: true,
@@ -324,6 +348,22 @@ function updatesEnabled() {
   return app.isPackaged && process.env.JDEC_DESKTOP_ENABLE_UPDATES === "true";
 }
 
+function desktopWorkerStatus() {
+  if (localServerInstance && typeof localServerInstance.getStatus === "function") {
+    return localServerInstance.getStatus().workers;
+  }
+  return {
+    enabled: process.env.JDEC_DESKTOP_ENABLE_WORKERS !== "false",
+    state: "not_started",
+    reason: "local_companion_not_running",
+    workers: {
+      pipeline: { kind: "pipeline", state: "not_started", pid: null, lastStartAt: null, lastExitAt: null, restartCount: 0, reason: null },
+      evaluation: { kind: "evaluation", state: "not_started", pid: null, lastStartAt: null, lastExitAt: null, restartCount: 0, reason: null },
+      recovery: { kind: "recovery", state: "not_started", pid: null, lastStartAt: null, lastExitAt: null, restartCount: 0, reason: null },
+    },
+  };
+}
+
 function configureAutoUpdater(channel) {
   autoUpdater.autoDownload = false;
   autoUpdater.allowPrerelease = channel !== "stable";
@@ -371,6 +411,7 @@ function registerIpc(apiBaseUrl) {
     updaterChannel: updaterChannel(channel),
     apiBaseUrl: localServerInstance?.apiBaseUrl || apiBaseUrl,
     apiRuntime,
+    workers: desktopWorkerStatus(),
     safeStorageAvailable: safeStorage.isEncryptionAvailable(),
     hasDatabaseUrl: Boolean((await getSecret("databaseUrl")) || process.env.DATABASE_URL),
     hasGeminiApiKey: Boolean((await getSecret("geminiApiKey")) || process.env.GEMINI_API_KEY),
@@ -378,6 +419,7 @@ function registerIpc(apiBaseUrl) {
     apiTokenConfigured: Boolean(await getSecret("apiToken")),
     updatesEnabled: updatesEnabled(),
   }));
+  ipcMain.handle("jdec:runtime:get-worker-status", async () => desktopWorkerStatus());
   ipcMain.handle("jdec:updates:check", async () => {
     if (!updatesEnabled()) {
       return { ok: false, status: "disabled" };

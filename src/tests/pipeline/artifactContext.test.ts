@@ -48,7 +48,18 @@ describe("pipeline artifact context", () => {
       ...base,
       payload: { ...base.payload, reassessment_reason: "REASSESSMENT_V2" },
     });
+    expect(first).not.toBe(second);
+  });
 
+  it("changes when the verification answer revision changes", () => {
+    const first = buildPipelineTaskContextFingerprint({
+      ...base,
+      payload: { ...base.payload, verification_answer_revision_id: "revision-1" },
+    });
+    const second = buildPipelineTaskContextFingerprint({
+      ...base,
+      payload: { ...base.payload, verification_answer_revision_id: "revision-2" },
+    });
     expect(first).not.toBe(second);
   });
 });

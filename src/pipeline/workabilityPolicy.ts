@@ -27,6 +27,42 @@ export interface WorkabilityPolicy {
   blacklistedCompanies: string[];
 }
 
+/** The five persisted verification answers understood by deterministic gates. */
+export const VERIFICATION_ANSWER_KEYS = {
+  workplaceOfficeDays: "workplace_hybrid_office_days_allowed",
+  degreeSubjects: "profile_degree_subjects",
+  workAuthorization: "work_authorization_jurisdictions",
+  experienceDomains: "experience_equivalent_domains",
+  travelPercentage: "lifestyle_travel_percentage_cap",
+} as const;
+
+export interface VerificationAnswerOverrides {
+  workplaceOfficeDaysCap: number | null;
+  degreeSubjects: string[];
+  workAuthorizationRegions: string[];
+  experienceDomains: string[];
+  travelPercentageCap: number | null;
+}
+
+/**
+ * Normalized, immutable-input context for one verification-answer revision.
+ * A null/empty override means that the payload was absent or not recognized;
+ * gates must then retain their ordinary UNKNOWN/NEEDS_VERIFICATION result.
+ */
+export interface VerificationAnswerContext {
+  answerRevisionId: string | null;
+  revisionNumber: number | null;
+  jobVersionId: string | null;
+  /** Keys explicitly present in the immutable revision, including unknown/null answers. */
+  providedAnswerKeys?: string[];
+  overrides: VerificationAnswerOverrides;
+}
+
+export interface VerificationAnswerContextIdentity {
+  answerRevisionId?: string | null;
+  jobVersionId?: string | null;
+}
+
 const defaults: WorkabilityPolicy = {
   unknownWorkModeDisposition: "NEEDS_VERIFICATION",
   onsiteOnlyAllowed: false,
@@ -139,6 +175,293 @@ export function extractTerritories(value: unknown): string[] {
     }
   }
   return found;
+}
+
+const KNOWN_TERRITORIES = new Set(TERRITORY_ALIASES.map(([territory]) => territory));
+
+function answerObject(content: unknown): Record<string, unknown> {
+  let parsed = content;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      parsed = null;
+    }
+  }
+  const root = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : {};
+  const nested = [root.answers, root.verification_answers, root.content]
+    .find((value) => value && typeof value === "object" && !Array.isArray(value));
+  return nested ? nested as Record<string, unknown> : root;
+}
+
+function answerValue(root: Record<string, unknown>, key: string, ordinal: number): unknown {
+  const aliases = [key, `Q0${ordinal}`, `q0${ordinal}`];
+  for (const candidate of [root, root.answers, root.verification_answers]) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const record = candidate as Record<string, unknown>;
+    for (const alias of aliases) {
+      if (Object.prototype.hasOwnProperty.call(record, alias)) return record[alias];
+    }
+  }
+  return undefined;
+}
+
+function flattenAnswerValues(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value.flatMap(flattenAnswerValues);
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).flatMap(flattenAnswerValues);
+  return value === null || value === undefined ? [] : [value];
+}
+
+function answerKeyProvided(root: Record<string, unknown>, key: string, ordinal: number): boolean {
+  const aliases = [key, `Q0${ordinal}`, `q0${ordinal}`];
+  for (const candidate of [root, root.answers, root.verification_answers]) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const record = candidate as Record<string, unknown>;
+    if (aliases.some((alias) => Object.prototype.hasOwnProperty.call(record, alias))) return true;
+  }
+  return false;
+}
+
+function answerText(value: unknown): string {
+  return flattenAnswerValues(value)
+    .map((item) => String(item).trim())
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function parseAnswerNumber(value: unknown, maximum: number, unitPattern: RegExp): number | null {
+  const values = flattenAnswerValues(value);
+  for (const item of values) {
+    if (typeof item === "number" && Number.isFinite(item) && item >= 0 && item <= maximum) {
+      return item;
+    }
+    const text = String(item).trim().toLowerCase();
+    if (!text) continue;
+    if (/^(?:fully\s+)?remote(?:\s+only)?$|^no\s+(?:office|travel)$/i.test(text)) return 0;
+    const match = text.match(unitPattern) || text.match(new RegExp(`\\b(\\d+(?:\\.\\d+)?)\\b`));
+    if (!match) continue;
+    const parsed = Number(match[1]);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= maximum) return parsed;
+  }
+  return null;
+}
+
+/** Normalize the degree-subject vocabulary used by verification answer options. */
+export function normalizeVerificationDegreeSubjects(value: unknown): string[] {
+  const text = answerText(value).replace(/[_-]+/g, " ");
+  const subjects: string[] = [];
+  const add = (subject: string) => {
+    if (!subjects.includes(subject)) subjects.push(subject);
+  };
+  if (/\b(computer\s+science|computing|informatics|software\s+engineering)\b/i.test(text)) add("computer_science");
+  if (/\b(data\s+science|analytics?|statistics?)\b/i.test(text)) add("data_science");
+  if (/\b(mathematics?|mathematical|quantitative)\b/i.test(text)) add("mathematics");
+  if (/\b(electrical|systems?)\s+engineering\b|\bengineering\b/i.test(text) && !/software\s+engineering/i.test(text)) add("engineering");
+  if (/\bphysics?|computational\s+science\b/i.test(text)) add("physics");
+  if (/\b(biology|biological|biomedical|biochemistry)\b/i.test(text)) add("biology");
+  if (/\b(finance|financial|economics?)\b/i.test(text)) add("finance");
+  if (/\b(business|management)\b/i.test(text)) add("business");
+  if (/\b(law|legal\s+studies|jurisprudence)\b/i.test(text)) add("law");
+  return subjects;
+}
+
+/** Normalize accepted equivalent experience domains without treating free text as evidence. */
+export function normalizeVerificationExperienceDomains(value: unknown): string[] {
+  const text = answerText(value);
+  const domains: string[] = [];
+  const add = (domain: string) => {
+    if (!domains.includes(domain)) domains.push(domain);
+  };
+  if (/\b(ai|artificial\s+intelligence|machine\s+learning|\bml\b|llm|generative\s+ai|computer\s+vision)\b/i.test(text)) add("ai");
+  if (/\b(software|full[- ]?stack|backend|frontend|application|coding|web)\b/i.test(text)) add("software");
+  if (/\b(data|analytics?|etl|pipeline|warehous(?:e|ing)|business\s+intelligence)\b/i.test(text)) add("data");
+  if (/\b(cloud|devops|infrastructure|platform|kubernetes|terraform)\b/i.test(text)) add("cloud_devops");
+  return domains;
+}
+
+function normalizeVerificationAuthorizationRegions(value: unknown): string[] {
+  const regions: string[] = [];
+  for (const item of flattenAnswerValues(value)) {
+    for (const territory of extractTerritories(String(item))) {
+      if (KNOWN_TERRITORIES.has(territory) && !regions.includes(territory)) regions.push(territory);
+    }
+    const normalized = normalizeTerritory(item);
+    if (normalized && KNOWN_TERRITORIES.has(normalized) && !regions.includes(normalized)) {
+      regions.push(normalized);
+    }
+  }
+  return regions;
+}
+
+/**
+ * Convert the immutable `verification_answers` revision payload into the
+ * narrow contract consumed by gates. Unrecognized values intentionally yield
+ * no override; the caller must not infer a fact from an arbitrary string.
+ */
+export function createVerificationAnswerContext(
+  content: unknown,
+  identity: VerificationAnswerContextIdentity & { revisionNumber?: number | null } = {},
+): VerificationAnswerContext {
+  const root = answerObject(content);
+  const officeDays = parseAnswerNumber(
+    answerValue(root, VERIFICATION_ANSWER_KEYS.workplaceOfficeDays, 1),
+    3,
+    /(\d+(?:\.\d+)?)\s*days?/i,
+  );
+  const travelPct = parseAnswerNumber(
+    answerValue(root, VERIFICATION_ANSWER_KEYS.travelPercentage, 5),
+    100,
+    /(\d+(?:\.\d+)?)\s*%/i,
+  );
+
+  return {
+    answerRevisionId: identity.answerRevisionId ?? null,
+    revisionNumber: identity.revisionNumber ?? null,
+    jobVersionId: identity.jobVersionId ?? null,
+    providedAnswerKeys: Object.values(VERIFICATION_ANSWER_KEYS).filter((key, index) =>
+      answerKeyProvided(root, key, index + 1)
+    ),
+    overrides: {
+      workplaceOfficeDaysCap: officeDays,
+      degreeSubjects: normalizeVerificationDegreeSubjects(answerValue(root, VERIFICATION_ANSWER_KEYS.degreeSubjects, 2)),
+      workAuthorizationRegions: normalizeVerificationAuthorizationRegions(answerValue(root, VERIFICATION_ANSWER_KEYS.workAuthorization, 3)),
+      experienceDomains: normalizeVerificationExperienceDomains(answerValue(root, VERIFICATION_ANSWER_KEYS.experienceDomains, 4)),
+      travelPercentageCap: travelPct,
+    },
+  };
+}
+
+/** Map a registry row or revision-shaped object without exposing registry types here. */
+export function mapVerificationAnswerRevision(
+  revision: { content?: unknown; id?: string | null; configRevisionId?: string | null; revisionNumber?: number | null; answerRevisionId?: string | null },
+  identity: VerificationAnswerContextIdentity & { revisionNumber?: number | null } = {},
+): VerificationAnswerContext {
+  return createVerificationAnswerContext(revision.content, {
+    answerRevisionId: identity.answerRevisionId ?? revision.answerRevisionId ?? revision.configRevisionId ?? revision.id ?? null,
+    revisionNumber: identity.revisionNumber ?? revision.revisionNumber ?? null,
+    jobVersionId: identity.jobVersionId ?? null,
+  });
+}
+
+/** Return false when a task's answer/job identity does not match its context. */
+export function isVerificationAnswerContextApplicable(
+  answerContext: VerificationAnswerContext | null | undefined,
+  expected: VerificationAnswerContextIdentity = {},
+): boolean {
+  if (!answerContext) return false;
+  if (expected.answerRevisionId !== undefined && expected.answerRevisionId !== null
+    && answerContext.answerRevisionId !== expected.answerRevisionId) return false;
+  if (expected.jobVersionId !== undefined && expected.jobVersionId !== null
+    && answerContext.jobVersionId !== null && answerContext.jobVersionId !== expected.jobVersionId) return false;
+  return true;
+}
+
+export function isVerificationAnswerProvided(
+  answerContext: VerificationAnswerContext | null | undefined,
+  key: string,
+): boolean {
+  return answerContext?.providedAnswerKeys?.includes(key) ?? false;
+}
+
+/** Apply only the workability axes represented by recognized answer values. */
+export function applyVerificationAnswerOverrides(
+  policy: WorkabilityPolicy,
+  answerContext?: VerificationAnswerContext | null,
+): WorkabilityPolicy {
+  if (!answerContext) return policy;
+  const overrides = answerContext.overrides;
+  const next: WorkabilityPolicy = { ...policy };
+  const workplaceAnswerProvided = isVerificationAnswerProvided(
+    answerContext,
+    VERIFICATION_ANSWER_KEYS.workplaceOfficeDays,
+  );
+  if (overrides.workplaceOfficeDaysCap !== null || workplaceAnswerProvided) {
+    if (overrides.workplaceOfficeDaysCap !== null) {
+      next.maxOfficeDaysPerWeek = overrides.workplaceOfficeDaysCap;
+    }
+    // A known or explicitly unanswered personal cap cannot resolve a posting
+    // that omits its office-day count. Require the missing job fact instead of
+    // treating it as a pass.
+    next.hybridWithoutOfficeDaysAllowed = false;
+  }
+  const workAuthorizationAnswerProvided = isVerificationAnswerProvided(
+    answerContext,
+    VERIFICATION_ANSWER_KEYS.workAuthorization,
+  );
+  if (overrides.workAuthorizationRegions.length > 0) {
+    next.authorizedRegions = [...overrides.workAuthorizationRegions];
+  }
+  if (workAuthorizationAnswerProvided) {
+    next.unknownWorkAuthorizationNeedsVerification = true;
+  }
+  if (overrides.travelPercentageCap !== null) {
+    next.maxTravelPct = overrides.travelPercentageCap;
+  }
+  return next;
+}
+
+interface VerificationAnswerRevisionRow {
+  id: string;
+  revision_number: number;
+  content: unknown;
+}
+
+/**
+ * Load one active or explicitly requested answer revision. Read failures are
+ * deliberately converted to `null`: answer persistence is advisory to the
+ * gate, and an operational registry outage must never become a career reject.
+ */
+export async function loadVerificationAnswerContext(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  options: {
+    context?: WorkspaceContext;
+    answerRevisionId?: string | null;
+    jobVersionId?: string | null;
+  } = {},
+): Promise<VerificationAnswerContext | null> {
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const ownsClient = isPool(clientOrPool);
+  let client: pg.Pool | pg.PoolClient = clientOrPool;
+
+  try {
+    if (ownsClient) client = await clientOrPool.connect();
+    const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
+    const requestedRevisionId = options.answerRevisionId ?? null;
+    const query = requestedRevisionId
+      ? `SELECT cr.id, cr.revision_number, cr.content
+         FROM config_definitions cd
+         JOIN config_revisions cr ON cr.config_definition_id = cd.id
+         WHERE cd.workspace_id = $1
+           AND cd.config_key = 'verification_answers'
+           AND cr.id = $2
+         LIMIT 1`
+      : `SELECT cr.id, cr.revision_number, cr.content
+         FROM config_definitions cd
+         JOIN config_active_revisions car ON car.config_definition_id = cd.id
+         JOIN config_revisions cr ON cr.id = car.config_revision_id
+         WHERE cd.workspace_id = $1
+           AND cd.config_key = 'verification_answers'
+         LIMIT 1`;
+    const values = requestedRevisionId ? [ctx.workspaceId, requestedRevisionId] : [ctx.workspaceId];
+    const result = await client.query<VerificationAnswerRevisionRow>(query, values);
+    const row = result.rows[0];
+    if (!row) return null;
+    return createVerificationAnswerContext(row.content, {
+      answerRevisionId: row.id,
+      revisionNumber: row.revision_number,
+      jobVersionId: options.jobVersionId ?? null,
+    });
+  } catch {
+    return null;
+  } finally {
+    if (ownsClient && typeof (client as any).release === "function") {
+      (client as any).release();
+    }
+  }
 }
 
 /**

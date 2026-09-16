@@ -1,0 +1,439 @@
+//#region \0rolldown/runtime.js
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __copyProps = (to, from, except, desc) => {
+	if (from && typeof from === "object" || typeof from === "function") for (var keys = __getOwnPropNames(from), i = 0, n = keys.length, key; i < n; i++) {
+		key = keys[i];
+		if (!__hasOwnProp.call(to, key) && key !== except) __defProp(to, key, {
+			get: ((k) => from[k]).bind(null, key),
+			enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
+		});
+	}
+	return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(isNodeMode || !mod || !mod.__esModule || !__hasOwnProp.call(mod, "default") ? __defProp(target, "default", {
+	value: mod,
+	enumerable: true
+}) : target, mod));
+//#endregion
+let pg = require("pg");
+pg = __toESM(pg, 1);
+let dotenv = require("dotenv");
+dotenv = __toESM(dotenv, 1);
+//#region src/db/pgSsl.ts
+/**
+* Canonical SSL configuration for all pg.Pool instances.
+*
+* - Local (localhost / 127.0.0.1 / CI container): no SSL needed.
+* - All remote connections (Neon, RDS, Cloud SQL, etc.): require a valid cert.
+*
+* NEVER use rejectUnauthorized: false. It silently bypasses TLS verification
+* and makes database connections vulnerable to MITM attacks.
+*/
+function pgSslConfig(connectionString) {
+	if (!connectionString) return false;
+	return isLocalPostgresConnectionString(connectionString) ? false : { rejectUnauthorized: true };
+}
+function pgConnectionConfig(connectionString) {
+	const normalizedConnectionString = normalizePgConnectionString(connectionString);
+	return {
+		connectionString: normalizedConnectionString,
+		ssl: pgSslConfig(normalizedConnectionString)
+	};
+}
+var pgPoolConfig = pgConnectionConfig;
+function normalizePgConnectionString(connectionString) {
+	if (!connectionString) return connectionString;
+	const trimmed = connectionString.trim();
+	if (!trimmed) return connectionString;
+	let parsed;
+	try {
+		parsed = new URL(trimmed);
+	} catch {
+		return connectionString;
+	}
+	if (!isPostgresUrl(parsed)) return connectionString;
+	const targetSslMode = isLocalPostgresUrl(parsed) ? "disable" : "verify-full";
+	if (parsed.searchParams.get("sslmode")?.toLowerCase() !== targetSslMode) parsed.searchParams.set("sslmode", targetSslMode);
+	return parsed.toString();
+}
+function isLocalPostgresConnectionString(connectionString) {
+	const trimmed = connectionString.trim();
+	if (!trimmed) return false;
+	if (trimmed.startsWith("/") || trimmed.startsWith("socket:")) return true;
+	try {
+		const parsed = new URL(trimmed);
+		if (!isPostgresUrl(parsed)) return false;
+		return isLocalPostgresUrl(parsed);
+	} catch {
+		const lower = trimmed.toLowerCase();
+		return lower.includes("localhost") || lower.includes("127.0.0.1") || lower.includes("::1");
+	}
+}
+function isPostgresUrl(parsed) {
+	const protocol = parsed.protocol.toLowerCase();
+	return protocol === "postgres:" || protocol === "postgresql:";
+}
+function isLocalPostgresUrl(parsed) {
+	const host = parsed.hostname.toLowerCase();
+	return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+}
+function getWorkspaceKeyFromEnv() {
+	return (process.env.WORKSPACE_KEY || "default").trim();
+}
+function getUserKeyFromEnv() {
+	return (process.env.WORKSPACE_USER_KEY || process.env.USER_KEY || "local_user").trim();
+}
+async function resolveWorkspaceContext(client, options) {
+	const workspaceKey = (options?.workspaceKey || getWorkspaceKeyFromEnv()).trim();
+	const userKey = (options?.userKey || getUserKeyFromEnv()).trim();
+	const { rows } = await client.query(`
+      SELECT
+        w.id AS workspace_id,
+        u.id AS user_id,
+        m.role AS role
+      FROM workspaces w
+      JOIN workspace_memberships m ON m.workspace_id = w.id
+      JOIN workspace_users u ON u.id = m.user_id
+      WHERE w.workspace_key = $1
+        AND u.user_key = $2
+        AND m.status = 'ACTIVE'
+      LIMIT 1
+    `, [workspaceKey, userKey]);
+	if (rows.length === 0) throw new Error(`Unauthorized: no ACTIVE membership for user_key=${userKey} in workspace_key=${workspaceKey}`);
+	return {
+		workspaceId: rows[0].workspace_id,
+		workspaceKey,
+		userId: rows[0].user_id,
+		userKey,
+		role: rows[0].role
+	};
+}
+//#endregion
+//#region scripts/reconcile_pipeline.ts
+dotenv.default.config();
+dotenv.default.config({ path: ".env.local" });
+function parseArgs(argv) {
+	const out = { json: false };
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i];
+		if (arg === "--workspace-key" && argv[i + 1]) out.workspaceKey = String(argv[++i]).trim();
+		else if (arg === "--user-key" && argv[i + 1]) out.userKey = String(argv[++i]).trim();
+		else if (arg === "--json") out.json = true;
+	}
+	return out;
+}
+async function countRows(client, sql, params) {
+	return (await client.query(sql, params)).rows.map((row) => ({
+		key: row.key ?? "UNKNOWN",
+		count: Number(row.count)
+	}));
+}
+async function run() {
+	const databaseUrl = (process.env.DATABASE_URL || "").trim();
+	if (!databaseUrl) throw new Error("DATABASE_URL is required.");
+	const args = parseArgs(process.argv.slice(2));
+	const pool = new pg.default.Pool(pgPoolConfig(databaseUrl));
+	const client = await pool.connect();
+	try {
+		const ctx = await resolveWorkspaceContext(client, {
+			workspaceKey: args.workspaceKey,
+			userKey: args.userKey
+		});
+		const activeProfileVersionId = (await client.query(`SELECT id
+       FROM profile_versions
+       WHERE workspace_id = $1 AND status = 'ACTIVE'
+       ORDER BY created_at DESC
+       LIMIT 1`, [ctx.workspaceId])).rows[0]?.id ?? null;
+		const jobStates = await countRows(client, `SELECT COALESCE(processing_state, processing_status) AS key, COUNT(*)::int AS count
+       FROM canonical_jobs
+       WHERE workspace_id = $1
+       GROUP BY COALESCE(processing_state, processing_status)
+       ORDER BY key`, [ctx.workspaceId]);
+		const taskStates = await countRows(client, `SELECT status AS key, COUNT(*)::int AS count
+       FROM pipeline_tasks
+       WHERE workspace_id = $1
+       GROUP BY status
+       ORDER BY status`, [ctx.workspaceId]);
+		const evaluationQueueStates = await countRows(client, `SELECT status AS key, COUNT(*)::int AS count
+       FROM evaluation_queue
+       WHERE workspace_id = $1
+       GROUP BY status
+       ORDER BY status`, [ctx.workspaceId]);
+		const evaluationQueueCurrentness = await client.query(`WITH latest_versions AS (
+         SELECT c.id AS canonical_job_id,
+                COALESCE(c.latest_job_version_id, lv.id) AS job_version_id,
+                target_jv.active_requirement_set_id,
+                target_jv.content_hash
+         FROM canonical_jobs c
+         LEFT JOIN LATERAL (
+           SELECT id
+           FROM job_versions
+           WHERE workspace_id = $1 AND canonical_job_id = c.id
+           ORDER BY observed_at DESC, id DESC
+           LIMIT 1
+         ) lv ON TRUE
+         LEFT JOIN job_versions target_jv
+           ON target_jv.workspace_id = $1
+          AND target_jv.id = COALESCE(c.latest_job_version_id, lv.id)
+         WHERE c.workspace_id = $1
+       ),
+       current_evaluation_queue AS (
+         SELECT DISTINCT eq.id
+         FROM evaluation_queue eq
+         JOIN canonical_jobs c
+           ON c.workspace_id = eq.workspace_id
+          AND c.id = eq.canonical_job_id
+         JOIN latest_versions lv
+           ON lv.canonical_job_id = c.id
+         JOIN profile_versions pv
+           ON pv.workspace_id = c.workspace_id
+          AND pv.status = 'ACTIVE'
+         JOIN match_runs mr
+           ON mr.workspace_id = c.workspace_id
+          AND mr.id = c.latest_match_run_id
+          AND mr.canonical_job_id = c.id
+          AND mr.job_version_id = lv.job_version_id
+          AND mr.profile_version_id = pv.id
+          AND mr.requirement_set_id = lv.active_requirement_set_id
+          AND mr.job_content_hash = lv.content_hash
+          AND mr.context_fingerprint IS NOT NULL
+          AND mr.status = 'COMPLETED'
+          AND COALESCE(mr.matched_count, 0) > 0
+         JOIN deterministic_decisions dd
+           ON dd.workspace_id = c.workspace_id
+          AND dd.id = c.latest_deterministic_decision_id
+          AND dd.canonical_job_id = c.id
+          AND dd.job_version_id = lv.job_version_id
+          AND dd.match_run_id = mr.id
+          AND dd.context_fingerprint IS NOT NULL
+         WHERE eq.workspace_id = $1
+           AND eq.status IN ('PENDING', 'EVALUATING', 'RETRY_WAIT')
+           AND eq.job_version_id = lv.job_version_id
+           AND eq.profile_version_id = pv.id
+           AND eq.match_run_id = mr.id
+           AND eq.deterministic_decision_id = dd.id
+           AND eq.job_content_hash = lv.content_hash
+           AND eq.context_fingerprint = dd.context_fingerprint
+       )
+       SELECT
+         (SELECT COUNT(*)::int
+          FROM evaluation_queue
+          WHERE workspace_id = $1
+            AND status IN ('PENDING', 'EVALUATING', 'RETRY_WAIT')) AS active_evaluation_queue,
+         (SELECT COUNT(*)::int FROM current_evaluation_queue) AS current_evaluation_queue`, [ctx.workspaceId]);
+		const funnel = await client.query(`WITH latest_versions AS (
+         SELECT c.id AS canonical_job_id,
+                COALESCE(c.latest_job_version_id, lv.id) AS job_version_id,
+                target_jv.active_requirement_set_id,
+                target_jv.content_hash
+         FROM canonical_jobs c
+         LEFT JOIN LATERAL (
+           SELECT id
+           FROM job_versions
+           WHERE workspace_id = $1 AND canonical_job_id = c.id
+           ORDER BY observed_at DESC, id DESC
+           LIMIT 1
+         ) lv ON TRUE
+         LEFT JOIN job_versions target_jv
+           ON target_jv.workspace_id = $1
+          AND target_jv.id = COALESCE(c.latest_job_version_id, lv.id)
+         WHERE c.workspace_id = $1
+       ),
+       current_requirements AS (
+         SELECT DISTINCT jv.job_version_id
+         FROM latest_versions jv
+         JOIN job_version_pipeline_state ps
+           ON ps.workspace_id = $1
+          AND ps.job_version_id = jv.job_version_id
+          AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+          AND ps.stage_status = 'COMPLETED'
+         JOIN requirement_extraction_runs rer
+           ON rer.workspace_id = $1
+          AND rer.job_version_id = jv.job_version_id
+          AND rer.run_type = 'DETERMINISTIC'
+          AND rer.status = 'COMPLETED'
+          AND rer.requirement_set_id = jv.active_requirement_set_id
+         WHERE jv.active_requirement_set_id IS NOT NULL
+       ),
+       current_matches AS (
+         SELECT c.id AS canonical_job_id
+         FROM canonical_jobs c
+         JOIN latest_versions lv ON lv.canonical_job_id = c.id
+         JOIN match_runs mr
+           ON mr.workspace_id = $1
+          AND mr.id = c.latest_match_run_id
+          AND mr.canonical_job_id = c.id
+          AND mr.job_version_id = lv.job_version_id
+          AND mr.profile_version_id = $2
+          AND mr.requirement_set_id = lv.active_requirement_set_id
+          AND mr.job_content_hash = lv.content_hash
+          AND mr.context_fingerprint IS NOT NULL
+          AND mr.status = 'COMPLETED'
+          AND COALESCE(mr.matched_count, 0) > 0
+         WHERE c.workspace_id = $1
+       ),
+       current_decisions AS (
+         SELECT cm.canonical_job_id
+         FROM current_matches cm
+         JOIN canonical_jobs c ON c.id = cm.canonical_job_id
+         JOIN latest_versions lv ON lv.canonical_job_id = c.id
+         JOIN deterministic_decisions dd
+           ON dd.workspace_id = $1
+          AND dd.id = c.latest_deterministic_decision_id
+          AND dd.canonical_job_id = c.id
+          AND dd.job_version_id = lv.job_version_id
+          AND dd.match_run_id = c.latest_match_run_id
+          AND dd.context_fingerprint IS NOT NULL
+         WHERE c.workspace_id = $1
+       ),
+       current_evaluations AS (
+         SELECT DISTINCT cd.canonical_job_id
+         FROM current_decisions cd
+         JOIN canonical_jobs c ON c.id = cd.canonical_job_id
+         JOIN latest_versions lv ON lv.canonical_job_id = c.id
+         JOIN deterministic_decisions dd
+           ON dd.workspace_id = $1
+          AND dd.id = c.latest_deterministic_decision_id
+          AND dd.canonical_job_id = c.id
+         JOIN ai_evaluations ae
+           ON ae.workspace_id = $1
+          AND ae.canonical_job_id = c.id
+          AND ae.job_version_id = lv.job_version_id
+          AND ae.profile_version_id = $2
+          AND ae.match_run_id = c.latest_match_run_id
+          AND ae.deterministic_decision_id = dd.id
+          AND ae.job_content_hash = lv.content_hash
+          AND ae.context_fingerprint IS NOT NULL
+       ),
+       stale_matches AS (
+         SELECT c.id
+         FROM canonical_jobs c
+         JOIN match_runs mr
+           ON mr.workspace_id = $1 AND mr.id = c.latest_match_run_id
+         WHERE c.workspace_id = $1
+           AND (mr.status = 'COMPLETED' OR mr.status IS NULL)
+           AND COALESCE(mr.matched_count, 0) > 0
+           AND NOT EXISTS (SELECT 1 FROM current_matches cm WHERE cm.canonical_job_id = c.id)
+       ),
+       task_counts AS (
+         SELECT
+           COUNT(*) FILTER (WHERE status = 'BLOCKED_DEPENDENCY')::int AS blocked_tasks,
+           COUNT(*) FILTER (WHERE status = 'RETRY_WAIT')::int AS retrying_tasks,
+           COUNT(*) FILTER (WHERE status = 'DEAD_LETTER')::int AS dead_letter_tasks
+         FROM pipeline_tasks
+         WHERE workspace_id = $1
+       )
+       SELECT
+         (SELECT COUNT(*)::int FROM canonical_jobs WHERE workspace_id = $1) AS canonical_jobs,
+         (SELECT COUNT(*)::int FROM canonical_jobs WHERE workspace_id = $1 AND gate_decision = 'PASS') AS gate_passed,
+         (SELECT COUNT(*)::int FROM current_requirements) AS current_requirements,
+         (SELECT COUNT(*)::int FROM current_matches) AS current_matches,
+         (SELECT COUNT(*)::int FROM current_decisions) AS current_decisions,
+         (SELECT COUNT(*)::int FROM current_evaluations) AS current_evaluations,
+         $3::int AS active_evaluation_queue,
+         $4::int AS current_evaluation_queue,
+         GREATEST($3::int - $4::int, 0) AS stale_evaluation_queue,
+         (SELECT COUNT(*)::int FROM stale_matches) AS stale_or_unprovable_matches,
+         task_counts.blocked_tasks,
+         task_counts.retrying_tasks,
+         task_counts.dead_letter_tasks
+       FROM task_counts`, [
+			ctx.workspaceId,
+			activeProfileVersionId,
+			Number(evaluationQueueCurrentness.rows[0]?.active_evaluation_queue ?? 0),
+			Number(evaluationQueueCurrentness.rows[0]?.current_evaluation_queue ?? 0)
+		]);
+		const samples = await client.query(`WITH latest_versions AS (
+         SELECT DISTINCT ON (jv.canonical_job_id)
+                jv.canonical_job_id, jv.id AS job_version_id,
+                jv.active_requirement_set_id, jv.content_hash
+         FROM job_versions jv
+         WHERE jv.workspace_id = $1
+         ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
+       )
+       SELECT
+         ARRAY(
+           SELECT c.id::text
+           FROM canonical_jobs c
+           JOIN latest_versions lv ON lv.canonical_job_id = c.id
+           WHERE c.workspace_id = $1
+             AND c.gate_decision = 'PASS'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM job_version_pipeline_state ps
+               JOIN requirement_extraction_runs rer
+                 ON rer.workspace_id = $1
+                AND rer.job_version_id = lv.job_version_id
+                AND rer.run_type = 'DETERMINISTIC'
+                AND rer.status = 'COMPLETED'
+                AND rer.requirement_set_id = lv.active_requirement_set_id
+               WHERE ps.workspace_id = $1
+                 AND ps.job_version_id = lv.job_version_id
+                 AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+                 AND ps.stage_status = 'COMPLETED'
+             )
+           LIMIT 20
+         ) AS pass_missing_current_requirements,
+         ARRAY(
+           SELECT c.id::text
+           FROM canonical_jobs c
+           JOIN latest_versions lv ON lv.canonical_job_id = c.id
+           LEFT JOIN match_runs mr ON mr.workspace_id = $1 AND mr.id = c.latest_match_run_id
+           WHERE c.workspace_id = $1
+             AND c.gate_decision = 'PASS'
+             AND COALESCE(c.profile_match_status, 'UNKNOWN') <> 'NO_PROFILE_MATCH'
+             AND COALESCE(c.processing_state, c.processing_status) <> 'ROUTING_DEFERRED'
+             AND NOT (
+               mr.status = 'COMPLETED'
+               AND mr.canonical_job_id = c.id
+               AND mr.job_version_id = lv.job_version_id
+               AND mr.profile_version_id = $2
+               AND mr.requirement_set_id = lv.active_requirement_set_id
+               AND mr.job_content_hash = lv.content_hash
+               AND mr.context_fingerprint IS NOT NULL
+               AND COALESCE(mr.matched_count, 0) > 0
+             )
+           LIMIT 20
+         ) AS pass_missing_current_matches,
+         ARRAY(
+           SELECT t.id::text
+           FROM pipeline_tasks t
+           WHERE t.workspace_id = $1 AND t.status = 'BLOCKED_DEPENDENCY'
+           ORDER BY t.updated_at ASC
+           LIMIT 20
+         ) AS blocked_tasks`, [ctx.workspaceId, activeProfileVersionId]);
+		const report = {
+			mode: "read_only",
+			generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+			workspace_id: ctx.workspaceId,
+			active_profile_version_id: activeProfileVersionId,
+			job_states: jobStates,
+			task_states: taskStates,
+			evaluation_queue_states: evaluationQueueStates,
+			funnel: { ...funnel.rows[0] },
+			samples: samples.rows[0] ?? {
+				pass_missing_current_requirements: [],
+				pass_missing_current_matches: [],
+				blocked_tasks: []
+			}
+		};
+		if (args.json) console.log(JSON.stringify(report, null, 2));
+		else {
+			console.log("PIPELINE RECONCILIATION (READ ONLY)");
+			console.log(JSON.stringify(report, null, 2));
+		}
+	} finally {
+		client.release();
+		await pool.end();
+	}
+}
+run().catch((error) => {
+	console.error("Pipeline reconciliation failed:", error instanceof Error ? error.message : String(error));
+	process.exitCode = 1;
+});
+//#endregion

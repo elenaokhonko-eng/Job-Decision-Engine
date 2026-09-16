@@ -32,6 +32,7 @@ const CONTEXT_PAYLOAD_KEYS = [
   "reprocess",
   "repair_existing_state",
   "reassessment_reason",
+  "verification_answer_revision_id",
 ] as const;
 
 function contextPayload(payload: Record<string, unknown>): Record<string, unknown> {

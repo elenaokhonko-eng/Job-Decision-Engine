@@ -26,6 +26,8 @@ export interface UpsertConfigRevisionOptions {
   context?: WorkspaceContext;
   activate?: boolean;
   note?: string;
+  /** Set false when the caller owns an enclosing transaction. */
+  manageTransaction?: boolean;
 }
 
 export interface ActiveConfigRevision {
@@ -110,6 +112,7 @@ export async function upsertConfigRevision(
   const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
 
   const activate = options?.activate !== false;
+  const manageTransaction = options?.manageTransaction !== false;
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
@@ -117,7 +120,9 @@ export async function upsertConfigRevision(
     const canonicalJson = stableStringify(input.content);
     const contentHash = sha256Hex(canonicalJson);
 
-    await client.query('BEGIN');
+    if (manageTransaction) {
+      await client.query('BEGIN');
+    }
 
     const defRes = await (client as QueryClient).query<{ id: string }>(
       `INSERT INTO config_definitions (
@@ -235,7 +240,9 @@ export async function upsertConfigRevision(
       activated = true;
     }
 
-    await client.query('COMMIT');
+    if (manageTransaction) {
+      await client.query('COMMIT');
+    }
 
     return {
       configDefinitionId,
@@ -245,7 +252,9 @@ export async function upsertConfigRevision(
       activated,
     };
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (manageTransaction) {
+      await client.query('ROLLBACK');
+    }
     throw error;
   } finally {
     if (ownsClient && typeof (client as any).release === 'function') {

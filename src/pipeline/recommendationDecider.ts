@@ -427,6 +427,7 @@ export async function runRecommendationDecider(
               updated_at = NOW()
           WHERE c.workspace_id = $1
             AND c.id = $8
+            AND c.latest_job_version_id = $9
             AND (
               c.recommendation_eligibility IS DISTINCT FROM $2
               OR c.recommendation_outcome IS DISTINCT FROM $3
@@ -447,6 +448,7 @@ export async function runRecommendationDecider(
             evidenceCompleteness,
             decisionId,
             job.canonical_job_id,
+            job.job_version_id,
           ]
         );
 

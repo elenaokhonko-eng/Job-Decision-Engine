@@ -19,6 +19,7 @@ const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
 export interface EmbeddingBatchSummary {
   batchId: string | null;
+  batchIds?: string[];
   embeddingSpaceId: string;
   processed: number;
   processedInputIds: string[];
@@ -27,6 +28,7 @@ export interface EmbeddingBatchSummary {
   failedInputIds: string[];
   runType: 'PRIMARY' | 'FALLBACK';
   errors: string[];
+  publicationComplete?: boolean;
 }
 
 export interface EmbeddingFallbackSummary {
@@ -154,7 +156,8 @@ export async function runEmbeddingBatch(
   fallbackFromBatchId?: string,
   rerunOfBatchId?: string,
   clientOrPool?: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: { context?: WorkspaceContext },
+  excludeInputIds: string[] = []
 ): Promise<EmbeddingBatchSummary> {
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
@@ -209,37 +212,42 @@ export async function runEmbeddingBatch(
       };
     }
 
+    const excludedInputIds = excludeInputIds.length > 0 ? excludeInputIds : null;
     const inputRes = Array.isArray(inputIds)
       ? await client.query<InputRow>(
           `SELECT ei.id, ei.content_text
            FROM embedding_inputs ei
            WHERE ei.workspace_id = $1
+             AND ei.is_current = TRUE
              AND ei.id = ANY($2::uuid[])
+             AND ($5::uuid[] IS NULL OR ei.id <> ALL($5::uuid[]))
              AND NOT EXISTS (
                SELECT 1
-               FROM semantic_embeddings se
+               FROM v_published_semantic_embeddings se
                WHERE se.workspace_id = $1
                  AND se.embedding_space_id = $3
                  AND se.embedding_input_id = ei.id
              )
            ORDER BY ei.created_at ASC
            LIMIT $4`,
-          [workspaceId, inputIds, space.id, maxItems]
+          [workspaceId, inputIds, space.id, maxItems, excludedInputIds]
         )
       : await client.query<InputRow>(
           `SELECT ei.id, ei.content_text
            FROM embedding_inputs ei
            WHERE ei.workspace_id = $1
+             AND ei.is_current = TRUE
+             AND ($4::uuid[] IS NULL OR ei.id <> ALL($4::uuid[]))
              AND NOT EXISTS (
              SELECT 1
-             FROM semantic_embeddings se
+             FROM v_published_semantic_embeddings se
              WHERE se.workspace_id = $1
                AND se.embedding_space_id = $2
                AND se.embedding_input_id = ei.id
            )
            ORDER BY ei.created_at ASC
            LIMIT $3`,
-          [workspaceId, space.id, maxItems]
+          [workspaceId, space.id, maxItems, excludedInputIds]
         );
 
     if (inputRes.rows.length === 0) {
@@ -503,21 +511,43 @@ export async function runEmbeddingBatch(
       ]
     );
 
-    if (failed === 0) {
+    let publicationComplete = false;
+    if (failed === 0 && succeeded === inputRes.rows.length) {
       try {
-        await client.query(
-          `UPDATE embedding_batches
+        const publicationRes = await client.query(
+          `UPDATE embedding_batches eb
            SET published_at = NOW(),
                publication_note = NULL
-           WHERE workspace_id = $1 AND id = $2`,
+           WHERE eb.workspace_id = $1
+             AND eb.id = $2
+             AND eb.status = 'COMPLETED'
+             AND eb.item_count > 0
+             AND eb.item_count = (
+               SELECT COUNT(*)
+               FROM embedding_batch_items ebi
+               WHERE ebi.workspace_id = eb.workspace_id
+                 AND ebi.embedding_batch_id = eb.id
+                 AND ebi.status = 'COMPLETED'
+             )`,
           [workspaceId, batchId]
         );
-      } catch (publishErr: any) {
-        // Allow running against pre-migration databases.
-        if (publishErr?.code !== '42703') {
+        publicationComplete = (publicationRes.rowCount ?? 0) === 1;
+      } catch (publishErr: unknown) {
+        const code =
+          typeof publishErr === 'object' && publishErr !== null && 'code' in publishErr
+            ? String((publishErr as { code?: unknown }).code)
+            : undefined;
+        // Allow running against pre-migration databases; the completed batch
+        // remains auditable even when publication metadata is unavailable.
+        if (code !== '42703') {
           throw publishErr;
         }
+        publicationComplete = true;
       }
+    }
+
+    if (failed === 0 && inputRes.rows.length === 0) {
+      publicationComplete = true;
     }
 
     console.log(
@@ -526,6 +556,7 @@ export async function runEmbeddingBatch(
 
     return {
       batchId,
+      batchIds: [batchId],
       embeddingSpaceId: space.id,
       processed: inputRes.rows.length,
       processedInputIds,
@@ -534,6 +565,7 @@ export async function runEmbeddingBatch(
       failedInputIds,
       runType,
       errors,
+      publicationComplete,
     };
   } catch (error) {
     throw error;
@@ -542,6 +574,118 @@ export async function runEmbeddingBatch(
       client.release();
     }
   }
+}
+
+interface EmbeddingBatchDrainResult {
+  summary: EmbeddingBatchSummary;
+  batches: EmbeddingBatchSummary[];
+}
+
+function emptyBatchSummary(embeddingSpaceId: string, runType: 'PRIMARY' | 'FALLBACK'): EmbeddingBatchSummary {
+  return {
+    batchId: null,
+    batchIds: [],
+    embeddingSpaceId,
+    processed: 0,
+    processedInputIds: [],
+    succeeded: 0,
+    failed: 0,
+    failedInputIds: [],
+    runType,
+    errors: [],
+    publicationComplete: true,
+  };
+}
+
+function mergeBatchSummaries(
+  summaries: EmbeddingBatchSummary[],
+  embeddingSpaceId: string,
+  runType: 'PRIMARY' | 'FALLBACK'
+): EmbeddingBatchSummary {
+  if (summaries.length === 0) {
+    return emptyBatchSummary(embeddingSpaceId, runType);
+  }
+
+  const processedInputIds = [...new Set(summaries.flatMap((summary) => summary.processedInputIds))];
+  const failedInputIds = [...new Set(summaries.flatMap((summary) => summary.failedInputIds))];
+  const batchIds = summaries.flatMap((summary) => summary.batchIds ?? (summary.batchId ? [summary.batchId] : []));
+  return {
+    batchId: batchIds[0] ?? null,
+    batchIds,
+    embeddingSpaceId,
+    processed: summaries.reduce((total, summary) => total + summary.processed, 0),
+    processedInputIds,
+    succeeded: summaries.reduce((total, summary) => total + summary.succeeded, 0),
+    failed: summaries.reduce((total, summary) => total + summary.failed, 0),
+    failedInputIds,
+    runType,
+    errors: summaries.flatMap((summary) => summary.errors),
+    publicationComplete: summaries.every(
+      (summary) => summary.publicationComplete !== false && summary.failed === 0
+    ),
+  };
+}
+
+async function drainEmbeddingBatches(
+  embeddingSpaceId: string,
+  runType: 'PRIMARY' | 'FALLBACK',
+  maxItems: number,
+  inputIds: string[] | undefined,
+  fallbackFromBatchId: string | undefined,
+  rerunOfBatchId: string | undefined,
+  client: pg.PoolClient,
+  context: WorkspaceContext
+): Promise<EmbeddingBatchDrainResult> {
+  const requestedInputIds = inputIds ? [...new Set(inputIds)] : undefined;
+  const attemptedInputIds = new Set<string>();
+  const batches: EmbeddingBatchSummary[] = [];
+
+  while (true) {
+    const batch = await runEmbeddingBatch(
+      embeddingSpaceId,
+      `${runType.toLowerCase()}-${Date.now()}-${batches.length}`,
+      runType,
+      maxItems,
+      requestedInputIds,
+      fallbackFromBatchId,
+      rerunOfBatchId,
+      client,
+      { context },
+      [...attemptedInputIds]
+    );
+
+    if (batch.processed === 0) {
+      break;
+    }
+    if (
+      batch.processedInputIds.length === 0 ||
+      !batch.processedInputIds.some((inputId) => !attemptedInputIds.has(inputId))
+    ) {
+      // Protect the coordinator from a broken or stale provider/query adapter
+      // returning the same batch repeatedly.
+      break;
+    }
+
+    batches.push(batch);
+    for (const inputId of batch.processedInputIds) {
+      attemptedInputIds.add(inputId);
+    }
+
+    // A provider failure is intentionally attempted once per coordinator run.
+    // Keeping it in the attempted set prevents an unbounded retry loop while
+    // still leaving the failed input durably available for a later run.
+    if (batch.processedInputIds.length === 0) {
+      break;
+    }
+    if (requestedInputIds && attemptedInputIds.size >= requestedInputIds.length) {
+      break;
+    }
+  }
+
+  return {
+    summary: mergeBatchSummaries(batches, embeddingSpaceId, runType),
+    batches,
+  };
 }
 
 export async function runEmbeddingBatchWithFallback(
@@ -556,7 +700,7 @@ export async function runEmbeddingBatchWithFallback(
   const client = ownsClient ? await pool.connect() : pool;
 
   try {
-    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as pg.PoolClient));
     const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
     const scopedToJobVersions = jobVersionIds.length > 0;
     console.log(`[embeddings] seeding embedding spaces`);
@@ -581,6 +725,7 @@ export async function runEmbeddingBatchWithFallback(
         `SELECT DISTINCT ei.id
          FROM embedding_inputs ei
          WHERE ei.workspace_id = $1
+           AND ei.is_current = TRUE
            AND (
              (ei.source_type = 'JOB_VERSION' AND ei.source_id = ANY($2::uuid[]))
              OR (ei.source_type = 'JOB_REQUIREMENT' AND EXISTS (
@@ -624,103 +769,59 @@ export async function runEmbeddingBatchWithFallback(
       );
     }
 
-    console.log(`[embeddings] primary batch starting max_items=${maxItems}`);
-    const primary = await runEmbeddingBatch(
+    console.log(`[embeddings] draining primary batches max_items=${maxItems}`);
+    const primaryDrain = await drainEmbeddingBatches(
       seeded.primarySpaceId,
-      `primary-${Date.now()}`,
       'PRIMARY',
       maxItems,
       scopedInputIds,
       undefined,
       undefined,
       client as pg.PoolClient,
-      { context: ctx }
+      ctx
     );
+    const primary = primaryDrain.summary;
     console.log(
-      `[embeddings] primary batch finished processed=${primary.processed} succeeded=${primary.succeeded} failed=${primary.failed}`
+      `[embeddings] primary batches finished batches=${primaryDrain.batches.length} processed=${primary.processed} succeeded=${primary.succeeded} failed=${primary.failed}`
     );
 
     let fallback: EmbeddingBatchSummary | undefined;
     if (primary.failedInputIds.length > 0) {
-      let fallbackInputIds = scopedInputIds && scopedInputIds.length > 0
-        ? scopedInputIds
-        : primary.processedInputIds;
-      console.log(
-        `[embeddings] primary had ${primary.failedInputIds.length} failed input(s); selecting active corpus for fallback`
-      );
-      if (!scopedInputIds || scopedInputIds.length === 0) {
-        try {
-          const allRelevantInputs = await client.query<{ id: string }>(
-            `SELECT DISTINCT ei.id
-             FROM embedding_inputs ei
-             WHERE ei.workspace_id = $1
-               AND (
-                 (ei.source_type = 'PROFILE_FACT' AND EXISTS (
-                   SELECT 1
-                   FROM profile_facts pf
-                   JOIN profile_versions pv
-                     ON pv.workspace_id = pf.workspace_id
-                    AND pv.id = pf.profile_version_id
-                    AND pv.status = 'ACTIVE'
-                   WHERE pf.workspace_id = ei.workspace_id
-                     AND COALESCE(pf.fact_revision_id, pf.id) = ei.source_id
-                 ))
-                 OR (ei.source_type = 'JOB_REQUIREMENT' AND EXISTS (
-                   SELECT 1
-                   FROM job_requirements jr
-                   JOIN job_versions jv
-                     ON jv.workspace_id = jr.workspace_id
-                    AND jv.id = jr.job_version_id
-                   WHERE jr.workspace_id = ei.workspace_id
-                     AND jr.id = ei.source_id
-                     AND jr.status = 'VALIDATED'
-                     AND (jv.active_requirement_set_id IS NULL OR jr.requirement_set_id = jv.active_requirement_set_id)
-                 ))
-                 OR (ei.source_type = 'JOB_VERSION' AND EXISTS (
-                   SELECT 1
-                   FROM canonical_jobs cj
-                   WHERE cj.workspace_id = ei.workspace_id
-                     AND cj.latest_job_version_id = ei.source_id
-                      AND COALESCE(cj.processing_state, cj.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'ROUTING_DEFERRED', 'MATCHED')
-                 ))
-                 OR (ei.source_type = 'LANE_PROTOTYPE' AND EXISTS (
-                   SELECT 1
-                   FROM lane_revisions lr
-                   JOIN lane_active_revisions lar ON lar.lane_revision_id = lr.id
-                   JOIN lane_identities li ON li.id = lr.lane_identity_id
-                   WHERE li.workspace_id = ei.workspace_id
-                     AND lr.id = ei.source_id
-                     AND li.status = 'ACTIVE'
-                 ))
-               )
-             ORDER BY ei.id` ,
-            [ctx.workspaceId]
-          );
-          if (allRelevantInputs.rows.length > 0) {
-            fallbackInputIds = allRelevantInputs.rows.map((row) => row.id);
-          }
-        } catch (error: any) {
-          if (error?.code !== '42P01') throw error;
+      const fallbackBatches: EmbeddingBatchSummary[] = [];
+      const failedByPrimaryBatch = new Map<string, string[]>();
+      for (const batch of primaryDrain.batches) {
+        if (!batch.batchId || batch.failedInputIds.length === 0) {
+          continue;
         }
+        failedByPrimaryBatch.set(batch.batchId, batch.failedInputIds);
       }
 
-      // A failed primary batch is never a usable semantic space. Full runs
-      // re-embed the active corpus; scoped stage tasks re-embed only their
-      // claimed job inputs so a single task cannot escape its budget.
-      console.log(`[embeddings] fallback batch starting input_count=${fallbackInputIds.length}`);
-      fallback = await runEmbeddingBatch(
-        seeded.fallbackSpaceId,
-        `fallback-${Date.now()}`,
-        'FALLBACK',
-        maxItems,
-        fallbackInputIds,
-        primary.batchId ?? undefined,
-        primary.batchId ?? undefined,
-        client as pg.PoolClient,
-        { context: ctx }
-      );
+      // Fallback is deliberately restricted to the inputs that failed in the
+      // corresponding primary batch. It must never widen to the active corpus.
+      for (const [primaryBatchId, failedInputIds] of failedByPrimaryBatch) {
+        console.log(
+          `[embeddings] draining fallback batches primary_batch_id=${primaryBatchId} input_count=${failedInputIds.length}`
+        );
+        const fallbackDrain = await drainEmbeddingBatches(
+          seeded.fallbackSpaceId,
+          'FALLBACK',
+          maxItems,
+          failedInputIds,
+          primaryBatchId,
+          primaryBatchId,
+          client as pg.PoolClient,
+          ctx
+        );
+        fallbackBatches.push(...fallbackDrain.batches);
+        if (fallbackDrain.batches.length === 0) {
+          // Preserve the fact that fallback was required even when all failed
+          // inputs were already published by an earlier fallback run.
+          fallbackBatches.push(emptyBatchSummary(seeded.fallbackSpaceId, 'FALLBACK'));
+        }
+      }
+      fallback = mergeBatchSummaries(fallbackBatches, seeded.fallbackSpaceId, 'FALLBACK');
       console.log(
-        `[embeddings] fallback batch finished processed=${fallback.processed} succeeded=${fallback.succeeded} failed=${fallback.failed}`
+        `[embeddings] fallback batches finished batches=${fallbackBatches.length} processed=${fallback.processed} succeeded=${fallback.succeeded} failed=${fallback.failed}`
       );
     }
 

@@ -197,8 +197,10 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
                SET processing_state = 'NEEDS_MANUAL_REVIEW',
                    processing_status = 'NEEDS_MANUAL_REVIEW',
                    updated_at = NOW()
-               WHERE workspace_id = $1 AND id = $2`,
-              [ctx.workspaceId, item.canonical_job_id]
+               WHERE workspace_id = $1
+                 AND id = $2
+                 AND latest_job_version_id = $3`,
+              [ctx.workspaceId, item.canonical_job_id, item.job_version_id]
             );
             manualReviewCount++;
           } else {
@@ -312,14 +314,21 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
 
         await client.query("BEGIN");
         try {
-          await client.query(
+          const canonicalUpdate = await client.query(
             `UPDATE canonical_jobs
              SET processing_state = 'AI_EVALUATED',
                  processing_status = 'AI_EVALUATED',
                  updated_at = NOW()
-             WHERE workspace_id = $1 AND id = $2`,
-            [ctx.workspaceId, item.canonical_job_id]
+             WHERE workspace_id = $1
+               AND id = $2
+               AND latest_job_version_id = $3`,
+            [ctx.workspaceId, item.canonical_job_id, jobVersionId]
           );
+          if ((canonicalUpdate.rowCount ?? 0) === 0) {
+            console.warn(
+              `Canonical job ${item.canonical_job_id} is no longer current for version ${jobVersionId}; preserving evaluation lineage without changing current state.`
+            );
+          }
 
           await client.query(
             `INSERT INTO ai_evaluations (

@@ -1,4 +1,6 @@
 import dotenv from "dotenv";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { buildPipelineTaskContextFingerprint } from "../src/pipeline/artifactContext.js";
@@ -13,7 +15,7 @@ import { aggregateVerificationQuestions } from "../src/services/verificationQues
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
-interface RepairCandidate {
+export interface RepairCandidate {
   canonical_job_id: string;
   job_version_id: string;
   processing_state: string;
@@ -42,62 +44,176 @@ function parseArgs(argv: string[]): { apply: boolean; workspaceKey?: string; use
   return args;
 }
 
-async function loadCandidates(client: pg.PoolClient, context: WorkspaceContext): Promise<RepairCandidate[]> {
+export async function loadCandidates(
+  client: pg.PoolClient,
+  context: WorkspaceContext
+): Promise<RepairCandidate[]> {
   const { rows } = await client.query<RepairCandidateRow>(
     `
-      WITH latest_versions AS (
-        SELECT DISTINCT ON (jv.canonical_job_id)
-               jv.canonical_job_id,
-               jv.id AS job_version_id,
-               LENGTH(COALESCE(jv.description_text, '')) as desc_len
-        FROM job_versions jv
-        WHERE jv.workspace_id = $1
-        ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
+      WITH authoritative_versions AS (
+        SELECT
+          c.id AS canonical_job_id,
+          jv.id AS job_version_id,
+          jv.active_requirement_set_id,
+          LENGTH(COALESCE(jv.description_text, '')) AS desc_len
+        FROM canonical_jobs c
+        JOIN LATERAL (
+          SELECT jv.*
+          FROM job_versions jv
+          WHERE jv.workspace_id = c.workspace_id
+            AND jv.canonical_job_id = c.id
+            AND (c.latest_job_version_id IS NULL OR jv.id = c.latest_job_version_id)
+          ORDER BY
+            (jv.id = c.latest_job_version_id) DESC,
+            jv.observed_at DESC,
+            jv.id DESC
+          LIMIT 1
+        ) jv ON TRUE
+        WHERE c.workspace_id = $1
       ),
       prior_complete_versions AS (
         SELECT DISTINCT ON (jv.canonical_job_id)
                jv.canonical_job_id,
                jv.id AS complete_version_id
         FROM job_versions jv
+        JOIN authoritative_versions av
+          ON av.canonical_job_id = jv.canonical_job_id
+         AND av.job_version_id <> jv.id
         WHERE jv.workspace_id = $1
           AND LENGTH(COALESCE(jv.description_text, '')) >= 1000
         ORDER BY jv.canonical_job_id, jv.observed_at DESC, jv.id DESC
+      ),
+      active_profile_version AS (
+        SELECT pv.id
+        FROM profile_versions pv
+        WHERE pv.workspace_id = $1
+          AND pv.status = 'ACTIVE'
+        ORDER BY pv.created_at DESC, pv.id DESC
+        LIMIT 1
+      ),
+      active_profile_inputs AS (
+        SELECT DISTINCT COALESCE(pf.fact_revision_id, pf.id) AS source_id
+        FROM profile_facts pf
+        JOIN active_profile_version apv ON apv.id = pf.profile_version_id
+        WHERE pf.workspace_id = $1
+      ),
+      active_job_requirements AS (
+        SELECT av.canonical_job_id, av.job_version_id, jr.id AS source_id
+        FROM authoritative_versions av
+        JOIN job_requirements jr
+          ON jr.workspace_id = $1
+         AND jr.job_version_id = av.job_version_id
+         AND jr.status = 'VALIDATED'
+         AND av.active_requirement_set_id IS NOT NULL
+         AND jr.requirement_set_id = av.active_requirement_set_id
+      ),
+      usable_embedding_spaces AS (
+        SELECT es.id, es.dimensions
+        FROM embedding_spaces es
+        WHERE es.workspace_id = $1
+          AND es.active = TRUE
+          AND es.dimensions > 0
+      ),
+      ready_embedding_spaces AS (
+        SELECT av.canonical_job_id, av.job_version_id, ues.id AS embedding_space_id
+        FROM authoritative_versions av
+        CROSS JOIN usable_embedding_spaces ues
+        WHERE EXISTS (
+          SELECT 1
+          FROM active_job_requirements ajr
+          WHERE ajr.canonical_job_id = av.canonical_job_id
+            AND ajr.job_version_id = av.job_version_id
+        )
+          AND EXISTS (SELECT 1 FROM active_profile_inputs)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM active_job_requirements ajr
+            WHERE ajr.canonical_job_id = av.canonical_job_id
+              AND ajr.job_version_id = av.job_version_id
+              AND NOT EXISTS (
+                SELECT 1
+                FROM embedding_inputs ei
+                JOIN v_published_semantic_embeddings se
+                  ON se.workspace_id = ei.workspace_id
+                 AND se.embedding_input_id = ei.id
+                 AND se.embedding_space_id = ues.id
+                WHERE ei.workspace_id = $1
+                  AND ei.is_current = TRUE
+                  AND ei.source_type = 'JOB_REQUIREMENT'
+                  AND ei.source_id = ajr.source_id
+                  AND se.vector_dimensions = ues.dimensions
+                  AND cardinality(se.embedding_values) = ues.dimensions
+                  AND cardinality(se.embedding_values) > 0
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM active_profile_inputs api
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM embedding_inputs ei
+              JOIN v_published_semantic_embeddings se
+                ON se.workspace_id = ei.workspace_id
+               AND se.embedding_input_id = ei.id
+               AND se.embedding_space_id = ues.id
+              WHERE ei.workspace_id = $1
+                AND ei.is_current = TRUE
+                AND ei.source_type = 'PROFILE_FACT'
+                AND ei.source_id = api.source_id
+                AND se.vector_dimensions = ues.dimensions
+                AND cardinality(se.embedding_values) = ues.dimensions
+                AND cardinality(se.embedding_values) > 0
+            )
+          )
       ),
       latest_gate_decisions AS (
         SELECT DISTINCT ON (gd.canonical_job_id)
                gd.canonical_job_id,
                gd.rejection_codes
         FROM gate_decisions gd
-        JOIN canonical_jobs c ON c.id = gd.canonical_job_id AND c.workspace_id = $1
+        JOIN canonical_jobs c
+          ON c.id = gd.canonical_job_id
+         AND c.workspace_id = $1
         ORDER BY gd.canonical_job_id, gd.created_at DESC, gd.id DESC
       )
-       SELECT
-         c.id AS canonical_job_id,
-         COALESCE(c.latest_job_version_id, lv.job_version_id) AS job_version_id,
-         COALESCE(c.processing_state, c.processing_status) AS processing_state,
-         c.gate_decision,
-         c.primary_lane,
-         c.rejection_reason,
-         COALESCE(lgd.rejection_codes, '[]'::jsonb) AS rejection_reason_codes,
-         c.gate_evidence_quotes AS evidence_quotes,
-         c.profile_match_status,
-         NOT EXISTS (
-           SELECT 1 FROM job_version_embeddings jve
-           WHERE jve.workspace_id = $1
-             AND jve.job_version_id = COALESCE(c.latest_job_version_id, lv.job_version_id)
-         ) AS has_missing_embeddings,
-         (lv.desc_len < 1000 AND pcv.complete_version_id IS NOT NULL AND pcv.complete_version_id <> COALESCE(c.latest_job_version_id, lv.job_version_id)) AS has_complete_prior_version,
-         pcv.complete_version_id
+      SELECT
+        c.id AS canonical_job_id,
+        av.job_version_id,
+        COALESCE(c.processing_state, c.processing_status) AS processing_state,
+        c.gate_decision,
+        c.primary_lane,
+        c.rejection_reason,
+        COALESCE(lgd.rejection_codes, '[]'::jsonb) AS rejection_reason_codes,
+        c.gate_evidence_quotes AS evidence_quotes,
+        c.profile_match_status,
+        NOT EXISTS (
+          SELECT 1
+          FROM ready_embedding_spaces res
+          WHERE res.canonical_job_id = av.canonical_job_id
+            AND res.job_version_id = av.job_version_id
+        ) AS has_missing_embeddings,
+        (
+          av.desc_len < 1000
+          AND pcv.complete_version_id IS NOT NULL
+          AND pcv.complete_version_id <> av.job_version_id
+        ) AS has_complete_prior_version,
+        pcv.complete_version_id
       FROM canonical_jobs c
-      JOIN latest_versions lv ON lv.canonical_job_id = c.id
+      JOIN authoritative_versions av ON av.canonical_job_id = c.id
       LEFT JOIN prior_complete_versions pcv ON pcv.canonical_job_id = c.id
       LEFT JOIN latest_gate_decisions lgd ON lgd.canonical_job_id = c.id
       WHERE c.workspace_id = $1
         AND (
-           COALESCE(c.processing_state, c.processing_status) IN ('NEEDS_MANUAL_REVIEW', 'HARD_REJECTED', 'RAW_STAGED', 'MATCHED', 'DECIDED', 'LANE_ROUTED')
-           OR (lv.desc_len < 1000 AND pcv.complete_version_id IS NOT NULL AND pcv.complete_version_id <> COALESCE(c.latest_job_version_id, lv.job_version_id))
-         )
-       ORDER BY c.created_at, c.id
+          COALESCE(c.processing_state, c.processing_status) IN (
+            'NEEDS_MANUAL_REVIEW', 'HARD_REJECTED', 'RAW_STAGED', 'MATCHED', 'DECIDED', 'LANE_ROUTED'
+          )
+          OR (
+            av.desc_len < 1000
+            AND pcv.complete_version_id IS NOT NULL
+            AND pcv.complete_version_id <> av.job_version_id
+          )
+        )
+      ORDER BY c.created_at, c.id
     `,
     [context.workspaceId]
   );
@@ -168,7 +284,11 @@ async function enqueueRepairTask(
   return result.inserted || Boolean(result.reactivated);
 }
 
-async function applyRepair(client: pg.PoolClient, context: WorkspaceContext, candidates: RepairCandidate[]): Promise<Record<string, number>> {
+export async function applyRepair(
+  client: pg.PoolClient,
+  context: WorkspaceContext,
+  candidates: RepairCandidate[]
+): Promise<Record<string, number>> {
   const profileVersionId = await activeProfileVersionId(client, context);
   const counts: Record<string, number> = {};
 
@@ -435,7 +555,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error("Pipeline funnel repair failed:", error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error("Pipeline funnel repair failed:", error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

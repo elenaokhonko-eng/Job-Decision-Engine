@@ -105,5 +105,33 @@ describe('upsertConfigRevision', () => {
     expect(calls.some((sql) => sql.includes('config_active_revisions'))).toBe(false);
     expect(calls.some((sql) => sql.includes('config_activation_events'))).toBe(false);
   });
+
+  it('can participate in a caller-owned transaction without committing it', async () => {
+    const calls: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
+      if (sql.includes('INSERT INTO config_definitions')) return { rows: [{ id: 'def-3' }] };
+      if (sql.includes('SELECT id, revision_number') && sql.includes('FROM config_revisions')) {
+        return { rows: [{ id: 'rev-existing', revision_number: 4 }] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    const fakeClient = { query, release: vi.fn() } as any;
+    const result = await upsertConfigRevision(
+      {
+        configKey: 'verification_answers',
+        configType: 'verification_preferences',
+        content: { 'workplace:office_days': 2 },
+      },
+      fakeClient,
+      { context: ctx, manageTransaction: false }
+    );
+
+    expect(result.configRevisionId).toBe('rev-existing');
+    expect(calls).not.toContain('BEGIN');
+    expect(calls).not.toContain('COMMIT');
+    expect(calls).not.toContain('ROLLBACK');
+  });
 });
 

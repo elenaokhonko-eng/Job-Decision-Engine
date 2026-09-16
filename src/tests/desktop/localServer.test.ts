@@ -24,6 +24,14 @@ describe("desktop local companion server", () => {
       expect(data.ok).toBe(true);
       expect(data.database).toBeDefined();
 
+      const workerStatusRes = await fetch(`${server.apiBaseUrl}/status`);
+      expect(workerStatusRes.status).toBe(200);
+      const workerStatus = (await workerStatusRes.json()) as any;
+      expect(workerStatus.ok).toBe(true);
+      expect(workerStatus.workers).toBeDefined();
+      expect(workerStatus.workers.workers).toHaveProperty("pipeline");
+      expect(server.getStatus().workers).toEqual(workerStatus.workers);
+
       // Test updating dynamic configuration in memory
       server.updateConfig({
         geminiApiKey: "test-gemini-key",

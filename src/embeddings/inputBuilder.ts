@@ -55,6 +55,88 @@ function buildJobVersionInputText(row: { normalized_title: string; description_t
   return `${row.normalized_title}: ${row.description_text}`.trim().slice(0, 12000);
 }
 
+type EmbeddingInputSourceType = 'PROFILE_FACT' | 'JOB_REQUIREMENT' | 'JOB_VERSION' | 'LANE_PROTOTYPE';
+
+interface EmbeddingInputCandidate {
+  workspaceId: string;
+  sourceType: EmbeddingInputSourceType;
+  sourceId: string;
+  inputKey: string;
+  contentText: string;
+  contentHash: string;
+}
+
+async function upsertEmbeddingInput(
+  client: pg.PoolClient,
+  candidate: EmbeddingInputCandidate
+): Promise<boolean> {
+  const currentResult = await client.query<{ content_hash: string }>(
+    `SELECT content_hash
+     FROM embedding_inputs
+     WHERE workspace_id = $1
+       AND source_type = $2
+       AND source_id = $3
+       AND is_current = TRUE
+     FOR UPDATE`,
+    [candidate.workspaceId, candidate.sourceType, candidate.sourceId]
+  );
+
+  if (currentResult.rows[0]?.content_hash === candidate.contentHash) {
+    return false;
+  }
+
+  let inputKey = candidate.inputKey;
+  const existingKey = await client.query(
+    `SELECT 1
+     FROM embedding_inputs
+     WHERE workspace_id = $1
+       AND input_key = $2
+     LIMIT 1`,
+    [candidate.workspaceId, inputKey]
+  );
+  if (existingKey.rows.length > 0) {
+    // Keep superseded revisions immutable when a source returns to an older hash.
+    inputKey = `${candidate.inputKey}:${crypto.randomUUID()}`;
+  }
+
+  await client.query(
+    `UPDATE embedding_inputs
+     SET is_current = FALSE,
+         superseded_at = COALESCE(superseded_at, NOW())
+     WHERE workspace_id = $1
+       AND source_type = $2
+       AND source_id = $3
+       AND is_current = TRUE`,
+    [candidate.workspaceId, candidate.sourceType, candidate.sourceId]
+  );
+
+  const inserted = await client.query<{ id: string }>(
+    `INSERT INTO embedding_inputs (
+       workspace_id,
+       input_key,
+       source_type,
+       source_id,
+       content_text,
+       content_hash,
+       is_current,
+       superseded_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, TRUE, NULL)
+     ON CONFLICT (workspace_id, input_key) DO NOTHING
+     RETURNING id`,
+    [
+      candidate.workspaceId,
+      inputKey,
+      candidate.sourceType,
+      candidate.sourceId,
+      candidate.contentText,
+      candidate.contentHash,
+    ]
+  );
+
+  return (inserted.rowCount ?? inserted.rows.length) > 0;
+}
+
 export async function buildEmbeddingInputs(
   clientOrPool?: pg.Pool | pg.PoolClient,
   maxPerSource = 200,
@@ -109,13 +191,6 @@ export async function buildEmbeddingInputs(
            jv.active_requirement_set_id IS NULL
            OR jr.requirement_set_id = jv.active_requirement_set_id
          )
-         AND NOT EXISTS (
-           SELECT 1
-           FROM embedding_inputs ei
-           WHERE ei.workspace_id = $1
-             AND ei.source_type = 'JOB_REQUIREMENT'
-             AND ei.source_id = jr.id
-         )
        ORDER BY jr.created_at ASC
        LIMIT $2`,
       requirementParams
@@ -126,22 +201,19 @@ export async function buildEmbeddingInputs(
       const contentHash = hashText(contentText);
       const inputKey = `req:${row.id}:${contentHash.slice(0, 16)}`;
 
-      await client.query(
-        `INSERT INTO embedding_inputs (
-           workspace_id,
-           input_key,
-           source_type,
-           source_id,
-           content_text,
-           content_hash
-         )
-         VALUES ($1, $2, 'JOB_REQUIREMENT', $3, $4, $5)
-         ON CONFLICT (workspace_id, input_key) DO NOTHING`,
-        [ctx.workspaceId, inputKey, row.id, contentText, contentHash]
-      );
+      const didWrite = await upsertEmbeddingInput(client, {
+        workspaceId: ctx.workspaceId,
+        inputKey,
+        sourceType: 'JOB_REQUIREMENT',
+        sourceId: row.id,
+        contentText,
+        contentHash,
+      });
 
-      inserted += 1;
-      fromRequirements += 1;
+      if (didWrite) {
+        inserted += 1;
+        fromRequirements += 1;
+      }
     }
 
     if (includeProfileFacts) {
@@ -161,13 +233,6 @@ export async function buildEmbeddingInputs(
           AND pv.id = pf.profile_version_id
           AND pv.status = 'ACTIVE'
          WHERE pf.workspace_id = $1
-           AND NOT EXISTS (
-             SELECT 1
-             FROM embedding_inputs ei
-             WHERE ei.workspace_id = $1
-               AND ei.source_type = 'PROFILE_FACT'
-               AND ei.source_id = COALESCE(pf.fact_revision_id, pf.id)
-         )
          ORDER BY pf.created_at ASC
          LIMIT $2`,
         [ctx.workspaceId, maxPerSource]
@@ -179,22 +244,19 @@ export async function buildEmbeddingInputs(
         const embeddingNodeId = row.embedding_node_id || row.id;
         const inputKey = `fact:${embeddingNodeId}:${contentHash.slice(0, 16)}`;
 
-        await client.query(
-          `INSERT INTO embedding_inputs (
-             workspace_id,
-             input_key,
-             source_type,
-             source_id,
-             content_text,
-             content_hash
-           )
-           VALUES ($1, $2, 'PROFILE_FACT', $3, $4, $5)
-           ON CONFLICT (workspace_id, input_key) DO NOTHING`,
-          [ctx.workspaceId, inputKey, embeddingNodeId, contentText, contentHash]
-        );
+        const didWrite = await upsertEmbeddingInput(client, {
+          workspaceId: ctx.workspaceId,
+          inputKey,
+          sourceType: 'PROFILE_FACT',
+          sourceId: embeddingNodeId,
+          contentText,
+          contentHash,
+        });
 
-        inserted += 1;
-        fromProfileFacts += 1;
+        if (didWrite) {
+          inserted += 1;
+          fromProfileFacts += 1;
+        }
       }
     }
 
@@ -233,13 +295,6 @@ export async function buildEmbeddingInputs(
           )
          ${jobScope}
          AND jv.description_text IS NOT NULL
-         AND NOT EXISTS (
-           SELECT 1
-           FROM embedding_inputs ei
-           WHERE ei.workspace_id = $1
-             AND ei.source_type = 'JOB_VERSION'
-             AND ei.source_id = jv.id
-         )
        ORDER BY jv.observed_at DESC
        LIMIT $2`,
       [...jobParams, scopedToJobVersions]
@@ -249,15 +304,19 @@ export async function buildEmbeddingInputs(
       const contentText = buildJobVersionInputText(row);
       const contentHash = hashText(contentText);
       const inputKey = `job:${row.id}:${contentHash.slice(0, 16)}`;
-      await client.query(
-        `INSERT INTO embedding_inputs (
-           workspace_id, input_key, source_type, source_id, content_text, content_hash
-         ) VALUES ($1, $2, 'JOB_VERSION', $3, $4, $5)
-         ON CONFLICT (workspace_id, input_key) DO NOTHING`,
-        [ctx.workspaceId, inputKey, row.id, contentText, contentHash]
-      );
-      inserted += 1;
-      fromJobVersions += 1;
+      const didWrite = await upsertEmbeddingInput(client, {
+        workspaceId: ctx.workspaceId,
+        inputKey,
+        sourceType: 'JOB_VERSION',
+        sourceId: row.id,
+        contentText,
+        contentHash,
+      });
+
+      if (didWrite) {
+        inserted += 1;
+        fromJobVersions += 1;
+      }
     }
 
     await client.query('COMMIT');
@@ -281,22 +340,19 @@ export async function buildEmbeddingInputs(
         const contentHash = hashText(contentText);
         const inputKey = `lane:${lane.laneRevisionId}:${contentHash.slice(0, 16)}`;
 
-        await client.query(
-          `INSERT INTO embedding_inputs (
-             workspace_id,
-             input_key,
-             source_type,
-             source_id,
-             content_text,
-             content_hash
-           )
-           VALUES ($1, $2, 'LANE_PROTOTYPE', $3, $4, $5)
-           ON CONFLICT (workspace_id, input_key) DO NOTHING`,
-          [ctx.workspaceId, inputKey, lane.laneRevisionId, contentText, contentHash]
-        );
+        const didWrite = await upsertEmbeddingInput(client as pg.PoolClient, {
+          workspaceId: ctx.workspaceId,
+          inputKey,
+          sourceType: 'LANE_PROTOTYPE',
+          sourceId: lane.laneRevisionId,
+          contentText,
+          contentHash,
+        });
 
-        inserted += 1;
-        fromLanePrototypes += 1;
+        if (didWrite) {
+          inserted += 1;
+          fromLanePrototypes += 1;
+        }
       }
     } catch (err: any) {
       // Allow running against pre-migration databases.

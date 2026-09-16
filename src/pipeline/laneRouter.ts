@@ -879,7 +879,7 @@ export async function runLaneRouter(
               laneEvidence: ["ZERO_VECTOR_EMBEDDING"],
               evaluatedAt,
             });
-            await client.query(
+            const canonicalUpdate = await client.query(
               `UPDATE canonical_jobs
                SET primary_lane = 'UNCLASSIFIED',
                    semantic_score = 0.0,
@@ -890,16 +890,30 @@ export async function runLaneRouter(
                    processing_state = 'ROUTING_DEFERRED',
                    processing_status = 'ROUTING_DEFERRED',
                    updated_at = NOW()
-               WHERE workspace_id = $1 AND id = $2`,
-              [ctx.workspaceId, job.id, JSON.stringify([]), JSON.stringify(["ZERO_VECTOR_EMBEDDING"])]
+               WHERE workspace_id = $1
+                 AND id = $2
+                 AND latest_job_version_id = $5`,
+              [
+                ctx.workspaceId,
+                job.id,
+                JSON.stringify([]),
+                JSON.stringify(["ZERO_VECTOR_EMBEDDING"]),
+                job.latest_version_id,
+              ]
             );
+            if (canonicalUpdate?.rowCount === 0) {
+              await client.query("COMMIT");
+              continue;
+            }
             if (laneDecisionId) {
               await client.query(
                 `UPDATE canonical_jobs
                  SET latest_lane_decision_id = $3,
                      updated_at = NOW()
-                 WHERE workspace_id = $1 AND id = $2`,
-                [ctx.workspaceId, job.id, laneDecisionId]
+                 WHERE workspace_id = $1
+                   AND id = $2
+                   AND latest_job_version_id = $4`,
+                [ctx.workspaceId, job.id, laneDecisionId, job.latest_version_id]
               );
             }
             await client.query("COMMIT");
@@ -925,7 +939,7 @@ export async function runLaneRouter(
               laneEvidence: [`EMBEDDING_DIM_MISMATCH:${jobEmbedding.length}!=${prototypeDimensions}`],
               evaluatedAt,
             });
-            await client.query(
+            const canonicalUpdate = await client.query(
               `UPDATE canonical_jobs
                SET primary_lane = 'UNCLASSIFIED',
                    semantic_score = 0.0,
@@ -936,21 +950,30 @@ export async function runLaneRouter(
                    processing_state = 'ROUTING_DEFERRED',
                    processing_status = 'ROUTING_DEFERRED',
                    updated_at = NOW()
-               WHERE workspace_id = $1 AND id = $2`,
+               WHERE workspace_id = $1
+                 AND id = $2
+                 AND latest_job_version_id = $5`,
               [
                 ctx.workspaceId,
                 job.id,
                 JSON.stringify([]),
                 JSON.stringify([`EMBEDDING_DIM_MISMATCH:${jobEmbedding.length}!=${prototypeDimensions}`]),
+                job.latest_version_id,
               ]
             );
+            if (canonicalUpdate?.rowCount === 0) {
+              await client.query("COMMIT");
+              continue;
+            }
             if (laneDecisionId) {
               await client.query(
                 `UPDATE canonical_jobs
                  SET latest_lane_decision_id = $3,
                      updated_at = NOW()
-                 WHERE workspace_id = $1 AND id = $2`,
-                [ctx.workspaceId, job.id, laneDecisionId]
+                 WHERE workspace_id = $1
+                   AND id = $2
+                   AND latest_job_version_id = $4`,
+                [ctx.workspaceId, job.id, laneDecisionId, job.latest_version_id]
               );
             }
             await client.query("COMMIT");
@@ -1083,8 +1106,6 @@ export async function runLaneRouter(
 
           const processingStatus =
             bestLane === "UNCLASSIFIED" ? "ROUTING_DEFERRED" : "LANE_ROUTED";
-          if (bestLane === "UNCLASSIFIED") deferredCount++; else routedCount++;
-
           const finalLaneEvidence =
             bestLane === "UNCLASSIFIED"
               ? laneEvidence
@@ -1109,7 +1130,7 @@ export async function runLaneRouter(
             evaluatedAt,
           });
 
-          await client.query(
+          const canonicalUpdate = await client.query(
             `UPDATE canonical_jobs
              SET primary_lane       = $1,
                  semantic_score     = $2,
@@ -1124,7 +1145,9 @@ export async function runLaneRouter(
                    ELSE 'TECHNICAL_DEFERRED'
                  END,
                  updated_at         = NOW()
-             WHERE workspace_id = $7 AND id = $8`,
+             WHERE workspace_id = $7
+               AND id = $8
+               AND latest_job_version_id = $9`,
             [
               bestLane,
               bestScore,
@@ -1134,20 +1157,29 @@ export async function runLaneRouter(
               JSON.stringify(finalLaneEvidence),
               ctx.workspaceId,
               job.id,
+              job.latest_version_id,
             ]
           );
+
+          if (canonicalUpdate?.rowCount === 0) {
+            await client.query("COMMIT");
+            continue;
+          }
 
           if (laneDecisionId) {
             await client.query(
               `UPDATE canonical_jobs
                SET latest_lane_decision_id = $3,
                    updated_at = NOW()
-               WHERE workspace_id = $1 AND id = $2`,
-              [ctx.workspaceId, job.id, laneDecisionId]
+               WHERE workspace_id = $1
+                 AND id = $2
+                 AND latest_job_version_id = $4`,
+              [ctx.workspaceId, job.id, laneDecisionId, job.latest_version_id]
             );
           }
 
           await client.query("COMMIT");
+          if (bestLane === "UNCLASSIFIED") deferredCount++; else routedCount++;
           const scoreLabel = bestLane === "UNCLASSIFIED" ? "BestScore" : "Score";
           const reasonLabel =
             bestLane === "UNCLASSIFIED" && finalLaneEvidence.length > 0
@@ -1179,7 +1211,7 @@ export async function runLaneRouter(
             laneEvidence: [`ROUTING_ERROR:${trimmed}`],
             evaluatedAt,
           });
-          await client.query(
+          const canonicalUpdate = await client.query(
             `UPDATE canonical_jobs
              SET primary_lane = 'UNCLASSIFIED',
                  semantic_score = 0.0,
@@ -1190,24 +1222,29 @@ export async function runLaneRouter(
                  processing_state = 'ROUTING_DEFERRED',
                  processing_status = 'ROUTING_DEFERRED',
                  updated_at = NOW()
-             WHERE workspace_id = $1 AND id = $2`,
+             WHERE workspace_id = $1
+               AND id = $2
+               AND latest_job_version_id = $5`,
             [
               ctx.workspaceId,
               job.id,
               JSON.stringify([]),
               JSON.stringify([`ROUTING_ERROR:${trimmed}`]),
+              job.latest_version_id,
             ]
           );
-          if (laneDecisionId) {
+          if (canonicalUpdate?.rowCount !== 0 && laneDecisionId) {
             await client.query(
               `UPDATE canonical_jobs
                SET latest_lane_decision_id = $3,
                    updated_at = NOW()
-               WHERE workspace_id = $1 AND id = $2`,
-              [ctx.workspaceId, job.id, laneDecisionId]
+               WHERE workspace_id = $1
+                 AND id = $2
+                 AND latest_job_version_id = $4`,
+              [ctx.workspaceId, job.id, laneDecisionId, job.latest_version_id]
             );
           }
-          deferredCount += 1;
+          if (canonicalUpdate?.rowCount !== 0) deferredCount += 1;
         }
       }
 
@@ -1247,7 +1284,7 @@ export async function runLaneRouter(
     let deferredCount = 0;
 
     for (const job of jobs) {
-      await client.query(
+      const deferredUpdate = await client.query(
         `UPDATE canonical_jobs
          SET primary_lane = 'UNCLASSIFIED',
              semantic_score = 0.0,
@@ -1258,15 +1295,18 @@ export async function runLaneRouter(
              processing_state = 'ROUTING_DEFERRED',
              processing_status = 'ROUTING_DEFERRED',
              updated_at = NOW()
-         WHERE workspace_id = $1 AND id = $2`,
+         WHERE workspace_id = $1
+           AND id = $2
+           AND latest_job_version_id = $5`,
         [
           ctx.workspaceId,
           job.id,
           JSON.stringify([]),
           JSON.stringify([`EMBEDDING_UNAVAILABLE:${trimmed}`]),
+          job.latest_version_id,
         ]
       );
-      deferredCount += 1;
+      if (deferredUpdate?.rowCount !== 0) deferredCount += 1;
     }
 
     console.warn(

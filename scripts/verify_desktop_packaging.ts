@@ -70,6 +70,10 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   requireCheck(pkg.build?.icon === "build/desktop/icon.png", "electron-builder generic icon is configured");
   requireCheck(pkg.build?.win?.icon === "build/desktop/icon.ico", "electron-builder Windows icon is configured");
   requireCheck(pkg.build?.generateUpdatesFilesForAllChannels === true, "electron-builder update metadata is configured");
+  requireCheck(
+    Array.isArray(pkg.build?.asarUnpack) && pkg.build.asarUnpack.includes("desktop/electron/dist-backend/**/*"),
+    "Electron worker bundles are unpacked for child-process execution"
+  );
   requireCheck(Array.isArray(pkg.build?.win?.target), "Windows installer target is configured");
   requireCheck(pkg.build?.nsis?.oneClick === false, "NSIS assisted installer is configured");
   requireCheck(Array.isArray(pkg.build?.publish), "update publish provider is configured");
@@ -77,6 +81,8 @@ export function verifyDesktopPackaging(rootDir = process.cwd()): DesktopPackagin
   requireCheck(fileContains(mainPath, "jdec:api:request"), "main process owns the authenticated remote API bridge");
   requireCheck(!fileContains(mainPath, 'ipcMain.handle("jdec:secret:get"'), "main process does not expose bearer-token reads over IPC");
   requireCheck(fileContains(mainPath, "localServerModule"), "main process loads standalone local companion server");
+  requireCheck(fileContains(mainPath, "app.asar.unpacked"), "main process resolves unpacked packaged backend bundles");
+  requireCheck(fileContains(mainPath, "NODE_PATH"), "main process exposes packaged dependencies to worker child processes");
   requireCheck(fileContains(mainPath, "http://127.0.0.1"), "main process configures local companion loopback transport");
   requireCheck(fileContains(mainPath, "databaseUrl"), "main process manages database credentials via safeStorage");
   requireCheck(fileContains(pkgPath, "migrations/**/*"), "package.json packages migrations for standalone initialization");

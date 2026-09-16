@@ -195,12 +195,15 @@ describe('runEmbeddingBatch', () => {
       if (sql.includes('INSERT INTO model_route_invocations')) {
         return { rows: [{ id: `route-invocation-${nextBatchId}` }] };
       }
-      if (sql.includes('WHERE ei.id = ANY')) {
+      if (sql.includes('ei.id = ANY')) {
+        const scopedInputIds = Array.isArray(params?.[1]) ? params[1].map(String) : [];
         return {
-          rows: [
-            { id: 'input-req-1', content_text: 'retry input 1' },
-            { id: 'input-req-2', content_text: 'retry input 2' },
-          ],
+          rows: scopedInputIds.includes('input-req-2')
+            ? [
+                { id: 'input-req-1', content_text: 'retry input 1' },
+                { id: 'input-req-2', content_text: 'retry input 2' },
+              ]
+            : [{ id: 'input-req-1', content_text: 'retry input 1' }],
         };
       }
       if (sql.includes('FROM embedding_inputs ei')) {
@@ -240,13 +243,13 @@ describe('runEmbeddingBatch', () => {
     expect(second.primary.failedInputIds).toContain('input-req-1');
     expect(second.fallback).toBeTruthy();
     expect(second.fallback?.runType).toBe('FALLBACK');
-    expect(second.fallback?.processedInputIds).toEqual(['input-req-1', 'input-req-2']);
+    expect(second.fallback?.processedInputIds).toEqual(['input-req-1']);
     const sqlCalls = query.mock.calls.map((c: unknown[]) => String(c[0]));
     expect(sqlCalls.some((sql) => sql.includes('fallback_from_batch_id'))).toBe(true);
 
     const anyCall = query.mock.calls.find((c: unknown[]) => String(c[0]).includes('ei.id = ANY'));
     expect(anyCall).toBeTruthy();
     const params = (anyCall as unknown[])[1] as any[] | undefined;
-    expect(params?.[1]).toEqual(['input-req-1', 'input-req-2']);
+    expect(params?.[1]).toEqual(['input-req-1']);
   });
 });

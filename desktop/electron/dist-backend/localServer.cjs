@@ -45,6 +45,7 @@ dotenv = __toESM(dotenv, 1);
 let fs = require("fs");
 fs = __toESM(fs, 1);
 let url = require("url");
+let node_child_process = require("node:child_process");
 //#region src/db/pgSsl.ts
 /**
 * Canonical SSL configuration for all pg.Pool instances.
@@ -541,6 +542,7 @@ function normalizeTerritories(value) {
 	if (!Array.isArray(value)) return [];
 	return [...new Set(value.map(normalizeTerritory).filter((item) => Boolean(item)))];
 }
+new Set(TERRITORY_ALIASES.map(([territory]) => territory));
 function finiteNumber(value, fallback) {
 	const parsed = typeof value === "number" ? value : Number(value);
 	return Number.isFinite(parsed) ? parsed : fallback;
@@ -1584,6 +1586,163 @@ function createSetupRouter(deps = {}) {
 	return router;
 }
 //#endregion
+//#region src/config/registry.ts
+async function upsertConfigRevision(input, clientOrPool, options) {
+	const isPool = (value) => typeof value.connect === "function" && !("release" in value);
+	const ownsClient = isPool(clientOrPool);
+	const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
+	const activate = options?.activate !== false;
+	const manageTransaction = options?.manageTransaction !== false;
+	try {
+		const ctx = options?.context ?? await resolveWorkspaceContext(client);
+		const contentHash = sha256Hex$1(stableStringify(input.content));
+		if (manageTransaction) await client.query("BEGIN");
+		const configDefinitionId = (await client.query(`INSERT INTO config_definitions (
+         workspace_id,
+         config_key,
+         config_type,
+         description,
+         created_by_user_id
+       )
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (workspace_id, config_key)
+       DO UPDATE SET
+         config_type = EXCLUDED.config_type,
+         description = EXCLUDED.description,
+         updated_at = NOW()
+       RETURNING id`, [
+			ctx.workspaceId,
+			input.configKey,
+			input.configType,
+			input.description ?? null,
+			ctx.userId
+		])).rows[0].id;
+		const existingRevision = await client.query(`SELECT id, revision_number
+       FROM config_revisions
+       WHERE config_definition_id = $1
+         AND content_hash = $2
+       LIMIT 1`, [configDefinitionId, contentHash]);
+		let configRevisionId;
+		let revisionNumber;
+		if (existingRevision.rows.length > 0) {
+			configRevisionId = existingRevision.rows[0].id;
+			revisionNumber = existingRevision.rows[0].revision_number;
+		} else {
+			revisionNumber = (await client.query(`SELECT COALESCE(MAX(revision_number), 0) + 1 AS next
+         FROM config_revisions
+         WHERE config_definition_id = $1`, [configDefinitionId])).rows[0].next;
+			configRevisionId = (await client.query(`INSERT INTO config_revisions (
+           config_definition_id,
+           revision_number,
+           schema_version,
+           content_hash,
+           content,
+           created_by_user_id
+         )
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id`, [
+				configDefinitionId,
+				revisionNumber,
+				input.schemaVersion ?? "2.2.0",
+				contentHash,
+				input.content,
+				ctx.userId
+			])).rows[0].id;
+		}
+		let activated = false;
+		if (activate) {
+			const fromRevisionId = (await client.query(`SELECT config_revision_id
+         FROM config_active_revisions
+         WHERE config_definition_id = $1
+         LIMIT 1`, [configDefinitionId])).rows[0]?.config_revision_id ?? null;
+			await client.query(`INSERT INTO config_active_revisions (
+           config_definition_id,
+           config_revision_id,
+           activated_by_user_id,
+           activated_at
+         )
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (config_definition_id)
+         DO UPDATE SET
+           config_revision_id = EXCLUDED.config_revision_id,
+           activated_by_user_id = EXCLUDED.activated_by_user_id,
+           activated_at = NOW()`, [
+				configDefinitionId,
+				configRevisionId,
+				ctx.userId
+			]);
+			if (fromRevisionId !== configRevisionId) await client.query(`INSERT INTO config_activation_events (
+             config_definition_id,
+             from_revision_id,
+             to_revision_id,
+             activated_by_user_id,
+             activated_at,
+             note
+           )
+           VALUES ($1, $2, $3, $4, NOW(), $5)`, [
+				configDefinitionId,
+				fromRevisionId,
+				configRevisionId,
+				ctx.userId,
+				options?.note ?? null
+			]);
+			activated = true;
+		}
+		if (manageTransaction) await client.query("COMMIT");
+		return {
+			configDefinitionId,
+			configRevisionId,
+			revisionNumber,
+			contentHash,
+			activated
+		};
+	} catch (error) {
+		if (manageTransaction) await client.query("ROLLBACK");
+		throw error;
+	} finally {
+		if (ownsClient && typeof client.release === "function") client.release();
+	}
+}
+//#endregion
+//#region src/pipeline/artifactContext.ts
+var PIPELINE_CONTEXT_SCHEMA_VERSION = "pipeline_context_v1";
+var CONTEXT_PAYLOAD_KEYS = [
+	"canonical_job_id",
+	"job_version_id",
+	"content_hash",
+	"active_requirement_set_id",
+	"requirement_extraction_run_id",
+	"match_run_id",
+	"profile_version_id",
+	"workability_policy_hash",
+	"lane_policy_version",
+	"embedding_space_id",
+	"embedding_model",
+	"matcher_version",
+	"policy_snapshot_id",
+	"policy_hash",
+	"evidence_strength_policy_hash",
+	"evaluation_schema_version",
+	"prompt_hash",
+	"model_route",
+	"force_policy_recalculation",
+	"reprocess",
+	"repair_existing_state",
+	"reassessment_reason",
+	"verification_answer_revision_id"
+];
+function contextPayload(payload) {
+	return Object.fromEntries(CONTEXT_PAYLOAD_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(payload, key)).map((key) => [key, payload[key]]));
+}
+function buildPipelineTaskContextFingerprint(input) {
+	return sha256Hex$1(`${PIPELINE_CONTEXT_SCHEMA_VERSION}|${stableStringify({
+		workspace_id: input.workspaceId,
+		task_type: input.taskType,
+		task_version: input.taskVersion,
+		payload: contextPayload(input.payload)
+	})}`);
+}
+//#endregion
 //#region src/services/verificationQuestionService.ts
 dotenv.default.config();
 dotenv.default.config({ path: ".env.local" });
@@ -1625,70 +1784,28 @@ async function answerVerificationQuestion(clientOrPool, questionKey, answer, opt
 				normalizedKey,
 				JSON.stringify(answer)
 			]);
-			const defId = (await client.query(`INSERT INTO config_definitions (
-           workspace_id,
-           config_key,
-           config_type,
-           description,
-           created_by_user_id
-         )
-         VALUES ($1, 'verification_answers', 'verification_preferences', 'User verification answers for hard gates', $2)
-         ON CONFLICT (workspace_id, config_key)
-         DO UPDATE SET updated_at = NOW()
-         RETURNING id`, [ctx.workspaceId, ctx.userId])).rows[0]?.id;
-			if (defId) {
-				const activeRes = await client.query(`SELECT cr.content
-           FROM config_active_revisions car
-           JOIN config_revisions cr ON cr.id = car.config_revision_id
-           WHERE car.config_definition_id = $1`, [defId]);
-				const canonicalJson = stableStringify({
-					...activeRes.rows[0]?.content && typeof activeRes.rows[0].content === "object" ? activeRes.rows[0].content : {},
+			const activeAnswer = await client.query(`SELECT cr.content
+         FROM config_definitions cd
+         JOIN config_active_revisions car ON car.config_definition_id = cd.id
+         JOIN config_revisions cr ON cr.id = car.config_revision_id
+         WHERE cd.workspace_id = $1
+           AND cd.config_key = 'verification_answers'
+         LIMIT 1`, [ctx.workspaceId]);
+			const answerRevision = await upsertConfigRevision({
+				configKey: "verification_answers",
+				configType: "verification_preferences",
+				description: "User verification answers for hard gates",
+				schemaVersion: "1.0.0",
+				content: {
+					...activeAnswer.rows[0]?.content && typeof activeAnswer.rows[0].content === "object" ? activeAnswer.rows[0].content : {},
 					[normalizedKey]: answer
-				});
-				const contentHash = sha256Hex$1(canonicalJson);
-				const revisionId = (await client.query(`INSERT INTO config_revisions (
-             config_definition_id,
-             revision_number,
-             schema_version,
-             content_hash,
-             content,
-             change_summary,
-             created_by_user_id
-           )
-           VALUES (
-             $1,
-             (SELECT COALESCE(MAX(revision_number), 0) + 1 FROM config_revisions WHERE config_definition_id = $1),
-             '1.0.0',
-             $2,
-             $3::jsonb,
-             $4,
-             $5
-           )
-           ON CONFLICT (config_definition_id, content_hash)
-           DO UPDATE SET updated_at = NOW()
-           RETURNING id`, [
-					defId,
-					contentHash,
-					canonicalJson,
-					`Updated answer for ${normalizedKey}`,
-					ctx.userId
-				])).rows[0]?.id;
-				if (revisionId) await client.query(`INSERT INTO config_active_revisions (
-               config_definition_id,
-               config_revision_id,
-               activated_by_user_id
-             )
-             VALUES ($1, $2, $3)
-             ON CONFLICT (config_definition_id)
-             DO UPDATE SET
-               config_revision_id = EXCLUDED.config_revision_id,
-               activated_by_user_id = EXCLUDED.activated_by_user_id,
-               activated_at = NOW()`, [
-					defId,
-					revisionId,
-					ctx.userId
-				]);
-			}
+				}
+			}, client, {
+				context: ctx,
+				activate: true,
+				note: `Updated answer for ${normalizedKey}`,
+				manageTransaction: false
+			});
 			let resumedCount = 0;
 			if (linkedIds.length > 0) {
 				resumedCount = (await client.query(`UPDATE canonical_jobs
@@ -1712,6 +1829,17 @@ async function answerVerificationQuestion(clientOrPool, questionKey, answer, opt
              AND c.id = ANY($2::uuid[])`, [ctx.workspaceId, linkedIds]);
 				for (const rj of resumedJobs) if (rj.job_version_id) {
 					const taskKey = `APPLY_HARD_GATES:${rj.job_version_id}:hard_gate_v2`;
+					const taskPayload = {
+						canonical_job_id: rj.canonical_job_id,
+						job_version_id: rj.job_version_id,
+						verification_answer_revision_id: answerRevision.configRevisionId
+					};
+					const contextFingerprint = buildPipelineTaskContextFingerprint({
+						workspaceId: ctx.workspaceId,
+						taskType: "APPLY_HARD_GATES",
+						taskVersion: "hard_gate_v2",
+						payload: taskPayload
+					});
 					await client.query(`INSERT INTO pipeline_tasks (
                  workspace_id,
                  task_type,
@@ -1724,7 +1852,7 @@ async function answerVerificationQuestion(clientOrPool, questionKey, answer, opt
                  created_at,
                  updated_at
                )
-               VALUES ($1, 'APPLY_HARD_GATES', $2, $3::jsonb, 'verification_resumed_v1', 'PENDING', NOW(), 8, NOW(), NOW())
+               VALUES ($1, 'APPLY_HARD_GATES', $2, $3::jsonb, $4, 'PENDING', NOW(), 8, NOW(), NOW())
                ON CONFLICT (workspace_id, task_key, context_fingerprint)
                DO UPDATE SET
                  status = 'PENDING',
@@ -1738,10 +1866,8 @@ async function answerVerificationQuestion(clientOrPool, questionKey, answer, opt
                  updated_at = NOW()`, [
 						ctx.workspaceId,
 						taskKey,
-						JSON.stringify({
-							canonical_job_id: rj.canonical_job_id,
-							job_version_id: rj.job_version_id
-						})
+						JSON.stringify(taskPayload),
+						contextFingerprint
 					]);
 				}
 			}
@@ -3253,6 +3379,407 @@ function createApiV2Router(deps = {}) {
 	return router;
 }
 //#endregion
+//#region src/desktop/workerSupervisor.ts
+var DESKTOP_WORKER_KINDS = [
+	"pipeline",
+	"evaluation",
+	"recovery"
+];
+var WORKER_DEFINITIONS = [
+	{
+		kind: "pipeline",
+		bundledFile: "process_pipeline_tasks.cjs",
+		developmentScript: "process_pipeline_tasks.ts",
+		args: []
+	},
+	{
+		kind: "evaluation",
+		bundledFile: "evaluate_queue.cjs",
+		developmentScript: "evaluate_queue.ts",
+		args: []
+	},
+	{
+		kind: "recovery",
+		bundledFile: "reconcile_pipeline.cjs",
+		developmentScript: "reconcile_pipeline.ts",
+		args: ["--json"]
+	}
+];
+var DEFAULT_RESTART_BASE_MS = 1e3;
+var DEFAULT_RESTART_MAX_MS = 6e4;
+var DEFAULT_STABLE_RUN_MS = 6e4;
+var DEFAULT_SHUTDOWN_GRACE_MS = 5e3;
+function definitionFor(kind) {
+	const definition = WORKER_DEFINITIONS.find((candidate) => candidate.kind === kind);
+	if (!definition) throw new Error(`Unsupported desktop worker kind: ${kind}`);
+	return definition;
+}
+function defaultFileExists(filePath) {
+	return node_fs.default.existsSync(filePath);
+}
+function isElectronRuntime() {
+	return Boolean(process.versions.electron);
+}
+function desktopWorkersEnabled(env = process.env) {
+	return String(env.JDEC_DESKTOP_ENABLE_WORKERS || "").trim().toLowerCase() !== "false";
+}
+function resolveWorkerCommand(kind, options) {
+	const definition = definitionFor(kind);
+	const fileExists = options.fileExists ?? defaultFileExists;
+	const nodeExecutable = options.nodeExecutable ?? process.execPath;
+	const bundledDir = options.bundledDir;
+	const bundledEntrypoint = bundledDir ? node_path.default.join(bundledDir, definition.bundledFile) : null;
+	const projectRoot = options.projectRoot ?? (options.isPackaged ? null : process.cwd());
+	const developmentEntrypoint = projectRoot ? node_path.default.join(projectRoot, "scripts", definition.developmentScript) : null;
+	const tsxCliPath = options.tsxCliPath ?? (projectRoot ? node_path.default.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs") : null);
+	if (!options.isPackaged && Boolean(projectRoot && developmentEntrypoint && tsxCliPath) && fileExists(developmentEntrypoint) && fileExists(tsxCliPath) && projectRoot && developmentEntrypoint && tsxCliPath) return {
+		executable: nodeExecutable,
+		args: [
+			tsxCliPath,
+			developmentEntrypoint,
+			...definition.args
+		],
+		cwd: projectRoot,
+		source: "development-ts",
+		entrypoint: developmentEntrypoint
+	};
+	if (bundledEntrypoint && fileExists(bundledEntrypoint)) return {
+		executable: nodeExecutable,
+		args: [bundledEntrypoint],
+		cwd: bundledDir,
+		source: "bundled",
+		entrypoint: bundledEntrypoint
+	};
+	return null;
+}
+function emptyWorkerStatus(kind) {
+	return {
+		kind,
+		state: "not_started",
+		pid: null,
+		lastStartAt: null,
+		lastExitAt: null,
+		restartCount: 0,
+		reason: null
+	};
+}
+function parsePositiveNumber(value, fallback) {
+	return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+function isActiveState(state) {
+	return state === "starting" || state === "running" || state === "backoff";
+}
+function exitReason(code, signal) {
+	return `worker_exit: exit_code=${code ?? "null"} signal=${signal ?? "null"}`;
+}
+var DesktopWorkerSupervisor = class {
+	env;
+	isPackaged;
+	bundledDir;
+	projectRoot;
+	resolveCommand;
+	spawn;
+	now;
+	restartBaseMs;
+	restartMaxMs;
+	stableRunMs;
+	shutdownGraceMs;
+	logger;
+	desiredRunning = false;
+	lifecycleState = "not_started";
+	globalReason = null;
+	runtimes;
+	constructor(options = {}) {
+		this.env = options.env ?? process.env;
+		this.isPackaged = options.isPackaged ?? Boolean(process.versions.electron && process.defaultApp === false);
+		this.bundledDir = options.bundledDir;
+		this.projectRoot = options.projectRoot;
+		this.resolveCommand = options.resolveCommand ?? ((kind, resolutionOptions) => resolveWorkerCommand(kind, resolutionOptions));
+		this.spawn = options.spawn ?? ((command, env) => this.spawnChild(command, env));
+		this.now = options.now ?? (() => /* @__PURE__ */ new Date());
+		this.restartBaseMs = parsePositiveNumber(options.restartBaseMs, DEFAULT_RESTART_BASE_MS);
+		this.restartMaxMs = Math.max(this.restartBaseMs, parsePositiveNumber(options.restartMaxMs, DEFAULT_RESTART_MAX_MS));
+		this.stableRunMs = parsePositiveNumber(options.stableRunMs, DEFAULT_STABLE_RUN_MS);
+		this.shutdownGraceMs = parsePositiveNumber(options.shutdownGraceMs, DEFAULT_SHUTDOWN_GRACE_MS);
+		this.logger = options.logger ?? ((message) => console.warn(message));
+		this.runtimes = Object.fromEntries(DESKTOP_WORKER_KINDS.map((kind) => [kind, {
+			status: emptyWorkerStatus(kind),
+			process: null,
+			restartTimer: null,
+			startedAtMs: null,
+			consecutiveRestarts: 0,
+			stopResolve: null
+		}]));
+	}
+	async start() {
+		if (this.desiredRunning && this.lifecycleState !== "stopped") return;
+		this.desiredRunning = true;
+		this.lifecycleState = "starting";
+		await this.refresh();
+	}
+	async refresh() {
+		if (!this.desiredRunning) return;
+		if (!desktopWorkersEnabled(this.env)) {
+			this.globalReason = "disabled_by_env";
+			this.lifecycleState = "disabled";
+			this.stopWorkersForConfiguration("disabled", this.globalReason);
+			return;
+		}
+		if (!String(this.env.DATABASE_URL || "").trim()) {
+			this.globalReason = "DATABASE_URL is required for desktop workers.";
+			this.lifecycleState = "misconfigured";
+			this.stopWorkersForConfiguration("misconfigured", this.globalReason);
+			return;
+		}
+		this.globalReason = null;
+		for (const kind of DESKTOP_WORKER_KINDS) {
+			const runtime = this.runtimes[kind];
+			if (runtime.process || runtime.restartTimer || isActiveState(runtime.status.state)) continue;
+			this.launch(kind);
+		}
+		this.recomputeLifecycleState();
+	}
+	async stop() {
+		if (!this.desiredRunning && this.lifecycleState === "stopped") return;
+		this.desiredRunning = false;
+		this.lifecycleState = "stopping";
+		this.globalReason = "shutdown";
+		const waits = [];
+		for (const runtime of Object.values(this.runtimes)) {
+			if (runtime.restartTimer) {
+				clearTimeout(runtime.restartTimer);
+				runtime.restartTimer = null;
+			}
+			if (!runtime.process) {
+				runtime.status = {
+					...runtime.status,
+					state: "stopped",
+					pid: null,
+					reason: "shutdown"
+				};
+				continue;
+			}
+			const child = runtime.process;
+			waits.push(new Promise((resolve) => {
+				let forceTimer = null;
+				const finishStop = () => {
+					if (forceTimer) clearTimeout(forceTimer);
+					forceTimer = null;
+					runtime.stopResolve = null;
+					resolve();
+				};
+				runtime.stopResolve = finishStop;
+				forceTimer = setTimeout(() => {
+					if (runtime.process) try {
+						runtime.process.kill("SIGKILL");
+					} catch {}
+					finishStop();
+				}, this.shutdownGraceMs);
+				forceTimer?.unref?.();
+				try {
+					child.kill("SIGTERM");
+				} catch {
+					finishStop();
+				}
+			}));
+		}
+		await Promise.all(waits);
+		for (const runtime of Object.values(this.runtimes)) {
+			runtime.process = null;
+			runtime.status = {
+				...runtime.status,
+				state: "stopped",
+				pid: null,
+				reason: "shutdown"
+			};
+		}
+		this.lifecycleState = "stopped";
+	}
+	getStatus() {
+		const workers = Object.fromEntries(DESKTOP_WORKER_KINDS.map((kind) => {
+			return [kind, { ...this.runtimes[kind].status }];
+		}));
+		return {
+			enabled: desktopWorkersEnabled(this.env),
+			state: this.lifecycleState,
+			reason: this.globalReason,
+			workers
+		};
+	}
+	spawnChild(command, env) {
+		const childEnv = { ...env };
+		if (isElectronRuntime()) childEnv.ELECTRON_RUN_AS_NODE = "1";
+		const child = (0, node_child_process.spawn)(command.executable, command.args, {
+			cwd: command.cwd,
+			env: childEnv,
+			shell: false,
+			windowsHide: true,
+			stdio: [
+				"ignore",
+				"pipe",
+				"pipe"
+			]
+		});
+		child.stdout?.resume();
+		child.stderr?.resume();
+		return child;
+	}
+	launch(kind) {
+		if (!this.desiredRunning || !desktopWorkersEnabled(this.env) || !String(this.env.DATABASE_URL || "").trim()) return;
+		const runtime = this.runtimes[kind];
+		const command = this.resolveCommand(kind, {
+			isPackaged: this.isPackaged,
+			bundledDir: this.bundledDir,
+			projectRoot: this.projectRoot
+		});
+		if (!command) {
+			runtime.status = {
+				...runtime.status,
+				state: "misconfigured",
+				pid: null,
+				reason: this.isPackaged ? "bundled_worker_entrypoint_missing" : "development_worker_entrypoint_unavailable"
+			};
+			this.globalReason = runtime.status.reason;
+			this.recomputeLifecycleState();
+			return;
+		}
+		const startedAt = this.now();
+		runtime.startedAtMs = startedAt.getTime();
+		runtime.status = {
+			...runtime.status,
+			state: "starting",
+			pid: null,
+			lastStartAt: startedAt.toISOString(),
+			reason: `starting:${command.source}`
+		};
+		this.recomputeLifecycleState();
+		let child;
+		try {
+			child = this.spawn(command, {
+				...this.env,
+				JDEC_DESKTOP_WORKER_KIND: kind
+			});
+		} catch (error) {
+			this.handleFailure(kind, error instanceof Error ? error.message : String(error));
+			return;
+		}
+		runtime.process = child;
+		runtime.status = {
+			...runtime.status,
+			state: "running",
+			pid: child.pid ?? null,
+			reason: `running:${command.source}`
+		};
+		this.recomputeLifecycleState();
+		let handled = false;
+		const finish = (code, signal, reason) => {
+			if (handled) return;
+			handled = true;
+			this.handleExit(kind, child, code, signal, reason);
+		};
+		child.once("error", (error) => finish(null, null, `worker_error: ${error.message}`));
+		child.once("exit", (code, signal) => finish(code, signal));
+	}
+	handleFailure(kind, reason) {
+		const runtime = this.runtimes[kind];
+		runtime.consecutiveRestarts += 1;
+		runtime.status = {
+			...runtime.status,
+			state: "backoff",
+			pid: null,
+			lastExitAt: this.now().toISOString(),
+			restartCount: runtime.status.restartCount + 1,
+			reason
+		};
+		this.scheduleRestart(kind);
+	}
+	handleExit(kind, child, code, signal, explicitReason) {
+		const runtime = this.runtimes[kind];
+		if (runtime.process !== child) return;
+		runtime.process = null;
+		runtime.stopResolve?.();
+		runtime.stopResolve = null;
+		const endedAt = this.now();
+		if ((runtime.startedAtMs === null ? 0 : endedAt.getTime() - runtime.startedAtMs) >= this.stableRunMs) runtime.consecutiveRestarts = 0;
+		runtime.consecutiveRestarts += 1;
+		runtime.status = {
+			...runtime.status,
+			state: this.desiredRunning && desktopWorkersEnabled(this.env) && String(this.env.DATABASE_URL || "").trim() ? "backoff" : !this.desiredRunning ? "stopped" : !desktopWorkersEnabled(this.env) ? "disabled" : "misconfigured",
+			pid: null,
+			lastExitAt: endedAt.toISOString(),
+			restartCount: runtime.status.restartCount + 1,
+			reason: explicitReason ?? exitReason(code, signal)
+		};
+		if (runtime.status.state === "backoff") this.scheduleRestart(kind);
+		else this.recomputeLifecycleState();
+	}
+	scheduleRestart(kind) {
+		const runtime = this.runtimes[kind];
+		if (!this.desiredRunning || !desktopWorkersEnabled(this.env) || !String(this.env.DATABASE_URL || "").trim()) {
+			this.recomputeLifecycleState();
+			return;
+		}
+		if (runtime.restartTimer) clearTimeout(runtime.restartTimer);
+		const exponent = Math.max(0, runtime.consecutiveRestarts - 1);
+		const delay = Math.min(this.restartMaxMs, this.restartBaseMs * Math.pow(2, exponent));
+		runtime.status = {
+			...runtime.status,
+			state: "backoff"
+		};
+		this.logger(`Desktop ${kind} worker exited; restarting in ${delay}ms.`);
+		runtime.restartTimer = setTimeout(() => {
+			runtime.restartTimer = null;
+			this.launch(kind);
+		}, delay);
+		runtime.restartTimer.unref?.();
+		this.recomputeLifecycleState();
+	}
+	stopWorkersForConfiguration(state, reason) {
+		for (const runtime of Object.values(this.runtimes)) {
+			if (runtime.restartTimer) {
+				clearTimeout(runtime.restartTimer);
+				runtime.restartTimer = null;
+			}
+			if (runtime.process) {
+				try {
+					runtime.process.kill("SIGTERM");
+				} catch {}
+				runtime.process = null;
+			}
+			runtime.status = {
+				...runtime.status,
+				state,
+				pid: null,
+				reason
+			};
+		}
+	}
+	recomputeLifecycleState() {
+		if (!this.desiredRunning) return;
+		if (!desktopWorkersEnabled(this.env)) {
+			this.lifecycleState = "disabled";
+			return;
+		}
+		if (!String(this.env.DATABASE_URL || "").trim()) {
+			this.lifecycleState = "misconfigured";
+			return;
+		}
+		const statuses = Object.values(this.runtimes).map((runtime) => runtime.status);
+		if (statuses.some((status) => isActiveState(status.state))) {
+			this.lifecycleState = "running";
+			return;
+		}
+		if (statuses.some((status) => status.state === "misconfigured")) {
+			this.lifecycleState = "misconfigured";
+			return;
+		}
+		this.lifecycleState = "starting";
+	}
+};
+function createWorkerSupervisor(options = {}) {
+	return new DesktopWorkerSupervisor(options);
+}
+//#endregion
 //#region src/desktop/localServer.ts
 async function findAvailablePort(preferredPort, host = "127.0.0.1") {
 	return new Promise((resolve, reject) => {
@@ -3277,6 +3804,12 @@ async function startLocalServer(options = {}) {
 	if (options.geminiApiKey) process.env.GEMINI_API_KEY = options.geminiApiKey;
 	if (options.openaiApiKey) process.env.OPENAI_API_KEY = options.openaiApiKey;
 	const app = (0, express.default)();
+	const workerSupervisor = options.workerSupervisor ?? createWorkerSupervisor({
+		env: process.env,
+		isPackaged: options.workerPackaged ?? false,
+		bundledDir: options.workerBundleDir,
+		projectRoot: options.workerProjectRoot
+	});
 	app.use((req, res, next) => {
 		const rawHost = String(req.headers.host || "").split(":")[0].toLowerCase();
 		if (rawHost !== "127.0.0.1" && rawHost !== "localhost") {
@@ -3288,6 +3821,28 @@ async function startLocalServer(options = {}) {
 		}
 		next();
 	});
+	const getStatus = () => ({
+		ok: true,
+		timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+		api: {
+			state: "running",
+			host,
+			port: actualPort,
+			apiBaseUrl: `http://${host}:${actualPort}/api/v2`
+		},
+		workers: workerSupervisor.getStatus()
+	});
+	app.get([
+		"/health",
+		"/status",
+		"/api/v2/status"
+	], (_req, res) => {
+		res.json(getStatus());
+	});
+	app.use((_req, _res, next) => {
+		workerSupervisor.refresh();
+		next();
+	});
 	app.use("/api/v2", createApiV2Router());
 	const server = http.default.createServer(app);
 	await new Promise((resolve, reject) => {
@@ -3296,25 +3851,33 @@ async function startLocalServer(options = {}) {
 			resolve();
 		});
 	});
-	return {
+	const instance = {
 		server,
 		port: actualPort,
 		host,
 		token,
 		apiBaseUrl: `http://${host}:${actualPort}/api/v2`,
-		close: () => new Promise((resolve, reject) => {
-			server.close((err) => {
-				if (err) reject(err);
-				else resolve();
+		workerSupervisor,
+		getStatus,
+		close: async () => {
+			await workerSupervisor.stop();
+			await new Promise((resolve, reject) => {
+				server.close((err) => {
+					if (err) reject(err);
+					else resolve();
+				});
 			});
-		}),
+		},
 		updateConfig: (config) => {
 			if (config.databaseUrl !== void 0) process.env.DATABASE_URL = config.databaseUrl;
 			if (config.databaseUrlDirect !== void 0) process.env.DATABASE_URL_UNPOOLED = config.databaseUrlDirect;
 			if (config.geminiApiKey !== void 0) process.env.GEMINI_API_KEY = config.geminiApiKey;
 			if (config.openaiApiKey !== void 0) process.env.OPENAI_API_KEY = config.openaiApiKey;
+			workerSupervisor.refresh();
 		}
 	};
+	await workerSupervisor.start();
+	return instance;
 }
 if (process.argv[1]?.includes("localServer")) startLocalServer().then((inst) => {
 	console.log(`Local Job Decision Engine server listening at ${inst.apiBaseUrl}`);

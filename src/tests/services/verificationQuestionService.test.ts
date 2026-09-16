@@ -70,6 +70,7 @@ describe("verificationQuestionService", () => {
 
   it("answers a verification question and resumes linked jobs to RAW_STAGED", async () => {
     const executedQueries: string[] = [];
+    const taskParams: unknown[][] = [];
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       executedQueries.push(sql);
       if (sql.includes("SELECT *") && sql.includes("FROM verification_questions")) {
@@ -86,6 +87,27 @@ describe("verificationQuestionService", () => {
           ],
         };
       }
+      if (sql.includes("INSERT INTO config_definitions")) return { rows: [{ id: "def-1" }] };
+      if (sql.includes("SELECT id, revision_number") && sql.includes("FROM config_revisions")) {
+        return { rows: [] };
+      }
+      if (sql.includes("SELECT COALESCE(MAX(revision_number)")) return { rows: [{ next: 1 }] };
+      if (sql.includes("INSERT INTO config_revisions")) return { rows: [{ id: "rev-1" }] };
+      if (sql.includes("SELECT config_revision_id") && sql.includes("FROM config_active_revisions")) {
+        return { rows: [] };
+      }
+      if (sql.includes("SELECT c.id AS canonical_job_id")) {
+        return {
+          rows: [
+            { canonical_job_id: "job-1", job_version_id: "version-1" },
+            { canonical_job_id: "job-2", job_version_id: "version-2" },
+          ],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        taskParams.push(params || []);
+        return { rows: [{ id: "task-1" }], rowCount: 1 };
+      }
       if (sql.includes("UPDATE canonical_jobs")) {
         return { rows: [], rowCount: 2 };
       }
@@ -101,6 +123,15 @@ describe("verificationQuestionService", () => {
     const updateJobSql = executedQueries.find((q) => q.includes("UPDATE canonical_jobs"));
     expect(updateJobSql).toBeDefined();
     expect(updateJobSql).toContain("SET processing_state = 'RAW_STAGED'");
+    expect(executedQueries.some((q) => q.includes("change_summary"))).toBe(false);
+    expect(executedQueries.some((q) => q.includes("FROM config_revisions") && q.includes("updated_at"))).toBe(false);
+    expect(executedQueries.filter((q) => q === "BEGIN")).toHaveLength(1);
+    expect(executedQueries.filter((q) => q === "COMMIT")).toHaveLength(1);
+    expect(taskParams).toHaveLength(2);
+    expect(taskParams[0][3]).toBeTruthy();
+    expect(JSON.parse(String(taskParams[0][2]))).toMatchObject({
+      verification_answer_revision_id: "rev-1",
+    });
   });
 
   it("dismisses a verification question", async () => {

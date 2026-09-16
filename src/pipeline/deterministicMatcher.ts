@@ -600,7 +600,7 @@ export async function runDeterministicMatcher(
               [matchRunId]
             );
 
-            await client.query(
+            const canonicalUpdate = await client.query(
               `UPDATE canonical_jobs
                SET deterministic_match_score = 0,
                    deterministic_match_coverage = 0,
@@ -616,7 +616,7 @@ export async function runDeterministicMatcher(
             );
 
             await client.query("COMMIT");
-            matchedJobs += 1;
+            if (canonicalUpdate?.rowCount !== 0) matchedJobs += 1;
             continue;
           }
 
@@ -910,7 +910,7 @@ export async function runDeterministicMatcher(
               ? 'NO_PROFILE_MATCH'
               : 'UNKNOWN';
 
-        await client.query(
+        const canonicalUpdate = await client.query(
           `UPDATE canonical_jobs
            SET deterministic_match_score = $2,
                deterministic_match_coverage = $3,
@@ -926,7 +926,7 @@ export async function runDeterministicMatcher(
         );
 
         await client.query("COMMIT");
-        matchedJobs += 1;
+        if (canonicalUpdate?.rowCount !== 0) matchedJobs += 1;
       } catch (error) {
         await client.query("ROLLBACK");
         errors += 1;

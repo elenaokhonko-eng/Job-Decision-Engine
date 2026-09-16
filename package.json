@@ -64,6 +64,9 @@
       "main": "desktop/electron/main.cjs"
     },
     "asar": true,
+    "asarUnpack": [
+      "desktop/electron/dist-backend/**/*"
+    ],
     "generateUpdatesFilesForAllChannels": true,
     "win": {
       "icon": "build/desktop/icon.ico",
