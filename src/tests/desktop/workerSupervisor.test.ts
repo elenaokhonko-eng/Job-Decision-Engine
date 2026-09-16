@@ -1,3 +1,4 @@
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createWorkerSupervisor,
@@ -60,7 +61,7 @@ function commandFor(kind: DesktopWorkerKind): WorkerCommand {
 
 describe("desktop worker command resolution", () => {
   it("prefers an absolute bundled entrypoint for packaged Electron", () => {
-    const bundleDir = "C:\\installed\\resources\\app.asar\\desktop\\electron\\dist-backend";
+    const bundleDir = path.resolve("/installed", "resources", "app.asar", "desktop", "electron", "dist-backend");
     const result = resolveWorkerCommand("pipeline", {
       isPackaged: true,
       bundledDir: bundleDir,
@@ -77,17 +78,17 @@ describe("desktop worker command resolution", () => {
   });
 
   it("uses the repository tsx entrypoint only in development when bundled output is absent", () => {
-    const projectRoot = "C:\\repo";
+    const projectRoot = path.resolve("/repo");
     const result = resolveWorkerCommand("evaluation", {
       isPackaged: false,
-      bundledDir: "C:\\repo\\desktop\\electron\\dist-backend",
+      bundledDir: path.join(projectRoot, "desktop", "electron", "dist-backend"),
       projectRoot,
-      fileExists: (filePath) => filePath.endsWith("evaluate_queue.ts") || filePath.endsWith("tsx\\dist\\cli.mjs"),
+      fileExists: (filePath) => filePath.endsWith("evaluate_queue.ts") || filePath.includes("cli.mjs"),
     });
 
     expect(result).toMatchObject({ source: "development-ts", cwd: projectRoot });
-    expect(result?.args[0]).toContain("tsx");
-    expect(result?.args).toContain(`${projectRoot}\\scripts\\evaluate_queue.ts`);
+    expect(result?.args[0]).toContain("cli.mjs");
+    expect(result?.args).toContain(path.join(projectRoot, "scripts", "evaluate_queue.ts"));
   });
 });
 

@@ -1,0 +1,2 @@
+# Gitleaks ignore list
+9e87f6ffd2e81993d6d11b933f12ad733f9e7053:desktop/electron/dist-backend/process_pipeline_tasks.cjs:generic-api-key:9166

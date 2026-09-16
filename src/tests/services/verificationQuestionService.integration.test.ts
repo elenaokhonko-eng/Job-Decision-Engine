@@ -143,7 +143,7 @@ describe.skipIf(skipReal)("verification question answers: immutable registry int
 
     await answerVerificationQuestion(client, "workplace:office_days", 4, { context });
     const revised = await q(
-      `SELECT cr.revision_number, cr.content, car.config_revision_id AS active_revision_id
+      `SELECT cr.id, cr.revision_number, cr.content, car.config_revision_id AS active_revision_id
        FROM config_revisions cr
        JOIN config_definitions cd ON cd.id = cr.config_definition_id
        JOIN config_active_revisions car ON car.config_definition_id = cd.id

@@ -1,0 +1,10 @@
+[allowlist]
+description = "Ignore build artifacts, distribution bundles, and known non-secret configuration identifiers"
+paths = [
+  '''desktop/electron/dist-backend/''',
+  '''dist/''',
+  '''dist-backend/''',
+]
+stopwords = [
+  "evidence_strength_v1",
+]
