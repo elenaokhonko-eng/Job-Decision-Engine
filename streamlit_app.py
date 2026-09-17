@@ -253,12 +253,17 @@ def default_accessibility_settings():
     }
 
 def fetch_accessibility_settings():
-    resp = api_request("GET", "/api/v2/accessibility", timeout=15)
-    if isinstance(resp, dict) and resp.get("ok"):
-        settings = resp.get("settings") or {}
-        merged = dict(default_accessibility_settings())
-        merged.update(settings if isinstance(settings, dict) else {})
-        return merged
+    if not get_api_base_url():
+        return default_accessibility_settings()
+    try:
+        resp = api_request("GET", "/api/v2/accessibility", timeout=15)
+        if isinstance(resp, dict) and resp.get("ok"):
+            settings = resp.get("settings") or {}
+            merged = dict(default_accessibility_settings())
+            merged.update(settings if isinstance(settings, dict) else {})
+            return merged
+    except Exception:
+        pass
     return default_accessibility_settings()
 
 def update_accessibility_settings(patch):
@@ -268,10 +273,15 @@ def update_accessibility_settings(patch):
     raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
 
 def fetch_preference_modes():
-    resp = api_request("GET", "/api/v2/preference-modes", timeout=20)
-    if isinstance(resp, dict) and resp.get("ok"):
-        modes = resp.get("modes") or []
-        return modes if isinstance(modes, list) else []
+    if not get_api_base_url():
+        return []
+    try:
+        resp = api_request("GET", "/api/v2/preference-modes", timeout=20)
+        if isinstance(resp, dict) and resp.get("ok"):
+            modes = resp.get("modes") or []
+            return modes if isinstance(modes, list) else []
+    except Exception:
+        pass
     return []
 
 def create_preference_mode(mode_key, display_name, description, content):
@@ -487,95 +497,95 @@ def fetch_jobs_from_db():
     read-only PostgreSQL read-model fallback for hosted Streamlit deployments
     that do not have a reachable API process.
     """
-    try:
-        all_rows = []
-        cursor = None
-        pages = 0
-
-        while True:
-            pages += 1
-            params = {"limit": 500}
-            if cursor:
-                params["cursor"] = cursor
-
-            resp = api_request("GET", "/api/v2/shortlist", params=params, timeout=60)
-            rows = resp.get("jobs") or []
-            if not isinstance(rows, list):
-                raise Exception("API returned invalid shortlist payload (jobs is not a list).")
-
-            all_rows.extend(rows)
-            cursor = resp.get("next_cursor")
-
-            if not cursor:
-                break
-            if pages >= 20:
-                st.warning("Shortlist pagination stopped after 20 pages to avoid excessive load.")
-                break
-
-        valid_rows = []
-        invalid_count = 0
-        for row in all_rows:
-            row_dict = dict(row) if isinstance(row, dict) else {}
-            ok, reason = validate_shortlist_row_shape(row_dict) if row_dict else (False, "Row is not a JSON object")
-            if ok:
-                valid_rows.append(row_dict)
-            else:
-                invalid_count += 1
-                st.warning(f"Dropped invalid shortlist row from read model: {reason}")
-
-        if invalid_count > 0:
-            st.warning(f"Filtered out {invalid_count} invalid shortlist rows due to schema mismatch.")
-
-        return valid_rows
-    except Exception as api_error:
+    api_url = get_api_base_url()
+    if api_url:
         try:
-            fallback_rows = fetch_jobs_from_postgres_read_model()
+            all_rows = []
+            cursor = None
+            pages = 0
+
+            while True:
+                pages += 1
+                params = {"limit": 500}
+                if cursor:
+                    params["cursor"] = cursor
+
+                resp = api_request("GET", "/api/v2/shortlist", params=params, timeout=60)
+                rows = resp.get("jobs") or []
+                if not isinstance(rows, list):
+                    raise Exception("API returned invalid shortlist payload (jobs is not a list).")
+
+                all_rows.extend(rows)
+                cursor = resp.get("next_cursor")
+
+                if not cursor:
+                    break
+                if pages >= 20:
+                    st.warning("Shortlist pagination stopped after 20 pages to avoid excessive load.")
+                    break
+
             valid_rows = []
             invalid_count = 0
-            for row in fallback_rows:
+            for row in all_rows:
                 row_dict = dict(row) if isinstance(row, dict) else {}
                 ok, reason = validate_shortlist_row_shape(row_dict) if row_dict else (False, "Row is not a JSON object")
                 if ok:
                     valid_rows.append(row_dict)
                 else:
                     invalid_count += 1
-                    st.warning(f"Dropped invalid PostgreSQL read-model row: {reason}")
+                    st.warning(f"Dropped invalid shortlist row from read model: {reason}")
+
             if invalid_count > 0:
-                st.warning(f"Filtered out {invalid_count} invalid PostgreSQL read-model rows.")
-            st.warning(
-                "API unavailable; displaying the canonical PostgreSQL read model in read-only mode. "
-                f"API error: {api_error}"
-            )
+                st.warning(f"Filtered out {invalid_count} invalid shortlist rows due to schema mismatch.")
+
             return valid_rows
-        except Exception as fallback_error:
-            st.error(
-                "Failed to fetch the canonical shortlist from both the API and PostgreSQL read model. "
-                f"API error: {api_error}; read-model error: {fallback_error}"
+        except Exception as api_error:
+            st.info(
+                f"Managed API at {api_url} is unavailable; displaying the canonical PostgreSQL read model in read-only mode."
             )
-            return []
+
+    try:
+        fallback_rows = fetch_jobs_from_postgres_read_model()
+        valid_rows = []
+        invalid_count = 0
+        for row in fallback_rows:
+            row_dict = dict(row) if isinstance(row, dict) else {}
+            ok, reason = validate_shortlist_row_shape(row_dict) if row_dict else (False, "Row is not a JSON object")
+            if ok:
+                valid_rows.append(row_dict)
+            else:
+                invalid_count += 1
+                st.warning(f"Dropped invalid PostgreSQL read-model row: {reason}")
+        if invalid_count > 0:
+            st.warning(f"Filtered out {invalid_count} invalid PostgreSQL read-model rows.")
+        return valid_rows
+    except Exception as fallback_error:
+        st.error(
+            f"Failed to fetch the canonical shortlist from PostgreSQL read model: {fallback_error}"
+        )
+        return []
 
 def fetch_rejected_jobs_from_db():
     """Fetch rejected jobs from the API, with a read-only view fallback."""
-    try:
-        resp = api_request("GET", "/api/v2/rejected", params={"limit": 50}, timeout=60)
-        rows = resp.get("jobs") or []
-        if not isinstance(rows, list):
-            raise Exception("API returned invalid rejected-jobs payload (jobs is not a list).")
-        return [dict(r) for r in rows if isinstance(r, dict)]
-    except Exception as api_error:
+    api_url = get_api_base_url()
+    if api_url:
         try:
-            rows = fetch_rejected_jobs_from_postgres_read_model()
-            st.warning(
-                "Rejected-job API unavailable; displaying the canonical PostgreSQL audit read model. "
-                f"API error: {api_error}"
-            )
-            return [dict(row) for row in rows if isinstance(row, dict)]
-        except Exception as fallback_error:
-            st.error(
-                "Failed to fetch rejected jobs from both the API and PostgreSQL read model. "
-                f"API error: {api_error}; read-model error: {fallback_error}"
-            )
-            return []
+            resp = api_request("GET", "/api/v2/rejected", params={"limit": 50}, timeout=60)
+            rows = resp.get("jobs") or []
+            if not isinstance(rows, list):
+                raise Exception("API returned invalid rejected-jobs payload (jobs is not a list).")
+            return [dict(r) for r in rows if isinstance(r, dict)]
+        except Exception:
+            pass
+
+    try:
+        rows = fetch_rejected_jobs_from_postgres_read_model()
+        return [dict(row) for row in rows if isinstance(row, dict)]
+    except Exception as fallback_error:
+        st.error(
+            f"Failed to fetch rejected jobs from PostgreSQL read model: {fallback_error}"
+        )
+        return []
 
 def delete_job_from_db(job_id):
     """Soft-delete a canonical job by marking it MANUALLY_REMOVED (via /api/v2)."""
@@ -822,6 +832,8 @@ def ingest_linkedin_saved_json(jobs):
         return 0, 0
 
 def fetch_company_analytics_from_db():
+    if not get_api_base_url():
+        return []
     try:
         resp = api_request("GET", "/api/v2/analytics/companies", timeout=60)
         rows = resp.get("companies") or []
@@ -1067,6 +1079,11 @@ with st.sidebar.expander("Accessibility & Preferences", expanded=False):
     st.markdown("---")
 
 st.sidebar.header("🎯 Navigation & Filters")
+api_base_url = get_api_base_url()
+if api_base_url:
+    st.sidebar.caption(f"🔌 Connected to Managed API (`{api_base_url}`)")
+else:
+    st.sidebar.caption("📦 PostgreSQL Direct Read Model (Live)")
 
 # Metrics
 total_jobs = len(jobs_list)
