@@ -210,6 +210,28 @@ def fetch_rejected_jobs_from_postgres_read_model():
         workspace_connection.close()
     return _read_model_query(REJECTED_READ_MODEL_QUERY, (workspace_id, 200))
 
+
+def fetch_preference_modes_from_postgres_read_model():
+    query = """
+        SELECT
+          mode_key,
+          display_name,
+          description,
+          is_active,
+          content,
+          created_at,
+          updated_at
+        FROM workspace_user_preference_modes
+        WHERE workspace_id = %s
+        ORDER BY is_active DESC, updated_at DESC
+    """
+    workspace_connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(workspace_connection)
+    finally:
+        workspace_connection.close()
+    return _read_model_query(query, (workspace_id,))
+
 def api_request(method, path, params=None, body=None, timeout=30):
     import urllib.parse
 
@@ -273,16 +295,19 @@ def update_accessibility_settings(patch):
     raise Exception(resp.get("error") if isinstance(resp, dict) else "Unknown API error")
 
 def fetch_preference_modes():
-    if not get_api_base_url():
-        return []
+    if get_api_base_url():
+        try:
+            resp = api_request("GET", "/api/v2/preference-modes", timeout=20)
+            if isinstance(resp, dict) and resp.get("ok"):
+                modes = resp.get("modes") or []
+                return modes if isinstance(modes, list) else []
+        except Exception:
+            pass
+
     try:
-        resp = api_request("GET", "/api/v2/preference-modes", timeout=20)
-        if isinstance(resp, dict) and resp.get("ok"):
-            modes = resp.get("modes") or []
-            return modes if isinstance(modes, list) else []
+        return fetch_preference_modes_from_postgres_read_model()
     except Exception:
-        pass
-    return []
+        return []
 
 def create_preference_mode(mode_key, display_name, description, content):
     body = {
@@ -1845,18 +1870,21 @@ with tab_analytics:
     st.markdown("---")
     st.subheader("Source Health (Compliance-Aware)")
     st.caption("Counts are based on staged raw observations. Compliance metadata comes from source plugin manifests.")
-    try:
-        resp = api_request("GET", "/api/v2/sources/health", timeout=30)
-        sources = resp.get("sources") if isinstance(resp, dict) else None
-        if isinstance(resp, dict) and resp.get("ok") and isinstance(sources, list) and sources:
-            sdf = pd.DataFrame(sources)
-            st.dataframe(sdf, use_container_width=True)
-        elif isinstance(resp, dict) and resp.get("ok") and isinstance(sources, list) and not sources:
-            st.info("No source plugin rows found yet. Run `npm run sources:sync` and ingest at least one source.")
-        else:
-            st.warning(f"Source health endpoint returned an unexpected payload: {resp}")
-    except Exception as e:
-        st.error(f"Failed to fetch source health from API: {e}")
+    if get_api_base_url():
+        try:
+            resp = api_request("GET", "/api/v2/sources/health", timeout=30)
+            sources = resp.get("sources") if isinstance(resp, dict) else None
+            if isinstance(resp, dict) and resp.get("ok") and isinstance(sources, list) and sources:
+                sdf = pd.DataFrame(sources)
+                st.dataframe(sdf, use_container_width=True)
+            elif isinstance(resp, dict) and resp.get("ok") and isinstance(sources, list) and not sources:
+                st.info("No source plugin rows found yet. Run `npm run sources:sync` and ingest at least one source.")
+            else:
+                st.warning(f"Source health endpoint returned an unexpected payload: {resp}")
+        except Exception as e:
+            st.error(f"Failed to fetch source health from API: {e}")
+    else:
+        st.info("Source plugin health analytics are available when connected to the backend API.")
 
 with tab_cv:
     st.subheader("📄 Canonical Documents")
