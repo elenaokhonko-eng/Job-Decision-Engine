@@ -19,6 +19,7 @@ import {
   answerVerificationQuestion,
   dismissVerificationQuestion,
 } from "../../services/verificationQuestionService.js";
+import { RejectedJobRowSchema, ShortlistRowV2Schema } from "../../readModels/contracts.js";
 
 type QueryClient = {
   query: pg.PoolClient["query"];
@@ -277,14 +278,15 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         `,
         params
       );
+      const validatedRows = rows.map((row) => ShortlistRowV2Schema.parse(row));
 
-      const last = rows.length > 0 ? rows[rows.length - 1] : null;
+      const last = validatedRows.length > 0 ? validatedRows[validatedRows.length - 1] : null;
       const next_cursor =
-        rows.length === limit && last?.observed_at && last?.canonical_job_id
+        validatedRows.length === limit && last?.observed_at && last?.canonical_job_id
           ? encodeCursor({ t: new Date(last.observed_at).toISOString(), id: String(last.canonical_job_id) })
           : null;
 
-      res.json({ ok: true, jobs: rows, next_cursor });
+      res.json({ ok: true, jobs: validatedRows, next_cursor });
     })
   );
 
@@ -320,8 +322,9 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         `,
         [ctx.workspaceId, limit]
       );
+      const validatedRows = rows.map((row) => RejectedJobRowSchema.parse(row));
 
-      res.json({ ok: true, jobs: rows });
+      res.json({ ok: true, jobs: validatedRows });
     })
   );
 

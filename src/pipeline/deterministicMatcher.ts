@@ -140,6 +140,20 @@ function requirementWeight(importance: RequirementRow["importance"]): number {
   return 0.4;
 }
 
+const NON_CAPABILITY_REQUIREMENT_TYPES = new Set([
+  "OFFICE_DAYS",
+  "WORK_MODE",
+  "EMPLOYMENT_TYPE",
+  "TRAVEL",
+  "WORK_AUTH",
+  "ON_CALL",
+  "SHIFT_WORK",
+]);
+
+export function isCapabilityRequirementType(requirementType: string): boolean {
+  return !NON_CAPABILITY_REQUIREMENT_TYPES.has(requirementType);
+}
+
 function scoreMatch(requirement: RequirementRow, fact: FactRow): number {
   const requirementTokens = tokenize(buildRequirementText(requirement));
   const factTokens = tokenize(buildFactText(fact));
@@ -387,17 +401,49 @@ export async function runDeterministicMatcher(
     }
     try {
       const engagementRes = await client.query<{
+        id: string;
         start_date: string;
         end_date: string | null;
         is_current: boolean;
         experience_class: string;
+        engagement_type: string;
+        role_title: string;
+        summary: string;
+        operating_model: string | null;
       }>(
-        `SELECT start_date, end_date, is_current, experience_class
+        `SELECT id, start_date, end_date, is_current, experience_class,
+                engagement_type, role_title, summary, operating_model
          FROM profile_engagements
          WHERE profile_version_id = $1`,
         [profileVersionId]
       );
       const experienceYears = calculateProfessionalExperienceYears(engagementRes.rows);
+      for (const engagement of engagementRes.rows) {
+        if (engagement.experience_class !== "PROFESSIONAL_PRODUCTION") continue;
+        const start = new Date(engagement.start_date).getTime();
+        const end = engagement.is_current || !engagement.end_date
+          ? Date.now()
+          : new Date(engagement.end_date).getTime();
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+        const years = (end - start) / (1000 * 60 * 60 * 24 * 365.25);
+        credentialFacts.push({
+          id: engagement.id,
+          fact_type: "EXPERIENCE_YEARS",
+          statement: `${engagement.role_title}: ${engagement.summary}`,
+          evidence_tier: "PROFESSIONAL_PRODUCTION",
+          verification_status: "VERIFIED",
+          structured_value: {
+            experience_years: years,
+            experience_scope: `${engagement.role_title} ${engagement.summary}`,
+            engagement_type: engagement.engagement_type,
+            operating_model: engagement.operating_model,
+            experience_start_date: new Date(start).toISOString(),
+            experience_end_date: new Date(end).toISOString(),
+            engagement_is_current: engagement.is_current,
+          },
+          source_type: "PROFILE_FACT",
+        });
+      }
       if (experienceYears > 0) {
         credentialFacts.push({
           id: `experience:${profileVersionId}`,
@@ -405,7 +451,10 @@ export async function runDeterministicMatcher(
           statement: `${experienceYears.toFixed(1)} years of professional production experience`,
           evidence_tier: "PROFESSIONAL_PRODUCTION",
           verification_status: "VERIFIED",
-          structured_value: { professional_years: experienceYears },
+          structured_value: {
+            professional_years: experienceYears,
+            experience_scope: "overall professional production",
+          },
           source_type: "CREDENTIAL",
         });
       }
@@ -685,11 +734,36 @@ export async function runDeterministicMatcher(
           factEmbeddings.size === factIds.length &&
           requirementEmbeddings.size === requirementIds.length;
 
+        const scoredRequirements = reqRes.rows.filter((req) =>
+          isCapabilityRequirementType(req.requirement_type)
+        );
         let weightedScoreSum = 0;
         let weightSum = 0;
         let matchedCount = 0;
 
         for (const req of reqRes.rows) {
+          if (!isCapabilityRequirementType(req.requirement_type)) {
+            await client.query(
+              `INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, NULL, 'UNKNOWN', 0, $4, $5)`,
+              [
+                ctx.workspaceId,
+                matchRunId,
+                req.id,
+                "Excluded from capability matching; evaluated by deterministic workability gates.",
+                JSON.stringify({
+                  requirement_key: req.requirement_key,
+                  requirement_type: req.requirement_type,
+                  excluded_from_capability_score: true,
+                  semantic_ready: usedEmbeddings,
+                }),
+              ]
+            );
+            continue;
+          }
+
           const weight = requirementWeight(req.importance);
           weightSum += weight;
 
@@ -786,7 +860,11 @@ export async function runDeterministicMatcher(
                 semanticScore = Math.max(0, cosineSimilarity(reqEmbedding, factEmbedding));
               }
             }
-            const score = usedEmbeddings ? lexicalScore * 0.35 + semanticScore * 0.65 : lexicalScore;
+            const score = usedEmbeddings
+              ? req.requirement_type === "FUNCTION" && semanticScore >= SEMANTIC_MATCH_THRESHOLD
+                ? semanticScore
+                : lexicalScore * 0.35 + semanticScore * 0.65
+              : lexicalScore;
             if (score > bestScore) {
               bestScore = score;
               bestLexical = lexicalScore;
@@ -879,7 +957,7 @@ export async function runDeterministicMatcher(
            );
         }
 
-        const reqCount = reqRes.rows.length;
+        const reqCount = scoredRequirements.length;
         const overallScore = weightSum > 0 ? (weightedScoreSum / weightSum) * 100 : 0;
         const coverageScore = reqCount > 0 ? (matchedCount / reqCount) * 100 : 0;
 

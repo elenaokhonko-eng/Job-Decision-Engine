@@ -194,7 +194,7 @@ var VERIFICATION_ANSWER_KEYS = {
 	travelPercentage: "lifestyle_travel_percentage_cap"
 };
 var defaults = {
-	unknownWorkModeDisposition: "NEEDS_VERIFICATION",
+	unknownWorkModeDisposition: "HARD_REJECT",
 	onsiteOnlyAllowed: false,
 	maxOfficeDaysPerWeek: 3,
 	hardFailOfficeDaysPerWeek: 4,
@@ -203,10 +203,12 @@ var defaults = {
 	remoteWithoutTerritoryAllowed: true,
 	rejectExplicitForeignTerritory: true,
 	unknownWorkAuthorizationNeedsVerification: false,
-	maxTravelPct: 10,
+	maxTravelPct: 20,
 	contractAllowed: false,
 	minimumBuildingResearchPct: 60,
 	maximumInteractionPct: 40,
+	preferredBuildingResearchPct: 85,
+	preferredInteractionPct: 15,
 	regularOnCallAllowed: false,
 	shiftWorkAllowed: false,
 	frequentTravelAllowed: false,
@@ -696,9 +698,9 @@ async function loadVerificationAnswerContext(clientOrPool, options = {}) {
 function hasExplicitTerritoryRestriction(value, territory) {
 	const canonical = normalizeTerritory(territory);
 	if (!canonical) return false;
-	const aliases = TERRITORY_ALIASES.find(([key]) => key === canonical)?.[1] ?? [canonical.toLowerCase()];
+	const aliases = (TERRITORY_ALIASES.find(([key]) => key === canonical)?.[1] ?? [canonical.toLowerCase()]).map(normalizeTerritorySearchText);
 	return normalizeTerritorySearchText(value).split(/[.!?;\n]+/).map((sentence) => sentence.trim()).filter(Boolean).some((sentence) => {
-		return aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(sentence)) && /\b(only|remote|work\s+(?:in|from)|working\s+(?:in|from)|based|located|location|office|on[- ]?site|authorization|authorised|authorized|eligible|rights|territory)\b/i.test(sentence);
+		return aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(sentence)) && /\b(only|required|must|mandatory|work\s+(?:in|from)|working\s+(?:in|from)|based\s+in|located\s+in|location\s*[:=-]\s*|office\s+in|on[- ]?site\s+in|authorization|authorised|authorized|eligible|rights|citizen(?:ship)?|visa|residen(?:cy|tial))\b/i.test(sentence);
 	});
 }
 function finiteNumber(value, fallback) {
@@ -772,6 +774,8 @@ function loadWorkabilityPolicy() {
 		contractAllowed: document?.global_workability_gates?.employment?.contract_allowed === true,
 		minimumBuildingResearchPct: finiteNumber(composition.minimum_building_research_pct, defaults.minimumBuildingResearchPct),
 		maximumInteractionPct: finiteNumber(composition.maximum_interaction_pct, defaults.maximumInteractionPct),
+		preferredBuildingResearchPct: finiteNumber(composition.preferred_building_research_pct, defaults.preferredBuildingResearchPct ?? 85),
+		preferredInteractionPct: finiteNumber(composition.preferred_interaction_pct, defaults.preferredInteractionPct ?? 15),
 		regularOnCallAllowed: operations.regular_on_call_allowed === true,
 		shiftWorkAllowed: operations.shift_work_allowed === true,
 		frequentTravelAllowed: operations.frequent_travel_allowed === true,
@@ -1044,7 +1048,7 @@ var GLOBAL_TITLE_EXCLUSIONS = [
 	/\b(human resources?|hr|recruiter|talent acquisition|people operations?|people partner)\b/i,
 	/\b(executive assistant|office manager|receptionist|admin assistant|administrative assistant)\b/i,
 	/\b(legal counsel|attorney|lawyer|m&a|paralegal|contracts? manager)\b/i,
-	/\b(sales manager|account executive|business development representative|bdr|sdr|account manager)\b/i,
+	/\b(sales manager|account executive|business development representative|bdr|sdr|(?<!technical\s+)account manager)\b/i,
 	/\b(marketing manager|social media|content writer|pr manager|brand manager)\b/i,
 	/\b(quality assurance coordinator|manual tester|qa tester)\b/i,
 	/\b(brain researcher|neuroscientist|wet lab|postdoctoral fellow)\b/i
@@ -1164,6 +1168,70 @@ function isTechnicalRole(title, description) {
 		reason: isTechnical ? void 0 : "Axis 1 Failed: Role lacks evidence of technical, building, or engineering function"
 	};
 }
+function numericRange(match) {
+	const first = Number(match[1]);
+	const second = match[2] === void 0 ? first : Number(match[2]);
+	return [Math.min(first, second), Math.max(first, second)];
+}
+/** Extract only attendance phrases; unrelated durations such as annual leave are ignored. */
+function extractHybridAttendance(description) {
+	const text = String(description || "").toLowerCase();
+	const ranges = [];
+	const officePatterns = [
+		/\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)\s+(?:the\s+)?(?:office|on-?site|onsite)\b/gi,
+		/\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\s*(?:per\s*week|a\s*week|\/week)?\s*(?:on-?site|onsite|in-?office)\b/gi,
+		/\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\s*(?:per\s*week|a\s*week|\/week)?\s*(?:on-?site|onsite)\b/gi,
+		/\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:office|on-?site|onsite)\s+days?\b/gi
+	];
+	const wfhPatterns = [/\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\s*(?:per\s*week|a\s*week|\/week)?\s*(?:wfh|work\s+from\s+home|from\s+home|remote)\b/gi, /\b(?:wfh|work\s+from\s+home|from\s+home|remote)\s*(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\b/gi];
+	for (const pattern of officePatterns) for (const match of text.matchAll(pattern)) {
+		const range = numericRange(match);
+		ranges.push({
+			range,
+			evidence: match[0]
+		});
+	}
+	for (const pattern of wfhPatterns) for (const match of text.matchAll(pattern)) {
+		const [wfhMin, wfhMax] = numericRange(match);
+		ranges.push({
+			range: [5 - wfhMax, 5 - wfhMin],
+			evidence: match[0]
+		});
+	}
+	if (ranges.length === 0) return null;
+	const intersectionMin = Math.max(...ranges.map(({ range }) => range[0]));
+	const intersectionMax = Math.min(...ranges.map(({ range }) => range[1]));
+	const contradictory = intersectionMin > intersectionMax;
+	const officeMin = contradictory ? Math.min(...ranges.map(({ range }) => range[0])) : intersectionMin;
+	const officeMax = contradictory ? Math.max(...ranges.map(({ range }) => range[1])) : intersectionMax;
+	return {
+		office_days_min: Math.max(0, officeMin),
+		office_days_max: Math.min(7, officeMax),
+		evidence: [...new Set(ranges.map(({ evidence }) => evidence))],
+		basis: "EMPLOYER_STATED",
+		contradictory
+	};
+}
+/** Return the upper bound of a travel requirement, preserving range semantics. */
+function extractTravelRequirement(description) {
+	const text = String(description || "").toLowerCase();
+	for (const pattern of [
+		/(?:travel|travelling|traveling)(?:[^.;\n%]{0,40}?)(\d+)\s*%\s*(?:-|–|to)\s*(\d+)\s*%/gi,
+		/(\d+)\s*%\s*(?:-|–|to)\s*(\d+)\s*%(?:[^.;\n%]{0,40}?)(?:travel|travelling|traveling)/gi,
+		/(?:travel|travelling|traveling)(?:[^.;\n%]{0,40}?)(\d+)\s*%/gi,
+		/(\d+)\s*%(?:[^.;\n%]{0,40}?)(?:travel|travelling|traveling)/gi
+	]) {
+		const match = pattern.exec(text);
+		if (!match) continue;
+		const first = Number(match[1]);
+		const second = match[2] === void 0 ? first : Number(match[2]);
+		return {
+			max_pct: Math.max(first, second),
+			evidence: match[0]
+		};
+	}
+	return null;
+}
 function evaluateWorkability(location, workplaceType, description, employmentType, policy = loadWorkabilityPolicy(), answerContext) {
 	const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
 	const officeDaysAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.workplaceOfficeDays) && answerContext?.overrides.workplaceOfficeDaysCap === null;
@@ -1189,23 +1257,29 @@ function evaluateWorkability(location, workplaceType, description, employmentTyp
 		reasonCode: "GATE_CONTRACT_ROLE",
 		facts: baseFacts
 	};
-	const officeDaysMatch = d.match(/\b(\d+)\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i) || d.match(/\b(\d+)\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
+	const officeDaysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i) || d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
 	const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d) || /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i.test(d) || /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i.test(d) || /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i.test(d) || officeDaysMatch !== null && Number(officeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek;
-	if (!effectivePolicy.onsiteOnlyAllowed && wp === "ONSITE" || !effectivePolicy.onsiteOnlyAllowed && isExplicitOnsiteText) return {
-		workable: false,
-		needsVerify: false,
-		reason: "Requires 100% on-premises / on-site presence (ONSITE mode not workable)",
-		reasonCode: "GATE_HIGH_OFFICE_DAYS",
-		facts: {
-			...baseFacts,
-			office_days_min: 4,
-			office_days_max: 5
-		}
-	};
+	if (!effectivePolicy.onsiteOnlyAllowed && wp === "ONSITE" || !effectivePolicy.onsiteOnlyAllowed && isExplicitOnsiteText) {
+		const minDays = officeDaysMatch ? Number(officeDaysMatch[1]) : 4;
+		const maxDays = officeDaysMatch ? Number(officeDaysMatch[1]) : 5;
+		return {
+			workable: false,
+			needsVerify: false,
+			reason: "Requires 100% on-premises / on-site presence (ONSITE mode not workable)",
+			reasonCode: "GATE_HIGH_OFFICE_DAYS",
+			facts: {
+				...baseFacts,
+				office_days_min: minDays,
+				office_days_max: maxDays
+			}
+		};
+	}
+	const isExplicitRemoteText = /\b(?:fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|remote\s+(?:from|in)\b|work\s+from\s+home|work\s+remotely)\b/i.test(d) || /(?:^|[|·•:])\s*remote\b/i.test(d) || /\b(?:location|workplace|work\s+location)\s*:\s*remote\b/i.test(d);
+	const isRemote = wp === "REMOTE" || wp === "UNKNOWN" && (/\bremote\b/i.test(loc) || isExplicitRemoteText);
 	const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
 	const locationTerritories = extractTerritories(loc);
 	const descriptionTerritories = extractTerritories(d);
-	const explicitlyDisallowed = effectivePolicy.rejectExplicitForeignTerritory ? [...locationTerritories, ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory))].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory)) : [];
+	const explicitlyDisallowed = effectivePolicy.rejectExplicitForeignTerritory ? [...isRemote ? [] : locationTerritories, ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory))].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory)) : [];
 	if (explicitlyDisallowed.length > 0) {
 		const territory = explicitlyDisallowed[0];
 		if (workAuthorizationAnswerUnknown) return {
@@ -1228,16 +1302,16 @@ function evaluateWorkability(location, workplaceType, description, employmentTyp
 			}
 		};
 	}
-	const isExplicitRemoteText = /\b(?:fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|remote\s+(?:from|in)\b|work\s+from\s+home|work\s+remotely)\b/i.test(d) || /(?:^|[|·•:])\s*remote\b/i.test(d) || /\b(?:location|workplace|work\s+location)\s*:\s*remote\b/i.test(d);
-	if (wp === "REMOTE" || /\bremote\b/i.test(loc) || isExplicitRemoteText) {
-		if (!(locationTerritories.length > 0 || descriptionTerritories.length > 0) && !effectivePolicy.remoteWithoutTerritoryAllowed) return {
+	if (isRemote) {
+		if (locationTerritories.length === 0 && descriptionTerritories.length === 0 && !effectivePolicy.remoteWithoutTerritoryAllowed) return {
 			workable: true,
 			needsVerify: true,
 			reason: "Remote territory is not stated and this preference mode requires it",
 			facts: {
 				...baseFacts,
 				office_days_min: 0,
-				office_days_max: 0
+				office_days_max: 0,
+				attendance_basis: "REMOTE"
 			}
 		};
 		return {
@@ -1246,23 +1320,24 @@ function evaluateWorkability(location, workplaceType, description, employmentTyp
 			facts: {
 				...baseFacts,
 				office_days_min: 0,
-				office_days_max: 0
+				office_days_max: 0,
+				attendance_basis: "REMOTE"
 			}
 		};
 	}
 	if (wp === "HYBRID" || /\bhybrid\b/i.test(d) || /\bhybrid\b/i.test(loc)) {
-		const hybridDaysMatch = d.match(/\b(\d+)\s*days?\b/i);
-		if (hybridDaysMatch) {
-			const days = Number(hybridDaysMatch[1]);
-			if (days >= effectivePolicy.hardFailOfficeDaysPerWeek) return {
+		const attendance = extractHybridAttendance(d);
+		if (attendance) {
+			if (attendance.contradictory || attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek) return {
 				workable: false,
 				needsVerify: false,
-				reason: "Hybrid arrangement requires 4-5 days in-office",
+				reason: attendance.contradictory ? "Hybrid attendance statements contradict one another" : "Hybrid arrangement requires 4-5 days in-office",
 				reasonCode: "GATE_HIGH_OFFICE_DAYS",
 				facts: {
 					...baseFacts,
-					office_days_min: days,
-					office_days_max: days
+					office_days_min: attendance.office_days_min,
+					office_days_max: attendance.office_days_max,
+					attendance_basis: "EMPLOYER_STATED"
 				}
 			};
 			if (officeDaysAnswerUnknown) return {
@@ -1271,56 +1346,99 @@ function evaluateWorkability(location, workplaceType, description, employmentTyp
 				reason: "Office-day cap answer is unknown; needs manual verification",
 				facts: {
 					...baseFacts,
-					office_days_min: days,
-					office_days_max: days
+					office_days_min: attendance.office_days_min,
+					office_days_max: attendance.office_days_max,
+					attendance_basis: "EMPLOYER_STATED"
 				}
 			};
-			if (days > effectivePolicy.maxOfficeDaysPerWeek) return {
+			if (attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) return {
 				workable: false,
 				needsVerify: false,
 				reason: "Hybrid arrangement exceeds the accepted office-day cap",
 				reasonCode: "GATE_HIGH_OFFICE_DAYS",
 				facts: {
 					...baseFacts,
-					office_days_min: days,
-					office_days_max: days
-				}
-			};
-		}
-		const daysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i);
-		if (!daysMatch && !d.includes("1 day/week") && !d.includes("2 days/week") && !d.includes("3 days/week")) {
-			if (effectivePolicy.hybridWithoutOfficeDaysAllowed) return {
-				workable: true,
-				needsVerify: false,
-				reason: "Hybrid arrangement accepted without an exact office-day count by the active policy",
-				facts: {
-					...baseFacts,
-					office_days_min: null,
-					office_days_max: null
+					office_days_min: attendance.office_days_min,
+					office_days_max: attendance.office_days_max,
+					attendance_basis: "EMPLOYER_STATED"
 				}
 			};
 			return {
 				workable: true,
-				needsVerify: true,
-				reason: "Hybrid arrangement listed without explicit office-day count",
+				needsVerify: false,
 				facts: {
 					...baseFacts,
-					office_days_min: null,
-					office_days_max: null
+					office_days_min: attendance.office_days_min,
+					office_days_max: attendance.office_days_max,
+					attendance_basis: "EMPLOYER_STATED"
 				}
 			};
 		}
-		const days = daysMatch ? parseInt(daysMatch[1], 10) : d.includes("1 day/week") ? 1 : d.includes("2 days/week") ? 2 : 3;
-		return {
+		if (officeDaysAnswerUnknown) return {
 			workable: true,
-			needsVerify: false,
+			needsVerify: true,
+			reason: "Office-day cap answer is unknown; needs manual verification",
 			facts: {
 				...baseFacts,
-				office_days_min: days,
-				office_days_max: days
+				office_days_min: 3,
+				office_days_max: 3,
+				attendance_basis: "POLICY_HYBRID_3_2"
+			}
+		};
+		if (effectivePolicy.hybridWithoutOfficeDaysAllowed) return {
+			workable: true,
+			needsVerify: false,
+			reason: "Hybrid attendance unspecified; applied the 3 onsite / 2 WFH policy assumption",
+			facts: {
+				...baseFacts,
+				office_days_min: 3,
+				office_days_max: 3,
+				attendance_basis: "POLICY_HYBRID_3_2"
+			}
+		};
+		return {
+			workable: true,
+			needsVerify: true,
+			reason: "Hybrid arrangement listed without explicit office-day count",
+			facts: {
+				...baseFacts,
+				office_days_min: null,
+				office_days_max: null,
+				attendance_basis: "UNKNOWN"
 			}
 		};
 	}
+	const unknownWorkModeOutcome = () => {
+		const facts = {
+			...baseFacts,
+			office_days_min: null,
+			office_days_max: null,
+			attendance_basis: "UNKNOWN"
+		};
+		switch (effectivePolicy.unknownWorkModeDisposition) {
+			case "PASS": return {
+				workable: true,
+				needsVerify: false,
+				reason: "Workplace model unspecified; accepted by configured policy",
+				reasonCode: "GATE_UNKNOWN_WORK_MODE",
+				facts
+			};
+			case "NEEDS_VERIFICATION": return {
+				workable: true,
+				needsVerify: true,
+				reason: "Workplace model unspecified; needs manual verification",
+				reasonCode: "GATE_UNKNOWN_WORK_MODE",
+				facts
+			};
+			default: return {
+				workable: false,
+				needsVerify: false,
+				reason: "Workplace model unspecified; rejected by owner policy",
+				reasonCode: "GATE_UNKNOWN_WORK_MODE",
+				facts
+			};
+		}
+	};
 	if ([
 		"office based",
 		"office-based",
@@ -1333,49 +1451,8 @@ function evaluateWorkability(location, workplaceType, description, employmentTyp
 		"partner discussions",
 		"location flexible",
 		"location tbd"
-	].some((c) => d.includes(c) || loc.includes(c))) return {
-		workable: true,
-		needsVerify: true,
-		reason: "Workplace model ambiguous/unspecified; needs manual verification",
-		facts: {
-			...baseFacts,
-			office_days_min: null,
-			office_days_max: null
-		}
-	};
-	if (wp === "UNKNOWN") {
-		if (effectivePolicy.unknownWorkModeDisposition === "PASS") return {
-			workable: true,
-			needsVerify: false,
-			reason: "Workplace model unspecified; accepted by configured policy",
-			facts: {
-				...baseFacts,
-				office_days_min: null,
-				office_days_max: null
-			}
-		};
-		if (effectivePolicy.unknownWorkModeDisposition === "HARD_REJECT") return {
-			workable: false,
-			needsVerify: false,
-			reason: "Workplace model unspecified; rejected by configured policy",
-			reasonCode: "GATE_UNKNOWN_WORK_MODE",
-			facts: {
-				...baseFacts,
-				office_days_min: null,
-				office_days_max: null
-			}
-		};
-		return {
-			workable: true,
-			needsVerify: true,
-			reason: "Workplace model unspecified; needs manual verification",
-			facts: {
-				...baseFacts,
-				office_days_min: null,
-				office_days_max: null
-			}
-		};
-	}
+	].some((c) => d.includes(c) || loc.includes(c))) return unknownWorkModeOutcome();
+	if (wp === "UNKNOWN") return unknownWorkModeOutcome();
 	return {
 		workable: true,
 		needsVerify: false,
@@ -1398,6 +1475,7 @@ function makePass$1(extraFacts) {
 			travel_pct_max: null,
 			employment_type: "UNKNOWN",
 			location_restriction: null,
+			attendance_basis: "UNKNOWN",
 			...extraFacts
 		}
 	};
@@ -1415,6 +1493,7 @@ function makeReject$1(codes, evidence, facts) {
 			travel_pct_max: null,
 			employment_type: "UNKNOWN",
 			location_restriction: null,
+			attendance_basis: "UNKNOWN",
 			...facts
 		}
 	};
@@ -1432,6 +1511,7 @@ function makeVerification$1(codes, evidence, facts) {
 			travel_pct_max: null,
 			employment_type: "UNKNOWN",
 			location_restriction: null,
+			attendance_basis: "UNKNOWN",
 			...facts
 		}
 	};
@@ -1500,16 +1580,24 @@ function findNonNegatedEvidence(d, keywords) {
 }
 function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) {
 	const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
-	const travelAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.travelPercentage) && answerContext?.overrides.travelPercentageCap === null;
+	const travelAnswerProvided = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.travelPercentage);
+	const travelAnswerUnknown = travelAnswerProvided && answerContext?.overrides.travelPercentageCap === null;
 	const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.workAuthorization) && answerContext?.overrides.workAuthorizationRegions.length === 0;
 	const t = (job.title || "").toLowerCase();
 	const c = (job.company_name || "").toLowerCase();
 	const d = extractDescriptionText(job);
 	(job.location || "").toLowerCase();
-	const wp = (job.workplace_type || "").toLowerCase();
+	const wp = (job.workplace_type || "").toUpperCase();
 	(job.employment_type || "").toUpperCase();
 	let pendingVerification = null;
 	for (const pattern of GLOBAL_TITLE_EXCLUSIONS) if (pattern.test(job.title || "")) return makeReject$1(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title exclusion: "${job.title}"`]);
+	if (/\b(?:fde|forward[- ]deployed(?:\s+engineer(?:ing)?)?)\b/i.test(`${t} ${d}`)) {
+		const evidence = findNonNegatedEvidence(d, ["forward deployed", "fde"]);
+		return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], evidence.length > 0 ? evidence : [`FDE role: "${job.title}"`]);
+	}
+	const consultancyTitle = /\b(consult(?:ant|ancy)|advis(?:er|ory))\b/i.test(t);
+	const approvedTechnicalConsultancy = /\b(?:technical|technology|engineering|software|data|ai|ml|digital|transformation)\b/i.test(t) && /\b(?:engineer(?:ing)?|architect(?:ure)?|program(?:me)?|project|product|delivery|transformation)\b/i.test(t);
+	if (consultancyTitle && !approvedTechnicalConsultancy) return makeReject$1(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Generic consultancy/advisory title: "${job.title}"`]);
 	const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d, job.employment_type || "", effectivePolicy, answerContext);
 	if (!workability.workable) {
 		if (workability.reasonCode === "GATE_CONTRACT_ROLE") return makeReject$1(["GATE_CONTRACT_ROLE"], [workability.reason || "Contract role is not eligible"], workability.facts);
@@ -1524,16 +1612,27 @@ function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) 
 		facts: workability.facts
 	};
 	if (effectivePolicy.blacklistedCompanies.some((company) => c === company || c.includes(company))) return makeReject$1(["GATE_BLACKLISTED_COMPANY"], [`Company is configured as blacklisted: "${job.company_name}"`]);
-	const buildingMatch = d.match(/(?:building|research|hands-on|implementation)[^%]{0,50}(\d{1,3})\s*%/i) || d.match(/(\d{1,3})\s*%[^.]{0,50}(?:building|research|hands-on|implementation)/i);
-	if (buildingMatch && Number(buildingMatch[1]) < effectivePolicy.minimumBuildingResearchPct) return makeReject$1(["GATE_BUILDING_RESEARCH_RATIO"], [buildingMatch[0]]);
-	const interactionMatch = [d.match(/(?:interaction|stakeholder|client-facing|client facing)[^%]{0,50}(\d{1,3})\s*%/i), d.match(/(\d{1,3})\s*%[^.]{0,50}(?:interaction|stakeholder|client-facing|client facing)/i)].filter((match) => match !== null).sort((left, right) => Number(right[1]) - Number(left[1]))[0];
-	if (interactionMatch && Number(interactionMatch[1]) > effectivePolicy.maximumInteractionPct) return makeReject$1(["GATE_HIGH_INTERACTION"], [interactionMatch[0]]);
-	const travelMatch = d.match(/(?:travel|travelling|traveling)[^%]{0,35}(\d{1,3})\s*%/i) || d.match(/(\d{1,3})\s*%[^.]{0,35}(?:travel|travelling|traveling)/i);
-	if (travelMatch && travelAnswerUnknown) pendingVerification = {
+	const buildingPctBefore = d.match(/(\d+(?:\.\d+)?)\s*%\s*(?:of\s+)?(?:time\s+)?(?:spent\s+on\s+)?(?:in\s+)?(?:building|research|hands-on|implementation|technical delivery|architecture)/i);
+	const buildingPctAfter = d.match(/(?:building|research|hands-on|implementation|technical delivery|architecture)\s*(?:is|:|accounts\s+for|\()\s*(\d+(?:\.\d+)?)\s*%/i);
+	const buildingPct = buildingPctBefore ? Number(buildingPctBefore[1]) : buildingPctAfter ? Number(buildingPctAfter[1]) : null;
+	const buildingSnippet = buildingPctBefore?.[0] ?? buildingPctAfter?.[0] ?? null;
+	const interactionPctBefore = d.match(/(\d+(?:\.\d+)?)\s*%\s*(?:of\s+)?(?:time\s+)?(?:spent\s+on\s+)?(?:in\s+)?(?:interaction|stakeholder|client-facing|client facing)/i);
+	const interactionPctAfter = d.match(/(?:interaction|stakeholder|client-facing|client facing)\s*(?:is|:|accounts\s+for|\()\s*(\d+(?:\.\d+)?)\s*%/i);
+	const interactionPct = interactionPctBefore ? Number(interactionPctBefore[1]) : interactionPctAfter ? Number(interactionPctAfter[1]) : null;
+	const interactionSnippet = interactionPctBefore?.[0] ?? interactionPctAfter?.[0] ?? null;
+	const isBuildingFailed = buildingPct !== null && buildingPct < effectivePolicy.minimumBuildingResearchPct;
+	const isInteractionFailed = interactionPct !== null && interactionPct > effectivePolicy.maximumInteractionPct;
+	if (isBuildingFailed && isInteractionFailed) return makeReject$1(["GATE_BUILDING_RESEARCH_RATIO", "GATE_HIGH_INTERACTION"], [buildingSnippet ?? `${buildingPct}% building`, interactionSnippet ?? `${interactionPct}% interaction`]);
+	if (isBuildingFailed) return makeReject$1(["GATE_BUILDING_RESEARCH_RATIO"], [buildingSnippet ?? `${buildingPct}% building`]);
+	if (isInteractionFailed) return makeReject$1(["GATE_HIGH_INTERACTION"], [interactionSnippet ?? `${interactionPct}% interaction`]);
+	const travelRequirement = extractTravelRequirement(d);
+	const frequentTravelEvidence = findNonNegatedEvidence(d, ["frequent travel", "travel extensively"]);
+	if (travelRequirement && travelAnswerUnknown) pendingVerification = {
 		reason: "Travel cap answer is unknown; needs manual verification",
-		facts: { travel_pct_max: Number(travelMatch[1]) }
+		facts: { travel_pct_max: travelRequirement.max_pct }
 	};
-	else if (travelMatch && Number(travelMatch[1]) > effectivePolicy.maxTravelPct) return makeReject$1(["GATE_LIFESTYLE_INCOMPATIBLE"], [travelMatch[0]], { travel_pct_max: Number(travelMatch[1]) });
+	else if (travelRequirement && travelRequirement.max_pct > effectivePolicy.maxTravelPct) return makeReject$1(["GATE_LIFESTYLE_INCOMPATIBLE"], [travelRequirement.evidence], { travel_pct_max: travelRequirement.max_pct });
+	else if (frequentTravelEvidence.length > 0 && !effectivePolicy.frequentTravelAllowed && !travelAnswerProvided) return makeReject$1(["GATE_LIFESTYLE_INCOMPATIBLE"], frequentTravelEvidence, { travel_pct_max: null });
 	if (/\b(human resources|hr manager|hr generalist|hr business partner|hrbp|talent acquisition|recruiter|recruitment|people ops|people operations|people partner)\b/i.test(t)) return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: HR / Talent role "${job.title}"`]);
 	if (/\b(executive assistant|personal assistant|office manager|administrative assistant|admin assistant|receptionist|workplace coordinator|workplace manager|facilities manager)\b/i.test(t)) return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Administrative / Office Management "${job.title}"`]);
 	if (/\b(attorney|associate attorney|m&a attorney|counsel|corporate counsel|legal counsel|general counsel|lawyer|paralegal|legal assistant)\b/i.test(t) && !techCheck.isTechnical) return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Legal Practice / Counsel "${job.title}"`]);
@@ -1811,7 +1910,41 @@ function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) 
 		"digital transformation",
 		"data transformation",
 		"technical program",
-		"technical project"
+		"technical project",
+		"cloud",
+		"cloud infrastructure",
+		"cloud architecture",
+		"solutions architect",
+		"enterprise architect",
+		"cloud architect",
+		"microservices",
+		"software architecture",
+		"technical delivery",
+		"techno-functional",
+		"devops",
+		"platform engineering",
+		"engineering delivery",
+		"systems architecture",
+		"hands-on architecture",
+		"technical discovery",
+		"hands-on engineering",
+		"technical transformation",
+		"engineering transformation",
+		"devops modernization",
+		"cloud migration",
+		"technical deployment",
+		"technical client deployment",
+		"systems engineering",
+		"systems engineer",
+		"data engineer",
+		"data scientist",
+		"data platform",
+		"lakehouse",
+		"ai engineer",
+		"ml engineer",
+		"machine learning engineer",
+		"high-throughput",
+		"core infrastructure"
 	].some((kw) => t.includes(kw) || d.includes(kw)))) {
 		if (pendingVerification) return makeVerification$1(["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"], [pendingVerification.reason], pendingVerification.facts);
 		return makeReject$1(["GATE_NOT_AI_DATA"], ["Axis 2 Failed: No signal found for target domains (AI/Data, RegTech, Bio/Pharma, Quant/FinTech)"]);
@@ -3203,6 +3336,550 @@ async function runRequirementsExtraction(clientOrPool, options = {}) {
 	return summary;
 }
 //#endregion
+//#region src/contracts/sourcePlugin.ts
+var SourceKeySchema = zod.z.string().regex(/^[a-z][a-z0-9_]{2,63}$/);
+var SourcePluginKindSchema = zod.z.enum([
+	"ats",
+	"json_api",
+	"rss",
+	"atom",
+	"schema_org",
+	"email_alert",
+	"manual_import"
+]);
+var SourcePluginStatusSchema = zod.z.enum([
+	"active",
+	"experimental",
+	"disabled",
+	"deprecated"
+]);
+var SourcePluginCapabilitiesSchema = zod.z.object({
+	discovery: zod.z.boolean(),
+	pagination: zod.z.boolean(),
+	incremental: zod.z.boolean(),
+	location_filter: zod.z.boolean(),
+	work_mode_evidence: zod.z.boolean()
+});
+var SourcePluginComplianceSchema = zod.z.object({
+	access_basis: zod.z.enum([
+		"official_api",
+		"public_feed",
+		"user_supplied",
+		"manual_import",
+		"documented_permission"
+	]),
+	terms_url: zod.z.string().url(),
+	license: zod.z.string().nullable().optional(),
+	attribution_required: zod.z.boolean(),
+	attribution_text: zod.z.string().nullable().optional(),
+	authenticated_scraping: zod.z.literal(false),
+	reviewed_at: zod.z.string().optional()
+});
+var SourcePluginScheduleSchema = zod.z.object({
+	enabled: zod.z.boolean(),
+	interval_minutes: zod.z.number().int().min(15).max(10080),
+	jitter_seconds: zod.z.number().int().min(0).max(3600).default(0)
+});
+var SourcePluginRetrySchema = zod.z.object({
+	max_attempts: zod.z.number().int().min(0).max(10),
+	base_delay_ms: zod.z.number().int().min(100),
+	max_delay_ms: zod.z.number().int().min(100)
+});
+var SourcePluginRateLimitSchema = zod.z.object({
+	requests_per_minute: zod.z.number().int().min(1),
+	items_per_run: zod.z.number().int().min(1).nullable()
+});
+var SourcePluginPaginationSchema = zod.z.object({
+	strategy: zod.z.enum([
+		"none",
+		"page",
+		"cursor",
+		"link_header",
+		"updated_since"
+	]),
+	page_parameter: zod.z.string().nullable().optional(),
+	cursor_json_path: zod.z.string().nullable().optional(),
+	next_link_json_path: zod.z.string().nullable().optional(),
+	checkpoint_field: zod.z.string().nullable().optional()
+});
+var SourcePluginQuerySchema = zod.z.object({
+	keywords: zod.z.array(zod.z.string()).optional(),
+	locations: zod.z.array(zod.z.string()).optional(),
+	work_modes: zod.z.array(zod.z.enum([
+		"REMOTE",
+		"HYBRID",
+		"ONSITE",
+		"UNKNOWN"
+	])).optional(),
+	lane_keys: zod.z.array(zod.z.string()).optional()
+}).optional();
+var SourcePluginRequestSchema = zod.z.object({
+	endpoint: zod.z.string().url(),
+	timeout_ms: zod.z.number().int().min(1e3).max(12e4),
+	headers_from_secret_keys: zod.z.array(zod.z.string()).default([]).optional(),
+	retry: SourcePluginRetrySchema,
+	rate_limit: SourcePluginRateLimitSchema,
+	pagination: SourcePluginPaginationSchema,
+	query: SourcePluginQuerySchema
+});
+var SourcePluginMappingSchema = zod.z.object({
+	external_id: zod.z.string(),
+	title: zod.z.string(),
+	company: zod.z.string(),
+	description: zod.z.string(),
+	url: zod.z.string(),
+	location: zod.z.string(),
+	work_mode: zod.z.string(),
+	employment_type: zod.z.string(),
+	posted_at: zod.z.string().nullable().optional(),
+	updated_at: zod.z.string().nullable().optional()
+});
+zod.z.object({
+	schema_version: zod.z.literal(SCHEMA_VERSION),
+	source_key: SourceKeySchema,
+	display_name: zod.z.string().min(1).max(100),
+	kind: SourcePluginKindSchema,
+	status: SourcePluginStatusSchema,
+	capabilities: SourcePluginCapabilitiesSchema,
+	compliance: SourcePluginComplianceSchema,
+	schedule: SourcePluginScheduleSchema,
+	request: SourcePluginRequestSchema,
+	mapping: SourcePluginMappingSchema
+});
+//#endregion
+//#region src/contracts/index.ts
+var SourceNameSchema = zod.z.enum([
+	"GMAIL_ALERT",
+	"GREENHOUSE",
+	"LEVER",
+	"ASHBY",
+	"HIMALAYAS",
+	"JOBICY",
+	"REMOTIVE",
+	"WE_WORK_REMOTELY",
+	"STARTUP_JOBS",
+	"MANUAL_IMPORT",
+	"MANUAL_STREAMLIT",
+	"LINKEDIN"
+]);
+zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
+	source_type: SourceNameSchema,
+	source_id: zod.z.string().min(1),
+	source_run_id: zod.z.string().uuid(),
+	observed_at: zod.z.string().datetime(),
+	raw_payload_hash: zod.z.string().min(1),
+	raw_payload: zod.z.string().min(1),
+	metadata: zod.z.record(zod.z.unknown()).default({})
+});
+zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
+	source_external_id: zod.z.string().min(1).optional(),
+	company_name: zod.z.string().min(1),
+	title: zod.z.string().min(1),
+	location_raw: zod.z.string().default("Unknown"),
+	workplace_type_raw: zod.z.string().default("UNKNOWN"),
+	employment_type_raw: zod.z.string().default("UNKNOWN"),
+	compensation_raw: zod.z.string().default("UNKNOWN"),
+	canonical_apply_url: zod.z.string().url().or(zod.z.string().min(1)),
+	description_raw: zod.z.string().min(1),
+	published_at: zod.z.string().datetime().optional(),
+	feed_delay_hours: zod.z.number().nonnegative().optional(),
+	source_attribution: zod.z.string().min(1).optional(),
+	raw_payload: zod.z.unknown().optional()
+});
+zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
+	id: zod.z.string().uuid(),
+	workspace_id: zod.z.string().uuid(),
+	source_type: SourceNameSchema,
+	source_id: zod.z.string().min(1),
+	source_run_id: zod.z.string().uuid(),
+	source_plugin_key: zod.z.string().min(1).nullable().default(null),
+	source_plugin_revision_id: zod.z.string().uuid().nullable().default(null),
+	source_external_id: zod.z.string().min(1).nullable().default(null),
+	source_url: zod.z.string().min(1).nullable().default(null),
+	observed_at: zod.z.string().datetime(),
+	retrieved_at: zod.z.string().datetime(),
+	company_name_raw: zod.z.string().min(1),
+	title_raw: zod.z.string().min(1),
+	location_raw: zod.z.string().default("Unknown"),
+	workplace_type_raw: zod.z.string().default("UNKNOWN"),
+	employment_type_raw: zod.z.string().default("UNKNOWN"),
+	compensation_raw: zod.z.string().default("UNKNOWN"),
+	canonical_apply_url: zod.z.string().min(1),
+	source_lane: zod.z.string().min(1).nullable().default(null),
+	search_plan_version: zod.z.string().min(1).default("1.0"),
+	description_text: zod.z.string().min(1),
+	raw_payload: zod.z.unknown().nullable().default(null),
+	raw_payload_hash: zod.z.string().min(1),
+	processing_status: zod.z.enum([
+		"PENDING",
+		"PROCESSED",
+		"PARSE_FAILED",
+		"FETCH_FAILED",
+		"DESCRIPTION_INCOMPLETE"
+	]).default("PENDING"),
+	error_history: zod.z.array(zod.z.record(zod.z.unknown())).default([]),
+	job_version_id: zod.z.string().uuid().nullable().default(null)
+});
+zod.z.object({
+	schema_version: SchemaVersionSchema,
+	workspace_id: zod.z.string().uuid(),
+	source_run_id: zod.z.string().uuid(),
+	source_type: SourceNameSchema,
+	source_plugin_key: zod.z.string().min(1),
+	source_plugin_revision_id: zod.z.string().uuid().nullable(),
+	source_external_id: zod.z.string().min(1).nullable(),
+	source_url: zod.z.string().min(1).nullable(),
+	retrieved_at: zod.z.string().datetime(),
+	company_name_raw: zod.z.string().min(1),
+	title_raw: zod.z.string().min(1),
+	description_text: zod.z.string().min(1),
+	location_raw: zod.z.string().nullable(),
+	workplace_type_raw: zod.z.string().nullable(),
+	employment_type_raw: zod.z.string().nullable(),
+	compensation_raw: zod.z.string().nullable(),
+	canonical_apply_url: zod.z.string().min(1).nullable(),
+	source_lane: zod.z.string().min(1).nullable(),
+	search_plan_version: zod.z.string().min(1),
+	raw_payload: zod.z.unknown(),
+	raw_payload_hash: zod.z.string().min(1)
+});
+zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().min(1),
+	company_name: zod.z.string().min(1),
+	normalized_title: zod.z.string().min(1),
+	canonical_url: zod.z.string().min(1),
+	location_summary: zod.z.string().default("Unknown"),
+	workplace_type: zod.z.enum([
+		"REMOTE",
+		"HYBRID",
+		"ONSITE",
+		"UNKNOWN"
+	]).default("UNKNOWN"),
+	employment_type: zod.z.string().default("UNKNOWN"),
+	description_text: zod.z.string().min(1),
+	version_number: zod.z.number().int().positive().default(1),
+	observed_at: zod.z.string().datetime(),
+	processing_state: zod.z.enum([
+		"RAW_STAGED",
+		"HARD_REJECTED",
+		"MANUALLY_REMOVED",
+		"NEEDS_VERIFICATION",
+		"PREQUALIFIED",
+		"ROUTING_DEFERRED",
+		"LANE_ROUTED",
+		"MATCHED",
+		"SEMANTIC_SHORTLISTED",
+		"QUEUED_FOR_AI",
+		"DEFERRED_BUDGET",
+		"EVALUATING",
+		"AI_EVALUATED",
+		"EVALUATED",
+		"RETRY_WAIT",
+		"NEEDS_MANUAL_REVIEW",
+		"REJECTED_AFTER_EVALUATION"
+	]).default("RAW_STAGED"),
+	processing_status: zod.z.enum([
+		"RAW_STAGED",
+		"HARD_REJECTED",
+		"MANUALLY_REMOVED",
+		"NEEDS_VERIFICATION",
+		"PREQUALIFIED",
+		"ROUTING_DEFERRED",
+		"LANE_ROUTED",
+		"MATCHED",
+		"SEMANTIC_SHORTLISTED",
+		"QUEUED_FOR_AI",
+		"DEFERRED_BUDGET",
+		"EVALUATING",
+		"AI_EVALUATED",
+		"EVALUATED",
+		"RETRY_WAIT",
+		"NEEDS_MANUAL_REVIEW",
+		"REJECTED_AFTER_EVALUATION"
+	]).default("RAW_STAGED"),
+	recommendation_eligibility: zod.z.enum([
+		"ELIGIBLE",
+		"VERIFY",
+		"INELIGIBLE"
+	]).nullable().default(null),
+	recommendation_outcome: zod.z.enum([
+		"PRIORITY",
+		"REVIEW",
+		"TRACK",
+		"SKIP"
+	]).nullable().default(null),
+	recommendation_requirement_score: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_coverage_score: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_evidence_completeness: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_decided_at: zod.z.string().datetime().nullable().default(null)
+});
+/**
+* 5. Workability Facts
+* Persisted deterministic workability evidence shared by gate, queue, and UI.
+*/
+var WorkabilityFactsSchema = zod.z.object({
+	office_days_min: zod.z.number().int().min(0).max(7).nullable(),
+	office_days_max: zod.z.number().int().min(0).max(7).nullable(),
+	travel_pct_max: zod.z.number().min(0).max(100).nullable(),
+	employment_type: zod.z.enum([
+		"PERMANENT",
+		"CONTRACT",
+		"UNKNOWN"
+	]),
+	location_restriction: zod.z.string().nullable()
+});
+/** Strict persistence variant: schema_version must be supplied by the writer. */
+var PersistedGateDecisionSchema = zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().min(1),
+	pipeline_run_id: zod.z.string().uuid(),
+	gate_version: zod.z.string().min(1),
+	status: zod.z.enum([
+		"PASS",
+		"NEEDS_VERIFICATION",
+		"HARD_REJECT"
+	]),
+	rejection_codes: zod.z.array(zod.z.string()).default([]),
+	evidence_quotes: zod.z.array(zod.z.string()).default([]),
+	workability_facts: WorkabilityFactsSchema,
+	evaluated_at: zod.z.string().datetime()
+}).extend({ schema_version: SchemaVersionSchema });
+/**
+* 6. Lane Decision
+* Multi-lane semantic classification outcome.
+*/
+var LaneKeySchema = zod.z.string().regex(/^[A-Z][A-Z0-9_]{2,63}$/);
+/** Strict persistence variant: schema_version must be supplied by the writer. */
+var PersistedLaneDecisionSchema = zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().min(1),
+	pipeline_run_id: zod.z.string().uuid(),
+	model_version: zod.z.string().min(1),
+	primary_lane: LaneKeySchema.nullable(),
+	secondary_lanes: zod.z.array(LaneKeySchema).default([]),
+	lane_confidence: zod.z.enum([
+		"High",
+		"Medium",
+		"Low",
+		"None"
+	]),
+	semantic_scores: zod.z.record(LaneKeySchema, zod.z.number()).default({}),
+	lane_evidence: zod.z.array(zod.z.string()).default([]),
+	evaluated_at: zod.z.string().datetime()
+}).extend({ schema_version: SchemaVersionSchema });
+/** Strict persistence variant: schema_version must be supplied by the writer. */
+var PersistedEvaluationQueueItemSchema = zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
+	id: zod.z.string().uuid(),
+	workspace_id: zod.z.string().uuid(),
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().min(1),
+	profile_version_id: zod.z.string().uuid().nullable().default(null),
+	match_run_id: zod.z.string().uuid().nullable().default(null),
+	deterministic_decision_id: zod.z.string().uuid().nullable().default(null),
+	job_content_hash: zod.z.string().min(1).nullable().default(null),
+	context_fingerprint: zod.z.string().min(1).nullable().default(null),
+	lane: LaneKeySchema,
+	priority_score: zod.z.number(),
+	status: zod.z.enum([
+		"PENDING",
+		"EVALUATING",
+		"COMPLETED",
+		"RETRY_WAIT",
+		"FAILED",
+		"NEEDS_MANUAL_REVIEW"
+	]).default("PENDING"),
+	budget_run_id: zod.z.string().uuid().nullable().default(null),
+	available_at: zod.z.string().datetime().nullable().default(null),
+	lease_id: zod.z.string().uuid().nullable().default(null),
+	lease_expires_at: zod.z.string().datetime().nullable().default(null),
+	attempt_count: zod.z.number().int().nonnegative().default(0),
+	max_attempts: zod.z.number().int().positive().default(3),
+	last_error: zod.z.string().nullable().default(null),
+	enqueued_at: zod.z.string().datetime(),
+	updated_at: zod.z.string().datetime()
+}).extend({ schema_version: SchemaVersionSchema });
+zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().min(1),
+	pipeline_run_id: zod.z.string().uuid(),
+	provider: zod.z.enum([
+		"gemini",
+		"openai",
+		"local",
+		"mock"
+	]),
+	model: zod.z.string().min(1),
+	attempt: zod.z.number().int().positive().default(1),
+	is_fallback: zod.z.boolean().default(false),
+	degraded_state: zod.z.boolean().default(false),
+	evaluation_summary: zod.z.string().min(1),
+	primary_lane: LaneKeySchema.nullable(),
+	secondary_lanes: zod.z.array(LaneKeySchema).default([]),
+	lane_confidence: zod.z.enum([
+		"High",
+		"Medium",
+		"Low"
+	]),
+	lane_evidence: zod.z.string().default(""),
+	nd_score: zod.z.number().int().min(0).max(100),
+	nd_friendly_score: zod.z.number().int().min(0).max(100),
+	politics_stress_score: zod.z.number().int().min(0).max(100),
+	sensory_overload_index: zod.z.number().int().min(0).max(100),
+	building_research_ratio: zod.z.number().int().min(0).max(100),
+	interaction_load: zod.z.number().int().min(0).max(100),
+	rejection_codes: zod.z.array(zod.z.string()).default([]),
+	strategic_value: zod.z.string().default(""),
+	recommended_cv_version: zod.z.string().default("None"),
+	next_action: zod.z.enum([
+		"PRIORITY_APPLY",
+		"APPLY_AFTER_VERIFICATION",
+		"LOW_STRATEGIC_VALUE",
+		"REJECTED"
+	]),
+	evaluated_at: zod.z.string().datetime()
+});
+var ApplicationStatusSchema = zod.z.enum([
+	"INTENT",
+	"READY_TO_APPLY",
+	"SUBMITTED",
+	"FOLLOW_UP",
+	"INTERVIEW",
+	"OFFER",
+	"REJECTED",
+	"WITHDRAWN",
+	"CLOSED"
+]);
+zod.z.object({
+	application_record_id: zod.z.string().uuid(),
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().uuid(),
+	title: zod.z.string().min(1),
+	company: zod.z.string().min(1),
+	canonical_url: zod.z.string().min(1).nullable().default(null),
+	processing_state: zod.z.string().nullable().default(null),
+	processing_status: zod.z.string().nullable().default(null),
+	recommendation_eligibility: zod.z.enum([
+		"ELIGIBLE",
+		"VERIFY",
+		"INELIGIBLE"
+	]).nullable().default(null),
+	recommendation_outcome: zod.z.enum([
+		"PRIORITY",
+		"REVIEW",
+		"TRACK",
+		"SKIP"
+	]).nullable().default(null),
+	primary_lane: LaneKeySchema.nullable().default(null),
+	secondary_lanes: zod.z.array(LaneKeySchema).nullable().default(null),
+	application_status: ApplicationStatusSchema,
+	submission_url: zod.z.string().nullable().default(null),
+	cv_document_run_id: zod.z.string().uuid().nullable().default(null),
+	cover_letter_document_run_id: zod.z.string().uuid().nullable().default(null),
+	notes: zod.z.string().nullable().default(null),
+	handoff_payload: zod.z.record(zod.z.unknown()).default({}),
+	target_submit_at: zod.z.string().datetime().nullable().default(null),
+	submitted_at: zod.z.string().datetime().nullable().default(null),
+	follow_up_at: zod.z.string().datetime().nullable().default(null),
+	last_action_at: zod.z.string().datetime(),
+	created_at: zod.z.string().datetime(),
+	updated_at: zod.z.string().datetime()
+});
+zod.z.object({
+	id: zod.z.string().uuid(),
+	application_record_id: zod.z.string().uuid(),
+	event_type: zod.z.enum([
+		"CREATED",
+		"STATUS_CHANGED",
+		"DOCUMENT_LINKED",
+		"NOTE_ADDED",
+		"SUBMISSION_HANDOFF",
+		"FOLLOW_UP_SCHEDULED"
+	]),
+	from_status: ApplicationStatusSchema.nullable().default(null),
+	to_status: ApplicationStatusSchema.nullable().default(null),
+	note: zod.z.string().nullable().default(null),
+	event_payload: zod.z.record(zod.z.unknown()).default({}),
+	created_at: zod.z.string().datetime()
+});
+zod.z.object({
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().min(1),
+	title: zod.z.string().min(1),
+	company: zod.z.string().min(1),
+	canonical_url: zod.z.string().min(1),
+	source: SourceNameSchema.default("GMAIL_ALERT"),
+	location: zod.z.string().default("Unknown"),
+	workplace_type: zod.z.string().default("UNKNOWN"),
+	employment_type: zod.z.string().default("UNKNOWN"),
+	description: zod.z.string().nullable().default(null),
+	gate_status: zod.z.enum([
+		"PASS",
+		"NEEDS_VERIFICATION",
+		"HARD_REJECT"
+	]),
+	rejection_codes: zod.z.array(zod.z.string()).nullable().default(null),
+	gate_evidence_quotes: zod.z.array(zod.z.string()).nullable().default(null),
+	primary_lane: LaneKeySchema.nullable(),
+	secondary_lanes: zod.z.array(LaneKeySchema).default([]),
+	lane_confidence: zod.z.enum([
+		"High",
+		"Medium",
+		"Low",
+		"None"
+	]).default("None"),
+	priority_score: zod.z.number().nullable().default(null),
+	deterministic_match_score: zod.z.number().nullable().default(null),
+	deterministic_match_coverage: zod.z.number().nullable().default(null),
+	processing_state: zod.z.string(),
+	processing_status: zod.z.string(),
+	recommendation_eligibility: zod.z.enum([
+		"ELIGIBLE",
+		"VERIFY",
+		"INELIGIBLE"
+	]).nullable().default(null),
+	recommendation_outcome: zod.z.enum([
+		"PRIORITY",
+		"REVIEW",
+		"TRACK",
+		"SKIP"
+	]).nullable().default(null),
+	recommendation_requirement_score: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_coverage_score: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_evidence_completeness: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_decided_at: zod.z.string().datetime().nullable().default(null),
+	nd_friendly_score: zod.z.number().int().min(0).max(100).nullable().default(null),
+	politics_stress_score: zod.z.number().int().min(0).max(100).nullable().default(null),
+	sensory_overload_index: zod.z.number().int().min(0).max(100).nullable().default(null),
+	next_action: zod.z.string().nullable().default(null),
+	strategic_value: zod.z.string().nullable().default(null),
+	recommended_cv_version: zod.z.string().nullable().default(null),
+	evaluation_summary: zod.z.string().nullable().default(null),
+	eval_provider: zod.z.string().nullable().default(null),
+	eval_is_fallback: zod.z.boolean().nullable().default(null),
+	version_mismatch: zod.z.boolean().default(false),
+	observed_at: zod.z.string().datetime(),
+	evaluated_at: zod.z.string().datetime().nullable().default(null),
+	lane_matches: zod.z.array(zod.z.unknown()).nullable().default(null),
+	workability_facts: zod.z.record(zod.z.unknown()).nullable().default(null),
+	queue_status: zod.z.string().nullable().default(null),
+	latest_match_run_id: zod.z.string().uuid().nullable().default(null),
+	cv_document_run_id: zod.z.string().uuid().nullable().default(null),
+	cover_letter_document_run_id: zod.z.string().uuid().nullable().default(null),
+	document_ready: zod.z.boolean().default(false),
+	current_artifact_status: zod.z.string().default("CURRENTNESS_UNKNOWN"),
+	current_artifact_reason: zod.z.string().nullable().default(null),
+	blocked_task_count: zod.z.number().int().min(0).default(0)
+});
+//#endregion
 //#region src/pipeline/requirementComparators.ts
 function calculateProfessionalExperienceYears(engagements, asOf = /* @__PURE__ */ new Date()) {
 	const intervals = engagements.filter((engagement) => engagement.experience_class === "PROFESSIONAL_PRODUCTION").map((engagement) => {
@@ -3309,6 +3986,34 @@ function factYears(fact) {
 	if (months !== null) return months / 12;
 	const match = textForFact(fact).match(/(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\+?\s*years?/i);
 	return match ? parseNumberWord(match[1]) : null;
+}
+function experienceInterval(fact) {
+	const structured = fact.structured_value;
+	if (!structured) return null;
+	const startValue = structured.experience_start_date ?? structured.engagement_start_date ?? structured.start_date;
+	const endValue = structured.experience_end_date ?? structured.engagement_end_date ?? structured.end_date;
+	const start = new Date(String(startValue ?? "")).getTime();
+	const end = endValue === null || endValue === void 0 || structured.is_current === true || structured.engagement_is_current === true ? Date.now() : new Date(String(endValue)).getTime();
+	return Number.isFinite(start) && Number.isFinite(end) && end > start ? {
+		start,
+		end
+	} : null;
+}
+function unionExperienceYears(intervals) {
+	if (intervals.length === 0) return 0;
+	const ordered = [...intervals].sort((left, right) => left.start - right.start || left.end - right.end);
+	let coveredMilliseconds = 0;
+	let current = ordered[0];
+	for (const interval of ordered.slice(1)) if (interval.start <= current.end) current = {
+		start: current.start,
+		end: Math.max(current.end, interval.end)
+	};
+	else {
+		coveredMilliseconds += current.end - current.start;
+		current = interval;
+	}
+	coveredMilliseconds += current.end - current.start;
+	return coveredMilliseconds / 315576e5;
 }
 function normalizedScope(value) {
 	return normalizeComparableText(value).replace(/\b(roles?|positions?|jobs?|experience|years?|of|in|the)\b/g, " ").replace(/\s+/g, " ").trim();
@@ -3479,6 +4184,20 @@ function detectDomainFamilies(scope) {
 	for (const { domain, regex } of DOMAIN_FAMILY_PATTERNS) if (regex.test(scope)) families.add(domain);
 	return families;
 }
+/**
+* Keep role shape separate from domain family. Architecture, hands-on
+* engineering, research, and technical delivery are transferable but are not
+* interchangeable for a scoped employer requirement.
+*/
+function detectRoleFamilies(scope) {
+	const normalized = scope.toLowerCase();
+	const families = /* @__PURE__ */ new Set();
+	if (/\b(architect(?:ure)?|systems? design)\b/i.test(normalized)) families.add("architecture");
+	if (/\b(engineer(?:ing)?|developer|development|coding|implementation|building|hands[- ]on)\b/i.test(normalized)) families.add("engineering");
+	if (/\b(research|scientist|scientific)\b/i.test(normalized)) families.add("research");
+	if (/\b(program(?:me)?|project|product|delivery|transformation|portfolio)\b/i.test(normalized)) families.add("delivery");
+	return families;
+}
 function scopesOverlap(requiredScope, factScope) {
 	const reqLower = requiredScope.toLowerCase().trim();
 	const factLower = factScope.toLowerCase().trim();
@@ -3486,9 +4205,14 @@ function scopesOverlap(requiredScope, factScope) {
 	const reqDomains = detectDomainFamilies(reqLower);
 	const factDomains = detectDomainFamilies(factLower);
 	if (reqDomains.size > 0) {
-		for (const d of reqDomains) if (factDomains.has(d)) return true;
-		return false;
+		if (![...reqDomains].some((domain) => factDomains.has(domain))) return false;
 	}
+	const requiredRoles = detectRoleFamilies(reqLower);
+	const factRoles = detectRoleFamilies(factLower);
+	if (requiredRoles.size > 0 && factRoles.size > 0) {
+		if (![...requiredRoles].some((role) => factRoles.has(role))) return false;
+	}
+	if (reqDomains.size > 0) return true;
 	const requiredTokens = tokenizeScope(reqLower);
 	const factTokens = tokenizeScope(factLower);
 	if (requiredTokens.size === 0) return true;
@@ -3572,6 +4296,17 @@ function factCredentialIdentifiers(fact) {
 	const structured = fact.structured_value || {};
 	return [fact.statement, ...structuredStrings(structured)].map(normalizeComparableText).filter(Boolean);
 }
+function factExplicitlyLacksCredential(fact, credential) {
+	const structured = fact.structured_value || {};
+	if ([
+		"has_credential",
+		"credential_present",
+		"possesses_credential",
+		"verified"
+	].some((key) => structured[key] === false)) return true;
+	const text = normalizeComparableText(`${fact.statement} ${JSON.stringify(structured)}`);
+	return new RegExp(`\\b(no|not|without|missing|lacks?)\\b[^.]{0,80}\\b${credential.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\b`, "i").test(text) || new RegExp(`\\b${credential.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\b[^.]{0,80}\\b(no|not|without|missing|lacks?)\\b`, "i").test(text);
+}
 function extractJurisdictions(value) {
 	const normalized = normalizeComparableText(value);
 	return [
@@ -3617,7 +4352,8 @@ function compareStructuredRequirement(requirement, facts) {
 			return {
 				fact,
 				years: factYears(fact),
-				scopes
+				scopes,
+				interval: experienceInterval(fact)
 			};
 		}).filter((candidate) => candidate.years !== null);
 		if (candidates.length === 0) return {
@@ -3631,15 +4367,27 @@ function compareStructuredRequirement(requirement, facts) {
 			rationale: `No structured profile experience duration is available for the required scope: ${requiredScope}.`,
 			fact: null
 		};
-		const best = [...scopedCandidates].sort((a, b) => b.years - a.years)[0];
-		return best.years >= required ? {
+		const hasScopedEvidence = scopedCandidates.some((candidate) => candidate.scopes.some((scope) => {
+			const normalized = scope.replace(/\s+/g, " ").trim();
+			return normalized.length > 0 && !/\b(overall|professional|production)\b/i.test(normalized);
+		}) || candidate.interval !== null);
+		const usableCandidates = !requiredScope && hasScopedEvidence ? scopedCandidates.filter((candidate) => !candidate.scopes.some((scope) => /\b(overall|professional|production)\b/i.test(scope))) : scopedCandidates;
+		const totalYears = unionExperienceYears(usableCandidates.flatMap((candidate) => candidate.interval ? [candidate.interval] : [])) + usableCandidates.filter((candidate) => candidate.interval === null).reduce((sum, candidate) => sum + candidate.years, 0);
+		const representative = [...usableCandidates].sort((a, b) => b.years - a.years)[0] || [...scopedCandidates].sort((a, b) => b.years - a.years)[0];
+		if (!representative) return {
+			status: "UNKNOWN",
+			rationale: `No structured profile experience duration is available for the required scope: ${requiredScope || "professional experience"}.`,
+			fact: null
+		};
+		const scopeSuffix = requiredScope ? ` for ${requiredScope}` : "";
+		return totalYears >= required ? {
 			status: "MATCH",
-			rationale: `Profile experience ${best.years.toFixed(1)} years meets the ${required}-year requirement${requiredScope ? ` for ${requiredScope}` : ""}.`,
-			fact: best.fact
+			rationale: `Combined profile experience ${totalYears.toFixed(1)} years meets the ${required}-year requirement${scopeSuffix}.`,
+			fact: representative.fact
 		} : {
 			status: "MISMATCH",
-			rationale: `Profile experience ${best.years.toFixed(1)} years is below the ${required}-year requirement${requiredScope ? ` for ${requiredScope}` : ""}.`,
-			fact: best.fact
+			rationale: `Combined profile experience ${totalYears.toFixed(1)} years is below the ${required}-year requirement${scopeSuffix}.`,
+			fact: representative.fact
 		};
 	}
 	if (requirement.requirement_type === "DEGREE") {
@@ -3686,6 +4434,12 @@ function compareStructuredRequirement(requirement, facts) {
 			status: "UNKNOWN",
 			rationale: "Credential name is not explicit.",
 			fact: null
+		};
+		const explicitAbsence = facts.find((fact) => factExplicitlyLacksCredential(fact, specificCredential));
+		if (explicitAbsence) return {
+			status: "MISMATCH",
+			rationale: "Profile evidence explicitly confirms that the required credential is not held.",
+			fact: explicitAbsence
 		};
 		const matching = facts.find((fact) => factCredentialIdentifiers(fact).some((value) => value.includes(specificCredential)));
 		if (matching) return {
@@ -3814,8 +4568,7 @@ function detectOfficeDays(req) {
 		const raw = structured[key];
 		if (typeof raw === "number" && Number.isFinite(raw)) return raw;
 	}
-	const m = quoteOrText(req).match(/([1-5])\s*days?/i);
-	return m ? Number(m[1]) : null;
+	return extractHybridAttendance(quoteOrText(req))?.office_days_max ?? null;
 }
 function detectTravelPct(req) {
 	const structured = req.structured_value || {};
@@ -3828,8 +4581,7 @@ function detectTravelPct(req) {
 		const raw = structured[key];
 		if (typeof raw === "number" && Number.isFinite(raw)) return raw;
 	}
-	const m = quoteOrText(req).match(/(\d{1,2})%/);
-	return m ? Number(m[1]) : null;
+	return extractTravelRequirement(quoteOrText(req))?.max_pct ?? null;
 }
 function structuredNumber(req, keys) {
 	for (const key of keys) {
@@ -3846,6 +4598,7 @@ function applyPersistedRequirementGates(job, deterministicRequirements, policy =
 	const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.workAuthorization) && answerContext?.overrides.workAuthorizationRegions.length === 0;
 	const title = job.title || "";
 	let pendingVerification = null;
+	let inferredWorkabilityFacts = {};
 	for (const pattern of GLOBAL_TITLE_EXCLUSIONS) if (pattern.test(title)) return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title exclusion: "${title}"`]);
 	const functionRequirements = deterministicRequirements.filter((r) => r.requirement_type === "FUNCTION");
 	const domainRequirements = deterministicRequirements.filter((r) => r.requirement_type === "DOMAIN");
@@ -3965,7 +4718,30 @@ function applyPersistedRequirementGates(job, deterministicRequirements, policy =
 		};
 	}
 	if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {
-		if (!effectivePolicy.hybridWithoutOfficeDaysAllowed) pendingVerification = {
+		const attendance = extractHybridAttendance(quoteOrText(workModeReq));
+		if (attendance?.contradictory || attendance && attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek) return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], attendance?.evidence || [quoteOrText(workModeReq)], {
+			office_days_min: attendance?.office_days_min ?? null,
+			office_days_max: attendance?.office_days_max ?? null
+		});
+		if (attendance && attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], attendance.evidence, {
+			office_days_min: attendance.office_days_min,
+			office_days_max: attendance.office_days_max
+		});
+		if (officeDaysAnswerUnknown) pendingVerification = {
+			codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+			evidence: [quoteOrText(workModeReq)],
+			facts: {
+				office_days_min: attendance?.office_days_min ?? 3,
+				office_days_max: attendance?.office_days_max ?? 3,
+				attendance_basis: attendance ? "EMPLOYER_STATED" : "POLICY_HYBRID_3_2"
+			}
+		};
+		else if (!attendance && effectivePolicy.hybridWithoutOfficeDaysAllowed) inferredWorkabilityFacts = {
+			office_days_min: 3,
+			office_days_max: 3,
+			attendance_basis: "POLICY_HYBRID_3_2"
+		};
+		else if (!attendance && !effectivePolicy.hybridWithoutOfficeDaysAllowed) pendingVerification = {
 			codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
 			evidence: [quoteOrText(workModeReq)],
 			facts: {
@@ -3974,10 +4750,14 @@ function applyPersistedRequirementGates(job, deterministicRequirements, policy =
 			}
 		};
 	}
-	if (pendingVerification) return makeVerification(pendingVerification.codes, pendingVerification.evidence, pendingVerification.facts);
+	if (pendingVerification) return makeVerification(pendingVerification.codes, pendingVerification.evidence, {
+		...inferredWorkabilityFacts,
+		...pendingVerification.facts
+	});
 	return makePass({
-		office_days_min: officeReq ? detectOfficeDays(officeReq) : null,
-		office_days_max: officeReq ? detectOfficeDays(officeReq) : null,
+		...inferredWorkabilityFacts,
+		office_days_min: officeReq ? detectOfficeDays(officeReq) : inferredWorkabilityFacts.office_days_min ?? null,
+		office_days_max: officeReq ? detectOfficeDays(officeReq) : inferredWorkabilityFacts.office_days_max ?? null,
 		travel_pct_max: travelReq ? detectTravelPct(travelReq) : null,
 		employment_type: employmentType
 	});
@@ -3989,7 +4769,12 @@ function combineGateResults(results) {
 	const rejectionCodes = [...new Set(results.flatMap((result) => result.rejection_codes))];
 	const evidenceQuotes = [...new Set(results.flatMap((result) => result.evidence_quotes))];
 	const workabilityFacts = { ...makePass().workability_facts };
-	for (const result of results) for (const [key, value] of Object.entries(result.workability_facts)) if (value !== null && value !== void 0) workabilityFacts[key] = value;
+	for (const result of results) for (const [key, value] of Object.entries(result.workability_facts)) {
+		if (value === null || value === void 0) continue;
+		const existingValue = workabilityFacts[key];
+		if (value === "UNKNOWN" && existingValue !== null && existingValue !== void 0 && existingValue !== "UNKNOWN") continue;
+		workabilityFacts[key] = value;
+	}
 	return {
 		...selected,
 		rejection_code: rejectionCodes[0],
@@ -4095,6 +4880,7 @@ async function runHardGates(clientOrPool, options) {
 	const ownsClient = isPool(pool);
 	const client = ownsClient ? await pool.connect() : pool;
 	const ctx = options?.context ?? await resolveWorkspaceContext(client);
+	const pipelineRunId = crypto.default.randomUUID();
 	const policyResolution = await resolveWorkspaceWorkabilityPolicy(client, { context: ctx });
 	console.log(`Hard Gate workability policy: ${policyResolution.source}${policyResolution.modeKey ? ` mode=${policyResolution.modeKey}` : ""} hash=${policyResolution.policyHash.slice(0, 12)}`);
 	const requestedAnswerJobVersionId = options?.verificationJobVersionId ?? options?.jobVersionId ?? (options?.jobVersionIds?.length === 1 ? options.jobVersionIds[0] : null);
@@ -4204,14 +4990,39 @@ async function runHardGates(clientOrPool, options) {
 						},
 						source_type: "CREDENTIAL"
 					})));
-					const { rows: engagementRows } = await client.query(`SELECT start_date, end_date, is_current, experience_class
+					const { rows: engagementRows } = await client.query(`SELECT id, start_date, end_date, is_current, experience_class,
+                    engagement_type, role_title, summary, operating_model
              FROM profile_engagements
              WHERE profile_version_id = $1`, [activeProfileVersionId]);
 					const experienceYears = calculateProfessionalExperienceYears(engagementRows);
+					for (const engagement of engagementRows) {
+						if (engagement.experience_class !== "PROFESSIONAL_PRODUCTION") continue;
+						const start = new Date(engagement.start_date).getTime();
+						const end = engagement.is_current || !engagement.end_date ? Date.now() : new Date(engagement.end_date).getTime();
+						if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+						const years = (end - start) / 315576e5;
+						profileFacts.push({
+							id: engagement.id,
+							statement: `${engagement.role_title}: ${engagement.summary}`,
+							structured_value: {
+								experience_years: years,
+								experience_scope: `${engagement.role_title} ${engagement.summary}`,
+								engagement_type: engagement.engagement_type,
+								operating_model: engagement.operating_model,
+								experience_start_date: new Date(engagement.start_date).toISOString(),
+								experience_end_date: new Date(end).toISOString(),
+								engagement_is_current: engagement.is_current
+							},
+							source_type: "PROFILE_FACT"
+						});
+					}
 					if (experienceYears > 0) profileFacts.push({
 						id: `experience:${ctx.workspaceId}`,
 						statement: `${experienceYears.toFixed(1)} years of professional production experience`,
-						structured_value: { professional_years: experienceYears },
+						structured_value: {
+							professional_years: experienceYears,
+							experience_scope: "overall professional production"
+						},
 						source_type: "CREDENTIAL"
 					});
 				}
@@ -4279,19 +5090,32 @@ async function runHardGates(clientOrPool, options) {
 					job.id,
 					reprocess
 				]);
+				const persistedGateDecision = PersistedGateDecisionSchema.parse({
+					schema_version: GATE_VERSION,
+					canonical_job_id: job.id,
+					job_version_id: job.job_version_id,
+					pipeline_run_id: pipelineRunId,
+					gate_version: GATE_VERSION,
+					status: gateResult.status,
+					rejection_codes: gateResult.rejection_codes,
+					evidence_quotes: gateResult.evidence_quotes,
+					workability_facts: gateResult.workability_facts,
+					evaluated_at: (/* @__PURE__ */ new Date()).toISOString()
+				});
 				await client.query(`INSERT INTO gate_decisions (
              workspace_id,
-             canonical_job_id, job_version_id, gate_version,
+             canonical_job_id, job_version_id, pipeline_run_id, gate_version,
              decision, rejection_codes, evidence_quotes, workability_facts
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
 					ctx.workspaceId,
-					job.id,
-					job.job_version_id,
-					GATE_VERSION,
-					gateResult.status,
-					JSON.stringify(gateResult.rejection_codes),
-					JSON.stringify(gateResult.evidence_quotes),
-					JSON.stringify(gateResult.workability_facts)
+					persistedGateDecision.canonical_job_id,
+					persistedGateDecision.job_version_id,
+					persistedGateDecision.pipeline_run_id,
+					persistedGateDecision.gate_version,
+					persistedGateDecision.status,
+					JSON.stringify(persistedGateDecision.rejection_codes),
+					JSON.stringify(persistedGateDecision.evidence_quotes),
+					JSON.stringify(persistedGateDecision.workability_facts)
 				]);
 				await client.query("COMMIT");
 				const codeStr = gateResult.rejection_codes.length ? ` [${gateResult.rejection_codes.join(", ")}]` : "";
@@ -4694,502 +5518,6 @@ var PostgresDatabase = class {
 	}
 };
 new PostgresDatabase();
-//#endregion
-//#region src/contracts/sourcePlugin.ts
-var SourceKeySchema = zod.z.string().regex(/^[a-z][a-z0-9_]{2,63}$/);
-var SourcePluginKindSchema = zod.z.enum([
-	"ats",
-	"json_api",
-	"rss",
-	"atom",
-	"schema_org",
-	"email_alert",
-	"manual_import"
-]);
-var SourcePluginStatusSchema = zod.z.enum([
-	"active",
-	"experimental",
-	"disabled",
-	"deprecated"
-]);
-var SourcePluginCapabilitiesSchema = zod.z.object({
-	discovery: zod.z.boolean(),
-	pagination: zod.z.boolean(),
-	incremental: zod.z.boolean(),
-	location_filter: zod.z.boolean(),
-	work_mode_evidence: zod.z.boolean()
-});
-var SourcePluginComplianceSchema = zod.z.object({
-	access_basis: zod.z.enum([
-		"official_api",
-		"public_feed",
-		"user_supplied",
-		"manual_import",
-		"documented_permission"
-	]),
-	terms_url: zod.z.string().url(),
-	license: zod.z.string().nullable().optional(),
-	attribution_required: zod.z.boolean(),
-	attribution_text: zod.z.string().nullable().optional(),
-	authenticated_scraping: zod.z.literal(false),
-	reviewed_at: zod.z.string().optional()
-});
-var SourcePluginScheduleSchema = zod.z.object({
-	enabled: zod.z.boolean(),
-	interval_minutes: zod.z.number().int().min(15).max(10080),
-	jitter_seconds: zod.z.number().int().min(0).max(3600).default(0)
-});
-var SourcePluginRetrySchema = zod.z.object({
-	max_attempts: zod.z.number().int().min(0).max(10),
-	base_delay_ms: zod.z.number().int().min(100),
-	max_delay_ms: zod.z.number().int().min(100)
-});
-var SourcePluginRateLimitSchema = zod.z.object({
-	requests_per_minute: zod.z.number().int().min(1),
-	items_per_run: zod.z.number().int().min(1).nullable()
-});
-var SourcePluginPaginationSchema = zod.z.object({
-	strategy: zod.z.enum([
-		"none",
-		"page",
-		"cursor",
-		"link_header",
-		"updated_since"
-	]),
-	page_parameter: zod.z.string().nullable().optional(),
-	cursor_json_path: zod.z.string().nullable().optional(),
-	next_link_json_path: zod.z.string().nullable().optional(),
-	checkpoint_field: zod.z.string().nullable().optional()
-});
-var SourcePluginQuerySchema = zod.z.object({
-	keywords: zod.z.array(zod.z.string()).optional(),
-	locations: zod.z.array(zod.z.string()).optional(),
-	work_modes: zod.z.array(zod.z.enum([
-		"REMOTE",
-		"HYBRID",
-		"ONSITE",
-		"UNKNOWN"
-	])).optional(),
-	lane_keys: zod.z.array(zod.z.string()).optional()
-}).optional();
-var SourcePluginRequestSchema = zod.z.object({
-	endpoint: zod.z.string().url(),
-	timeout_ms: zod.z.number().int().min(1e3).max(12e4),
-	headers_from_secret_keys: zod.z.array(zod.z.string()).default([]).optional(),
-	retry: SourcePluginRetrySchema,
-	rate_limit: SourcePluginRateLimitSchema,
-	pagination: SourcePluginPaginationSchema,
-	query: SourcePluginQuerySchema
-});
-var SourcePluginMappingSchema = zod.z.object({
-	external_id: zod.z.string(),
-	title: zod.z.string(),
-	company: zod.z.string(),
-	description: zod.z.string(),
-	url: zod.z.string(),
-	location: zod.z.string(),
-	work_mode: zod.z.string(),
-	employment_type: zod.z.string(),
-	posted_at: zod.z.string().nullable().optional(),
-	updated_at: zod.z.string().nullable().optional()
-});
-zod.z.object({
-	schema_version: zod.z.literal(SCHEMA_VERSION),
-	source_key: SourceKeySchema,
-	display_name: zod.z.string().min(1).max(100),
-	kind: SourcePluginKindSchema,
-	status: SourcePluginStatusSchema,
-	capabilities: SourcePluginCapabilitiesSchema,
-	compliance: SourcePluginComplianceSchema,
-	schedule: SourcePluginScheduleSchema,
-	request: SourcePluginRequestSchema,
-	mapping: SourcePluginMappingSchema
-});
-//#endregion
-//#region src/contracts/index.ts
-var SourceNameSchema = zod.z.enum([
-	"GMAIL_ALERT",
-	"GREENHOUSE",
-	"LEVER",
-	"ASHBY",
-	"HIMALAYAS",
-	"JOBICY",
-	"REMOTIVE",
-	"WE_WORK_REMOTELY",
-	"STARTUP_JOBS",
-	"MANUAL_IMPORT",
-	"MANUAL_STREAMLIT",
-	"LINKEDIN"
-]);
-zod.z.object({
-	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
-	source_type: SourceNameSchema,
-	source_id: zod.z.string().min(1),
-	source_run_id: zod.z.string().uuid(),
-	observed_at: zod.z.string().datetime(),
-	raw_payload_hash: zod.z.string().min(1),
-	raw_payload: zod.z.string().min(1),
-	metadata: zod.z.record(zod.z.unknown()).default({})
-});
-zod.z.object({
-	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
-	source_external_id: zod.z.string().min(1).optional(),
-	company_name: zod.z.string().min(1),
-	title: zod.z.string().min(1),
-	location_raw: zod.z.string().default("Unknown"),
-	workplace_type_raw: zod.z.string().default("UNKNOWN"),
-	employment_type_raw: zod.z.string().default("UNKNOWN"),
-	compensation_raw: zod.z.string().default("UNKNOWN"),
-	canonical_apply_url: zod.z.string().url().or(zod.z.string().min(1)),
-	description_raw: zod.z.string().min(1),
-	published_at: zod.z.string().datetime().optional(),
-	feed_delay_hours: zod.z.number().nonnegative().optional(),
-	source_attribution: zod.z.string().min(1).optional(),
-	raw_payload: zod.z.unknown().optional()
-});
-zod.z.object({
-	id: zod.z.string().uuid(),
-	source_type: SourceNameSchema,
-	source_id: zod.z.string().min(1),
-	source_run_id: zod.z.string().uuid(),
-	observed_at: zod.z.string().datetime(),
-	company_name_raw: zod.z.string().min(1),
-	title_raw: zod.z.string().min(1),
-	location_raw: zod.z.string().default("Unknown"),
-	workplace_type_raw: zod.z.string().default("UNKNOWN"),
-	employment_type_raw: zod.z.string().default("UNKNOWN"),
-	compensation_raw: zod.z.string().default("UNKNOWN"),
-	canonical_apply_url: zod.z.string().min(1),
-	description_text: zod.z.string().min(1),
-	raw_payload_hash: zod.z.string().min(1),
-	processing_status: zod.z.enum([
-		"PENDING",
-		"PROCESSED",
-		"PARSE_FAILED",
-		"FETCH_FAILED",
-		"DESCRIPTION_INCOMPLETE"
-	]).default("PENDING"),
-	error_history: zod.z.array(zod.z.record(zod.z.unknown())).default([])
-});
-zod.z.object({
-	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
-	canonical_job_id: zod.z.string().uuid(),
-	job_version_id: zod.z.string().min(1),
-	company_name: zod.z.string().min(1),
-	normalized_title: zod.z.string().min(1),
-	canonical_url: zod.z.string().min(1),
-	location_summary: zod.z.string().default("Unknown"),
-	workplace_type: zod.z.enum([
-		"REMOTE",
-		"HYBRID",
-		"ONSITE",
-		"UNKNOWN"
-	]).default("UNKNOWN"),
-	employment_type: zod.z.string().default("UNKNOWN"),
-	description_text: zod.z.string().min(1),
-	version_number: zod.z.number().int().positive().default(1),
-	observed_at: zod.z.string().datetime(),
-	processing_state: zod.z.enum([
-		"RAW_STAGED",
-		"HARD_REJECTED",
-		"MANUALLY_REMOVED",
-		"NEEDS_VERIFICATION",
-		"PREQUALIFIED",
-		"ROUTING_DEFERRED",
-		"LANE_ROUTED",
-		"MATCHED",
-		"SEMANTIC_SHORTLISTED",
-		"QUEUED_FOR_AI",
-		"EVALUATING",
-		"AI_EVALUATED",
-		"EVALUATED",
-		"RETRY_WAIT",
-		"NEEDS_MANUAL_REVIEW",
-		"REJECTED_AFTER_EVALUATION"
-	]).default("RAW_STAGED"),
-	processing_status: zod.z.enum([
-		"RAW_STAGED",
-		"HARD_REJECTED",
-		"MANUALLY_REMOVED",
-		"NEEDS_VERIFICATION",
-		"PREQUALIFIED",
-		"ROUTING_DEFERRED",
-		"LANE_ROUTED",
-		"MATCHED",
-		"SEMANTIC_SHORTLISTED",
-		"QUEUED_FOR_AI",
-		"EVALUATING",
-		"AI_EVALUATED",
-		"EVALUATED",
-		"RETRY_WAIT",
-		"NEEDS_MANUAL_REVIEW",
-		"REJECTED_AFTER_EVALUATION"
-	]).default("RAW_STAGED"),
-	recommendation_eligibility: zod.z.enum([
-		"ELIGIBLE",
-		"VERIFY",
-		"INELIGIBLE"
-	]).nullable().default(null),
-	recommendation_outcome: zod.z.enum([
-		"PRIORITY",
-		"REVIEW",
-		"TRACK",
-		"SKIP"
-	]).nullable().default(null),
-	recommendation_requirement_score: zod.z.number().min(0).max(1).nullable().default(null),
-	recommendation_coverage_score: zod.z.number().min(0).max(1).nullable().default(null),
-	recommendation_evidence_completeness: zod.z.number().min(0).max(1).nullable().default(null),
-	recommendation_decided_at: zod.z.string().datetime().nullable().default(null)
-});
-/**
-* 5. Workability Facts
-* Persisted deterministic workability evidence shared by gate, queue, and UI.
-*/
-var WorkabilityFactsSchema = zod.z.object({
-	office_days_min: zod.z.number().int().min(0).max(7).nullable(),
-	office_days_max: zod.z.number().int().min(0).max(7).nullable(),
-	travel_pct_max: zod.z.number().min(0).max(100).nullable(),
-	employment_type: zod.z.enum([
-		"PERMANENT",
-		"CONTRACT",
-		"UNKNOWN"
-	]),
-	location_restriction: zod.z.string().nullable()
-});
-zod.z.object({
-	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
-	canonical_job_id: zod.z.string().uuid(),
-	job_version_id: zod.z.string().min(1),
-	pipeline_run_id: zod.z.string().uuid(),
-	gate_version: zod.z.string().min(1),
-	status: zod.z.enum([
-		"PASS",
-		"NEEDS_VERIFICATION",
-		"HARD_REJECT"
-	]),
-	rejection_codes: zod.z.array(zod.z.string()).default([]),
-	evidence_quotes: zod.z.array(zod.z.string()).default([]),
-	workability_facts: WorkabilityFactsSchema,
-	evaluated_at: zod.z.string().datetime()
-});
-/**
-* 6. Lane Decision
-* Multi-lane semantic classification outcome.
-*/
-var LaneKeySchema = zod.z.string().regex(/^[A-Z][A-Z0-9_]{2,63}$/);
-zod.z.object({
-	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
-	canonical_job_id: zod.z.string().uuid(),
-	job_version_id: zod.z.string().min(1),
-	pipeline_run_id: zod.z.string().uuid(),
-	model_version: zod.z.string().min(1),
-	primary_lane: LaneKeySchema.nullable(),
-	secondary_lanes: zod.z.array(LaneKeySchema).default([]),
-	lane_confidence: zod.z.enum([
-		"High",
-		"Medium",
-		"Low",
-		"None"
-	]),
-	semantic_scores: zod.z.record(LaneKeySchema, zod.z.number()).default({}),
-	lane_evidence: zod.z.array(zod.z.string()).default([]),
-	evaluated_at: zod.z.string().datetime()
-});
-zod.z.object({
-	id: zod.z.string().uuid(),
-	canonical_job_id: zod.z.string().uuid(),
-	job_version_id: zod.z.string().min(1),
-	lane: LaneKeySchema,
-	priority_score: zod.z.number(),
-	status: zod.z.enum([
-		"PENDING",
-		"EVALUATING",
-		"COMPLETED",
-		"RETRY_WAIT",
-		"FAILED",
-		"NEEDS_MANUAL_REVIEW"
-	]).default("PENDING"),
-	lease_id: zod.z.string().uuid().nullable().default(null),
-	lease_expires_at: zod.z.string().datetime().nullable().default(null),
-	attempt_count: zod.z.number().int().nonnegative().default(0),
-	max_attempts: zod.z.number().int().positive().default(3),
-	last_error: zod.z.string().nullable().default(null),
-	enqueued_at: zod.z.string().datetime(),
-	updated_at: zod.z.string().datetime()
-});
-zod.z.object({
-	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
-	canonical_job_id: zod.z.string().uuid(),
-	job_version_id: zod.z.string().min(1),
-	pipeline_run_id: zod.z.string().uuid(),
-	provider: zod.z.enum([
-		"gemini",
-		"openai",
-		"local",
-		"mock"
-	]),
-	model: zod.z.string().min(1),
-	attempt: zod.z.number().int().positive().default(1),
-	is_fallback: zod.z.boolean().default(false),
-	degraded_state: zod.z.boolean().default(false),
-	evaluation_summary: zod.z.string().min(1),
-	primary_lane: LaneKeySchema.nullable(),
-	secondary_lanes: zod.z.array(LaneKeySchema).default([]),
-	lane_confidence: zod.z.enum([
-		"High",
-		"Medium",
-		"Low"
-	]),
-	lane_evidence: zod.z.string().default(""),
-	nd_score: zod.z.number().int().min(0).max(100),
-	nd_friendly_score: zod.z.number().int().min(0).max(100),
-	politics_stress_score: zod.z.number().int().min(0).max(100),
-	sensory_overload_index: zod.z.number().int().min(0).max(100),
-	building_research_ratio: zod.z.number().int().min(0).max(100),
-	interaction_load: zod.z.number().int().min(0).max(100),
-	rejection_codes: zod.z.array(zod.z.string()).default([]),
-	strategic_value: zod.z.string().default(""),
-	recommended_cv_version: zod.z.string().default("None"),
-	next_action: zod.z.enum([
-		"PRIORITY_APPLY",
-		"APPLY_AFTER_VERIFICATION",
-		"LOW_STRATEGIC_VALUE",
-		"REJECTED"
-	]),
-	evaluated_at: zod.z.string().datetime()
-});
-var ApplicationStatusSchema = zod.z.enum([
-	"INTENT",
-	"READY_TO_APPLY",
-	"SUBMITTED",
-	"FOLLOW_UP",
-	"INTERVIEW",
-	"OFFER",
-	"REJECTED",
-	"WITHDRAWN",
-	"CLOSED"
-]);
-zod.z.object({
-	application_record_id: zod.z.string().uuid(),
-	canonical_job_id: zod.z.string().uuid(),
-	job_version_id: zod.z.string().uuid(),
-	title: zod.z.string().min(1),
-	company: zod.z.string().min(1),
-	canonical_url: zod.z.string().min(1).nullable().default(null),
-	processing_state: zod.z.string().nullable().default(null),
-	processing_status: zod.z.string().nullable().default(null),
-	recommendation_eligibility: zod.z.enum([
-		"ELIGIBLE",
-		"VERIFY",
-		"INELIGIBLE"
-	]).nullable().default(null),
-	recommendation_outcome: zod.z.enum([
-		"PRIORITY",
-		"REVIEW",
-		"TRACK",
-		"SKIP"
-	]).nullable().default(null),
-	primary_lane: LaneKeySchema.nullable().default(null),
-	secondary_lanes: zod.z.array(LaneKeySchema).nullable().default(null),
-	application_status: ApplicationStatusSchema,
-	submission_url: zod.z.string().nullable().default(null),
-	cv_document_run_id: zod.z.string().uuid().nullable().default(null),
-	cover_letter_document_run_id: zod.z.string().uuid().nullable().default(null),
-	notes: zod.z.string().nullable().default(null),
-	handoff_payload: zod.z.record(zod.z.unknown()).default({}),
-	target_submit_at: zod.z.string().datetime().nullable().default(null),
-	submitted_at: zod.z.string().datetime().nullable().default(null),
-	follow_up_at: zod.z.string().datetime().nullable().default(null),
-	last_action_at: zod.z.string().datetime(),
-	created_at: zod.z.string().datetime(),
-	updated_at: zod.z.string().datetime()
-});
-zod.z.object({
-	id: zod.z.string().uuid(),
-	application_record_id: zod.z.string().uuid(),
-	event_type: zod.z.enum([
-		"CREATED",
-		"STATUS_CHANGED",
-		"DOCUMENT_LINKED",
-		"NOTE_ADDED",
-		"SUBMISSION_HANDOFF",
-		"FOLLOW_UP_SCHEDULED"
-	]),
-	from_status: ApplicationStatusSchema.nullable().default(null),
-	to_status: ApplicationStatusSchema.nullable().default(null),
-	note: zod.z.string().nullable().default(null),
-	event_payload: zod.z.record(zod.z.unknown()).default({}),
-	created_at: zod.z.string().datetime()
-});
-zod.z.object({
-	canonical_job_id: zod.z.string().uuid(),
-	job_version_id: zod.z.string().min(1),
-	title: zod.z.string().min(1),
-	company: zod.z.string().min(1),
-	canonical_url: zod.z.string().min(1),
-	source: SourceNameSchema.default("GMAIL_ALERT"),
-	location: zod.z.string().default("Unknown"),
-	workplace_type: zod.z.string().default("UNKNOWN"),
-	employment_type: zod.z.string().default("UNKNOWN"),
-	description: zod.z.string().nullable().default(null),
-	gate_status: zod.z.enum([
-		"PASS",
-		"NEEDS_VERIFICATION",
-		"HARD_REJECT"
-	]),
-	rejection_codes: zod.z.array(zod.z.string()).nullable().default(null),
-	gate_evidence_quotes: zod.z.array(zod.z.string()).nullable().default(null),
-	primary_lane: LaneKeySchema.nullable(),
-	secondary_lanes: zod.z.array(LaneKeySchema).default([]),
-	lane_confidence: zod.z.enum([
-		"High",
-		"Medium",
-		"Low",
-		"None"
-	]).default("None"),
-	priority_score: zod.z.number().default(0),
-	deterministic_match_score: zod.z.number().nullable().default(null),
-	deterministic_match_coverage: zod.z.number().nullable().default(null),
-	processing_state: zod.z.string(),
-	processing_status: zod.z.string(),
-	recommendation_eligibility: zod.z.enum([
-		"ELIGIBLE",
-		"VERIFY",
-		"INELIGIBLE"
-	]).nullable().default(null),
-	recommendation_outcome: zod.z.enum([
-		"PRIORITY",
-		"REVIEW",
-		"TRACK",
-		"SKIP"
-	]).nullable().default(null),
-	recommendation_requirement_score: zod.z.number().min(0).max(1).nullable().default(null),
-	recommendation_coverage_score: zod.z.number().min(0).max(1).nullable().default(null),
-	recommendation_evidence_completeness: zod.z.number().min(0).max(1).nullable().default(null),
-	recommendation_decided_at: zod.z.string().datetime().nullable().default(null),
-	nd_friendly_score: zod.z.number().int().min(0).max(100).nullable().default(null),
-	politics_stress_score: zod.z.number().int().min(0).max(100).nullable().default(null),
-	sensory_overload_index: zod.z.number().int().min(0).max(100).nullable().default(null),
-	next_action: zod.z.string().nullable().default(null),
-	strategic_value: zod.z.string().nullable().default(null),
-	recommended_cv_version: zod.z.string().nullable().default(null),
-	evaluation_summary: zod.z.string().nullable().default(null),
-	eval_provider: zod.z.string().nullable().default(null),
-	eval_is_fallback: zod.z.boolean().nullable().default(null),
-	version_mismatch: zod.z.boolean().default(false),
-	observed_at: zod.z.string().datetime(),
-	evaluated_at: zod.z.string().datetime().nullable().default(null),
-	lane_matches: zod.z.array(zod.z.unknown()).nullable().default(null),
-	workability_facts: zod.z.record(zod.z.unknown()).nullable().default(null),
-	queue_status: zod.z.string().nullable().default(null),
-	latest_match_run_id: zod.z.string().uuid().nullable().default(null),
-	cv_document_run_id: zod.z.string().uuid().nullable().default(null),
-	cover_letter_document_run_id: zod.z.string().uuid().nullable().default(null),
-	document_ready: zod.z.boolean().default(false),
-	current_artifact_status: zod.z.string().default("CURRENTNESS_UNKNOWN"),
-	current_artifact_reason: zod.z.string().nullable().default(null),
-	blocked_task_count: zod.z.number().int().min(0).default(0)
-});
 //#endregion
 //#region src/modelRoutes/registry.ts
 function asPurpose(value) {
@@ -7925,6 +8253,7 @@ function laneConfigToDefinition(laneConfig) {
 		minimum_domain_score: laneConfig.routing?.minimum_domain_score,
 		minimum_function_score: laneConfig.routing?.minimum_function_score,
 		secondary_lane_threshold: laneConfig.routing?.secondary_lane_threshold,
+		maximum_ai_interpretations_per_run: laneConfig.budget?.maximum_ai_interpretations_per_run ?? 0,
 		prototype_query: prototypeTexts.join(" ") || laneConfig.description
 	};
 }
@@ -7952,6 +8281,7 @@ function loadGlobalLanesConfig() {
 		}
 	};
 }
+var loadLanesConfig = loadGlobalLanesConfig;
 async function loadWorkspaceLanesConfig(clientOrPool, options) {
 	const isPool = (value) => typeof value.connect === "function" && !("release" in value);
 	const ownsClient = isPool(clientOrPool);
@@ -8277,6 +8607,48 @@ var CONCEPT_ALIASES = {
 		"algorithmic trading platforms",
 		"market data platform",
 		"low-latency market data"
+	],
+	"technical programme delivery": [
+		"technical programme",
+		"technical program",
+		"technical programme manager",
+		"technical program manager",
+		"technical delivery"
+	],
+	"technical project delivery": [
+		"technical project",
+		"technical project manager",
+		"technical delivery"
+	],
+	"technical product delivery": [
+		"technical product",
+		"technical product manager",
+		"technical product owner"
+	],
+	"technical architecture": [
+		"technical architect",
+		"solution architect",
+		"systems architect",
+		"software architect",
+		"data architect",
+		"ai architect"
+	],
+	"technical delivery": [
+		"technical delivery",
+		"technical delivery manager",
+		"delivery manager",
+		"engineering delivery"
+	],
+	"digital public infrastructure": [
+		"digital public infrastructure",
+		"digital government infrastructure",
+		"public digital infrastructure"
+	],
+	"machine learning research": [
+		"machine learning research",
+		"ml research",
+		"ai research",
+		"research scientist"
 	]
 };
 function conceptVariants(concept) {
@@ -8634,8 +9006,8 @@ async function runLaneRouter(clientOrPool, options) {
 				config.version ?? "lanes_unknown",
 				`${params.embeddingProvider}:${embeddingModel}:${params.embeddingDimensions}`
 			].join("|");
-			const decisionJson = {
-				schema_version: "2.2.0",
+			const decisionJson = PersistedLaneDecisionSchema.parse({
+				schema_version: SCHEMA_VERSION,
 				canonical_job_id: params.canonicalJobId,
 				job_version_id: params.jobVersionId,
 				pipeline_run_id: pipelineRunId,
@@ -8646,7 +9018,7 @@ async function runLaneRouter(clientOrPool, options) {
 				semantic_scores: params.semanticScores,
 				lane_evidence: params.laneEvidence,
 				evaluated_at: params.evaluatedAt
-			};
+			});
 			const decisionHash = sha256Hex(stableStringify(decisionJson));
 			try {
 				const inserted = await client.query(`
@@ -8671,7 +9043,7 @@ async function runLaneRouter(clientOrPool, options) {
 					params.canonicalJobId,
 					params.jobVersionId,
 					decisionHash,
-					"2.2.0",
+					decisionJson.schema_version,
 					modelVersion,
 					laneSnapshot,
 					decisionJson,
@@ -9333,6 +9705,18 @@ function requirementWeight(importance) {
 	if (importance === "PREFERRED") return .7;
 	return .4;
 }
+var NON_CAPABILITY_REQUIREMENT_TYPES = /* @__PURE__ */ new Set([
+	"OFFICE_DAYS",
+	"WORK_MODE",
+	"EMPLOYMENT_TYPE",
+	"TRAVEL",
+	"WORK_AUTH",
+	"ON_CALL",
+	"SHIFT_WORK"
+]);
+function isCapabilityRequirementType(requirementType) {
+	return !NON_CAPABILITY_REQUIREMENT_TYPES.has(requirementType);
+}
 function scoreMatch(requirement, fact) {
 	let score = jaccard(tokenize(buildRequirementText(requirement)), tokenize(buildFactText(fact)));
 	if (requirement.requirement_type === "DOMAIN" || requirement.requirement_type === "FUNCTION") {
@@ -9479,16 +9863,45 @@ async function runDeterministicMatcher(clientOrPool, options) {
 			if (error?.code !== "42P01") throw error;
 		}
 		try {
-			const experienceYears = calculateProfessionalExperienceYears((await client.query(`SELECT start_date, end_date, is_current, experience_class
+			const engagementRes = await client.query(`SELECT id, start_date, end_date, is_current, experience_class,
+                engagement_type, role_title, summary, operating_model
          FROM profile_engagements
-         WHERE profile_version_id = $1`, [profileVersionId])).rows);
+         WHERE profile_version_id = $1`, [profileVersionId]);
+			const experienceYears = calculateProfessionalExperienceYears(engagementRes.rows);
+			for (const engagement of engagementRes.rows) {
+				if (engagement.experience_class !== "PROFESSIONAL_PRODUCTION") continue;
+				const start = new Date(engagement.start_date).getTime();
+				const end = engagement.is_current || !engagement.end_date ? Date.now() : new Date(engagement.end_date).getTime();
+				if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+				const years = (end - start) / 315576e5;
+				credentialFacts.push({
+					id: engagement.id,
+					fact_type: "EXPERIENCE_YEARS",
+					statement: `${engagement.role_title}: ${engagement.summary}`,
+					evidence_tier: "PROFESSIONAL_PRODUCTION",
+					verification_status: "VERIFIED",
+					structured_value: {
+						experience_years: years,
+						experience_scope: `${engagement.role_title} ${engagement.summary}`,
+						engagement_type: engagement.engagement_type,
+						operating_model: engagement.operating_model,
+						experience_start_date: new Date(start).toISOString(),
+						experience_end_date: new Date(end).toISOString(),
+						engagement_is_current: engagement.is_current
+					},
+					source_type: "PROFILE_FACT"
+				});
+			}
 			if (experienceYears > 0) credentialFacts.push({
 				id: `experience:${profileVersionId}`,
 				fact_type: "EXPERIENCE_YEARS",
 				statement: `${experienceYears.toFixed(1)} years of professional production experience`,
 				evidence_tier: "PROFESSIONAL_PRODUCTION",
 				verification_status: "VERIFIED",
-				structured_value: { professional_years: experienceYears },
+				structured_value: {
+					professional_years: experienceYears,
+					experience_scope: "overall professional production"
+				},
 				source_type: "CREDENTIAL"
 			});
 		} catch (error) {
@@ -9661,10 +10074,29 @@ async function runDeterministicMatcher(clientOrPool, options) {
 				if (semanticEmbeddingSpaceId && !factEmbeddingsBySpace.has(semanticEmbeddingSpaceId)) factEmbeddingsBySpace.set(semanticEmbeddingSpaceId, factEmbeddings);
 				const requirementEmbeddings = semanticEmbeddingSpaceId && requirementIds.length > 0 ? await loadNodeEmbeddings(client, ctx, semanticEmbeddingSpaceId, "JOB_REQUIREMENT", requirementIds) : /* @__PURE__ */ new Map();
 				const usedEmbeddings = !!semanticEmbeddingSpaceId && factEmbeddings.size === factIds.length && requirementEmbeddings.size === requirementIds.length;
+				const scoredRequirements = reqRes.rows.filter((req) => isCapabilityRequirementType(req.requirement_type));
 				let weightedScoreSum = 0;
 				let weightSum = 0;
 				let matchedCount = 0;
 				for (const req of reqRes.rows) {
+					if (!isCapabilityRequirementType(req.requirement_type)) {
+						await client.query(`INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, NULL, 'UNKNOWN', 0, $4, $5)`, [
+							ctx.workspaceId,
+							matchRunId,
+							req.id,
+							"Excluded from capability matching; evaluated by deterministic workability gates.",
+							JSON.stringify({
+								requirement_key: req.requirement_key,
+								requirement_type: req.requirement_type,
+								excluded_from_capability_score: true,
+								semantic_ready: usedEmbeddings
+							})
+						]);
+						continue;
+					}
 					const weight = requirementWeight(req.importance);
 					weightSum += weight;
 					if (comparisonFacts.length === 0) {
@@ -9749,7 +10181,7 @@ async function runDeterministicMatcher(clientOrPool, options) {
 							const factEmbedding = factEmbeddings.get(fact.embedding_node_id || fact.id);
 							if (factEmbedding) semanticScore = Math.max(0, cosineSimilarity(reqEmbedding, factEmbedding));
 						}
-						const score = usedEmbeddings ? lexicalScore * .35 + semanticScore * .65 : lexicalScore;
+						const score = usedEmbeddings ? req.requirement_type === "FUNCTION" && semanticScore >= SEMANTIC_MATCH_THRESHOLD ? semanticScore : lexicalScore * .35 + semanticScore * .65 : lexicalScore;
 						if (score > bestScore) {
 							bestScore = score;
 							bestLexical = lexicalScore;
@@ -9802,7 +10234,7 @@ async function runDeterministicMatcher(clientOrPool, options) {
 						})
 					]);
 				}
-				const reqCount = reqRes.rows.length;
+				const reqCount = scoredRequirements.length;
 				const overallScore = weightSum > 0 ? weightedScoreSum / weightSum * 100 : 0;
 				const coverageScore = reqCount > 0 ? matchedCount / reqCount * 100 : 0;
 				await client.query(`UPDATE match_runs
@@ -10684,8 +11116,16 @@ async function runRecommendationDecider(clientOrPool, options) {
 dotenv.default.config();
 dotenv.default.config({ path: ".env.local" });
 var defaultPool$1 = new pg.default.Pool(pgPoolConfig(process.env.DATABASE_URL));
+function normalizePersistedTimestamp(value) {
+	if (value === null || value === void 0) return value;
+	const parsed = new Date(String(value));
+	return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+}
+function laneBudgets() {
+	const configured = loadLanesConfig().lanes;
+	return Object.fromEntries(Object.entries(configured).map(([lane, definition]) => [lane, Math.max(0, Math.floor(definition.maximum_ai_interpretations_per_run))]));
+}
 async function runExplanationQueueEnqueuer(clientOrPool, options) {
-	console.log("Starting Explanation Queue Enqueuer (unbounded eligibility)...");
 	const pool = clientOrPool || defaultPool$1;
 	const isPool = (value) => typeof value.connect === "function" && !("release" in value);
 	const ownsClient = isPool(pool);
@@ -10695,141 +11135,345 @@ async function runExplanationQueueEnqueuer(clientOrPool, options) {
 		const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
 		const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
 		const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0 ? Number(options?.limit) : null;
-		const params = [ctx.workspaceId];
-		const jobVersionFilter = jobVersionIds.length > 0 ? `AND COALESCE(c.latest_job_version_id, lv.id) = ANY($${params.push(jobVersionIds)}::uuid[])` : "";
-		const canonicalJobFilter = canonicalJobIds.length > 0 ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])` : "";
-		const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
-		const { rows } = await client.query(`
-      WITH candidates AS (
-        SELECT
-          c.id AS canonical_job_id,
-          target_jv.id AS job_version_id,
-          active_profile.id AS profile_version_id,
-          mr.id AS match_run_id,
-          dd.id AS deterministic_decision_id,
-          target_jv.content_hash AS job_content_hash,
-          dd.context_fingerprint,
-          c.primary_lane AS lane,
-          CASE
-            WHEN COALESCE(c.deterministic_match_score, 0) > 0 THEN c.deterministic_match_score::float
-            ELSE COALESCE(c.semantic_score, 0)::float
-          END AS priority_score
-        FROM canonical_jobs c
-        LEFT JOIN LATERAL (
-          SELECT id, active_requirement_set_id, content_hash
-          FROM job_versions
-          WHERE canonical_job_id = c.id
-            AND workspace_id = $1
-          ORDER BY observed_at DESC
-          LIMIT 1
-        ) lv ON TRUE
-        JOIN job_versions target_jv
-          ON target_jv.workspace_id = c.workspace_id
-         AND target_jv.id = COALESCE(c.latest_job_version_id, lv.id)
-        CROSS JOIN LATERAL (
-          SELECT pv.id
-          FROM profile_versions pv
-          WHERE pv.workspace_id = c.workspace_id
-            AND pv.status = 'ACTIVE'
-          ORDER BY pv.created_at DESC
-          LIMIT 1
-        ) active_profile
-        JOIN match_runs mr
-          ON mr.workspace_id = c.workspace_id
-         AND mr.id = c.latest_match_run_id
-         AND mr.job_version_id = target_jv.id
-         AND mr.profile_version_id = active_profile.id
-         AND mr.requirement_set_id = target_jv.active_requirement_set_id
-         AND mr.job_content_hash = target_jv.content_hash
-         AND mr.status = 'COMPLETED'
-        JOIN deterministic_decisions dd
-          ON dd.workspace_id = c.workspace_id
-         AND dd.id = c.latest_deterministic_decision_id
-         AND dd.canonical_job_id = c.id
-         AND dd.job_version_id = target_jv.id
-         AND dd.match_run_id = mr.id
-         AND dd.context_fingerprint IS NOT NULL
-        WHERE c.workspace_id = $1
-          AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI')
-          AND c.primary_lane IS NOT NULL
-          AND c.primary_lane <> 'UNCLASSIFIED'
-          AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
-          AND COALESCE(c.recommendation_outcome, 'TRACK') IN ('PRIORITY', 'REVIEW')
-          AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM ai_evaluations ae
-            WHERE ae.workspace_id = $1
-              AND ae.canonical_job_id = c.id
-              AND ae.job_version_id = target_jv.id
-              AND ae.profile_version_id = active_profile.id
-              AND ae.match_run_id = mr.id
-              AND ae.deterministic_decision_id = dd.id
-              AND ae.job_content_hash = target_jv.content_hash
-              AND ae.context_fingerprint = dd.context_fingerprint
+		const budgetRunId = options?.budgetRunId ?? crypto.default.randomUUID();
+		const budgets = laneBudgets();
+		await client.query("BEGIN");
+		try {
+			await client.query(`INSERT INTO ai_evaluation_budget_runs (id, workspace_id)
+         VALUES ($1::uuid, $2::uuid)
+         ON CONFLICT (id) DO UPDATE SET last_seen_at = NOW()`, [budgetRunId, ctx.workspaceId]);
+			await client.query(`INSERT INTO ai_evaluation_budget_usage (
+           budget_run_id, workspace_id, lane, budget_limit
+         )
+         SELECT $1::uuid, $2::uuid, key, GREATEST(value::int, 0)
+         FROM jsonb_each_text($3::jsonb)
+         ON CONFLICT (budget_run_id, lane) DO UPDATE
+           SET budget_limit = EXCLUDED.budget_limit,
+               updated_at = NOW()`, [
+				budgetRunId,
+				ctx.workspaceId,
+				JSON.stringify(budgets)
+			]);
+			await client.query(`SELECT lane
+         FROM ai_evaluation_budget_usage
+         WHERE budget_run_id = $1::uuid AND workspace_id = $2::uuid
+         FOR UPDATE`, [budgetRunId, ctx.workspaceId]);
+			const params = [
+				ctx.workspaceId,
+				budgetRunId,
+				JSON.stringify(budgets),
+				limit
+			];
+			const jobVersionFilter = jobVersionIds.length > 0 ? `AND COALESCE(c.latest_job_version_id, lv.id) = ANY($${params.push(jobVersionIds)}::uuid[])` : "";
+			const canonicalJobFilter = canonicalJobIds.length > 0 ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])` : "";
+			const { rows } = await client.query(`
+        WITH lane_budgets AS (
+          SELECT key AS lane, GREATEST(value::int, 0) AS budget_limit
+          FROM jsonb_each_text($3::jsonb)
+        ),
+        budget_usage AS (
+          SELECT lane, budget_limit, selected_count
+          FROM ai_evaluation_budget_usage
+          WHERE budget_run_id = $2::uuid
+            AND workspace_id = $1::uuid
+        ),
+        candidates AS (
+          SELECT
+            c.id AS canonical_job_id,
+            target_jv.id AS job_version_id,
+            active_profile.id AS profile_version_id,
+            mr.id AS match_run_id,
+            dd.id AS deterministic_decision_id,
+            target_jv.content_hash AS job_content_hash,
+            dd.context_fingerprint,
+            c.primary_lane AS lane,
+            c.created_at AS candidate_created_at,
+            COALESCE(bu.selected_count, 0) AS selected_count,
+            COALESCE(lb.budget_limit, 0) AS budget_limit,
+            (lb.lane IS NOT NULL) AS budget_configured,
+            CASE
+              WHEN COALESCE(c.deterministic_match_score, 0) > 0 THEN c.deterministic_match_score::float
+              ELSE COALESCE(c.semantic_score, 0)::float
+            END AS priority_score,
+            ROW_NUMBER() OVER (
+              PARTITION BY c.primary_lane
+              ORDER BY
+                CASE WHEN COALESCE(c.processing_state, c.processing_status) = 'DEFERRED_BUDGET' THEN 0 ELSE 1 END,
+                CASE
+                  WHEN COALESCE(c.deterministic_match_score, 0) > 0 THEN c.deterministic_match_score::float
+                  ELSE COALESCE(c.semantic_score, 0)::float
+                END DESC,
+                c.created_at ASC,
+                c.id ASC
+            ) AS lane_rank
+          FROM canonical_jobs c
+          LEFT JOIN LATERAL (
+            SELECT id, active_requirement_set_id, content_hash
+            FROM job_versions
+            WHERE canonical_job_id = c.id
+              AND workspace_id = $1::uuid
+            ORDER BY observed_at DESC
+            LIMIT 1
+          ) lv ON TRUE
+          JOIN job_versions target_jv
+            ON target_jv.workspace_id = c.workspace_id
+           AND target_jv.id = COALESCE(c.latest_job_version_id, lv.id)
+          CROSS JOIN LATERAL (
+            SELECT pv.id
+            FROM profile_versions pv
+            WHERE pv.workspace_id = c.workspace_id
+              AND pv.status = 'ACTIVE'
+            ORDER BY pv.created_at DESC
+            LIMIT 1
+          ) active_profile
+          JOIN match_runs mr
+            ON mr.workspace_id = c.workspace_id
+           AND mr.id = c.latest_match_run_id
+           AND mr.job_version_id = target_jv.id
+           AND mr.profile_version_id = active_profile.id
+           AND mr.requirement_set_id = target_jv.active_requirement_set_id
+           AND mr.job_content_hash = target_jv.content_hash
+           AND mr.status = 'COMPLETED'
+          JOIN deterministic_decisions dd
+            ON dd.workspace_id = c.workspace_id
+           AND dd.id = c.latest_deterministic_decision_id
+           AND dd.canonical_job_id = c.id
+           AND dd.job_version_id = target_jv.id
+           AND dd.match_run_id = mr.id
+           AND dd.context_fingerprint IS NOT NULL
+          LEFT JOIN lane_budgets lb ON lb.lane = c.primary_lane
+          LEFT JOIN budget_usage bu ON bu.lane = c.primary_lane
+          WHERE c.workspace_id = $1::uuid
+            AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
+            AND c.primary_lane IS NOT NULL
+            AND c.primary_lane <> 'UNCLASSIFIED'
+            AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
+            AND COALESCE(c.recommendation_outcome, 'TRACK') IN ('PRIORITY', 'REVIEW', 'TRACK')
+            AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM ai_evaluations ae
+              WHERE ae.workspace_id = $1::uuid
+                AND ae.canonical_job_id = c.id
+                AND ae.job_version_id = target_jv.id
+                AND ae.profile_version_id = active_profile.id
+                AND ae.match_run_id = mr.id
+                AND ae.deterministic_decision_id = dd.id
+                AND ae.job_content_hash = target_jv.content_hash
+                AND ae.context_fingerprint = dd.context_fingerprint
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM evaluation_queue eq
+              WHERE eq.workspace_id = $1::uuid
+                AND eq.canonical_job_id = c.id
+                AND eq.job_version_id = target_jv.id
+                AND eq.profile_version_id = active_profile.id
+                AND eq.match_run_id = mr.id
+                AND eq.deterministic_decision_id = dd.id
+                AND eq.job_content_hash = target_jv.content_hash
+                AND eq.context_fingerprint = dd.context_fingerprint
+                AND eq.status IN ('PENDING', 'EVALUATING', 'RETRY_WAIT')
+            )
+            ${jobVersionFilter}
+            ${canonicalJobFilter}
+        ),
+        capacity_candidates AS (
+          SELECT *
+          FROM candidates
+          WHERE lane_rank <= GREATEST(budget_limit - selected_count, 0)
+        ),
+        fair_ranked AS (
+          SELECT capacity_candidates.*,
+                 ROW_NUMBER() OVER (
+                   ORDER BY lane_rank ASC, lane ASC, candidate_created_at ASC, canonical_job_id ASC
+                 ) AS fair_rank
+          FROM capacity_candidates
+        ),
+        selected AS (
+          SELECT *
+          FROM fair_ranked
+          WHERE $4::int IS NULL OR fair_rank <= $4::int
+        ),
+        deferred_candidates AS (
+          SELECT c.*, NULL::bigint AS fair_rank
+          FROM candidates c
+          WHERE c.lane_rank > GREATEST(c.budget_limit - c.selected_count, 0)
+          UNION ALL
+          SELECT fr.*
+          FROM fair_ranked fr
+          WHERE $4::int IS NOT NULL AND fr.fair_rank > $4::int
+        ),
+        inserted AS (
+          INSERT INTO evaluation_queue (
+            workspace_id,
+            canonical_job_id,
+            job_version_id,
+            profile_version_id,
+            match_run_id,
+            deterministic_decision_id,
+            job_content_hash,
+            context_fingerprint,
+            lane,
+            priority_score,
+            budget_run_id,
+            status,
+            enqueued_at,
+            updated_at
           )
-          ${jobVersionFilter}
-          ${canonicalJobFilter}
-        ORDER BY c.created_at ASC, c.id ASC
-        ${limitClause}
-      ),
-      inserted AS (
-        INSERT INTO evaluation_queue (
-          workspace_id,
-          canonical_job_id,
-          job_version_id,
-          profile_version_id,
-          match_run_id,
-          deterministic_decision_id,
-          job_content_hash,
-          context_fingerprint,
-          lane,
-          priority_score,
-          status,
-          enqueued_at,
-          updated_at
+          SELECT
+            $1::uuid,
+            canonical_job_id,
+            job_version_id,
+            profile_version_id,
+            match_run_id,
+            deterministic_decision_id,
+            job_content_hash,
+            context_fingerprint,
+            lane,
+            priority_score,
+            $2::uuid,
+            'PENDING',
+            NOW(),
+            NOW()
+          FROM selected
+          WHERE job_version_id IS NOT NULL
+            AND lane IS NOT NULL
+          ON CONFLICT DO NOTHING
+          RETURNING
+            id,
+            workspace_id,
+            canonical_job_id,
+            job_version_id,
+            profile_version_id,
+            match_run_id,
+            deterministic_decision_id,
+            job_content_hash,
+            context_fingerprint,
+            lane,
+            priority_score,
+            status,
+            budget_run_id,
+            available_at,
+            lease_id,
+            lease_expires_at,
+            attempt_count,
+            max_attempts,
+            last_error,
+            enqueued_at,
+            updated_at
+        ),
+        deferred_rows AS (
+          INSERT INTO evaluation_budget_deferrals (
+            workspace_id,
+            canonical_job_id,
+            job_version_id,
+            budget_run_id,
+            lane,
+            budget_limit,
+            lane_rank,
+            reason_code,
+            evidence
+          )
+          SELECT
+            $1::uuid,
+            canonical_job_id,
+            job_version_id,
+            $2::uuid,
+            lane,
+            budget_limit,
+            lane_rank,
+            CASE
+              WHEN budget_configured THEN 'AI_BUDGET_EXHAUSTED'
+              ELSE 'AI_BUDGET_UNCONFIGURED_LANE'
+            END,
+            jsonb_build_object(
+              'selected_count', selected_count,
+              'fair_rank', fair_rank,
+              'priority_score', priority_score,
+              'budget_configured', budget_configured
+            )
+          FROM deferred_candidates
+          WHERE job_version_id IS NOT NULL
+            AND lane IS NOT NULL
+          ON CONFLICT (budget_run_id, canonical_job_id, job_version_id) DO NOTHING
+          RETURNING canonical_job_id
+        ),
+        updated_jobs AS (
+          UPDATE canonical_jobs c
+          SET processing_state = 'QUEUED_FOR_AI',
+              processing_status = 'QUEUED_FOR_AI',
+              updated_at = NOW()
+          FROM inserted i
+          WHERE c.workspace_id = $1::uuid
+            AND c.id = i.canonical_job_id
+            AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'DEFERRED_BUDGET')
+          RETURNING c.id
+        ),
+        updated_deferred_jobs AS (
+          UPDATE canonical_jobs c
+          SET processing_state = 'DEFERRED_BUDGET',
+              processing_status = 'DEFERRED_BUDGET',
+              updated_at = NOW()
+          FROM deferred_candidates d
+          WHERE c.workspace_id = $1::uuid
+            AND c.id = d.canonical_job_id
+            AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
+          RETURNING c.id
         )
         SELECT
-          $1,
-          canonical_job_id,
-          job_version_id,
-          profile_version_id,
-          match_run_id,
-          deterministic_decision_id,
-          job_content_hash,
-          context_fingerprint,
-          lane,
-          priority_score,
-          'PENDING',
-          NOW(),
-          NOW()
-        FROM candidates
-        WHERE job_version_id IS NOT NULL
-          AND lane IS NOT NULL
-        ON CONFLICT DO NOTHING
-        RETURNING canonical_job_id
-      ),
-      updated_jobs AS (
-        UPDATE canonical_jobs c
-        SET processing_state = 'QUEUED_FOR_AI',
-            processing_status = 'QUEUED_FOR_AI',
-            updated_at = NOW()
-        FROM inserted i
-        WHERE c.workspace_id = $1
-          AND c.id = i.canonical_job_id
-          AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED')
-        RETURNING c.id
-      )
-      SELECT
-        (SELECT COUNT(*)::int FROM inserted) AS enqueued,
-        (SELECT COUNT(*)::int FROM updated_jobs) AS updated
-    `, params);
-		const summary = rows[0] ?? {
-			enqueued: 0,
-			updated: 0
-		};
-		console.log(`Explanation Queue Enqueuer complete. Enqueued: ${summary.enqueued}, Updated: ${summary.updated}`);
-		return summary;
+          (SELECT COUNT(*)::int FROM inserted) AS enqueued,
+          (SELECT COUNT(*)::int FROM updated_jobs) AS updated,
+          (SELECT COUNT(*)::int FROM deferred_rows) AS deferred,
+          COALESCE(
+            (
+              SELECT jsonb_agg(
+                to_jsonb(inserted) || jsonb_build_object('schema_version', '2.2.0')
+              )
+              FROM inserted
+            ),
+            '[]'::jsonb
+          ) AS queue_contract_items
+      `, params);
+			const summary = rows[0] ?? {
+				enqueued: 0,
+				updated: 0,
+				deferred: 0,
+				queue_contract_items: []
+			};
+			const queueContractItems = Array.isArray(summary.queue_contract_items) ? summary.queue_contract_items.map((item) => PersistedEvaluationQueueItemSchema.parse({
+				...item,
+				available_at: normalizePersistedTimestamp(item.available_at),
+				lease_expires_at: normalizePersistedTimestamp(item.lease_expires_at),
+				enqueued_at: normalizePersistedTimestamp(item.enqueued_at),
+				updated_at: normalizePersistedTimestamp(item.updated_at)
+			})) : [];
+			if (queueContractItems.length !== Number(summary.enqueued ?? 0)) throw new Error(`Evaluation queue contract count mismatch: inserted=${summary.enqueued ?? 0}, validated=${queueContractItems.length}`);
+			const result = {
+				enqueued: Number(summary.enqueued ?? 0),
+				updated: Number(summary.updated ?? 0),
+				deferred: Number(summary.deferred ?? 0)
+			};
+			await client.query(`UPDATE ai_evaluation_budget_usage u
+        SET selected_count = selected.lane_count,
+             updated_at = NOW()
+         FROM (
+           SELECT lane, COUNT(*)::int AS lane_count
+           FROM evaluation_queue
+           WHERE workspace_id = $1::uuid
+             AND budget_run_id = $2::uuid
+           GROUP BY lane
+         ) selected
+         WHERE u.workspace_id = $1::uuid
+           AND u.budget_run_id = $2::uuid
+           AND u.lane = selected.lane`, [ctx.workspaceId, budgetRunId]);
+			await client.query("COMMIT");
+			console.log(`Explanation Queue Enqueuer complete. Enqueued: ${result.enqueued}, Updated: ${result.updated}, Deferred: ${result.deferred}`);
+			return result;
+		} catch (error) {
+			await client.query("ROLLBACK").catch(() => void 0);
+			throw error;
+		}
 	} finally {
 		if (ownsClient && typeof client.release === "function") client.release();
 	}
@@ -11700,7 +12344,7 @@ async function maybeEnqueueAfterTask(taskType, task, clientOrPool, ctx) {
 	}
 	if (taskType === "DECIDE_RECOMMENDATION" && state.recommendationEligibility === "ELIGIBLE" && (state.recommendationOutcome === "PRIORITY" || state.recommendationOutcome === "REVIEW")) await enqueueStageTask("ENQUEUE_EXPLANATION", jobVersionId, stagePayload, clientOrPool, ctx);
 }
-async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies) {
+async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies, budgetRunId) {
 	if (taskType === "NORMALIZE_OBSERVATION") {
 		const observationId = requireStringPayload(task, "observation_id");
 		if ((await dependencies.runNormalization(clientOrPool, {
@@ -11857,7 +12501,8 @@ async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies)
 	if (taskType === "ENQUEUE_EXPLANATION") await dependencies.runExplanationQueueEnqueuer(clientOrPool, {
 		context: ctx,
 		jobVersionIds: [jobVersionId],
-		limit: 1
+		limit: 1,
+		budgetRunId
 	});
 }
 async function processClaimedTask(task, clientOrPool, ctx, options, dependencies) {
@@ -11876,7 +12521,7 @@ async function processClaimedTask(task, clientOrPool, ctx, options, dependencies
 		heartbeatTimer.unref?.();
 	}
 	try {
-		await executeStageTask(taskType, task, clientOrPool, ctx, dependencies);
+		await executeStageTask(taskType, task, clientOrPool, ctx, dependencies, options.budgetRunId);
 		await completePipelineTaskAndRun(task, clientOrPool, {
 			context: ctx,
 			afterComplete: async (transactionClient) => {
@@ -11899,6 +12544,7 @@ async function runPipelineStageTaskWorker(clientOrPool, options = {}, dependenci
 	const heartbeatSeconds = options.heartbeatSeconds ?? Math.max(15, Math.floor(leaseSeconds / 3));
 	const wallClockMs = options.wallClockMs ?? 33e5;
 	const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
+	const budgetRunId = options.budgetRunId?.trim() || crypto.default.randomUUID();
 	const startedAt = Date.now();
 	const summary = {
 		seeded: null,
@@ -11938,7 +12584,10 @@ async function runPipelineStageTaskWorker(clientOrPool, options = {}, dependenci
 					incrementWorker(summary, task.taskType, "claimed");
 					try {
 						throwIfWorkerCancelled(options.abortSignal);
-						await processClaimedTask(task, client, ctx, { heartbeatSeconds }, dependencies);
+						await processClaimedTask(task, client, ctx, {
+							heartbeatSeconds,
+							budgetRunId
+						}, dependencies);
 						summary.completed += 1;
 						incrementWorker(summary, task.taskType, "completed");
 						throwIfWorkerCancelled(options.abortSignal);

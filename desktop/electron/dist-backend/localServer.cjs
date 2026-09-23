@@ -39,7 +39,7 @@ let js_yaml = require("js-yaml");
 js_yaml = __toESM(js_yaml, 1);
 let path = require("path");
 path = __toESM(path, 1);
-require("zod");
+let zod = require("zod");
 let dotenv = require("dotenv");
 dotenv = __toESM(dotenv, 1);
 let fs = require("fs");
@@ -266,7 +266,7 @@ function sha256Hex$1(input) {
 //#endregion
 //#region src/pipeline/workabilityPolicy.ts
 var defaults = {
-	unknownWorkModeDisposition: "NEEDS_VERIFICATION",
+	unknownWorkModeDisposition: "HARD_REJECT",
 	onsiteOnlyAllowed: false,
 	maxOfficeDaysPerWeek: 3,
 	hardFailOfficeDaysPerWeek: 4,
@@ -275,10 +275,12 @@ var defaults = {
 	remoteWithoutTerritoryAllowed: true,
 	rejectExplicitForeignTerritory: true,
 	unknownWorkAuthorizationNeedsVerification: false,
-	maxTravelPct: 10,
+	maxTravelPct: 20,
 	contractAllowed: false,
 	minimumBuildingResearchPct: 60,
 	maximumInteractionPct: 40,
+	preferredBuildingResearchPct: 85,
+	preferredInteractionPct: 15,
 	regularOnCallAllowed: false,
 	shiftWorkAllowed: false,
 	frequentTravelAllowed: false,
@@ -614,6 +616,8 @@ function loadWorkabilityPolicy() {
 		contractAllowed: document?.global_workability_gates?.employment?.contract_allowed === true,
 		minimumBuildingResearchPct: finiteNumber(composition.minimum_building_research_pct, defaults.minimumBuildingResearchPct),
 		maximumInteractionPct: finiteNumber(composition.maximum_interaction_pct, defaults.maximumInteractionPct),
+		preferredBuildingResearchPct: finiteNumber(composition.preferred_building_research_pct, defaults.preferredBuildingResearchPct ?? 85),
+		preferredInteractionPct: finiteNumber(composition.preferred_interaction_pct, defaults.preferredInteractionPct ?? 15),
 		regularOnCallAllowed: operations.regular_on_call_allowed === true,
 		shiftWorkAllowed: operations.shift_work_allowed === true,
 		frequentTravelAllowed: operations.frequent_travel_allowed === true,
@@ -723,6 +727,7 @@ dotenv.default.config({ path: ".env.local" });
 var __filename$1 = (0, url.fileURLToPath)(require("url").pathToFileURL(__filename).href);
 var __dirname$1 = path.default.dirname(__filename$1);
 var MIGRATIONS_LOCK_NAMESPACE = "job_decision_engine_migrations";
+var MIGRATIONS_GLOBAL_LOCK_NAMESPACE = "job_decision_engine_migrations_global";
 function isPool(value) {
 	const maybe = value;
 	return typeof maybe?.connect === "function" && typeof maybe?.query === "function" && "totalCount" in maybe && "idleCount" in maybe && "waitingCount" in maybe;
@@ -787,8 +792,10 @@ async function runMigrations(clientOrPool) {
 	const pool = clientOrPool;
 	const ownsClient = isPool(pool);
 	const client = ownsClient ? await pool.connect() : pool;
+	let schemaLockAcquired = false;
 	try {
 		await client.query(`SELECT pg_advisory_lock(hashtext($1), hashtext(current_schema()))`, [MIGRATIONS_LOCK_NAMESPACE]);
+		schemaLockAcquired = true;
 		await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version VARCHAR(255) PRIMARY KEY,
@@ -804,22 +811,32 @@ async function runMigrations(clientOrPool) {
 			console.log(`Applying migration: ${file}...`);
 			const filePath = path.default.join(migrationsDir, file);
 			const sqlContent = fs.default.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "");
-			await client.query("BEGIN");
+			const requiresGlobalExtensionLock = /\bCREATE\s+EXTENSION\b/i.test(sqlContent);
+			let globalExtensionLockAcquired = false;
 			try {
-				await client.query(sqlContent);
-				await client.query(`INSERT INTO schema_migrations (version, applied_at) VALUES ($1, NOW())`, [file]);
-				await client.query("COMMIT");
-				console.log(`✅ Applied migration: ${file}`);
-				newlyApplied.push(file);
-			} catch (err) {
-				await client.query("ROLLBACK");
-				console.error(`❌ Migration failed on ${file}:`, err.message);
-				throw err;
+				if (requiresGlobalExtensionLock) {
+					await client.query(`SELECT pg_advisory_lock(hashtext($1))`, [MIGRATIONS_GLOBAL_LOCK_NAMESPACE]);
+					globalExtensionLockAcquired = true;
+				}
+				await client.query("BEGIN");
+				try {
+					await client.query(sqlContent);
+					await client.query(`INSERT INTO schema_migrations (version, applied_at) VALUES ($1, NOW())`, [file]);
+					await client.query("COMMIT");
+					console.log(`✅ Applied migration: ${file}`);
+					newlyApplied.push(file);
+				} catch (err) {
+					await client.query("ROLLBACK");
+					console.error(`❌ Migration failed on ${file}:`, err.message);
+					throw err;
+				}
+			} finally {
+				if (globalExtensionLockAcquired) await client.query(`SELECT pg_advisory_unlock(hashtext($1))`, [MIGRATIONS_GLOBAL_LOCK_NAMESPACE]).catch(() => void 0);
 			}
 		}
 		return newlyApplied;
 	} finally {
-		await client.query(`SELECT pg_advisory_unlock(hashtext($1), hashtext(current_schema()))`, [MIGRATIONS_LOCK_NAMESPACE]).catch(() => void 0);
+		if (schemaLockAcquired) await client.query(`SELECT pg_advisory_unlock(hashtext($1), hashtext(current_schema()))`, [MIGRATIONS_LOCK_NAMESPACE]).catch(() => void 0);
 		if (ownsClient && typeof client.release === "function") client.release();
 	}
 }
@@ -1895,6 +1912,135 @@ async function dismissVerificationQuestion(clientOrPool, questionKey, options) {
 	return { ok: true };
 }
 //#endregion
+//#region src/contracts/version.ts
+var SCHEMA_VERSION = "2.2.0";
+var schemaVersions = [SCHEMA_VERSION, ...["2.0", "1.0.0"]];
+var SchemaVersionSchema = zod.z.enum(schemaVersions);
+//#endregion
+//#region src/readModels/contracts.ts
+/**
+* Read model contracts
+* @description Zod schemas for Streamlit and report consumers of canonical data
+* @version 2.2.0
+*/
+var READ_MODEL_SCHEMA_VERSION = SCHEMA_VERSION;
+var ShortlistRowV2Schema = zod.z.object({
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().uuid(),
+	title: zod.z.string().min(1),
+	company: zod.z.string().min(1),
+	canonical_url: zod.z.string().min(1),
+	source: zod.z.string().min(1),
+	location: zod.z.string().min(1),
+	workplace_type: zod.z.string().min(1),
+	employment_type: zod.z.string().min(1),
+	description: zod.z.string().nullable(),
+	gate_status: zod.z.enum([
+		"PASS",
+		"NEEDS_VERIFICATION",
+		"HARD_REJECT"
+	]),
+	rejection_codes: zod.z.array(zod.z.string()).nullable(),
+	gate_evidence_quotes: zod.z.array(zod.z.string()).nullable(),
+	primary_lane: zod.z.string().nullable(),
+	secondary_lanes: zod.z.array(zod.z.string()).nullable().default([]),
+	lane_confidence: zod.z.string().nullable().default("None"),
+	priority_score: zod.z.number().nullable().default(null),
+	deterministic_match_score: zod.z.number().nullable().default(null),
+	deterministic_match_coverage: zod.z.number().nullable().default(null),
+	processing_state: zod.z.string(),
+	processing_status: zod.z.string(),
+	recommendation_eligibility: zod.z.enum([
+		"ELIGIBLE",
+		"VERIFY",
+		"INELIGIBLE"
+	]).nullable().default(null),
+	recommendation_outcome: zod.z.enum([
+		"PRIORITY",
+		"REVIEW",
+		"TRACK",
+		"SKIP"
+	]).nullable().default(null),
+	recommendation_requirement_score: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_coverage_score: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_evidence_completeness: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_decided_at: zod.z.coerce.date().nullable(),
+	nd_friendly_score: zod.z.number().nullable().default(null),
+	politics_stress_score: zod.z.number().nullable().default(null),
+	sensory_overload_index: zod.z.number().nullable().default(null),
+	next_action: zod.z.string().nullable().default(null),
+	strategic_value: zod.z.string().nullable().default(null),
+	recommended_cv_version: zod.z.string().nullable().default(null),
+	evaluation_summary: zod.z.string().nullable().default(null),
+	eval_provider: zod.z.string().nullable().default(null),
+	eval_is_fallback: zod.z.boolean().nullable().default(null),
+	version_mismatch: zod.z.boolean(),
+	observed_at: zod.z.coerce.date(),
+	evaluated_at: zod.z.coerce.date().nullable(),
+	queue_status: zod.z.string().nullable().default(null),
+	latest_match_run_id: zod.z.string().uuid().nullable().default(null),
+	cv_document_run_id: zod.z.string().uuid().nullable().default(null),
+	cover_letter_document_run_id: zod.z.string().uuid().nullable().default(null),
+	document_ready: zod.z.boolean().default(false),
+	current_artifact_status: zod.z.string().default("CURRENTNESS_UNKNOWN"),
+	current_artifact_reason: zod.z.string().nullable().default(null),
+	blocked_task_count: zod.z.number().int().min(0).default(0)
+}).passthrough();
+var RejectedJobRowSchema = zod.z.object({
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().uuid().nullable(),
+	title: zod.z.string().min(1),
+	company: zod.z.string().min(1),
+	canonical_url: zod.z.string().min(1).nullable(),
+	source: zod.z.string().min(1),
+	processing_state: zod.z.string().min(1),
+	rejection_reason: zod.z.string().nullable(),
+	gate_status: zod.z.enum([
+		"PASS",
+		"NEEDS_VERIFICATION",
+		"HARD_REJECT"
+	]),
+	rejection_codes: zod.z.array(zod.z.string()).nullable(),
+	gate_evidence_quotes: zod.z.array(zod.z.string()).nullable(),
+	description: zod.z.string().nullable(),
+	nd_friendly_score: zod.z.coerce.number().nullable(),
+	politics_stress_score: zod.z.coerce.number().nullable(),
+	sensory_overload_index: zod.z.coerce.number().nullable(),
+	observed_at: zod.z.coerce.date().nullable()
+});
+var StreamlitJobDetailSchema = zod.z.object({
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().uuid(),
+	title: zod.z.string(),
+	company: zod.z.string(),
+	strategic_value: zod.z.string().nullable(),
+	evaluation_summary: zod.z.string().nullable(),
+	workability_facts: zod.z.record(zod.z.unknown()).nullable(),
+	lane_matches: zod.z.array(zod.z.unknown()).nullable(),
+	gate_evidence_quotes: zod.z.array(zod.z.string()).nullable()
+});
+var PipelineHealthSchema = zod.z.object({
+	generated_at: zod.z.coerce.date(),
+	counts_by_status: zod.z.record(zod.z.string(), zod.z.number().int().min(0)),
+	version_mismatch_count: zod.z.number().int().min(0),
+	document_ready_count: zod.z.number().int().min(0)
+});
+var DocumentStatusSchema = zod.z.object({
+	canonical_job_id: zod.z.string().uuid(),
+	job_version_id: zod.z.string().uuid(),
+	latest_match_run_id: zod.z.string().uuid().nullable(),
+	cv_document_run_id: zod.z.string().uuid().nullable(),
+	cover_letter_document_run_id: zod.z.string().uuid().nullable(),
+	document_ready: zod.z.boolean()
+});
+zod.z.object({
+	schema_version: SchemaVersionSchema.default(READ_MODEL_SCHEMA_VERSION),
+	shortlist_row: ShortlistRowV2Schema,
+	job_detail: StreamlitJobDetailSchema,
+	pipeline_health: PipelineHealthSchema,
+	document_status: DocumentStatusSchema
+});
+//#endregion
 //#region src/api/v2/router.ts
 function asyncHandler(handler) {
 	return (req, res, next) => {
@@ -2090,14 +2236,15 @@ function createApiV2Router(deps = {}) {
           ORDER BY s.observed_at DESC, s.canonical_job_id DESC
           LIMIT $${params.length}
         `, params);
-		const last = rows.length > 0 ? rows[rows.length - 1] : null;
-		const next_cursor = rows.length === limit && last?.observed_at && last?.canonical_job_id ? encodeCursor({
+		const validatedRows = rows.map((row) => ShortlistRowV2Schema.parse(row));
+		const last = validatedRows.length > 0 ? validatedRows[validatedRows.length - 1] : null;
+		const next_cursor = validatedRows.length === limit && last?.observed_at && last?.canonical_job_id ? encodeCursor({
 			t: new Date(last.observed_at).toISOString(),
 			id: String(last.canonical_job_id)
 		}) : null;
 		res.json({
 			ok: true,
-			jobs: rows,
+			jobs: validatedRows,
 			next_cursor
 		});
 	}));
@@ -2130,9 +2277,10 @@ function createApiV2Router(deps = {}) {
           ORDER BY observed_at DESC, a.id DESC
           LIMIT $2
         `, [ctx.workspaceId, limit]);
+		const validatedRows = rows.map((row) => RejectedJobRowSchema.parse(row));
 		res.json({
 			ok: true,
-			jobs: rows
+			jobs: validatedRows
 		});
 	}));
 	router.delete("/jobs/:id", asyncHandler(async (req, res) => {

@@ -249,7 +249,7 @@ SELECT
   c.primary_lane,
   c.secondary_lanes,
   c.lane_confidence,
-  COALESCE(vq.priority_score, 0.0) AS priority_score,
+  vq.priority_score AS priority_score,
   c.deterministic_match_score,
   c.deterministic_match_coverage,
   COALESCE(c.processing_state, c.processing_status) AS processing_state,

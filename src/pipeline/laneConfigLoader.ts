@@ -27,6 +27,7 @@ export interface LaneDefinition {
   minimum_domain_score?: number;
   minimum_function_score?: number;
   secondary_lane_threshold?: number;
+  maximum_ai_interpretations_per_run: number;
   prototype_query: string;
 }
 
@@ -102,6 +103,7 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
     minimum_domain_score: laneConfig.routing?.minimum_domain_score,
     minimum_function_score: laneConfig.routing?.minimum_function_score,
     secondary_lane_threshold: laneConfig.routing?.secondary_lane_threshold,
+    maximum_ai_interpretations_per_run: laneConfig.budget?.maximum_ai_interpretations_per_run ?? 0,
     prototype_query: prototypeTexts.join(" ") || laneConfig.description,
   };
 }

@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { runDeterministicMatcher } from '../../pipeline/deterministicMatcher.js';
+import {
+  isCapabilityRequirementType,
+  runDeterministicMatcher,
+} from '../../pipeline/deterministicMatcher.js';
 import pg from 'pg';
 import type { WorkspaceContext } from '../../workspace/context.js';
 
@@ -18,6 +21,18 @@ vi.mock('pg', () => {
 });
 
 const mPool = new pg.Pool();
+
+describe('deterministic matching requirement classification', () => {
+  it('keeps workability requirements out of capability scores', () => {
+    expect(isCapabilityRequirementType('DOMAIN')).toBe(true);
+    expect(isCapabilityRequirementType('FUNCTION')).toBe(true);
+    expect(isCapabilityRequirementType('EXPERIENCE_YEARS')).toBe(true);
+    expect(isCapabilityRequirementType('WORK_MODE')).toBe(false);
+    expect(isCapabilityRequirementType('OFFICE_DAYS')).toBe(false);
+    expect(isCapabilityRequirementType('WORK_AUTH')).toBe(false);
+    expect(isCapabilityRequirementType('TRAVEL')).toBe(false);
+  });
+});
 
 describe('Pipeline Stage: Deterministic Matcher', () => {
   beforeEach(() => {

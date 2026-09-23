@@ -19,11 +19,11 @@ export interface EmbeddingInputBuildSummary {
   fromLanePrototypes?: number;
 }
 
-function hashText(value: string): string {
+export function hashText(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-function buildRequirementInputText(row: {
+export function buildRequirementInputText(row: {
   requirement_type: string;
   requirement_text: string;
   quote_text: string | null;
@@ -34,7 +34,7 @@ function buildRequirementInputText(row: {
   return `${row.requirement_type}: ${row.requirement_text}${quote}${structured}`.trim();
 }
 
-function buildProfileFactInputText(row: {
+export function buildProfileFactInputText(row: {
   fact_type: string;
   statement: string;
   structured_value: unknown;
@@ -44,14 +44,14 @@ function buildProfileFactInputText(row: {
   return `${row.fact_type} (${row.evidence_tier}): ${row.statement}${structured}`.trim();
 }
 
-function buildLanePrototypeInputText(lane: LaneFileConfig): string {
+export function buildLanePrototypeInputText(lane: LaneFileConfig): string {
   const prototypeTexts = (lane.prototypes || [])
     .map((p) => (typeof p?.text === 'string' ? p.text.trim() : ''))
     .filter((p) => p.length > 0);
   return (prototypeTexts.join(' ') || lane.description || lane.display_name || lane.lane_key).trim();
 }
 
-function buildJobVersionInputText(row: { normalized_title: string; description_text: string }): string {
+export function buildJobVersionInputText(row: { normalized_title: string; description_text: string }): string {
   return `${row.normalized_title}: ${row.description_text}`.trim().slice(0, 12000);
 }
 

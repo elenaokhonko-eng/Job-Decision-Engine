@@ -126,8 +126,11 @@
           "default": "None"
         },
         "priority_score": {
-          "type": "number",
-          "default": 0
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null
         },
         "deterministic_match_score": {
           "type": [

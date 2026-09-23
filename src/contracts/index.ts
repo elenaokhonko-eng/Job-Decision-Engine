@@ -63,11 +63,18 @@ export type ExtractedJob = z.infer<typeof ExtractedJobSchema>;
  * Persisted raw observation stored in `raw_job_observations`.
  */
 export const JobObservationSchema = z.object({
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   id: z.string().uuid(),
+  workspace_id: z.string().uuid(),
   source_type: SourceNameSchema,
   source_id: z.string().min(1),
   source_run_id: z.string().uuid(),
+  source_plugin_key: z.string().min(1).nullable().default(null),
+  source_plugin_revision_id: z.string().uuid().nullable().default(null),
+  source_external_id: z.string().min(1).nullable().default(null),
+  source_url: z.string().min(1).nullable().default(null),
   observed_at: z.string().datetime(),
+  retrieved_at: z.string().datetime(),
   company_name_raw: z.string().min(1),
   title_raw: z.string().min(1),
   location_raw: z.string().default("Unknown"),
@@ -75,12 +82,46 @@ export const JobObservationSchema = z.object({
   employment_type_raw: z.string().default("UNKNOWN"),
   compensation_raw: z.string().default("UNKNOWN"),
   canonical_apply_url: z.string().min(1),
+  source_lane: z.string().min(1).nullable().default(null),
+  search_plan_version: z.string().min(1).default("1.0"),
   description_text: z.string().min(1),
+  raw_payload: z.unknown().nullable().default(null),
   raw_payload_hash: z.string().min(1),
   processing_status: z.enum(["PENDING", "PROCESSED", "PARSE_FAILED", "FETCH_FAILED", "DESCRIPTION_INCOMPLETE"]).default("PENDING"),
   error_history: z.array(z.record(z.unknown())).default([]),
+  job_version_id: z.string().uuid().nullable().default(null),
 });
 export type JobObservation = z.infer<typeof JobObservationSchema>;
+
+/**
+ * Exact write envelope for the raw observation persistence boundary.
+ * Unlike the consumer-facing observation schema, schema_version is required
+ * so callers cannot silently persist an unversioned event.
+ */
+export const ObservationPersistenceSchema = z.object({
+  schema_version: SchemaVersionSchema,
+  workspace_id: z.string().uuid(),
+  source_run_id: z.string().uuid(),
+  source_type: SourceNameSchema,
+  source_plugin_key: z.string().min(1),
+  source_plugin_revision_id: z.string().uuid().nullable(),
+  source_external_id: z.string().min(1).nullable(),
+  source_url: z.string().min(1).nullable(),
+  retrieved_at: z.string().datetime(),
+  company_name_raw: z.string().min(1),
+  title_raw: z.string().min(1),
+  description_text: z.string().min(1),
+  location_raw: z.string().nullable(),
+  workplace_type_raw: z.string().nullable(),
+  employment_type_raw: z.string().nullable(),
+  compensation_raw: z.string().nullable(),
+  canonical_apply_url: z.string().min(1).nullable(),
+  source_lane: z.string().min(1).nullable(),
+  search_plan_version: z.string().min(1),
+  raw_payload: z.unknown(),
+  raw_payload_hash: z.string().min(1),
+});
+export type ObservationPersistence = z.infer<typeof ObservationPersistenceSchema>;
 
 /**
  * 4. Canonical Job & Version
@@ -110,6 +151,7 @@ export const CanonicalJobVersionSchema = z.object({
     "MATCHED",
     "SEMANTIC_SHORTLISTED",
     "QUEUED_FOR_AI",
+    "DEFERRED_BUDGET",
     "EVALUATING",
     "AI_EVALUATED",
     "EVALUATED",
@@ -128,6 +170,7 @@ export const CanonicalJobVersionSchema = z.object({
     "MATCHED",
     "SEMANTIC_SHORTLISTED",
     "QUEUED_FOR_AI",
+    "DEFERRED_BUDGET",
     "EVALUATING",
     "AI_EVALUATED",
     "EVALUATED",
@@ -185,6 +228,11 @@ export const GateDecisionSchema = z.object({
 });
 export type GateDecision = z.infer<typeof GateDecisionSchema>;
 
+/** Strict persistence variant: schema_version must be supplied by the writer. */
+export const PersistedGateDecisionSchema = GateDecisionSchema.extend({
+  schema_version: SchemaVersionSchema,
+});
+
 /**
  * 6. Lane Decision
  * Multi-lane semantic classification outcome.
@@ -207,17 +255,31 @@ export const LaneDecisionSchema = z.object({
 });
 export type LaneDecision = z.infer<typeof LaneDecisionSchema>;
 
+/** Strict persistence variant: schema_version must be supplied by the writer. */
+export const PersistedLaneDecisionSchema = LaneDecisionSchema.extend({
+  schema_version: SchemaVersionSchema,
+});
+
 /**
  * 7. Evaluation Queue Item
  * Bounded AI evaluation queue row with lease management.
  */
 export const EvaluationQueueItemSchema = z.object({
+  schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   id: z.string().uuid(),
+  workspace_id: z.string().uuid(),
   canonical_job_id: z.string().uuid(),
   job_version_id: z.string().min(1),
+  profile_version_id: z.string().uuid().nullable().default(null),
+  match_run_id: z.string().uuid().nullable().default(null),
+  deterministic_decision_id: z.string().uuid().nullable().default(null),
+  job_content_hash: z.string().min(1).nullable().default(null),
+  context_fingerprint: z.string().min(1).nullable().default(null),
   lane: LaneKeySchema,
   priority_score: z.number(),
   status: z.enum(["PENDING", "EVALUATING", "COMPLETED", "RETRY_WAIT", "FAILED", "NEEDS_MANUAL_REVIEW"]).default("PENDING"),
+  budget_run_id: z.string().uuid().nullable().default(null),
+  available_at: z.string().datetime().nullable().default(null),
   lease_id: z.string().uuid().nullable().default(null),
   lease_expires_at: z.string().datetime().nullable().default(null),
   attempt_count: z.number().int().nonnegative().default(0),
@@ -227,6 +289,11 @@ export const EvaluationQueueItemSchema = z.object({
   updated_at: z.string().datetime(),
 });
 export type EvaluationQueueItem = z.infer<typeof EvaluationQueueItemSchema>;
+
+/** Strict persistence variant: schema_version must be supplied by the writer. */
+export const PersistedEvaluationQueueItemSchema = EvaluationQueueItemSchema.extend({
+  schema_version: SchemaVersionSchema,
+});
 
 /**
  * 8. Evaluation Result
@@ -342,7 +409,7 @@ export const ShortlistRowSchema = z.object({
   primary_lane: LaneKeySchema.nullable(),
   secondary_lanes: z.array(LaneKeySchema).default([]),
   lane_confidence: z.enum(["High", "Medium", "Low", "None"]).default("None"),
-  priority_score: z.number().default(0),
+  priority_score: z.number().nullable().default(null),
   deterministic_match_score: z.number().nullable().default(null),
   deterministic_match_coverage: z.number().nullable().default(null),
   processing_state: z.string(),

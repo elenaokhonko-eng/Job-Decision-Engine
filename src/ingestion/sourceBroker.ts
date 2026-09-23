@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { getActiveSourcePluginRevision } from "./sourcePluginRegistry.js";
+import { ObservationPersistenceSchema, SCHEMA_VERSION } from "../contracts/index.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -99,8 +100,32 @@ export class SourceBroker {
 
       const sourcePluginRevisionId =
         typeof (obs as any).sourcePluginRevisionId === "string"
-          ? String((obs as any).sourcePluginRevisionId).trim()
+          ? String((obs as any).sourcePluginRevisionId).trim() || null
           : await this.resolveSourcePluginRevisionId(sourcePluginKey, executor, ctx);
+
+      const persistenceInput = ObservationPersistenceSchema.parse({
+        schema_version: SCHEMA_VERSION,
+        workspace_id: ctx.workspaceId,
+        source_run_id: this.sourceRunId,
+        source_type: obs.sourceName,
+        source_plugin_key: sourcePluginKey,
+        source_plugin_revision_id: sourcePluginRevisionId,
+        source_external_id: obs.sourceExternalId,
+        source_url: obs.sourceUrl,
+        retrieved_at: obs.retrievedAt || new Date().toISOString(),
+        company_name_raw: obs.companyName,
+        title_raw: obs.title,
+        description_text: obs.descriptionRaw,
+        location_raw: obs.locationRaw || null,
+        workplace_type_raw: obs.workplaceTypeRaw || null,
+        employment_type_raw: obs.employmentTypeRaw || null,
+        compensation_raw: obs.compensationRaw || null,
+        canonical_apply_url: obs.canonicalApplyUrl || null,
+        source_lane: obs.sourceLane || null,
+        search_plan_version: obs.searchPlanVersion,
+        raw_payload: rawPayload,
+        raw_payload_hash: rawPayloadHash,
+      });
 
       const canUseSourcePluginColumns =
         this.sourcePluginColumnsAvailable === true || this.sourcePluginColumnsAvailable === null;
@@ -134,46 +159,46 @@ export class SourceBroker {
         canUseSourcePluginColumns ? sqlWithPlugin : sqlLegacy,
         canUseSourcePluginColumns
           ? [
-              ctx.workspaceId,
-              this.sourceRunId,
-              obs.sourceName,
-              sourcePluginKey,
-              sourcePluginRevisionId,
-              obs.sourceExternalId,
-              obs.sourceUrl,
-              obs.retrievedAt || new Date().toISOString(),
-              obs.companyName,
-              obs.title,
-              obs.descriptionRaw,
-              obs.locationRaw || null,
-              obs.workplaceTypeRaw || null,
-              obs.employmentTypeRaw || null,
-              obs.compensationRaw || null,
-              obs.canonicalApplyUrl || null,
-              obs.sourceLane,
-              obs.searchPlanVersion,
-              JSON.stringify(rawPayload),
-              rawPayloadHash,
+              persistenceInput.workspace_id,
+              persistenceInput.source_run_id,
+              persistenceInput.source_type,
+              persistenceInput.source_plugin_key,
+              persistenceInput.source_plugin_revision_id,
+              persistenceInput.source_external_id,
+              persistenceInput.source_url,
+              persistenceInput.retrieved_at,
+              persistenceInput.company_name_raw,
+              persistenceInput.title_raw,
+              persistenceInput.description_text,
+              persistenceInput.location_raw,
+              persistenceInput.workplace_type_raw,
+              persistenceInput.employment_type_raw,
+              persistenceInput.compensation_raw,
+              persistenceInput.canonical_apply_url,
+              persistenceInput.source_lane,
+              persistenceInput.search_plan_version,
+              JSON.stringify(persistenceInput.raw_payload),
+              persistenceInput.raw_payload_hash,
             ]
           : [
-              ctx.workspaceId,
-              this.sourceRunId,
-              obs.sourceName,
-              obs.sourceExternalId,
-              obs.sourceUrl,
-              obs.retrievedAt || new Date().toISOString(),
-              obs.companyName,
-              obs.title,
-              obs.descriptionRaw,
-              obs.locationRaw || null,
-              obs.workplaceTypeRaw || null,
-              obs.employmentTypeRaw || null,
-              obs.compensationRaw || null,
-              obs.canonicalApplyUrl || null,
-              obs.sourceLane,
-              obs.searchPlanVersion,
-              JSON.stringify(rawPayload),
-              rawPayloadHash,
+              persistenceInput.workspace_id,
+              persistenceInput.source_run_id,
+              persistenceInput.source_type,
+              persistenceInput.source_external_id,
+              persistenceInput.source_url,
+              persistenceInput.retrieved_at,
+              persistenceInput.company_name_raw,
+              persistenceInput.title_raw,
+              persistenceInput.description_text,
+              persistenceInput.location_raw,
+              persistenceInput.workplace_type_raw,
+              persistenceInput.employment_type_raw,
+              persistenceInput.compensation_raw,
+              persistenceInput.canonical_apply_url,
+              persistenceInput.source_lane,
+              persistenceInput.search_plan_version,
+              JSON.stringify(persistenceInput.raw_payload),
+              persistenceInput.raw_payload_hash,
             ]
       );
       if (

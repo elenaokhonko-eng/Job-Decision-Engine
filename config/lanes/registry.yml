@@ -17,3 +17,11 @@ lanes:
   - lane_key: INVESTMENT_MARKETS_FINTECH
     config_file: investment_markets_fintech.yml
     enabled_by_default: true
+
+  - lane_key: SOCIAL_IMPACT_MULTILATERAL
+    config_file: social_impact_multilateral.yml
+    enabled_by_default: true
+
+  - lane_key: UNIVERSITY_AI_RESEARCH
+    config_file: university_ai_research.yml
+    enabled_by_default: true

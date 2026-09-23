@@ -45,7 +45,7 @@ describe('End-to-End Funnel & Gate Verification Suite', () => {
     expect(labResult.reasonCode).toBe('UNWORKABLE_LOCATION_MODEL');
   });
 
-  it('should yield NEEDS_VERIFICATION for unspecified location conditions', () => {
+  it('should reject unspecified workplace conditions deterministically', () => {
     const unknownResult = evaluateHardGates(
       'Backend AI Engineer',
       'Build scalable Python and PostgreSQL distributed systems.',
@@ -53,8 +53,8 @@ describe('End-to-End Funnel & Gate Verification Suite', () => {
       ''
     );
     expect(unknownResult.passed).toBe(false);
-    expect(unknownResult.needsVerification).toBe(true);
-    expect(unknownResult.reasonCode).toBe('NEEDS_VERIFICATION');
+    expect(unknownResult.needsVerification).toBe(false);
+    expect(unknownResult.reasonCode).toBe('GATE_UNKNOWN_WORK_MODE');
   });
 
   it('should pass Data Engineer with technical function verified', () => {

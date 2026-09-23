@@ -12,6 +12,11 @@ export interface ComparableFact {
   source_type?: "PROFILE_FACT" | "CREDENTIAL";
 }
 
+interface ExperienceInterval {
+  start: number;
+  end: number;
+}
+
 export type StructuredComparison = {
   status: "MATCH" | "MISMATCH" | "UNKNOWN";
   rationale: string;
@@ -138,6 +143,41 @@ function factYears(fact: ComparableFact): number | null {
   return match ? parseNumberWord(match[1]) : null;
 }
 
+function experienceInterval(fact: ComparableFact): ExperienceInterval | null {
+  const structured = fact.structured_value;
+  if (!structured) return null;
+  const startValue = structured.experience_start_date
+    ?? structured.engagement_start_date
+    ?? structured.start_date;
+  const endValue = structured.experience_end_date
+    ?? structured.engagement_end_date
+    ?? structured.end_date;
+  const start = new Date(String(startValue ?? "")).getTime();
+  const end = endValue === null || endValue === undefined || structured.is_current === true || structured.engagement_is_current === true
+    ? Date.now()
+    : new Date(String(endValue)).getTime();
+  return Number.isFinite(start) && Number.isFinite(end) && end > start
+    ? { start, end }
+    : null;
+}
+
+function unionExperienceYears(intervals: ExperienceInterval[]): number {
+  if (intervals.length === 0) return 0;
+  const ordered = [...intervals].sort((left, right) => left.start - right.start || left.end - right.end);
+  let coveredMilliseconds = 0;
+  let current = ordered[0];
+  for (const interval of ordered.slice(1)) {
+    if (interval.start <= current.end) {
+      current = { start: current.start, end: Math.max(current.end, interval.end) };
+    } else {
+      coveredMilliseconds += current.end - current.start;
+      current = interval;
+    }
+  }
+  coveredMilliseconds += current.end - current.start;
+  return coveredMilliseconds / (1000 * 60 * 60 * 24 * 365.25);
+}
+
 function normalizedScope(value: unknown): string {
   return normalizeComparableText(value)
     .replace(/\b(roles?|positions?|jobs?|experience|years?|of|in|the)\b/g, " ")
@@ -219,6 +259,23 @@ function detectDomainFamilies(scope: string): Set<string> {
   return families;
 }
 
+/**
+ * Keep role shape separate from domain family. Architecture, hands-on
+ * engineering, research, and technical delivery are transferable but are not
+ * interchangeable for a scoped employer requirement.
+ */
+function detectRoleFamilies(scope: string): Set<string> {
+  const normalized = scope.toLowerCase();
+  const families = new Set<string>();
+  if (/\b(architect(?:ure)?|systems? design)\b/i.test(normalized)) families.add("architecture");
+  if (/\b(engineer(?:ing)?|developer|development|coding|implementation|building|hands[- ]on)\b/i.test(normalized)) {
+    families.add("engineering");
+  }
+  if (/\b(research|scientist|scientific)\b/i.test(normalized)) families.add("research");
+  if (/\b(program(?:me)?|project|product|delivery|transformation|portfolio)\b/i.test(normalized)) families.add("delivery");
+  return families;
+}
+
 function scopesOverlap(requiredScope: string, factScope: string): boolean {
   const reqLower = requiredScope.toLowerCase().trim();
   const factLower = factScope.toLowerCase().trim();
@@ -228,11 +285,17 @@ function scopesOverlap(requiredScope: string, factScope: string): boolean {
   const factDomains = detectDomainFamilies(factLower);
 
   if (reqDomains.size > 0) {
-    for (const d of reqDomains) {
-      if (factDomains.has(d)) return true;
-    }
-    return false;
+    const sharesDomain = [...reqDomains].some((domain) => factDomains.has(domain));
+    if (!sharesDomain) return false;
   }
+
+  const requiredRoles = detectRoleFamilies(reqLower);
+  const factRoles = detectRoleFamilies(factLower);
+  if (requiredRoles.size > 0 && factRoles.size > 0) {
+    if (![...requiredRoles].some((role) => factRoles.has(role))) return false;
+  }
+
+  if (reqDomains.size > 0) return true;
 
   const requiredTokens = tokenizeScope(reqLower);
   const factTokens = tokenizeScope(factLower);
@@ -300,6 +363,16 @@ function factCredentialIdentifiers(fact: ComparableFact): string[] {
     .filter(Boolean);
 }
 
+function factExplicitlyLacksCredential(fact: ComparableFact, credential: string): boolean {
+  const structured = fact.structured_value || {};
+  const negativeFlag = ["has_credential", "credential_present", "possesses_credential", "verified"]
+    .some((key) => structured[key] === false);
+  if (negativeFlag) return true;
+  const text = normalizeComparableText(`${fact.statement} ${JSON.stringify(structured)}`);
+  return new RegExp(`\\b(no|not|without|missing|lacks?)\\b[^.]{0,80}\\b${credential.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\b`, "i").test(text)
+    || new RegExp(`\\b${credential.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\b[^.]{0,80}\\b(no|not|without|missing|lacks?)\\b`, "i").test(text);
+}
+
 function extractJurisdictions(value: string): string[] {
   const normalized = normalizeComparableText(value);
   const aliases: Array<[string, string[]]> = [
@@ -347,9 +420,9 @@ export function compareStructuredRequirement(
             scopes.push(normalizedScope(text));
           }
         }
-        return { fact, years: factYears(fact), scopes };
+        return { fact, years: factYears(fact), scopes, interval: experienceInterval(fact) };
       })
-      .filter((candidate): candidate is { fact: ComparableFact; years: number; scopes: string[] } => candidate.years !== null);
+      .filter((candidate): candidate is { fact: ComparableFact; years: number; scopes: string[]; interval: ExperienceInterval | null } => candidate.years !== null);
     if (candidates.length === 0) return { status: "UNKNOWN", rationale: "No structured profile experience duration is available.", fact: null };
     const scopedCandidates = requiredScope
       ? candidates.filter((candidate) => candidate.scopes.some((scope) => scopesOverlap(requiredScope, scope)))
@@ -361,10 +434,36 @@ export function compareStructuredRequirement(
         fact: null,
       };
     }
-    const best = [...scopedCandidates].sort((a, b) => b.years - a.years)[0];
-    return best.years >= required
-      ? { status: "MATCH", rationale: `Profile experience ${best.years.toFixed(1)} years meets the ${required}-year requirement${requiredScope ? ` for ${requiredScope}` : ""}.`, fact: best.fact }
-      : { status: "MISMATCH", rationale: `Profile experience ${best.years.toFixed(1)} years is below the ${required}-year requirement${requiredScope ? ` for ${requiredScope}` : ""}.`, fact: best.fact };
+
+    // Add genuinely relevant role/domain evidence rather than selecting the
+    // largest single fact. A generic overall-years fact is an aggregate and
+    // must not be counted again when scoped engagement facts are present.
+    const hasScopedEvidence = scopedCandidates.some((candidate) => candidate.scopes.some((scope) => {
+      const normalized = scope.replace(/\s+/g, " ").trim();
+      return normalized.length > 0 && !/\b(overall|professional|production)\b/i.test(normalized);
+    }) || candidate.interval !== null);
+    const usableCandidates = !requiredScope && hasScopedEvidence
+      ? scopedCandidates.filter((candidate) => !candidate.scopes.some((scope) => /\b(overall|professional|production)\b/i.test(scope)))
+      : scopedCandidates;
+    const intervals = usableCandidates.flatMap((candidate) => candidate.interval ? [candidate.interval] : []);
+    const intervalYears = unionExperienceYears(intervals);
+    const nonIntervalYears = usableCandidates
+      .filter((candidate) => candidate.interval === null)
+      .reduce((sum, candidate) => sum + candidate.years, 0);
+    const totalYears = intervalYears + nonIntervalYears;
+    const representative = [...usableCandidates].sort((a, b) => b.years - a.years)[0]
+      || [...scopedCandidates].sort((a, b) => b.years - a.years)[0];
+    if (!representative) {
+      return {
+        status: "UNKNOWN",
+        rationale: `No structured profile experience duration is available for the required scope: ${requiredScope || "professional experience"}.`,
+        fact: null,
+      };
+    }
+    const scopeSuffix = requiredScope ? ` for ${requiredScope}` : "";
+    return totalYears >= required
+      ? { status: "MATCH", rationale: `Combined profile experience ${totalYears.toFixed(1)} years meets the ${required}-year requirement${scopeSuffix}.`, fact: representative.fact }
+      : { status: "MISMATCH", rationale: `Combined profile experience ${totalYears.toFixed(1)} years is below the ${required}-year requirement${scopeSuffix}.`, fact: representative.fact };
   }
 
   if (requirement.requirement_type === "DEGREE") {
@@ -399,6 +498,10 @@ export function compareStructuredRequirement(
   if (requirement.requirement_type === "CREDENTIAL") {
     const specificCredential = requirementCredentialIdentifier(requirement);
     if (!specificCredential) return { status: "UNKNOWN", rationale: "Credential name is not explicit.", fact: null };
+    const explicitAbsence = facts.find((fact) => factExplicitlyLacksCredential(fact, specificCredential));
+    if (explicitAbsence) {
+      return { status: "MISMATCH", rationale: "Profile evidence explicitly confirms that the required credential is not held.", fact: explicitAbsence };
+    }
     const matching = facts.find((fact) => factCredentialIdentifiers(fact).some((value) => value.includes(specificCredential)));
     if (matching) return { status: "MATCH", rationale: "Profile evidence contains the required credential.", fact: matching };
     const credentialEvidence = facts.find((fact) => /certif|license|licence|credential/i.test(textForFact(fact)) || fact.source_type === "CREDENTIAL");

@@ -145,6 +145,8 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("018_backfill_cutover.sql");
     expect(versions).toContain("044_evaluation_queue_context_identity.sql");
     expect(versions).toContain("049_embedding_input_history.sql");
+    expect(versions).toContain("050_ai_evaluation_budget_deferral.sql");
+    expect(versions).toContain("054_repair_rejected_read_model_views.sql");
   });
 
   it("embedding inputs preserve history with current-row uniqueness and current-only views", async () => {
@@ -215,6 +217,88 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(rows).toHaveLength(1);
   });
 
+  it("evaluation queue exposes durable budget-run identity and budget audit tables", async () => {
+    const { rows: queueColumns } = await realPool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'evaluation_queue'
+        AND column_name = 'budget_run_id'
+    `);
+    expect(queueColumns).toHaveLength(1);
+
+    const { rows: tables } = await realPool.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_name IN (
+          'ai_evaluation_budget_runs',
+          'ai_evaluation_budget_usage',
+          'evaluation_budget_deferrals'
+        )
+    `);
+    expect(tables.map((row: { table_name: string }) => row.table_name)).toEqual(
+      expect.arrayContaining([
+        'ai_evaluation_budget_runs',
+        'ai_evaluation_budget_usage',
+        'evaluation_budget_deferrals',
+      ])
+    );
+    expect(tables).toHaveLength(3);
+  });
+
+  it("budget deferrals retain both durable reason codes and nullable queue priority", async () => {
+    const { rows: constraints } = await realPool.query<{ definition: string }>(`
+      SELECT pg_get_constraintdef(oid) AS definition
+      FROM pg_constraint
+      WHERE conrelid = 'evaluation_budget_deferrals'::regclass
+        AND conname = 'evaluation_budget_deferrals_reason_code_chk'
+    `);
+    expect(constraints).toHaveLength(1);
+    expect(constraints[0].definition).toContain("AI_BUDGET_EXHAUSTED");
+    expect(constraints[0].definition).toContain("AI_BUDGET_UNCONFIGURED_LANE");
+
+    const { rows: views } = await realPool.query<{ definition: string }>(`
+      SELECT pg_get_viewdef('v_canonical_shortlist'::regclass, TRUE) AS definition
+    `);
+    expect(views).toHaveLength(1);
+    expect(views[0].definition).toContain("vq.priority_score");
+    expect(views[0].definition).not.toMatch(/COALESCE\s*\(\s*vq\.priority_score/i);
+  });
+
+  it("migration 052 repairs a legacy coalesced shortlist priority expression", async () => {
+    const client = await realPool.connect();
+    const schemaName = `nullable_priority_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
+    try {
+      await client.query(`CREATE SCHEMA ${schemaName}`);
+      await client.query(`SET search_path TO ${schemaName}, public`);
+      await client.query(`
+        CREATE TABLE schema_migrations (
+          version VARCHAR(255) PRIMARY KEY,
+          applied_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE vq (priority_score NUMERIC);
+        CREATE VIEW v_canonical_shortlist AS
+        SELECT COALESCE(vq.priority_score, 0.0) AS priority_score
+        FROM vq;
+      `);
+
+      await applyMigrationFile(client, "052_preserve_nullable_queue_priority.sql");
+
+      const { rows } = await client.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('v_canonical_shortlist'::regclass, TRUE) AS definition`
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].definition).toContain("priority_score");
+      expect(rows[0].definition).not.toMatch(/COALESCE\s*\(\s*(?:vq\.)?priority_score/i);
+    } finally {
+      await client.query("RESET search_path").catch(() => undefined);
+      await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+    }
+  });
+
   it("evaluation queue uniqueness is scoped to current context", async () => {
     const { rows } = await realPool.query<{ indexname: string; indexdef: string }>(
       `SELECT indexname, indexdef
@@ -228,13 +312,35 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(currentIndex?.indexdef).toContain("context_fingerprint");
   });
 
-  it("gate_decisions audit table exists from migration 004", async () => {
+  it("gate_decisions audit table and pipeline run identity exist", async () => {
     const { rows } = await realPool.query(`
       SELECT table_name
       FROM information_schema.tables
       WHERE table_name = 'gate_decisions' AND table_schema = 'public'
     `);
     expect(rows).toHaveLength(1);
+
+    const { rows: columns } = await realPool.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name = 'gate_decisions'
+        AND column_name = 'pipeline_run_id'
+        AND table_schema = 'public'
+    `);
+    expect(columns).toHaveLength(1);
+  });
+
+  it("rejected-job audit read models exist for base and workspace-scoped consumers", async () => {
+    const { rows } = await realPool.query<{ table_name: string }>(`
+      SELECT table_name
+      FROM information_schema.views
+      WHERE table_schema = 'public'
+        AND table_name IN ('v_rejected_jobs_audit', 'v_rejected_jobs_audit_scoped')
+    `);
+    expect(rows.map((row) => row.table_name)).toEqual(
+      expect.arrayContaining(['v_rejected_jobs_audit', 'v_rejected_jobs_audit_scoped'])
+    );
+    expect(rows).toHaveLength(2);
   });
 
   it("raw_email_alerts has gmail_message_id column from migration 004", async () => {

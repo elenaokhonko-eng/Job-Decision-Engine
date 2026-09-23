@@ -20,6 +20,8 @@ vi.mock('pg', () => {
 
 vi.mock('../../services/criteria.js', () => ({
   applyGlobalGates: vi.fn(),
+  extractHybridAttendance: vi.fn(() => null),
+  extractTravelRequirement: vi.fn(() => null),
   GLOBAL_TITLE_EXCLUSIONS: [],
   isTechnicalRole: vi.fn(() => ({ isTechnical: true, hasBuildingEvidence: true }))
 }));
@@ -62,9 +64,9 @@ describe('Pipeline Stage: Hard Gates', () => {
 
   it('should always evaluate hard gates using structured evidence even when deterministic requirements exist', async () => {
     const context: WorkspaceContext = {
-      workspaceId: 'workspace-id-1',
+      workspaceId: 'cd3f21ff-11b7-440f-b708-1a32b2a0c9f8',
       workspaceKey: 'default',
-      userId: 'user-id-1',
+      userId: '7d96e708-dde3-4fd2-8f72-1e22f6607c74',
       userKey: 'local_user',
       role: 'OWNER',
     };
@@ -73,12 +75,12 @@ describe('Pipeline Stage: Hard Gates', () => {
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
-          id: 'canon-1',
+          id: '1b58ad5d-5806-4245-8ee9-8a9f8705d499',
           company_name: 'Test Corp',
           normalized_title: 'AI Eng',
           canonical_url: 'https://test.com',
           description_text: 'Good job',
-          job_version_id: 'ver-1'
+          job_version_id: 'aeb6feb4-aaed-4602-bb58-5efff54e5bcf'
         }
       ]
     });
@@ -96,7 +98,9 @@ describe('Pipeline Stage: Hard Gates', () => {
       ]
     });
 
-    (criteria.applyGlobalGates as any).mockReturnValueOnce(makePassResult());
+    const globalPass = makePassResult();
+    globalPass.workability_facts.employment_type = 'PERMANENT';
+    (criteria.applyGlobalGates as any).mockReturnValueOnce(globalPass);
 
     (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE canonical_jobs
     (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // INSERT gate_decisions
@@ -114,14 +118,19 @@ describe('Pipeline Stage: Hard Gates', () => {
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCall[1][0]).toBe('PASS');
     expect(updateCall[1][1]).toBe('PREQUALIFIED');
-    expect(updateCall[1][6]).toBe('canon-1');
+    expect(JSON.parse(updateCall[1][4]).employment_type).toBe('PERMANENT');
+    expect(updateCall[1][6]).toBe('1b58ad5d-5806-4245-8ee9-8a9f8705d499');
+
+    const insertCall = (mPool.query as any).mock.calls[5];
+    expect(insertCall[0]).toContain('pipeline_run_id');
+    expect(insertCall[1][3]).toMatch(/^[0-9a-f-]{36}$/i);
   });
 
   it('gates via applyGlobalGates when no persisted requirements exist', async () => {
     const context: WorkspaceContext = {
-      workspaceId: 'workspace-id-1',
+      workspaceId: 'cd3f21ff-11b7-440f-b708-1a32b2a0c9f8',
       workspaceKey: 'default',
-      userId: 'user-id-1',
+      userId: '7d96e708-dde3-4fd2-8f72-1e22f6607c74',
       userKey: 'local_user',
       role: 'OWNER',
     };
@@ -130,12 +139,12 @@ describe('Pipeline Stage: Hard Gates', () => {
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
-          id: 'canon-2',
+          id: '4cdafe74-6b33-480f-b0d5-e3609b2306bc',
           normalized_title: 'AI Eng',
           company_name: 'Test Corp 2',
           description_text: 'Missing remote keywords',
           canonical_url: 'http://test.com/2',
-          job_version_id: 'ver-2'
+          job_version_id: '0d90b7bf-039b-4c12-9d41-11513e75c990'
         }
       ]
     });
@@ -161,9 +170,9 @@ describe('Pipeline Stage: Hard Gates', () => {
 
   it('reports hard-gate technical failures instead of hiding them', async () => {
     const context: WorkspaceContext = {
-      workspaceId: 'workspace-id-1',
+      workspaceId: 'cd3f21ff-11b7-440f-b708-1a32b2a0c9f8',
       workspaceKey: 'default',
-      userId: 'user-id-1',
+      userId: '7d96e708-dde3-4fd2-8f72-1e22f6607c74',
       userKey: 'local_user',
       role: 'OWNER',
     };
@@ -176,12 +185,12 @@ describe('Pipeline Stage: Hard Gates', () => {
         return {
           rows: [
             {
-              id: 'canon-error',
+              id: '7c43500c-bcf8-4f2d-a5f8-cecb9bfb5291',
               normalized_title: 'AI Eng',
               company_name: 'Broken Corp',
               description_text: 'Good job',
               canonical_url: 'https://test.com/error',
-              job_version_id: 'ver-error',
+              job_version_id: '87a221a2-06d6-4643-a60d-22f7f9dc38f8',
             },
           ],
         };
