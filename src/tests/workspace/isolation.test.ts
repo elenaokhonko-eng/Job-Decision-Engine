@@ -1,9 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import pg from 'pg';
 import { runMigrations } from '../../db/migrate.js';
 import { isLocalPostgresConnectionString, pgConnectionConfig } from '../../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../../workspace/context.js';
 import { runDeterministicMatcher } from '../../pipeline/deterministicMatcher.js';
+import { runEmbeddingBatchWithFallback } from '../../embeddings/batchCoordinator.js';
+import * as agent from '../../services/agent.js';
 
 const DB_URL = process.env.DATABASE_URL || '';
 const isCI = isLocalPostgresConnectionString(DB_URL);
@@ -117,17 +119,7 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
         )
       ).rows[0].id as string;
 
-      const spaceRes = await q(
-        `INSERT INTO embedding_spaces (
-           workspace_id, space_key, provider, model, dimensions,
-           is_fallback_space, active
-         ) VALUES ($1, $2, 'fixture', 'fixture-primary', 4, FALSE, TRUE)
-         RETURNING id`,
-        [workspaceId, `space_${workspaceId}_${Math.random()}`]
-      );
-      const spaceId = spaceRes.rows[0].id as string;
-
-      const factRes = await q(
+      await q(
         `INSERT INTO profile_facts (
            workspace_id,
            profile_version_id,
@@ -143,17 +135,8 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
            is_current,
            confidentiality
          )
-         VALUES ($1, $2, NULL, 'fact_python', 'SKILL', 'Python', NULL, 'PROFESSIONAL_PRODUCTION', 'SELF_ATTESTED', NULL, NULL, TRUE, 'PRIVATE_REUSABLE')
-         RETURNING id`,
+         VALUES ($1, $2, NULL, 'fact_python', 'SKILL', 'Python', NULL, 'PROFESSIONAL_PRODUCTION', 'SELF_ATTESTED', NULL, NULL, TRUE, 'PRIVATE_REUSABLE')`,
         [workspaceId, pvId]
-      );
-
-      await q(
-        `INSERT INTO embedding_inputs (
-           workspace_id, embedding_space_id, input_key, source_type, source_id,
-           input_text, input_hash, vector_dimensions, embedding_values, status
-         ) VALUES ($1, $2, $3, 'PROFILE_FACT', $4, 'Python', $5, 4, '{0.1,0.2,0.3,0.4}', 'COMPLETED')`,
-        [workspaceId, spaceId, `input_fact_${pvId}`, factRes.rows[0].id, `hash_fact_${pvId}`]
       );
 
       return { cpId, pvId };
@@ -228,7 +211,7 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
         [requirementSetId, workspaceId, versionId]
       );
 
-      const reqRes = await q(
+      await q(
         `INSERT INTO job_requirements (
            workspace_id,
            canonical_job_id,
@@ -247,24 +230,25 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
            confidence,
            status
          )
-         VALUES ($1, $2, $3, $4, 'REQ-1', 'DOMAIN', 'MUST', 'Python', NULL, NULL, NULL, NULL, 'DETERMINISTIC', 'test', 1.0, 'VALIDATED')
-         RETURNING id`,
+         VALUES ($1, $2, $3, $4, 'REQ-1', 'DOMAIN', 'MUST', 'Python', NULL, NULL, NULL, NULL, 'DETERMINISTIC', 'test', 1.0, 'VALIDATED')`,
         [workspaceId, canonicalId, versionId, requirementSetId]
       );
 
-      const spaceRes = await q(
-        `SELECT id FROM embedding_spaces WHERE workspace_id = $1 AND active = TRUE LIMIT 1`,
-        [workspaceId]
+      await q(
+        `INSERT INTO requirement_extraction_runs (
+           workspace_id, canonical_job_id, job_version_id, requirement_set_id,
+           run_type, status, requirements_extracted, completed_at
+         ) VALUES ($1, $2, $3, $4, 'DETERMINISTIC', 'COMPLETED', 1, NOW())`,
+        [workspaceId, canonicalId, versionId, requirementSetId]
       );
-      if (spaceRes.rows.length > 0) {
-        await q(
-          `INSERT INTO embedding_inputs (
-             workspace_id, embedding_space_id, input_key, source_type, source_id,
-             input_text, input_hash, vector_dimensions, embedding_values, status
-           ) VALUES ($1, $2, $3, 'JOB_REQUIREMENT', $4, 'Python', $5, 4, '{0.1,0.2,0.3,0.4}', 'COMPLETED')`,
-          [workspaceId, spaceRes.rows[0].id, `input_req_${reqRes.rows[0].id}`, reqRes.rows[0].id, `hash_req_${reqRes.rows[0].id}`]
-        );
-      }
+
+      await q(
+        `INSERT INTO job_version_pipeline_state (
+           workspace_id, canonical_job_id, job_version_id,
+           current_stage, stage_status
+         ) VALUES ($1, $2, $3, 'REQUIREMENTS_EXTRACTED', 'COMPLETED')`,
+        [workspaceId, canonicalId, versionId]
+      );
 
       return { canonicalId, versionId };
     };
@@ -273,6 +257,10 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
     await makeProfile(betaId, 'p_beta');
     const alphaJob = await makeJob(alphaId, 'AlphaCo');
     const betaJob = await makeJob(betaId, 'BetaCo');
+
+    vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel').mockResolvedValue([0.1, 0.2, 0.3, 0.4]);
+    await runEmbeddingBatchWithFallback(100, client, { context: alphaCtx });
+    await runEmbeddingBatchWithFallback(100, client, { context: betaCtx });
 
     await runDeterministicMatcher(client, { context: alphaCtx });
 
