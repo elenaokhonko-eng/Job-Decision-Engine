@@ -258,7 +258,7 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
     const alphaJob = await makeJob(alphaId, 'AlphaCo');
     const betaJob = await makeJob(betaId, 'BetaCo');
 
-    vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel').mockResolvedValue([0.1, 0.2, 0.3, 0.4]);
+    vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel').mockResolvedValue(new Array(768).fill(0.1));
     await runEmbeddingBatchWithFallback(100, client, { context: alphaCtx });
     await runEmbeddingBatchWithFallback(100, client, { context: betaCtx });
 
