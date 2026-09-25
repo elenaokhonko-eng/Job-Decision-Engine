@@ -59,6 +59,34 @@ describe('readModels contracts', () => {
     expect(parsed.current_artifact_status).toBe("CURRENTNESS_UNKNOWN");
   });
 
+  it('preserves a missing shortlist priority score as null', () => {
+    const parsed = ShortlistRowV2Schema.parse({
+      canonical_job_id: '11111111-1111-4111-8111-111111111111',
+      job_version_id: '22222222-2222-4222-8222-222222222222',
+      title: 'Principal AI Architect',
+      company: 'Example Corp',
+      canonical_url: 'https://example.com/jobs/1',
+      source: 'GREENHOUSE',
+      location: 'Singapore',
+      workplace_type: 'HYBRID',
+      employment_type: 'PERMANENT',
+      description: 'Build AI systems',
+      gate_status: 'PASS',
+      rejection_codes: [],
+      gate_evidence_quotes: [],
+      primary_lane: 'CORE_AI_DATA',
+      secondary_lanes: [],
+      processing_state: 'MATCHED',
+      processing_status: 'MATCHED',
+      recommendation_decided_at: null,
+      version_mismatch: false,
+      observed_at: '2026-09-02T10:00:00.000Z',
+      evaluated_at: null,
+    });
+
+    expect(parsed.priority_score).toBeNull();
+  });
+
   it('parses pipeline health and document status', () => {
     const health = PipelineHealthSchema.parse({
       generated_at: '2026-09-02T12:00:00.000Z',

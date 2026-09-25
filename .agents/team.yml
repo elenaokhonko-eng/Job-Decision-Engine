@@ -62,7 +62,7 @@ roles:
   - id: decision-policy-engineer
     title: "Decision Policy Engineer"
     card: .agents/decision-policy-engineer/AGENT.md
-    focus: "Deterministic hard gates, tri-state evaluation (PASS/NEEDS_VERIFICATION/HARD_REJECT), semantic lane routing, budget deferral"
+    focus: "Deterministic hard gates, tri-state evaluation (PASS/NEEDS_VERIFICATION/HARD_REJECT), six-lane routing, budget deferral"
     owned_paths:
       - "src/pipeline/hardGate.ts"
       - "src/pipeline/laneRouter.ts"

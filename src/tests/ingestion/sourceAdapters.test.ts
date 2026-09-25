@@ -3,6 +3,7 @@ import { JobicyAdapter } from "../../ingestion/adapters/jobicyAdapter.js";
 import { HimalayasAdapter } from "../../ingestion/adapters/himalayasAdapter.js";
 import { RemotiveAdapter } from "../../ingestion/adapters/remotiveAdapter.js";
 import { createWeWorkRemotelyAdapter } from "../../ingestion/adapters/attributedRssAdapter.js";
+import { stripHtmlToText } from "../../security/sanitize.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -16,6 +17,10 @@ afterEach(() => {
 });
 
 describe("public source adapters", () => {
+  it("removes script and style blocks with non-canonical closing tags", () => {
+    expect(stripHtmlToText("<script>untrusted</script >Visible <style>hidden</style foo=\"bar\">text")).toBe("Visible text");
+  });
+
   it("maps Jobicy jobs, strips HTML, and preserves identity/raw payload", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [{
       id: 42,
@@ -24,7 +29,7 @@ describe("public source adapters", () => {
       jobGeo: "Worldwide",
       jobType: ["full-time", "permanent"],
       url: "https://jobicy.example/jobs/42",
-      jobDescription: "<p>Build <strong>ML</strong> systems.</p>",
+      jobDescription: "<p>Build <strong>ML</strong> systems.</p><script>alert(1)</script >",
       pubDate: "2026-09-01T00:00:00Z"
     }] })));
 

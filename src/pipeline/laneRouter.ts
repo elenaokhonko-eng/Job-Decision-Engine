@@ -18,6 +18,7 @@ import {
   type LaneDefinition,
 } from "./laneConfigLoader.js";
 import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
+import { PersistedLaneDecisionSchema, SCHEMA_VERSION } from "../contracts/index.js";
 
 export { loadGlobalLanesConfig, loadLanesConfig };
 export type { GlobalLanesConfig, LaneDefinition };
@@ -168,6 +169,48 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "algorithmic trading platforms",
     "market data platform",
     "low-latency market data",
+  ],
+  "technical programme delivery": [
+    "technical programme",
+    "technical program",
+    "technical programme manager",
+    "technical program manager",
+    "technical delivery",
+  ],
+  "technical project delivery": [
+    "technical project",
+    "technical project manager",
+    "technical delivery",
+  ],
+  "technical product delivery": [
+    "technical product",
+    "technical product manager",
+    "technical product owner",
+  ],
+  "technical architecture": [
+    "technical architect",
+    "solution architect",
+    "systems architect",
+    "software architect",
+    "data architect",
+    "ai architect",
+  ],
+  "technical delivery": [
+    "technical delivery",
+    "technical delivery manager",
+    "delivery manager",
+    "engineering delivery",
+  ],
+  "digital public infrastructure": [
+    "digital public infrastructure",
+    "digital government infrastructure",
+    "public digital infrastructure",
+  ],
+  "machine learning research": [
+    "machine learning research",
+    "ml research",
+    "ai research",
+    "research scientist",
   ],
 };
 
@@ -708,8 +751,8 @@ export async function runLaneRouter(
         `${params.embeddingProvider}:${embeddingModel}:${params.embeddingDimensions}`,
       ].join("|");
 
-      const decisionJson = {
-        schema_version: "2.2.0",
+      const decisionJson = PersistedLaneDecisionSchema.parse({
+        schema_version: SCHEMA_VERSION,
         canonical_job_id: params.canonicalJobId,
         job_version_id: params.jobVersionId,
         pipeline_run_id: pipelineRunId,
@@ -720,7 +763,7 @@ export async function runLaneRouter(
         semantic_scores: params.semanticScores,
         lane_evidence: params.laneEvidence,
         evaluated_at: params.evaluatedAt,
-      };
+      });
 
       const decisionHash = sha256Hex(stableStringify(decisionJson));
 
@@ -749,7 +792,7 @@ export async function runLaneRouter(
             params.canonicalJobId,
             params.jobVersionId,
             decisionHash,
-            "2.2.0",
+            decisionJson.schema_version,
             modelVersion,
             laneSnapshot,
             decisionJson,

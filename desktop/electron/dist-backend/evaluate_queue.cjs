@@ -188,11 +188,18 @@ zod.z.object({
 	raw_payload: zod.z.unknown().optional()
 });
 zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
 	id: zod.z.string().uuid(),
+	workspace_id: zod.z.string().uuid(),
 	source_type: SourceNameSchema,
 	source_id: zod.z.string().min(1),
 	source_run_id: zod.z.string().uuid(),
+	source_plugin_key: zod.z.string().min(1).nullable().default(null),
+	source_plugin_revision_id: zod.z.string().uuid().nullable().default(null),
+	source_external_id: zod.z.string().min(1).nullable().default(null),
+	source_url: zod.z.string().min(1).nullable().default(null),
 	observed_at: zod.z.string().datetime(),
+	retrieved_at: zod.z.string().datetime(),
 	company_name_raw: zod.z.string().min(1),
 	title_raw: zod.z.string().min(1),
 	location_raw: zod.z.string().default("Unknown"),
@@ -200,7 +207,10 @@ zod.z.object({
 	employment_type_raw: zod.z.string().default("UNKNOWN"),
 	compensation_raw: zod.z.string().default("UNKNOWN"),
 	canonical_apply_url: zod.z.string().min(1),
+	source_lane: zod.z.string().min(1).nullable().default(null),
+	search_plan_version: zod.z.string().min(1).default("1.0"),
 	description_text: zod.z.string().min(1),
+	raw_payload: zod.z.unknown().nullable().default(null),
 	raw_payload_hash: zod.z.string().min(1),
 	processing_status: zod.z.enum([
 		"PENDING",
@@ -209,7 +219,31 @@ zod.z.object({
 		"FETCH_FAILED",
 		"DESCRIPTION_INCOMPLETE"
 	]).default("PENDING"),
-	error_history: zod.z.array(zod.z.record(zod.z.unknown())).default([])
+	error_history: zod.z.array(zod.z.record(zod.z.unknown())).default([]),
+	job_version_id: zod.z.string().uuid().nullable().default(null)
+});
+zod.z.object({
+	schema_version: SchemaVersionSchema,
+	workspace_id: zod.z.string().uuid(),
+	source_run_id: zod.z.string().uuid(),
+	source_type: SourceNameSchema,
+	source_plugin_key: zod.z.string().min(1),
+	source_plugin_revision_id: zod.z.string().uuid().nullable(),
+	source_external_id: zod.z.string().min(1).nullable(),
+	source_url: zod.z.string().min(1).nullable(),
+	retrieved_at: zod.z.string().datetime(),
+	company_name_raw: zod.z.string().min(1),
+	title_raw: zod.z.string().min(1),
+	description_text: zod.z.string().min(1),
+	location_raw: zod.z.string().nullable(),
+	workplace_type_raw: zod.z.string().nullable(),
+	employment_type_raw: zod.z.string().nullable(),
+	compensation_raw: zod.z.string().nullable(),
+	canonical_apply_url: zod.z.string().min(1).nullable(),
+	source_lane: zod.z.string().min(1).nullable(),
+	search_plan_version: zod.z.string().min(1),
+	raw_payload: zod.z.unknown(),
+	raw_payload_hash: zod.z.string().min(1)
 });
 zod.z.object({
 	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
@@ -240,6 +274,7 @@ zod.z.object({
 		"MATCHED",
 		"SEMANTIC_SHORTLISTED",
 		"QUEUED_FOR_AI",
+		"DEFERRED_BUDGET",
 		"EVALUATING",
 		"AI_EVALUATED",
 		"EVALUATED",
@@ -258,6 +293,7 @@ zod.z.object({
 		"MATCHED",
 		"SEMANTIC_SHORTLISTED",
 		"QUEUED_FOR_AI",
+		"DEFERRED_BUDGET",
 		"EVALUATING",
 		"AI_EVALUATED",
 		"EVALUATED",
@@ -320,7 +356,7 @@ zod.z.object({
 	evidence_quotes: zod.z.array(zod.z.string()).default([]),
 	workability_facts: WorkabilityFactsSchema,
 	evaluated_at: zod.z.string().datetime()
-});
+}).extend({ schema_version: SchemaVersionSchema });
 /**
 * 6. Lane Decision
 * Multi-lane semantic classification outcome.
@@ -343,11 +379,18 @@ zod.z.object({
 	semantic_scores: zod.z.record(LaneKeySchema, zod.z.number()).default({}),
 	lane_evidence: zod.z.array(zod.z.string()).default([]),
 	evaluated_at: zod.z.string().datetime()
-});
+}).extend({ schema_version: SchemaVersionSchema });
 zod.z.object({
+	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
 	id: zod.z.string().uuid(),
+	workspace_id: zod.z.string().uuid(),
 	canonical_job_id: zod.z.string().uuid(),
 	job_version_id: zod.z.string().min(1),
+	profile_version_id: zod.z.string().uuid().nullable().default(null),
+	match_run_id: zod.z.string().uuid().nullable().default(null),
+	deterministic_decision_id: zod.z.string().uuid().nullable().default(null),
+	job_content_hash: zod.z.string().min(1).nullable().default(null),
+	context_fingerprint: zod.z.string().min(1).nullable().default(null),
 	lane: LaneKeySchema,
 	priority_score: zod.z.number(),
 	status: zod.z.enum([
@@ -358,6 +401,8 @@ zod.z.object({
 		"FAILED",
 		"NEEDS_MANUAL_REVIEW"
 	]).default("PENDING"),
+	budget_run_id: zod.z.string().uuid().nullable().default(null),
+	available_at: zod.z.string().datetime().nullable().default(null),
 	lease_id: zod.z.string().uuid().nullable().default(null),
 	lease_expires_at: zod.z.string().datetime().nullable().default(null),
 	attempt_count: zod.z.number().int().nonnegative().default(0),
@@ -365,7 +410,7 @@ zod.z.object({
 	last_error: zod.z.string().nullable().default(null),
 	enqueued_at: zod.z.string().datetime(),
 	updated_at: zod.z.string().datetime()
-});
+}).extend({ schema_version: SchemaVersionSchema });
 /**
 * 8. Evaluation Result
 * Full structured LLM output with cultural, risk, and career scoring.
@@ -500,7 +545,7 @@ zod.z.object({
 		"Low",
 		"None"
 	]).default("None"),
-	priority_score: zod.z.number().default(0),
+	priority_score: zod.z.number().nullable().default(null),
 	deterministic_match_score: zod.z.number().nullable().default(null),
 	deterministic_match_coverage: zod.z.number().nullable().default(null),
 	processing_state: zod.z.string(),
