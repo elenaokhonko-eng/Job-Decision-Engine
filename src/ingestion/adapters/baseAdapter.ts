@@ -9,6 +9,7 @@
  *    passed downstream (AGENTS.md invariant 2)
  */
 import { ExtractedJob, ExtractedJobSchema, SourceName } from "../../contracts/index.js";
+import { stripHtmlToText } from "../../security/sanitize.js";
 
 export interface AdapterResult {
   sourceName: SourceName;
@@ -72,17 +73,6 @@ export abstract class BaseSourceAdapter {
   }
 
   protected sanitizeHtml(value: unknown): string {
-    return String(value ?? "")
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/gi, " ")
-      .replace(/&amp;/gi, "&")
-      .replace(/&lt;/gi, "<")
-      .replace(/&gt;/gi, ">")
-      .replace(/&quot;/gi, '"')
-      .replace(/&#39;/gi, "'")
-      .replace(/\s+/g, " ")
-      .trim();
+    return stripHtmlToText(value).replace(/\s+/g, " ").trim();
   }
 }

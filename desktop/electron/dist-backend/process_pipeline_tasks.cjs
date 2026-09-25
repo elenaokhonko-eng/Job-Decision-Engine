@@ -871,6 +871,8 @@ var HTML_ENTITY_MAP = {
 	apos: "'",
 	"#39": "'"
 };
+var SCRIPT_BLOCK_PATTERN = /<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi;
+var STYLE_BLOCK_PATTERN = /<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi;
 function decodeNumericEntity(code) {
 	const normalized = code.toLowerCase();
 	const isHex = normalized.startsWith("#x");
@@ -904,7 +906,7 @@ function normalizeWhitespace(input) {
 function stripHtmlToText(input) {
 	const raw = String(input ?? "");
 	if (!raw) return "";
-	return normalizeWhitespace(decodeHtmlEntities(raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<(br|br\/)\s*>/gi, "\n").replace(/<\/(p|div|section|article|header|footer|ul|ol|li|h1|h2|h3|h4|h5|h6)\s*>/gi, "\n").replace(/<(p|div|section|article|header|footer|ul|ol|li|h1|h2|h3|h4|h5|h6)\b[^>]*>/gi, "\n").replace(/<[^>]+>/g, " ")).replace(/\s+\n/g, "\n").replace(/\n\s+/g, "\n"));
+	return normalizeWhitespace(decodeHtmlEntities(raw.replace(SCRIPT_BLOCK_PATTERN, " ").replace(STYLE_BLOCK_PATTERN, " ").replace(/<br\b[^>]*>/gi, "\n").replace(/<\/(p|div|section|article|header|footer|ul|ol|li|h1|h2|h3|h4|h5|h6)\b[^>]*>/gi, "\n").replace(/<(p|div|section|article|header|footer|ul|ol|li|h1|h2|h3|h4|h5|h6)\b[^>]*>/gi, "\n").replace(/<[^>]+>/g, " ")).replace(/\s+\n/g, "\n").replace(/\n\s+/g, "\n"));
 }
 //#endregion
 //#region src/requirements/clauseAnalysis.ts
