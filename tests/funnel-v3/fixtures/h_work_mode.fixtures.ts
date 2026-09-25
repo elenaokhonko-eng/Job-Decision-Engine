@@ -130,8 +130,9 @@ export const WORK_MODE_FIXTURES: Record<string, TestJobFixture> = {
     location: "",
     workplace_type: "UNKNOWN",
     raw_description: "Join our NLP team to build custom domain LLMs using Python and PyTorch. Competitive compensation and equity.",
-    expectedStatus: "NEEDS_VERIFICATION",
-    notes: "truly missing workplace after bounded extraction produces NEEDS_VERIFICATION with user policy, not false employer onsite assertion",
+    expectedStatus: "HARD_REJECT",
+    expectedRejectionCode: "GATE_UNKNOWN_WORK_MODE",
+    notes: "truly missing workplace after bounded extraction is rejected by the owner policy with explicit unknown-work-mode evidence",
   },
   H10: {
     id: "H10",

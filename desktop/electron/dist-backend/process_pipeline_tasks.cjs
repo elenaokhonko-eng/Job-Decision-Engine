@@ -9953,6 +9953,7 @@ async function runDeterministicMatcher(clientOrPool, options) {
 		const semanticSpaceCandidates = [];
 		for (const candidate of embeddingSpaceCandidates) if (await countMatchableNodes(client, ctx, candidate, "PROFILE_FACT", factIds) === factIds.length) semanticSpaceCandidates.push(candidate);
 		const factEmbeddingsBySpace = /* @__PURE__ */ new Map();
+		embeddingSpaceCandidates.length;
 		for (const job of jobs) {
 			const versionId = job.resolved_job_version_id || job.latest_job_version_id;
 			if (!versionId) {
@@ -10073,8 +10074,9 @@ async function runDeterministicMatcher(clientOrPool, options) {
 				const factEmbeddings = semanticEmbeddingSpaceId ? factEmbeddingsBySpace.get(semanticEmbeddingSpaceId) || await loadNodeEmbeddings(client, ctx, semanticEmbeddingSpaceId, "PROFILE_FACT", factIds) : /* @__PURE__ */ new Map();
 				if (semanticEmbeddingSpaceId && !factEmbeddingsBySpace.has(semanticEmbeddingSpaceId)) factEmbeddingsBySpace.set(semanticEmbeddingSpaceId, factEmbeddings);
 				const requirementEmbeddings = semanticEmbeddingSpaceId && requirementIds.length > 0 ? await loadNodeEmbeddings(client, ctx, semanticEmbeddingSpaceId, "JOB_REQUIREMENT", requirementIds) : /* @__PURE__ */ new Map();
-				const usedEmbeddings = !!semanticEmbeddingSpaceId && factEmbeddings.size === factIds.length && requirementEmbeddings.size === requirementIds.length;
+				const usedEmbeddings = !!semanticEmbeddingSpaceId && factIds.length > 0 && requirementIds.length > 0 && factEmbeddings.size === factIds.length && requirementEmbeddings.size === requirementIds.length;
 				const scoredRequirements = reqRes.rows.filter((req) => isCapabilityRequirementType(req.requirement_type));
+				const semanticEvidenceIncomplete = scoredRequirements.length > 0 && factIds.length > 0 && !usedEmbeddings;
 				let weightedScoreSum = 0;
 				let weightSum = 0;
 				let matchedCount = 0;
@@ -10253,14 +10255,14 @@ async function runDeterministicMatcher(clientOrPool, options) {
 					overallScore,
 					usedEmbeddings ? semanticEmbeddingSpaceId : null
 				]);
-				const profileMatchStatus = matchedCount > 0 ? "POSITIVE_MATCH" : usedEmbeddings ? "NO_PROFILE_MATCH" : "UNKNOWN";
+				const profileMatchStatus = semanticEvidenceIncomplete ? "UNKNOWN" : matchedCount > 0 ? "POSITIVE_MATCH" : usedEmbeddings ? "NO_PROFILE_MATCH" : "UNKNOWN";
 				const canonicalUpdate = await client.query(`UPDATE canonical_jobs
-           SET deterministic_match_score = $2,
-               deterministic_match_coverage = $3,
+           SET deterministic_match_score = CASE WHEN $8::boolean THEN NULL ELSE $2 END,
+               deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE $3 END,
                latest_match_run_id = $4,
                profile_match_status = $6,
-               processing_state = 'MATCHED',
-               processing_status = 'MATCHED',
+               processing_state = CASE WHEN $8::boolean THEN 'LANE_ROUTED' ELSE 'MATCHED' END,
+               processing_status = CASE WHEN $8::boolean THEN 'LANE_ROUTED' ELSE 'MATCHED' END,
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = $5
@@ -10271,10 +10273,12 @@ async function runDeterministicMatcher(clientOrPool, options) {
 					matchRunId,
 					job.id,
 					profileMatchStatus,
-					versionId
+					versionId,
+					semanticEvidenceIncomplete
 				]);
 				await client.query("COMMIT");
-				if (canonicalUpdate?.rowCount !== 0) matchedJobs += 1;
+				if (canonicalUpdate?.rowCount !== 0 && !semanticEvidenceIncomplete) matchedJobs += 1;
+				if (canonicalUpdate?.rowCount !== 0 && semanticEvidenceIncomplete) skippedJobs += 1;
 			} catch (error) {
 				await client.query("ROLLBACK");
 				errors += 1;

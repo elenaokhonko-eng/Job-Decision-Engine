@@ -3,21 +3,29 @@
 --
 -- This migration is intentionally additive and idempotent. It restores the base
 -- audit view before recreating the workspace-scoped view consumed by API/UI code.
--- Qualify the canonical schema and dependencies so an upgrade test using a
--- temporary search path cannot create a view tied to that temporary schema.
 
-CREATE OR REPLACE VIEW public.v_rejected_jobs_audit AS
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'v_rejected_jobs_audit_scoped') THEN
+    EXECUTE format('DROP VIEW %I.v_rejected_jobs_audit_scoped CASCADE', current_schema());
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'v_rejected_jobs_audit') THEN
+    EXECUTE format('DROP VIEW %I.v_rejected_jobs_audit CASCADE', current_schema());
+  END IF;
+END $$;
+
+CREATE OR REPLACE VIEW v_rejected_jobs_audit AS
 WITH target_versions AS (
   SELECT
     c.id AS canonical_job_id,
     COALESCE(c.latest_job_version_id, lv.id) AS version_id,
     COALESCE(jv_direct.description_text, lv.description_text) AS description_text,
     COALESCE(jv_direct.observed_at, lv.observed_at, c.created_at) AS observed_at
-  FROM public.canonical_jobs c
-  LEFT JOIN public.job_versions jv_direct ON jv_direct.id = c.latest_job_version_id
+  FROM canonical_jobs c
+  LEFT JOIN job_versions jv_direct ON jv_direct.id = c.latest_job_version_id
   LEFT JOIN LATERAL (
     SELECT id, description_text, observed_at
-    FROM public.job_versions
+    FROM job_versions
     WHERE canonical_job_id = c.id
     ORDER BY observed_at DESC
     LIMIT 1
@@ -28,7 +36,7 @@ latest_observations AS (
     rjo.job_version_id,
     rjo.source_name,
     rjo.retrieved_at
-  FROM public.raw_job_observations rjo
+  FROM raw_job_observations rjo
   WHERE rjo.job_version_id IS NOT NULL
   ORDER BY rjo.job_version_id, rjo.retrieved_at DESC
 ),
@@ -40,7 +48,7 @@ version_gates AS (
     rejection_codes,
     evidence_quotes,
     created_at
-  FROM public.gate_decisions
+  FROM gate_decisions
   ORDER BY canonical_job_id, job_version_id, created_at DESC
 ),
 version_evaluations AS (
@@ -49,7 +57,7 @@ version_evaluations AS (
     job_version_id,
     full_evaluation_payload,
     evaluated_at
-  FROM public.ai_evaluations
+  FROM ai_evaluations
   ORDER BY canonical_job_id, job_version_id, evaluated_at DESC
 )
 SELECT
@@ -69,19 +77,19 @@ SELECT
   (ve.full_evaluation_payload->>'politics_stress_score')::numeric AS politics_stress_score,
   (ve.full_evaluation_payload->>'sensory_overload_index')::numeric AS sensory_overload_index,
   tv.observed_at::text AS "postedDate"
-FROM public.canonical_jobs c
+FROM canonical_jobs c
 JOIN target_versions tv ON tv.canonical_job_id = c.id
 LEFT JOIN latest_observations lo ON lo.job_version_id = tv.version_id
 LEFT JOIN version_gates vg ON vg.canonical_job_id = c.id AND vg.job_version_id = tv.version_id
 LEFT JOIN version_evaluations ve ON ve.canonical_job_id = c.id AND ve.job_version_id = tv.version_id
 WHERE COALESCE(c.processing_state, c.processing_status) IN ('HARD_REJECTED', 'MANUALLY_REMOVED');
 
-CREATE OR REPLACE VIEW public.v_rejected_jobs_audit_scoped AS
+CREATE OR REPLACE VIEW v_rejected_jobs_audit_scoped AS
 SELECT c.workspace_id, r.*
-FROM public.canonical_jobs c
-JOIN public.v_rejected_jobs_audit r ON r.id = c.id;
+FROM canonical_jobs c
+JOIN v_rejected_jobs_audit r ON r.id = c.id;
 
-COMMENT ON VIEW public.v_rejected_jobs_audit IS
+COMMENT ON VIEW v_rejected_jobs_audit IS
   'Rejected and manually removed jobs with gate evidence for audit consumers.';
-COMMENT ON VIEW public.v_rejected_jobs_audit_scoped IS
+COMMENT ON VIEW v_rejected_jobs_audit_scoped IS
   'Stable workspace-scoped rejected-job audit read model.';

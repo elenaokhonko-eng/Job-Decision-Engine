@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { applyGlobalGates } from "../../src/services/criteria.js";
-import { applyPersistedRequirementGates } from "../../src/pipeline/hardGate.js";
 import { WORK_MODE_FIXTURES } from "./fixtures/h_work_mode.fixtures.js";
 import { loadWorkabilityPolicy } from "../../src/pipeline/workabilityPolicy.js";
 
@@ -134,7 +133,7 @@ describe("Funnel V3 Independent Test Suite — Work Mode and Authorization (H01-
     expect(result.rejection_codes).toContain("GATE_HIGH_OFFICE_DAYS");
   });
 
-  it("H09: truly missing workplace after bounded extraction is REJECTED or NEEDS_VERIFICATION with user policy", () => {
+  it("H09: truly missing workplace is a hard rejection with persisted policy evidence", () => {
     const fixture = WORK_MODE_FIXTURES.H09;
     const result = applyGlobalGates({
       id: fixture.id,
@@ -145,7 +144,13 @@ describe("Funnel V3 Independent Test Suite — Work Mode and Authorization (H01-
       raw_description: fixture.raw_description,
     });
 
-    expect(["NEEDS_VERIFICATION", "HARD_REJECT"]).toContain(result.status);
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.passed).toBe(false);
+    expect(result.rejection_codes).toEqual(["GATE_UNKNOWN_WORK_MODE"]);
+    expect(result.evidence_quotes.join(" ")).toMatch(/workplace model unspecified/i);
+    expect(result.workability_facts.office_days_min).toBeNull();
+    expect(result.workability_facts.office_days_max).toBeNull();
+    expect(result.workability_facts.attendance_basis).toBe("UNKNOWN");
   });
 
   it("H10: worldwide remote pass", () => {

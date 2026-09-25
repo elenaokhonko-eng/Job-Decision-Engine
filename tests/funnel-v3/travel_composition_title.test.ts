@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyGlobalGates, isTechnicalRole } from "../../src/services/criteria.js";
+import { applyGlobalGates } from "../../src/services/criteria.js";
 import { applyPersistedRequirementGates } from "../../src/pipeline/hardGate.js";
 import {
   TRAVEL_FIXTURES,
@@ -284,9 +284,19 @@ describe("Funnel V3 Independent Test Suite — Work Composition (C01-C11)", () =
 describe("Funnel V3 Independent Test Suite — Title Taxonomy (R01-R10)", () => {
   it("R01: FDE / Forward-Deployed Engineer reject even with 95% AI", () => {
     const fixture = TITLE_FIXTURES.R01;
-    const techCheck = isTechnicalRole(fixture.title, fixture.raw_description);
-    // Even if technically qualified, FDE roles are excluded in prequalification or role policy
-    expect(fixture.title.toLowerCase()).toContain("forward deployed");
+    const result = applyGlobalGates({
+      id: fixture.id,
+      title: fixture.title,
+      company_name: fixture.company_name,
+      location: fixture.location,
+      workplace_type: fixture.workplace_type,
+      raw_description: fixture.raw_description,
+    });
+
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.passed).toBe(false);
+    expect(result.rejection_codes).toContain("GATE_OUT_OF_SCOPE_DOMAIN");
+    expect(result.evidence_quotes.join(" ")).toMatch(/forward.?deployed|fde/i);
   });
 
   it("R02: generic Director / Programme / Project / Delivery / Consultant reject", () => {

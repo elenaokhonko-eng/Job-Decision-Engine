@@ -1,69 +1,94 @@
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import * as agent from "../../src/services/agent.js";
+import { runLaneRouter, runLaneRouting } from "../../src/pipeline/laneRouter.js";
+import { isRequirementOptional } from "../../src/pipeline/hardGate.js";
 import { applyGlobalGates } from "../../src/services/criteria.js";
+import type { WorkspaceContext } from "../../src/workspace/context.js";
+import {
+  ACTIVE_LANE_KEYS,
+  createLaneRouterTestHarness,
+  deterministicLaneEmbedding,
+} from "./fixtures/lane_router.test-helper.js";
 import {
   LANE_FIXTURES,
   QUALIFICATION_FIXTURES,
   COMPENSATION_FIXTURES,
 } from "./fixtures/l_q_k_lanes_qualifications.fixtures.js";
-import { loadGlobalLanesConfig } from "../../src/pipeline/laneConfigLoader.js";
-import { isRequirementOptional } from "../../src/pipeline/hardGate.js";
 
-describe("Funnel V3 Independent Test Suite — Lanes & Routing (L01-L16)", () => {
-  const globalLanes = loadGlobalLanesConfig();
+vi.mock("../../src/services/agent.js", () => ({
+  generateEmbeddingWithProvider: vi.fn(),
+  MODEL_REGISTRY: {
+    EMBEDDING_PRIMARY_MODEL: "deterministic-primary",
+    EMBEDDING_FALLBACK_MODEL: "deterministic-fallback",
+  },
+}));
 
-  it("L01: Core AI & Data lane definition exists and is active", () => {
-    const lane = globalLanes.lanes["CORE_AI_DATA"];
-    expect(lane).toBeDefined();
-    expect(lane?.required_function_concepts?.length).toBeGreaterThan(0);
+const TEST_CONTEXT: WorkspaceContext = {
+  workspaceId: "funnel-v3-lane-workspace",
+  workspaceKey: "funnel-v3-lane-workspace",
+  userId: "funnel-v3-lane-user",
+  userKey: "funnel-v3-lane-user",
+  role: "OWNER",
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(agent.generateEmbeddingWithProvider).mockImplementation(async (text: string) =>
+    deterministicLaneEmbedding(text),
+  );
+});
+
+describe("Funnel V3 Independent Test Suite — Lanes & Routing", () => {
+  it("routes deterministic fixtures to all six active lanes", async () => {
+    const fixtures = [
+      LANE_FIXTURES.L01,
+      LANE_FIXTURES.L02,
+      LANE_FIXTURES.L03,
+      LANE_FIXTURES.L04,
+      LANE_FIXTURES.L05,
+      LANE_FIXTURES.L06,
+    ];
+    const harness = createLaneRouterTestHarness(fixtures);
+
+    const result = await runLaneRouter(harness.client, { context: TEST_CONTEXT });
+
+    expect(result).toEqual({ routed: 6, deferred: 0 });
+    const updatesByJobId = new Map(harness.updates.map((update) => [update.jobId, update]));
+    const routedLanes = fixtures.map((fixture) => {
+      const update = updatesByJobId.get(fixture.id);
+      expect(update).toBeDefined();
+      expect(update?.primaryLane).toBe(fixture.expectedLanes?.[0]);
+      expect(update?.processingState).toBe("LANE_ROUTED");
+      expect(update?.semanticScore).toBe(1);
+      expect(update?.laneEvidence).toContain(
+        `${fixture.expectedLanes?.[0]}:domain_score=1.000`,
+      );
+      return update?.primaryLane;
+    });
+
+    expect(new Set(routedLanes)).toEqual(new Set(ACTIVE_LANE_KEYS));
   });
 
-  it("L02: Legal, RegTech & Digital Trust lane definition exists and includes AML/KYC concepts", () => {
-    const lane = globalLanes.lanes["LEGAL_REGTECH"];
-    expect(lane).toBeDefined();
-    expect(lane?.included_domain_concepts).toContain("aml");
-    expect(lane?.included_domain_concepts).toContain("kyc");
-  });
+  it("keeps negative scope and title fixtures unclassified with policy evidence", async () => {
+    const fixtures = [LANE_FIXTURES.L07, LANE_FIXTURES.L13, LANE_FIXTURES.L14];
+    const harness = createLaneRouterTestHarness(fixtures);
 
-  it("L03: Health, Bio & Pharma lane definition exists", () => {
-    const lane = globalLanes.lanes["HEALTH_BIO_PHARMA"];
-    expect(lane).toBeDefined();
-  });
+    const result = await runLaneRouting(harness.client, { context: TEST_CONTEXT });
 
-  it("L04: Investment, Markets & FinTech lane definition exists", () => {
-    const lane = globalLanes.lanes["INVESTMENT_MARKETS_FINTECH"];
-    expect(lane).toBeDefined();
-  });
+    expect(result).toEqual({ routed: 0, deferred: 3 });
+    for (const fixture of fixtures) {
+      const update = harness.updates.find((candidate) => candidate.jobId === fixture.id);
+      expect(update).toBeDefined();
+      expect(update?.primaryLane).toBe("UNCLASSIFIED");
+      expect(update?.processingState).toBe("ROUTING_DEFERRED");
+      expect(update?.laneEvidence[0]).toBe("ROUTING_POLICY_NO_MATCH");
+    }
 
-  it("L05-L06: Six-lane inventory audit: reports status of Lane 5 (NATURE_CLIMATE_NGO) and Lane 6 (ACADEMIA_RESEARCH_LABS)", () => {
-    const lane5 = globalLanes.lanes["NATURE_CLIMATE_NGO"];
-    const lane6 = globalLanes.lanes["ACADEMIA_RESEARCH_LABS"];
-    // In current candidate, 4 lanes are configured in registry.yml. Audit reports exact status.
-    const activeLaneKeys = Object.keys(globalLanes.lanes);
-    expect(activeLaneKeys).toContain("CORE_AI_DATA");
-    expect(activeLaneKeys).toContain("LEGAL_REGTECH");
-    expect(activeLaneKeys).toContain("HEALTH_BIO_PHARMA");
-    expect(activeLaneKeys).toContain("INVESTMENT_MARKETS_FINTECH");
-  });
-
-  it("L07: payments-only scope is excluded from lane 4 (INVESTMENT_MARKETS_FINTECH)", () => {
-    const lane4 = globalLanes.lanes["INVESTMENT_MARKETS_FINTECH"];
-    expect(lane4).toBeDefined();
-    expect(lane4?.negative_concepts).toContain("payments");
-    expect(lane4?.negative_concepts).toContain("merchant acquiring");
-  });
-
-  it("L08: insurance AI/data initiative is accepted in lane 4 concepts", () => {
-    const lane4 = globalLanes.lanes["INVESTMENT_MARKETS_FINTECH"];
-    expect(lane4).toBeDefined();
-    // Does not exclude insurance risk modeling
-    expect(lane4?.negative_concepts).not.toContain("insurance");
-  });
-
-  it("L09: KYC/AML compliance AI is recognized in lane 2 (LEGAL_REGTECH)", () => {
-    const lane2 = globalLanes.lanes["LEGAL_REGTECH"];
-    expect(lane2).toBeDefined();
-    expect(lane2?.included_domain_concepts).toContain("aml");
-    expect(lane2?.included_domain_concepts).toContain("kyc");
+    const hospitalityUpdate = harness.updates.find((update) => update.jobId === "L14");
+    expect(hospitalityUpdate?.laneEvidence.some((evidence) =>
+      evidence.startsWith("CORE_AI_DATA:blocked_by="),
+    )).toBe(true);
   });
 
   it("L12: pure UN fundraising role is rejected on non-technical axis", () => {

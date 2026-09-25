@@ -68,6 +68,27 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
           ]
         };
       }
+      if (sql.includes('FROM embedding_spaces') && sql.includes('is_fallback_space = FALSE')) {
+        return { rows: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }] };
+      }
+      if (sql.includes('FROM embedding_spaces') && sql.includes('is_fallback_space = TRUE')) {
+        return { rows: [] };
+      }
+      if (sql.includes('COUNT(DISTINCT node_id)') && sql.includes('FROM v_matchable_nodes')) {
+        return { rows: [{ n: 1 }] };
+      }
+      if (sql.includes('SELECT node_id, vector_dimensions, embedding_values') && sql.includes('FROM v_matchable_nodes')) {
+        const nodeId = params?.[3]?.[0] || '22222222-2222-4222-8222-222222222222';
+        return {
+          rows: [
+            {
+              node_id: nodeId,
+              vector_dimensions: 4,
+              embedding_values: [0.1, 0.2, 0.3, 0.4],
+            },
+          ],
+        };
+      }
       if (sql.includes('INSERT INTO match_runs') && sql.includes('RETURNING id')) {
         return { rows: [{ id: '55555555-5555-4555-8555-555555555555' }] };
       }
@@ -120,9 +141,95 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     expect(reqMatchInsert).toBeDefined();
 
     const canonicalUpdate = calls.find(
-      (c: any) => typeof c[0] === 'string' && c[0].includes("processing_status = 'MATCHED'")
+      (c: any) =>
+        typeof c[0] === 'string' &&
+        c[0].includes('UPDATE canonical_jobs') &&
+        c[0].includes('latest_match_run_id')
     );
     expect(canonicalUpdate).toBeDefined();
+    expect(canonicalUpdate?.[0]).toContain("ELSE 'MATCHED'");
+    expect(canonicalUpdate?.[1][7]).toBe(false);
+  });
+
+  it('does not publish MATCHED while an active embedding cohort is incomplete', async () => {
+    (mPool.query as any).mockImplementation(async (sql: string, params?: any[]) => {
+      if (sql.includes("FROM profile_versions") && sql.includes("pv.status = 'ACTIVE'")) {
+        return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
+      }
+      if (sql.includes('FROM profile_facts pf')) {
+        return {
+          rows: [{
+            id: '22222222-2222-4222-8222-222222222222',
+            fact_type: 'EXPERIENCE_YEARS',
+            statement: 'Five years of professional production experience',
+            evidence_tier: 'PROFESSIONAL_PRODUCTION',
+            verification_status: 'VERIFIED',
+            structured_value: { experience_years: 5 },
+          }],
+        };
+      }
+      if (sql.includes('FROM canonical_jobs c')) {
+        return {
+          rows: [{
+            id: '33333333-3333-4333-8333-333333333333',
+            latest_job_version_id: '44444444-4444-4444-8444-444444444444',
+            resolved_job_version_id: '44444444-4444-4444-8444-444444444444',
+          }],
+        };
+      }
+      if (sql.includes('FROM embedding_spaces') && sql.includes('is_fallback_space = FALSE')) {
+        return { rows: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }] };
+      }
+      if (sql.includes('FROM embedding_spaces') && sql.includes('is_fallback_space = TRUE')) {
+        return { rows: [] };
+      }
+      if (sql.includes('FROM v_matchable_nodes')) {
+        return { rows: [{ n: params?.[2] === 'PROFILE_FACT' ? 1 : 0 }] };
+      }
+      if (sql.includes('INSERT INTO match_runs') && sql.includes('RETURNING id')) {
+        return { rows: [{ id: '55555555-5555-4555-8555-555555555555' }] };
+      }
+      if (sql.includes('JOIN job_requirements jr')) {
+        return {
+          rows: [{
+            id: '66666666-6666-4666-8666-666666666666',
+            requirement_key: 'R-001',
+            requirement_type: 'EXPERIENCE_YEARS',
+            importance: 'MUST',
+            requirement_text: 'At least 3 years of professional experience',
+            quote_text: 'At least 3 years of professional experience',
+            structured_value: { minimum_years: 3 },
+          }],
+        };
+      }
+      return { rows: [] };
+    });
+
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const summary = await runDeterministicMatcher(undefined, { context });
+
+    expect(summary.matchedJobs).toBe(0);
+    expect(summary.skippedJobs).toBe(1);
+    expect(summary.errors).toBe(0);
+
+    const canonicalUpdate = (mPool.query as any).mock.calls.find(
+      (call: any[]) =>
+        typeof call[0] === 'string' &&
+        call[0].includes('UPDATE canonical_jobs') &&
+        call[0].includes("processing_state = CASE")
+    );
+    expect(canonicalUpdate).toBeDefined();
+    expect(canonicalUpdate?.[1][5]).toBe('UNKNOWN');
+    expect(canonicalUpdate?.[1][7]).toBe(true);
+    expect(canonicalUpdate?.[0]).toContain("THEN 'LANE_ROUTED'");
+    expect(canonicalUpdate?.[0]).not.toContain("processing_state = 'MATCHED'");
   });
 
   it('allows an explicitly requeued stale match to run from MATCHED state', async () => {
@@ -148,6 +255,26 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
             latest_job_version_id: '44444444-4444-4444-8444-444444444444',
             resolved_job_version_id: '44444444-4444-4444-8444-444444444444',
           }],
+        };
+      }
+      if (sql.includes('FROM embedding_spaces') && sql.includes('is_fallback_space = FALSE')) {
+        return { rows: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }] };
+      }
+      if (sql.includes('FROM embedding_spaces') && sql.includes('is_fallback_space = TRUE')) {
+        return { rows: [] };
+      }
+      if (sql.includes('COUNT(DISTINCT node_id)') && sql.includes('FROM v_matchable_nodes')) {
+        return { rows: [{ n: 1 }] };
+      }
+      if (sql.includes('SELECT node_id, vector_dimensions, embedding_values') && sql.includes('FROM v_matchable_nodes')) {
+        return {
+          rows: [
+            {
+              node_id: '22222222-2222-4222-8222-222222222222',
+              vector_dimensions: 4,
+              embedding_values: [0.1, 0.2, 0.3, 0.4],
+            },
+          ],
         };
       }
       if (sql.includes('INSERT INTO match_runs') && sql.includes('RETURNING id')) {
@@ -189,6 +316,81 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     );
     expect(jobSelect?.[0]).toContain("'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'");
     expect(jobSelect?.[1]).toContain(true);
+  });
+
+  it('does not publish MATCHED when no active compatible embedding space is configured', async () => {
+    (mPool.query as any).mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM profile_versions") && sql.includes("pv.status = 'ACTIVE'")) {
+        return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
+      }
+      if (sql.includes('FROM profile_facts pf')) {
+        return {
+          rows: [{
+            id: '22222222-2222-4222-8222-222222222222',
+            fact_type: 'EXPERIENCE_YEARS',
+            statement: 'Five years of professional production experience',
+            evidence_tier: 'PROFESSIONAL_PRODUCTION',
+            verification_status: 'VERIFIED',
+            structured_value: { experience_years: 5 },
+          }],
+        };
+      }
+      if (sql.includes('FROM canonical_jobs c')) {
+        return {
+          rows: [{
+            id: '33333333-3333-4333-8333-333333333333',
+            latest_job_version_id: '44444444-4444-4444-8444-444444444444',
+            resolved_job_version_id: '44444444-4444-4444-8444-444444444444',
+          }],
+        };
+      }
+      if (sql.includes('FROM embedding_spaces')) {
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO match_runs') && sql.includes('RETURNING id')) {
+        return { rows: [{ id: '55555555-5555-4555-8555-555555555555' }] };
+      }
+      if (sql.includes('JOIN job_requirements jr')) {
+        return {
+          rows: [{
+            id: '66666666-6666-4666-8666-666666666666',
+            requirement_key: 'R-001',
+            requirement_type: 'EXPERIENCE_YEARS',
+            importance: 'MUST',
+            requirement_text: 'At least 3 years of professional experience',
+            quote_text: 'At least 3 years of professional experience',
+            structured_value: { minimum_years: 3 },
+          }],
+        };
+      }
+      return { rows: [] };
+    });
+
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const summary = await runDeterministicMatcher(undefined, { context });
+
+    expect(summary.matchedJobs).toBe(0);
+    expect(summary.skippedJobs).toBe(1);
+    expect(summary.errors).toBe(0);
+
+    const canonicalUpdate = (mPool.query as any).mock.calls.find(
+      (call: any[]) =>
+        typeof call[0] === 'string' &&
+        call[0].includes('UPDATE canonical_jobs') &&
+        call[0].includes("processing_state = CASE")
+    );
+    expect(canonicalUpdate).toBeDefined();
+    expect(canonicalUpdate?.[1][5]).toBe('UNKNOWN');
+    expect(canonicalUpdate?.[1][7]).toBe(true);
+    expect(canonicalUpdate?.[0]).toContain("THEN 'LANE_ROUTED'");
+    expect(canonicalUpdate?.[0]).not.toContain("processing_state = 'MATCHED'");
   });
 
   it('records a completed zero-coverage match when deterministic extraction completed with no requirements', async () => {

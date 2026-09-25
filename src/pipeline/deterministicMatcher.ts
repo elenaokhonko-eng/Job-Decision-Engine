@@ -540,6 +540,7 @@ export async function runDeterministicMatcher(
       }
     }
     const factEmbeddingsBySpace = new Map<string, Map<string, number[]>>();
+    const semanticEmbeddingsConfigured = embeddingSpaceCandidates.length > 0;
 
     for (const job of jobs) {
       const versionId = job.resolved_job_version_id || job.latest_job_version_id;
@@ -731,12 +732,19 @@ export async function runDeterministicMatcher(
 
         const usedEmbeddings =
           !!semanticEmbeddingSpaceId &&
+          factIds.length > 0 &&
+          requirementIds.length > 0 &&
           factEmbeddings.size === factIds.length &&
           requirementEmbeddings.size === requirementIds.length;
 
         const scoredRequirements = reqRes.rows.filter((req) =>
           isCapabilityRequirementType(req.requirement_type)
         );
+        // Complete semantic evidence is required to publish MATCHED.
+        // Neither an incomplete cohort nor a missing/unconfigured embedding space may bypass semantic evaluation.
+        const semanticEvidenceRequired = scoredRequirements.length > 0 && factIds.length > 0;
+        const semanticEvidenceIncomplete = semanticEvidenceRequired && !usedEmbeddings;
+
         let weightedScoreSum = 0;
         let weightSum = 0;
         let matchedCount = 0;
@@ -982,29 +990,41 @@ export async function runDeterministicMatcher(
         );
 
         const profileMatchStatus =
-          matchedCount > 0
-            ? 'POSITIVE_MATCH'
-            : usedEmbeddings
-              ? 'NO_PROFILE_MATCH'
-              : 'UNKNOWN';
+          semanticEvidenceIncomplete
+            ? 'UNKNOWN'
+            : matchedCount > 0
+              ? 'POSITIVE_MATCH'
+              : usedEmbeddings
+                ? 'NO_PROFILE_MATCH'
+                : 'UNKNOWN';
 
         const canonicalUpdate = await client.query(
           `UPDATE canonical_jobs
-           SET deterministic_match_score = $2,
-               deterministic_match_coverage = $3,
+           SET deterministic_match_score = CASE WHEN $8::boolean THEN NULL ELSE $2 END,
+               deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE $3 END,
                latest_match_run_id = $4,
                profile_match_status = $6,
-               processing_state = 'MATCHED',
-               processing_status = 'MATCHED',
+               processing_state = CASE WHEN $8::boolean THEN 'LANE_ROUTED' ELSE 'MATCHED' END,
+               processing_status = CASE WHEN $8::boolean THEN 'LANE_ROUTED' ELSE 'MATCHED' END,
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = $5
              AND (latest_job_version_id IS NULL OR latest_job_version_id = $7)`,
-          [ctx.workspaceId, overallScore, coverageScore, matchRunId, job.id, profileMatchStatus, versionId]
+          [
+            ctx.workspaceId,
+            overallScore,
+            coverageScore,
+            matchRunId,
+            job.id,
+            profileMatchStatus,
+            versionId,
+            semanticEvidenceIncomplete,
+          ]
         );
 
         await client.query("COMMIT");
-        if (canonicalUpdate?.rowCount !== 0) matchedJobs += 1;
+        if (canonicalUpdate?.rowCount !== 0 && !semanticEvidenceIncomplete) matchedJobs += 1;
+        if (canonicalUpdate?.rowCount !== 0 && semanticEvidenceIncomplete) skippedJobs += 1;
       } catch (error) {
         await client.query("ROLLBACK");
         errors += 1;
