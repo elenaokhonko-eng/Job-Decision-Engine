@@ -303,7 +303,7 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'embedding_spaces'
       AND constraint_type = 'UNIQUE'
       AND constraint_name = 'embedding_spaces_space_key_key'
@@ -320,7 +320,7 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'embedding_inputs'
       AND constraint_type = 'UNIQUE'
       AND constraint_name = 'embedding_inputs_input_key_key'
@@ -331,7 +331,7 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'embedding_inputs'
       AND constraint_type = 'UNIQUE'
       AND constraint_name = 'embedding_inputs_source_type_source_id_key'
@@ -351,7 +351,7 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'embedding_batches'
       AND constraint_type = 'UNIQUE'
       AND constraint_name = 'embedding_batches_batch_key_key'
@@ -394,7 +394,7 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'candidate_profiles'
       AND constraint_type = 'UNIQUE'
       AND constraint_name = 'candidate_profiles_profile_key_key'
@@ -570,7 +570,7 @@ DO $$
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'source_runs' AND constraint_name = 'fk_source_runs_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'source_runs' AND constraint_name = 'fk_source_runs_workspace'
   ) THEN
     ALTER TABLE source_runs
       ADD CONSTRAINT fk_source_runs_workspace
@@ -579,7 +579,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'raw_job_observations' AND constraint_name = 'fk_raw_job_observations_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'raw_job_observations' AND constraint_name = 'fk_raw_job_observations_workspace'
   ) THEN
     ALTER TABLE raw_job_observations
       ADD CONSTRAINT fk_raw_job_observations_workspace
@@ -588,7 +588,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'canonical_jobs' AND constraint_name = 'fk_canonical_jobs_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'canonical_jobs' AND constraint_name = 'fk_canonical_jobs_workspace'
   ) THEN
     ALTER TABLE canonical_jobs
       ADD CONSTRAINT fk_canonical_jobs_workspace
@@ -597,7 +597,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'job_versions' AND constraint_name = 'fk_job_versions_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'job_versions' AND constraint_name = 'fk_job_versions_workspace'
   ) THEN
     ALTER TABLE job_versions
       ADD CONSTRAINT fk_job_versions_workspace
@@ -606,7 +606,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'evaluation_queue' AND constraint_name = 'fk_evaluation_queue_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'evaluation_queue' AND constraint_name = 'fk_evaluation_queue_workspace'
   ) THEN
     ALTER TABLE evaluation_queue
       ADD CONSTRAINT fk_evaluation_queue_workspace
@@ -615,7 +615,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'ai_evaluations' AND constraint_name = 'fk_ai_evaluations_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'ai_evaluations' AND constraint_name = 'fk_ai_evaluations_workspace'
   ) THEN
     ALTER TABLE ai_evaluations
       ADD CONSTRAINT fk_ai_evaluations_workspace
@@ -624,7 +624,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'raw_email_alerts' AND constraint_name = 'fk_raw_email_alerts_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'raw_email_alerts' AND constraint_name = 'fk_raw_email_alerts_workspace'
   ) THEN
     ALTER TABLE raw_email_alerts
       ADD CONSTRAINT fk_raw_email_alerts_workspace
@@ -633,7 +633,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'gate_decisions' AND constraint_name = 'fk_gate_decisions_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'gate_decisions' AND constraint_name = 'fk_gate_decisions_workspace'
   ) THEN
     ALTER TABLE gate_decisions
       ADD CONSTRAINT fk_gate_decisions_workspace
@@ -642,7 +642,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'quarantined_queue_records' AND constraint_name = 'fk_quarantined_queue_records_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'quarantined_queue_records' AND constraint_name = 'fk_quarantined_queue_records_workspace'
   ) THEN
     ALTER TABLE quarantined_queue_records
       ADD CONSTRAINT fk_quarantined_queue_records_workspace
@@ -651,7 +651,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'evaluation_attempts' AND constraint_name = 'fk_evaluation_attempts_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'evaluation_attempts' AND constraint_name = 'fk_evaluation_attempts_workspace'
   ) THEN
     ALTER TABLE evaluation_attempts
       ADD CONSTRAINT fk_evaluation_attempts_workspace
@@ -660,7 +660,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'job_requirements' AND constraint_name = 'fk_job_requirements_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'job_requirements' AND constraint_name = 'fk_job_requirements_workspace'
   ) THEN
     ALTER TABLE job_requirements
       ADD CONSTRAINT fk_job_requirements_workspace
@@ -669,7 +669,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'requirement_extraction_runs' AND constraint_name = 'fk_requirement_extraction_runs_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'requirement_extraction_runs' AND constraint_name = 'fk_requirement_extraction_runs_workspace'
   ) THEN
     ALTER TABLE requirement_extraction_runs
       ADD CONSTRAINT fk_requirement_extraction_runs_workspace
@@ -678,7 +678,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'job_version_pipeline_state' AND constraint_name = 'fk_job_version_pipeline_state_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'job_version_pipeline_state' AND constraint_name = 'fk_job_version_pipeline_state_workspace'
   ) THEN
     ALTER TABLE job_version_pipeline_state
       ADD CONSTRAINT fk_job_version_pipeline_state_workspace
@@ -687,7 +687,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'pipeline_stage_events' AND constraint_name = 'fk_pipeline_stage_events_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'pipeline_stage_events' AND constraint_name = 'fk_pipeline_stage_events_workspace'
   ) THEN
     ALTER TABLE pipeline_stage_events
       ADD CONSTRAINT fk_pipeline_stage_events_workspace
@@ -696,7 +696,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'match_runs' AND constraint_name = 'fk_match_runs_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'match_runs' AND constraint_name = 'fk_match_runs_workspace'
   ) THEN
     ALTER TABLE match_runs
       ADD CONSTRAINT fk_match_runs_workspace
@@ -705,7 +705,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'requirement_evidence_matches' AND constraint_name = 'fk_requirement_evidence_matches_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'requirement_evidence_matches' AND constraint_name = 'fk_requirement_evidence_matches_workspace'
   ) THEN
     ALTER TABLE requirement_evidence_matches
       ADD CONSTRAINT fk_requirement_evidence_matches_workspace
@@ -714,7 +714,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'embedding_spaces' AND constraint_name = 'fk_embedding_spaces_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'embedding_spaces' AND constraint_name = 'fk_embedding_spaces_workspace'
   ) THEN
     ALTER TABLE embedding_spaces
       ADD CONSTRAINT fk_embedding_spaces_workspace
@@ -723,7 +723,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'embedding_inputs' AND constraint_name = 'fk_embedding_inputs_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'embedding_inputs' AND constraint_name = 'fk_embedding_inputs_workspace'
   ) THEN
     ALTER TABLE embedding_inputs
       ADD CONSTRAINT fk_embedding_inputs_workspace
@@ -732,7 +732,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'embedding_batches' AND constraint_name = 'fk_embedding_batches_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'embedding_batches' AND constraint_name = 'fk_embedding_batches_workspace'
   ) THEN
     ALTER TABLE embedding_batches
       ADD CONSTRAINT fk_embedding_batches_workspace
@@ -741,7 +741,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'embedding_batch_items' AND constraint_name = 'fk_embedding_batch_items_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'embedding_batch_items' AND constraint_name = 'fk_embedding_batch_items_workspace'
   ) THEN
     ALTER TABLE embedding_batch_items
       ADD CONSTRAINT fk_embedding_batch_items_workspace
@@ -750,7 +750,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'semantic_embeddings' AND constraint_name = 'fk_semantic_embeddings_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'semantic_embeddings' AND constraint_name = 'fk_semantic_embeddings_workspace'
   ) THEN
     ALTER TABLE semantic_embeddings
       ADD CONSTRAINT fk_semantic_embeddings_workspace
@@ -759,7 +759,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'document_runs' AND constraint_name = 'fk_document_runs_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'document_runs' AND constraint_name = 'fk_document_runs_workspace'
   ) THEN
     ALTER TABLE document_runs
       ADD CONSTRAINT fk_document_runs_workspace
@@ -768,7 +768,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'document_claims' AND constraint_name = 'fk_document_claims_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'document_claims' AND constraint_name = 'fk_document_claims_workspace'
   ) THEN
     ALTER TABLE document_claims
       ADD CONSTRAINT fk_document_claims_workspace
@@ -777,7 +777,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'candidate_profiles' AND constraint_name = 'fk_candidate_profiles_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'candidate_profiles' AND constraint_name = 'fk_candidate_profiles_workspace'
   ) THEN
     ALTER TABLE candidate_profiles
       ADD CONSTRAINT fk_candidate_profiles_workspace
@@ -786,7 +786,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'profile_versions' AND constraint_name = 'fk_profile_versions_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'profile_versions' AND constraint_name = 'fk_profile_versions_workspace'
   ) THEN
     ALTER TABLE profile_versions
       ADD CONSTRAINT fk_profile_versions_workspace
@@ -795,7 +795,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'profile_engagements' AND constraint_name = 'fk_profile_engagements_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'profile_engagements' AND constraint_name = 'fk_profile_engagements_workspace'
   ) THEN
     ALTER TABLE profile_engagements
       ADD CONSTRAINT fk_profile_engagements_workspace
@@ -804,7 +804,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'profile_facts' AND constraint_name = 'fk_profile_facts_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'profile_facts' AND constraint_name = 'fk_profile_facts_workspace'
   ) THEN
     ALTER TABLE profile_facts
       ADD CONSTRAINT fk_profile_facts_workspace
@@ -813,7 +813,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'profile_fact_concepts' AND constraint_name = 'fk_profile_fact_concepts_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'profile_fact_concepts' AND constraint_name = 'fk_profile_fact_concepts_workspace'
   ) THEN
     ALTER TABLE profile_fact_concepts
       ADD CONSTRAINT fk_profile_fact_concepts_workspace
@@ -822,7 +822,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'profile_credentials' AND constraint_name = 'fk_profile_credentials_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'profile_credentials' AND constraint_name = 'fk_profile_credentials_workspace'
   ) THEN
     ALTER TABLE profile_credentials
       ADD CONSTRAINT fk_profile_credentials_workspace
@@ -831,7 +831,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'evidence_sources' AND constraint_name = 'fk_evidence_sources_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'evidence_sources' AND constraint_name = 'fk_evidence_sources_workspace'
   ) THEN
     ALTER TABLE evidence_sources
       ADD CONSTRAINT fk_evidence_sources_workspace
@@ -840,7 +840,7 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
-    WHERE table_schema = 'public' AND table_name = 'profile_fact_evidence_sources' AND constraint_name = 'fk_profile_fact_evidence_sources_workspace'
+    WHERE table_schema = current_schema() AND table_name = 'profile_fact_evidence_sources' AND constraint_name = 'fk_profile_fact_evidence_sources_workspace'
   ) THEN
     ALTER TABLE profile_fact_evidence_sources
       ADD CONSTRAINT fk_profile_fact_evidence_sources_workspace

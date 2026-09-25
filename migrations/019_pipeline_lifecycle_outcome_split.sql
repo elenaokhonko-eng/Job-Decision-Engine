@@ -38,7 +38,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'canonical_jobs'
       AND constraint_name = 'canonical_jobs_recommendation_eligibility_chk'
   ) THEN
@@ -53,7 +53,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'canonical_jobs'
       AND constraint_name = 'canonical_jobs_recommendation_outcome_chk'
   ) THEN
