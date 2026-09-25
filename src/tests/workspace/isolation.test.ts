@@ -117,7 +117,17 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
         )
       ).rows[0].id as string;
 
-      await q(
+      const spaceRes = await q(
+        `INSERT INTO embedding_spaces (
+           workspace_id, space_key, provider, model, dimensions,
+           is_fallback_space, active
+         ) VALUES ($1, $2, 'fixture', 'fixture-primary', 4, FALSE, TRUE)
+         RETURNING id`,
+        [workspaceId, `space_${workspaceId}_${Math.random()}`]
+      );
+      const spaceId = spaceRes.rows[0].id as string;
+
+      const factRes = await q(
         `INSERT INTO profile_facts (
            workspace_id,
            profile_version_id,
@@ -133,8 +143,17 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
            is_current,
            confidentiality
          )
-         VALUES ($1, $2, NULL, 'fact_python', 'SKILL', 'Python', NULL, 'PROFESSIONAL_PRODUCTION', 'SELF_ATTESTED', NULL, NULL, TRUE, 'PRIVATE_REUSABLE')`,
+         VALUES ($1, $2, NULL, 'fact_python', 'SKILL', 'Python', NULL, 'PROFESSIONAL_PRODUCTION', 'SELF_ATTESTED', NULL, NULL, TRUE, 'PRIVATE_REUSABLE')
+         RETURNING id`,
         [workspaceId, pvId]
+      );
+
+      await q(
+        `INSERT INTO embedding_inputs (
+           workspace_id, embedding_space_id, input_key, source_type, source_id,
+           input_text, input_hash, vector_dimensions, embedding_values, status
+         ) VALUES ($1, $2, $3, 'PROFILE_FACT', $4, 'Python', $5, 4, '{0.1,0.2,0.3,0.4}', 'COMPLETED')`,
+        [workspaceId, spaceId, `input_fact_${pvId}`, factRes.rows[0].id, `hash_fact_${pvId}`]
       );
 
       return { cpId, pvId };
@@ -209,7 +228,7 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
         [requirementSetId, workspaceId, versionId]
       );
 
-      await q(
+      const reqRes = await q(
         `INSERT INTO job_requirements (
            workspace_id,
            canonical_job_id,
@@ -228,9 +247,24 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
            confidence,
            status
          )
-         VALUES ($1, $2, $3, $4, 'REQ-1', 'DOMAIN', 'MUST', 'Python', NULL, NULL, NULL, NULL, 'DETERMINISTIC', 'test', 1.0, 'VALIDATED')`,
+         VALUES ($1, $2, $3, $4, 'REQ-1', 'DOMAIN', 'MUST', 'Python', NULL, NULL, NULL, NULL, 'DETERMINISTIC', 'test', 1.0, 'VALIDATED')
+         RETURNING id`,
         [workspaceId, canonicalId, versionId, requirementSetId]
       );
+
+      const spaceRes = await q(
+        `SELECT id FROM embedding_spaces WHERE workspace_id = $1 AND active = TRUE LIMIT 1`,
+        [workspaceId]
+      );
+      if (spaceRes.rows.length > 0) {
+        await q(
+          `INSERT INTO embedding_inputs (
+             workspace_id, embedding_space_id, input_key, source_type, source_id,
+             input_text, input_hash, vector_dimensions, embedding_values, status
+           ) VALUES ($1, $2, $3, 'JOB_REQUIREMENT', $4, 'Python', $5, 4, '{0.1,0.2,0.3,0.4}', 'COMPLETED')`,
+          [workspaceId, spaceRes.rows[0].id, `input_req_${reqRes.rows[0].id}`, reqRes.rows[0].id, `hash_req_${reqRes.rows[0].id}`]
+        );
+      }
 
       return { canonicalId, versionId };
     };

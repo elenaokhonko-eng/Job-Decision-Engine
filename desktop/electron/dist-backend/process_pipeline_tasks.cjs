@@ -10257,8 +10257,8 @@ async function runDeterministicMatcher(clientOrPool, options) {
 				]);
 				const profileMatchStatus = semanticEvidenceIncomplete ? "UNKNOWN" : matchedCount > 0 ? "POSITIVE_MATCH" : usedEmbeddings ? "NO_PROFILE_MATCH" : "UNKNOWN";
 				const canonicalUpdate = await client.query(`UPDATE canonical_jobs
-           SET deterministic_match_score = CASE WHEN $8::boolean THEN NULL ELSE $2 END,
-               deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE $3 END,
+           SET deterministic_match_score = CASE WHEN $8::boolean THEN NULL ELSE $2::numeric END,
+               deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE $3::numeric END,
                latest_match_run_id = $4,
                profile_match_status = $6,
                processing_state = CASE WHEN $8::boolean THEN 'LANE_ROUTED' ELSE 'MATCHED' END,
