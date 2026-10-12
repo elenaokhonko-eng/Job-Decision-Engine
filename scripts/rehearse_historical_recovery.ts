@@ -80,6 +80,72 @@ async function getLaneDistribution(client: pg.PoolClient, workspaceId: string): 
   return out;
 }
 
+interface AffectedHistoricalJob {
+  id: string;
+  reason: string;
+}
+
+async function listAffectedHistoricalJobs(
+  client: pg.PoolClient,
+  workspaceId: string,
+): Promise<AffectedHistoricalJob[]> {
+  const result = await client.query<AffectedHistoricalJob>(`
+    WITH latest_gates AS (
+      SELECT DISTINCT ON (gd.canonical_job_id, gd.job_version_id)
+        gd.canonical_job_id,
+        gd.job_version_id,
+        gd.rejection_codes
+      FROM gate_decisions gd
+      WHERE gd.workspace_id = $1
+      ORDER BY gd.canonical_job_id, gd.job_version_id, gd.created_at DESC
+    )
+    SELECT
+      c.id,
+      CASE
+        WHEN COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED', 'LANE_ROUTED')
+          THEN 'PENDING_OR_ROUTING_DEFERRED'
+        WHEN COALESCE(c.processing_state, c.processing_status) IN ('MATCHED', 'UNMATCHED')
+          THEN 'MATCH_OR_QUALIFICATION_REVALIDATION'
+        ELSE 'CHANGED_GLOBAL_RULE_REASON'
+      END AS reason
+    FROM canonical_jobs c
+    LEFT JOIN latest_gates lg
+      ON lg.canonical_job_id = c.id
+     AND (c.latest_job_version_id IS NULL OR lg.job_version_id = c.latest_job_version_id)
+    WHERE c.workspace_id = $1
+      AND c.id::text NOT LIKE 'c0000000-0000-4000-8000-%'
+      AND (
+        COALESCE(c.processing_state, c.processing_status) IN (
+          'RAW_STAGED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED', 'LANE_ROUTED', 'MATCHED', 'UNMATCHED'
+        )
+        OR (
+          COALESCE(c.processing_state, c.processing_status) = 'HARD_REJECTED'
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(COALESCE(lg.rejection_codes, '[]'::jsonb)) AS code(value)
+            WHERE code.value IN (
+              'GATE_EXPERIENCE_YEARS_MISMATCH',
+              'GATE_DEGREE_MISMATCH',
+              'GATE_CREDENTIAL_MISMATCH',
+              'NEEDS_VERIFICATION_EXPERIENCE',
+              'NEEDS_VERIFICATION_EXPERIENCE_YEARS',
+              'NEEDS_VERIFICATION_DEGREE',
+              'NEEDS_VERIFICATION_CREDENTIAL',
+              'GATE_UNKNOWN_WORK_MODE',
+              'UNWORKABLE_LOCATION_MODEL',
+              'GATE_HIGH_OFFICE_DAYS',
+              'GATE_LIFESTYLE_INCOMPATIBLE',
+              'GATE_OUT_OF_SCOPE_DOMAIN'
+            )
+          )
+        )
+      )
+    ORDER BY c.created_at ASC, c.id ASC;
+  `, [workspaceId]);
+
+  return result.rows;
+}
+
 async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceContext) {
   console.log("Staging deterministic canaries for six lanes and qualification stages...");
   await loadWorkspaceLanesConfig(client as any, { context: ctx, seedIfEmpty: true });
@@ -822,50 +888,65 @@ async function main() {
 
     console.log("✅ ALL CANARY INVARIANTS AND CRITICAL ASSERTIONS VERIFIED CLEANLY.");
 
-    // 4. Full Staging Replay (with controlled AI evaluation budget)
-    console.log("\n--- 4. Full Staging Replay with Controlled AI Budget ---");
-    
-    // Step 4a: Run Hard Gates on all jobs with reprocess = true
-    console.log("Executing Full Hard Gate Evaluation across all historical jobs...");
+    // 4. Affected Historical Cohort Replay (with controlled AI evaluation budget)
+    // Never reprocess a record merely because it exists. This selector includes only
+    // nonterminal workflow states, stale match states, and hard rejects tied to rules
+    // revised by Funnel V3; canaries are excluded from the historical cohort.
+    console.log("\n--- 4. Affected Historical Cohort Replay with Controlled AI Budget ---");
+    const affectedJobs = await listAffectedHistoricalJobs(client, ctx.workspaceId);
+    const affectedJobIds = affectedJobs.map((job) => job.id);
+    const affectedByReason = affectedJobs.reduce<Record<string, number>>((counts, job) => {
+      counts[job.reason] = (counts[job.reason] ?? 0) + 1;
+      return counts;
+    }, {});
+    console.log(`Selected ${affectedJobIds.length} affected historical job(s) for replay.`, affectedByReason);
+
+    // Step 4a: Run hard gates only for the affected cohort.
+    console.log("Executing Hard Gate Evaluation for affected historical cohort...");
     const fullGateResult = await runHardGates(pool, {
       context: ctx,
+      canonicalJobIds: affectedJobIds,
       reprocess: true,
     });
-    console.log("Full Hard Gate Results:", fullGateResult);
+    console.log("Affected Cohort Hard Gate Results:", fullGateResult);
 
-    // Step 4b: Run Lane Routing across all gate-passed jobs
-    console.log("Executing Full Lane Routing across gate-passed jobs...");
+    // Step 4b: Route only the affected cohort that passed hard gates.
+    console.log("Executing Lane Routing for affected historical cohort...");
     const fullLaneResult = await runLaneRouting(pool, {
       context: ctx,
+      canonicalJobIds: affectedJobIds,
     });
-    console.log("Full Lane Routing Results:", fullLaneResult);
+    console.log("Affected Cohort Lane Routing Results:", fullLaneResult);
 
-    // Step 4c: Run Deterministic Matcher across routed jobs
-    console.log("Executing Full Deterministic Matcher across routed jobs...");
+    // Step 4c: Deterministic qualification and semantic matching for the same cohort.
+    console.log("Executing Deterministic Matcher for affected historical cohort...");
     const fullMatchResult = await runDeterministicMatcher(pool, {
       context: ctx,
+      canonicalJobIds: affectedJobIds,
     });
-    console.log("Full Deterministic Match Results:", fullMatchResult);
+    console.log("Affected Cohort Deterministic Match Results:", fullMatchResult);
 
-    // Step 4d: Run Recommendation Decider
-    console.log("Executing Recommendation Decider...");
+    // Step 4d: Recompute recommendations only for affected records.
+    console.log("Executing Recommendation Decider for affected historical cohort...");
     try {
       const recDecideResult = await runRecommendationDecider(pool, {
         context: ctx,
+        canonicalJobIds: affectedJobIds,
       });
-      console.log("Recommendation Decider Results:", recDecideResult);
+      console.log("Affected Cohort Recommendation Decider Results:", recDecideResult);
     } catch (recErr) {
       console.warn("Recommendation Decider notice:", recErr);
     }
 
-    // Step 4e: Controlled AI Evaluation Budgeting via canonical Enqueuer
+    // Step 4e: Controlled AI Evaluation Budgeting only for the selected cohort.
     console.log("\n--- 4e. Controlled AI Evaluation Budget Enqueueing ---");
     const budgetRunId = crypto.randomUUID();
     const enqueueResult = await runExplanationQueueEnqueuer(pool, {
       context: ctx,
+      canonicalJobIds: affectedJobIds,
       budgetRunId,
     });
-    console.log("Explanation Queue Enqueuer Results:", enqueueResult);
+    console.log("Affected Cohort Explanation Queue Enqueuer Results:", enqueueResult);
 
     // 5. Post-Replay Snapshot & Idempotency Run
     console.log("\n--- 5. Post-Replay State Distribution ---");
@@ -896,19 +977,22 @@ async function main() {
     console.log("\n--- 5b. Second Replay Pass (Idempotency Check) ---");
     const secondGateResult = await runHardGates(pool, {
       context: ctx,
+      canonicalJobIds: affectedJobIds,
       reprocess: false,
     });
-    console.log("Second Gate Run (should be 0 unhandled):", secondGateResult);
+    console.log("Second affected-cohort gate run (should be 0 unhandled):", secondGateResult);
 
     const secondLaneResult = await runLaneRouting(pool, {
       context: ctx,
+      canonicalJobIds: affectedJobIds,
     });
-    console.log("Second Lane Run (should be 0 newly routed):", secondLaneResult);
+    console.log("Second affected-cohort lane run (should be 0 newly routed):", secondLaneResult);
 
     const secondMatchResult = await runDeterministicMatcher(pool, {
       context: ctx,
+      canonicalJobIds: affectedJobIds,
     });
-    console.log("Second Match Run (should be 0 newly matched):", secondMatchResult);
+    console.log("Second affected-cohort match run (should be 0 newly matched):", secondMatchResult);
 
     const postIdempotencyDist = await getProcessingDistribution(client, ctx.workspaceId);
     console.table(postIdempotencyDist);
