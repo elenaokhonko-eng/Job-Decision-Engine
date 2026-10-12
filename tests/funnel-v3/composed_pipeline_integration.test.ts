@@ -146,11 +146,11 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     const harness = createComposedGateHarness({
       jobs: [
         {
-          id: "job-exp-10yr",
+          id: "10000000-0000-4000-8000-000000000001",
           title: "Staff Machine Learning Engineer",
           company_name: "AI Corp",
           description_text: "Lead AI systems. 10 years experience required in machine learning engineering.",
-          job_version_id: "jv-exp-10yr",
+          job_version_id: "11000000-0000-4000-8000-000000000001",
           workplace_type: "REMOTE",
           requirements: [
             {
@@ -178,7 +178,7 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     expect(res.passed).toBe(1);
     expect(res.hardRejected).toBe(0);
 
-    const update = harness.jobUpdates.find((u) => u.id === "job-exp-10yr");
+    const update = harness.jobUpdates.find((u) => u.id === "10000000-0000-4000-8000-000000000001");
     expect(update).toBeDefined();
     expect(update?.gate_decision).toBe("PASS");
     expect(update?.processing_status).toBe("PREQUALIFIED");
@@ -189,11 +189,11 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     const harness = createComposedGateHarness({
       jobs: [
         {
-          id: "job-degree-phd",
+          id: "10000000-0000-4000-8000-000000000002",
           title: "Senior AI Researcher",
           company_name: "Research Labs",
           description_text: "Build foundational LLMs. PhD degree required in Computer Science.",
-          job_version_id: "jv-degree-phd",
+          job_version_id: "11000000-0000-4000-8000-000000000002",
           workplace_type: "REMOTE",
           requirements: [
             {
@@ -221,7 +221,7 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     expect(res.passed).toBe(1);
     expect(res.hardRejected).toBe(0);
 
-    const update = harness.jobUpdates.find((u) => u.id === "job-degree-phd");
+    const update = harness.jobUpdates.find((u) => u.id === "10000000-0000-4000-8000-000000000002");
     expect(update?.gate_decision).toBe("PASS");
     expect(update?.processing_status).toBe("PREQUALIFIED");
   });
@@ -230,11 +230,11 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     const harness = createComposedGateHarness({
       jobs: [
         {
-          id: "job-pref-cert",
+          id: "10000000-0000-4000-8000-000000000003",
           title: "Cloud Infrastructure Architect",
           company_name: "CloudTech",
           description_text: "Design Kubernetes infrastructure. AWS Solutions Architect Professional preferred.",
-          job_version_id: "jv-pref-cert",
+          job_version_id: "11000000-0000-4000-8000-000000000003",
           workplace_type: "REMOTE",
           requirements: [
             {
@@ -243,6 +243,13 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
               importance: "PREFERRED",
               requirement_text: "AWS Certified Solutions Architect Professional preferred",
               structured_value: { is_required: false, credential_name: "AWS Certified Solutions Architect" },
+            },
+            {
+              requirement_key: "req_masters_degree",
+              requirement_type: "DEGREE",
+              importance: "PREFERRED",
+              requirement_text: "Master's degree in Computer Science preferred",
+              structured_value: { is_required: false, degree_level: "masters", degree_subject: "computer science" },
             },
           ],
         },
@@ -255,7 +262,7 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     expect(res.passed).toBe(1);
     expect(res.hardRejected).toBe(0);
 
-    const update = harness.jobUpdates.find((u) => u.id === "job-pref-cert");
+    const update = harness.jobUpdates.find((u) => u.id === "10000000-0000-4000-8000-000000000003");
     expect(update?.gate_decision).toBe("PASS");
     expect(update?.processing_status).toBe("PREQUALIFIED");
   });
@@ -264,11 +271,11 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     const harness = createComposedGateHarness({
       jobs: [
         {
-          id: "job-mand-cert",
+          id: "10000000-0000-4000-8000-000000000004",
           title: "Financial Security Systems Engineer",
           company_name: "SecureBank",
           description_text: "Lead security audit infrastructure. CISSP certification strictly required.",
-          job_version_id: "jv-mand-cert",
+          job_version_id: "11000000-0000-4000-8000-000000000004",
           workplace_type: "REMOTE",
           requirements: [
             {
@@ -289,7 +296,7 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     expect(res.passed).toBe(1);
     expect(res.hardRejected).toBe(0);
 
-    const update = harness.jobUpdates.find((u) => u.id === "job-mand-cert");
+    const update = harness.jobUpdates.find((u) => u.id === "10000000-0000-4000-8000-000000000004");
     expect(update?.gate_decision).toBe("PASS");
     expect(update?.processing_status).toBe("PREQUALIFIED");
   });
@@ -298,11 +305,11 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     const harness = createComposedGateHarness({
       jobs: [
         {
-          id: "job-auth-mismatch",
+          id: "10000000-0000-4000-8000-000000000005",
           title: "Senior AI Engineer (Defense)",
           company_name: "US Defense Contractor",
           description_text: "US Citizens only. Strictly requires United States citizenship and security clearance.",
-          job_version_id: "jv-auth-mismatch",
+          job_version_id: "11000000-0000-4000-8000-000000000005",
           workplace_type: "REMOTE",
           location: "Remote - United States",
           requirements: [
@@ -331,7 +338,7 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     expect(res.passed).toBe(0);
     expect(res.hardRejected).toBe(1);
 
-    const update = harness.jobUpdates.find((u) => u.id === "job-auth-mismatch");
+    const update = harness.jobUpdates.find((u) => u.id === "10000000-0000-4000-8000-000000000005");
     expect(update?.gate_decision).toBe("HARD_REJECT");
     expect(update?.processing_status).toBe("HARD_REJECTED");
     expect(update?.rejection_reason).toContain("GATE_LOCATION_RESTRICTED");
@@ -341,27 +348,27 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     const harness = createComposedGateHarness({
       jobs: [
         {
-          id: "job-onsite-5",
+          id: "10000000-0000-4000-8000-000000000006",
           title: "AI Engineer",
           company_name: "Strict Onsite Corp",
           description_text: "5 days onsite required at office.",
-          job_version_id: "jv-onsite-5",
+          job_version_id: "11000000-0000-4000-8000-000000000006",
           workplace_type: "ONSITE",
         },
         {
-          id: "job-travel-50",
+          id: "10000000-0000-4000-8000-000000000007",
           title: "Implementation Engineer",
           company_name: "Travel Corp",
           description_text: "50% travel required across APAC.",
-          job_version_id: "jv-travel-50",
+          job_version_id: "11000000-0000-4000-8000-000000000007",
           workplace_type: "REMOTE",
         },
         {
-          id: "job-fde-role",
+          id: "10000000-0000-4000-8000-000000000008",
           title: "Forward Deployed Engineer - AI Applications",
           company_name: "Unicorn AI",
           description_text: "Forward deployment engineer delivering client integrations.",
-          job_version_id: "jv-fde-role",
+          job_version_id: "11000000-0000-4000-8000-000000000008",
           workplace_type: "REMOTE",
         },
       ],
@@ -372,9 +379,9 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     expect(res.passed).toBe(0);
     expect(res.hardRejected).toBe(3);
 
-    expect(harness.jobUpdates.find((u) => u.id === "job-onsite-5")?.gate_decision).toBe("HARD_REJECT");
-    expect(harness.jobUpdates.find((u) => u.id === "job-travel-50")?.gate_decision).toBe("HARD_REJECT");
-    expect(harness.jobUpdates.find((u) => u.id === "job-fde-role")?.gate_decision).toBe("HARD_REJECT");
+    expect(harness.jobUpdates.find((u) => u.id === "10000000-0000-4000-8000-000000000006")?.gate_decision).toBe("HARD_REJECT");
+    expect(harness.jobUpdates.find((u) => u.id === "10000000-0000-4000-8000-000000000007")?.gate_decision).toBe("HARD_REJECT");
+    expect(harness.jobUpdates.find((u) => u.id === "10000000-0000-4000-8000-000000000008")?.gate_decision).toBe("HARD_REJECT");
   });
 });
 
@@ -675,6 +682,50 @@ describe("Composed Pipeline Integration — Full Lifecycle Transition", () => {
     const match = harness.getRecordedMatches().find((m) => m.requirement_id === "req-cert-mand");
     expect(match?.match_type).toBe("NO_MATCH");
     expect(match?.evidence.match_qualification_code).toBe("MATCH_QUALIFICATION_MANDATORY_CERT_MISSING");
+  });
+
+  it("transitions GATE_PASSED -> LANE_ROUTED -> mandatory degree mismatch -> UNMATCHED with MATCH_QUALIFICATION_DEGREE_GAP", async () => {
+    const harness = createFullPipelineHarness({
+      canonicalJob: {
+        id: "job-degree-gap",
+        latest_job_version_id: "jv-degree-gap",
+        primary_lane: "UNIVERSITY_AI_RESEARCH",
+        processing_state: "LANE_ROUTED",
+        processing_status: "LANE_ROUTED",
+      },
+      requirements: [
+        {
+          id: "req-degree-phd",
+          requirement_key: "req_phd_cs",
+          requirement_type: "DEGREE",
+          importance: "MUST",
+          requirement_text: "PhD in Computer Science required",
+          structured_value: { degree_level: "phd", degree_subject: "computer science" },
+        },
+      ],
+      profileFacts: [
+        {
+          id: "fact-degree-bachelor",
+          fact_type: "DEGREE",
+          statement: "Bachelor of Science in Computer Science",
+          evidence_tier: "VERIFIED_DOCUMENT",
+          verification_status: "VERIFIED",
+          structured_value: { degree_level: "bachelor", degree_subject: "computer science" },
+        },
+      ],
+      embeddingsReady: true,
+    });
+
+    const result = await runDeterministicMatcher(harness.client, { context: TEST_CONTEXT });
+
+    expect(result.skippedJobs).toBe(1);
+    expect(harness.getUpdatedJobState()).toMatchObject({
+      processing_state: "UNMATCHED",
+      profile_match_status: "NO_PROFILE_MATCH",
+      rejection_reason: "MATCH_QUALIFICATION_DEGREE_GAP",
+    });
+    const match = harness.getRecordedMatches().find((entry) => entry.requirement_id === "req-degree-phd");
+    expect(match?.evidence.match_qualification_code).toBe("MATCH_QUALIFICATION_DEGREE_GAP");
   });
 
   it("10-year experience ask with 1.5 years evidenced calculates mathematical fit (coverage 0.15) and does not hard reject", async () => {

@@ -339,6 +339,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
           recommendation_decided_at TIMESTAMPTZ,
           latest_job_version_id UUID,
           latest_match_run_id UUID,
+          latest_deterministic_decision_id UUID,
           created_at TIMESTAMPTZ DEFAULT NOW(),
           updated_at TIMESTAMPTZ DEFAULT NOW()
         );
@@ -367,8 +368,14 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
         );
         CREATE TABLE ai_evaluations (
           id UUID PRIMARY KEY,
+          workspace_id UUID,
           canonical_job_id UUID,
           job_version_id UUID,
+          profile_version_id UUID,
+          match_run_id UUID,
+          deterministic_decision_id UUID,
+          job_content_hash TEXT,
+          context_fingerprint TEXT,
           full_evaluation_payload JSONB,
           lane_matches JSONB,
           workability_facts JSONB,
@@ -398,6 +405,37 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
           status TEXT,
           completed_at TIMESTAMPTZ,
           created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE profile_versions (
+          id UUID PRIMARY KEY,
+          workspace_id UUID,
+          status TEXT,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE match_runs (
+          id UUID PRIMARY KEY,
+          workspace_id UUID,
+          canonical_job_id UUID,
+          job_version_id UUID,
+          profile_version_id UUID,
+          requirement_set_id UUID,
+          job_content_hash TEXT,
+          context_fingerprint TEXT,
+          status TEXT
+        );
+        CREATE TABLE deterministic_decisions (
+          id UUID PRIMARY KEY,
+          workspace_id UUID,
+          canonical_job_id UUID,
+          job_version_id UUID,
+          match_run_id UUID,
+          context_fingerprint TEXT
+        );
+        CREATE TABLE pipeline_tasks (
+          workspace_id UUID,
+          status TEXT,
+          payload JSONB,
+          blocked_reason TEXT
         );
 
         -- Legacy view definition with COALESCE to 0.0::double precision
@@ -434,9 +472,9 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
           ('44444444-4444-4444-4444-444444444444', '${jobNull}'),
           ('55555555-5555-5555-5555-555555555555', '${jobZero}'),
           ('66666666-6666-6666-6666-666666666666', '${jobKnown}');
-        INSERT INTO evaluation_queue (canonical_job_id, priority_score) VALUES
-          ('${jobZero}', 0.0),
-          ('${jobKnown}', 0.875);
+        INSERT INTO evaluation_queue (canonical_job_id, job_version_id, priority_score) VALUES
+          ('${jobZero}', '55555555-5555-5555-5555-555555555555', 0.0),
+          ('${jobKnown}', '66666666-6666-6666-6666-666666666666', 0.875);
       `);
 
       const { rows: res } = await client.query<{ canonical_job_id: string; priority_score: number | null }>(

@@ -41,11 +41,17 @@ async function getProcessingDistribution(client: pg.PoolClient, workspaceId: str
 
 async function getRejectionCodes(client: pg.PoolClient, workspaceId: string): Promise<Record<string, number>> {
   const res = await client.query<{ code: string; count: string }>(`
+    WITH latest_gate_decisions AS (
+      SELECT DISTINCT ON (canonical_job_id, job_version_id)
+        rejection_codes
+      FROM gate_decisions
+      WHERE workspace_id = $1
+      ORDER BY canonical_job_id, job_version_id, created_at DESC
+    )
     SELECT code, COUNT(*)::text AS count
     FROM (
       SELECT jsonb_array_elements_text(COALESCE(rejection_codes, '[]'::jsonb)) AS code
-      FROM gate_decisions
-      WHERE workspace_id = $1
+      FROM latest_gate_decisions
     ) sub
     GROUP BY code
     ORDER BY count DESC;
@@ -130,8 +136,6 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
     UNIVERSITY_AI_RESEARCH: [0, 0, 0, 0, 0, 1],
   };
 
-  const laneVectors: Record<string, number[]> = {};
-
   for (const lr of laneRevs.rows) {
     const vecRaw = prototypeVectors[lr.lane_key] || [1, 0, 0, 0, 0, 0];
     const vec = padVector768(vecRaw);
@@ -169,7 +173,6 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       `, [ctx.workspaceId, batchId, inputId, spaceId, vec]);
     }
 
-    laneVectors[lr.lane_key] = vec;
   }
 
   // 4. Staged Canaries for the 6 lanes and qualifications
@@ -181,6 +184,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       company: "Core AI Systems",
       desc: "Build production AI systems and machine learning engineering pipelines with MLOps infrastructure, scalable distributed training, PyTorch, and LLM inference platforms.",
       vec: padVector768([1, 0, 0, 0, 0, 0]),
+      req: { key: "req_core_ai", type: "FUNCTION", importance: "MUST", text: "Machine Learning Engineering", struct: {} },
     },
     {
       id: "c0000000-0000-4000-8000-000000000002",
@@ -189,6 +193,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       company: "Trust & Compliance Tech",
       desc: "Build RegTech compliance automation and legal document intelligence using AML/KYC data, AI, and knowledge graphs.",
       vec: padVector768([0, 1, 0, 0, 0, 0]),
+      req: { key: "req_legal_regtech", type: "FUNCTION", importance: "MUST", text: "RegTech compliance automation", struct: {} },
     },
     {
       id: "c0000000-0000-4000-8000-000000000003",
@@ -197,6 +202,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       company: "Pharma Therapeutics AI",
       desc: "Apply bioinformatics and scientific machine learning to computational biology, drug discovery, and genomic sequence modeling.",
       vec: padVector768([0, 0, 1, 0, 0, 0]),
+      req: { key: "req_health_bio", type: "FUNCTION", importance: "MUST", text: "Bioinformatics machine learning", struct: {} },
     },
     {
       id: "c0000000-0000-4000-8000-000000000004",
@@ -205,6 +211,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       company: "Alpha Market Management",
       desc: "Design quantitative research and time-series models for institutional portfolio management, market data, and capital markets.",
       vec: padVector768([0, 0, 0, 1, 0, 0]),
+      req: { key: "req_fintech", type: "FUNCTION", importance: "MUST", text: "Quantitative market data engineering", struct: {} },
     },
     {
       id: "c0000000-0000-4000-8000-000000000005",
@@ -213,6 +220,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       company: "Global Wildlife & Climate Initiative",
       desc: "Deliver multilateral international-development technology with digital public infrastructure, environmental data, and climate technology for biodiversity protection.",
       vec: padVector768([0, 0, 0, 0, 1, 0]),
+      req: { key: "req_social_impact", type: "FUNCTION", importance: "MUST", text: "Digital public infrastructure", struct: {} },
     },
     {
       id: "c0000000-0000-4000-8000-000000000006",
@@ -221,6 +229,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       company: "Institute for Advanced AI Studies",
       desc: "Conduct university AI research and research software engineering in scientific machine learning, neural architectures, and publish at top conferences.",
       vec: padVector768([0, 0, 0, 0, 0, 1]),
+      req: { key: "req_university_research", type: "FUNCTION", importance: "MUST", text: "Machine learning research", struct: {} },
     },
     {
       id: "c0000000-0000-4000-8000-000000000007",
@@ -229,6 +238,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       company: "LegalTech AI Systems",
       desc: "Build MLOps machine learning engineering infrastructure for RegTech compliance automation and legal document intelligence.",
       vec: padVector768([0.707, 0.707, 0, 0, 0, 0]),
+      req: { key: "req_multi_lane", type: "FUNCTION", importance: "MUST", text: "Legal AI machine learning infrastructure", struct: {} },
     },
     {
       id: "c0000000-0000-4000-8000-000000000008",
@@ -738,7 +748,7 @@ async function main() {
 
     // Assertion 3: High semantic similarity cannot override failed deterministic gate
     const gateRejectedMatched = canaryResults.filter(
-      r => r.gateResult === "REJECTED" && r.finalState === "MATCHED"
+      r => r.gateResult === "HARD_REJECT" && r.finalState === "MATCHED"
     );
     if (gateRejectedMatched.length > 0) {
       throw new Error(`CRITICAL VIOLATION: Hard rejected job reached MATCHED: ${gateRejectedMatched.map(g => g.jobId).join(", ")}`);
@@ -747,7 +757,7 @@ async function main() {
 
     // Assertion 4: Compensation missing does not hard reject
     const compCase = canaryResults.find(r => r.scenario.includes("Compensation missing"));
-    if (compCase && compCase.gateReason.includes("SALARY") || compCase?.gateReason.includes("COMPENSATION")) {
+    if (compCase && (compCase.gateReason.includes("SALARY") || compCase.gateReason.includes("COMPENSATION"))) {
       throw new Error("CRITICAL VIOLATION: Compensation missing caused hard rejection!");
     }
     console.log("✓ Critical Assertion 4: Compensation missing does not hard reject.");
@@ -864,6 +874,20 @@ async function main() {
 
     const postReplayRejections = await getRejectionCodes(client, ctx.workspaceId);
     console.log("Post-Replay top rejection codes:", postReplayRejections);
+
+    const forbiddenGlobalQualificationCodes = [
+      "GATE_EXPERIENCE_YEARS_MISMATCH",
+      "GATE_DEGREE_MISMATCH",
+      "GATE_CREDENTIAL_MISMATCH",
+      "NEEDS_VERIFICATION_EXPERIENCE",
+      "NEEDS_VERIFICATION_EXPERIENCE_YEARS",
+    ].filter((code) => (postReplayRejections[code] ?? 0) > 0);
+    if (forbiddenGlobalQualificationCodes.length > 0) {
+      throw new Error(
+        `CRITICAL VIOLATION: Employer qualification codes persisted as latest global gate outcomes: ${forbiddenGlobalQualificationCodes.join(", ")}`
+      );
+    }
+    console.log("✓ Qualification separation confirmed: latest global gate decisions contain no employer-fit reason codes.");
 
     const postReplayLanes = await getLaneDistribution(client, ctx.workspaceId);
     console.log("Post-Replay lane distribution:", postReplayLanes);
