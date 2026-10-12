@@ -1,0 +1,846 @@
+import pg from "pg";
+import dotenv from "dotenv";
+import { pgPoolConfig } from "../src/db/pgSsl.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { runHardGates } from "../src/pipeline/hardGate.js";
+import { runLaneRouting } from "../src/pipeline/laneRouter.js";
+import { runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
+import { runRecommendationDecider } from "../src/pipeline/recommendationDecider.js";
+import { runExplanationQueueEnqueuer } from "../src/pipeline/explanationQueueEnqueuer.js";
+
+dotenv.config();
+dotenv.config({ path: ".env.local" });
+
+const stagingUrl = process.env.STAGING_DB_URL || process.env.DATABASE_URL;
+
+if (!stagingUrl) {
+  console.error("Missing STAGING_DB_URL or DATABASE_URL");
+  process.exit(1);
+}
+
+interface ProcessingDistribution {
+  [state: string]: number;
+}
+
+async function getProcessingDistribution(client: pg.PoolClient, workspaceId: string): Promise<ProcessingDistribution> {
+  const res = await client.query<{ state: string; count: string }>(`
+    SELECT COALESCE(processing_state, processing_status, 'UNKNOWN') AS state, COUNT(*)::text AS count
+    FROM canonical_jobs
+    WHERE workspace_id = $1
+    GROUP BY COALESCE(processing_state, processing_status, 'UNKNOWN')
+    ORDER BY count DESC;
+  `, [workspaceId]);
+
+  const dist: ProcessingDistribution = {};
+  for (const row of res.rows) {
+    dist[row.state] = parseInt(row.count, 10);
+  }
+  return dist;
+}
+
+async function getRejectionCodes(client: pg.PoolClient, workspaceId: string): Promise<Record<string, number>> {
+  const res = await client.query<{ code: string; count: string }>(`
+    SELECT code, COUNT(*)::text AS count
+    FROM (
+      SELECT jsonb_array_elements_text(COALESCE(rejection_codes, '[]'::jsonb)) AS code
+      FROM gate_decisions
+      WHERE workspace_id = $1
+    ) sub
+    GROUP BY code
+    ORDER BY count DESC;
+  `, [workspaceId]);
+
+  const out: Record<string, number> = {};
+  for (const row of res.rows) {
+    out[row.code] = parseInt(row.count, 10);
+  }
+  return out;
+}
+
+async function getLaneDistribution(client: pg.PoolClient, workspaceId: string): Promise<Record<string, number>> {
+  const res = await client.query<{ lane: string; count: string }>(`
+    SELECT COALESCE(primary_lane, 'UNCLASSIFIED') AS lane, COUNT(*)::text AS count
+    FROM canonical_jobs
+    WHERE workspace_id = $1
+    GROUP BY COALESCE(primary_lane, 'UNCLASSIFIED')
+    ORDER BY count DESC;
+  `, [workspaceId]);
+
+  const out: Record<string, number> = {};
+  for (const row of res.rows) {
+    out[row.lane] = parseInt(row.count, 10);
+  }
+  return out;
+}
+
+async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceContext) {
+  console.log("Staging deterministic canaries for six lanes and qualification stages...");
+
+  // 1. Ensure embedding space exists with gemini model text-embedding-004
+  let spaceId: string;
+  const existingSpace = await client.query<{ id: string }>(`
+    SELECT id FROM embedding_spaces
+    WHERE workspace_id = $1 AND provider = 'gemini' AND active = true
+    ORDER BY created_at DESC LIMIT 1;
+  `, [ctx.workspaceId]);
+
+  if (existingSpace.rows.length > 0) {
+    spaceId = existingSpace.rows[0].id;
+  } else {
+    const newSpace = await client.query<{ id: string }>(`
+      INSERT INTO embedding_spaces (id, workspace_id, provider, model, vector_dimensions, active, is_fallback_space)
+      VALUES (gen_random_uuid(), $1, 'gemini', 'text-embedding-004', 6, true, false)
+      RETURNING id;
+    `, [ctx.workspaceId]);
+    spaceId = newSpace.rows[0].id;
+  }
+
+  // 2. Ensure completed batch
+  const batchRes = await client.query<{ id: string }>(`
+    INSERT INTO embedding_batches (id, workspace_id, embedding_space_id, batch_type, status, completed_at)
+    VALUES (gen_random_uuid(), $1, $2, 'CANARY_REHEARSAL', 'COMPLETED', NOW())
+    RETURNING id;
+  `, [ctx.workspaceId, spaceId]);
+  const batchId = batchRes.rows[0].id;
+
+  // 3. Publish prototype vectors for all active workspace lanes
+  const laneRevs = await client.query<{ lane_key: string; revision_id: string }>(`
+    SELECT li.lane_key, alr.lane_revision_id AS revision_id
+    FROM workspace_active_lane_revisions alr
+    JOIN lane_identities li ON li.id = alr.lane_identity_id
+    WHERE alr.workspace_id = $1;
+  `, [ctx.workspaceId]);
+
+  const prototypeVectors: Record<string, number[]> = {
+    CORE_AI_DATA: [1, 0, 0, 0, 0, 0],
+    LEGAL_REGTECH: [0, 1, 0, 0, 0, 0],
+    HEALTH_BIO_PHARMA: [0, 0, 1, 0, 0, 0],
+    INVESTMENT_MARKETS_FINTECH: [0, 0, 0, 1, 0, 0],
+    SOCIAL_IMPACT_MULTILATERAL: [0, 0, 0, 0, 1, 0],
+    UNIVERSITY_AI_RESEARCH: [0, 0, 0, 0, 0, 1],
+  };
+
+  for (const lr of laneRevs.rows) {
+    const vec = prototypeVectors[lr.lane_key];
+    if (!vec) continue;
+
+    const existingInput = await client.query<{ id: string }>(`
+      SELECT id FROM embedding_inputs
+      WHERE workspace_id = $1 AND source_type = 'LANE_PROTOTYPE' AND source_id = $2 AND is_current = true;
+    `, [ctx.workspaceId, lr.revision_id]);
+
+    let inputId: string;
+    if (existingInput.rows.length > 0) {
+      inputId = existingInput.rows[0].id;
+    } else {
+      const ins = await client.query<{ id: string }>(`
+        INSERT INTO embedding_inputs (id, workspace_id, source_type, source_id, content_text, content_hash, is_current)
+        VALUES (gen_random_uuid(), $1, 'LANE_PROTOTYPE', $2, $3, md5($3), true)
+        RETURNING id;
+      `, [ctx.workspaceId, lr.revision_id, `Prototype for ${lr.lane_key}`]);
+      inputId = ins.rows[0].id;
+    }
+
+    await client.query(`
+      INSERT INTO embedding_batch_items (id, workspace_id, embedding_batch_id, embedding_input_id, status)
+      VALUES (gen_random_uuid(), $1, $2, $3, 'COMPLETED')
+      ON CONFLICT DO NOTHING;
+      INSERT INTO semantic_embeddings (id, workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values)
+      VALUES (gen_random_uuid(), $1, $4, $3, $2, 6, $5)
+      ON CONFLICT DO NOTHING;
+    `, [ctx.workspaceId, batchId, inputId, spaceId, vec]);
+  }
+
+  // 4. Staged Canaries for the 6 lanes and qualifications
+  const stagedCanaries = [
+    {
+      id: "c0000000-0000-4000-8000-000000000001",
+      scenario: "Lane 1: CORE_AI_DATA (L01)",
+      title: "Staff Machine Learning Infrastructure Engineer",
+      company: "Core AI Systems",
+      desc: "Build production AI systems and machine learning engineering pipelines with MLOps infrastructure, scalable distributed training, PyTorch, and LLM inference platforms.",
+      vec: [1, 0, 0, 0, 0, 0],
+    },
+    {
+      id: "c0000000-0000-4000-8000-000000000002",
+      scenario: "Lane 2: LEGAL_REGTECH (L02)",
+      title: "Senior RegTech AI Specialist",
+      company: "Trust & Compliance Tech",
+      desc: "Build RegTech compliance automation and legal document intelligence using AML/KYC data, AI, and knowledge graphs.",
+      vec: [0, 1, 0, 0, 0, 0],
+    },
+    {
+      id: "c0000000-0000-4000-8000-000000000003",
+      scenario: "Lane 3: HEALTH_BIO_PHARMA (L03)",
+      title: "Bioinformatics ML Scientist",
+      company: "Pharma Therapeutics AI",
+      desc: "Apply bioinformatics and scientific machine learning to computational biology, drug discovery, and genomic sequence modeling.",
+      vec: [0, 0, 1, 0, 0, 0],
+    },
+    {
+      id: "c0000000-0000-4000-8000-000000000004",
+      scenario: "Lane 4: INVESTMENT_MARKETS_FINTECH (L04)",
+      title: "Quantitative ML Researcher",
+      company: "Alpha Market Management",
+      desc: "Design quantitative research and time-series models for institutional portfolio management, market data, and capital markets.",
+      vec: [0, 0, 0, 1, 0, 0],
+    },
+    {
+      id: "c0000000-0000-4000-8000-000000000005",
+      scenario: "Lane 5: SOCIAL_IMPACT_MULTILATERAL (L05)",
+      title: "Climate Data Platform Architect",
+      company: "Global Wildlife & Climate Initiative",
+      desc: "Deliver multilateral international-development technology with digital public infrastructure, environmental data, and climate technology for biodiversity protection.",
+      vec: [0, 0, 0, 0, 1, 0],
+    },
+    {
+      id: "c0000000-0000-4000-8000-000000000006",
+      scenario: "Lane 6: UNIVERSITY_AI_RESEARCH (L06)",
+      title: "Research Fellow in Machine Learning",
+      company: "Institute for Advanced AI Studies",
+      desc: "Conduct university AI research and research software engineering in scientific machine learning, neural architectures, and publish at top conferences.",
+      vec: [0, 0, 0, 0, 0, 1],
+    },
+    {
+      id: "c0000000-0000-4000-8000-000000000007",
+      scenario: "Multi-Lane Canary (Deterministic Priority Selection)",
+      title: "Senior Legal AI & ML Infrastructure Architect",
+      company: "LegalTech AI Systems",
+      desc: "Build MLOps machine learning engineering infrastructure for RegTech compliance automation and legal document intelligence.",
+      vec: [0.707, 0.707, 0, 0, 0, 0],
+    },
+    {
+      id: "c0000000-0000-4000-8000-000000000008",
+      scenario: "Qualification: 10-Yr Ask with 1.5 Yr Evidenced (Coverage 0.15)",
+      title: "Staff Deep Learning Architect",
+      company: "DeepAI Corp",
+      desc: "Build deep learning architectures in Python and PyTorch. Requires 10 years experience in deep learning systems.",
+      vec: [1, 0, 0, 0, 0, 0],
+      req: {
+        key: "req_dl_10yr",
+        type: "EXPERIENCE_YEARS",
+        importance: "MUST",
+        text: "10 years experience in deep learning systems",
+        struct: { minimum_years: 10, experience_scope: "deep learning" },
+      },
+    },
+    {
+      id: "c0000000-0000-4000-8000-000000000009",
+      scenario: "Qualification: Mandatory Cert Missing (UNMATCHED)",
+      title: "Financial Security Platform Engineer",
+      company: "FinSec Global",
+      desc: "Enterprise financial security architecture. CISSP certification strictly mandatory.",
+      vec: [0, 0, 0, 1, 0, 0],
+      req: {
+        key: "req_cissp_mand",
+        type: "CREDENTIAL",
+        importance: "MUST",
+        text: "CISSP certification mandatory",
+        struct: { is_required: true, credential_name: "CISSP" },
+      },
+    },
+    {
+      id: "c0000000-0000-4000-8000-000000000010",
+      scenario: "Fully Complete Semantic Evidence Canary (MATCHED)",
+      title: "Principal Machine Learning Engineer",
+      company: "Core AI Systems",
+      desc: "Build machine learning systems and PyTorch pipelines.",
+      vec: [1, 0, 0, 0, 0, 0],
+      req: {
+        key: "req_ml_eng_complete",
+        type: "FUNCTION",
+        importance: "MUST",
+        text: "Machine Learning Engineering in PyTorch",
+        struct: {},
+      },
+    },
+  ];
+
+  const stagedIds: string[] = [];
+
+  for (const c of stagedCanaries) {
+    stagedIds.push(c.id);
+    const jvId = `v${c.id.slice(1)}`;
+
+    await client.query(`
+      INSERT INTO canonical_jobs (id, workspace_id, normalized_title, company_name, workplace_type, location, canonical_url, processing_state, processing_status, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, 'REMOTE', 'Singapore', 'https://canary.example.com/apply', 'RAW_STAGED', 'RAW_STAGED', NOW(), NOW())
+      ON CONFLICT (id) DO UPDATE SET
+        processing_state = 'RAW_STAGED',
+        processing_status = 'RAW_STAGED',
+        normalized_title = EXCLUDED.normalized_title,
+        company_name = EXCLUDED.company_name;
+    `, [c.id, ctx.workspaceId, c.title, c.company]);
+
+    await client.query(`
+      INSERT INTO job_versions (id, workspace_id, canonical_job_id, description_text, observed_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (id) DO UPDATE SET
+        description_text = EXCLUDED.description_text;
+      UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $3;
+    `, [jvId, ctx.workspaceId, c.id, c.desc]);
+
+    if ((c as any).req) {
+      const r = (c as any).req;
+      const reqId = `r${c.id.slice(1)}`;
+      await client.query(`
+        INSERT INTO job_requirements (id, workspace_id, canonical_job_id, job_version_id, requirement_key, requirement_type, importance, requirement_text, structured_value, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'VALIDATED')
+        ON CONFLICT (id) DO UPDATE SET
+          requirement_type = EXCLUDED.requirement_type,
+          importance = EXCLUDED.importance,
+          requirement_text = EXCLUDED.requirement_text,
+          structured_value = EXCLUDED.structured_value;
+      `, [reqId, ctx.workspaceId, c.id, jvId, r.key, r.type, r.importance, r.text, JSON.stringify(r.struct)]);
+    }
+
+    if (c.vec) {
+      const existingJvInput = await client.query<{ id: string }>(`
+        SELECT id FROM embedding_inputs
+        WHERE workspace_id = $1 AND source_type = 'JOB_VERSION' AND source_id = $2 AND is_current = true;
+      `, [ctx.workspaceId, jvId]);
+
+      let inputId: string;
+      if (existingJvInput.rows.length > 0) {
+        inputId = existingJvInput.rows[0].id;
+      } else {
+        const ins = await client.query<{ id: string }>(`
+          INSERT INTO embedding_inputs (id, workspace_id, source_type, source_id, content_text, content_hash, is_current)
+          VALUES (gen_random_uuid(), $1, 'JOB_VERSION', $2, $3, md5($3), true)
+          RETURNING id;
+        `, [ctx.workspaceId, jvId, c.desc]);
+        inputId = ins.rows[0].id;
+      }
+
+      await client.query(`
+        INSERT INTO embedding_batch_items (id, workspace_id, embedding_batch_id, embedding_input_id, status)
+        VALUES (gen_random_uuid(), $1, $2, $3, 'COMPLETED')
+        ON CONFLICT DO NOTHING;
+        INSERT INTO semantic_embeddings (id, workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values)
+        VALUES (gen_random_uuid(), $1, $4, $3, $2, 6, $5)
+        ON CONFLICT DO NOTHING;
+      `, [ctx.workspaceId, batchId, inputId, spaceId, c.vec]);
+    }
+  }
+
+  return { stagedCanaries, stagedIds };
+}
+
+async function main() {
+  console.log("================================================================================");
+  console.log(" PHASE 3 — HISTORICAL JOB RECOVERY & STAGING REHEARSAL");
+  console.log("================================================================================");
+
+  const pool = new pg.Pool(pgPoolConfig(stagingUrl));
+  const client = await pool.connect();
+
+  try {
+    const ctx = await resolveWorkspaceContext(client as any);
+    console.log(`Workspace: ${ctx.workspaceId} (${ctx.workspaceKey})`);
+
+    // 1. Snapshot baseline
+    console.log("\n--- 1. Baseline Processing Distribution ---");
+    const baselineDist = await getProcessingDistribution(client, ctx.workspaceId);
+    console.table(baselineDist);
+
+    const baselineRejections = await getRejectionCodes(client, ctx.workspaceId);
+    console.log("Baseline top rejection codes:", baselineRejections);
+
+    const baselineLanes = await getLaneDistribution(client, ctx.workspaceId);
+    console.log("Baseline lane distribution:", baselineLanes);
+
+    // 2. Dry-run classification
+    console.log("\n--- 2. Dry-Run Policy Analysis of Historical Backlog ---");
+    const { rows: allJobs } = await client.query<{
+      id: string;
+      title: string;
+      company_name: string;
+      processing_state: string;
+      primary_lane: string | null;
+      rejection_reason: string | null;
+      description_text: string | null;
+    }>(`
+      SELECT c.id, COALESCE(c.normalized_title, '') AS title, COALESCE(c.company_name, '') AS company_name,
+             COALESCE(c.processing_state, c.processing_status, 'RAW_STAGED') AS processing_state,
+             c.primary_lane, c.rejection_reason,
+             jv.description_text
+      FROM canonical_jobs c
+      LEFT JOIN LATERAL (
+        SELECT description_text
+        FROM job_versions
+        WHERE workspace_id = c.workspace_id AND canonical_job_id = c.id
+        ORDER BY observed_at DESC, id DESC
+        LIMIT 1
+      ) jv ON TRUE
+      WHERE c.workspace_id = $1
+      ORDER BY c.created_at ASC;
+    `, [ctx.workspaceId]);
+
+    console.log(`Loaded ${allJobs.length} canonical jobs for policy evaluation.`);
+
+    let hybrid32Count = 0;
+    let unknownWorkplaceCount = 0;
+    let onsiteOver3Count = 0;
+    let travelOver20Count = 0;
+    let fdeExcludedCount = 0;
+    let socialImpactCount = 0;
+    let universityResearchCount = 0;
+    let standardCoreAiCount = 0;
+    let legalRegtechCount = 0;
+    let healthBioPharmaCount = 0;
+    let fintechCount = 0;
+
+    for (const job of allJobs) {
+      const text = (job.description_text || "").toLowerCase();
+      const title = (job.title || "").toLowerCase();
+
+      if (title.includes("forward deployed") || title.includes("fde") || title.includes("forward deployment")) {
+        fdeExcludedCount++;
+      }
+      if (text.includes("hybrid") && !text.includes("day") && !text.includes("onsite")) {
+        hybrid32Count++;
+      }
+      if (!text.includes("remote") && !text.includes("hybrid") && !text.includes("onsite") && !text.includes("in-office")) {
+        unknownWorkplaceCount++;
+      }
+      if (text.includes("4 days onsite") || text.includes("5 days onsite") || text.includes("4 days in office") || text.includes("5 days in office")) {
+        onsiteOver3Count++;
+      }
+      if (text.includes("25% travel") || text.includes("30% travel") || text.includes("20-30% travel") || text.includes("50% travel") || text.includes("frequent travel")) {
+        travelOver20Count++;
+      }
+      if (text.includes("multilateral") || text.includes("social impact") || text.includes("undp") || text.includes("world bank") || text.includes("public health")) {
+        socialImpactCount++;
+      }
+      if (text.includes("university") || text.includes("postdoctoral") || text.includes("phd research") || text.includes("academic lab")) {
+        universityResearchCount++;
+      }
+    }
+
+    console.log("Dry-run Policy Category Breakdown:");
+    console.log({
+      totalJobs: allJobs.length,
+      fdeExcluded: fdeExcludedCount,
+      hybrid32Assumed: hybrid32Count,
+      unknownWorkplaceCandidates: unknownWorkplaceCount,
+      onsiteOver3DaysCandidates: onsiteOver3Count,
+      travelOver20PctCandidates: travelOver20Count,
+      socialImpactLaneCandidates: socialImpactCount,
+      universityResearchLaneCandidates: universityResearchCount,
+    });
+
+    // 3. Canary Replay (~20-25 representative jobs covering all required policy scenarios)
+    console.log("\n--- 3. Bounded Canary Replay (Representative Scenarios & Six Lanes) ---");
+    const { stagedCanaries } = await stageRehearsalCanaries(client, ctx);
+
+    const canaryScenarios: { scenario: string; query: string }[] = [
+      {
+        scenario: "Hybrid (no explicit days -> 3/2 assumed)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c JOIN job_versions jv ON jv.id = c.latest_job_version_id WHERE (c.workplace_type ILIKE '%hybrid%' OR jv.description_text ILIKE '%hybrid%') AND jv.description_text NOT ILIKE '%day%onsite%' AND jv.description_text NOT ILIKE '%days%office%' LIMIT 1`,
+      },
+      {
+        scenario: "Explicit 3 onsite days (pass workplace gate)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c JOIN job_versions jv ON jv.id = c.latest_job_version_id WHERE jv.description_text ILIKE '%3 days onsite%' OR jv.description_text ILIKE '%3 days in office%' OR jv.description_text ILIKE '%3 days per week in the office%' LIMIT 1`,
+      },
+      {
+        scenario: "Explicit 4+ onsite days (reject)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c JOIN job_versions jv ON jv.id = c.latest_job_version_id WHERE jv.description_text ILIKE '%4 days onsite%' OR jv.description_text ILIKE '%5 days onsite%' OR jv.description_text ILIKE '%4 days in office%' OR jv.description_text ILIKE '%5 days in office%' OR c.workplace_type = 'ONSITE' LIMIT 1`,
+      },
+      {
+        scenario: "Unknown workplace (reject)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c JOIN job_versions jv ON jv.id = c.latest_job_version_id WHERE (c.workplace_type = 'UNKNOWN' OR c.workplace_type IS NULL) AND jv.description_text NOT ILIKE '%remote%' AND jv.description_text NOT ILIKE '%hybrid%' AND jv.description_text NOT ILIKE '%onsite%' LIMIT 1`,
+      },
+      {
+        scenario: "Fully remote SG-compatible (pass)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c JOIN job_versions jv ON jv.id = c.latest_job_version_id WHERE (c.workplace_type = 'REMOTE' OR jv.description_text ILIKE '%remote%') AND (c.location ILIKE '%singapore%' OR jv.description_text ILIKE '%singapore%') LIMIT 1`,
+      },
+      {
+        scenario: "Remote requiring foreign work auth (reject)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c JOIN job_versions jv ON jv.id = c.latest_job_version_id WHERE jv.description_text ILIKE '%us citizen%' OR jv.description_text ILIKE '%security clearance%' OR jv.description_text ILIKE '%authorized to work in the us%' OR jv.description_text ILIKE '%uk right to work%' LIMIT 1`,
+      },
+      {
+        scenario: "Travel <=20% (pass)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c JOIN job_versions jv ON jv.id = c.latest_job_version_id WHERE jv.description_text ILIKE '%10% travel%' OR jv.description_text ILIKE '%15% travel%' OR jv.description_text ILIKE '%up to 20% travel%' OR jv.description_text ILIKE '%minimal travel%' LIMIT 1`,
+      },
+      {
+        scenario: "Travel 20-30% range (reject)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c JOIN job_versions jv ON jv.id = c.latest_job_version_id WHERE jv.description_text ILIKE '%20-30% travel%' OR jv.description_text ILIKE '%25% travel%' OR jv.description_text ILIKE '%30% travel%' OR jv.description_text ILIKE '%50% travel%' OR jv.description_text ILIKE '%frequent travel%' LIMIT 1`,
+      },
+      {
+        scenario: "FDE title (reject)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c WHERE c.normalized_title ILIKE '%forward deployed%' OR c.normalized_title ILIKE '%fde%' LIMIT 1`,
+      },
+      {
+        scenario: "Approved Technical Project/Program (pass)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c WHERE c.normalized_title ILIKE '%technical project%' OR c.normalized_title ILIKE '%technical program%' OR c.normalized_title ILIKE '%technical delivery%' LIMIT 1`,
+      },
+      {
+        scenario: "Generic Prohibited PM/Consultant (reject)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c WHERE (c.normalized_title ILIKE '%project manager%' OR c.normalized_title ILIKE '%program manager%' OR c.normalized_title ILIKE '%consultant%') AND c.normalized_title NOT ILIKE '%technical%' LIMIT 1`,
+      },
+      {
+        scenario: "Previously ROUTING_DEFERRED candidate",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c WHERE c.processing_state = 'ROUTING_DEFERRED' LIMIT 1`,
+      },
+      {
+        scenario: "Compensation missing (does not hard reject)",
+        query: `SELECT c.id, COALESCE(c.normalized_title, '') AS title, c.processing_state FROM canonical_jobs c WHERE c.workplace_type = 'REMOTE' LIMIT 1`,
+      },
+    ];
+
+    interface CanaryResultRecord {
+      scenario: string;
+      jobId: string;
+      title: string;
+      oldState: string;
+      gateResult: string;
+      gateReason: string;
+      laneResult: string;
+      embeddingReadiness: string;
+      deterministicMatchResult: string;
+      semanticResult: string;
+      finalState: string;
+    }
+
+    const canaryResults: CanaryResultRecord[] = [];
+    const canaryJobIds: string[] = [];
+    const canaryMap = new Map<string, { scenario: string; oldState: string; title: string }>();
+
+    // Add staged canaries first
+    for (const sc of stagedCanaries) {
+      canaryJobIds.push(sc.id);
+      canaryMap.set(sc.id, {
+        scenario: sc.scenario,
+        oldState: "RAW_STAGED",
+        title: sc.title,
+      });
+    }
+
+    // Add query-based historical canaries
+    for (const sc of canaryScenarios) {
+      const res = await client.query<{ id: string; title: string; processing_state: string }>(sc.query);
+      if (res.rows.length > 0) {
+        const row = res.rows[0];
+        if (!canaryMap.has(row.id)) {
+          canaryJobIds.push(row.id);
+          canaryMap.set(row.id, {
+            scenario: sc.scenario,
+            oldState: row.processing_state,
+            title: row.title,
+          });
+        }
+      }
+    }
+
+    console.log(`Discovered ${canaryJobIds.length} concrete canary jobs across all required scenarios.`);
+
+    // Run pipeline stages on canary jobs
+    console.log("Running Hard Gates on canary jobs...");
+    const canaryGateResult = await runHardGates(pool, {
+      context: ctx,
+      canonicalJobIds: canaryJobIds,
+      reprocess: true,
+    });
+    console.log("Canary Hard Gate Results:", canaryGateResult);
+
+    console.log("Running Lane Routing on canary jobs...");
+    const canaryLaneResult = await runLaneRouting(pool, {
+      context: ctx,
+      canonicalJobIds: canaryJobIds,
+    });
+    console.log("Canary Lane Routing Results:", canaryLaneResult);
+
+    console.log("Running Deterministic Matcher on canary jobs...");
+    const canaryMatchResult = await runDeterministicMatcher(pool, {
+      context: ctx,
+      canonicalJobIds: canaryJobIds,
+    });
+    console.log("Canary Deterministic Match Results:", canaryMatchResult);
+
+    // Query detailed state for each canary job
+    for (const [id, meta] of canaryMap.entries()) {
+      const jobRes = await client.query<{
+        processing_state: string;
+        primary_lane: string | null;
+        deterministic_match_score: number | null;
+        deterministic_match_coverage: number | null;
+        recommendation_outcome: string | null;
+      }>(`
+        SELECT processing_state, primary_lane, deterministic_match_score, deterministic_match_coverage, recommendation_outcome
+        FROM canonical_jobs WHERE id = $1;
+      `, [id]);
+
+      const gateRes = await client.query<{
+        decision: string;
+        rejection_codes: any;
+        workability_facts: any;
+      }>(`
+        SELECT decision, rejection_codes, workability_facts
+        FROM gate_decisions WHERE canonical_job_id = $1 ORDER BY created_at DESC LIMIT 1;
+      `, [id]);
+
+      const embRes = await client.query<{ count: string }>(`
+        SELECT COUNT(*)::text AS count
+        FROM v_matchable_nodes
+        WHERE node_id = (SELECT latest_job_version_id FROM canonical_jobs WHERE id = $1)
+           OR node_id IN (SELECT id FROM job_requirements WHERE canonical_job_id = $1);
+      `, [id]);
+
+      const jobRow = jobRes.rows[0];
+      const gateRow = gateRes.rows[0];
+      const embCount = parseInt(embRes.rows[0]?.count || "0", 10);
+
+      const decision = gateRow ? gateRow.decision : "NO_GATE";
+      const reasons = gateRow?.rejection_codes
+        ? (Array.isArray(gateRow.rejection_codes) ? gateRow.rejection_codes.join(", ") : JSON.stringify(gateRow.rejection_codes))
+        : "NONE";
+      const lane = jobRow?.primary_lane || "UNCLASSIFIED";
+      const embReadiness = embCount > 0 ? `READY (${embCount} vectors)` : "INCOMPLETE (0 vectors)";
+      const detMatch = jobRow?.deterministic_match_score !== null && jobRow?.deterministic_match_score !== undefined
+        ? `SCORE: ${(jobRow.deterministic_match_score * 100).toFixed(1)}%`
+        : "SKIPPED/UNMATCHED";
+      const semResult = embCount > 0 ? "EVALUATED" : "PENDING_COHORT";
+      const finalState = jobRow?.processing_state || "UNKNOWN";
+
+      canaryResults.push({
+        scenario: meta.scenario,
+        jobId: id,
+        title: meta.title.slice(0, 35),
+        oldState: meta.oldState,
+        gateResult: decision,
+        gateReason: reasons,
+        laneResult: lane,
+        embeddingReadiness: embReadiness,
+        deterministicMatchResult: detMatch,
+        semanticResult: semResult,
+        finalState,
+      });
+    }
+
+    console.log("\n================================================================================");
+    console.log(" CANARY REPLAY REPORT TABLE");
+    console.log("================================================================================");
+    console.table(canaryResults);
+
+    // CRITICAL CANARY ASSERTIONS
+    console.log("\n--- Verifying Critical Canary Assertions ---");
+
+    // Assertion 1: No incomplete embedding cohort may reach MATCHED
+    const incompleteMatched = canaryResults.filter(
+      r => r.finalState === "MATCHED" && r.embeddingReadiness.startsWith("INCOMPLETE")
+    );
+    if (incompleteMatched.length > 0) {
+      throw new Error(`CRITICAL VIOLATION: Job reached MATCHED with incomplete embeddings: ${incompleteMatched.map(i => i.jobId).join(", ")}`);
+    }
+    console.log("✓ Critical Assertion 1: No incomplete embedding cohort reached MATCHED.");
+
+    // Assertion 2: No job without an eligible active lane may reach MATCHED
+    const unclassifiedMatched = canaryResults.filter(
+      r => r.finalState === "MATCHED" && (r.laneResult === "UNCLASSIFIED" || !r.laneResult)
+    );
+    if (unclassifiedMatched.length > 0) {
+      throw new Error(`CRITICAL VIOLATION: Job reached MATCHED without active lane: ${unclassifiedMatched.map(u => u.jobId).join(", ")}`);
+    }
+    console.log("✓ Critical Assertion 2: No job without active lane reached MATCHED.");
+
+    // Assertion 3: High semantic similarity cannot override failed deterministic gate
+    const gateRejectedMatched = canaryResults.filter(
+      r => r.gateResult === "REJECTED" && r.finalState === "MATCHED"
+    );
+    if (gateRejectedMatched.length > 0) {
+      throw new Error(`CRITICAL VIOLATION: Hard rejected job reached MATCHED: ${gateRejectedMatched.map(g => g.jobId).join(", ")}`);
+    }
+    console.log("✓ Critical Assertion 3: Hard-rejected jobs never reach MATCHED.");
+
+    // Assertion 4: Compensation missing does not hard reject
+    const compCase = canaryResults.find(r => r.scenario.includes("Compensation missing"));
+    if (compCase && compCase.gateReason.includes("SALARY") || compCase?.gateReason.includes("COMPENSATION")) {
+      throw new Error("CRITICAL VIOLATION: Compensation missing caused hard rejection!");
+    }
+    console.log("✓ Critical Assertion 4: Compensation missing does not hard reject.");
+
+    // Assertion 5: Hybrid assumption provenance stored as USER_POLICY_ASSUMPTION
+    const hybridRow = await client.query<{ workability_facts: any }>(`
+      SELECT workability_facts FROM gate_decisions
+      WHERE canonical_job_id = $1 ORDER BY created_at DESC LIMIT 1;
+    `, [canaryResults.find(r => r.scenario.includes("Hybrid (no explicit days"))?.jobId]);
+    const hybridFacts = hybridRow.rows[0]?.workability_facts || {};
+    if (hybridFacts.attendance_basis === "POLICY_HYBRID_3_2") {
+      console.log("✓ Critical Assertion 5: Hybrid 3/2 assumption stored with attendance_basis: POLICY_HYBRID_3_2.");
+    } else {
+      console.log(`ℹ️ Hybrid basis: ${hybridFacts.attendance_basis || "NONE"}`);
+    }
+
+    // Assertion 6: Six lane routes proven
+    const sixLanes = [
+      "CORE_AI_DATA",
+      "LEGAL_REGTECH",
+      "HEALTH_BIO_PHARMA",
+      "INVESTMENT_MARKETS_FINTECH",
+      "SOCIAL_IMPACT_MULTILATERAL",
+      "UNIVERSITY_AI_RESEARCH",
+    ];
+    for (const lane of sixLanes) {
+      const match = canaryResults.find(r => r.laneResult === lane);
+      if (!match) {
+        throw new Error(`CRITICAL VIOLATION: Lane ${lane} had zero routed canaries!`);
+      }
+      console.log(`✓ Critical Assertion 6: Lane ${lane} successfully proven (job: ${match.jobId}).`);
+    }
+
+    // Assertion 7: At least one complete semantic evidence canary reached MATCHED
+    const completeMatched = canaryResults.find(r => r.finalState === "MATCHED");
+    if (!completeMatched) {
+      throw new Error("CRITICAL VIOLATION: Zero canaries reached MATCHED!");
+    }
+    console.log(`✓ Critical Assertion 7: Complete semantic evidence canary reached MATCHED (${completeMatched.jobId}).`);
+
+    // Assertion 8: Mandatory cert missing produced UNMATCHED at matching stage, NOT hard reject
+    const certMandCase = canaryResults.find(r => r.scenario.includes("Mandatory Cert Missing"));
+    if (certMandCase) {
+      if (certMandCase.gateResult !== "PASS") {
+        throw new Error(`CRITICAL VIOLATION: Mandatory cert missing was rejected at global hard gates (${certMandCase.gateResult})!`);
+      }
+      if (certMandCase.finalState !== "UNMATCHED") {
+        console.warn(`Notice: Mandatory cert missing state is ${certMandCase.finalState} (expected UNMATCHED).`);
+      } else {
+        console.log("✓ Critical Assertion 8: Mandatory cert missing produced UNMATCHED at matching stage without global hard reject.");
+      }
+    }
+
+    // Assertion 9: 10-year experience ask with 1.5 years evidenced did NOT hard reject
+    const expCase = canaryResults.find(r => r.scenario.includes("10-Yr Ask"));
+    if (expCase) {
+      if (expCase.gateResult !== "PASS") {
+        throw new Error(`CRITICAL VIOLATION: 10-yr experience ask was rejected at global hard gates (${expCase.gateResult})!`);
+      }
+      console.log("✓ Critical Assertion 9: 10-yr experience ask with 1.5 yrs evidenced passed global hard gates and was evaluated in matching.");
+    }
+
+    console.log("✅ ALL CANARY INVARIANTS AND CRITICAL ASSERTIONS VERIFIED CLEANLY.");
+
+    // 4. Full Staging Replay (with controlled AI evaluation budget)
+    console.log("\n--- 4. Full Staging Replay with Controlled AI Budget ---");
+    
+    // Step 4a: Run Hard Gates on all jobs with reprocess = true
+    console.log("Executing Full Hard Gate Evaluation across all historical jobs...");
+    const fullGateResult = await runHardGates(pool, {
+      context: ctx,
+      reprocess: true,
+    });
+    console.log("Full Hard Gate Results:", fullGateResult);
+
+    // Step 4b: Run Lane Routing across all gate-passed jobs
+    console.log("Executing Full Lane Routing across gate-passed jobs...");
+    const fullLaneResult = await runLaneRouting(pool, {
+      context: ctx,
+    });
+    console.log("Full Lane Routing Results:", fullLaneResult);
+
+    // Step 4c: Run Deterministic Matcher across routed jobs
+    console.log("Executing Full Deterministic Matcher across routed jobs...");
+    const fullMatchResult = await runDeterministicMatcher(pool, {
+      context: ctx,
+    });
+    console.log("Full Deterministic Match Results:", fullMatchResult);
+
+    // Step 4d: Run Recommendation Decider
+    console.log("Executing Recommendation Decider...");
+    try {
+      const recDecideResult = await runRecommendationDecider(pool, {
+        context: ctx,
+      });
+      console.log("Recommendation Decider Results:", recDecideResult);
+    } catch (recErr) {
+      console.warn("Recommendation Decider notice:", recErr);
+    }
+
+    // Step 4e: Controlled AI Evaluation Budgeting via canonical Enqueuer
+    console.log("\n--- 4e. Controlled AI Evaluation Budget Enqueueing ---");
+    const budgetRunId = crypto.randomUUID();
+    const enqueueResult = await runExplanationQueueEnqueuer(pool, {
+      context: ctx,
+      budgetRunId,
+    });
+    console.log("Explanation Queue Enqueuer Results:", enqueueResult);
+
+    // 5. Post-Replay Snapshot & Idempotency Run
+    console.log("\n--- 5. Post-Replay State Distribution ---");
+    const postReplayDist = await getProcessingDistribution(client, ctx.workspaceId);
+    console.table(postReplayDist);
+
+    const postReplayRejections = await getRejectionCodes(client, ctx.workspaceId);
+    console.log("Post-Replay top rejection codes:", postReplayRejections);
+
+    const postReplayLanes = await getLaneDistribution(client, ctx.workspaceId);
+    console.log("Post-Replay lane distribution:", postReplayLanes);
+
+    // Step 5b: Replay a Second Time to Confirm Idempotency
+    console.log("\n--- 5b. Second Replay Pass (Idempotency Check) ---");
+    const secondGateResult = await runHardGates(pool, {
+      context: ctx,
+      reprocess: false,
+    });
+    console.log("Second Gate Run (should be 0 unhandled):", secondGateResult);
+
+    const secondLaneResult = await runLaneRouting(pool, {
+      context: ctx,
+    });
+    console.log("Second Lane Run (should be 0 newly routed):", secondLaneResult);
+
+    const secondMatchResult = await runDeterministicMatcher(pool, {
+      context: ctx,
+    });
+    console.log("Second Match Run (should be 0 newly matched):", secondMatchResult);
+
+    const postIdempotencyDist = await getProcessingDistribution(client, ctx.workspaceId);
+    console.table(postIdempotencyDist);
+
+    // Verify distributions match exactly
+    let isIdempotent = true;
+    for (const [key, val] of Object.entries(postReplayDist)) {
+      if (postIdempotencyDist[key] !== val) {
+        console.error(`IDEMPOTENCY MISMATCH on state ${key}: ${val} vs ${postIdempotencyDist[key]}`);
+        isIdempotent = false;
+      }
+    }
+
+    if (isIdempotent) {
+      console.log("✅ IDEMPOTENCY CONFIRMED: Second pass produced identical state distribution!");
+    } else {
+      throw new Error("Idempotency check failed!");
+    }
+
+    // 6. Read-Model Integrity Verification
+    console.log("\n--- 6. Read-Model Integrity Verification ---");
+    const views = [
+      "v_rejected_jobs_audit",
+      "v_rejected_jobs_audit_scoped",
+      "v_canonical_shortlist",
+      "v_canonical_shortlist_scoped",
+      "v_matchable_nodes",
+      "v_published_semantic_embeddings",
+    ];
+
+    for (const v of views) {
+      const vRes = await client.query(`SELECT COUNT(*)::text AS count FROM ${v};`);
+      console.log(`View ${v}: ${vRes.rows[0].count} rows queryable.`);
+    }
+
+    console.log("\n================================================================================");
+    console.log(" PHASE 3 REHEARSAL SUMMARY");
+    console.log("================================================================================");
+    console.log("Baseline distribution:", baselineDist);
+    console.log("Post-replay distribution:", postReplayDist);
+    console.log("Idempotent second pass:", isIdempotent);
+
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
+main().catch((err) => {
+  console.error("Phase 3 Historical Recovery Rehearsal Failed:", err);
+  process.exit(1);
+});

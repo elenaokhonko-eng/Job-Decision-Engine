@@ -554,8 +554,11 @@ export function applyExactProfileGates(
   profileFacts: ComparableFact[],
   answerContext?: VerificationAnswerContext | null,
 ): GateResult {
+  // Employer qualifications (EXPERIENCE_YEARS, DEGREE, CREDENTIAL) are evaluated
+  // in deterministic profile-to-job matching, NOT as global deterministic hard gates.
+  // Genuine legal work-authorization incompatibility remains an approved global gate.
   const exactRequirements = deterministicRequirements.filter((requirement) =>
-    ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(requirement.requirement_type)
+    ["WORK_AUTH"].includes(requirement.requirement_type)
   );
   if (exactRequirements.length === 0) return makePass();
 
@@ -568,26 +571,9 @@ export function applyExactProfileGates(
       continue;
     }
 
-    let comparison = compareStructuredRequirement(requirement, profileFacts);
+    let comparison = compareStructuredRequirement(requirement, profileFacts, answerContext);
     if (comparison.status === "UNKNOWN" && answerContext) {
-      if (requirement.requirement_type === "DEGREE" && answerContext.overrides.degreeSubjects.length > 0) {
-        const subject = degreeRequirementSubject(requirement);
-        if (subject && !answerContext.overrides.degreeSubjects.includes(subject)) {
-          comparison = {
-            status: "MISMATCH",
-            rationale: `Verification answer does not accept the required ${subject.replace(/_/g, " ")} degree subject.`,
-            fact: null,
-          };
-        } else if (subject) {
-          comparison = compareStructuredRequirement(removeDegreeSubject(requirement), profileFacts);
-        }
-      } else if (requirement.requirement_type === "EXPERIENCE_YEARS"
-        && answerContext.overrides.experienceDomains.length > 0) {
-        comparison = compareStructuredRequirement(
-          expandExperienceScope(requirement, answerContext.overrides.experienceDomains),
-          profileFacts,
-        );
-      } else if (requirement.requirement_type === "WORK_AUTH"
+      if (requirement.requirement_type === "WORK_AUTH"
         && answerContext.overrides.workAuthorizationRegions.length > 0) {
         const answerFact: ComparableFact = {
           id: `verification-answer:${answerContext.answerRevisionId || "unversioned"}`,
@@ -595,7 +581,7 @@ export function applyExactProfileGates(
           structured_value: { authorized_regions: answerContext.overrides.workAuthorizationRegions },
           source_type: "PROFILE_FACT",
         };
-        comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact]);
+        comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact], answerContext);
       }
     }
 
@@ -760,7 +746,7 @@ export async function runHardGates(
         const deterministicRequirements = requirementRows as PersistedRequirement[];
         let profileFacts: ComparableFact[] = [];
         if (deterministicRequirements.some((requirement) =>
-          ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(requirement.requirement_type)
+          ["WORK_AUTH"].includes(requirement.requirement_type)
         )) {
           const { rows: activeProfileRows } = await client.query<{ id: string }>(
             `SELECT id
@@ -780,71 +766,6 @@ export async function runHardGates(
             activeProfileVersionId ? [ctx.workspaceId, activeProfileVersionId] : [ctx.workspaceId]
           );
           profileFacts = profileFactRows as ComparableFact[];
-          const { rows: credentialRows } = await client.query(
-            `SELECT pc.id, pc.credential_name, pc.issuer, pc.credential_type, pc.level
-             FROM profile_credentials pc
-             WHERE pc.workspace_id = $1
-               ${activeProfileVersionId ? "AND pc.profile_version_id = $2" : "AND FALSE"}
-             AND pc.status = 'ACTIVE'`,
-            activeProfileVersionId ? [ctx.workspaceId, activeProfileVersionId] : [ctx.workspaceId]
-          );
-          profileFacts = profileFacts.concat(
-            credentialRows.map((credential: any) => ({
-              id: credential.id,
-              statement: `${credential.credential_name} ${credential.issuer} ${credential.level || ""}`.trim(),
-              structured_value: { credential_type: credential.credential_type, level: credential.level },
-              source_type: "CREDENTIAL" as const,
-            }))
-          );
-          const { rows: engagementRows } = await client.query(
-            `SELECT id, start_date, end_date, is_current, experience_class,
-                    engagement_type, role_title, summary, operating_model
-             FROM profile_engagements
-             WHERE profile_version_id = $1`,
-            [activeProfileVersionId]
-          );
-          const experienceYears = calculateProfessionalExperienceYears(engagementRows);
-          for (const engagement of engagementRows as Array<{
-            id: string;
-            start_date: string | Date;
-            end_date: string | Date | null;
-            is_current: boolean;
-            experience_class: string;
-            engagement_type: string;
-            role_title: string;
-            summary: string;
-            operating_model: string | null;
-          }>) {
-            if (engagement.experience_class !== "PROFESSIONAL_PRODUCTION") continue;
-            const start = new Date(engagement.start_date).getTime();
-            const end = engagement.is_current || !engagement.end_date
-              ? Date.now()
-              : new Date(engagement.end_date).getTime();
-            if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
-            const years = (end - start) / (1000 * 60 * 60 * 24 * 365.25);
-            profileFacts.push({
-              id: engagement.id,
-              statement: `${engagement.role_title}: ${engagement.summary}`,
-              structured_value: {
-                experience_years: years,
-                experience_scope: `${engagement.role_title} ${engagement.summary}`,
-                engagement_type: engagement.engagement_type,
-                operating_model: engagement.operating_model,
-                experience_start_date: new Date(engagement.start_date).toISOString(),
-                experience_end_date: new Date(end).toISOString(),
-                engagement_is_current: engagement.is_current,
-              },
-              source_type: "PROFILE_FACT",
-            });
-          }
-          if (experienceYears > 0) {
-            profileFacts.push({
-              id: `experience:${ctx.workspaceId}`,
-              statement: `${experienceYears.toFixed(1)} years of professional production experience`,
-              structured_value: { professional_years: experienceYears, experience_scope: "overall professional production" },
-              source_type: "CREDENTIAL",
-            });
-          }
         }
         const requirementHints = deterministicRequirements
           .map((r) => r.quote_text || r.requirement_text)

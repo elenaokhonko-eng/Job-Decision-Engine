@@ -4,6 +4,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { computeEvidenceStrength, loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement } from "./requirementComparators.js";
+import { isRequirementOptional } from "./hardGate.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 
 dotenv.config();
@@ -748,6 +749,7 @@ export async function runDeterministicMatcher(
         let weightedScoreSum = 0;
         let weightSum = 0;
         let matchedCount = 0;
+        const mandatoryQualificationFailures: string[] = [];
 
         for (const req of reqRes.rows) {
           if (!isCapabilityRequirementType(req.requirement_type)) {
@@ -828,6 +830,78 @@ export async function runDeterministicMatcher(
             );
             continue;
           }
+
+          if (req.requirement_type === "EXPERIENCE_YEARS" && structuredComparison.status === "MISMATCH") {
+            const coverage = structuredComparison.coverage ?? 0;
+            const weightedScore = coverage * weight;
+            weightedScoreSum += weightedScore;
+            if (coverage >= 0.5) {
+              matchedCount += 1;
+            }
+            await client.query(
+              `INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [
+                ctx.workspaceId,
+                matchRunId,
+                req.id,
+                structuredComparison.fact?.id || null,
+                coverage > 0 ? "PARTIAL" : "NO_MATCH",
+                coverage,
+                structuredComparison.rationale,
+                JSON.stringify({
+                  requirement_key: req.requirement_key,
+                  requirement_type: req.requirement_type,
+                  comparator: "STRUCTURED_EXACT",
+                  required_years: structuredComparison.requiredYears ?? null,
+                  evidenced_years: structuredComparison.evidencedYears ?? null,
+                  experience_coverage: coverage,
+                  match_qualification_code: "MATCH_QUALIFICATION_EXPERIENCE_GAP",
+                  semantic_ready: usedEmbeddings,
+                }),
+              ]
+            );
+            continue;
+          }
+
+          if ((req.requirement_type === "CREDENTIAL" || req.requirement_type === "DEGREE") && structuredComparison.status === "MISMATCH") {
+            const isOptional = isRequirementOptional(req as any);
+            const qualCode = req.requirement_type === "DEGREE"
+              ? "MATCH_QUALIFICATION_DEGREE_GAP"
+              : isOptional
+                ? "MATCH_QUALIFICATION_PREFERRED_CERT_GAP"
+                : "MATCH_QUALIFICATION_MANDATORY_CERT_MISSING";
+
+            if (!isOptional && req.importance === "MUST") {
+              mandatoryQualificationFailures.push(qualCode);
+            }
+
+            await client.query(
+              `INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, $4, 'NO_MATCH', 0, $5, $6)`,
+              [
+                ctx.workspaceId,
+                matchRunId,
+                req.id,
+                structuredComparison.fact?.id || null,
+                structuredComparison.rationale,
+                JSON.stringify({
+                  requirement_key: req.requirement_key,
+                  requirement_type: req.requirement_type,
+                  comparator: "STRUCTURED_EXACT",
+                  optional: isOptional,
+                  match_qualification_code: qualCode,
+                  semantic_ready: usedEmbeddings,
+                }),
+              ]
+            );
+            continue;
+          }
+
           if (structuredComparison.status === "MISMATCH") {
             await client.query(
               `INSERT INTO requirement_evidence_matches (
@@ -989,14 +1063,17 @@ export async function runDeterministicMatcher(
           ]
         );
 
+        const hasMandatoryQualFailure = mandatoryQualificationFailures.length > 0;
         const profileMatchStatus =
-          semanticEvidenceIncomplete
-            ? 'UNKNOWN'
-            : matchedCount > 0
-              ? 'POSITIVE_MATCH'
-              : usedEmbeddings
-                ? 'NO_PROFILE_MATCH'
-                : 'UNKNOWN';
+          hasMandatoryQualFailure
+            ? 'NO_PROFILE_MATCH'
+            : semanticEvidenceIncomplete
+              ? 'UNKNOWN'
+              : matchedCount > 0
+                ? 'POSITIVE_MATCH'
+                : usedEmbeddings
+                  ? 'NO_PROFILE_MATCH'
+                  : 'UNKNOWN';
 
         const canonicalUpdate = await client.query(
           `UPDATE canonical_jobs
@@ -1004,8 +1081,28 @@ export async function runDeterministicMatcher(
                deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE $3::numeric END,
                latest_match_run_id = $4,
                profile_match_status = $6,
-               processing_state = CASE WHEN $8::boolean THEN 'LANE_ROUTED' ELSE 'MATCHED' END,
-               processing_status = CASE WHEN $8::boolean THEN 'LANE_ROUTED' ELSE 'MATCHED' END,
+               processing_state = CASE
+                 WHEN $9::boolean THEN 'UNMATCHED'
+                 WHEN $8::boolean THEN 'LANE_ROUTED'
+                 ELSE 'MATCHED'
+               END,
+               processing_status = CASE
+                 WHEN $9::boolean THEN 'UNMATCHED'
+                 WHEN $8::boolean THEN 'LANE_ROUTED'
+                 ELSE 'MATCHED'
+               END,
+               rejection_reason = CASE
+                 WHEN $9::boolean THEN $10
+                 ELSE rejection_reason
+               END,
+               recommendation_eligibility = CASE
+                 WHEN $9::boolean THEN 'INELIGIBLE'
+                 ELSE recommendation_eligibility
+               END,
+               recommendation_outcome = CASE
+                 WHEN $9::boolean THEN 'SKIP'
+                 ELSE recommendation_outcome
+               END,
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = $5
@@ -1019,12 +1116,14 @@ export async function runDeterministicMatcher(
             profileMatchStatus,
             versionId,
             semanticEvidenceIncomplete,
+            hasMandatoryQualFailure,
+            mandatoryQualificationFailures.join(", "),
           ]
         );
 
         await client.query("COMMIT");
-        if (canonicalUpdate?.rowCount !== 0 && !semanticEvidenceIncomplete) matchedJobs += 1;
-        if (canonicalUpdate?.rowCount !== 0 && semanticEvidenceIncomplete) skippedJobs += 1;
+        if (canonicalUpdate?.rowCount !== 0 && !semanticEvidenceIncomplete && !hasMandatoryQualFailure) matchedJobs += 1;
+        if (canonicalUpdate?.rowCount !== 0 && (semanticEvidenceIncomplete || hasMandatoryQualFailure)) skippedJobs += 1;
       } catch (error) {
         await client.query("ROLLBACK");
         errors += 1;

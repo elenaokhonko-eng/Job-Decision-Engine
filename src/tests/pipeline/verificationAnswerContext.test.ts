@@ -6,6 +6,7 @@ import {
   applyExactProfileGates,
   applyPersistedRequirementGates,
 } from "../../pipeline/hardGate.js";
+import { compareStructuredRequirement } from "../../pipeline/requirementComparators.js";
 import {
   createVerificationAnswerContext,
   isVerificationAnswerContextApplicable,
@@ -88,10 +89,10 @@ describe("verification answer context", () => {
       profile_degree_subjects: "Data Science / Analytics",
     });
 
-    expect(applyExactProfileGates(degreeRequirement, degreeLevelOnly).status).toBe("NEEDS_VERIFICATION");
-    expect(applyExactProfileGates(degreeRequirement, degreeLevelOnly, accepted).status).toBe("PASS");
-    expect(applyExactProfileGates(degreeRequirement, degreeLevelOnly, unrelated).status).toBe("HARD_REJECT");
-    expect(applyExactProfileGates(degreeRequirement, [], accepted).status).toBe("NEEDS_VERIFICATION");
+    expect(compareStructuredRequirement(degreeRequirement[0], degreeLevelOnly).status).toBe("UNKNOWN");
+    expect(compareStructuredRequirement(degreeRequirement[0], degreeLevelOnly, accepted).status).toBe("MATCH");
+    expect(compareStructuredRequirement(degreeRequirement[0], degreeLevelOnly, unrelated).status).toBe("MISMATCH");
+    expect(compareStructuredRequirement(degreeRequirement[0], [], accepted).status).toBe("UNKNOWN");
   });
 
   it("uses authorization answers only for an unknown authorization fact and preserves conflicts", () => {
@@ -135,9 +136,9 @@ describe("verification answer context", () => {
       structured_value: { professional_years: 2, experience_scope: "software" },
     }];
 
-    expect(applyExactProfileGates(experienceRequirement, softwareExperience).status).toBe("NEEDS_VERIFICATION");
-    expect(applyExactProfileGates(experienceRequirement, softwareExperience, softwareAnswer).status).toBe("PASS");
-    expect(applyExactProfileGates(experienceRequirement, shortExperience, softwareAnswer).status).toBe("HARD_REJECT");
+    expect(compareStructuredRequirement(experienceRequirement[0], softwareExperience).status).toBe("UNKNOWN");
+    expect(compareStructuredRequirement(experienceRequirement[0], softwareExperience, softwareAnswer).status).toBe("MATCH");
+    expect(compareStructuredRequirement(experienceRequirement[0], shortExperience, softwareAnswer).status).toBe("MISMATCH");
   });
 
   it("applies a travel cap without clearing an unrelated office blocker", () => {

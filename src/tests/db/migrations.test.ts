@@ -147,6 +147,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("049_embedding_input_history.sql");
     expect(versions).toContain("050_ai_evaluation_budget_deferral.sql");
     expect(versions).toContain("054_repair_rejected_read_model_views.sql");
+    expect(versions).toContain("055_repair_shortlist_nullable_priority.sql");
   });
 
   it("embedding inputs preserve history with current-row uniqueness and current-only views", async () => {
@@ -292,6 +293,163 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       expect(rows).toHaveLength(1);
       expect(rows[0].definition).toContain("priority_score");
       expect(rows[0].definition).not.toMatch(/COALESCE\s*\(\s*(?:vq\.)?priority_score/i);
+    } finally {
+      await client.query("RESET search_path").catch(() => undefined);
+      await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+    }
+  });
+
+  it("migration 055 deterministically repairs legacy 019 view definition preserving null and zero", async () => {
+    const client = await realPool.connect();
+    const schemaName = `nullable_055_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
+    try {
+      await client.query(`CREATE SCHEMA ${schemaName}`);
+      await client.query(`SET search_path TO ${schemaName}, public`);
+      await client.query(`
+        CREATE TABLE schema_migrations (
+          version VARCHAR(255) PRIMARY KEY,
+          applied_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE canonical_jobs (
+          id UUID PRIMARY KEY,
+          workspace_id UUID,
+          normalized_title TEXT,
+          company_name TEXT,
+          canonical_url TEXT,
+          location TEXT,
+          location_summary TEXT,
+          workplace_type TEXT,
+          employment_type TEXT,
+          gate_decision TEXT,
+          rejection_codes JSONB,
+          primary_lane TEXT,
+          secondary_lanes JSONB,
+          lane_confidence TEXT,
+          deterministic_match_score NUMERIC,
+          deterministic_match_coverage NUMERIC,
+          processing_state TEXT,
+          processing_status TEXT,
+          recommendation_eligibility TEXT,
+          recommendation_outcome TEXT,
+          recommendation_requirement_score NUMERIC,
+          recommendation_coverage_score NUMERIC,
+          recommendation_evidence_completeness NUMERIC,
+          recommendation_decided_at TIMESTAMPTZ,
+          latest_job_version_id UUID,
+          latest_match_run_id UUID,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE job_versions (
+          id UUID PRIMARY KEY,
+          workspace_id UUID,
+          canonical_job_id UUID,
+          active_requirement_set_id UUID,
+          content_hash TEXT,
+          description_text TEXT,
+          observed_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE raw_job_observations (
+          job_version_id UUID,
+          source_name TEXT,
+          retrieved_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE gate_decisions (
+          canonical_job_id UUID,
+          job_version_id UUID,
+          decision TEXT,
+          rejection_codes JSONB,
+          evidence_quotes JSONB,
+          gate_version TEXT,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE ai_evaluations (
+          id UUID PRIMARY KEY,
+          canonical_job_id UUID,
+          job_version_id UUID,
+          full_evaluation_payload JSONB,
+          lane_matches JSONB,
+          workability_facts JSONB,
+          provider TEXT,
+          model TEXT,
+          attempt INT,
+          is_fallback BOOLEAN,
+          degraded_state BOOLEAN,
+          evaluated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE evaluation_queue (
+          canonical_job_id UUID,
+          job_version_id UUID,
+          status TEXT,
+          priority_score DOUBLE PRECISION,
+          attempt_count INT,
+          last_error TEXT,
+          available_at TIMESTAMPTZ,
+          enqueued_at TIMESTAMPTZ,
+          updated_at TIMESTAMPTZ
+        );
+        CREATE TABLE document_runs (
+          id UUID PRIMARY KEY,
+          canonical_job_id UUID,
+          job_version_id UUID,
+          document_type TEXT,
+          status TEXT,
+          completed_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+
+        -- Legacy view definition with COALESCE to 0.0::double precision
+        CREATE VIEW v_canonical_shortlist AS
+        SELECT
+          c.id AS canonical_job_id,
+          COALESCE(vq.priority_score, 0.0::double precision) AS priority_score
+        FROM canonical_jobs c
+        LEFT JOIN evaluation_queue vq ON vq.canonical_job_id = c.id;
+      `);
+
+      await applyMigrationFile(client, "055_repair_shortlist_nullable_priority.sql");
+
+      const { rows: viewDef } = await client.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('v_canonical_shortlist'::regclass, TRUE) AS definition`
+      );
+      expect(viewDef[0].definition).toContain("vq.priority_score");
+      expect(viewDef[0].definition).not.toMatch(/COALESCE\s*\(\s*vq\.priority_score/i);
+
+      // Verify data behavior:
+      // 1. Unknown priority => NULL
+      // 2. Genuine numeric zero => 0
+      // 3. Known numeric priority => preserved value
+      const jobNull = "11111111-1111-1111-1111-111111111111";
+      const jobZero = "22222222-2222-2222-2222-222222222222";
+      const jobKnown = "33333333-3333-3333-3333-333333333333";
+
+      await client.query(`
+        INSERT INTO canonical_jobs (id, processing_state) VALUES
+          ('${jobNull}', 'RAW_STAGED'),
+          ('${jobZero}', 'RAW_STAGED'),
+          ('${jobKnown}', 'RAW_STAGED');
+        INSERT INTO job_versions (id, canonical_job_id) VALUES
+          ('44444444-4444-4444-4444-444444444444', '${jobNull}'),
+          ('55555555-5555-5555-5555-555555555555', '${jobZero}'),
+          ('66666666-6666-6666-6666-666666666666', '${jobKnown}');
+        INSERT INTO evaluation_queue (canonical_job_id, priority_score) VALUES
+          ('${jobZero}', 0.0),
+          ('${jobKnown}', 0.875);
+      `);
+
+      const { rows: res } = await client.query<{ canonical_job_id: string; priority_score: number | null }>(
+        `SELECT canonical_job_id, priority_score FROM v_canonical_shortlist ORDER BY canonical_job_id`
+      );
+
+      const rowNull = res.find((r) => r.canonical_job_id === jobNull);
+      const rowZero = res.find((r) => r.canonical_job_id === jobZero);
+      const rowKnown = res.find((r) => r.canonical_job_id === jobKnown);
+
+      expect(rowNull?.priority_score).toBeNull();
+      expect(Number(rowZero?.priority_score)).toBe(0);
+      expect(Number(rowKnown?.priority_score)).toBeCloseTo(0.875, 3);
     } finally {
       await client.query("RESET search_path").catch(() => undefined);
       await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
