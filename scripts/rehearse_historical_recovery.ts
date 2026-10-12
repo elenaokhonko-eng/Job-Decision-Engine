@@ -8,16 +8,20 @@ import { runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js
 import { runRecommendationDecider } from "../src/pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer } from "../src/pipeline/explanationQueueEnqueuer.js";
 import { loadWorkspaceLanesConfig } from "../src/pipeline/laneConfigLoader.js";
+import {
+  AFFECTED_HISTORICAL_REPLAY_STATES,
+  EARLY_PIPELINE_REPLAY_STATES,
+  haveSameNumericCounts,
+  MATCH_REVALIDATION_REPLAY_STATES,
+  shouldReplayAffectedHistoricalJobs,
+} from "./historicalReplayScope.js";
+import {
+  getProductionDatabaseUrl,
+  requireProductionWriteConfirmation,
+} from "./productionRehearsalTarget.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
-
-const stagingUrl = process.env.STAGING_DB_URL || process.env.DATABASE_URL;
-
-if (!stagingUrl) {
-  console.error("Missing STAGING_DB_URL or DATABASE_URL");
-  process.exit(1);
-}
 
 interface ProcessingDistribution {
   [state: string]: number;
@@ -80,6 +84,69 @@ async function getLaneDistribution(client: pg.PoolClient, workspaceId: string): 
   return out;
 }
 
+interface ReplayAuditCounts {
+  [key: string]: number;
+  gateDecisions: number;
+  laneDecisions: number;
+  matchRuns: number;
+  evaluationQueue: number;
+  pipelineTasks: number;
+  pipelineTaskAttempts: number;
+}
+
+async function getReplayAuditCounts(
+  client: pg.PoolClient,
+  workspaceId: string,
+  canonicalJobIds: string[],
+): Promise<ReplayAuditCounts> {
+  const result = await client.query<ReplayAuditCounts>(`
+    SELECT
+      (
+        SELECT COUNT(*)::int
+        FROM gate_decisions gd
+        WHERE gd.workspace_id = $1
+          AND gd.canonical_job_id = ANY($2::uuid[])
+      ) AS "gateDecisions",
+      (
+        SELECT COUNT(*)::int
+        FROM lane_decisions ld
+        WHERE ld.workspace_id = $1
+          AND ld.canonical_job_id = ANY($2::uuid[])
+      ) AS "laneDecisions",
+      (
+        SELECT COUNT(*)::int
+        FROM match_runs mr
+        WHERE mr.workspace_id = $1
+          AND mr.canonical_job_id = ANY($2::uuid[])
+      ) AS "matchRuns",
+      (
+        SELECT COUNT(*)::int
+        FROM evaluation_queue eq
+        WHERE eq.workspace_id = $1
+          AND eq.canonical_job_id = ANY($2::uuid[])
+      ) AS "evaluationQueue",
+      (
+        SELECT COUNT(*)::int
+        FROM pipeline_tasks pt
+        WHERE pt.workspace_id = $1
+          AND pt.payload ->> 'canonical_job_id' = ANY($3::text[])
+      ) AS "pipelineTasks",
+      (
+        SELECT COUNT(*)::int
+        FROM pipeline_task_attempts pta
+        JOIN pipeline_tasks pt ON pt.id = pta.task_id
+        WHERE pta.workspace_id = $1
+          AND pt.payload ->> 'canonical_job_id' = ANY($3::text[])
+      ) AS "pipelineTaskAttempts"
+  `, [workspaceId, canonicalJobIds, canonicalJobIds]);
+
+  const counts = result.rows[0];
+  if (!counts) {
+    throw new Error("Expected replay audit counts for the affected historical cohort.");
+  }
+  return counts;
+}
+
 interface AffectedHistoricalJob {
   id: string;
   reason: string;
@@ -102,9 +169,9 @@ async function listAffectedHistoricalJobs(
     SELECT
       c.id,
       CASE
-        WHEN COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED', 'LANE_ROUTED')
+        WHEN COALESCE(c.processing_state, c.processing_status) = ANY($2::text[])
           THEN 'PENDING_OR_ROUTING_DEFERRED'
-        WHEN COALESCE(c.processing_state, c.processing_status) IN ('MATCHED', 'UNMATCHED')
+        WHEN COALESCE(c.processing_state, c.processing_status) = ANY($3::text[])
           THEN 'MATCH_OR_QUALIFICATION_REVALIDATION'
         ELSE 'CHANGED_GLOBAL_RULE_REASON'
       END AS reason
@@ -115,9 +182,7 @@ async function listAffectedHistoricalJobs(
     WHERE c.workspace_id = $1
       AND c.id::text NOT LIKE 'c0000000-0000-4000-8000-%'
       AND (
-        COALESCE(c.processing_state, c.processing_status) IN (
-          'RAW_STAGED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED', 'LANE_ROUTED', 'MATCHED', 'UNMATCHED'
-        )
+        COALESCE(c.processing_state, c.processing_status) = ANY($4::text[])
         OR (
           COALESCE(c.processing_state, c.processing_status) = 'HARD_REJECTED'
           AND EXISTS (
@@ -141,7 +206,12 @@ async function listAffectedHistoricalJobs(
         )
       )
     ORDER BY c.created_at ASC, c.id ASC;
-  `, [workspaceId]);
+  `, [
+    workspaceId,
+    EARLY_PIPELINE_REPLAY_STATES,
+    MATCH_REVALIDATION_REPLAY_STATES,
+    AFFECTED_HISTORICAL_REPLAY_STATES,
+  ]);
 
   return result.rows;
 }
@@ -496,11 +566,14 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
 }
 
 async function main() {
+  requireProductionWriteConfirmation();
+  const productionUrl = getProductionDatabaseUrl();
+
   console.log("================================================================================");
-  console.log(" PHASE 3 — HISTORICAL JOB RECOVERY & STAGING REHEARSAL");
+  console.log(" PHASE 3 — HISTORICAL JOB RECOVERY & PRODUCTION REHEARSAL");
   console.log("================================================================================");
 
-  const pool = new pg.Pool(pgPoolConfig(stagingUrl));
+  const pool = new pg.Pool(pgPoolConfig(productionUrl));
   const client = await pool.connect();
 
   try {
@@ -900,6 +973,10 @@ async function main() {
       return counts;
     }, {});
     console.log(`Selected ${affectedJobIds.length} affected historical job(s) for replay.`, affectedByReason);
+    if (!shouldReplayAffectedHistoricalJobs(affectedJobIds)) {
+      console.log("No affected historical jobs selected; skipping the historical replay as a no-op.");
+      return;
+    }
 
     // Step 4a: Run hard gates only for the affected cohort.
     console.log("Executing Hard Gate Evaluation for affected historical cohort...");
@@ -973,6 +1050,13 @@ async function main() {
     const postReplayLanes = await getLaneDistribution(client, ctx.workspaceId);
     console.log("Post-Replay lane distribution:", postReplayLanes);
 
+    const postReplayAuditCounts = await getReplayAuditCounts(
+      client,
+      ctx.workspaceId,
+      affectedJobIds,
+    );
+    console.log("Post-Replay decision/task/queue counts:", postReplayAuditCounts);
+
     // Step 5b: Replay a Second Time to Confirm Idempotency
     console.log("\n--- 5b. Second Replay Pass (Idempotency Check) ---");
     const secondGateResult = await runHardGates(pool, {
@@ -997,19 +1081,27 @@ async function main() {
     const postIdempotencyDist = await getProcessingDistribution(client, ctx.workspaceId);
     console.table(postIdempotencyDist);
 
-    // Verify distributions match exactly
-    let isIdempotent = true;
-    for (const [key, val] of Object.entries(postReplayDist)) {
-      if (postIdempotencyDist[key] !== val) {
-        console.error(`IDEMPOTENCY MISMATCH on state ${key}: ${val} vs ${postIdempotencyDist[key]}`);
-        isIdempotent = false;
-      }
-    }
+    const postIdempotencyAuditCounts = await getReplayAuditCounts(
+      client,
+      ctx.workspaceId,
+      affectedJobIds,
+    );
+    console.log("Post-idempotency decision/task/queue counts:", postIdempotencyAuditCounts);
+
+    const stateCountsAreIdempotent = haveSameNumericCounts(
+      postReplayDist,
+      postIdempotencyDist,
+    );
+    const artifactCountsAreIdempotent = haveSameNumericCounts(
+      postReplayAuditCounts,
+      postIdempotencyAuditCounts,
+    );
+    const isIdempotent = stateCountsAreIdempotent && artifactCountsAreIdempotent;
 
     if (isIdempotent) {
-      console.log("✅ IDEMPOTENCY CONFIRMED: Second pass produced identical state distribution!");
+      console.log("✅ IDEMPOTENCY CONFIRMED: State and decision/task/queue counts are unchanged after the second pass.");
     } else {
-      throw new Error("Idempotency check failed!");
+      throw new Error("Idempotency check failed: state or decision/task/queue counts changed.");
     }
 
     // 6. Read-Model Integrity Verification

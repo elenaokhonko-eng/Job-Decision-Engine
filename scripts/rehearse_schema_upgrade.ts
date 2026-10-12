@@ -1,13 +1,11 @@
 import pg from "pg";
+
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { runMigrations, getMigrationStatus } from "../src/db/migrate.js";
-
-const stagingUrl = process.env.STAGING_DB_URL || process.env.DATABASE_URL;
-
-if (!stagingUrl) {
-  console.error("Missing STAGING_DB_URL or DATABASE_URL");
-  process.exit(1);
-}
+import {
+  getProductionDatabaseUrl,
+  requireProductionWriteConfirmation,
+} from "./productionRehearsalTarget.js";
 
 interface SchemaSnapshot {
   tables: string[];
@@ -75,11 +73,14 @@ async function captureSnapshot(client: pg.Client): Promise<SchemaSnapshot> {
 }
 
 async function main() {
+  requireProductionWriteConfirmation();
+  const productionUrl = getProductionDatabaseUrl();
+
   console.log("==================================================");
-  console.log("PHASE 2: NEON STAGING SCHEMA UPGRADE REHEARSAL");
+  console.log("PHASE 2: PRODUCTION SCHEMA UPGRADE REHEARSAL");
   console.log("==================================================");
 
-  const client = new pg.Client(pgConnectionConfig(stagingUrl));
+  const client = new pg.Client(pgConnectionConfig(productionUrl));
   await client.connect();
 
   console.log("\n[1] Capturing PRE-MIGRATION schema snapshot...");

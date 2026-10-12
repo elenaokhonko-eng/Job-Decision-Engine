@@ -1,19 +1,15 @@
 import pg from "pg";
+
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { getMigrationStatus } from "../src/db/migrate.js";
-
-const stagingUrl = process.env.STAGING_DB_URL || process.env.DATABASE_URL;
-
-if (!stagingUrl) {
-  console.error("Missing STAGING_DB_URL or DATABASE_URL");
-  process.exit(1);
-}
+import { getProductionDatabaseUrl } from "./productionRehearsalTarget.js";
 
 async function main() {
-  const client = new pg.Client(pgConnectionConfig(stagingUrl));
+  const productionUrl = getProductionDatabaseUrl();
+  const client = new pg.Client(pgConnectionConfig(productionUrl));
   await client.connect();
 
-  console.log("=== STAGING DATABASE CONNECTION INFO ===");
+  console.log("=== PRODUCTION DATABASE CONNECTION INFO ===");
   const info = await client.query(`
     SELECT current_database() AS db, current_user AS usr, current_schema() AS schema, inet_server_addr() AS addr;
   `);
