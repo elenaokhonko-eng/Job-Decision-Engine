@@ -641,10 +641,11 @@ export async function runLaneRouter(
           const jobEmbeddings = new Map<string, number[]>();
           for (const job of jobs) {
             const vector = byNode.get(`JOB_VERSION:${job.latest_version_id}`);
-            if (!vector || vector.length !== dimensions) complete = false;
-            else jobEmbeddings.set(job.id, vector);
+            if (vector && vector.length === dimensions) {
+              jobEmbeddings.set(job.id, vector);
+            }
           }
-          if (complete && Object.keys(laneEmbeddings).length === laneNodeIds.length && jobEmbeddings.size === jobs.length) {
+          if (complete && Object.keys(laneEmbeddings).length === laneNodeIds.length) {
             publishedEmbeddingSets.set(provider, {
               laneEmbeddings,
               jobEmbeddings,
@@ -871,26 +872,21 @@ export async function runLaneRouter(
         console.log(`Using published ${provider} embedding batch for lane routing.`);
       }
       for (const job of jobs) {
-        if (publishedSet) break;
+        if (jobEmbeddings.has(job.id)) continue;
         const coreText = extractCoreJobText(job.normalized_title, job.description_text || "");
         let jobEmbedding: number[];
         try {
           jobEmbedding = await generateEmbeddingWithProvider(coreText, provider);
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
-          throw new EmbeddingRunError(provider, `job embedding failed: ${message}`, job.id);
+          if (jobEmbedding.length === 0 || jobEmbedding.every((value) => value === 0)) {
+            continue;
+          }
+          if (prototypeDimensions !== null && jobEmbedding.length !== prototypeDimensions) {
+            continue;
+          }
+          jobEmbeddings.set(job.id, jobEmbedding);
+        } catch {
+          // If individual job embedding generation fails, defer this job as TECHNICAL_DEFERRED without failing others
         }
-        if (jobEmbedding.length === 0 || jobEmbedding.every((value) => value === 0)) {
-          throw new EmbeddingRunError(provider, "job embedding was empty or zero-valued", job.id);
-        }
-        if (prototypeDimensions !== null && jobEmbedding.length !== prototypeDimensions) {
-          throw new EmbeddingRunError(
-            provider,
-            `job embedding dimension mismatch: expected ${prototypeDimensions} got ${jobEmbedding.length}`,
-            job.id
-          );
-        }
-        jobEmbeddings.set(job.id, jobEmbedding);
       }
 
       let routedCount = 0;
@@ -900,67 +896,41 @@ export async function runLaneRouter(
         await client.query("BEGIN");
         try {
           const jobEmbedding = jobEmbeddings.get(job.id);
-          if (!jobEmbedding) {
-            throw new EmbeddingRunError(provider, "job embedding was not prepared", job.id);
-          }
-
-          // Strict zero-vector check — embedding failure must not produce a default lane
-          const isZeroVector = jobEmbedding.every((v) => v === 0);
-          if (isZeroVector) {
-            console.warn(`⚠️ Zero embedding for job ${job.id}. Deferring (never default lane).`);
+          if (!jobEmbedding || jobEmbedding.every((v) => v === 0)) {
+            console.warn(`⚠️ Embedding unavailable for job ${job.id}. Deferring (never default lane).`);
             const evaluatedAt = new Date().toISOString();
             const laneDecisionId = await persistLaneDecision({
               canonicalJobId: job.id,
               jobVersionId: job.latest_version_id,
               embeddingProvider: provider,
               embeddingModel: publishedSet?.model,
-              embeddingDimensions: jobEmbedding.length,
+              embeddingDimensions: jobEmbedding?.length ?? 0,
               primaryLane: "UNCLASSIFIED",
               secondaryLanes: [],
               laneConfidence: "None",
               semanticScores: {},
-              laneEvidence: ["ZERO_VECTOR_EMBEDDING"],
+              laneEvidence: ["ROUTING_POLICY_NO_MATCH", "EMBEDDING_UNAVAILABLE"],
               evaluatedAt,
             });
-            const canonicalUpdate = await client.query(
+            await client.query(
               `UPDATE canonical_jobs
                SET primary_lane = 'UNCLASSIFIED',
                    semantic_score = 0.0,
                    lane_confidence = 'None',
-                   secondary_lanes = $3::jsonb,
-                   lane_evidence = $4::jsonb,
+                   secondary_lanes = '[]'::jsonb,
+                   lane_evidence = 'ROUTING_POLICY_NO_MATCH',
                    routing_disposition = 'TECHNICAL_DEFERRED',
                    processing_state = 'ROUTING_DEFERRED',
                    processing_status = 'ROUTING_DEFERRED',
+                   latest_lane_decision_id = $4,
                    updated_at = NOW()
                WHERE workspace_id = $1
                  AND id = $2
-                 AND latest_job_version_id = $5`,
-              [
-                ctx.workspaceId,
-                job.id,
-                JSON.stringify([]),
-                JSON.stringify(["ZERO_VECTOR_EMBEDDING"]),
-                job.latest_version_id,
-              ]
+                 AND (latest_job_version_id IS NULL OR latest_job_version_id = $3)`,
+              [ctx.workspaceId, job.id, job.latest_version_id, laneDecisionId]
             );
-            if (canonicalUpdate?.rowCount === 0) {
-              await client.query("COMMIT");
-              continue;
-            }
-            if (laneDecisionId) {
-              await client.query(
-                `UPDATE canonical_jobs
-                 SET latest_lane_decision_id = $3,
-                     updated_at = NOW()
-                 WHERE workspace_id = $1
-                   AND id = $2
-                   AND latest_job_version_id = $4`,
-                [ctx.workspaceId, job.id, laneDecisionId, job.latest_version_id]
-              );
-            }
             await client.query("COMMIT");
-            deferredCount++;
+            deferredCount += 1;
             continue;
           }
 

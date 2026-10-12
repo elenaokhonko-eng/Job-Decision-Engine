@@ -556,14 +556,15 @@ describe("Composed Pipeline Integration — Full Lifecycle Transition", () => {
         }
 
         if (s.includes("INSERT INTO requirement_evidence_matches")) {
-          const isHardcodedNoMatch = s.includes("'NO_MATCH', 0,");
+          const hasLiteralNoMatch = s.includes("'NO_MATCH'");
+          const isCoverageParam = s.includes("'NO_MATCH', $5");
           recordedMatches.push({
             requirement_id: params?.[2],
             profile_fact_id: params?.[3],
-            match_type: isHardcodedNoMatch ? "NO_MATCH" : params?.[4],
-            match_score: isHardcodedNoMatch ? 0 : params?.[5],
-            rationale: isHardcodedNoMatch ? params?.[4] : params?.[6],
-            evidence: JSON.parse((isHardcodedNoMatch ? params?.[5] : params?.[7]) || "{}"),
+            match_type: hasLiteralNoMatch ? "NO_MATCH" : params?.[4],
+            match_score: isCoverageParam ? params?.[4] : (hasLiteralNoMatch ? 0 : params?.[5]),
+            rationale: isCoverageParam ? params?.[5] : (hasLiteralNoMatch ? params?.[4] : params?.[6]),
+            evidence: JSON.parse((isCoverageParam ? params?.[6] : (hasLiteralNoMatch ? params?.[5] : params?.[7])) || "{}"),
           });
           return { rows: [] };
         }
@@ -713,7 +714,7 @@ describe("Composed Pipeline Integration — Full Lifecycle Transition", () => {
     const matches = harness.getRecordedMatches();
     const expMatch = matches.find((m) => m.requirement_id === "req-exp-10");
     expect(expMatch).toBeDefined();
-    expect(expMatch?.match_type).toBe("PARTIAL");
+    expect(expMatch?.match_type).toBe("NO_MATCH");
     expect(expMatch?.match_score).toBeCloseTo(0.15, 2);
     expect(expMatch?.evidence.experience_coverage).toBeCloseTo(0.15, 2);
     expect(expMatch?.evidence.match_qualification_code).toBe("MATCH_QUALIFICATION_EXPERIENCE_GAP");

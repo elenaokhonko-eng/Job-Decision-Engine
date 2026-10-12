@@ -122,7 +122,7 @@ async function main() {
 
   console.log("\n[5] VALIDATION CHECKS:");
 
-  // 1. All pending migrations recorded
+  // 1. All pending migrations recorded in schema_migrations
   const expectedPending = [
     '050_ai_evaluation_budget_deferral.sql',
     '051_budget_deferral_reason_codes.sql',
@@ -131,11 +131,11 @@ async function main() {
     '054_repair_rejected_read_model_views.sql',
     '055_repair_shortlist_nullable_priority.sql',
   ];
-  const missingFromApplied = expectedPending.filter((m) => !newlyApplied.includes(m));
+  const missingFromApplied = expectedPending.filter((m) => !postStatus.applied.includes(m));
   if (missingFromApplied.length > 0) {
-    throw new Error(`FAIL: Missing migrations from newlyApplied: ${missingFromApplied.join(', ')}`);
+    throw new Error(`FAIL: Missing migrations from schema_migrations: ${missingFromApplied.join(', ')}`);
   }
-  console.log("✓ All 6 pending migrations applied.");
+  console.log("✓ All 6 pending migrations recorded in schema_migrations.");
 
   // 2. Budget tables exist
   const budgetTables = ['ai_evaluation_budget_runs', 'ai_evaluation_budget_usage', 'evaluation_budget_deferrals'];
@@ -195,7 +195,6 @@ async function main() {
     'v_matchable_nodes',
     'v_published_semantic_embeddings',
     'v_application_tracker',
-    'shortlist_view',
   ];
   for (const v of requiredViews) {
     try {

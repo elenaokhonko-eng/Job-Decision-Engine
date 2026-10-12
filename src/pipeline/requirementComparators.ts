@@ -9,7 +9,7 @@ export interface ComparableFact {
   id: string;
   statement: string;
   structured_value: Record<string, unknown> | null;
-  source_type?: "PROFILE_FACT" | "CREDENTIAL";
+  source_type?: "PROFILE_FACT" | "CREDENTIAL" | "ENGAGEMENT";
 }
 
 interface ExperienceInterval {

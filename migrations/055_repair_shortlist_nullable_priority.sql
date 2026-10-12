@@ -266,31 +266,26 @@ LEFT JOIN LATERAL (
   LIMIT 1
 ) dd ON TRUE
 LEFT JOIN LATERAL (
-  SELECT
-    ae.id,
-    ae.profile_version_id,
-    ae.canonical_job_id,
-    ae.job_version_id,
-    ae.match_run_id,
-    ae.deterministic_decision_id,
-    ae.job_content_hash,
-    ae.context_fingerprint
+  SELECT ae.id, ae.canonical_job_id, ae.job_version_id,
+         ae.profile_version_id, ae.match_run_id,
+         ae.deterministic_decision_id, ae.job_content_hash,
+         ae.context_fingerprint
   FROM ai_evaluations ae
   WHERE ae.workspace_id = c.workspace_id
     AND ae.canonical_job_id = c.id
-    AND ae.job_version_id = target_jv.id
-  ORDER BY ae.evaluated_at DESC
+    AND ae.job_version_id = s.job_version_id::uuid
+  ORDER BY ae.evaluated_at DESC, ae.id DESC
   LIMIT 1
 ) latest_eval ON TRUE
 LEFT JOIN LATERAL (
   SELECT
-    COUNT(*) AS blocked_task_count,
-    STRING_AGG(pt.task_type || ':' || pt.blocked_reason, '; ') AS blocked_reason
+    COUNT(*)::int AS blocked_task_count,
+    MAX(pt.blocked_reason) AS blocked_reason
   FROM pipeline_tasks pt
   WHERE pt.workspace_id = c.workspace_id
-    AND pt.status = 'BLOCKED'
+    AND pt.status = 'BLOCKED_DEPENDENCY'
     AND (
-      (pt.context_entity_type = 'CANONICAL_JOB' AND pt.context_entity_id = c.id)
-      OR (pt.context_entity_type = 'JOB_VERSION' AND pt.context_entity_id = target_jv.id)
+      pt.payload->>'canonical_job_id' = c.id::text
+      OR pt.payload->>'job_version_id' = s.job_version_id::text
     )
 ) blocked ON TRUE;

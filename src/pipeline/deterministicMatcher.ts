@@ -34,7 +34,7 @@ interface RequirementRow {
 
 interface FactRow {
   id: string;
-  source_type?: "PROFILE_FACT" | "CREDENTIAL";
+  source_type?: "PROFILE_FACT" | "CREDENTIAL" | "ENGAGEMENT";
   embedding_node_id?: string;
   fact_type: string;
   statement: string;
@@ -442,7 +442,7 @@ export async function runDeterministicMatcher(
             experience_end_date: new Date(end).toISOString(),
             engagement_is_current: engagement.is_current,
           },
-          source_type: "PROFILE_FACT",
+          source_type: "ENGAGEMENT",
         });
       }
       if (experienceYears > 0) {
@@ -842,13 +842,12 @@ export async function runDeterministicMatcher(
               `INSERT INTO requirement_evidence_matches (
                  workspace_id, match_run_id, requirement_id, profile_fact_id,
                  match_type, match_score, rationale, evidence
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+               ) VALUES ($1, $2, $3, $4, 'NO_MATCH', $5, $6, $7)`,
               [
                 ctx.workspaceId,
                 matchRunId,
                 req.id,
                 structuredComparison.fact?.id || null,
-                coverage > 0 ? "PARTIAL" : "NO_MATCH",
                 coverage,
                 structuredComparison.rationale,
                 JSON.stringify({
@@ -983,7 +982,10 @@ export async function runDeterministicMatcher(
             matchedCount += 1;
           }
 
-          const profileFactId = bestFact?.source_type === "CREDENTIAL" ? null : bestFact?.id || null;
+          const profileFactId =
+            bestFact?.source_type === "CREDENTIAL" || bestFact?.source_type === "ENGAGEMENT"
+              ? null
+              : bestFact?.id || null;
 
           await client.query(
             `INSERT INTO requirement_evidence_matches (

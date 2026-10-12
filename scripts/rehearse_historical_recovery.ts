@@ -7,6 +7,7 @@ import { runLaneRouting } from "../src/pipeline/laneRouter.js";
 import { runDeterministicMatcher } from "../src/pipeline/deterministicMatcher.js";
 import { runRecommendationDecider } from "../src/pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer } from "../src/pipeline/explanationQueueEnqueuer.js";
+import { loadWorkspaceLanesConfig } from "../src/pipeline/laneConfigLoader.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -75,21 +76,30 @@ async function getLaneDistribution(client: pg.PoolClient, workspaceId: string): 
 
 async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceContext) {
   console.log("Staging deterministic canaries for six lanes and qualification stages...");
+  await loadWorkspaceLanesConfig(client as any, { context: ctx, seedIfEmpty: true });
 
-  // 1. Ensure embedding space exists with gemini model text-embedding-004
-  let spaceId: string;
-  const existingSpace = await client.query<{ id: string }>(`
-    SELECT id FROM embedding_spaces
-    WHERE workspace_id = $1 AND provider = 'gemini' AND active = true
+  function padVector768(v: number[]): number[] {
+    const out = new Array(768).fill(0);
+    for (let i = 0; i < v.length; i++) out[i] = v[i];
+    return out;
+  }
+
+  // 1. Ensure embedding space exists with gemini-embedding-001 (768 dimensions)
+  const existingSpace = await client.query<{ id: string; dimensions: number }>(`
+    SELECT id, dimensions FROM embedding_spaces
+    WHERE workspace_id = $1 AND provider = 'gemini' AND model = 'gemini-embedding-001' AND active = true
     ORDER BY created_at DESC LIMIT 1;
   `, [ctx.workspaceId]);
 
+  let spaceId: string;
+  let dimensions = 768;
   if (existingSpace.rows.length > 0) {
     spaceId = existingSpace.rows[0].id;
+    dimensions = existingSpace.rows[0].dimensions;
   } else {
     const newSpace = await client.query<{ id: string }>(`
-      INSERT INTO embedding_spaces (id, workspace_id, provider, model, vector_dimensions, active, is_fallback_space)
-      VALUES (gen_random_uuid(), $1, 'gemini', 'text-embedding-004', 6, true, false)
+      INSERT INTO embedding_spaces (id, workspace_id, space_key, provider, model, dimensions, vector_dimensions, active, is_fallback_space)
+      VALUES (gen_random_uuid(), $1, 'gemini_canary', 'gemini', 'gemini-embedding-001', 768, 768, true, false)
       RETURNING id;
     `, [ctx.workspaceId]);
     spaceId = newSpace.rows[0].id;
@@ -97,18 +107,18 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
 
   // 2. Ensure completed batch
   const batchRes = await client.query<{ id: string }>(`
-    INSERT INTO embedding_batches (id, workspace_id, embedding_space_id, batch_type, status, completed_at)
-    VALUES (gen_random_uuid(), $1, $2, 'CANARY_REHEARSAL', 'COMPLETED', NOW())
+    INSERT INTO embedding_batches (id, workspace_id, embedding_space_id, batch_key, run_type, status, completed_at)
+    VALUES (gen_random_uuid(), $1, $2, 'canary-batch-' || gen_random_uuid()::text, 'PRIMARY', 'COMPLETED', NOW())
     RETURNING id;
   `, [ctx.workspaceId, spaceId]);
   const batchId = batchRes.rows[0].id;
 
   // 3. Publish prototype vectors for all active workspace lanes
   const laneRevs = await client.query<{ lane_key: string; revision_id: string }>(`
-    SELECT li.lane_key, alr.lane_revision_id AS revision_id
-    FROM workspace_active_lane_revisions alr
-    JOIN lane_identities li ON li.id = alr.lane_identity_id
-    WHERE alr.workspace_id = $1;
+    SELECT li.lane_key, lar.lane_revision_id AS revision_id
+    FROM lane_active_revisions lar
+    JOIN lane_identities li ON li.id = lar.lane_identity_id
+    WHERE li.workspace_id = $1;
   `, [ctx.workspaceId]);
 
   const prototypeVectors: Record<string, number[]> = {
@@ -120,9 +130,11 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
     UNIVERSITY_AI_RESEARCH: [0, 0, 0, 0, 0, 1],
   };
 
+  const laneVectors: Record<string, number[]> = {};
+
   for (const lr of laneRevs.rows) {
-    const vec = prototypeVectors[lr.lane_key];
-    if (!vec) continue;
+    const vecRaw = prototypeVectors[lr.lane_key] || [1, 0, 0, 0, 0, 0];
+    const vec = padVector768(vecRaw);
 
     const existingInput = await client.query<{ id: string }>(`
       SELECT id FROM embedding_inputs
@@ -132,23 +144,32 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
     let inputId: string;
     if (existingInput.rows.length > 0) {
       inputId = existingInput.rows[0].id;
+      await client.query(`
+        UPDATE semantic_embeddings
+        SET embedding_values = $1, vector_dimensions = 768
+        WHERE embedding_space_id = $2 AND embedding_input_id = $3;
+      `, [vec, spaceId, inputId]);
     } else {
       const ins = await client.query<{ id: string }>(`
-        INSERT INTO embedding_inputs (id, workspace_id, source_type, source_id, content_text, content_hash, is_current)
-        VALUES (gen_random_uuid(), $1, 'LANE_PROTOTYPE', $2, $3, md5($3), true)
+        INSERT INTO embedding_inputs (id, workspace_id, input_key, source_type, source_id, content_text, content_hash, is_current)
+        VALUES (gen_random_uuid(), $1, 'canary-in-' || gen_random_uuid()::text, 'LANE_PROTOTYPE', $2, $3, md5($3), true)
         RETURNING id;
       `, [ctx.workspaceId, lr.revision_id, `Prototype for ${lr.lane_key}`]);
       inputId = ins.rows[0].id;
+
+      await client.query(`
+        INSERT INTO embedding_batch_items (id, workspace_id, embedding_batch_id, embedding_input_id, status)
+        VALUES (gen_random_uuid(), $1, $2, $3, 'COMPLETED')
+        ON CONFLICT DO NOTHING;
+      `, [ctx.workspaceId, batchId, inputId]);
+      await client.query(`
+        INSERT INTO semantic_embeddings (id, workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values, vector_checksum)
+        VALUES (gen_random_uuid(), $1, $4, $3, $2, 768, $5, md5(array_to_string($5::double precision[], ',')))
+        ON CONFLICT DO NOTHING;
+      `, [ctx.workspaceId, batchId, inputId, spaceId, vec]);
     }
 
-    await client.query(`
-      INSERT INTO embedding_batch_items (id, workspace_id, embedding_batch_id, embedding_input_id, status)
-      VALUES (gen_random_uuid(), $1, $2, $3, 'COMPLETED')
-      ON CONFLICT DO NOTHING;
-      INSERT INTO semantic_embeddings (id, workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values)
-      VALUES (gen_random_uuid(), $1, $4, $3, $2, 6, $5)
-      ON CONFLICT DO NOTHING;
-    `, [ctx.workspaceId, batchId, inputId, spaceId, vec]);
+    laneVectors[lr.lane_key] = vec;
   }
 
   // 4. Staged Canaries for the 6 lanes and qualifications
@@ -159,7 +180,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       title: "Staff Machine Learning Infrastructure Engineer",
       company: "Core AI Systems",
       desc: "Build production AI systems and machine learning engineering pipelines with MLOps infrastructure, scalable distributed training, PyTorch, and LLM inference platforms.",
-      vec: [1, 0, 0, 0, 0, 0],
+      vec: padVector768([1, 0, 0, 0, 0, 0]),
     },
     {
       id: "c0000000-0000-4000-8000-000000000002",
@@ -167,7 +188,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       title: "Senior RegTech AI Specialist",
       company: "Trust & Compliance Tech",
       desc: "Build RegTech compliance automation and legal document intelligence using AML/KYC data, AI, and knowledge graphs.",
-      vec: [0, 1, 0, 0, 0, 0],
+      vec: padVector768([0, 1, 0, 0, 0, 0]),
     },
     {
       id: "c0000000-0000-4000-8000-000000000003",
@@ -175,7 +196,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       title: "Bioinformatics ML Scientist",
       company: "Pharma Therapeutics AI",
       desc: "Apply bioinformatics and scientific machine learning to computational biology, drug discovery, and genomic sequence modeling.",
-      vec: [0, 0, 1, 0, 0, 0],
+      vec: padVector768([0, 0, 1, 0, 0, 0]),
     },
     {
       id: "c0000000-0000-4000-8000-000000000004",
@@ -183,7 +204,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       title: "Quantitative ML Researcher",
       company: "Alpha Market Management",
       desc: "Design quantitative research and time-series models for institutional portfolio management, market data, and capital markets.",
-      vec: [0, 0, 0, 1, 0, 0],
+      vec: padVector768([0, 0, 0, 1, 0, 0]),
     },
     {
       id: "c0000000-0000-4000-8000-000000000005",
@@ -191,7 +212,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       title: "Climate Data Platform Architect",
       company: "Global Wildlife & Climate Initiative",
       desc: "Deliver multilateral international-development technology with digital public infrastructure, environmental data, and climate technology for biodiversity protection.",
-      vec: [0, 0, 0, 0, 1, 0],
+      vec: padVector768([0, 0, 0, 0, 1, 0]),
     },
     {
       id: "c0000000-0000-4000-8000-000000000006",
@@ -199,7 +220,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       title: "Research Fellow in Machine Learning",
       company: "Institute for Advanced AI Studies",
       desc: "Conduct university AI research and research software engineering in scientific machine learning, neural architectures, and publish at top conferences.",
-      vec: [0, 0, 0, 0, 0, 1],
+      vec: padVector768([0, 0, 0, 0, 0, 1]),
     },
     {
       id: "c0000000-0000-4000-8000-000000000007",
@@ -207,15 +228,15 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       title: "Senior Legal AI & ML Infrastructure Architect",
       company: "LegalTech AI Systems",
       desc: "Build MLOps machine learning engineering infrastructure for RegTech compliance automation and legal document intelligence.",
-      vec: [0.707, 0.707, 0, 0, 0, 0],
+      vec: padVector768([0.707, 0.707, 0, 0, 0, 0]),
     },
     {
       id: "c0000000-0000-4000-8000-000000000008",
       scenario: "Qualification: 10-Yr Ask with 1.5 Yr Evidenced (Coverage 0.15)",
       title: "Staff Deep Learning Architect",
       company: "DeepAI Corp",
-      desc: "Build deep learning architectures in Python and PyTorch. Requires 10 years experience in deep learning systems.",
-      vec: [1, 0, 0, 0, 0, 0],
+      desc: "Build production machine learning engineering pipelines with MLOps infrastructure, PyTorch, and deep learning architectures. Requires 10 years experience in deep learning systems.",
+      vec: padVector768([1, 0, 0, 0, 0, 0]),
       req: {
         key: "req_dl_10yr",
         type: "EXPERIENCE_YEARS",
@@ -227,10 +248,10 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
     {
       id: "c0000000-0000-4000-8000-000000000009",
       scenario: "Qualification: Mandatory Cert Missing (UNMATCHED)",
-      title: "Financial Security Platform Engineer",
+      title: "Financial AI Security Platform Engineer",
       company: "FinSec Global",
-      desc: "Enterprise financial security architecture. CISSP certification strictly mandatory.",
-      vec: [0, 0, 0, 1, 0, 0],
+      desc: "Design quantitative research, market data, and AI financial security infrastructure for institutional trading platforms. CISSP certification strictly mandatory.",
+      vec: padVector768([0, 0, 0, 1, 0, 0]),
       req: {
         key: "req_cissp_mand",
         type: "CREDENTIAL",
@@ -245,7 +266,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
       title: "Principal Machine Learning Engineer",
       company: "Core AI Systems",
       desc: "Build machine learning systems and PyTorch pipelines.",
-      vec: [1, 0, 0, 0, 0, 0],
+      vec: padVector768([1, 0, 0, 0, 0, 0]),
       req: {
         key: "req_ml_eng_complete",
         type: "FUNCTION",
@@ -258,40 +279,67 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
 
   const stagedIds: string[] = [];
 
+  // Clean up any prior canary runs
+  await client.query(`
+    UPDATE canonical_jobs SET latest_job_version_id = NULL WHERE id::text LIKE 'c0000000-0000-4000-8000-%';
+    DELETE FROM job_versions WHERE canonical_job_id::text LIKE 'c0000000-0000-4000-8000-%';
+    DELETE FROM canonical_jobs WHERE id::text LIKE 'c0000000-0000-4000-8000-%';
+  `);
+
   for (const c of stagedCanaries) {
     stagedIds.push(c.id);
-    const jvId = `v${c.id.slice(1)}`;
+    const jvId = "d" + c.id.slice(1);
 
     await client.query(`
       INSERT INTO canonical_jobs (id, workspace_id, normalized_title, company_name, workplace_type, location, canonical_url, processing_state, processing_status, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, 'REMOTE', 'Singapore', 'https://canary.example.com/apply', 'RAW_STAGED', 'RAW_STAGED', NOW(), NOW())
-      ON CONFLICT (id) DO UPDATE SET
-        processing_state = 'RAW_STAGED',
-        processing_status = 'RAW_STAGED',
-        normalized_title = EXCLUDED.normalized_title,
-        company_name = EXCLUDED.company_name;
+      VALUES ($1, $2, $3, $4, 'REMOTE', 'Singapore', 'https://canary.example.com/apply', 'RAW_STAGED', 'RAW_STAGED', NOW(), NOW());
     `, [c.id, ctx.workspaceId, c.title, c.company]);
 
     await client.query(`
       INSERT INTO job_versions (id, workspace_id, canonical_job_id, description_text, observed_at)
-      VALUES ($1, $2, $3, $4, NOW())
-      ON CONFLICT (id) DO UPDATE SET
-        description_text = EXCLUDED.description_text;
-      UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $3;
+      VALUES ($1, $2, $3, $4, NOW());
     `, [jvId, ctx.workspaceId, c.id, c.desc]);
 
+    let canaryReqSetId: string | null = null;
     if ((c as any).req) {
-      const r = (c as any).req;
-      const reqId = `r${c.id.slice(1)}`;
+      const idRes = await client.query<{ id: string }>(`
+        INSERT INTO requirement_set_identities (id, workspace_id, canonical_job_id, identity_hash, schema_version, job_content_hash, deterministic_extractor_version, quoted_extractor_version, quoted_prompt_hash, normalizer_hash)
+        VALUES (gen_random_uuid(), $1, $2, md5($3), '2.2.0', md5($3), '1.0', '1.0', '1.0', '1.0')
+        RETURNING id;
+      `, [ctx.workspaceId, c.id, c.desc]);
+      const setRes = await client.query<{ id: string }>(`
+        INSERT INTO requirement_sets (id, workspace_id, requirement_identity_id, canonical_job_id, job_version_id, revision_number, source_type)
+        VALUES (gen_random_uuid(), $1, $2, $3, $4, 1, 'EXTRACTED')
+        RETURNING id;
+      `, [ctx.workspaceId, idRes.rows[0].id, c.id, jvId]);
+      canaryReqSetId = setRes.rows[0].id;
+
       await client.query(`
-        INSERT INTO job_requirements (id, workspace_id, canonical_job_id, job_version_id, requirement_key, requirement_type, importance, requirement_text, structured_value, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'VALIDATED')
-        ON CONFLICT (id) DO UPDATE SET
-          requirement_type = EXCLUDED.requirement_type,
-          importance = EXCLUDED.importance,
-          requirement_text = EXCLUDED.requirement_text,
-          structured_value = EXCLUDED.structured_value;
-      `, [reqId, ctx.workspaceId, c.id, jvId, r.key, r.type, r.importance, r.text, JSON.stringify(r.struct)]);
+        UPDATE job_versions SET active_requirement_set_id = $1 WHERE id = $2;
+      `, [canaryReqSetId, jvId]);
+    }
+
+    await client.query(`
+      UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $2;
+    `, [jvId, c.id]);
+
+    if ((c as any).req && canaryReqSetId) {
+      const r = (c as any).req;
+      const reqId = "e" + c.id.slice(1);
+      await client.query(`
+        INSERT INTO job_requirements (id, workspace_id, canonical_job_id, job_version_id, requirement_set_id, requirement_key, requirement_type, importance, requirement_text, structured_value, status, extractor_type, extractor_version, confidence)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'VALIDATED', 'DETERMINISTIC', '1.0', 1.0);
+      `, [reqId, ctx.workspaceId, c.id, jvId, canaryReqSetId, r.key, r.type, r.importance, r.text, JSON.stringify(r.struct)]);
+
+      await client.query(`
+        INSERT INTO requirement_extraction_runs (id, workspace_id, canonical_job_id, job_version_id, requirement_set_id, run_type, status, completed_at)
+        VALUES (gen_random_uuid(), $1, $2, $3, $4, 'DETERMINISTIC', 'COMPLETED', NOW());
+      `, [ctx.workspaceId, c.id, jvId, canaryReqSetId]);
+      await client.query(`
+        INSERT INTO job_version_pipeline_state (id, workspace_id, canonical_job_id, job_version_id, current_stage, stage_status, updated_at)
+        VALUES (gen_random_uuid(), $1, $2, $3, 'REQUIREMENTS_EXTRACTED', 'COMPLETED', NOW())
+        ON CONFLICT (job_version_id) DO UPDATE SET current_stage = 'REQUIREMENTS_EXTRACTED', stage_status = 'COMPLETED';
+      `, [ctx.workspaceId, c.id, jvId]);
     }
 
     if (c.vec) {
@@ -305,8 +353,8 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
         inputId = existingJvInput.rows[0].id;
       } else {
         const ins = await client.query<{ id: string }>(`
-          INSERT INTO embedding_inputs (id, workspace_id, source_type, source_id, content_text, content_hash, is_current)
-          VALUES (gen_random_uuid(), $1, 'JOB_VERSION', $2, $3, md5($3), true)
+          INSERT INTO embedding_inputs (id, workspace_id, input_key, source_type, source_id, content_text, content_hash, is_current)
+          VALUES (gen_random_uuid(), $1, 'canary-in-' || gen_random_uuid()::text, 'JOB_VERSION', $2, $3, md5($3), true)
           RETURNING id;
         `, [ctx.workspaceId, jvId, c.desc]);
         inputId = ins.rows[0].id;
@@ -316,10 +364,55 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
         INSERT INTO embedding_batch_items (id, workspace_id, embedding_batch_id, embedding_input_id, status)
         VALUES (gen_random_uuid(), $1, $2, $3, 'COMPLETED')
         ON CONFLICT DO NOTHING;
-        INSERT INTO semantic_embeddings (id, workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values)
-        VALUES (gen_random_uuid(), $1, $4, $3, $2, 6, $5)
+      `, [ctx.workspaceId, batchId, inputId]);
+      await client.query(`
+        INSERT INTO semantic_embeddings (id, workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values, vector_checksum)
+        VALUES (gen_random_uuid(), $1, $4, $3, $2, 768, $5, md5(array_to_string($5::double precision[], ',')))
         ON CONFLICT DO NOTHING;
-      `, [ctx.workspaceId, batchId, inputId, spaceId, c.vec]);
+      `, [ctx.workspaceId, batchId, inputId, spaceId, padVector768(c.vec)]);
+    }
+
+    if (c.id === "c0000000-0000-4000-8000-000000000010") {
+      const reqId = "e" + c.id.slice(1);
+      const reqInput = await client.query<{ id: string }>(`
+        INSERT INTO embedding_inputs (id, workspace_id, input_key, source_type, source_id, content_text, content_hash, is_current)
+        VALUES (gen_random_uuid(), $1, 'canary-in-' || gen_random_uuid()::text, 'JOB_REQUIREMENT', $2, 'Machine Learning Engineering in PyTorch', md5('mle'), true)
+        ON CONFLICT DO NOTHING RETURNING id;
+      `, [ctx.workspaceId, reqId]);
+      const reqInId = reqInput.rows[0]?.id;
+      if (reqInId) {
+        await client.query(`
+          INSERT INTO embedding_batch_items (id, workspace_id, embedding_batch_id, embedding_input_id, status)
+          VALUES (gen_random_uuid(), $1, $2, $3, 'COMPLETED') ON CONFLICT DO NOTHING;
+        `, [ctx.workspaceId, batchId, reqInId]);
+        await client.query(`
+          INSERT INTO semantic_embeddings (id, workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values, vector_checksum)
+          VALUES (gen_random_uuid(), $1, $4, $3, $2, 768, $5, md5(array_to_string($5::double precision[], ','))) ON CONFLICT DO NOTHING;
+        `, [ctx.workspaceId, batchId, reqInId, spaceId, padVector768([1, 0, 0, 0, 0, 0])]);
+      }
+
+      const pfRes = await client.query<{ id: string }>(`
+        SELECT id FROM profile_facts WHERE workspace_id = $1 LIMIT 1;
+      `, [ctx.workspaceId]);
+      if (pfRes.rows.length > 0) {
+        const pfId = pfRes.rows[0].id;
+        const pfInput = await client.query<{ id: string }>(`
+          INSERT INTO embedding_inputs (id, workspace_id, input_key, source_type, source_id, content_text, content_hash, is_current)
+          VALUES (gen_random_uuid(), $1, 'canary-in-' || gen_random_uuid()::text, 'PROFILE_FACT', $2, 'ML Profile Fact', md5('pf'), true)
+          ON CONFLICT DO NOTHING RETURNING id;
+        `, [ctx.workspaceId, pfId]);
+        const pfInId = pfInput.rows[0]?.id;
+        if (pfInId) {
+          await client.query(`
+            INSERT INTO embedding_batch_items (id, workspace_id, embedding_batch_id, embedding_input_id, status)
+            VALUES (gen_random_uuid(), $1, $2, $3, 'COMPLETED') ON CONFLICT DO NOTHING;
+          `, [ctx.workspaceId, batchId, pfInId]);
+          await client.query(`
+            INSERT INTO semantic_embeddings (id, workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id, vector_dimensions, embedding_values, vector_checksum)
+            VALUES (gen_random_uuid(), $1, $4, $3, $2, 768, $5, md5(array_to_string($5::double precision[], ','))) ON CONFLICT DO NOTHING;
+          `, [ctx.workspaceId, batchId, pfInId, spaceId, padVector768([1, 0, 0, 0, 0, 0])]);
+        }
+      }
     }
   }
 
