@@ -840,6 +840,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
              AND current_shortlist.job_version_id = jv.id
             WHERE c.workspace_id = $1
               AND c.id = $2::uuid
+              AND c.is_test_fixture = FALSE
             LIMIT 1
           `,
           [ctx.workspaceId, canonicalJobId, requestedJobVersionId]

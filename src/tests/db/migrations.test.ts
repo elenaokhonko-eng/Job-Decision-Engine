@@ -149,6 +149,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("054_repair_rejected_read_model_views.sql");
     expect(versions).toContain("055_repair_shortlist_nullable_priority.sql");
     expect(versions).toContain("056_authoritative_user_action_projection.sql");
+    expect(versions).toContain("057_pipeline_reliability_fixture_isolation.sql");
   });
 
   it("embedding inputs preserve history with current-row uniqueness and current-only views", async () => {
@@ -492,6 +493,71 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     } finally {
       await client.query("RESET search_path").catch(() => undefined);
       await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+    }
+  });
+
+  it("hides marked release fixtures from operational read models and queue metrics", async () => {
+    const client = await realPool.connect();
+    try {
+      await client.query("BEGIN");
+      const workspace = await client.query<{ id: string }>(
+        `SELECT id FROM workspaces WHERE workspace_key = 'default' LIMIT 1`,
+      );
+      const workspaceId = workspace.rows[0]?.id;
+      expect(workspaceId).toBeTruthy();
+      const reportTable = await client.query<{ exists: boolean }>(
+        `SELECT to_regclass('public.pipeline_run_reports') IS NOT NULL AS exists`,
+      );
+      expect(reportTable.rows[0]?.exists).toBe(true);
+      const fixtureJob = await client.query<{ id: string }>(
+        `INSERT INTO canonical_jobs (
+           workspace_id, company_name, normalized_title, canonical_url,
+           processing_state, processing_status, is_test_fixture
+         ) VALUES ($1, 'Fixture Co', 'Fixture Engineer', 'https://fixture.example.test',
+                   'RAW_STAGED', 'RAW_STAGED', TRUE)
+         RETURNING id`,
+        [workspaceId],
+      );
+      const fixtureJobId = fixtureJob.rows[0].id;
+      const fixtureVersion = await client.query<{ id: string }>(
+        `INSERT INTO job_versions (workspace_id, canonical_job_id, content_hash, description_text)
+         VALUES ($1, $2, 'fixture-content', 'Fixture-only canary job.')
+         RETURNING id`,
+        [workspaceId, fixtureJobId],
+      );
+      await client.query(
+        `UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $2`,
+        [fixtureVersion.rows[0].id, fixtureJobId],
+      );
+      await client.query(
+        `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload)
+         VALUES ($1, 'MATCH_PROFILE_EVIDENCE', 'fixture-task-' || gen_random_uuid()::text,
+                 jsonb_build_object('canonical_job_id', $2::text, 'job_version_id', $3::text))`,
+        [workspaceId, fixtureJobId, fixtureVersion.rows[0].id],
+      );
+
+      const shortlist = await client.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count
+         FROM v_canonical_shortlist_actions_scoped
+         WHERE workspace_id = $1 AND canonical_job_id = $2`,
+        [workspaceId, fixtureJobId],
+      );
+      const queueHealth = await client.query<{ count: number }>(
+        `SELECT COALESCE(SUM(task_count), 0)::int AS count
+         FROM v_pipeline_task_queue_health
+         WHERE workspace_id = $1
+           AND task_type = 'MATCH_PROFILE_EVIDENCE'`,
+        [workspaceId],
+      );
+
+      expect(shortlist.rows[0]?.count).toBe(0);
+      expect(queueHealth.rows[0]?.count).toBe(0);
+      await client.query("ROLLBACK");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
       client.release();
     }
   });

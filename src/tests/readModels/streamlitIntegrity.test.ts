@@ -28,6 +28,11 @@ describe('streamlit read-model integrity', () => {
     expect(content).toContain('current_artifact_status');
     expect(content).toContain('requires_user_action');
     expect(content).toContain('pipeline_display_category');
+    expect(content).toContain('st.sidebar.metric("Recommended", recommended_count)');
+    expect(content).toContain('st.sidebar.metric("Processing", automatic_processing_count)');
+    expect(content).toContain('st.sidebar.metric("Rejected", rejected_count)');
+    expect(content).toContain('st.sidebar.metric("Error", technical_error_count)');
+    expect(content).not.toContain('verify_count');
     expect(content).not.toContain('http://localhost:3000');
   });
 

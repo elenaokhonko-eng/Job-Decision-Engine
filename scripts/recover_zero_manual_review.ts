@@ -55,6 +55,7 @@ export async function listRecoveryCandidates(
     `SELECT id AS canonical_job_id, latest_job_version_id AS job_version_id
      FROM canonical_jobs
      WHERE workspace_id = $1
+       AND is_test_fixture = FALSE
        AND COALESCE(processing_state, processing_status) = 'ROUTING_DEFERRED'
        AND routing_disposition = 'POLICY_NO_MATCH'
        AND latest_job_version_id IS NOT NULL
@@ -66,6 +67,7 @@ export async function listRecoveryCandidates(
     `SELECT id AS canonical_job_id, latest_job_version_id AS job_version_id
      FROM canonical_jobs
      WHERE workspace_id = $1
+       AND is_test_fixture = FALSE
        AND COALESCE(processing_state, processing_status) = 'ROUTING_DEFERRED'
        AND routing_disposition = 'TECHNICAL_DEFERRED'
        AND latest_job_version_id IS NOT NULL
@@ -89,6 +91,7 @@ export async function listRecoveryCandidates(
        ON gate.canonical_job_id = c.id
       AND gate.job_version_id = c.latest_job_version_id
      WHERE c.workspace_id = $1
+       AND c.is_test_fixture = FALSE
        AND COALESCE(c.processing_state, c.processing_status) = 'NEEDS_VERIFICATION'
        AND gate.rejection_codes @> '["NEEDS_VERIFICATION_WORK_AUTH"]'::jsonb
        AND c.latest_job_version_id IS NOT NULL
@@ -100,6 +103,7 @@ export async function listRecoveryCandidates(
     `SELECT COUNT(*)::int AS count
      FROM canonical_jobs
      WHERE workspace_id = $1
+       AND is_test_fixture = FALSE
        AND COALESCE(processing_state, processing_status) = 'RAW_STAGED'`,
     [ctx.workspaceId],
   );
@@ -123,6 +127,7 @@ async function stateDistribution(client: pg.PoolClient, ctx: WorkspaceContext): 
     `SELECT COALESCE(processing_state, processing_status) AS state, COUNT(*)::int AS count
      FROM canonical_jobs
      WHERE workspace_id = $1
+       AND is_test_fixture = FALSE
      GROUP BY COALESCE(processing_state, processing_status)
      ORDER BY state`,
     [ctx.workspaceId],

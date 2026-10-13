@@ -39,6 +39,7 @@
     "pipeline:reconcile": "tsx scripts/reconcile_pipeline.ts",
     "pipeline:repair": "tsx scripts/repair_pipeline_funnel.ts",
     "pipeline:recover-zero-manual-review": "tsx scripts/recover_zero_manual_review.ts",
+    "pipeline:status": "tsx scripts/report_pipeline_status.ts",
     "source:enrich-incomplete": "tsx scripts/enrich_incomplete_descriptions.ts",
     "e2e:retest-gate": "tsx scripts/check_desktop_e2e_gate.ts",
     "decisions:replay": "tsx scripts/replay_deterministic_decisions.ts",

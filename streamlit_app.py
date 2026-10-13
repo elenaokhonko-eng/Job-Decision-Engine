@@ -1123,28 +1123,26 @@ else:
 # Metrics
 total_jobs = len(jobs_list)
 evaluated_count = sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED" and not j.get("version_mismatch"))
-completed_categories = {"COMPLETED", "REJECTED_UNMATCHED"}
-priority_count = sum(
+recommended_count = sum(
     1 for j in jobs_list
-    if j.get("pipeline_display_category") in completed_categories and j.get("decision_outcome") == "PRIORITY"
-)
-review_count = sum(
-    1 for j in jobs_list
-    if j.get("pipeline_display_category") == "COMPLETED" and j.get("decision_outcome") == "REVIEW"
+    if j.get("pipeline_display_category") == "COMPLETED"
+    and j.get("decision_outcome") in ("PRIORITY", "REVIEW", "TRACK")
 )
 manual_action_count = sum(1 for j in jobs_list if j.get("requires_user_action") is True)
 automatic_processing_count = sum(1 for j in jobs_list if j.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY")
+unmatched_count = sum(1 for j in jobs_list if j.get("pipeline_display_category") == "REJECTED_UNMATCHED")
+rejected_count = len(rejected_jobs_audit) + unmatched_count
 technical_error_count = sum(1 for j in jobs_list if j.get("pipeline_display_category") == "TECHNICAL_ERROR")
 toxic_count = sum(1 for j in jobs_list if isinstance(j.get("politics_stress_score"), (int, float)) and j.get("politics_stress_score") >= 70)
 
 st.sidebar.subheader("📊 Engine Statistics")
 st.sidebar.metric("Total Vault Jobs", total_jobs)
 st.sidebar.metric("Fully Evaluated", evaluated_count)
-st.sidebar.metric("Recommended (Priority)", priority_count)
-st.sidebar.metric("Recommended (Review)", review_count)
+st.sidebar.metric("Recommended", recommended_count)
+st.sidebar.metric("Processing", automatic_processing_count)
+st.sidebar.metric("Rejected", rejected_count)
+st.sidebar.metric("Error", technical_error_count)
 st.sidebar.metric("User action required", manual_action_count)
-st.sidebar.metric("Processing automatically", automatic_processing_count)
-st.sidebar.metric("Technical errors requiring support", technical_error_count)
 st.sidebar.metric("Toxicity Flags", toxic_count)
 
 st.sidebar.markdown("---")

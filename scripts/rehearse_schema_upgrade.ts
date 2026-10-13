@@ -132,12 +132,13 @@ async function main() {
     '054_repair_rejected_read_model_views.sql',
     '055_repair_shortlist_nullable_priority.sql',
     '056_authoritative_user_action_projection.sql',
+    '057_pipeline_reliability_fixture_isolation.sql',
   ];
   const missingFromApplied = expectedPending.filter((m) => !postStatus.applied.includes(m));
   if (missingFromApplied.length > 0) {
     throw new Error(`FAIL: Missing migrations from schema_migrations: ${missingFromApplied.join(', ')}`);
   }
-  console.log("✓ All 7 pending migrations recorded in schema_migrations.");
+  console.log("✓ All expected release migrations recorded in schema_migrations.");
 
   // 2. Budget tables exist
   const budgetTables = ['ai_evaluation_budget_runs', 'ai_evaluation_budget_usage', 'evaluation_budget_deferrals'];
@@ -196,6 +197,7 @@ async function main() {
     'v_canonical_shortlist_scoped',
     'v_current_user_actions',
     'v_canonical_shortlist_actions_scoped',
+    'v_pipeline_task_queue_health',
     'v_matchable_nodes',
     'v_published_semantic_embeddings',
     'v_application_tracker',
@@ -231,6 +233,7 @@ async function main() {
     'embedding_inputs',
     'embedding_batches',
     'semantic_embeddings',
+    'pipeline_run_reports',
   ];
   for (const tbl of coreTables) {
     const preCount = preSnapshot.rowCounts[tbl] ?? 0;

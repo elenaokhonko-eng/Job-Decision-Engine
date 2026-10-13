@@ -10,5 +10,8 @@ describe("discovery ingestion workflow", () => {
     expect(workflow).toContain("needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success'");
     expect(workflow).toContain("Check ingestion completeness");
     expect(workflow).toContain("needs.gmail_ingestion.result != 'success' || needs.public_source_ingestion.result != 'success'");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'");
+    expect(workflow).toContain('PIPELINE_TASK_WORKER_STAGE_MAX_TASKS');
+    expect(workflow).toContain('scripts/report_pipeline_status.ts');
   });
 });

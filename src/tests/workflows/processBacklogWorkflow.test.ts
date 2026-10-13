@@ -18,7 +18,8 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json');
     expect(workflow).toContain('actions/upload-artifact@v4');
     expect(workflow).toContain('timeout-minutes: 15');
-    expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '40' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '2500' }}");
+    expect(workflow).toContain('PIPELINE_TASK_WORKER_STAGE_MAX_TASKS');
     expect(workflow).toContain("PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '720000' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_TASK_TYPES: ${{ vars.PIPELINE_TASK_WORKER_TASK_TYPES || '' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_SEED: ${{ vars.PIPELINE_TASK_WORKER_SEED || 'true' }}");
@@ -26,7 +27,9 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain("PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION: ${{ vars.PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION || 'routing_deferred_replay_v1' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '60000' }}");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_WALL_CLOCK_MS');
-    expect(workflow).toContain('PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT');
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'");
+    expect(workflow).toContain('scripts/report_pipeline_status.ts');
     expect(workflow).not.toContain('scripts/ingest_gmail.ts');
     expect(workflow).not.toContain('scripts/run_adapters.ts');
     expect(workflow).not.toContain('scripts/parse_emails.ts');
@@ -73,7 +76,7 @@ describe('process backlog workflow', () => {
     expect(worker).toContain("PipelineTaskDependencyBlockedError");
   });
 
-  it('uses a serialized worker entrypoint that fails loudly on retryable stage errors', () => {
+  it('uses a serialized worker entrypoint with strict retry mode and production SLO gates', () => {
     const script = readFileSync(resolve('scripts/process_pipeline_tasks.ts'), 'utf8');
 
     expect(script).toContain('pg_try_advisory_lock');
@@ -85,7 +88,9 @@ describe('process backlog workflow', () => {
     expect(script).toContain('process.once("SIGTERM"');
     expect(script).toContain('abortSignal: shutdownController.signal');
     expect(script).toContain('PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS');
-    expect(script).toContain('Pipeline task worker moved');
+    expect(script).toContain('enforcePipelineWorkerExitPolicy');
+    expect(script).toContain('PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT');
+    expect(script).toContain('PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS');
     expect(script).toContain('process.exitCode = workerError instanceof PipelineWorkerCancelledError ? 130 : 1');
   });
 });

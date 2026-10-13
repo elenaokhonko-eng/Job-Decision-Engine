@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   PipelineWorkerCancelledError,
   buildPipelineTaskKey,
+  parsePipelineStageTaskLimits,
   parsePipelineTaskTypes,
   runPipelineStageTaskWorker,
   seedRecoverablePipelineTasks,
   type PipelineStageWorkerDependencies,
+  type PipelineStageWorkerOptions,
 } from "../../tasks/stageTaskWorker.js";
 
 describe("stageTaskWorker", () => {
@@ -95,6 +97,17 @@ describe("stageTaskWorker", () => {
       ...overrides,
     } as PipelineStageWorkerDependencies;
   }
+
+  it("parses per-stage task drain limits", () => {
+    expect(
+      parsePipelineStageTaskLimits("NORMALIZE_OBSERVATION=600,DECIDE_RECOMMENDATION=800"),
+    ).toEqual({
+      NORMALIZE_OBSERVATION: 600,
+      DECIDE_RECOMMENDATION: 800,
+    });
+    expect(() => parsePipelineStageTaskLimits("NORMALIZE_OBSERVATION=0")).toThrow("positive integer");
+    expect(() => parsePipelineStageTaskLimits("UNKNOWN_STAGE=10")).toThrow("Unsupported pipeline stage");
+  });
 
   it("versions profile matching task keys by active profile version", () => {
     expect(
@@ -639,6 +652,105 @@ describe("stageTaskWorker", () => {
     ).toBe(true);
   });
 
+  it("blocks semantic-incomplete matching and schedules embedding repair", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    let stateReads = 0;
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [{
+            id: "task-semantic-gap",
+            workspace_id: ctx.workspaceId,
+            task_type: "MATCH_PROFILE_EVIDENCE",
+            task_key: "MATCH_PROFILE_EVIDENCE:version-gap:deterministic_matcher_v1:profile:profile-1",
+            payload: { canonical_job_id: "job-gap", job_version_id: "version-gap" },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 8,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("c.is_test_fixture")) return { rows: [{ exists: false }], rowCount: 1 };
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        stateReads += 1;
+        return {
+          rows: [{
+            canonical_job_id: "job-gap",
+            processing_state: "LANE_ROUTED",
+            primary_lane: "CORE_AI_DATA",
+            lane_evidence: null,
+            routing_disposition: "ROUTED",
+            profile_match_status: "UNKNOWN",
+            gate_decision: "PASS",
+            recommendation_eligibility: null,
+            recommendation_outcome: null,
+            latest_job_version_id: "version-gap",
+          }],
+        };
+      }
+      if (sql.includes("FROM job_version_pipeline_state ps") && sql.includes("requirement_extraction_runs rer")) {
+        return { rows: [{ exists: true }], rowCount: 1 };
+      }
+      if (sql.includes("WITH active_spaces AS")) {
+        return {
+          rows: [{
+            has_active_space: true,
+            requirements_complete: false,
+            profile_facts_complete: true,
+            complete_cohort: false,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) return { rows: [{ id: "task-embedding-repair" }], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-semantic-gap" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies({ runDeterministicMatcher: vi.fn(async () => ({ matchedJobs: 0, skippedJobs: 1, errors: 0 })) });
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+        maxTasks: 1,
+        heartbeatSeconds: 0,
+      },
+      deps,
+    );
+
+    expect(stateReads).toBeGreaterThanOrEqual(2);
+    expect(summary).toMatchObject({ completed: 0, blocked: 1, failed: 0, deadLettered: 0 });
+    expect(deps.runDeterministicMatcher).toHaveBeenCalledOnce();
+    expect(
+      calls.some((call) =>
+        call.sql.includes("INSERT INTO pipeline_tasks") && call.params?.[1] === "PUBLISH_EMBEDDING",
+      ),
+    ).toBe(true);
+    expect(
+      calls.some((call) =>
+        call.sql.includes("UPDATE pipeline_tasks") &&
+        call.sql.includes("BLOCKED_DEPENDENCY") &&
+        call.params?.[4] === "REQUIREMENT_EMBEDDING_MISSING:version-gap",
+      ),
+    ).toBe(true);
+  });
+
   it("completes stale pre-lane decision tasks without creating a dependency block", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
@@ -1084,6 +1196,159 @@ describe("stageTaskWorker", () => {
     expect(deps.runHardGates).not.toHaveBeenCalled();
   });
 
+  it("excludes marked release fixtures from operational task seeding", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM canonical_jobs") && sql.includes("is_test_fixture = TRUE")) {
+        return { rows: [{ id: "c0000000-0000-4000-8000-000000000001" }] };
+      }
+      if (sql.includes("FROM canonical_jobs c") && sql.includes("active_profile.id AS profile_version_id")) {
+        return {
+          rows: [{
+            canonical_job_id: "c0000000-0000-4000-8000-000000000001",
+            job_version_id: "d0000000-0000-4000-8000-000000000001",
+            profile_version_id: "profile-1",
+            reprocess_existing_state: true,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        throw new Error("fixture must not be enqueued for operational processing");
+      }
+      return { rows: [] };
+    });
+
+    const summary = await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+      routingDeferredReplayVersion: "test-lane-revision",
+      maxSeedPerType: 1,
+    });
+
+    expect(summary.inserted).toBe(0);
+    expect(summary.existing).toBe(0);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("is_test_fixture = TRUE"))).toBe(true);
+  });
+
+  it("completes queued release fixtures without executing or seeding pipeline work", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [{
+            id: "fixture-task",
+            workspace_id: ctx.workspaceId,
+            task_type: "ROUTE_LANE",
+            task_key: "ROUTE_LANE:d0000000-0000-4000-8000-000000000001:lane_router_v1",
+            payload: {
+              canonical_job_id: "c0000000-0000-4000-8000-000000000001",
+              job_version_id: "d0000000-0000-4000-8000-000000000001",
+            },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 3,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts") || sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("c.is_test_fixture")) return { rows: [{ exists: true }] };
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "fixture-task" }], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_tasks")) throw new Error("fixture must not seed successors");
+      return { rows: [] };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      { context: ctx, seed: false, taskTypes: ["ROUTE_LANE"], maxTasks: 1, heartbeatSeconds: 0 },
+      deps,
+    );
+
+    expect(summary).toMatchObject({ claimed: 1, completed: 1, failed: 0, blocked: 0 });
+    expect(deps.runLaneRouting).not.toHaveBeenCalled();
+  });
+
+  it("drains more than 500 predecessor tasks and leaves a second drain idempotent", async () => {
+    const totalTasks = 525;
+    let claimed = 0;
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) {
+        const taskType = params?.[1];
+        if (taskType !== "NORMALIZE_OBSERVATION" || claimed >= totalTasks) return { rows: [] };
+        const limit = Number(params?.[2] ?? 1);
+        const count = Math.min(limit, totalTasks - claimed);
+        const rows = Array.from({ length: count }, (_, index) => {
+          const taskNumber = claimed + index + 1;
+          return {
+            id: `task-${taskNumber}`,
+            workspace_id: ctx.workspaceId,
+            task_type: "NORMALIZE_OBSERVATION",
+            task_key: `NORMALIZE_OBSERVATION:observation-${taskNumber}:normalizer_v1`,
+            payload: { observation_id: `observation-${taskNumber}` },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 8,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          };
+        });
+        claimed += count;
+        return { rows };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts") || sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("c.is_test_fixture")) return { rows: [{ exists: false }] };
+      if (sql.includes("SELECT jv.canonical_job_id, obs.job_version_id")) {
+        const observationId = String(params?.[1]);
+        return { rows: [{ canonical_job_id: `job-${observationId}`, job_version_id: `version-${observationId}` }] };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "completed" }], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_tasks")) return { rows: [{ id: "next" }], rowCount: 1 };
+      return { rows: [] };
+    });
+    const fakeClient = { query } as any;
+    const runNormalization = vi.fn(async () => ({ totalDiscovered: 1, totalProcessed: 1, totalErrors: 0, details: [] }));
+    const deps = dependencies({ runNormalization });
+    const options: PipelineStageWorkerOptions = {
+      context: ctx,
+      seed: false,
+      taskTypes: ["NORMALIZE_OBSERVATION"],
+      maxTasks: 600,
+      maxTasksByType: { NORMALIZE_OBSERVATION: 600 },
+      claimBatchSize: 25,
+      heartbeatSeconds: 0,
+    };
+
+    const firstDrain = await runPipelineStageTaskWorker(fakeClient, options, deps);
+    const secondDrain = await runPipelineStageTaskWorker(fakeClient, options, deps);
+
+    expect(firstDrain).toMatchObject({ claimed: totalTasks, completed: totalTasks, failed: 0 });
+    expect(secondDrain).toMatchObject({ claimed: 0, completed: 0, failed: 0 });
+    expect(runNormalization).toHaveBeenCalledTimes(totalTasks);
+  });
+
   it("runs embedding publication with a job-version scope", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
@@ -1117,6 +1382,9 @@ describe("stageTaskWorker", () => {
       }
       if (sql.includes("INSERT INTO pipeline_task_attempts")) {
         return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("is_test_fixture")) {
+        return { rows: [{ exists: false }], rowCount: 1 };
       }
       if (sql.includes("SELECT EXISTS")) {
         return { rows: [{ exists: true }], rowCount: 1 };
@@ -1173,9 +1441,14 @@ describe("stageTaskWorker", () => {
       includeProfileFacts: true,
       includeLanePrototypes: true,
     });
+    expect(
+      query.mock.calls.some(([sql]) =>
+        String(sql).includes("repair_action = $2") && String(sql).includes("BLOCKED_DEPENDENCY"),
+      ),
+    ).toBe(true);
   });
 
-  it("dead-letters exhausted technical routing failures and marks the job for manual review", async () => {
+  it("blocks a technical routing deferral and enqueues automatic embedding repair", async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = [];
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params });
@@ -1210,6 +1483,12 @@ describe("stageTaskWorker", () => {
       }
       if (sql.includes("INSERT INTO pipeline_task_attempts")) {
         return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("canonical.is_test_fixture")) {
+        return { rows: [{ exists: false }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-repair" }], rowCount: 1 };
       }
       if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
         return {
@@ -1258,9 +1537,9 @@ describe("stageTaskWorker", () => {
       deps
     );
 
-    expect(summary.failed).toBe(1);
-    expect(summary.deadLettered).toBe(1);
-    expect(summary.errors[0].error).toMatch(/Lane routing deferred due to technical evidence/);
+    expect(summary.failed).toBe(0);
+    expect(summary.deadLettered).toBe(0);
+    expect(summary.blocked).toBe(1);
     expect(deps.runLaneRouting).toHaveBeenCalledWith(fakeClient, {
       context: ctx,
       jobVersionIds: ["version-1"],
@@ -1269,16 +1548,16 @@ describe("stageTaskWorker", () => {
     expect(
       calls.some(
         (call) =>
-          call.sql.includes("UPDATE pipeline_tasks") &&
-          call.params?.[3] === "DEAD_LETTER"
+          call.sql.includes("INSERT INTO pipeline_tasks") &&
+          call.params?.[1] === "PUBLISH_EMBEDDING"
       )
     ).toBe(true);
     expect(
       calls.some(
         (call) =>
-          call.sql.includes("UPDATE canonical_jobs") &&
-          call.sql.includes("PROCESSING_ERROR") &&
-          call.params?.[1] === "job-1"
+          call.sql.includes("UPDATE pipeline_tasks") &&
+          call.sql.includes("BLOCKED_DEPENDENCY") &&
+          call.params?.[4] === "PROVIDER_TEMPORARILY_UNAVAILABLE:version-1"
       )
     ).toBe(true);
   });

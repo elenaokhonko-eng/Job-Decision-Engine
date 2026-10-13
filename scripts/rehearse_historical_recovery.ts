@@ -461,8 +461,8 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
     const jvId = "d" + c.id.slice(1);
 
     await client.query(`
-      INSERT INTO canonical_jobs (id, workspace_id, normalized_title, company_name, workplace_type, location, canonical_url, processing_state, processing_status, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, 'REMOTE', 'Singapore', 'https://canary.example.com/apply', 'RAW_STAGED', 'RAW_STAGED', NOW(), NOW());
+      INSERT INTO canonical_jobs (id, workspace_id, normalized_title, company_name, workplace_type, location, canonical_url, processing_state, processing_status, is_test_fixture, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, 'REMOTE', 'Singapore', 'https://canary.example.com/apply', 'RAW_STAGED', 'RAW_STAGED', TRUE, NOW(), NOW());
     `, [c.id, ctx.workspaceId, c.title, c.company]);
 
     await client.query(`
