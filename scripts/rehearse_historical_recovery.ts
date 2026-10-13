@@ -1102,13 +1102,11 @@ async function main() {
       ORDER BY id`,
       [ctx.workspaceId, affectedJobIds]
     );
-    const secondLaneResult = secondTechnicalDeferred.length > 0
-      ? await runLaneRouting(pool, {
-          context: ctx,
-          canonicalJobIds: secondTechnicalDeferred.map((row) => row.id),
-        })
-      : { routed: 0, deferred: 0 };
-    console.log("Second affected-cohort technical lane run (should be 0 newly routed):", secondLaneResult);
+    // Do not bypass the durable retry scheduler with an immediate second
+    // technical route. A fresh lane decision is an immutable audit artifact;
+    // the next retry must wait for its bounded task backoff or a repaired vector.
+    const secondLaneResult = { routed: 0, deferred: secondTechnicalDeferred.length };
+    console.log("Second affected-cohort technical lane run deferred to automatic retry:", secondLaneResult);
 
     const secondMatchResult = await runDeterministicMatcher(pool, {
       context: ctx,
