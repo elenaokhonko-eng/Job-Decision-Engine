@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import pg from "pg";
 import dotenv from "dotenv";
 
@@ -42,65 +44,65 @@ function parseArgs(argv: readonly string[]): { apply: boolean; limits: RecoveryL
   };
 }
 
-async function listCandidates(
+export async function listRecoveryCandidates(
   client: pg.PoolClient,
   ctx: WorkspaceContext,
   limits: RecoveryLimits,
 ): Promise<RecoveryCandidates> {
-  const [policyNoMatch, technicalDeferred, workAuth, rawStaged] = await Promise.all([
-    client.query<{ canonical_job_id: string; job_version_id: string }>(
-      `SELECT id AS canonical_job_id, latest_job_version_id AS job_version_id
-       FROM canonical_jobs
+  // A pg client executes one statement at a time; keep the bounded discovery
+  // queries sequential rather than issuing concurrent queries on one session.
+  const policyNoMatch = await client.query<{ canonical_job_id: string; job_version_id: string }>(
+    `SELECT id AS canonical_job_id, latest_job_version_id AS job_version_id
+     FROM canonical_jobs
+     WHERE workspace_id = $1
+       AND COALESCE(processing_state, processing_status) = 'ROUTING_DEFERRED'
+       AND routing_disposition = 'POLICY_NO_MATCH'
+       AND latest_job_version_id IS NOT NULL
+     ORDER BY updated_at ASC, id ASC
+     LIMIT $2`,
+    [ctx.workspaceId, limits.policyNoMatch],
+  );
+  const technicalDeferred = await client.query<{ canonical_job_id: string; job_version_id: string }>(
+    `SELECT id AS canonical_job_id, latest_job_version_id AS job_version_id
+     FROM canonical_jobs
+     WHERE workspace_id = $1
+       AND COALESCE(processing_state, processing_status) = 'ROUTING_DEFERRED'
+       AND routing_disposition = 'TECHNICAL_DEFERRED'
+       AND latest_job_version_id IS NOT NULL
+     ORDER BY updated_at ASC, id ASC
+     LIMIT $2`,
+    [ctx.workspaceId, limits.technicalDeferred],
+  );
+  const workAuth = await client.query<{ canonical_job_id: string; job_version_id: string }>(
+    `WITH latest_gates AS (
+       SELECT DISTINCT ON (canonical_job_id, job_version_id)
+         canonical_job_id,
+         job_version_id,
+         rejection_codes
+       FROM gate_decisions
        WHERE workspace_id = $1
-         AND COALESCE(processing_state, processing_status) = 'ROUTING_DEFERRED'
-         AND routing_disposition = 'POLICY_NO_MATCH'
-         AND latest_job_version_id IS NOT NULL
-       ORDER BY updated_at ASC, id ASC
-       LIMIT $2`,
-      [ctx.workspaceId, limits.policyNoMatch],
-    ),
-    client.query<{ canonical_job_id: string; job_version_id: string }>(
-      `SELECT id AS canonical_job_id, latest_job_version_id AS job_version_id
-       FROM canonical_jobs
-       WHERE workspace_id = $1
-         AND COALESCE(processing_state, processing_status) = 'ROUTING_DEFERRED'
-         AND routing_disposition = 'TECHNICAL_DEFERRED'
-         AND latest_job_version_id IS NOT NULL
-       ORDER BY updated_at ASC, id ASC
-       LIMIT $2`,
-      [ctx.workspaceId, limits.technicalDeferred],
-    ),
-    client.query<{ canonical_job_id: string; job_version_id: string }>(
-      `WITH latest_gates AS (
-         SELECT DISTINCT ON (canonical_job_id, job_version_id)
-           canonical_job_id,
-           job_version_id,
-           rejection_codes
-         FROM gate_decisions
-         WHERE workspace_id = $1
-         ORDER BY canonical_job_id, job_version_id, created_at DESC, id DESC
-       )
-       SELECT c.id AS canonical_job_id, c.latest_job_version_id AS job_version_id
-       FROM canonical_jobs c
-       JOIN latest_gates gate
-         ON gate.canonical_job_id = c.id
-        AND gate.job_version_id = c.latest_job_version_id
-       WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) = 'NEEDS_VERIFICATION'
-         AND gate.rejection_codes @> '["NEEDS_VERIFICATION_WORK_AUTH"]'::jsonb
-         AND c.latest_job_version_id IS NOT NULL
-       ORDER BY c.updated_at ASC, c.id ASC
-       LIMIT $2`,
-      [ctx.workspaceId, limits.workAuth],
-    ),
-    client.query<{ count: number }>(
-      `SELECT COUNT(*)::int AS count
-       FROM canonical_jobs
-       WHERE workspace_id = $1
-         AND COALESCE(processing_state, processing_status) = 'RAW_STAGED'`,
-      [ctx.workspaceId],
-    ),
-  ]);
+       ORDER BY canonical_job_id, job_version_id, created_at DESC, id DESC
+     )
+     SELECT c.id AS canonical_job_id, c.latest_job_version_id AS job_version_id
+     FROM canonical_jobs c
+     JOIN latest_gates gate
+       ON gate.canonical_job_id = c.id
+      AND gate.job_version_id = c.latest_job_version_id
+     WHERE c.workspace_id = $1
+       AND COALESCE(c.processing_state, c.processing_status) = 'NEEDS_VERIFICATION'
+       AND gate.rejection_codes @> '["NEEDS_VERIFICATION_WORK_AUTH"]'::jsonb
+       AND c.latest_job_version_id IS NOT NULL
+     ORDER BY c.updated_at ASC, c.id ASC
+     LIMIT $2`,
+    [ctx.workspaceId, limits.workAuth],
+  );
+  const rawStaged = await client.query<{ count: number }>(
+    `SELECT COUNT(*)::int AS count
+     FROM canonical_jobs
+     WHERE workspace_id = $1
+       AND COALESCE(processing_state, processing_status) = 'RAW_STAGED'`,
+    [ctx.workspaceId],
+  );
 
   const normalizeJobRows = (rows: Array<{ canonical_job_id: string; job_version_id: string }>) =>
     rows.map((row) => ({
@@ -142,7 +144,7 @@ async function run(): Promise<void> {
   try {
     const ctx = await resolveWorkspaceContext(client as unknown as pg.PoolClient);
     const before = await stateDistribution(client, ctx);
-    const candidates = await listCandidates(client, ctx, limits);
+    const candidates = await listRecoveryCandidates(client, ctx, limits);
 
     console.log("ZERO-MANUAL-REVIEW recovery candidates:", {
       mode: apply ? "APPLY" : "DRY_RUN",
@@ -219,7 +221,7 @@ async function run(): Promise<void> {
     }
 
     const after = await stateDistribution(client, ctx);
-    const remaining = await listCandidates(client, ctx, limits);
+    const remaining = await listRecoveryCandidates(client, ctx, limits);
     console.log("ZERO-MANUAL-REVIEW recovery result:", {
       after,
       policyNoMatchRemaining: remaining.policyNoMatch.length,
@@ -233,7 +235,9 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch((error) => {
-  console.error("Zero-manual-review recovery failed:", error);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  void run().catch((error) => {
+    console.error("Zero-manual-review recovery failed:", error);
+    process.exit(1);
+  });
+}
