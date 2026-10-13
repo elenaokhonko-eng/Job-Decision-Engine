@@ -55,8 +55,15 @@ CREATE TABLE IF NOT EXISTS evaluation_attempts (
 CREATE INDEX IF NOT EXISTS idx_eval_attempts_job_ver ON evaluation_attempts(canonical_job_id, job_version_id);
 
 -- 4. Rebuild v_canonical_shortlist and shortlist_view
-DROP VIEW IF EXISTS shortlist_view CASCADE;
-DROP VIEW IF EXISTS v_canonical_shortlist CASCADE;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'shortlist_view') THEN
+    EXECUTE format('DROP VIEW %I.shortlist_view CASCADE', current_schema());
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'v_canonical_shortlist') THEN
+    EXECUTE format('DROP VIEW %I.v_canonical_shortlist CASCADE', current_schema());
+  END IF;
+END $$;
 
 CREATE OR REPLACE VIEW v_canonical_shortlist AS
 WITH target_versions AS (

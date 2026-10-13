@@ -3,27 +3,35 @@ import { loadLanesConfig } from "../../pipeline/laneRouter.js";
 import { DiscoveryScoutPlanner } from "../../ingestion/scouts/discoveryScouts.js";
 
 describe("P1-07: Real-Job Calibration, Counterfactual & Yield Suite", () => {
-  it("should verify lane registry defines all 4 core career lanes with valid prototype queries", () => {
+  const expectedLanes = [
+    "CORE_AI_DATA",
+    "LEGAL_REGTECH",
+    "HEALTH_BIO_PHARMA",
+    "INVESTMENT_MARKETS_FINTECH",
+    "SOCIAL_IMPACT_MULTILATERAL",
+    "UNIVERSITY_AI_RESEARCH",
+  ];
+
+  it("should verify the six-lane registry has valid prototype queries", () => {
     const config = loadLanesConfig();
     const laneKeys = Object.keys(config.lanes);
 
-    expect(laneKeys).toContain("CORE_AI_DATA");
-    expect(laneKeys).toContain("LEGAL_REGTECH");
-    expect(laneKeys).toContain("HEALTH_BIO_PHARMA");
-    expect(laneKeys).toContain("INVESTMENT_MARKETS_FINTECH");
+    expect(laneKeys).toEqual(expect.arrayContaining(expectedLanes));
+    expect(laneKeys).toHaveLength(expectedLanes.length);
 
-    for (const lane of laneKeys) {
+    for (const lane of expectedLanes) {
       expect(config.lanes[lane].threshold).toBeGreaterThan(0.2);
       expect(config.lanes[lane].prototype_query.length).toBeGreaterThan(20);
       expect(config.lanes[lane].keywords.length).toBeGreaterThan(3);
     }
   });
 
-  it("should verify discovery scouts plan queries across all four target lanes without fabricating jobs", () => {
+  it("should verify discovery scouts plan queries across all six target lanes without fabricating jobs", () => {
     const planner = new DiscoveryScoutPlanner();
     const plans = planner.generateSearchPlans();
 
-    expect(Object.keys(plans)).toHaveLength(4);
+    expect(Object.keys(plans)).toEqual(expect.arrayContaining(expectedLanes));
+    expect(Object.keys(plans)).toHaveLength(expectedLanes.length);
     for (const [lane, plan] of Object.entries(plans)) {
       expect(plan.lane).toBe(lane);
       expect(plan.searchQueries.length).toBeGreaterThan(0);

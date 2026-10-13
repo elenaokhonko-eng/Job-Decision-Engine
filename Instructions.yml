@@ -13,7 +13,7 @@ stack:
   consumer: Python Streamlit
 
 mission: >-
-  Discover jobs broadly across four career lanes, apply deterministic and
+  Discover jobs broadly across six career lanes, apply deterministic and
   evidence-based workability gates before generative AI, evaluate only a
   bounded shortlist, preserve every state transition, and generate grounded
   application documents from verified profile evidence.
@@ -34,6 +34,7 @@ first_execution_wave:
 
 hard_rules:
   - Operational failures never become career rejections.
+  - An unknown workplace model is rejected after available evidence is examined.
   - Jobs outside the AI budget are deferred, not rejected.
   - Invalid or mismatched AI output is a provider failure, not success.
   - No source record may silently disappear.

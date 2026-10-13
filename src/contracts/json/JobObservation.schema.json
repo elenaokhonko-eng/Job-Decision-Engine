@@ -4,7 +4,20 @@
     "JobObservation": {
       "type": "object",
       "properties": {
+        "schema_version": {
+          "type": "string",
+          "enum": [
+            "2.2.0",
+            "2.0",
+            "1.0.0"
+          ],
+          "default": "2.2.0"
+        },
         "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workspace_id": {
           "type": "string",
           "format": "uuid"
         },
@@ -33,7 +46,59 @@
           "type": "string",
           "format": "uuid"
         },
+        "source_plugin_key": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_plugin_revision_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_external_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "retrieved_at": {
           "type": "string",
           "format": "date-time"
         },
@@ -65,9 +130,35 @@
           "type": "string",
           "minLength": 1
         },
+        "source_lane": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "search_plan_version": {
+          "type": "string",
+          "minLength": 1,
+          "default": "1.0"
+        },
         "description_text": {
           "type": "string",
           "minLength": 1
+        },
+        "raw_payload": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "raw_payload_hash": {
           "type": "string",
@@ -91,14 +182,28 @@
             "additionalProperties": {}
           },
           "default": []
+        },
+        "job_version_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
         "id",
+        "workspace_id",
         "source_type",
         "source_id",
         "source_run_id",
         "observed_at",
+        "retrieved_at",
         "company_name_raw",
         "title_raw",
         "canonical_apply_url",

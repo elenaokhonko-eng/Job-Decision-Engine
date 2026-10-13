@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
@@ -99,6 +100,8 @@ export interface PipelineStageWorkerOptions {
   heartbeatSeconds?: number;
   wallClockMs?: number;
   claimedBy?: string;
+  /** Reuse one durable AI budget identity across all explanation tasks in this worker run. */
+  budgetRunId?: string;
   abortSignal?: AbortSignal;
 }
 
@@ -1287,7 +1290,8 @@ async function executeStageTask(
   task: ClaimedPipelineTask,
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
-  dependencies: PipelineStageWorkerDependencies
+  dependencies: PipelineStageWorkerDependencies,
+  budgetRunId: string
 ): Promise<void> {
   if (taskType === "NORMALIZE_OBSERVATION") {
     const observationId = requireStringPayload(task, "observation_id");
@@ -1609,6 +1613,7 @@ async function executeStageTask(
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
+      budgetRunId,
     });
   }
 }
@@ -1617,7 +1622,7 @@ async function processClaimedTask(
   task: ClaimedPipelineTask,
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
-  options: Required<Pick<PipelineStageWorkerOptions, "heartbeatSeconds">>,
+  options: Required<Pick<PipelineStageWorkerOptions, "heartbeatSeconds">> & { budgetRunId: string },
   dependencies: PipelineStageWorkerDependencies
 ): Promise<void> {
   const taskType = task.taskType as PipelineStageTaskType;
@@ -1639,7 +1644,7 @@ async function processClaimedTask(
   }
 
   try {
-    await executeStageTask(taskType, task, clientOrPool, ctx, dependencies);
+    await executeStageTask(taskType, task, clientOrPool, ctx, dependencies, options.budgetRunId);
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
       afterComplete: async (transactionClient) => {
@@ -1669,6 +1674,7 @@ export async function runPipelineStageTaskWorker(
   const heartbeatSeconds = options.heartbeatSeconds ?? Math.max(15, Math.floor(leaseSeconds / 3));
   const wallClockMs = options.wallClockMs ?? 55 * 60 * 1000;
   const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
+  const budgetRunId = options.budgetRunId?.trim() || crypto.randomUUID();
   const startedAt = Date.now();
   const summary: PipelineStageWorkerSummary = {
     seeded: null,
@@ -1727,7 +1733,7 @@ export async function runPipelineStageTaskWorker(
               task,
               client as any,
               ctx,
-              { heartbeatSeconds },
+              { heartbeatSeconds, budgetRunId },
               dependencies
             );
             summary.completed += 1;

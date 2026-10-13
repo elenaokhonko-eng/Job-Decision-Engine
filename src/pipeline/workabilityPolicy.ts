@@ -19,6 +19,8 @@ export interface WorkabilityPolicy {
   contractAllowed: boolean;
   minimumBuildingResearchPct: number;
   maximumInteractionPct: number;
+  preferredBuildingResearchPct?: number;
+  preferredInteractionPct?: number;
   regularOnCallAllowed: boolean;
   shiftWorkAllowed: boolean;
   frequentTravelAllowed: boolean;
@@ -64,7 +66,10 @@ export interface VerificationAnswerContextIdentity {
 }
 
 const defaults: WorkabilityPolicy = {
-  unknownWorkModeDisposition: "NEEDS_VERIFICATION",
+  // Funnel V3 treats an unestablished workplace model as a deterministic
+  // conflict. It must not be held for manual verification or inferred as
+  // onsite from a non-empty location label.
+  unknownWorkModeDisposition: "HARD_REJECT",
   onsiteOnlyAllowed: false,
   maxOfficeDaysPerWeek: 3,
   hardFailOfficeDaysPerWeek: 4,
@@ -73,10 +78,12 @@ const defaults: WorkabilityPolicy = {
   remoteWithoutTerritoryAllowed: true,
   rejectExplicitForeignTerritory: true,
   unknownWorkAuthorizationNeedsVerification: false,
-  maxTravelPct: 10,
+  maxTravelPct: 20,
   contractAllowed: false,
   minimumBuildingResearchPct: 60,
   maximumInteractionPct: 40,
+  preferredBuildingResearchPct: 85,
+  preferredInteractionPct: 15,
   regularOnCallAllowed: false,
   shiftWorkAllowed: false,
   frequentTravelAllowed: false,
@@ -472,14 +479,18 @@ export async function loadVerificationAnswerContext(
 export function hasExplicitTerritoryRestriction(value: unknown, territory: string): boolean {
   const canonical = normalizeTerritory(territory);
   if (!canonical) return false;
-  const aliases = TERRITORY_ALIASES.find(([key]) => key === canonical)?.[1] ?? [canonical.toLowerCase()];
+  const aliases = (TERRITORY_ALIASES.find(([key]) => key === canonical)?.[1] ?? [canonical.toLowerCase()])
+    .map(normalizeTerritorySearchText);
   const sentences = normalizeTerritorySearchText(value)
     .split(/[.!?;\n]+/)
     .map((sentence) => sentence.trim())
     .filter(Boolean);
   return sentences.some((sentence) => {
     const hasTerritory = aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(sentence));
-    return hasTerritory && /\b(only|remote|work\s+(?:in|from)|working\s+(?:in|from)|based|located|location|office|on[- ]?site|authorization|authorised|authorized|eligible|rights|territory)\b/i.test(sentence);
+    // A company HQ, client reference, or generic "remote" mention is not a
+    // work-authorization fact. Require a mandatory or physical-residency
+    // qualifier before treating a foreign territory as a gate conflict.
+    return hasTerritory && /\b(only|required|must|mandatory|work\s+(?:in|from)|working\s+(?:in|from)|based\s+in|located\s+in|location\s*[:=-]\s*|office\s+in|on[- ]?site\s+in|authorization|authorised|authorized|eligible|rights|citizen(?:ship)?|visa|residen(?:cy|tial))\b/i.test(sentence);
   });
 }
 
@@ -573,6 +584,8 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
     contractAllowed: document?.global_workability_gates?.employment?.contract_allowed === true,
     minimumBuildingResearchPct: finiteNumber(composition.minimum_building_research_pct, defaults.minimumBuildingResearchPct),
     maximumInteractionPct: finiteNumber(composition.maximum_interaction_pct, defaults.maximumInteractionPct),
+    preferredBuildingResearchPct: finiteNumber(composition.preferred_building_research_pct, defaults.preferredBuildingResearchPct ?? 85),
+    preferredInteractionPct: finiteNumber(composition.preferred_interaction_pct, defaults.preferredInteractionPct ?? 15),
     regularOnCallAllowed: operations.regular_on_call_allowed === true,
     shiftWorkAllowed: operations.shift_work_allowed === true,
     frequentTravelAllowed: operations.frequent_travel_allowed === true,

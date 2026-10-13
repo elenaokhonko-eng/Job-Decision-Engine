@@ -8,6 +8,7 @@ import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
 import { SourceNameSchema, type SourceName } from "../src/contracts/index.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { stripHtmlToText } from "../src/security/sanitize.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
@@ -60,32 +61,15 @@ function isAuthenticatedSource(url: URL): boolean {
   return url.hostname === "linkedin.com" || url.hostname.endsWith(".linkedin.com");
 }
 
-function decodeHtml(text: string): string {
-  return text
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&#(\d+);/g, (_, value: string) => String.fromCodePoint(Number(value)));
-}
-
 function textFromHtml(html: string): string {
-  return decodeHtml(
-    html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-  ).trim();
+  return stripHtmlToText(html).replace(/\s+/g, " ").trim();
 }
 
 function jsonLdDescriptions(html: string): string[] {
   const descriptions: string[] = [];
-  const scripts = html.match(/<script[^>]+type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) || [];
+  const scripts = html.match(/<script\b[^>]+type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script\b[^>]*>/gi) || [];
   for (const script of scripts) {
-    const body = script.replace(/^<[\s\S]*?>/i, "").replace(/<\/script>$/i, "").trim();
+    const body = script.replace(/^<script\b[^>]*>/i, "").replace(/<\/script\b[^>]*>$/i, "").trim();
     try {
       const parsed = JSON.parse(body) as unknown;
       const values = Array.isArray(parsed) ? parsed : [parsed];

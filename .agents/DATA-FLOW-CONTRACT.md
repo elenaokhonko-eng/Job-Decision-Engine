@@ -12,7 +12,7 @@ The `data-contract-checker` owns this contract. Feature agents propose changes; 
 | Job version -> gate decision | normalizer | `src/pipeline/hardGate.ts` | Structured workplace fields and description evidence agree; tri-state status is stored |
 | Gate decision -> lane decision | hard gate | `src/pipeline/laneRouter.ts` | Only eligible records route; primary/secondary lane, confidence, evidence and model version persist |
 | Lane decision -> deterministic matching | lane router | `src/pipeline/deterministicMatcher.ts` | Only `LANE_ROUTED` records match; match runs are version-pinned and recoverable failures never become rejections |
-| Deterministic decision -> evaluation queue | `src/pipeline/recommendationDecider.ts` | `src/pipeline/explanationQueueEnqueuer.ts` | Unbounded enqueue for eligible jobs; no per-lane business quotas; never writes `DEFERRED_BUDGET`; one queue item per job version |
+| Deterministic decision -> evaluation queue | `src/pipeline/recommendationDecider.ts` | `src/pipeline/explanationQueueEnqueuer.ts` | Eligible jobs are selected by the durable per-lane AI budget; overflow is recorded as `DEFERRED_BUDGET`, never rejected; one queue item per job version |
 | Queue item -> AI evaluation | evaluation worker | evaluation store | Lease, attempts, provider/model, fallback/degraded state, full validated result and matching job identity persist atomically |
 | Canonical data -> shortlist read model | database view/query | `streamlit_app.py` | One row per current job version; no legacy joins; every displayed field has a real source; UI sanitizes untrusted content + validates links; missing scores remain null/N/A (never coerced to 0) |
 | Evaluation -> documents | evaluation/profile ledgers | CV and cover-letter generators | Every substantive claim resolves to verified evidence IDs |
@@ -43,7 +43,8 @@ Every persisted contract includes `schema_version`. Every processing decision in
 | Invalid extraction JSON | `PARSE_FAILED` plus raw input/error | Yes or manual review | No |
 | Missing essential description | `DESCRIPTION_INCOMPLETE` | Enrichment/manual | No |
 | Deterministic gate conflict | `HARD_REJECTED` plus codes/evidence | Only after rule change | Yes |
-| Work pattern unknown | `NEEDS_VERIFICATION` plus questions | Enrichment/manual | No |
+| Workplace model remains unknown after available evidence is examined | `HARD_REJECTED` with `WORKPLACE_MODEL_UNKNOWN` evidence | Policy recalculation only | Yes |
+| Other material workability fact remains unknown | `NEEDS_VERIFICATION` plus questions | Enrichment/manual | No |
 | Lane embedding/provider failure | `ROUTING_DEFERRED` | Yes | No |
 | AI evaluation capacity not drained | `QUEUED_FOR_AI` / queue remains `PENDING` | Next run | No |
 | Evaluation provider/schema failure | `RETRY_WAIT` | Backoff | No |

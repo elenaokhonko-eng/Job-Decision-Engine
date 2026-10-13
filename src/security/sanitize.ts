@@ -8,6 +8,9 @@ const HTML_ENTITY_MAP: Record<string, string> = {
   "#39": "'",
 };
 
+const SCRIPT_BLOCK_PATTERN = /<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi;
+const STYLE_BLOCK_PATTERN = /<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi;
+
 function decodeNumericEntity(code: string): string {
   const normalized = code.toLowerCase();
   const isHex = normalized.startsWith("#x");
@@ -65,12 +68,12 @@ export function stripHtmlToText(input: unknown): string {
   }
 
   const withoutScripts = raw
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ");
+    .replace(SCRIPT_BLOCK_PATTERN, " ")
+    .replace(STYLE_BLOCK_PATTERN, " ");
 
   const withBreaks = withoutScripts
-    .replace(/<(br|br\/)\s*>/gi, "\n")
-    .replace(/<\/(p|div|section|article|header|footer|ul|ol|li|h1|h2|h3|h4|h5|h6)\s*>/gi, "\n")
+    .replace(/<br\b[^>]*>/gi, "\n")
+    .replace(/<\/(p|div|section|article|header|footer|ul|ol|li|h1|h2|h3|h4|h5|h6)\b[^>]*>/gi, "\n")
     .replace(/<(p|div|section|article|header|footer|ul|ol|li|h1|h2|h3|h4|h5|h6)\b[^>]*>/gi, "\n");
 
   const withoutTags = withBreaks.replace(/<[^>]+>/g, " ");

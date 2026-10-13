@@ -24,9 +24,9 @@ export const ShortlistRowV2Schema = z.object({
   rejection_codes: z.array(z.string()).nullable(),
   gate_evidence_quotes: z.array(z.string()).nullable(),
   primary_lane: z.string().nullable(),
-  secondary_lanes: z.array(z.string()).default([]),
-  lane_confidence: z.string().default('None'),
-  priority_score: z.number(),
+  secondary_lanes: z.array(z.string()).nullable().default([]),
+  lane_confidence: z.string().nullable().default('None'),
+  priority_score: z.number().nullable().default(null),
   deterministic_match_score: z.number().nullable().default(null),
   deterministic_match_coverage: z.number().nullable().default(null),
   processing_state: z.string(),
@@ -57,6 +57,25 @@ export const ShortlistRowV2Schema = z.object({
   current_artifact_status: z.string().default("CURRENTNESS_UNKNOWN"),
   current_artifact_reason: z.string().nullable().default(null),
   blocked_task_count: z.number().int().min(0).default(0),
+}).passthrough();
+
+export const RejectedJobRowSchema = z.object({
+  canonical_job_id: z.string().uuid(),
+  job_version_id: z.string().uuid().nullable(),
+  title: z.string().min(1),
+  company: z.string().min(1),
+  canonical_url: z.string().min(1).nullable(),
+  source: z.string().min(1),
+  processing_state: z.string().min(1),
+  rejection_reason: z.string().nullable(),
+  gate_status: z.enum(['PASS', 'NEEDS_VERIFICATION', 'HARD_REJECT']),
+  rejection_codes: z.array(z.string()).nullable(),
+  gate_evidence_quotes: z.array(z.string()).nullable(),
+  description: z.string().nullable(),
+  nd_friendly_score: z.coerce.number().nullable(),
+  politics_stress_score: z.coerce.number().nullable(),
+  sensory_overload_index: z.coerce.number().nullable(),
+  observed_at: z.coerce.date().nullable(),
 });
 
 export const StreamlitJobDetailSchema = z.object({

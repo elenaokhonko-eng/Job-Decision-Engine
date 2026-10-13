@@ -52,6 +52,50 @@ describe("structured requirement comparators", () => {
 		expect(result.status).toBe("MATCH");
 	});
 
+  it("unions overlapping scoped engagement intervals instead of double-counting them", () => {
+    const facts = [
+      fact("AI engineering role", {
+        experience_years: 2,
+        experience_scope: "AI engineering",
+        experience_start_date: "2020-01-01",
+        experience_end_date: "2022-01-01",
+      }),
+      fact("AI platform engineering role", {
+        experience_years: 2,
+        experience_scope: "AI engineering",
+        experience_start_date: "2021-01-01",
+        experience_end_date: "2023-01-01",
+      }),
+      fact("Overall professional experience", {
+        professional_years: 6,
+        experience_scope: "overall professional production",
+      }),
+    ];
+
+    const threeYearResult = compareStructuredRequirement(
+      {
+        requirement_type: "EXPERIENCE_YEARS",
+        requirement_text: "At least 3 years of AI engineering experience",
+        quote_text: null,
+        structured_value: { minimum_years: 3, experience_scope: "AI engineering" },
+      },
+      facts
+    );
+    const fourYearResult = compareStructuredRequirement(
+      {
+        requirement_type: "EXPERIENCE_YEARS",
+        requirement_text: "At least 4 years of AI engineering experience",
+        quote_text: null,
+        structured_value: { minimum_years: 4, experience_scope: "AI engineering" },
+      },
+      facts
+    );
+
+    expect(threeYearResult.status).toBe("MATCH");
+    expect(fourYearResult.status).toBe("MISMATCH");
+    expect(fourYearResult.rationale).toContain("3.0 years");
+  });
+
   it("requires the explicit degree level", () => {
     const result = compareStructuredRequirement(
       { requirement_type: "DEGREE", requirement_text: "Master's degree required", quote_text: null, structured_value: null },

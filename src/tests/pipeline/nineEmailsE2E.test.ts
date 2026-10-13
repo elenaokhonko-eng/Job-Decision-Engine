@@ -45,8 +45,62 @@ async function countWhere(table: string, condition: string): Promise<number> {
   return res.rows[0].n;
 }
 
+type GateStatus = "PASS" | "NEEDS_VERIFICATION" | "HARD_REJECT";
+type FixtureLane =
+  | "CORE_AI_DATA"
+  | "LEGAL_REGTECH"
+  | "HEALTH_BIO_PHARMA"
+  | "INVESTMENT_MARKETS_FINTECH"
+  | "UNCLASSIFIED";
+type FixtureAction = "PRIORITY_APPLY" | "APPLY_AFTER_VERIFICATION" | "HARD_REJECT";
+type RecommendationOutcome = "PRIORITY" | "REVIEW" | "TRACK" | "SKIP";
+type LifecycleStatus = "QUEUED_FOR_AI" | "DEFERRED_BUDGET" | "HARD_REJECTED";
+
+interface NineEmailFixture {
+  readonly id: string;
+  readonly subject: string;
+  readonly raw_html?: string;
+  readonly location_raw: string;
+  readonly workplace_type_raw: string;
+  readonly employment_type_raw: string;
+  readonly expected_lane: FixtureLane;
+  readonly expected_gate: GateStatus;
+  readonly expected_rejection_codes?: readonly string[];
+  readonly expected_action: FixtureAction;
+  readonly expected_recommendation_outcome: RecommendationOutcome;
+  readonly expected_status: LifecycleStatus;
+  readonly expected_duplicate_canonical_id?: string;
+  readonly expected_version: number;
+}
+
+interface PipelineFixtureRow {
+  readonly fixture_id: string;
+  readonly canonical_job_id: string;
+  readonly job_version_id: string;
+  readonly gate_decision: GateStatus;
+  readonly processing_state: LifecycleStatus;
+  readonly processing_status: LifecycleStatus;
+  readonly primary_lane: FixtureLane | null;
+  readonly recommendation_outcome: RecommendationOutcome;
+  readonly recommendation_eligibility: "ELIGIBLE" | "VERIFY" | "INELIGIBLE" | null;
+  readonly version_count: number;
+}
+
 const FIXTURE_PATH = path.resolve(__dirname, "../../../fixtures/anonymized_nine_emails.json");
-const fixtureEmails: any[] = JSON.parse(fs.readFileSync(FIXTURE_PATH, "utf-8"));
+// The fixture is the deterministic external-data boundary for this E2E test.
+const fixtureEmails = JSON.parse(fs.readFileSync(FIXTURE_PATH, "utf-8")) as NineEmailFixture[];
+const actionToOutcome: Readonly<Record<FixtureAction, RecommendationOutcome>> = {
+  PRIORITY_APPLY: "PRIORITY",
+  APPLY_AFTER_VERIFICATION: "REVIEW",
+  HARD_REJECT: "SKIP",
+};
+
+const expectedEligibleLaneBudgets: Readonly<Record<Exclude<FixtureLane, "UNCLASSIFIED">, number>> = {
+  CORE_AI_DATA: 3,
+  LEGAL_REGTECH: 3,
+  HEALTH_BIO_PHARMA: 3,
+  INVESTMENT_MARKETS_FINTECH: 3,
+};
 
 function restoreEnv(): void {
   for (const [key, value] of Object.entries(originalEnv)) {
@@ -128,11 +182,18 @@ async function seedFixtureProfile(context: WorkspaceContext): Promise<void> {
 
   const facts = [
     {
+      key: "ai_systems_domain",
+      type: "DOMAIN",
+      statement:
+        "AI systems technical domain expertise across distributed LLM training and inference.",
+      structured: { domains: ["AI_SYSTEMS"] },
+    },
+    {
       key: "ai_data_platforms",
       type: "PROJECT",
       statement:
-        "Built production AI systems, LLM applications, machine learning pipelines, PyTorch services, MLOps infrastructure, SQL ETL, dashboards, and data warehouse platforms.",
-      structured: { domains: ["AI", "LLM", "DATA_ENGINEERING", "DATA_PLATFORM"] },
+        "Built production AI systems, distributed LLM training and inference pipelines, machine learning pipelines, Python and PyTorch services, C++ systems, MLOps infrastructure, SQL ETL, dashboards, and data warehouse platforms.",
+      structured: { domains: ["AI_SYSTEMS", "AI", "LLM", "DATA_ENGINEERING", "DATA_PLATFORM"] },
     },
     {
       key: "legal_regtech",
@@ -238,13 +299,22 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         return [0, 0, 0, 1];
       }
       if (
+        t.includes("junior data pipeline") ||
+        t.includes("data_pipeline_associate")
+      ) {
+        return [0.6, 0.3, 0.3, 0.3];
+      }
+      if (
         t.includes("ai systems engineer") ||
+        t.includes("ai scientist") ||
+        t.includes("systems architect") ||
         t.includes("pytorch") ||
         t.includes("core ai") ||
         t.includes("deep learning") ||
         t.includes("llm") ||
         t.includes("data pipeline") ||
-        t.includes("cloudscale")
+        t.includes("cloudscale") ||
+        t.includes('"domain_key":"ai_systems"')
       ) {
         return [1, 0, 0, 0];
       }
@@ -291,8 +361,9 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       await q(
         `INSERT INTO raw_job_observations (
            source_name, source_external_id, source_url, company_name, title,
-           description_raw, location_raw, workplace_type_raw, raw_payload_hash, processing_status
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING')`,
+           description_raw, location_raw, workplace_type_raw, employment_type_raw,
+           raw_payload_hash, processing_status
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING')`,
         [
           "gmail",
           email.id,
@@ -300,15 +371,19 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
           company,
           title,
           email.raw_html || email.subject,
-          email.id === "fixture-email-005" ? "Melbourne, Australia" : "Singapore",
-          email.id === "fixture-email-005" ? "ON_SITE" : "REMOTE",
+          email.location_raw,
+          email.workplace_type_raw,
+          email.employment_type_raw,
           contentHash,
         ]
       );
     }
 
-    const alertCount = await countWhere("raw_email_alerts", "TRUE");
-    const obsCount = await countWhere("raw_job_observations", "TRUE");
+    const alertCount = await countWhere("raw_email_alerts", "gmail_message_id LIKE 'fixture-email-%'");
+    const obsCount = await countWhere(
+      "raw_job_observations",
+      "source_name = 'gmail' AND source_external_id LIKE 'fixture-email-%'"
+    );
     expect(alertCount).toBe(9);
     expect(obsCount).toBe(9);
   });
@@ -317,21 +392,38 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     const { runNormalization } = await import("../../pipeline/normalize.js");
     await runNormalization(getClient(), { context: getContext() });
 
-    const observationCount = await countWhere("raw_job_observations", "TRUE");
+    const observationCount = await countWhere(
+      "raw_job_observations",
+      "source_name = 'gmail' AND source_external_id LIKE 'fixture-email-%'"
+    );
     const canonicalCount = await countWhere("canonical_jobs", "processing_status = 'RAW_STAGED'");
     const versionCount = await countWhere("job_versions", "TRUE");
+    const conservation = await q(
+      `SELECT COUNT(*)::int AS observation_count,
+              COUNT(rjo.job_version_id)::int AS linked_observation_count,
+              COUNT(jv.id)::int AS resolved_version_count,
+              COUNT(DISTINCT jv.canonical_job_id)::int AS canonical_count
+         FROM raw_job_observations rjo
+         LEFT JOIN job_versions jv ON jv.id = rjo.job_version_id
+        WHERE rjo.source_name = 'gmail'
+          AND rjo.source_external_id LIKE 'fixture-email-%'`
+    );
 
-    expect(observationCount).toBeGreaterThanOrEqual(9);
+    expect(observationCount).toBe(9);
     expect(canonicalCount).toBe(8); // 1 repost maps to existing canonical job
     expect(versionCount).toBe(9);
+    expect(Number(conservation.rows[0].observation_count)).toBe(9);
+    expect(Number(conservation.rows[0].linked_observation_count)).toBe(9);
+    expect(Number(conservation.rows[0].resolved_version_count)).toBe(9);
+    expect(Number(conservation.rows[0].canonical_count)).toBe(8);
   });
 
-  it("Stage 2 — hard gates produce 2 HARD_REJECTED, 1 NEEDS_VERIFICATION, 5 PREQUALIFIED", async () => {
+  it("Stage 2 — hard gates produce 3 HARD_REJECTED, 0 NEEDS_VERIFICATION, 5 PREQUALIFIED", async () => {
     const { runHardGates } = await import("../../pipeline/hardGate.js");
     const result = await runHardGates(getClient(), { context: getContext() });
 
-    expect(result.hardRejected).toBe(2);
-    expect(result.needsVerification).toBe(1);
+    expect(result.hardRejected).toBe(3);
+    expect(result.needsVerification).toBe(0);
     expect(result.passed).toBe(5);
 
     const gated = await countWhere(
@@ -342,22 +434,37 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     const gateRows = await countWhere("gate_decisions", "TRUE");
     expect(gateRows).toBe(8);
+    const gateRowsWithoutRunIdentity = await countWhere(
+      "gate_decisions",
+      "pipeline_run_id IS NULL"
+    );
+    expect(gateRowsWithoutRunIdentity).toBe(0);
   });
 
   it("Stage 2.5 - deterministic requirements and published embeddings exist for eligible and recoverable jobs", async () => {
     const { runRequirementsExtraction } = await import("../../pipeline/requirementsExtractor.js");
     const { runEmbeddingBatchWithFallback } = await import("../../embeddings/batchCoordinator.js");
-    const { loadWorkspaceLanesConfig } = await import("../../pipeline/laneConfigLoader.js");
+    const { loadLanesConfig, loadWorkspaceLanesConfig } = await import("../../pipeline/laneConfigLoader.js");
 
     applyDeterministicTestEnv();
     const requirements = await runRequirementsExtraction(getClient(), { context: getContext() });
     await loadWorkspaceLanesConfig(getClient(), { context: getContext(), seedIfEmpty: true });
+
+    const configuredLanes = loadLanesConfig().lanes;
+    const expectedFixtureLanes = [...new Set(
+      fixtureEmails
+        .filter((fixture) => fixture.expected_gate === "PASS")
+        .map((fixture) => fixture.expected_lane)
+    )].sort();
+    expect(expectedFixtureLanes).toEqual(Object.keys(expectedEligibleLaneBudgets).sort());
+    for (const [lane, budget] of Object.entries(expectedEligibleLaneBudgets)) {
+      expect(configuredLanes[lane]?.maximum_ai_interpretations_per_run, lane).toBe(budget);
+    }
+
     const embeddings = await runEmbeddingBatchWithFallback(200, getClient(), { context: getContext() });
 
-    // Requirement extraction also repairs late-state records so that a job
-    // which advanced before this stage completed can be recovered. The fixture
-    // therefore includes the five PREQUALIFIED jobs and the one
-    // NEEDS_VERIFICATION job, while HARD_REJECTED jobs remain excluded.
+    // The fixture includes five PREQUALIFIED jobs; all three unknown or
+    // unworkable workplace cases are HARD_REJECTED before this stage.
     const requirementTargetCount = await countWhere(
       "canonical_jobs",
       `COALESCE(processing_state, processing_status) IN (
@@ -367,6 +474,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
        )`
     );
 
+    expect(requirementTargetCount).toBe(5);
     expect(requirements.errors).toBe(0);
     expect(requirements.processed).toBe(requirementTargetCount);
     expect(requirements.deterministicInserted).toBeGreaterThan(0);
@@ -406,10 +514,15 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
          FROM lane_decisions
         WHERE decision_json->>'primary_lane' <> 'UNCLASSIFIED'`
     );
+    const rejectedWithLane = await countWhere(
+      "canonical_jobs",
+      "processing_status = 'HARD_REJECTED' AND primary_lane IS NOT NULL"
+    );
     expect(Number(laneDecisions.rows[0].count)).toBe(5);
+    expect(rejectedWithLane).toBe(0);
   });
 
-  it("Stage 4 — deterministic decisions exist and eligible jobs are enqueueable (no DEFERRED_BUDGET)", async () => {
+  it("Stage 4 — deterministic decisions persist and budget overflow is deferred durably", async () => {
     const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
     const { runExplanationQueueEnqueuer } = await import("../../pipeline/explanationQueueEnqueuer.js");
 
@@ -417,36 +530,185 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     const matching = await runDeterministicMatcher(getClient(), { context: getContext() });
     const decisions = await runRecommendationDecider(getClient(), { context: getContext() });
-    await runExplanationQueueEnqueuer(getClient(), { context: getContext() });
+    const budgetRunId = crypto.randomUUID();
+    const queueSummary = await runExplanationQueueEnqueuer(getClient(), {
+      context: getContext(),
+      limit: 4,
+      budgetRunId,
+    });
 
-    const queued = await countWhere("evaluation_queue", "status = 'PENDING'");
-    const deferred = await countWhere(
-      "canonical_jobs",
-      "processing_status = 'DEFERRED_BUDGET' OR processing_state = 'DEFERRED_BUDGET'"
+    const budgetUsage = await q(
+      `SELECT lane, budget_limit, selected_count
+         FROM ai_evaluation_budget_usage
+        WHERE workspace_id = $1 AND budget_run_id = $2
+        ORDER BY lane`,
+      [getContext().workspaceId, budgetRunId]
+    );
+    const usageByLane = new Map(
+      budgetUsage.rows.map((row) => [row.lane as string, row] as const)
+    );
+    for (const [lane, budget] of Object.entries(expectedEligibleLaneBudgets)) {
+      const usage = usageByLane.get(lane);
+      expect(usage, `Missing persisted budget for ${lane}`).toBeDefined();
+      expect(usage?.budget_limit, lane).toBe(budget);
+    }
+
+    const persistedQueue = await q(
+      `SELECT eq.canonical_job_id::text AS canonical_job_id,
+              eq.job_version_id::text AS job_version_id,
+              eq.lane,
+              eq.status,
+              c.processing_state,
+              c.processing_status
+         FROM evaluation_queue eq
+         JOIN canonical_jobs c ON c.id = eq.canonical_job_id
+        WHERE eq.workspace_id = $1 AND eq.budget_run_id = $2
+        ORDER BY eq.lane, eq.canonical_job_id`,
+      [getContext().workspaceId, budgetRunId]
     );
     const missingDecisions = await countWhere(
       "canonical_jobs",
       "processing_status != 'MANUALLY_REMOVED' AND recommendation_outcome IS NULL"
     );
-
+    const deferral = await q(
+      `SELECT rjo.source_external_id AS fixture_id,
+              c.normalized_title,
+              c.processing_state,
+              c.processing_status,
+              d.lane,
+              d.budget_limit,
+              d.reason_code,
+              d.evidence
+         FROM evaluation_budget_deferrals d
+         JOIN canonical_jobs c ON c.id = d.canonical_job_id
+         JOIN raw_job_observations rjo ON rjo.job_version_id = d.job_version_id
+        WHERE d.workspace_id = $1 AND d.budget_run_id = $2`,
+      [getContext().workspaceId, budgetRunId]
+    );
     expect(matching.errors).toBe(0);
     expect(matching.matchedJobs).toBe(5);
     expect(decisions.errors).toBe(0);
-    expect(queued).toBeGreaterThanOrEqual(1);
-    expect(deferred).toBe(0);
+    expect(queueSummary.enqueued).toBe(4);
+    expect(queueSummary.updated).toBe(4);
+    expect(queueSummary.deferred).toBe(1);
+    expect(persistedQueue.rows).toHaveLength(4);
+    expect(new Set(persistedQueue.rows.map((row) => row.canonical_job_id)).size).toBe(4);
+    expect(new Set(persistedQueue.rows.map((row) => row.lane))).toEqual(
+      new Set(Object.keys(expectedEligibleLaneBudgets))
+    );
+    for (const row of persistedQueue.rows) {
+      expect(row.status).toBe("PENDING");
+      expect(row.processing_state).toBe("QUEUED_FOR_AI");
+      expect(row.processing_status).toBe("QUEUED_FOR_AI");
+    }
+    for (const lane of Object.keys(expectedEligibleLaneBudgets)) {
+      expect(usageByLane.get(lane)?.selected_count, lane).toBe(1);
+    }
+    expect(deferral.rows).toHaveLength(1);
+    expect(deferral.rows[0].fixture_id).toBe("fixture-email-008");
+    expect(deferral.rows[0].normalized_title).toBe("fourth junior data engineer");
+    expect(deferral.rows[0].processing_state).toBe("DEFERRED_BUDGET");
+    expect(deferral.rows[0].processing_status).toBe("DEFERRED_BUDGET");
+    expect(deferral.rows[0].lane).toBe("CORE_AI_DATA");
+    expect(deferral.rows[0].budget_limit).toBe(expectedEligibleLaneBudgets.CORE_AI_DATA);
+    expect(deferral.rows[0].reason_code).toBe("AI_BUDGET_EXHAUSTED");
+    expect(deferral.rows[0].evidence.budget_configured).toBe(true);
     expect(missingDecisions).toBe(0);
+
+    const fixtureRowsResult = await q(
+      `SELECT rjo.source_external_id AS fixture_id,
+              c.id::text AS canonical_job_id,
+              jv.id::text AS job_version_id,
+              c.gate_decision,
+              c.processing_state,
+              c.processing_status,
+              c.primary_lane,
+              c.recommendation_outcome,
+              c.recommendation_eligibility,
+              c.deterministic_match_score,
+              c.deterministic_match_coverage,
+              c.recommendation_evidence_completeness,
+              COUNT(*) OVER (PARTITION BY c.id)::int AS version_count
+         FROM raw_job_observations rjo
+         JOIN job_versions jv ON jv.id = rjo.job_version_id
+         JOIN canonical_jobs c ON c.id = jv.canonical_job_id
+        WHERE rjo.source_name = 'gmail'
+          AND rjo.source_external_id LIKE 'fixture-email-%'
+        ORDER BY rjo.source_external_id`
+    );
+    // PostgreSQL rows are checked against the typed fixture contract below.
+    const fixtureRows = fixtureRowsResult.rows as PipelineFixtureRow[];
+    const rowsByFixture = new Map(fixtureRows.map((row) => [row.fixture_id, row]));
+    const expectedFixtureIds = fixtureEmails.map((fixture) => fixture.id).sort();
+    const observedFixtureIds = fixtureRows.map((row) => row.fixture_id).sort();
+
+    expect(fixtureRows).toHaveLength(9);
+    expect(observedFixtureIds).toEqual(expectedFixtureIds);
+    expect(new Set(fixtureRows.map((row) => row.job_version_id)).size).toBe(9);
+    expect(new Set(fixtureRows.map((row) => row.canonical_job_id)).size).toBe(8);
+
+    for (const fixture of fixtureEmails) {
+      const row = rowsByFixture.get(fixture.id);
+      expect(row, `Missing pipeline row for ${fixture.id}`).toBeDefined();
+      if (!row) {
+        throw new Error(`Missing pipeline row for ${fixture.id}`);
+      }
+
+      expect(actionToOutcome[fixture.expected_action]).toBe(fixture.expected_recommendation_outcome);
+      expect(row.gate_decision).toBe(fixture.expected_gate);
+      expect(row.recommendation_outcome, fixture.id).toBe(fixture.expected_recommendation_outcome);
+      expect(row.primary_lane ?? "UNCLASSIFIED").toBe(fixture.expected_lane);
+      expect(row.processing_state).toBe(fixture.expected_status);
+      expect(row.processing_status).toBe(fixture.expected_status);
+      expect(row.recommendation_eligibility).toBe(
+        fixture.expected_gate === "HARD_REJECT" ? "INELIGIBLE" : "ELIGIBLE"
+      );
+      expect(row.version_count).toBe(fixture.expected_version);
+
+      if (fixture.expected_duplicate_canonical_id) {
+        const original = rowsByFixture.get(fixture.expected_duplicate_canonical_id);
+        expect(original, `Missing original fixture for ${fixture.id}`).toBeDefined();
+        if (!original) {
+          throw new Error(`Missing original fixture for ${fixture.id}`);
+        }
+        expect(row.canonical_job_id).toBe(original.canonical_job_id);
+      }
+    }
   });
 
-  it("Conservation — no observation lost", async () => {
-    const nIn = await countWhere("raw_job_observations", "TRUE");
-    const totalJobs = await countWhere("canonical_jobs", "TRUE");
+  it("Conservation — no observation, canonical job, or version disappears", async () => {
+    const conservation = await q(
+      `SELECT COUNT(*)::int AS observation_count,
+              COUNT(DISTINCT rjo.job_version_id)::int AS observed_version_count,
+              COUNT(DISTINCT jv.canonical_job_id)::int AS canonical_count
+         FROM raw_job_observations rjo
+         JOIN job_versions jv ON jv.id = rjo.job_version_id
+        WHERE rjo.source_name = 'gmail'
+          AND rjo.source_external_id LIKE 'fixture-email-%'`
+    );
+    const versionCount = await countWhere("job_versions", "TRUE");
 
-    expect(totalJobs).toBeGreaterThan(0);
-    expect(nIn).toBe(9);
+    expect(Number(conservation.rows[0].observation_count)).toBe(9);
+    expect(Number(conservation.rows[0].observed_version_count)).toBe(9);
+    expect(Number(conservation.rows[0].canonical_count)).toBe(8);
+    expect(versionCount).toBe(9);
   });
 
-  it("Integrity — every observation maps to a canonical job version", async () => {
-    const unmapped = await countWhere("raw_job_observations", "job_version_id IS NULL");
+  it("Integrity — every fixture observation maps to a live canonical job version", async () => {
+    const unmapped = await countWhere(
+      "raw_job_observations",
+      "source_name = 'gmail' AND source_external_id LIKE 'fixture-email-%' AND job_version_id IS NULL"
+    );
+    const orphaned = await q(
+      `SELECT COUNT(*)::int AS count
+         FROM raw_job_observations rjo
+         LEFT JOIN job_versions jv ON jv.id = rjo.job_version_id
+        WHERE rjo.source_name = 'gmail'
+          AND rjo.source_external_id LIKE 'fixture-email-%'
+          AND jv.id IS NULL`
+    );
+
     expect(unmapped).toBe(0);
+    expect(Number(orphaned.rows[0].count)).toBe(0);
   });
 });

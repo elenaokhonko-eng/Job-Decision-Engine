@@ -27,6 +27,7 @@ export interface LaneDefinition {
   minimum_domain_score?: number;
   minimum_function_score?: number;
   secondary_lane_threshold?: number;
+  maximum_ai_interpretations_per_run: number;
   prototype_query: string;
 }
 
@@ -102,6 +103,7 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
     minimum_domain_score: laneConfig.routing?.minimum_domain_score,
     minimum_function_score: laneConfig.routing?.minimum_function_score,
     secondary_lane_threshold: laneConfig.routing?.secondary_lane_threshold,
+    maximum_ai_interpretations_per_run: laneConfig.budget?.maximum_ai_interpretations_per_run ?? 0,
     prototype_query: prototypeTexts.join(" ") || laneConfig.description,
   };
 }
@@ -166,16 +168,14 @@ export async function loadWorkspaceLanesConfig(
     try {
       let active = await listActiveLaneRevisions(client as any, { context: ctx });
 
-      if (active.length === 0 && options?.seedIfEmpty) {
+      const registryPath = path.resolve(__dirname, "../../config/lanes/registry.yml");
+      if (fs.existsSync(registryPath) && options?.seedIfEmpty) {
         try {
-          const registryPath = path.resolve(__dirname, "../../config/lanes/registry.yml");
-          if (!fs.existsSync(registryPath)) {
-            throw new Error(`Lane registry not found at ${registryPath}`);
-          }
-
           const registry = parseYamlFile<LaneRegistryFile>(registryPath);
+          const activeKeys = new Set(active.map((l) => l.laneKey));
+          let seededAny = false;
           for (const entry of registry.lanes || []) {
-            if (entry.enabled_by_default === false) {
+            if (entry.enabled_by_default === false || activeKeys.has(entry.lane_key)) {
               continue;
             }
 
@@ -190,9 +190,12 @@ export async function loadWorkspaceLanesConfig(
               client as any,
               { context: ctx, note: `seed from ${entry.config_file}` }
             );
+            seededAny = true;
           }
 
-          active = await listActiveLaneRevisions(client as any, { context: ctx });
+          if (seededAny) {
+            active = await listActiveLaneRevisions(client as any, { context: ctx });
+          }
         } catch (seedErr: unknown) {
           console.warn(
             `⚠️ Failed to seed workspace lane registry from files; falling back to FILES. ` +

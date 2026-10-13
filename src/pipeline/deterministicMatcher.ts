@@ -4,6 +4,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { computeEvidenceStrength, loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement } from "./requirementComparators.js";
+import { isRequirementOptional } from "./hardGate.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 
 dotenv.config();
@@ -33,7 +34,7 @@ interface RequirementRow {
 
 interface FactRow {
   id: string;
-  source_type?: "PROFILE_FACT" | "CREDENTIAL";
+  source_type?: "PROFILE_FACT" | "CREDENTIAL" | "ENGAGEMENT";
   embedding_node_id?: string;
   fact_type: string;
   statement: string;
@@ -138,6 +139,20 @@ function requirementWeight(importance: RequirementRow["importance"]): number {
     return 0.7;
   }
   return 0.4;
+}
+
+const NON_CAPABILITY_REQUIREMENT_TYPES = new Set([
+  "OFFICE_DAYS",
+  "WORK_MODE",
+  "EMPLOYMENT_TYPE",
+  "TRAVEL",
+  "WORK_AUTH",
+  "ON_CALL",
+  "SHIFT_WORK",
+]);
+
+export function isCapabilityRequirementType(requirementType: string): boolean {
+  return !NON_CAPABILITY_REQUIREMENT_TYPES.has(requirementType);
 }
 
 function scoreMatch(requirement: RequirementRow, fact: FactRow): number {
@@ -387,17 +402,49 @@ export async function runDeterministicMatcher(
     }
     try {
       const engagementRes = await client.query<{
+        id: string;
         start_date: string;
         end_date: string | null;
         is_current: boolean;
         experience_class: string;
+        engagement_type: string;
+        role_title: string;
+        summary: string;
+        operating_model: string | null;
       }>(
-        `SELECT start_date, end_date, is_current, experience_class
+        `SELECT id, start_date, end_date, is_current, experience_class,
+                engagement_type, role_title, summary, operating_model
          FROM profile_engagements
          WHERE profile_version_id = $1`,
         [profileVersionId]
       );
       const experienceYears = calculateProfessionalExperienceYears(engagementRes.rows);
+      for (const engagement of engagementRes.rows) {
+        if (engagement.experience_class !== "PROFESSIONAL_PRODUCTION") continue;
+        const start = new Date(engagement.start_date).getTime();
+        const end = engagement.is_current || !engagement.end_date
+          ? Date.now()
+          : new Date(engagement.end_date).getTime();
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+        const years = (end - start) / (1000 * 60 * 60 * 24 * 365.25);
+        credentialFacts.push({
+          id: engagement.id,
+          fact_type: "EXPERIENCE_YEARS",
+          statement: `${engagement.role_title}: ${engagement.summary}`,
+          evidence_tier: "PROFESSIONAL_PRODUCTION",
+          verification_status: "VERIFIED",
+          structured_value: {
+            experience_years: years,
+            experience_scope: `${engagement.role_title} ${engagement.summary}`,
+            engagement_type: engagement.engagement_type,
+            operating_model: engagement.operating_model,
+            experience_start_date: new Date(start).toISOString(),
+            experience_end_date: new Date(end).toISOString(),
+            engagement_is_current: engagement.is_current,
+          },
+          source_type: "ENGAGEMENT",
+        });
+      }
       if (experienceYears > 0) {
         credentialFacts.push({
           id: `experience:${profileVersionId}`,
@@ -405,7 +452,10 @@ export async function runDeterministicMatcher(
           statement: `${experienceYears.toFixed(1)} years of professional production experience`,
           evidence_tier: "PROFESSIONAL_PRODUCTION",
           verification_status: "VERIFIED",
-          structured_value: { professional_years: experienceYears },
+          structured_value: {
+            professional_years: experienceYears,
+            experience_scope: "overall professional production",
+          },
           source_type: "CREDENTIAL",
         });
       }
@@ -491,6 +541,7 @@ export async function runDeterministicMatcher(
       }
     }
     const factEmbeddingsBySpace = new Map<string, Map<string, number[]>>();
+    const semanticEmbeddingsConfigured = embeddingSpaceCandidates.length > 0;
 
     for (const job of jobs) {
       const versionId = job.resolved_job_version_id || job.latest_job_version_id;
@@ -682,14 +733,47 @@ export async function runDeterministicMatcher(
 
         const usedEmbeddings =
           !!semanticEmbeddingSpaceId &&
+          factIds.length > 0 &&
+          requirementIds.length > 0 &&
           factEmbeddings.size === factIds.length &&
           requirementEmbeddings.size === requirementIds.length;
+
+        const scoredRequirements = reqRes.rows.filter((req) =>
+          isCapabilityRequirementType(req.requirement_type)
+        );
+        // Complete semantic evidence is required to publish MATCHED.
+        // Neither an incomplete cohort nor a missing/unconfigured embedding space may bypass semantic evaluation.
+        const semanticEvidenceRequired = scoredRequirements.length > 0 && factIds.length > 0;
+        const semanticEvidenceIncomplete = semanticEvidenceRequired && !usedEmbeddings;
 
         let weightedScoreSum = 0;
         let weightSum = 0;
         let matchedCount = 0;
+        const mandatoryQualificationFailures: string[] = [];
 
         for (const req of reqRes.rows) {
+          if (!isCapabilityRequirementType(req.requirement_type)) {
+            await client.query(
+              `INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, NULL, 'UNKNOWN', 0, $4, $5)`,
+              [
+                ctx.workspaceId,
+                matchRunId,
+                req.id,
+                "Excluded from capability matching; evaluated by deterministic workability gates.",
+                JSON.stringify({
+                  requirement_key: req.requirement_key,
+                  requirement_type: req.requirement_type,
+                  excluded_from_capability_score: true,
+                  semantic_ready: usedEmbeddings,
+                }),
+              ]
+            );
+            continue;
+          }
+
           const weight = requirementWeight(req.importance);
           weightSum += weight;
 
@@ -746,6 +830,77 @@ export async function runDeterministicMatcher(
             );
             continue;
           }
+
+          if (req.requirement_type === "EXPERIENCE_YEARS" && structuredComparison.status === "MISMATCH") {
+            const coverage = structuredComparison.coverage ?? 0;
+            const weightedScore = coverage * weight;
+            weightedScoreSum += weightedScore;
+            if (coverage >= 0.5) {
+              matchedCount += 1;
+            }
+            await client.query(
+              `INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, $4, 'NO_MATCH', $5, $6, $7)`,
+              [
+                ctx.workspaceId,
+                matchRunId,
+                req.id,
+                structuredComparison.fact?.id || null,
+                coverage,
+                structuredComparison.rationale,
+                JSON.stringify({
+                  requirement_key: req.requirement_key,
+                  requirement_type: req.requirement_type,
+                  comparator: "STRUCTURED_EXACT",
+                  required_years: structuredComparison.requiredYears ?? null,
+                  evidenced_years: structuredComparison.evidencedYears ?? null,
+                  experience_coverage: coverage,
+                  match_qualification_code: "MATCH_QUALIFICATION_EXPERIENCE_GAP",
+                  semantic_ready: usedEmbeddings,
+                }),
+              ]
+            );
+            continue;
+          }
+
+          if ((req.requirement_type === "CREDENTIAL" || req.requirement_type === "DEGREE") && structuredComparison.status === "MISMATCH") {
+            const isOptional = isRequirementOptional(req as any);
+            const qualCode = req.requirement_type === "DEGREE"
+              ? "MATCH_QUALIFICATION_DEGREE_GAP"
+              : isOptional
+                ? "MATCH_QUALIFICATION_PREFERRED_CERT_GAP"
+                : "MATCH_QUALIFICATION_MANDATORY_CERT_MISSING";
+
+            if (!isOptional && req.importance === "MUST") {
+              mandatoryQualificationFailures.push(qualCode);
+            }
+
+            await client.query(
+              `INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, $4, 'NO_MATCH', 0, $5, $6)`,
+              [
+                ctx.workspaceId,
+                matchRunId,
+                req.id,
+                structuredComparison.fact?.id || null,
+                structuredComparison.rationale,
+                JSON.stringify({
+                  requirement_key: req.requirement_key,
+                  requirement_type: req.requirement_type,
+                  comparator: "STRUCTURED_EXACT",
+                  optional: isOptional,
+                  match_qualification_code: qualCode,
+                  semantic_ready: usedEmbeddings,
+                }),
+              ]
+            );
+            continue;
+          }
+
           if (structuredComparison.status === "MISMATCH") {
             await client.query(
               `INSERT INTO requirement_evidence_matches (
@@ -786,7 +941,11 @@ export async function runDeterministicMatcher(
                 semanticScore = Math.max(0, cosineSimilarity(reqEmbedding, factEmbedding));
               }
             }
-            const score = usedEmbeddings ? lexicalScore * 0.35 + semanticScore * 0.65 : lexicalScore;
+            const score = usedEmbeddings
+              ? req.requirement_type === "FUNCTION" && semanticScore >= SEMANTIC_MATCH_THRESHOLD
+                ? semanticScore
+                : lexicalScore * 0.35 + semanticScore * 0.65
+              : lexicalScore;
             if (score > bestScore) {
               bestScore = score;
               bestLexical = lexicalScore;
@@ -823,7 +982,10 @@ export async function runDeterministicMatcher(
             matchedCount += 1;
           }
 
-          const profileFactId = bestFact?.source_type === "CREDENTIAL" ? null : bestFact?.id || null;
+          const profileFactId =
+            bestFact?.source_type === "CREDENTIAL" || bestFact?.source_type === "ENGAGEMENT"
+              ? null
+              : bestFact?.id || null;
 
           await client.query(
             `INSERT INTO requirement_evidence_matches (
@@ -879,7 +1041,7 @@ export async function runDeterministicMatcher(
            );
         }
 
-        const reqCount = reqRes.rows.length;
+        const reqCount = scoredRequirements.length;
         const overallScore = weightSum > 0 ? (weightedScoreSum / weightSum) * 100 : 0;
         const coverageScore = reqCount > 0 ? (matchedCount / reqCount) * 100 : 0;
 
@@ -903,30 +1065,67 @@ export async function runDeterministicMatcher(
           ]
         );
 
+        const hasMandatoryQualFailure = mandatoryQualificationFailures.length > 0;
         const profileMatchStatus =
-          matchedCount > 0
-            ? 'POSITIVE_MATCH'
-            : usedEmbeddings
-              ? 'NO_PROFILE_MATCH'
-              : 'UNKNOWN';
+          hasMandatoryQualFailure
+            ? 'NO_PROFILE_MATCH'
+            : semanticEvidenceIncomplete
+              ? 'UNKNOWN'
+              : matchedCount > 0
+                ? 'POSITIVE_MATCH'
+                : usedEmbeddings
+                  ? 'NO_PROFILE_MATCH'
+                  : 'UNKNOWN';
 
         const canonicalUpdate = await client.query(
           `UPDATE canonical_jobs
-           SET deterministic_match_score = $2,
-               deterministic_match_coverage = $3,
+           SET deterministic_match_score = CASE WHEN $8::boolean THEN NULL ELSE $2::numeric END,
+               deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE $3::numeric END,
                latest_match_run_id = $4,
                profile_match_status = $6,
-               processing_state = 'MATCHED',
-               processing_status = 'MATCHED',
+               processing_state = CASE
+                 WHEN $9::boolean THEN 'UNMATCHED'
+                 WHEN $8::boolean THEN 'LANE_ROUTED'
+                 ELSE 'MATCHED'
+               END,
+               processing_status = CASE
+                 WHEN $9::boolean THEN 'UNMATCHED'
+                 WHEN $8::boolean THEN 'LANE_ROUTED'
+                 ELSE 'MATCHED'
+               END,
+               rejection_reason = CASE
+                 WHEN $9::boolean THEN $10
+                 ELSE rejection_reason
+               END,
+               recommendation_eligibility = CASE
+                 WHEN $9::boolean THEN 'INELIGIBLE'
+                 ELSE recommendation_eligibility
+               END,
+               recommendation_outcome = CASE
+                 WHEN $9::boolean THEN 'SKIP'
+                 ELSE recommendation_outcome
+               END,
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = $5
              AND (latest_job_version_id IS NULL OR latest_job_version_id = $7)`,
-          [ctx.workspaceId, overallScore, coverageScore, matchRunId, job.id, profileMatchStatus, versionId]
+          [
+            ctx.workspaceId,
+            overallScore,
+            coverageScore,
+            matchRunId,
+            job.id,
+            profileMatchStatus,
+            versionId,
+            semanticEvidenceIncomplete,
+            hasMandatoryQualFailure,
+            mandatoryQualificationFailures.join(", "),
+          ]
         );
 
         await client.query("COMMIT");
-        if (canonicalUpdate?.rowCount !== 0) matchedJobs += 1;
+        if (canonicalUpdate?.rowCount !== 0 && !semanticEvidenceIncomplete && !hasMandatoryQualFailure) matchedJobs += 1;
+        if (canonicalUpdate?.rowCount !== 0 && (semanticEvidenceIncomplete || hasMandatoryQualFailure)) skippedJobs += 1;
       } catch (error) {
         await client.query("ROLLBACK");
         errors += 1;

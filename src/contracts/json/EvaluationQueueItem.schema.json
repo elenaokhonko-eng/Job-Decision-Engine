@@ -4,7 +4,20 @@
     "EvaluationQueueItem": {
       "type": "object",
       "properties": {
+        "schema_version": {
+          "type": "string",
+          "enum": [
+            "2.2.0",
+            "2.0",
+            "1.0.0"
+          ],
+          "default": "2.2.0"
+        },
         "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workspace_id": {
           "type": "string",
           "format": "uuid"
         },
@@ -15,6 +28,66 @@
         "job_version_id": {
           "type": "string",
           "minLength": 1
+        },
+        "profile_version_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "match_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "deterministic_decision_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "job_content_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "context_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "lane": {
           "type": "string",
@@ -34,6 +107,30 @@
             "NEEDS_MANUAL_REVIEW"
           ],
           "default": "PENDING"
+        },
+        "budget_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "available_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "lease_id": {
           "anyOf": [
@@ -87,6 +184,7 @@
       },
       "required": [
         "id",
+        "workspace_id",
         "canonical_job_id",
         "job_version_id",
         "lane",

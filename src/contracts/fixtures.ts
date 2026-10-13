@@ -23,11 +23,18 @@ export const sampleGmailEnvelope: IngestionEnvelope = {
 };
 
 export const sampleAtsObservation: JobObservation = {
+  schema_version: SCHEMA_VERSION,
   id: "22222222-2222-4222-8222-222222222222",
+  workspace_id: "12121212-1212-4121-8121-121212121212",
   source_type: "GREENHOUSE",
   source_id: "greenhouse-9988",
   source_run_id: "33333333-3333-4333-8333-333333333333",
+  source_plugin_key: "greenhouse",
+  source_plugin_revision_id: "13131313-1313-4131-8131-131313131313",
+  source_external_id: "9988",
+  source_url: "https://boards.greenhouse.io/databricks/jobs/9988",
   observed_at: "2026-08-28T12:05:00.000Z",
+  retrieved_at: "2026-08-28T12:05:00.000Z",
   company_name_raw: "Databricks",
   title_raw: "Staff Solutions Architect - GenAI",
   location_raw: "Singapore",
@@ -35,10 +42,14 @@ export const sampleAtsObservation: JobObservation = {
   employment_type_raw: "FULL_TIME",
   compensation_raw: "SGD 20,000/month",
   canonical_apply_url: "https://boards.greenhouse.io/databricks/jobs/9988",
+  source_lane: "CORE_AI_DATA",
+  search_plan_version: "1.0",
   description_text: "Hands-on platform building, Spark, LLM systems...",
+  raw_payload: { id: 9988, source: "greenhouse" },
   raw_payload_hash: "sha256-databricks9988",
   processing_status: "PENDING",
-  error_history: []
+  error_history: [],
+  job_version_id: null
 };
 
 export const sampleDuplicateRepostVersion: CanonicalJobVersion = {
@@ -103,12 +114,21 @@ export const sampleNeedsVerificationGate: GateDecision = {
 };
 
 export const samplePendingQueueItem: EvaluationQueueItem = {
+  schema_version: SCHEMA_VERSION,
   id: "88888888-8888-4888-8888-888888888888",
+  workspace_id: "12121212-1212-4121-8121-121212121212",
   canonical_job_id: "99999999-9999-4999-8999-999999999999",
   job_version_id: "v1",
+  profile_version_id: "14141414-1414-4141-8141-141414141414",
+  match_run_id: "15151515-1515-4151-8151-151515151515",
+  deterministic_decision_id: "16161616-1616-4161-8161-161616161616",
+  job_content_hash: "sha256-job-content-9988",
+  context_fingerprint: "sha256-context-9988",
+  budget_run_id: null,
   lane: "CORE_AI_DATA",
   priority_score: 0.32,
   status: "PENDING",
+  available_at: "2026-08-28T12:20:00.000Z",
   lease_id: null,
   lease_expires_at: null,
   attempt_count: 0,
@@ -119,12 +139,21 @@ export const samplePendingQueueItem: EvaluationQueueItem = {
 };
 
 export const sampleFailedThenRetriedQueueItem: EvaluationQueueItem = {
+  schema_version: SCHEMA_VERSION,
   id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  workspace_id: "12121212-1212-4121-8121-121212121212",
   canonical_job_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
   job_version_id: "v1",
+  profile_version_id: "17171717-1717-4171-8171-171717171717",
+  match_run_id: "18181818-1818-4181-8181-181818181818",
+  deterministic_decision_id: "19191919-1919-4191-8191-191919191919",
+  job_content_hash: "sha256-job-content-retry",
+  context_fingerprint: "sha256-context-retry",
+  budget_run_id: null,
   lane: "INVESTMENT_MARKETS_FINTECH",
   priority_score: 0.45,
   status: "RETRY_WAIT",
+  available_at: "2026-08-28T12:30:00.000Z",
   lease_id: null,
   lease_expires_at: null,
   attempt_count: 1,

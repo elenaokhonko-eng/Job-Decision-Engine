@@ -1,11 +1,15 @@
+import crypto from "crypto";
 import pg from "pg";
 import dotenv from "dotenv";
 import {
   applyGlobalGates,
+  extractHybridAttendance,
+  extractTravelRequirement,
   GLOBAL_TITLE_EXCLUSIONS,
   isTechnicalRole,
   type GateResult,
 } from "../services/criteria.js";
+import { PersistedGateDecisionSchema } from "../contracts/index.js";
 import { GATE_VERSION } from "../contracts/version.js";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
@@ -127,9 +131,8 @@ function detectOfficeDays(req: PersistedRequirement): number | null {
       return raw;
     }
   }
-  const txt = quoteOrText(req);
-  const m = txt.match(/([1-5])\s*days?/i);
-  return m ? Number(m[1]) : null;
+  const attendance = extractHybridAttendance(quoteOrText(req));
+  return attendance?.office_days_max ?? null;
 }
 
 function detectTravelPct(req: PersistedRequirement): number | null {
@@ -140,9 +143,7 @@ function detectTravelPct(req: PersistedRequirement): number | null {
       return raw;
     }
   }
-  const txt = quoteOrText(req);
-  const m = txt.match(/(\d{1,2})%/);
-  return m ? Number(m[1]) : null;
+  return extractTravelRequirement(quoteOrText(req))?.max_pct ?? null;
 }
 
 function structuredNumber(req: PersistedRequirement, keys: string[]): number | null {
@@ -183,6 +184,7 @@ export function applyPersistedRequirementGates(
   ) && answerContext?.overrides.workAuthorizationRegions.length === 0;
   const title = job.title || "";
   let pendingVerification: { codes: string[]; evidence: string[]; facts?: Partial<GateResult["workability_facts"]> } | null = null;
+  let inferredWorkabilityFacts: Partial<GateResult["workability_facts"]> = {};
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
     if (pattern.test(title)) {
       return makeReject(
@@ -411,7 +413,40 @@ export function applyPersistedRequirementGates(
   }
 
   if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {
-    if (!effectivePolicy.hybridWithoutOfficeDaysAllowed) {
+    const attendance = extractHybridAttendance(quoteOrText(workModeReq));
+    if (attendance?.contradictory || (attendance && attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek)) {
+      return makeReject(
+        ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
+        attendance?.evidence || [quoteOrText(workModeReq)],
+        { office_days_min: attendance?.office_days_min ?? null, office_days_max: attendance?.office_days_max ?? null },
+      );
+    }
+    if (attendance && attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) {
+      return makeReject(
+        ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
+        attendance.evidence,
+        { office_days_min: attendance.office_days_min, office_days_max: attendance.office_days_max },
+      );
+    }
+    if (officeDaysAnswerUnknown) {
+      pendingVerification = {
+        codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+        evidence: [quoteOrText(workModeReq)],
+        facts: {
+          office_days_min: attendance?.office_days_min ?? 3,
+          office_days_max: attendance?.office_days_max ?? 3,
+          attendance_basis: attendance ? "EMPLOYER_STATED" : "POLICY_HYBRID_3_2",
+        },
+      };
+    } else if (!attendance && effectivePolicy.hybridWithoutOfficeDaysAllowed) {
+      // The owner policy treats unspecified hybrid attendance as 3 onsite / 2 WFH.
+      // Persist the assumption so later stages do not silently re-interpret it.
+      inferredWorkabilityFacts = {
+        office_days_min: 3,
+        office_days_max: 3,
+        attendance_basis: "POLICY_HYBRID_3_2",
+      };
+    } else if (!attendance && !effectivePolicy.hybridWithoutOfficeDaysAllowed) {
       pendingVerification = {
         codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
         evidence: [quoteOrText(workModeReq)],
@@ -421,12 +456,17 @@ export function applyPersistedRequirementGates(
   }
 
   if (pendingVerification) {
-    return makeVerification(pendingVerification.codes, pendingVerification.evidence, pendingVerification.facts);
+    return makeVerification(
+      pendingVerification.codes,
+      pendingVerification.evidence,
+      { ...inferredWorkabilityFacts, ...pendingVerification.facts },
+    );
   }
 
   return makePass({
-    office_days_min: officeReq ? detectOfficeDays(officeReq) : null,
-    office_days_max: officeReq ? detectOfficeDays(officeReq) : null,
+    ...inferredWorkabilityFacts,
+    office_days_min: officeReq ? detectOfficeDays(officeReq) : inferredWorkabilityFacts.office_days_min ?? null,
+    office_days_max: officeReq ? detectOfficeDays(officeReq) : inferredWorkabilityFacts.office_days_max ?? null,
     travel_pct_max: travelReq ? detectTravelPct(travelReq) : null,
     employment_type: employmentType,
   });
@@ -442,9 +482,13 @@ function combineGateResults(results: GateResult[]): GateResult {
   const workabilityFacts = { ...makePass().workability_facts };
   for (const result of results) {
     for (const [key, value] of Object.entries(result.workability_facts)) {
-      if (value !== null && value !== undefined) {
-        (workabilityFacts as Record<string, unknown>)[key] = value;
+      if (value === null || value === undefined) continue;
+
+      const existingValue = (workabilityFacts as Record<string, unknown>)[key];
+      if (value === "UNKNOWN" && existingValue !== null && existingValue !== undefined && existingValue !== "UNKNOWN") {
+        continue;
       }
+      (workabilityFacts as Record<string, unknown>)[key] = value;
     }
   }
 
@@ -510,8 +554,11 @@ export function applyExactProfileGates(
   profileFacts: ComparableFact[],
   answerContext?: VerificationAnswerContext | null,
 ): GateResult {
+  // Employer qualifications (EXPERIENCE_YEARS, DEGREE, CREDENTIAL) are evaluated
+  // in deterministic profile-to-job matching, NOT as global deterministic hard gates.
+  // Genuine legal work-authorization incompatibility remains an approved global gate.
   const exactRequirements = deterministicRequirements.filter((requirement) =>
-    ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(requirement.requirement_type)
+    ["WORK_AUTH"].includes(requirement.requirement_type)
   );
   if (exactRequirements.length === 0) return makePass();
 
@@ -524,26 +571,9 @@ export function applyExactProfileGates(
       continue;
     }
 
-    let comparison = compareStructuredRequirement(requirement, profileFacts);
+    let comparison = compareStructuredRequirement(requirement, profileFacts, answerContext);
     if (comparison.status === "UNKNOWN" && answerContext) {
-      if (requirement.requirement_type === "DEGREE" && answerContext.overrides.degreeSubjects.length > 0) {
-        const subject = degreeRequirementSubject(requirement);
-        if (subject && !answerContext.overrides.degreeSubjects.includes(subject)) {
-          comparison = {
-            status: "MISMATCH",
-            rationale: `Verification answer does not accept the required ${subject.replace(/_/g, " ")} degree subject.`,
-            fact: null,
-          };
-        } else if (subject) {
-          comparison = compareStructuredRequirement(removeDegreeSubject(requirement), profileFacts);
-        }
-      } else if (requirement.requirement_type === "EXPERIENCE_YEARS"
-        && answerContext.overrides.experienceDomains.length > 0) {
-        comparison = compareStructuredRequirement(
-          expandExperienceScope(requirement, answerContext.overrides.experienceDomains),
-          profileFacts,
-        );
-      } else if (requirement.requirement_type === "WORK_AUTH"
+      if (requirement.requirement_type === "WORK_AUTH"
         && answerContext.overrides.workAuthorizationRegions.length > 0) {
         const answerFact: ComparableFact = {
           id: `verification-answer:${answerContext.answerRevisionId || "unversioned"}`,
@@ -551,7 +581,7 @@ export function applyExactProfileGates(
           structured_value: { authorized_regions: answerContext.overrides.workAuthorizationRegions },
           source_type: "PROFILE_FACT",
         };
-        comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact]);
+        comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact], answerContext);
       }
     }
 
@@ -603,6 +633,7 @@ export async function runHardGates(
   const client = ownsClient ? await pool.connect() : pool;
 
   const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+  const pipelineRunId = crypto.randomUUID();
   const policyResolution = await resolveWorkspaceWorkabilityPolicy(client as any, { context: ctx });
   console.log(
     `Hard Gate workability policy: ${policyResolution.source}` +
@@ -715,7 +746,7 @@ export async function runHardGates(
         const deterministicRequirements = requirementRows as PersistedRequirement[];
         let profileFacts: ComparableFact[] = [];
         if (deterministicRequirements.some((requirement) =>
-          ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(requirement.requirement_type)
+          ["WORK_AUTH"].includes(requirement.requirement_type)
         )) {
           const { rows: activeProfileRows } = await client.query<{ id: string }>(
             `SELECT id
@@ -735,37 +766,6 @@ export async function runHardGates(
             activeProfileVersionId ? [ctx.workspaceId, activeProfileVersionId] : [ctx.workspaceId]
           );
           profileFacts = profileFactRows as ComparableFact[];
-          const { rows: credentialRows } = await client.query(
-            `SELECT pc.id, pc.credential_name, pc.issuer, pc.credential_type, pc.level
-             FROM profile_credentials pc
-             WHERE pc.workspace_id = $1
-               ${activeProfileVersionId ? "AND pc.profile_version_id = $2" : "AND FALSE"}
-             AND pc.status = 'ACTIVE'`,
-            activeProfileVersionId ? [ctx.workspaceId, activeProfileVersionId] : [ctx.workspaceId]
-          );
-          profileFacts = profileFacts.concat(
-            credentialRows.map((credential: any) => ({
-              id: credential.id,
-              statement: `${credential.credential_name} ${credential.issuer} ${credential.level || ""}`.trim(),
-              structured_value: { credential_type: credential.credential_type, level: credential.level },
-              source_type: "CREDENTIAL" as const,
-            }))
-          );
-          const { rows: engagementRows } = await client.query(
-            `SELECT start_date, end_date, is_current, experience_class
-             FROM profile_engagements
-             WHERE profile_version_id = $1`,
-            [activeProfileVersionId]
-          );
-          const experienceYears = calculateProfessionalExperienceYears(engagementRows);
-          if (experienceYears > 0) {
-            profileFacts.push({
-              id: `experience:${ctx.workspaceId}`,
-              statement: `${experienceYears.toFixed(1)} years of professional production experience`,
-              structured_value: { professional_years: experienceYears },
-              source_type: "CREDENTIAL",
-            });
-          }
         }
         const requirementHints = deterministicRequirements
           .map((r) => r.quote_text || r.requirement_text)
@@ -853,22 +853,37 @@ export async function runHardGates(
           ]
         );
 
+        // Validate the complete audit envelope before writing the immutable row.
+        const persistedGateDecision = PersistedGateDecisionSchema.parse({
+          schema_version: GATE_VERSION,
+          canonical_job_id: job.id,
+          job_version_id: job.job_version_id,
+          pipeline_run_id: pipelineRunId,
+          gate_version: GATE_VERSION,
+          status: gateResult.status,
+          rejection_codes: gateResult.rejection_codes,
+          evidence_quotes: gateResult.evidence_quotes,
+          workability_facts: gateResult.workability_facts,
+          evaluated_at: new Date().toISOString(),
+        });
+
         // Write immutable gate_decisions audit row (invariant 6)
         await client.query(
           `INSERT INTO gate_decisions (
              workspace_id,
-             canonical_job_id, job_version_id, gate_version,
+             canonical_job_id, job_version_id, pipeline_run_id, gate_version,
              decision, rejection_codes, evidence_quotes, workability_facts
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
           [
             ctx.workspaceId,
-            job.id,
-            job.job_version_id,
-            GATE_VERSION,
-            gateResult.status,
-            JSON.stringify(gateResult.rejection_codes),
-            JSON.stringify(gateResult.evidence_quotes),
-            JSON.stringify(gateResult.workability_facts)
+            persistedGateDecision.canonical_job_id,
+            persistedGateDecision.job_version_id,
+            persistedGateDecision.pipeline_run_id,
+            persistedGateDecision.gate_version,
+            persistedGateDecision.status,
+            JSON.stringify(persistedGateDecision.rejection_codes),
+            JSON.stringify(persistedGateDecision.evidence_quotes),
+            JSON.stringify(persistedGateDecision.workability_facts)
           ]
         );
 

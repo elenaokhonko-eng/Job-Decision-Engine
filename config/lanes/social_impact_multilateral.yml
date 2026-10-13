@@ -1,0 +1,84 @@
+schema_version: "2.2.0"
+lane_key: SOCIAL_IMPACT_MULTILATERAL
+display_name: "Social Impact & Multilateral Systems"
+description: "AI, data, digital public infrastructure, climate, development, humanitarian and multilateral technology delivery."
+
+scope:
+  required_function_concepts:
+    any:
+      - AI_ENGINEERING
+      - ML_ENGINEERING
+      - DATA_ENGINEERING
+      - AI_DATA_ARCHITECTURE
+      - AI_SYSTEMS_ARCHITECTURE
+      - DIGITAL_PUBLIC_INFRASTRUCTURE
+      - TECHNICAL_PROGRAMME_DELIVERY
+      - TECHNICAL_PROJECT_DELIVERY
+      - TECHNICAL_PRODUCT_DELIVERY
+      - TECHNICAL_ARCHITECTURE
+      - TECHNICAL_DELIVERY
+      - RESEARCH_ENGINEERING
+
+  included_domain_concepts:
+    any:
+      - SOCIAL_IMPACT
+      - INTERNATIONAL_DEVELOPMENT
+      - MULTILATERAL
+      - DEVELOPMENT_FINANCE
+      - HUMANITARIAN
+      - CLIMATE_TECH
+      - ENVIRONMENTAL_DATA
+      - DIGITAL_PUBLIC_INFRASTRUCTURE
+      - CIVIC_TECH
+      - PUBLIC_INTEREST_TECH
+      - GLOBAL_HEALTH
+      - SUSTAINABLE_DEVELOPMENT
+
+prototypes:
+  - prototype_key: multilateral_ai_data
+    text: "AI, data engineering, digital public infrastructure and technical architecture for international development and multilateral institutions."
+    weight: 1.0
+  - prototype_key: climate_humanitarian_technology
+    text: "Climate technology, humanitarian systems, environmental data and public-interest digital platforms."
+    weight: 0.95
+  - prototype_key: technical_programme_delivery
+    text: "Technical programme, project, product and delivery leadership for social impact and global development."
+    weight: 0.9
+
+routing:
+  minimum_domain_score: 0.60
+  minimum_function_score: 0.60
+  minimum_semantic_score: 0.35
+  secondary_lane_threshold: 0.30
+
+sourcing:
+  enabled_sources:
+    - GREENHOUSE
+    - ASHBY
+    - LEVER
+    - HIMALAYAS
+  query_sets:
+    - "remote social impact data engineer"
+    - "remote multilateral ai architect"
+    - "remote climate data platform"
+    - "remote humanitarian technology programme"
+
+budget:
+  maximum_ai_interpretations_per_run: 3
+
+documents:
+  include_criteria_snapshot: true
+positive_concepts:
+  - social impact
+  - international development
+  - multilateral
+  - climate technology
+  - humanitarian technology
+  - digital public infrastructure
+  - public interest technology
+  - global health
+negative_concepts:
+  - generic consulting
+  - sales engineering
+  - customer success
+semantic_threshold: 0.35

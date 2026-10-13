@@ -38,7 +38,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'canonical_jobs'
       AND constraint_name = 'canonical_jobs_recommendation_eligibility_chk'
   ) THEN
@@ -53,7 +53,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'canonical_jobs'
       AND constraint_name = 'canonical_jobs_recommendation_outcome_chk'
   ) THEN
@@ -141,9 +141,18 @@ FROM computed
 WHERE c.id = computed.canonical_job_id;
 
 -- 6) Update read models to expose lifecycle + deterministic outcome
-DROP VIEW IF EXISTS shortlist_view CASCADE;
-DROP VIEW IF EXISTS v_canonical_shortlist CASCADE;
-DROP VIEW IF EXISTS v_rejected_jobs_audit CASCADE;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'shortlist_view') THEN
+    EXECUTE format('DROP VIEW %I.shortlist_view CASCADE', current_schema());
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'v_canonical_shortlist') THEN
+    EXECUTE format('DROP VIEW %I.v_canonical_shortlist CASCADE', current_schema());
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'v_rejected_jobs_audit') THEN
+    EXECUTE format('DROP VIEW %I.v_rejected_jobs_audit CASCADE', current_schema());
+  END IF;
+END $$;
 
 CREATE OR REPLACE VIEW v_canonical_shortlist AS
 WITH target_versions AS (
@@ -249,7 +258,7 @@ SELECT
   c.primary_lane,
   c.secondary_lanes,
   c.lane_confidence,
-  COALESCE(vq.priority_score, 0.0) AS priority_score,
+  vq.priority_score AS priority_score,
   c.deterministic_match_score,
   c.deterministic_match_coverage,
   COALESCE(c.processing_state, c.processing_status) AS processing_state,

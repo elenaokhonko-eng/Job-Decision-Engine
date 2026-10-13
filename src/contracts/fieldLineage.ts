@@ -146,8 +146,8 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     sourceTable: "evaluation_queue",
     sourceColumn: "priority_score",
     producerStage: "explanationQueueEnqueuer.ts",
-    transformation: "Queue priority derived from deterministic_match_score when available, otherwise semantic_score fallback",
-    nullable: false
+    transformation: "Queue priority derived from deterministic_match_score when available, otherwise semantic_score fallback; remains NULL when no queue priority exists",
+    nullable: true
   },
   {
     field: "deterministic_match_score",

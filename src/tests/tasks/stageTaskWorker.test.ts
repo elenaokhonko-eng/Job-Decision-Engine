@@ -91,7 +91,7 @@ describe("stageTaskWorker", () => {
         policySnapshotId: "policy",
         policySnapshotHash: "hash",
       })),
-      runExplanationQueueEnqueuer: vi.fn(async () => ({ enqueued: 0, updated: 0 })),
+      runExplanationQueueEnqueuer: vi.fn(async () => ({ enqueued: 0, updated: 0, deferred: 0 })),
       ...overrides,
     } as PipelineStageWorkerDependencies;
   }
@@ -1361,6 +1361,67 @@ describe("stageTaskWorker", () => {
       context: ctx,
       jobVersionIds: ["version-1"],
       limit: 1,
+    });
+  });
+
+  it("passes one explicit budget run identity to explanation enqueue tasks", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [
+            {
+              id: "task-explanation",
+              workspace_id: ctx.workspaceId,
+              task_type: "ENQUEUE_EXPLANATION",
+              task_key: "ENQUEUE_EXPLANATION:version-1:explanation_v1",
+              payload: { canonical_job_id: "job-1", job_version_id: "version-1" },
+              status: "RUNNING",
+              available_at: new Date().toISOString(),
+              lease_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+              heartbeat_at: new Date().toISOString(),
+              claimed_by: "worker:test",
+              attempt_count: 1,
+              max_attempts: 3,
+              last_error: null,
+              dead_letter_reason: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              completed_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-explanation" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+    const fakeClient = { query } as any;
+    const runExplanationQueueEnqueuer = vi.fn(async () => ({ enqueued: 1, updated: 0, deferred: 0 }));
+    const deps = dependencies({ runExplanationQueueEnqueuer });
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["ENQUEUE_EXPLANATION"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+        budgetRunId: "budget-run-1",
+      },
+      deps
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(runExplanationQueueEnqueuer).toHaveBeenCalledWith(fakeClient, {
+      context: ctx,
+      jobVersionIds: ["version-1"],
+      limit: 1,
+      budgetRunId: "budget-run-1",
     });
   });
 });

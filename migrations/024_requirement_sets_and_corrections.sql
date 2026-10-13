@@ -369,7 +369,7 @@ BEGIN
     ON kcu.constraint_name = tc.constraint_name
    AND kcu.table_schema = tc.table_schema
    AND kcu.table_name = tc.table_name
-  WHERE tc.table_schema = 'public'
+  WHERE tc.table_schema = current_schema()
     AND tc.table_name = 'job_requirements'
     AND tc.constraint_type = 'UNIQUE'
   GROUP BY tc.constraint_name

@@ -23,12 +23,14 @@ Job searching often presents overwhelming cognitive fatigue, rejection trauma fr
 1. **Local-First & Private**: Runs as a standalone desktop app on your machine. Your job vault lives in your private [Neon PostgreSQL](https://neon.tech) database. No central telemetry, tracking, or intermediary SaaS servers exist.
 2. **Deterministic Hard Gates Before AI**: Hard constraints (location restrictions, remote vs office days, employment type, compensation minimums) are checked locally by deterministic code *before* any LLM evaluation. Non-fits are filtered out without incurring AI costs or hallucinated justifications.
 3. **Operational Failures Are Never Career Rejections**: Parser timeouts, network hiccups, schema mismatches, or API rate limits transition to `RETRY_WAIT` and `NEEDS_MANUAL_REVIEW`. They never become `HARD_REJECTED`.
-4. **Unknowns Stay Explicit**: Missing workability facts produce `NEEDS_VERIFICATION`, never fabricated assumptions.
-5. **Multi-Lane Strategic Discovery**: Discovers broadly across four strategic lanes:
+4. **Unknowns Stay Explicit**: An unknown workplace model is rejected after available evidence is examined; other unresolved workability facts produce `NEEDS_VERIFICATION`, never fabricated assumptions.
+5. **Multi-Lane Strategic Discovery**: Discovers broadly across six strategic lanes:
    - `CORE_AI_DATA`
    - `LEGAL_REGTECH`
    - `HEALTH_BIO_PHARMA`
    - `INVESTMENT_MARKETS_FINTECH`
+   - `SOCIAL_IMPACT_MULTILATERAL`
+   - `UNIVERSITY_AI_RESEARCH`
 6. **Bring Your Own Keys (BYOK)**: Connect your own Google Gemini or OpenAI API keys. Generative AI evaluation runs automatically as part of the bounded E2E pipeline after deterministic gates pass.
 7. **Factual Evidence-Grounded Documents**: Automatically generates customized DOCX resumes and cover letters mapped strictly to your factual career ledger. Zero hallucinations.
 
@@ -46,7 +48,8 @@ flowchart LR
   subgraph Screening [Deterministic Rules]
     Vault --> Gates{Deterministic\nHard Gates}
     Gates -->|Non-fit| Rejected[HARD_REJECTED\nWith Evidence Reason Code]
-    Gates -->|Missing Info| Verify[NEEDS_VERIFICATION]
+    Gates -->|Unknown workplace model| UnknownWorkplace[HARD_REJECTED\nWorkplace Evidence]
+    Gates -->|Other missing workability fact| Verify[NEEDS_VERIFICATION]
     Gates -->|Fit| Lane[Lane Routing & Scoring]
   end
 
@@ -101,7 +104,7 @@ Job Decision Engine supports two distribution modes:
    - Paste your private Neon PostgreSQL connection string.
    - Enter your personal Google Gemini or OpenAI API key.
    - Select your preferred model preset.
-   - Click **Initialize Database & Run Migrations** (all 46 migrations install automatically into your database).
+   - Click **Initialize Database & Run Migrations** (the complete additive migration chain installs automatically into your database).
 4. No Node.js, terminal, or server configuration required!
 
 ### Mode 2: Technical Users & Developers (Local Clone)

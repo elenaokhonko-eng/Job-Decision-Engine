@@ -1,6 +1,6 @@
 schema_version: "2.2.0"
-policy_version: "workability_v2"
-description: "Pre-lane workability hard gates and constraints"
+policy_version: "workability_v3"
+description: "Funnel V3 pre-lane workability hard gates and constraints"
 
 global_workability_gates:
   work_mode:
@@ -8,9 +8,9 @@ global_workability_gates:
     max_office_days_per_week: 3
     max_office_days_hard_fail: 4
     hybrid_without_office_days_allowed: true
-    # Safe default: an unstated work mode is not invented as a pass or reject.
-    # Set to PASS or HARD_REJECT only as an explicit user policy choice.
-    unknown_work_mode_policy: NEEDS_VERIFICATION
+    # Funnel V3 owner policy: do not infer a workplace model from a location
+    # label and do not hold an unestablished arrangement for verification.
+    unknown_work_mode_policy: HARD_REJECT
 
   territory:
     # Default profile policy. User preference modes can override this list.
@@ -25,11 +25,15 @@ global_workability_gates:
     shift_work_allowed: false
     frequent_travel_allowed: false
   travel:
-    max_travel_pct: 10
+    # A fixed requirement at 20% passes; a range whose upper bound exceeds
+    # 20% rejects (for example, 20-30%).
+    max_travel_pct: 20
 
   work_composition:
     minimum_building_research_pct: 60
     maximum_interaction_pct: 40
+    preferred_building_research_pct: 85
+    preferred_interaction_pct: 15
     external_client_primary_allowed: false
     people_management_primary_allowed: false
 

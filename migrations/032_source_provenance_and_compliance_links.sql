@@ -19,7 +19,7 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM information_schema.table_constraints
-    WHERE table_schema = 'public'
+    WHERE table_schema = current_schema()
       AND table_name = 'raw_job_observations'
       AND constraint_name = 'fk_raw_job_observations_source_plugin_revision'
   ) THEN

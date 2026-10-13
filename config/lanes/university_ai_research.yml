@@ -1,0 +1,84 @@
+schema_version: "2.2.0"
+lane_key: UNIVERSITY_AI_RESEARCH
+display_name: "University AI & Research"
+description: "University, institute and laboratory AI research, research engineering, scientific computing and responsible innovation."
+
+scope:
+  required_function_concepts:
+    any:
+      - AI_RESEARCH
+      - ML_ENGINEERING
+      - AI_ENGINEERING
+      - DATA_SCIENCE
+      - RESEARCH_ENGINEERING
+      - SCIENTIFIC_ML
+      - DATA_ENGINEERING
+      - AI_SYSTEMS_ARCHITECTURE
+      - TECHNICAL_PROGRAMME_DELIVERY
+      - TECHNICAL_PROJECT_DELIVERY
+      - TECHNICAL_PRODUCT_DELIVERY
+      - TECHNICAL_ARCHITECTURE
+      - TECHNICAL_DELIVERY
+
+  included_domain_concepts:
+    any:
+      - UNIVERSITY
+      - ACADEMIC_RESEARCH
+      - AI_RESEARCH
+      - MACHINE_LEARNING_RESEARCH
+      - RESPONSIBLE_AI
+      - SCIENTIFIC_COMPUTING
+      - RESEARCH_INSTITUTE
+      - HIGHER_EDUCATION
+      - RESEARCH_SOFTWARE
+      - COMPUTATIONAL_SCIENCE
+      - DIGITAL_HUMANITIES
+
+prototypes:
+  - prototype_key: university_ai_research
+    text: "University and institute AI research, machine learning, responsible AI and research software engineering."
+    weight: 1.0
+  - prototype_key: scientific_computing
+    text: "Scientific computing, computational research, data science and machine learning systems for academic research."
+    weight: 0.95
+  - prototype_key: research_delivery
+    text: "Research programme, project, product and technical delivery roles supporting universities and research institutes."
+    weight: 0.85
+
+routing:
+  minimum_domain_score: 0.60
+  minimum_function_score: 0.60
+  minimum_semantic_score: 0.35
+  secondary_lane_threshold: 0.30
+
+sourcing:
+  enabled_sources:
+    - GREENHOUSE
+    - ASHBY
+    - LEVER
+    - HIMALAYAS
+  query_sets:
+    - "remote university ai research"
+    - "remote academic machine learning"
+    - "remote research software engineer"
+    - "remote scientific computing architect"
+
+budget:
+  maximum_ai_interpretations_per_run: 3
+
+documents:
+  include_criteria_snapshot: true
+positive_concepts:
+  - university
+  - academic research
+  - ai research
+  - responsible ai
+  - scientific computing
+  - research software
+  - computational science
+negative_concepts:
+  - generic teaching only
+  - admissions
+  - student services
+  - nontechnical administration
+semantic_threshold: 0.35

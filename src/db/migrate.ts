@@ -14,6 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const MIGRATIONS_LOCK_NAMESPACE = "job_decision_engine_migrations";
+const MIGRATIONS_GLOBAL_LOCK_NAMESPACE = "job_decision_engine_migrations_global";
 
 function isPool(value: pg.Pool | pg.PoolClient | pg.Client): value is pg.Pool {
   const maybe: any = value as any;
@@ -118,15 +119,17 @@ export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.C
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
 
+  let schemaLockAcquired = false;
+
   try {
-    // Prevent concurrent migration runs (Vitest runs test files in parallel; so do Actions workflows).
-    // Advisory locks are session-scoped, so we must run on a single client connection.
-    // Serialize per-schema migration runs. Many CI tests run migrations against isolated schemas in parallel.
-    // Using `current_schema()` avoids cross-schema contention while still preventing public-schema races.
+    // Advisory locks are session-scoped, so migrations must stay on one client connection.
+    // Keep independent schemas concurrent, but serialize each database-scoped extension
+    // migration below so concurrent schema initialization cannot race on CREATE EXTENSION.
     await client.query(
       `SELECT pg_advisory_lock(hashtext($1), hashtext(current_schema()))`,
       [MIGRATIONS_LOCK_NAMESPACE]
     );
+    schemaLockAcquired = true;
 
     // 1. Ensure schema_migrations exists
     await client.query(`
@@ -157,27 +160,44 @@ export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.C
       const filePath = path.join(migrationsDir, file);
       // PostgreSQL treats a UTF-8 BOM as SQL input, so remove it defensively.
       const sqlContent = fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "");
+      const requiresGlobalExtensionLock = /\bCREATE\s+EXTENSION\b/i.test(sqlContent);
+      let globalExtensionLockAcquired = false;
 
-      // Execute in transaction
-      await client.query("BEGIN");
       try {
-        await client.query(sqlContent);
-        await client.query(`INSERT INTO schema_migrations (version, applied_at) VALUES ($1, NOW())`, [file]);
-        await client.query("COMMIT");
-        console.log(`✅ Applied migration: ${file}`);
-        newlyApplied.push(file);
-      } catch (err: any) {
-        await client.query("ROLLBACK");
-        console.error(`❌ Migration failed on ${file}:`, err.message);
-        throw err;
+        if (requiresGlobalExtensionLock) {
+          await client.query(`SELECT pg_advisory_lock(hashtext($1))`, [MIGRATIONS_GLOBAL_LOCK_NAMESPACE]);
+          globalExtensionLockAcquired = true;
+        }
+
+        // Execute in transaction
+        await client.query("BEGIN");
+        try {
+          await client.query(sqlContent);
+          await client.query(`INSERT INTO schema_migrations (version, applied_at) VALUES ($1, NOW())`, [file]);
+          await client.query("COMMIT");
+          console.log(`✅ Applied migration: ${file}`);
+          newlyApplied.push(file);
+        } catch (err: any) {
+          await client.query("ROLLBACK");
+          console.error(`❌ Migration failed on ${file}:`, err.message);
+          throw err;
+        }
+      } finally {
+        if (globalExtensionLockAcquired) {
+          await client
+            .query(`SELECT pg_advisory_unlock(hashtext($1))`, [MIGRATIONS_GLOBAL_LOCK_NAMESPACE])
+            .catch(() => undefined);
+        }
       }
     }
 
     return newlyApplied;
   } finally {
-    await client
-      .query(`SELECT pg_advisory_unlock(hashtext($1), hashtext(current_schema()))`, [MIGRATIONS_LOCK_NAMESPACE])
-      .catch(() => undefined);
+    if (schemaLockAcquired) {
+      await client
+        .query(`SELECT pg_advisory_unlock(hashtext($1), hashtext(current_schema()))`, [MIGRATIONS_LOCK_NAMESPACE])
+        .catch(() => undefined);
+    }
     if (ownsClient && typeof (client as any).release === "function") {
       (client as pg.PoolClient).release();
     }

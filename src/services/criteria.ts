@@ -37,7 +37,7 @@ export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\b(human resources?|hr|recruiter|talent acquisition|people operations?|people partner)\b/i,
   /\b(executive assistant|office manager|receptionist|admin assistant|administrative assistant)\b/i,
   /\b(legal counsel|attorney|lawyer|m&a|paralegal|contracts? manager)\b/i,
-  /\b(sales manager|account executive|business development representative|bdr|sdr|account manager)\b/i,
+  /\b(sales manager|account executive|business development representative|bdr|sdr|(?<!technical\s+)account manager)\b/i,
   /\b(marketing manager|social media|content writer|pr manager|brand manager)\b/i,
   /\b(quality assurance coordinator|manual tester|qa tester)\b/i,
   /\b(brain researcher|neuroscientist|wet lab|postdoctoral fellow)\b/i,
@@ -98,6 +98,88 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
     hasBuildingEvidence,
     reason: isTechnical ? undefined : "Axis 1 Failed: Role lacks evidence of technical, building, or engineering function"
   };
+}
+
+export interface HybridAttendanceFacts {
+  office_days_min: number;
+  office_days_max: number;
+  evidence: string[];
+  basis: "EMPLOYER_STATED" | "POLICY_HYBRID_3_2";
+  contradictory: boolean;
+}
+
+function numericRange(match: RegExpMatchArray): [number, number] {
+  const first = Number(match[1]);
+  const second = match[2] === undefined ? first : Number(match[2]);
+  return [Math.min(first, second), Math.max(first, second)];
+}
+
+/** Extract only attendance phrases; unrelated durations such as annual leave are ignored. */
+export function extractHybridAttendance(description: string): HybridAttendanceFacts | null {
+  const text = String(description || "").toLowerCase();
+  const ranges: Array<{ range: [number, number]; evidence: string }> = [];
+  const officePatterns = [
+    /\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)\s+(?:the\s+)?(?:office|on-?site|onsite)\b/gi,
+    /\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\s*(?:per\s*week|a\s*week|\/week)?\s*(?:on-?site|onsite|in-?office)\b/gi,
+    /\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\s*(?:per\s*week|a\s*week|\/week)?\s*(?:on-?site|onsite)\b/gi,
+    /\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:office|on-?site|onsite)\s+days?\b/gi,
+  ];
+  const wfhPatterns = [
+    /\b(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\s*(?:per\s*week|a\s*week|\/week)?\s*(?:wfh|work\s+from\s+home|from\s+home|remote)\b/gi,
+    /\b(?:wfh|work\s+from\s+home|from\s+home|remote)\s*(\d+)(?:\s*(?:-|–|to)\s*(\d+))?\s*(?:days?|d)\b/gi,
+  ];
+
+  for (const pattern of officePatterns) {
+    for (const match of text.matchAll(pattern)) {
+      const range = numericRange(match);
+      ranges.push({ range, evidence: match[0] });
+    }
+  }
+  for (const pattern of wfhPatterns) {
+    for (const match of text.matchAll(pattern)) {
+      const [wfhMin, wfhMax] = numericRange(match);
+      ranges.push({ range: [5 - wfhMax, 5 - wfhMin], evidence: match[0] });
+    }
+  }
+
+  if (ranges.length === 0) return null;
+
+  const intersectionMin = Math.max(...ranges.map(({ range }) => range[0]));
+  const intersectionMax = Math.min(...ranges.map(({ range }) => range[1]));
+  const contradictory = intersectionMin > intersectionMax;
+  const officeMin = contradictory ? Math.min(...ranges.map(({ range }) => range[0])) : intersectionMin;
+  const officeMax = contradictory ? Math.max(...ranges.map(({ range }) => range[1])) : intersectionMax;
+  return {
+    office_days_min: Math.max(0, officeMin),
+    office_days_max: Math.min(7, officeMax),
+    evidence: [...new Set(ranges.map(({ evidence }) => evidence))],
+    basis: "EMPLOYER_STATED",
+    contradictory,
+  };
+}
+
+export interface TravelRequirement {
+  max_pct: number;
+  evidence: string;
+}
+
+/** Return the upper bound of a travel requirement, preserving range semantics. */
+export function extractTravelRequirement(description: string): TravelRequirement | null {
+  const text = String(description || "").toLowerCase();
+  const patterns = [
+    /(?:travel|travelling|traveling)(?:[^.;\n%]{0,40}?)(\d+)\s*%\s*(?:-|–|to)\s*(\d+)\s*%/gi,
+    /(\d+)\s*%\s*(?:-|–|to)\s*(\d+)\s*%(?:[^.;\n%]{0,40}?)(?:travel|travelling|traveling)/gi,
+    /(?:travel|travelling|traveling)(?:[^.;\n%]{0,40}?)(\d+)\s*%/gi,
+    /(\d+)\s*%(?:[^.;\n%]{0,40}?)(?:travel|travelling|traveling)/gi,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (!match) continue;
+    const first = Number(match[1]);
+    const second = match[2] === undefined ? first : Number(match[2]);
+    return { max_pct: Math.max(first, second), evidence: match[0] };
+  }
+  return null;
 }
 
 // 3. Workability Requirements (Zero tolerance for on-premises-only lab/clinic)
@@ -169,8 +251,8 @@ export function evaluateWorkability(
   // Source adapters frequently leave workplace_type UNKNOWN while the posting
   // itself says "Full-time · Onsite" or "Location: On-site". Those are still
   // explicit work-location evidence and must be evaluated here.
-  const officeDaysMatch = d.match(/\b(\d+)\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
-    || d.match(/\b(\d+)\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
+  const officeDaysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
+    || d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
   const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
     || /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i.test(d)
     || /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i.test(d)
@@ -178,24 +260,33 @@ export function evaluateWorkability(
     || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek);
 
   if ((!effectivePolicy.onsiteOnlyAllowed && wp === "ONSITE") || (!effectivePolicy.onsiteOnlyAllowed && isExplicitOnsiteText)) {
+    const minDays = officeDaysMatch ? Number(officeDaysMatch[1]) : 4;
+    const maxDays = officeDaysMatch ? Number(officeDaysMatch[1]) : 5;
     return {
       workable: false,
       needsVerify: false,
       reason: "Requires 100% on-premises / on-site presence (ONSITE mode not workable)",
       reasonCode: "GATE_HIGH_OFFICE_DAYS",
-      facts: { ...baseFacts, office_days_min: 4, office_days_max: 5 }
+      facts: { ...baseFacts, office_days_min: minDays, office_days_max: maxDays }
     };
   }
 
-  // 2. Geographic restrictions. The structured job location is authoritative;
-  // free-text territory mentions only count when the source sentence describes
-  // where the person must work or be authorized to work.
+  // 2. Determine explicit remote evidence before applying territory rules. A
+  // remote employer location is not the worker's required work territory.
+  const isExplicitRemoteText = /\b(?:fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|remote\s+(?:from|in)\b|work\s+from\s+home|work\s+remotely)\b/i.test(d)
+    || /(?:^|[|·•:])\s*remote\b/i.test(d)
+    || /\b(?:location|workplace|work\s+location)\s*:\s*remote\b/i.test(d);
+  const isRemote = wp === "REMOTE" || (wp === "UNKNOWN" && (/\bremote\b/i.test(loc) || isExplicitRemoteText));
+
+  // 3. Geographic restrictions. Structured foreign locations are relevant to
+  // onsite/hybrid roles; remote roles require an explicit worker authorization
+  // or physical-residency restriction before they can fail this gate.
   const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
   const locationTerritories = extractTerritories(loc);
   const descriptionTerritories = extractTerritories(d);
   const explicitlyDisallowed = effectivePolicy.rejectExplicitForeignTerritory
     ? [
-        ...locationTerritories,
+        ...(isRemote ? [] : locationTerritories),
         ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory)),
       ].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory))
     : [];
@@ -218,41 +309,37 @@ export function evaluateWorkability(
     };
   }
 
-  // 3. REMOTE structured field or explicit remote work-mode text -> PASS.
-  // The description signal is intentionally contextual enough to avoid
-  // treating phrases such as "remote clients" as an employee location.
-  const isExplicitRemoteText = /\b(?:fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|remote\s+(?:from|in)\b|work\s+from\s+home|work\s+remotely)\b/i.test(d)
-    || /(?:^|[|·•:])\s*remote\b/i.test(d)
-    || /\b(?:location|workplace|work\s+location)\s*:\s*remote\b/i.test(d);
-  if (wp === "REMOTE" || /\bremote\b/i.test(loc) || isExplicitRemoteText) {
-    const hasTerritory = locationTerritories.length > 0 || descriptionTerritories.length > 0;
-    if (!hasTerritory && !effectivePolicy.remoteWithoutTerritoryAllowed) {
+  // 4. REMOTE structured field or explicit remote work-mode text -> PASS.
+  if (isRemote) {
+    if (locationTerritories.length === 0 && descriptionTerritories.length === 0 && !effectivePolicy.remoteWithoutTerritoryAllowed) {
       return {
         workable: true,
         needsVerify: true,
         reason: "Remote territory is not stated and this preference mode requires it",
-        facts: { ...baseFacts, office_days_min: 0, office_days_max: 0 }
+        facts: { ...baseFacts, office_days_min: 0, office_days_max: 0, attendance_basis: "REMOTE" }
       };
     }
     return {
       workable: true,
       needsVerify: false,
-      facts: { ...baseFacts, office_days_min: 0, office_days_max: 0 }
+      facts: { ...baseFacts, office_days_min: 0, office_days_max: 0, attendance_basis: "REMOTE" }
     };
   }
 
-  // 4. HYBRID checks
+  // 5. HYBRID checks. Explicit employer attendance wins; otherwise the
+  // owner-approved 3 onsite / 2 WFH assumption is persisted as evidence.
   if (wp === "HYBRID" || /\bhybrid\b/i.test(d) || /\bhybrid\b/i.test(loc)) {
-    const hybridDaysMatch = d.match(/\b(\d+)\s*days?\b/i);
-    if (hybridDaysMatch) {
-      const days = Number(hybridDaysMatch[1]);
-      if (days >= effectivePolicy.hardFailOfficeDaysPerWeek) {
+    const attendance = extractHybridAttendance(d);
+    if (attendance) {
+      if (attendance.contradictory || attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek) {
         return {
           workable: false,
           needsVerify: false,
-          reason: "Hybrid arrangement requires 4-5 days in-office",
+          reason: attendance.contradictory
+            ? "Hybrid attendance statements contradict one another"
+            : "Hybrid arrangement requires 4-5 days in-office",
           reasonCode: "GATE_HIGH_OFFICE_DAYS",
-          facts: { ...baseFacts, office_days_min: days, office_days_max: days }
+          facts: { ...baseFacts, office_days_min: attendance.office_days_min, office_days_max: attendance.office_days_max, attendance_basis: "EMPLOYER_STATED" }
         };
       }
       if (officeDaysAnswerUnknown) {
@@ -260,91 +347,95 @@ export function evaluateWorkability(
           workable: true,
           needsVerify: true,
           reason: "Office-day cap answer is unknown; needs manual verification",
-          facts: { ...baseFacts, office_days_min: days, office_days_max: days },
+          facts: { ...baseFacts, office_days_min: attendance.office_days_min, office_days_max: attendance.office_days_max, attendance_basis: "EMPLOYER_STATED" },
         };
       }
-      if (days > effectivePolicy.maxOfficeDaysPerWeek) {
+      if (attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) {
         return {
           workable: false,
           needsVerify: false,
           reason: "Hybrid arrangement exceeds the accepted office-day cap",
           reasonCode: "GATE_HIGH_OFFICE_DAYS",
-          facts: { ...baseFacts, office_days_min: days, office_days_max: days }
-        };
-      }
-    }
-    const daysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i);
-    if (!daysMatch && !d.includes("1 day/week") && !d.includes("2 days/week") && !d.includes("3 days/week")) {
-      if (effectivePolicy.hybridWithoutOfficeDaysAllowed) {
-        return {
-          workable: true,
-          needsVerify: false,
-          reason: "Hybrid arrangement accepted without an exact office-day count by the active policy",
-          facts: { ...baseFacts, office_days_min: null, office_days_max: null }
+          facts: { ...baseFacts, office_days_min: attendance.office_days_min, office_days_max: attendance.office_days_max, attendance_basis: "EMPLOYER_STATED" }
         };
       }
       return {
         workable: true,
-        needsVerify: true,
-        reason: "Hybrid arrangement listed without explicit office-day count",
-        facts: { ...baseFacts, office_days_min: null, office_days_max: null }
+        needsVerify: false,
+        facts: { ...baseFacts, office_days_min: attendance.office_days_min, office_days_max: attendance.office_days_max, attendance_basis: "EMPLOYER_STATED" }
       };
     }
-    const days = daysMatch
-      ? parseInt(daysMatch[1], 10)
-      : d.includes("1 day/week")
-        ? 1
-        : d.includes("2 days/week")
-          ? 2
-          : 3;
+
+    if (officeDaysAnswerUnknown) {
+      return {
+        workable: true,
+        needsVerify: true,
+        reason: "Office-day cap answer is unknown; needs manual verification",
+        facts: { ...baseFacts, office_days_min: 3, office_days_max: 3, attendance_basis: "POLICY_HYBRID_3_2" },
+      };
+    }
+    if (effectivePolicy.hybridWithoutOfficeDaysAllowed) {
+      return {
+        workable: true,
+        needsVerify: false,
+        reason: "Hybrid attendance unspecified; applied the 3 onsite / 2 WFH policy assumption",
+        facts: { ...baseFacts, office_days_min: 3, office_days_max: 3, attendance_basis: "POLICY_HYBRID_3_2" }
+      };
+    }
     return {
       workable: true,
-      needsVerify: false,
-      facts: { ...baseFacts, office_days_min: days, office_days_max: days }
+      needsVerify: true,
+      reason: "Hybrid arrangement listed without explicit office-day count",
+      facts: { ...baseFacts, office_days_min: null, office_days_max: null, attendance_basis: "UNKNOWN" }
     };
   }
 
-  // 5. Ambiguous location / office expectations in text -> NEEDS_VERIFICATION
+  const unknownWorkModeOutcome = () => {
+    const facts = { ...baseFacts, office_days_min: null, office_days_max: null, attendance_basis: "UNKNOWN" as const };
+    switch (effectivePolicy.unknownWorkModeDisposition) {
+      case "PASS":
+        return {
+          workable: true,
+          needsVerify: false,
+          reason: "Workplace model unspecified; accepted by configured policy",
+          reasonCode: "GATE_UNKNOWN_WORK_MODE",
+          facts,
+        };
+      case "NEEDS_VERIFICATION":
+        return {
+          workable: true,
+          needsVerify: true,
+          reason: "Workplace model unspecified; needs manual verification",
+          reasonCode: "GATE_UNKNOWN_WORK_MODE",
+          facts,
+        };
+      case "HARD_REJECT":
+      default:
+        return {
+          workable: false,
+          needsVerify: false,
+          reason: "Workplace model unspecified; rejected by owner policy",
+          reasonCode: "GATE_UNKNOWN_WORK_MODE",
+          facts,
+        };
+    }
+  };
+
+  // 6. Ambiguous location / office expectations are unresolved workplace-model
+  // evidence. Apply the configured disposition rather than bypassing policy.
   const ambiguousClues = [
     "office based", "office-based", "in-office", "in office",
     "office expectations", "workplace arrangement", "workplace expectations",
     "office to be evaluated", "partner discussions", "location flexible", "location tbd"
   ];
   if (ambiguousClues.some(c => d.includes(c) || loc.includes(c))) {
-    return {
-      workable: true,
-      needsVerify: true,
-      reason: "Workplace model ambiguous/unspecified; needs manual verification",
-      facts: { ...baseFacts, office_days_min: null, office_days_max: null }
-    };
+    return unknownWorkModeOutcome();
   }
 
-  // 6. Unspecified workplace_type and no remote/hybrid clues. This is a
-  // configurable source/workability policy, never an implicit career reject.
+  // 7. Never infer a work mode from a non-empty location label. Apply the
+  // configured policy when no accepted work-mode evidence was established.
   if (wp === "UNKNOWN") {
-    if (effectivePolicy.unknownWorkModeDisposition === "PASS") {
-      return {
-        workable: true,
-        needsVerify: false,
-        reason: "Workplace model unspecified; accepted by configured policy",
-        facts: { ...baseFacts, office_days_min: null, office_days_max: null },
-      };
-    }
-    if (effectivePolicy.unknownWorkModeDisposition === "HARD_REJECT") {
-      return {
-        workable: false,
-        needsVerify: false,
-        reason: "Workplace model unspecified; rejected by configured policy",
-        reasonCode: "GATE_UNKNOWN_WORK_MODE",
-        facts: { ...baseFacts, office_days_min: null, office_days_max: null },
-      };
-    }
-    return {
-      workable: true,
-      needsVerify: true,
-      reason: "Workplace model unspecified; needs manual verification",
-      facts: { ...baseFacts, office_days_min: null, office_days_max: null }
-    };
+    return unknownWorkModeOutcome();
   }
 
   return { workable: true, needsVerify: false, facts: baseFacts };
@@ -396,6 +487,7 @@ export interface GateResult {
     travel_pct_max: number | null;
     employment_type: "PERMANENT" | "CONTRACT" | "UNKNOWN";
     location_restriction: string | null;
+    attendance_basis?: "EMPLOYER_STATED" | "POLICY_HYBRID_3_2" | "REMOTE" | "UNKNOWN";
   };
 }
 
@@ -411,6 +503,7 @@ function makePass(extraFacts?: Partial<GateResult["workability_facts"]>): GateRe
       travel_pct_max: null,
       employment_type: "UNKNOWN",
       location_restriction: null,
+      attendance_basis: "UNKNOWN",
       ...extraFacts
     }
   };
@@ -429,6 +522,7 @@ function makeReject(codes: string[], evidence: string[], facts?: Partial<GateRes
       travel_pct_max: null,
       employment_type: "UNKNOWN",
       location_restriction: null,
+      attendance_basis: "UNKNOWN",
       ...facts
     }
   };
@@ -447,6 +541,7 @@ function makeVerification(codes: string[], evidence: string[], facts?: Partial<G
       travel_pct_max: null,
       employment_type: "UNKNOWN",
       location_restriction: null,
+      attendance_basis: "UNKNOWN",
       ...facts
     }
   };
@@ -529,10 +624,11 @@ export function applyGlobalGates(
   answerContext?: VerificationAnswerContext | null,
 ): GateResult {
   const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
-  const travelAnswerUnknown = isVerificationAnswerProvided(
+  const travelAnswerProvided = isVerificationAnswerProvided(
     answerContext,
     VERIFICATION_ANSWER_KEYS.travelPercentage,
-  ) && answerContext?.overrides.travelPercentageCap === null;
+  );
+  const travelAnswerUnknown = travelAnswerProvided && answerContext?.overrides.travelPercentageCap === null;
   const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(
     answerContext,
     VERIFICATION_ANSWER_KEYS.workAuthorization,
@@ -541,7 +637,7 @@ export function applyGlobalGates(
   const c = (job.company_name || "").toLowerCase();
   const d = extractDescriptionText(job);
   const loc = (job.location || "").toLowerCase();
-  const wp = (job.workplace_type || "").toLowerCase();
+  const wp = (job.workplace_type || "").toUpperCase();
   const emp = (job.employment_type || "").toUpperCase();
   let pendingVerification: { reason: string; facts?: Partial<GateResult["workability_facts"]> } | null = null;
 
@@ -550,6 +646,22 @@ export function applyGlobalGates(
     if (pattern.test(job.title || "")) {
       return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title exclusion: "${job.title}"`]);
     }
+  }
+
+  // FDE is a global exclusion, even when the posting also contains strong AI
+  // engineering signals.
+  if (/\b(?:fde|forward[- ]deployed(?:\s+engineer(?:ing)?)?)\b/i.test(`${t} ${d}`)) {
+    const evidence = findNonNegatedEvidence(d, ["forward deployed", "fde"]);
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], evidence.length > 0 ? evidence : [`FDE role: "${job.title}"`]);
+  }
+
+  // Generic consultancy/advisory work is outside the target role families;
+  // technically substantive delivery and transformation titles remain eligible.
+  const consultancyTitle = /\b(consult(?:ant|ancy)|advis(?:er|ory))\b/i.test(t);
+  const approvedTechnicalConsultancy = /\b(?:technical|technology|engineering|software|data|ai|ml|digital|transformation)\b/i.test(t)
+    && /\b(?:engineer(?:ing)?|architect(?:ure)?|program(?:me)?|project|product|delivery|transformation)\b/i.test(t);
+  if (consultancyTitle && !approvedTechnicalConsultancy) {
+    return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Generic consultancy/advisory title: "${job.title}"`]);
   }
 
   // ── 0a. Workability Check (location / workplace / employment type) ──
@@ -584,33 +696,50 @@ export function applyGlobalGates(
     return makeReject(["GATE_BLACKLISTED_COMPANY"], [`Company is configured as blacklisted: "${job.company_name}"`]);
   }
 
-  const buildingMatch = d.match(/(?:building|research|hands-on|implementation)[^%]{0,50}(\d{1,3})\s*%/i)
-    || d.match(/(\d{1,3})\s*%[^.]{0,50}(?:building|research|hands-on|implementation)/i);
-  if (buildingMatch && Number(buildingMatch[1]) < effectivePolicy.minimumBuildingResearchPct) {
-    return makeReject(["GATE_BUILDING_RESEARCH_RATIO"], [buildingMatch[0]]);
+  const buildingPctBefore = d.match(/(\d+(?:\.\d+)?)\s*%\s*(?:of\s+)?(?:time\s+)?(?:spent\s+on\s+)?(?:in\s+)?(?:building|research|hands-on|implementation|technical delivery|architecture)/i);
+  const buildingPctAfter = d.match(/(?:building|research|hands-on|implementation|technical delivery|architecture)\s*(?:is|:|accounts\s+for|\()\s*(\d+(?:\.\d+)?)\s*%/i);
+  const buildingPct = buildingPctBefore ? Number(buildingPctBefore[1]) : (buildingPctAfter ? Number(buildingPctAfter[1]) : null);
+  const buildingSnippet = buildingPctBefore?.[0] ?? buildingPctAfter?.[0] ?? null;
+
+  const interactionPctBefore = d.match(/(\d+(?:\.\d+)?)\s*%\s*(?:of\s+)?(?:time\s+)?(?:spent\s+on\s+)?(?:in\s+)?(?:interaction|stakeholder|client-facing|client facing)/i);
+  const interactionPctAfter = d.match(/(?:interaction|stakeholder|client-facing|client facing)\s*(?:is|:|accounts\s+for|\()\s*(\d+(?:\.\d+)?)\s*%/i);
+  const interactionPct = interactionPctBefore ? Number(interactionPctBefore[1]) : (interactionPctAfter ? Number(interactionPctAfter[1]) : null);
+  const interactionSnippet = interactionPctBefore?.[0] ?? interactionPctAfter?.[0] ?? null;
+
+  const isBuildingFailed = buildingPct !== null && buildingPct < effectivePolicy.minimumBuildingResearchPct;
+  const isInteractionFailed = interactionPct !== null && interactionPct > effectivePolicy.maximumInteractionPct;
+
+  if (isBuildingFailed && isInteractionFailed) {
+    return makeReject(
+      ["GATE_BUILDING_RESEARCH_RATIO", "GATE_HIGH_INTERACTION"],
+      [buildingSnippet ?? `${buildingPct}% building`, interactionSnippet ?? `${interactionPct}% interaction`]
+    );
+  }
+  if (isBuildingFailed) {
+    return makeReject(["GATE_BUILDING_RESEARCH_RATIO"], [buildingSnippet ?? `${buildingPct}% building`]);
+  }
+  if (isInteractionFailed) {
+    return makeReject(["GATE_HIGH_INTERACTION"], [interactionSnippet ?? `${interactionPct}% interaction`]);
   }
 
-  const interactionMatches = [
-    d.match(/(?:interaction|stakeholder|client-facing|client facing)[^%]{0,50}(\d{1,3})\s*%/i),
-    d.match(/(\d{1,3})\s*%[^.]{0,50}(?:interaction|stakeholder|client-facing|client facing)/i),
-  ].filter((match): match is RegExpMatchArray => match !== null);
-  const interactionMatch = interactionMatches.sort((left, right) => Number(right[1]) - Number(left[1]))[0];
-  if (interactionMatch && Number(interactionMatch[1]) > effectivePolicy.maximumInteractionPct) {
-    return makeReject(["GATE_HIGH_INTERACTION"], [interactionMatch[0]]);
-  }
-
-  const travelMatch = d.match(/(?:travel|travelling|traveling)[^%]{0,35}(\d{1,3})\s*%/i)
-    || d.match(/(\d{1,3})\s*%[^.]{0,35}(?:travel|travelling|traveling)/i);
-  if (travelMatch && travelAnswerUnknown) {
+  const travelRequirement = extractTravelRequirement(d);
+  const frequentTravelEvidence = findNonNegatedEvidence(d, ["frequent travel", "travel extensively"]);
+  if (travelRequirement && travelAnswerUnknown) {
     pendingVerification = {
       reason: "Travel cap answer is unknown; needs manual verification",
-      facts: { travel_pct_max: Number(travelMatch[1]) },
+      facts: { travel_pct_max: travelRequirement.max_pct },
     };
-  } else if (travelMatch && Number(travelMatch[1]) > effectivePolicy.maxTravelPct) {
+  } else if (travelRequirement && travelRequirement.max_pct > effectivePolicy.maxTravelPct) {
     return makeReject(
       ["GATE_LIFESTYLE_INCOMPATIBLE"],
-      [travelMatch[0]],
-      { travel_pct_max: Number(travelMatch[1]) }
+      [travelRequirement.evidence],
+      { travel_pct_max: travelRequirement.max_pct }
+    );
+  } else if (frequentTravelEvidence.length > 0 && !effectivePolicy.frequentTravelAllowed && !travelAnswerProvided) {
+    return makeReject(
+      ["GATE_LIFESTYLE_INCOMPATIBLE"],
+      frequentTravelEvidence,
+      { travel_pct_max: null }
     );
   }
 
@@ -885,7 +1014,9 @@ export function applyGlobalGates(
     "cheminformatics", "genomics", "drug discovery", "clinical trial", "regtech",
     "legaltech", "fraud detection", "kyc", "aml", "compliance automation",
     "contract analytics", "digital trust", "deep learning", "agentic", "market data",
-    "trading infrastructure", "software development", "software platform", "data science", "data analytics", "business intelligence", "data platform", "data architecture", "technology transformation", "digital transformation", "data transformation", "technical program", "technical project"
+    "trading infrastructure", "software development", "software platform", "data science", "data analytics", "business intelligence", "data platform", "data architecture", "technology transformation", "digital transformation", "data transformation", "technical program", "technical project",
+    "cloud", "cloud infrastructure", "cloud architecture", "solutions architect", "enterprise architect", "cloud architect", "microservices", "software architecture", "technical delivery", "techno-functional", "devops", "platform engineering", "engineering delivery", "systems architecture", "hands-on architecture", "technical discovery", "hands-on engineering",
+    "technical transformation", "engineering transformation", "devops modernization", "cloud migration", "technical deployment", "technical client deployment", "systems engineering", "systems engineer", "data engineer", "data scientist", "data platform", "lakehouse", "ai engineer", "ml engineer", "machine learning engineer", "high-throughput", "core infrastructure"
   ];
   const hasDomainRelevance = aiDataShortRegex.test(t) || aiDataShortRegex.test(d) ||
     targetDomainPhrases.some(kw => t.includes(kw) || d.includes(kw));

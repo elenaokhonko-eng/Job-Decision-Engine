@@ -8,7 +8,12 @@
 --   - This view is additive: it does not modify any existing table
 
 -- Drop and recreate so the definition is always current
-DROP VIEW IF EXISTS v_canonical_shortlist;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.views WHERE table_schema = current_schema() AND table_name = 'v_canonical_shortlist') THEN
+    EXECUTE format('DROP VIEW %I.v_canonical_shortlist CASCADE', current_schema());
+  END IF;
+END $$;
 
 CREATE OR REPLACE VIEW v_canonical_shortlist AS
 WITH latest_version AS (
