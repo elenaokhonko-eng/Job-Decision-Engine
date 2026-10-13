@@ -8,6 +8,7 @@ import { runRequirementsExtraction as defaultRunRequirementsExtraction } from ".
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
 import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback } from "../embeddings/batchCoordinator.js";
 import { runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
+import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
@@ -413,14 +414,20 @@ export async function seedRecoverablePipelineTasks(
   const client = ownsClient ? await pool.connect() : pool;
   const summary: SeedPipelineTasksSummary = { inserted: 0, existing: 0, byType: {} };
   const maxPerType = options.maxSeedPerType ?? 500;
-  const includeRoutingDeferred = options.includeRoutingDeferred === true;
-  const routingDeferredReplayVersion = options.routingDeferredReplayVersion?.trim() || "routing_deferred_replay_v1";
+  // Technical routing failures are machine-recoverable by default. Terminal
+  // POLICY_NO_MATCH outcomes are excluded below unless a lane revision changed.
+  const includeRoutingDeferred = options.includeRoutingDeferred !== false;
+  let routingDeferredReplayVersion = options.routingDeferredReplayVersion?.trim() || "";
   const enabledTypes: Set<PipelineStageTaskType> | undefined = options.taskTypes
     ? new Set<PipelineStageTaskType>(options.taskTypes)
     : undefined;
 
   try {
     const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
+    if (!routingDeferredReplayVersion) {
+      const lanes = await loadWorkspaceLanesConfig(client as any, { context: ctx, seedIfEmpty: true });
+      routingDeferredReplayVersion = lanes.config.version || "routing_deferred_replay_v1";
+    }
 
     await selectAndEnqueue(
       client as any,
@@ -588,7 +595,13 @@ export async function seedRecoverablePipelineTasks(
        FROM canonical_jobs c
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
-          AND COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED')
+          AND (
+            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+            OR (
+              COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+              AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'
+            )
+          )
          AND EXISTS (
            SELECT 1
            FROM job_version_pipeline_state ps
@@ -654,8 +667,16 @@ export async function seedRecoverablePipelineTasks(
            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
            OR (
             $2::boolean
-             AND COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
-             AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'
+             AND (
+               (
+                 COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+                 AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'
+               )
+               OR (
+                 COALESCE(c.processing_state, c.processing_status) = 'UNMATCHED'
+                 AND c.routing_disposition = 'POLICY_NO_MATCH'
+               )
+             )
              AND NOT EXISTS (
                SELECT 1
                  FROM pipeline_tasks replay_task
@@ -685,7 +706,7 @@ export async function seedRecoverablePipelineTasks(
           canonical_job_id: row.canonical_job_id,
           job_version_id: row.job_version_id,
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
-          ...(includeRoutingDeferred && row.processing_state === "ROUTING_DEFERRED"
+          ...(includeRoutingDeferred && ["ROUTING_DEFERRED", "UNMATCHED"].includes(row.processing_state)
             ? { routing_deferred_replay_version: routingDeferredReplayVersion }
             : {}),
         },
@@ -1122,7 +1143,7 @@ function isTechnicalRoutingDeferral(state: {
   ].some((marker) => evidence.includes(marker));
 }
 
-async function markTaskTargetNeedsManualReview(
+async function markTaskTargetProcessingError(
   task: ClaimedPipelineTask,
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
@@ -1139,14 +1160,14 @@ async function markTaskTargetNeedsManualReview(
 
   await (clientOrPool as QueryClient).query(
     `UPDATE canonical_jobs
-     SET processing_state = 'NEEDS_MANUAL_REVIEW',
-         processing_status = 'NEEDS_MANUAL_REVIEW',
+     SET processing_state = 'PROCESSING_ERROR',
+         processing_status = 'PROCESSING_ERROR',
          rejection_reason = COALESCE(rejection_reason, $3),
          updated_at = NOW()
      WHERE workspace_id = $1
        AND id = $2
        AND COALESCE(processing_state, processing_status) <> 'MANUALLY_REMOVED'`,
-    [ctx.workspaceId, canonicalJobId, `Task ${task.taskKey} exhausted retries: ${errorMessage}`]
+    [ctx.workspaceId, canonicalJobId, `ENGINE_ERROR: task ${task.taskKey} exhausted automatic retries: ${errorMessage}`]
   );
 }
 
@@ -1471,6 +1492,7 @@ async function executeStageTask(
     if (
       [
         "LANE_ROUTED",
+        "UNMATCHED",
         "MATCHED",
         "QUEUED_FOR_AI",
         "EVALUATING",
@@ -1774,7 +1796,7 @@ export async function runPipelineStageTaskWorker(
             const exhausted = task.attemptNumber >= task.maxAttempts;
             await failPipelineTask(task, message, client as any, { context: ctx });
             if (exhausted) {
-              await markTaskTargetNeedsManualReview(task, client as any, ctx, message);
+              await markTaskTargetProcessingError(task, client as any, ctx, message);
               summary.deadLettered += 1;
               incrementWorker(summary, task.taskType, "deadLettered");
             }

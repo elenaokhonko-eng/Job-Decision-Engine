@@ -195,7 +195,21 @@ describe("Funnel V3 Independent Test Suite — Work Mode and Authorization (H01-
     });
 
     expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toContain("GATE_LOCATION_RESTRICTED");
+    expect(result.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+  });
+
+  it("remote foreign location metadata alone does not create a verification or rejection", () => {
+    const result = applyGlobalGates({
+      id: "remote-location-only",
+      title: "Machine Learning Engineer",
+      company_name: "Remote Systems",
+      location: "Berlin, Germany",
+      workplace_type: "REMOTE",
+      raw_description: "Remote role. Build production machine learning systems and data pipelines.",
+    });
+
+    expect(result.status).toBe("PASS");
+    expect(result.rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
   });
 
   it("H13: remote with explicitly Singapore authorization => pass", () => {

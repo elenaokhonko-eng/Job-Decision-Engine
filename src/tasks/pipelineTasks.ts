@@ -554,7 +554,11 @@ export async function failPipelineTask(
   const ownsClient = isPool(clientOrPool);
   const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
 
-  const delaySeconds = Math.min(3600, 30 * Math.pow(2, Math.max(0, task.attemptNumber - 1)));
+  // First retry is immediate; later retries back off exponentially (30s, 60s, …)
+  // and dead-letter only after the bounded max-attempt policy is exhausted.
+  const delaySeconds = task.attemptNumber <= 1
+    ? 0
+    : Math.min(3600, 30 * Math.pow(2, task.attemptNumber - 2));
   const availableAt = new Date(Date.now() + delaySeconds * 1000).toISOString();
 
   try {

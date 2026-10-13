@@ -57,6 +57,18 @@ export const ShortlistRowV2Schema = z.object({
   current_artifact_status: z.string().default("CURRENTNESS_UNKNOWN"),
   current_artifact_reason: z.string().nullable().default(null),
   blocked_task_count: z.number().int().min(0).default(0),
+  requires_user_action: z.boolean().default(false),
+  user_action_type: z.string().nullable().default(null),
+  user_action_category: z.string().nullable().default(null),
+  user_action_status: z.string().nullable().default(null),
+  technical_error_count: z.number().int().min(0).default(0),
+  pipeline_display_category: z.enum([
+    "USER_ACTION_REQUIRED",
+    "PROCESSING_AUTOMATICALLY",
+    "TECHNICAL_ERROR",
+    "REJECTED_UNMATCHED",
+    "COMPLETED",
+  ]).default("PROCESSING_AUTOMATICALLY"),
 }).passthrough();
 
 export const RejectedJobRowSchema = z.object({

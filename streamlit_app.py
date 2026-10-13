@@ -161,8 +161,14 @@ SHORTLIST_READ_MODEL_QUERY = """
       s.document_ready,
       s.current_artifact_status,
       s.current_artifact_reason,
-      s.blocked_task_count
-    FROM v_canonical_shortlist_scoped s
+      s.blocked_task_count,
+      s.requires_user_action,
+      s.user_action_type,
+      s.user_action_category,
+      s.user_action_status,
+      s.technical_error_count,
+      s.pipeline_display_category
+    FROM v_canonical_shortlist_actions_scoped s
     WHERE s.workspace_id = %s
     ORDER BY s.observed_at DESC NULLS LAST, s.canonical_job_id DESC
     LIMIT %s
@@ -376,18 +382,20 @@ def normalize_workability_facts(raw):
     }
 
 def derive_deterministic_recommendation(job):
-    # The backend decision is authoritative. Streamlit must not recompute a
-    # recommendation from stale score columns or turn missing artifacts into a
-    # recommendation.
-    artifact_status = str(job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN")
-    if artifact_status != "CURRENT_OR_NOT_APPLICABLE":
+    # The backend projection is authoritative. A stale/incomplete pipeline
+    # artifact is automatic processing, not a career-review instruction.
+    if job.get("requires_user_action") is True:
         return "VERIFY", "TRACK", None, None, job.get("recommendation_evidence_completeness")
+
+    pipeline_category = str(job.get("pipeline_display_category") or "PROCESSING_AUTOMATICALLY")
+    artifact_status = str(job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN")
+    if pipeline_category in ("PROCESSING_AUTOMATICALLY", "TECHNICAL_ERROR") or artifact_status != "CURRENT_OR_NOT_APPLICABLE":
+        return "ELIGIBLE", "TRACK", None, None, job.get("recommendation_evidence_completeness")
 
     eligibility = job.get("recommendation_eligibility")
     outcome = job.get("recommendation_outcome")
     if eligibility not in ("ELIGIBLE", "VERIFY", "INELIGIBLE"):
-        gate_status = job.get("gate_status")
-        eligibility = "ELIGIBLE" if gate_status == "PASS" else "VERIFY" if gate_status == "NEEDS_VERIFICATION" else "INELIGIBLE"
+        eligibility = "INELIGIBLE" if job.get("processing_state") in ("HARD_REJECTED", "UNMATCHED") else "ELIGIBLE"
     if outcome not in ("PRIORITY", "REVIEW", "TRACK", "SKIP"):
         outcome = "SKIP" if eligibility == "INELIGIBLE" else "TRACK"
 
@@ -504,6 +512,8 @@ def validate_shortlist_row_shape(row):
         "location",
         "workplace_type",
         "processing_state",
+        "requires_user_action",
+        "pipeline_display_category",
         "observed_at",
     ]
     missing = [key for key in required if row.get(key) is None]
@@ -1113,18 +1123,28 @@ else:
 # Metrics
 total_jobs = len(jobs_list)
 evaluated_count = sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED" and not j.get("version_mismatch"))
-recommendation_states = {"PREQUALIFIED", "LANE_ROUTED", "MATCHED", "QUEUED_FOR_AI", "AI_EVALUATED"}
-priority_count = sum(1 for j in jobs_list if j.get("processing_state") in recommendation_states and j.get("decision_outcome") == "PRIORITY")
-review_count = sum(1 for j in jobs_list if j.get("processing_state") in recommendation_states and j.get("decision_outcome") == "REVIEW")
-verify_count = sum(1 for j in jobs_list if j.get("gate_status") == "NEEDS_VERIFICATION")
+completed_categories = {"COMPLETED", "REJECTED_UNMATCHED"}
+priority_count = sum(
+    1 for j in jobs_list
+    if j.get("pipeline_display_category") in completed_categories and j.get("decision_outcome") == "PRIORITY"
+)
+review_count = sum(
+    1 for j in jobs_list
+    if j.get("pipeline_display_category") == "COMPLETED" and j.get("decision_outcome") == "REVIEW"
+)
+manual_action_count = sum(1 for j in jobs_list if j.get("requires_user_action") is True)
+automatic_processing_count = sum(1 for j in jobs_list if j.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY")
+technical_error_count = sum(1 for j in jobs_list if j.get("pipeline_display_category") == "TECHNICAL_ERROR")
 toxic_count = sum(1 for j in jobs_list if isinstance(j.get("politics_stress_score"), (int, float)) and j.get("politics_stress_score") >= 70)
 
 st.sidebar.subheader("📊 Engine Statistics")
 st.sidebar.metric("Total Vault Jobs", total_jobs)
 st.sidebar.metric("Fully Evaluated", evaluated_count)
-st.sidebar.metric("Top Recommended (Priority)", priority_count)
+st.sidebar.metric("Recommended (Priority)", priority_count)
 st.sidebar.metric("Recommended (Review)", review_count)
-st.sidebar.metric("Needs Verification", verify_count)
+st.sidebar.metric("User action required", manual_action_count)
+st.sidebar.metric("Processing automatically", automatic_processing_count)
+st.sidebar.metric("Technical errors requiring support", technical_error_count)
 st.sidebar.metric("Toxicity Flags", toxic_count)
 
 st.sidebar.markdown("---")
@@ -1192,7 +1212,23 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("🔍 Filter Listings")
 search_query = st.sidebar.text_input("Keyword Search", "")
 lane_filter = st.sidebar.selectbox("Filter Target Lane", ["All Lanes", "CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", "UNCLASSIFIED"])
-status_filter = st.sidebar.selectbox("Filter Pipeline Status", ["All Statuses", "AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED", "NEEDS_VERIFICATION", "ROUTING_DEFERRED"])
+status_filter = st.sidebar.selectbox(
+    "Filter Pipeline Status",
+    [
+        "All Statuses",
+        "RAW_STAGED",
+        "PREQUALIFIED",
+        "ROUTING_DEFERRED",
+        "LANE_ROUTED",
+        "QUEUED_FOR_AI",
+        "EVALUATING",
+        "AI_EVALUATED",
+        "MATCHED",
+        "UNMATCHED",
+        "NEEDS_VERIFICATION",
+        "PROCESSING_ERROR",
+    ],
+)
 source_values = sorted({(j.get("source") or "UNKNOWN") for j in jobs_list})
 board_filter = st.sidebar.selectbox("Filter Source", ["All Sources", *source_values])
 track_values = sorted({(j.get("primary_lane") or "UNASSIGNED") for j in jobs_list})
@@ -1241,7 +1277,7 @@ with tab_dashboard:
     # Deterministic Top Recommended list (LLM next_action is displayed but not authoritative).
     top_recommended = [
         j for j in jobs_list
-        if j.get("processing_state") in recommendation_states
+        if j.get("pipeline_display_category") == "COMPLETED"
         and not j.get("version_mismatch")
         and j.get("decision_outcome") in ("PRIORITY", "REVIEW")
     ]
@@ -1301,7 +1337,63 @@ with tab_dashboard:
                 else:
                     st.write("Verify Job Ad & Apply URL unavailable.")
 
+    processing_jobs = [
+        job for job in jobs_list
+        if job.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY"
+    ]
+    technical_error_jobs = [
+        job for job in jobs_list
+        if job.get("pipeline_display_category") == "TECHNICAL_ERROR"
+    ]
+    unmatched_jobs = [
+        job for job in jobs_list
+        if job.get("pipeline_display_category") == "REJECTED_UNMATCHED"
+    ]
+
     st.markdown("---")
+    with st.expander(f"⚙️ Processing automatically ({len(processing_jobs)})", expanded=False):
+        st.caption("These jobs are advancing or retrying automatically. No user action is required.")
+        if processing_jobs:
+            st.dataframe([
+                {
+                    "Title": job.get("title"),
+                    "Company": job.get("company"),
+                    "State": job.get("processing_state"),
+                    "Reason": job.get("current_artifact_reason") or "Automatic pipeline work",
+                }
+                for job in processing_jobs[:100]
+            ], use_container_width=True)
+        else:
+            st.info("No jobs are awaiting automatic pipeline work.")
+
+    with st.expander(f"🔴 Rejected / Unmatched ({len(rejected_jobs_audit) + len(unmatched_jobs)})", expanded=False):
+        st.caption("Terminal career outcomes. These are not retry queues.")
+        if unmatched_jobs:
+            st.dataframe([
+                {
+                    "Title": job.get("title"),
+                    "Company": job.get("company"),
+                    "Reason": job.get("rejection_reason") or "UNMATCHED",
+                }
+                for job in unmatched_jobs[:100]
+            ], use_container_width=True)
+        else:
+            st.info("No unmatched jobs in the current shortlist.")
+
+    with st.expander(f"🛠️ Technical errors requiring support ({len(technical_error_jobs)})", expanded=False):
+        st.caption("These are dead-lettered processing dependencies, not career-review items.")
+        if technical_error_jobs:
+            st.dataframe([
+                {
+                    "Title": job.get("title"),
+                    "Company": job.get("company"),
+                    "State": job.get("processing_state"),
+                    "Reason": job.get("current_artifact_reason") or job.get("rejection_reason"),
+                }
+                for job in technical_error_jobs[:100]
+            ], use_container_width=True)
+        else:
+            st.info("No technical support items.")
 
     # Interactive search filters inside the main tab
     search_col1, search_col2 = st.columns(2)

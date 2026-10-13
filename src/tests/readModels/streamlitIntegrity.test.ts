@@ -16,7 +16,7 @@ describe('streamlit read-model integrity', () => {
     const appPath = path.resolve(process.cwd(), 'streamlit_app.py');
     const content = fs.readFileSync(appPath, 'utf8');
 
-    expect(content).toContain('FROM v_canonical_shortlist_scoped');
+    expect(content).toContain('FROM v_canonical_shortlist_actions_scoped');
     expect(content).toContain('FROM v_rejected_jobs_audit_scoped');
     expect(content).toContain('set_session(readonly=True, autocommit=True)');
     expect(content).toContain('DATABASE_URL');
@@ -26,6 +26,8 @@ describe('streamlit read-model integrity', () => {
     expect(content).not.toContain('JOIN canonical_jobs');
     expect(content).toContain('JDEC_API_BASE_URL');
     expect(content).toContain('current_artifact_status');
+    expect(content).toContain('requires_user_action');
+    expect(content).toContain('pipeline_display_category');
     expect(content).not.toContain('http://localhost:3000');
   });
 
@@ -33,7 +35,7 @@ describe('streamlit read-model integrity', () => {
     const routerPath = path.resolve(process.cwd(), 'src', 'api', 'v2', 'router.ts');
     const content = fs.readFileSync(routerPath, 'utf8');
 
-    expect(content).toContain('FROM v_canonical_shortlist_scoped');
+    expect(content).toContain('FROM v_canonical_shortlist_actions_scoped');
     expect(content).toContain('FROM v_rejected_jobs_audit_scoped');
   });
 });

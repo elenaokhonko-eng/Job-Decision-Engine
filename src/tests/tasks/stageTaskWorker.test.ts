@@ -787,7 +787,7 @@ describe("stageTaskWorker", () => {
     expect(calls.some((sql) => sql.includes("FROM raw_job_observations obs"))).toBe(false);
   });
 
-  it("requires explicit opt-in before seeding routing-deferred recovery tasks", async () => {
+  it("automatically seeds technical routing-deferred recovery tasks", async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = [];
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params });
@@ -798,7 +798,6 @@ describe("stageTaskWorker", () => {
       context: ctx,
       taskTypes: ["ROUTE_LANE"],
       maxSeedPerType: 103,
-      includeRoutingDeferred: true,
     });
 
     const routeSeed = calls.find(
@@ -808,8 +807,9 @@ describe("stageTaskWorker", () => {
         call.sql.includes("ROUTING_DEFERRED")
     );
     expect(routeSeed?.sql).toContain("$2::boolean");
+    expect(routeSeed?.sql).toContain("COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'");
     expect(routeSeed?.params?.[1]).toBe(true);
-    expect(routeSeed?.params?.[2]).toBe("routing_deferred_replay_v1");
+    expect(routeSeed?.params?.[2]).toBe("lanes_2.2.0");
     expect(routeSeed?.params?.[3]).toBe(103);
   });
 
@@ -1277,7 +1277,7 @@ describe("stageTaskWorker", () => {
       calls.some(
         (call) =>
           call.sql.includes("UPDATE canonical_jobs") &&
-          call.sql.includes("NEEDS_MANUAL_REVIEW") &&
+          call.sql.includes("PROCESSING_ERROR") &&
           call.params?.[1] === "job-1"
       )
     ).toBe(true);

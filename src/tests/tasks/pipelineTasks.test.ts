@@ -272,6 +272,41 @@ describe("pipelineTasks", () => {
     );
   });
 
+  it("retries the first technical failure immediately before applying exponential backoff", async () => {
+    let updateParams: unknown[] | undefined;
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        updateParams = params;
+        return { rows: [{ id: "task-retry" }], rowCount: 1 };
+      }
+      return { rows: [] };
+    });
+    const fakeClient = { query, release: vi.fn() } as any;
+    const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
+    const before = Date.now();
+
+    await failPipelineTask(
+      {
+        taskId: "task-retry",
+        taskKey: "PUBLISH_EMBEDDING:version-1",
+        taskType: "PUBLISH_EMBEDDING",
+        payload: {},
+        leaseId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        leaseExpiresAt: new Date().toISOString(),
+        attemptNumber: 1,
+        maxAttempts: 8,
+      },
+      "embedding dependency unavailable",
+      fakePool,
+      { context: ctx }
+    );
+
+    expect(updateParams?.[3]).toBe("RETRY_WAIT");
+    expect(new Date(String(updateParams?.[4])).getTime() - before).toBeLessThan(2_000);
+  });
+
   it("failPipelineTask rolls back when the lease is lost", async () => {
     const calls: string[] = [];
     const query = vi.fn(async (sql: string) => {

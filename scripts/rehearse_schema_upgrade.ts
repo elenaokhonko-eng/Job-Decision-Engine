@@ -131,12 +131,13 @@ async function main() {
     '053_gate_decision_pipeline_run_id.sql',
     '054_repair_rejected_read_model_views.sql',
     '055_repair_shortlist_nullable_priority.sql',
+    '056_authoritative_user_action_projection.sql',
   ];
   const missingFromApplied = expectedPending.filter((m) => !postStatus.applied.includes(m));
   if (missingFromApplied.length > 0) {
     throw new Error(`FAIL: Missing migrations from schema_migrations: ${missingFromApplied.join(', ')}`);
   }
-  console.log("✓ All 6 pending migrations recorded in schema_migrations.");
+  console.log("✓ All 7 pending migrations recorded in schema_migrations.");
 
   // 2. Budget tables exist
   const budgetTables = ['ai_evaluation_budget_runs', 'ai_evaluation_budget_usage', 'evaluation_budget_deferrals'];
@@ -193,6 +194,8 @@ async function main() {
     'v_rejected_jobs_audit_scoped',
     'v_canonical_shortlist',
     'v_canonical_shortlist_scoped',
+    'v_current_user_actions',
+    'v_canonical_shortlist_actions_scoped',
     'v_matchable_nodes',
     'v_published_semantic_embeddings',
     'v_application_tracker',

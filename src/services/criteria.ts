@@ -196,10 +196,6 @@ export function evaluateWorkability(
     answerContext,
     VERIFICATION_ANSWER_KEYS.workplaceOfficeDays,
   ) && answerContext?.overrides.workplaceOfficeDaysCap === null;
-  const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(
-    answerContext,
-    VERIFICATION_ANSWER_KEYS.workAuthorization,
-  ) && answerContext?.overrides.workAuthorizationRegions.length === 0;
   const wp = normalizeWorkMode(workplaceType);
   const loc = (location || "").toLowerCase().trim();
   const d = (description || "").toLowerCase().trim();
@@ -292,19 +288,11 @@ export function evaluateWorkability(
     : [];
   if (explicitlyDisallowed.length > 0) {
     const territory = explicitlyDisallowed[0];
-    if (workAuthorizationAnswerUnknown) {
-      return {
-        workable: true,
-        needsVerify: true,
-        reason: `Work authorization for ${territory} is unknown; needs manual verification`,
-        facts: { ...baseFacts, location_restriction: territory },
-      };
-    }
     return {
       workable: false,
       needsVerify: false,
-      reason: `Geographic restriction detected: ${territory}`,
-      reasonCode: "GATE_LOCATION_RESTRICTED",
+      reason: `Explicit work-authorization restriction detected: ${territory}`,
+      reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
       facts: { ...baseFacts, location_restriction: territory }
     };
   }
@@ -629,10 +617,6 @@ export function applyGlobalGates(
     VERIFICATION_ANSWER_KEYS.travelPercentage,
   );
   const travelAnswerUnknown = travelAnswerProvided && answerContext?.overrides.travelPercentageCap === null;
-  const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(
-    answerContext,
-    VERIFICATION_ANSWER_KEYS.workAuthorization,
-  ) && answerContext?.overrides.workAuthorizationRegions.length === 0;
   const t = (job.title || "").toLowerCase();
   const c = (job.company_name || "").toLowerCase();
   const d = extractDescriptionText(job);
@@ -672,6 +656,9 @@ export function applyGlobalGates(
     }
     if (workability.reasonCode === "GATE_LOCATION_RESTRICTED") {
       return makeReject(["GATE_LOCATION_RESTRICTED"], [workability.reason || "Geographic restriction detected"], workability.facts);
+    }
+    if (workability.reasonCode === "WORK_AUTHORIZATION_INCOMPATIBLE") {
+      return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [workability.reason || "Explicit work-authorization restriction detected"], workability.facts);
     }
     if (workability.reasonCode === "GATE_UNKNOWN_WORK_MODE") {
       return makeReject(["GATE_UNKNOWN_WORK_MODE"], [workability.reason || "Workplace model is unspecified"], workability.facts);
@@ -855,23 +842,19 @@ export function applyGlobalGates(
   const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
   const locationTerritories = extractTerritories(String(job.location || ""));
   const descriptionTerritories = extractTerritories(d);
+  const explicitlyRemote = wp === "REMOTE" || /\b(fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|work\s+from\s+home|work\s+remotely)\b/i.test(d);
   const disallowedTerritories = effectivePolicy.rejectExplicitForeignTerritory
     ? [
-        ...locationTerritories,
+        // A remote listing's display location is not an employment-eligibility requirement.
+        ...(explicitlyRemote ? [] : locationTerritories),
         ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory)),
       ].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory))
     : [];
   if (disallowedTerritories.length > 0) {
     const territory = disallowedTerritories[0];
-    if (!workAuthorizationAnswerUnknown) {
-      return makeReject(["GATE_LOCATION_RESTRICTED"], [`Explicit work territory restriction: ${territory}`], {
-        location_restriction: territory,
-      });
-    }
-    pendingVerification = {
-      reason: `Work authorization for ${territory} is unknown; needs manual verification`,
-      facts: { location_restriction: territory },
-    };
+    return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit work territory restriction: ${territory}`], {
+      location_restriction: territory,
+    });
   }
 
   // ── 5. Lifestyle incompatibilities ──

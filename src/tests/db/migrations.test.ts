@@ -148,6 +148,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("050_ai_evaluation_budget_deferral.sql");
     expect(versions).toContain("054_repair_rejected_read_model_views.sql");
     expect(versions).toContain("055_repair_shortlist_nullable_priority.sql");
+    expect(versions).toContain("056_authoritative_user_action_projection.sql");
   });
 
   it("embedding inputs preserve history with current-row uniqueness and current-only views", async () => {
@@ -491,6 +492,141 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     } finally {
       await client.query("RESET search_path").catch(() => undefined);
       await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+      client.release();
+    }
+  });
+
+  it("authoritative user-action projection exposes explicit action and technical-state fields", async () => {
+    const { rows } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'v_canonical_shortlist_actions_scoped'
+        AND column_name IN (
+          'requires_user_action',
+          'user_action_type',
+          'user_action_category',
+          'user_action_status',
+          'technical_error_count',
+          'pipeline_display_category'
+        )
+    `);
+    expect(rows.map((row) => row.column_name)).toEqual(expect.arrayContaining([
+      'requires_user_action',
+      'user_action_type',
+      'user_action_category',
+      'user_action_status',
+      'technical_error_count',
+      'pipeline_display_category',
+    ]));
+
+    const { rows: invariantRows } = await realPool.query<{ invalid_actions: number }>(`
+      SELECT COUNT(*)::int AS invalid_actions
+      FROM v_current_user_actions action
+      LEFT JOIN verification_question_job_links link
+        ON link.workspace_id = action.workspace_id
+       AND link.verification_question_id = action.verification_question_id
+       AND link.canonical_job_id = action.canonical_job_id
+       AND link.job_version_id = action.job_version_id
+      WHERE link.status <> 'OPEN'
+    `);
+    expect(invariantRows[0]?.invalid_actions).toBe(0);
+  });
+
+  it("requires a current open verification action before a shortlist row needs user action", async () => {
+    const client = await realPool.connect();
+
+    try {
+      await client.query("BEGIN");
+      const workspace = await client.query<{ id: string }>(
+        `SELECT id FROM workspaces WHERE workspace_key = 'default' LIMIT 1`
+      );
+      const workspaceId = workspace.rows[0]?.id;
+      expect(workspaceId).toBeTruthy();
+
+      const canonical = await client.query<{ id: string }>(
+        `INSERT INTO canonical_jobs (
+           workspace_id, company_name, normalized_title, canonical_url,
+           processing_state, processing_status, gate_decision
+         ) VALUES ($1, 'Action Test Co', 'Action Test Engineer', 'https://example.test/action',
+                   'NEEDS_VERIFICATION', 'NEEDS_VERIFICATION', 'NEEDS_VERIFICATION')
+         RETURNING id`,
+        [workspaceId]
+      );
+      const canonicalJobId = canonical.rows[0].id;
+      const version = await client.query<{ id: string }>(
+        `INSERT INTO job_versions (workspace_id, canonical_job_id, content_hash, description_text)
+         VALUES ($1, $2, 'action-test-content', 'Remote machine learning engineering role.')
+         RETURNING id`,
+        [workspaceId, canonicalJobId]
+      );
+      const jobVersionId = version.rows[0].id;
+      await client.query(
+        `UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $2`,
+        [jobVersionId, canonicalJobId]
+      );
+      const gate = await client.query<{ id: string }>(
+        `INSERT INTO gate_decisions (
+           workspace_id, canonical_job_id, job_version_id, gate_version,
+           decision, rejection_codes, evidence_quotes, workability_facts
+         ) VALUES ($1, $2, $3, 'test', 'NEEDS_VERIFICATION',
+                   '["NEEDS_VERIFICATION_OFFICE_DAYS"]'::jsonb, '[]'::jsonb, '{}'::jsonb)
+         RETURNING id`,
+        [workspaceId, canonicalJobId, jobVersionId]
+      );
+      const question = await client.query<{ id: string }>(
+        `INSERT INTO verification_questions (
+           workspace_id, question_key, category, question_text, linked_job_ids, status
+         ) VALUES ($1, 'test-current-action-' || gen_random_uuid()::text,
+                   'WORKPLACE_MODEL', 'Confirm office-day requirement.',
+                   jsonb_build_array($2::text), 'PENDING')
+         RETURNING id`,
+        [workspaceId, canonicalJobId]
+      );
+      await client.query(
+        `INSERT INTO verification_question_job_links (
+           workspace_id, verification_question_id, canonical_job_id, job_version_id,
+           gate_decision_id, status
+         ) VALUES ($1, $2, $3, $4, $5, 'OPEN')`,
+        [workspaceId, question.rows[0].id, canonicalJobId, jobVersionId, gate.rows[0].id]
+      );
+
+      const current = await client.query<{ requires_user_action: boolean; pipeline_display_category: string }>(
+        `SELECT requires_user_action, pipeline_display_category
+         FROM v_canonical_shortlist_actions_scoped
+         WHERE workspace_id = $1 AND canonical_job_id = $2`,
+        [workspaceId, canonicalJobId]
+      );
+      expect(current.rows[0]).toMatchObject({
+        requires_user_action: true,
+        pipeline_display_category: 'USER_ACTION_REQUIRED',
+      });
+
+      // A newer job version invalidates the old gate/question link, so stale
+      // history cannot inflate manual-action counters.
+      const nextVersion = await client.query<{ id: string }>(
+        `INSERT INTO job_versions (workspace_id, canonical_job_id, content_hash, description_text)
+         VALUES ($1, $2, 'action-test-content-next', 'Updated remote role.')
+         RETURNING id`,
+        [workspaceId, canonicalJobId]
+      );
+      await client.query(
+        `UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE id = $2`,
+        [nextVersion.rows[0].id, canonicalJobId]
+      );
+
+      const stale = await client.query<{ requires_user_action: boolean }>(
+        `SELECT requires_user_action
+         FROM v_canonical_shortlist_actions_scoped
+         WHERE workspace_id = $1 AND canonical_job_id = $2`,
+        [workspaceId, canonicalJobId]
+      );
+      expect(stale.rows[0]?.requires_user_action).toBe(false);
+      await client.query("ROLLBACK");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
       client.release();
     }
   });

@@ -404,6 +404,54 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     producerStage: "v_canonical_shortlist_scoped",
     transformation: "Count of dependency-blocked tasks associated with the displayed job/version",
     nullable: false
+  },
+  {
+    field: "requires_user_action",
+    sourceTable: "verification_question_job_links",
+    sourceColumn: "status + current job/profile/preference contexts",
+    producerStage: "v_current_user_actions",
+    transformation: "True only for an OPEN immutable verification action linked to the current job version and current context",
+    nullable: false
+  },
+  {
+    field: "user_action_type",
+    sourceTable: "verification_questions",
+    sourceColumn: "question category/status",
+    producerStage: "v_current_user_actions",
+    transformation: "Explicit action-artifact type; null when no current user action exists",
+    nullable: true
+  },
+  {
+    field: "user_action_category",
+    sourceTable: "verification_questions",
+    sourceColumn: "category",
+    producerStage: "v_current_user_actions",
+    transformation: "Question category for the current immutable action artifact",
+    nullable: true
+  },
+  {
+    field: "user_action_status",
+    sourceTable: "verification_question_job_links",
+    sourceColumn: "status",
+    producerStage: "v_current_user_actions",
+    transformation: "Current OPEN action status, otherwise null",
+    nullable: true
+  },
+  {
+    field: "technical_error_count",
+    sourceTable: "pipeline_tasks",
+    sourceColumn: "status/payload",
+    producerStage: "v_canonical_shortlist_actions_scoped",
+    transformation: "Dead-lettered machine tasks for the current job/version; support signal, not career review",
+    nullable: false
+  },
+  {
+    field: "pipeline_display_category",
+    sourceTable: "v_canonical_shortlist_actions_scoped",
+    sourceColumn: "derived",
+    producerStage: "v_canonical_shortlist_actions_scoped",
+    transformation: "Separates user action, automatic processing, technical support errors, terminal non-matches, and completed jobs",
+    nullable: false
   }
 ];
 

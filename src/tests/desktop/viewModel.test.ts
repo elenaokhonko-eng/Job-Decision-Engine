@@ -57,6 +57,12 @@ const baseJob: ShortlistRow = {
   current_artifact_status: "CURRENT_OR_NOT_APPLICABLE",
   current_artifact_reason: null,
   blocked_task_count: 0,
+  requires_user_action: false,
+  user_action_type: null,
+  user_action_category: null,
+  user_action_status: null,
+  technical_error_count: 0,
+  pipeline_display_category: "COMPLETED",
 };
 
 const baseApplication: ApplicationRecord = {
@@ -125,24 +131,56 @@ describe("desktop view model", () => {
     expect(safeExternalHref("not a url")).toBeNull();
   });
 
-  it("labels jobs from persisted deterministic state", () => {
+  it("labels only explicit user-action artifacts as user action", () => {
     expect(jobOutcomeLabel(baseJob)).toBe("PRIORITY");
-    expect(jobOutcomeLabel({ ...baseJob, recommendation_outcome: null, gate_status: "NEEDS_VERIFICATION" })).toBe("VERIFY");
-    expect(jobOutcomeLabel({ ...baseJob, current_artifact_status: "MATCH_STALE" })).toBe("VERIFY");
+    expect(jobOutcomeLabel({
+      ...baseJob,
+      gate_status: "NEEDS_VERIFICATION",
+      processing_state: "NEEDS_VERIFICATION",
+      pipeline_display_category: "PROCESSING_AUTOMATICALLY",
+    })).toBe("PROCESSING");
+    expect(jobOutcomeLabel({ ...baseJob, current_artifact_status: "MATCH_STALE" })).toBe("PROCESSING");
+    expect(jobOutcomeLabel({ ...baseJob, requires_user_action: true, pipeline_display_category: "USER_ACTION_REQUIRED" })).toBe("ACTION REQUIRED");
+    expect(jobOutcomeLabel({ ...baseJob, processing_state: "PROCESSING_ERROR", pipeline_display_category: "TECHNICAL_ERROR" })).toBe("ERROR");
   });
 
-  it("summarizes desktop counters without fabricating records", () => {
+  it("counts only current open user-action artifacts as manual action", () => {
     const counts = summarizeDesktopCounts(
-      [baseJob, { ...baseJob, canonical_job_id: "55555555-5555-4555-8555-555555555555", gate_status: "NEEDS_VERIFICATION", recommendation_outcome: null }],
+      [
+        baseJob,
+        {
+          ...baseJob,
+          canonical_job_id: "55555555-5555-4555-8555-555555555555",
+          gate_status: "NEEDS_VERIFICATION",
+          recommendation_outcome: null,
+          processing_state: "NEEDS_VERIFICATION",
+          pipeline_display_category: "PROCESSING_AUTOMATICALLY",
+        },
+        {
+          ...baseJob,
+          canonical_job_id: "77777777-7777-4777-8777-777777777777",
+          requires_user_action: true,
+          user_action_status: "OPEN",
+          pipeline_display_category: "USER_ACTION_REQUIRED",
+        },
+        {
+          ...baseJob,
+          canonical_job_id: "88888888-8888-4888-8888-888888888888",
+          processing_state: "PROCESSING_ERROR",
+          pipeline_display_category: "TECHNICAL_ERROR",
+        },
+      ],
       [baseApplication, { ...baseApplication, application_record_id: "66666666-6666-4666-8666-666666666666", application_status: "SUBMITTED" }],
-      [baseTask, { ...baseTask, id: "77777777-7777-4777-8777-777777777777", status: "COMPLETED" }],
+      [baseTask, { ...baseTask, id: "99999999-9999-4999-8999-999999999999", status: "COMPLETED" }],
       [baseSource, { ...baseSource, source_key: "stale", status: "DISABLED" }]
     );
 
     expect(counts).toMatchObject({
-      totalJobs: 2,
+      totalJobs: 4,
       priorityJobs: 1,
-      needsVerificationJobs: 1,
+      manualActionJobs: 1,
+      processingAutomaticallyJobs: 1,
+      technicalErrorJobs: 1,
       activeApplications: 1,
       submittedApplications: 1,
       runningTasks: 1,

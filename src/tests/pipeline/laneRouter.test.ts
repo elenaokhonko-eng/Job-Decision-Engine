@@ -320,7 +320,7 @@ describe('Pipeline Stage: Lane Routing', () => {
     const result = await runLaneRouting(undefined, { context });
 
     expect(result.routed).toBe(0);
-    expect(result.deferred).toBe(1);
+    expect(result.deferred).toBe(0);
 
     const selectCall = (mPool.query as any).mock.calls[0];
     expect(selectCall[0]).toContain("ROUTING_DEFERRED");
@@ -331,9 +331,11 @@ describe('Pipeline Stage: Lane Routing', () => {
     );
     expect(updateCall?.[1][0]).toBe('UNCLASSIFIED');
     expect(updateCall?.[1][1]).toBeCloseTo(0.5);
-    expect(updateCall?.[1][2]).toBe('ROUTING_DEFERRED');
+    expect(updateCall?.[1][2]).toBe('UNMATCHED');
+    expect(updateCall?.[1][9]).toBe(true);
     const evidence = JSON.parse(updateCall?.[1][5]);
     expect(evidence[0]).toBe('ROUTING_POLICY_NO_MATCH');
+    expect(evidence).toContain('NO_ACTIVE_LANE_MATCH');
     expect(evidence).toContain(
       'CORE_AI_DATA:blocked_by=semantic:0.500<0.900;score=0.500;threshold=0.900;domain=1.000/0.600;function=1.000/0.600'
     );

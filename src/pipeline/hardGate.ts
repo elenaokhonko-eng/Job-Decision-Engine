@@ -17,6 +17,7 @@ import { calculateProfessionalExperienceYears, compareStructuredRequirement, typ
 import {
   applyVerificationAnswerOverrides,
   extractTerritories,
+  hasExplicitTerritoryRestriction,
   isVerificationAnswerContextApplicable,
   isVerificationAnswerProvided,
   loadVerificationAnswerContext,
@@ -178,10 +179,6 @@ export function applyPersistedRequirementGates(
     answerContext,
     VERIFICATION_ANSWER_KEYS.travelPercentage,
   ) && answerContext?.overrides.travelPercentageCap === null;
-  const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(
-    answerContext,
-    VERIFICATION_ANSWER_KEYS.workAuthorization,
-  ) && answerContext?.overrides.workAuthorizationRegions.length === 0;
   const title = job.title || "";
   let pendingVerification: { codes: string[]; evidence: string[]; facts?: Partial<GateResult["workability_facts"]> } | null = null;
   let inferredWorkabilityFacts: Partial<GateResult["workability_facts"]> = {};
@@ -390,25 +387,23 @@ export function applyPersistedRequirementGates(
 
   const workAuthReq = deterministicRequirements.find((r) => r.requirement_type === "WORK_AUTH");
   if (workAuthReq) {
-    const authText = quoteOrText(workAuthReq).toLowerCase();
-    const requiredTerritories = extractTerritories(authText);
+    const authText = quoteOrText(workAuthReq);
     const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
-    const foreignRequired = requiredTerritories.filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory));
-    if (effectivePolicy.rejectExplicitForeignTerritory && foreignRequired.length > 0 && !workAuthorizationAnswerUnknown) {
+    const explicitlyRestrictedTerritories = extractTerritories(authText)
+      .filter((territory) => hasExplicitTerritoryRestriction(authText, territory));
+    const incompatibleTerritory = explicitlyRestrictedTerritories.find(
+      (territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory)
+    );
+
+    // A city/country label, an employer location, or generic "remote" text is
+    // not a work-authorization restriction. Only explicit eligibility evidence
+    // can reject; every other remote role advances automatically.
+    if (effectivePolicy.rejectExplicitForeignTerritory && incompatibleTerritory) {
       return makeReject(
-        ["GATE_LOCATION_RESTRICTED"],
-        [quoteOrText(workAuthReq)],
-        { location_restriction: foreignRequired[0] }
+        ["WORK_AUTHORIZATION_INCOMPATIBLE"],
+        [authText],
+        { location_restriction: incompatibleTerritory }
       );
-    }
-    if (
-      (requiredTerritories.length === 0 || (workAuthorizationAnswerUnknown && foreignRequired.length > 0))
-      && effectivePolicy.unknownWorkAuthorizationNeedsVerification
-    ) {
-      pendingVerification = {
-        codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_WORK_AUTH"],
-        evidence: [quoteOrText(workAuthReq)],
-      };
     }
   }
 
@@ -564,8 +559,6 @@ export function applyExactProfileGates(
 
   const mismatches: string[] = [];
   const mismatchEvidence: string[] = [];
-  const unknowns: string[] = [];
-  const unknownEvidence: string[] = [];
   for (const requirement of exactRequirements) {
     if (isRequirementOptional(requirement)) {
       continue;
@@ -586,16 +579,15 @@ export function applyExactProfileGates(
     }
 
     if (comparison.status === "MISMATCH") {
-      mismatches.push(`GATE_${requirement.requirement_type}_MISMATCH`);
+      mismatches.push("WORK_AUTHORIZATION_INCOMPATIBLE");
       mismatchEvidence.push(comparison.rationale);
-    } else if (comparison.status === "UNKNOWN") {
-      unknowns.push(`NEEDS_VERIFICATION_${requirement.requirement_type}`);
-      unknownEvidence.push(comparison.rationale);
     }
+    // An absent profile authorization fact is not a manual-review trigger.
+    // Explicit incompatible evidence is handled above; otherwise the remote
+    // role advances under the active Singapore authorization policy.
   }
 
   if (mismatches.length > 0) return makeReject(mismatches, mismatchEvidence);
-  if (unknowns.length > 0) return makeVerification(unknowns, unknownEvidence);
   return makePass();
 }
 
