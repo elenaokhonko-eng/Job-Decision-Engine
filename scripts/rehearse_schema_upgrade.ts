@@ -3,8 +3,8 @@ import pg from "pg";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { runMigrations, getMigrationStatus } from "../src/db/migrate.js";
 import {
-  getProductionDatabaseUrl,
-  requireProductionWriteConfirmation,
+  getRehearsalDatabaseTarget,
+  requireRehearsalWriteConfirmation,
 } from "./productionRehearsalTarget.js";
 
 interface SchemaSnapshot {
@@ -73,14 +73,14 @@ async function captureSnapshot(client: pg.Client): Promise<SchemaSnapshot> {
 }
 
 async function main() {
-  requireProductionWriteConfirmation();
-  const productionUrl = getProductionDatabaseUrl();
+  const target = getRehearsalDatabaseTarget();
+  requireRehearsalWriteConfirmation(target);
 
   console.log("==================================================");
-  console.log("PHASE 2: PRODUCTION SCHEMA UPGRADE REHEARSAL");
+  console.log(`PHASE 2: ${target.environment} SCHEMA UPGRADE REHEARSAL`);
   console.log("==================================================");
 
-  const client = new pg.Client(pgConnectionConfig(productionUrl));
+  const client = new pg.Client(pgConnectionConfig(target.databaseUrl));
   await client.connect();
 
   console.log("\n[1] Capturing PRE-MIGRATION schema snapshot...");

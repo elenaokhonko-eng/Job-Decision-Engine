@@ -17,8 +17,8 @@ import {
   shouldReplayAffectedHistoricalJobs,
 } from "./historicalReplayScope.js";
 import {
-  getProductionDatabaseUrl,
-  requireProductionWriteConfirmation,
+  getRehearsalDatabaseTarget,
+  requireRehearsalWriteConfirmation,
 } from "./productionRehearsalTarget.js";
 
 dotenv.config();
@@ -590,15 +590,15 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
 }
 
 async function main() {
-  requireProductionWriteConfirmation();
-  const productionUrl = getProductionDatabaseUrl();
+  const target = getRehearsalDatabaseTarget();
+  requireRehearsalWriteConfirmation(target);
   const canariesOnly = isCanariesOnlyMode();
 
   console.log("================================================================================");
-  console.log(" PHASE 3 — HISTORICAL JOB RECOVERY & PRODUCTION REHEARSAL");
+  console.log(` PHASE 3 — HISTORICAL JOB RECOVERY & ${target.environment} REHEARSAL`);
   console.log("================================================================================");
 
-  const pool = new pg.Pool(pgPoolConfig(productionUrl));
+  const pool = new pg.Pool(pgPoolConfig(target.databaseUrl));
   const client = await pool.connect();
 
   try {
@@ -1092,11 +1092,23 @@ async function main() {
     });
     console.log("Second affected-cohort gate run (should be 0 unhandled):", secondGateResult);
 
-    const secondLaneResult = await runLaneRouting(pool, {
-      context: ctx,
-      canonicalJobIds: affectedJobIds,
-    });
-    console.log("Second affected-cohort lane run (should be 0 newly routed):", secondLaneResult);
+    const { rows: secondTechnicalDeferred } = await client.query<{ id: string }>(`
+      SELECT id
+      FROM canonical_jobs
+      WHERE workspace_id = $1
+        AND id = ANY($2::uuid[])
+        AND COALESCE(processing_state, processing_status) = 'ROUTING_DEFERRED'
+        AND COALESCE(routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'
+      ORDER BY id`,
+      [ctx.workspaceId, affectedJobIds]
+    );
+    const secondLaneResult = secondTechnicalDeferred.length > 0
+      ? await runLaneRouting(pool, {
+          context: ctx,
+          canonicalJobIds: secondTechnicalDeferred.map((row) => row.id),
+        })
+      : { routed: 0, deferred: 0 };
+    console.log("Second affected-cohort technical lane run (should be 0 newly routed):", secondLaneResult);
 
     const secondMatchResult = await runDeterministicMatcher(pool, {
       context: ctx,
@@ -1151,6 +1163,8 @@ async function main() {
       "v_rejected_jobs_audit_scoped",
       "v_canonical_shortlist",
       "v_canonical_shortlist_scoped",
+      "v_current_user_actions",
+      "v_canonical_shortlist_actions_scoped",
       "v_matchable_nodes",
       "v_published_semantic_embeddings",
     ];
