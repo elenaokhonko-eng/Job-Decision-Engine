@@ -89,15 +89,19 @@ interface ReplayAuditCounts {
   gateDecisions: number;
   laneDecisions: number;
   matchRuns: number;
+  deterministicDecisions: number;
   evaluationQueue: number;
   pipelineTasks: number;
   pipelineTaskAttempts: number;
+  budgetUsage: number;
+  budgetDeferrals: number;
 }
 
 async function getReplayAuditCounts(
   client: pg.PoolClient,
   workspaceId: string,
   canonicalJobIds: string[],
+  budgetRunId: string,
 ): Promise<ReplayAuditCounts> {
   const result = await client.query<ReplayAuditCounts>(`
     SELECT
@@ -121,6 +125,12 @@ async function getReplayAuditCounts(
       ) AS "matchRuns",
       (
         SELECT COUNT(*)::int
+        FROM deterministic_decisions dd
+        WHERE dd.workspace_id = $1
+          AND dd.canonical_job_id = ANY($2::uuid[])
+      ) AS "deterministicDecisions",
+      (
+        SELECT COUNT(*)::int
         FROM evaluation_queue eq
         WHERE eq.workspace_id = $1
           AND eq.canonical_job_id = ANY($2::uuid[])
@@ -137,8 +147,21 @@ async function getReplayAuditCounts(
         JOIN pipeline_tasks pt ON pt.id = pta.task_id
         WHERE pta.workspace_id = $1
           AND pt.payload ->> 'canonical_job_id' = ANY($3::text[])
-      ) AS "pipelineTaskAttempts"
-  `, [workspaceId, canonicalJobIds, canonicalJobIds]);
+      ) AS "pipelineTaskAttempts",
+      (
+        SELECT COUNT(*)::int
+        FROM ai_evaluation_budget_usage aebu
+        WHERE aebu.workspace_id = $1
+          AND aebu.budget_run_id = $4::uuid
+      ) AS "budgetUsage",
+      (
+        SELECT COUNT(*)::int
+        FROM evaluation_budget_deferrals ebd
+        WHERE ebd.workspace_id = $1
+          AND ebd.budget_run_id = $4::uuid
+          AND ebd.canonical_job_id = ANY($2::uuid[])
+      ) AS "budgetDeferrals"
+  `, [workspaceId, canonicalJobIds, canonicalJobIds, budgetRunId]);
 
   const counts = result.rows[0];
   if (!counts) {
@@ -1005,15 +1028,11 @@ async function main() {
 
     // Step 4d: Recompute recommendations only for affected records.
     console.log("Executing Recommendation Decider for affected historical cohort...");
-    try {
-      const recDecideResult = await runRecommendationDecider(pool, {
-        context: ctx,
-        canonicalJobIds: affectedJobIds,
-      });
-      console.log("Affected Cohort Recommendation Decider Results:", recDecideResult);
-    } catch (recErr) {
-      console.warn("Recommendation Decider notice:", recErr);
-    }
+    const recDecideResult = await runRecommendationDecider(pool, {
+      context: ctx,
+      canonicalJobIds: affectedJobIds,
+    });
+    console.log("Affected Cohort Recommendation Decider Results:", recDecideResult);
 
     // Step 4e: Controlled AI Evaluation Budgeting only for the selected cohort.
     console.log("\n--- 4e. Controlled AI Evaluation Budget Enqueueing ---");
@@ -1054,8 +1073,9 @@ async function main() {
       client,
       ctx.workspaceId,
       affectedJobIds,
+      budgetRunId,
     );
-    console.log("Post-Replay decision/task/queue counts:", postReplayAuditCounts);
+    console.log("Post-Replay decision/task/queue/budget counts:", postReplayAuditCounts);
 
     // Step 5b: Replay a Second Time to Confirm Idempotency
     console.log("\n--- 5b. Second Replay Pass (Idempotency Check) ---");
@@ -1078,6 +1098,19 @@ async function main() {
     });
     console.log("Second affected-cohort match run (should be 0 newly matched):", secondMatchResult);
 
+    const secondRecommendationResult = await runRecommendationDecider(pool, {
+      context: ctx,
+      canonicalJobIds: affectedJobIds,
+    });
+    console.log("Second affected-cohort recommendation run:", secondRecommendationResult);
+
+    const secondEnqueueResult = await runExplanationQueueEnqueuer(pool, {
+      context: ctx,
+      canonicalJobIds: affectedJobIds,
+      budgetRunId,
+    });
+    console.log("Second affected-cohort enqueue run:", secondEnqueueResult);
+
     const postIdempotencyDist = await getProcessingDistribution(client, ctx.workspaceId);
     console.table(postIdempotencyDist);
 
@@ -1085,8 +1118,9 @@ async function main() {
       client,
       ctx.workspaceId,
       affectedJobIds,
+      budgetRunId,
     );
-    console.log("Post-idempotency decision/task/queue counts:", postIdempotencyAuditCounts);
+    console.log("Post-idempotency decision/task/queue/budget counts:", postIdempotencyAuditCounts);
 
     const stateCountsAreIdempotent = haveSameNumericCounts(
       postReplayDist,
@@ -1101,7 +1135,7 @@ async function main() {
     if (isIdempotent) {
       console.log("✅ IDEMPOTENCY CONFIRMED: State and decision/task/queue counts are unchanged after the second pass.");
     } else {
-      throw new Error("Idempotency check failed: state or decision/task/queue counts changed.");
+      throw new Error("Idempotency check failed: state or decision/task/queue/budget counts changed.");
     }
 
     // 6. Read-Model Integrity Verification
