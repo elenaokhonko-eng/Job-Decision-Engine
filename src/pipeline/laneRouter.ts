@@ -390,14 +390,14 @@ export async function runLaneRouter(
     `${LANE_ROUTER_RULE_VERSION}|${config.version ?? "lanes_unknown"}|`;
   const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
   const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
+  const hasExplicitTargets = jobVersionIds.length > 0 || canonicalJobIds.length > 0;
   const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
     ? Number(options?.limit)
     : null;
-  // The explicit replay branch does not reference the router-model prefix.
-  // Do not pass an unreferenced $2 parameter: PostgreSQL cannot infer its type
-  // and targeted ROUTING_DEFERRED replays fail before routing starts.
+  // Explicit repair/backfill targets may replay a prior policy no-match.
+  // Normal scans may only reopen one after the lane policy/model revision changes.
   const params: unknown[] = [ctx.workspaceId];
-  if (jobVersionIds.length === 0) params.push(currentLaneRouterModelPrefix);
+  if (!hasExplicitTargets) params.push(currentLaneRouterModelPrefix);
   const jobVersionFilter = jobVersionIds.length > 0
     ? `AND jv.id = ANY($${params.push(jobVersionIds)}::uuid[])`
     : "";
@@ -428,15 +428,12 @@ export async function runLaneRouter(
           AND (
             COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
            OR (
-             COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+             COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')
              AND (
-               -- Explicit replay targets are allowed through even when a
-               -- previous lane decision exists. This is required to repair
-               -- technical/threshold deferrals after embedding or policy
-               -- changes without weakening the normal idempotent scan.
-               ${jobVersionIds.length > 0 ? "TRUE" : `
-                 COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'
-                 AND
+               -- Explicit recovery/backfill targets may replay either a
+               -- technical deferral or a terminal no-match. Normal scans only
+               -- reopen after the lane policy/model revision changes.
+               ${hasExplicitTargets ? "TRUE" : `
                  COALESCE(c.primary_lane, 'UNCLASSIFIED') = 'UNCLASSIFIED'
                  AND (
                    c.latest_lane_decision_id IS NULL
@@ -465,6 +462,7 @@ export async function runLaneRouter(
       throw error;
     }
     const fallbackParams: unknown[] = [ctx.workspaceId];
+    if (!hasExplicitTargets) fallbackParams.push(currentLaneRouterModelPrefix);
     const fallbackJobVersionFilter = jobVersionIds.length > 0
       ? `AND jv.id = ANY($${fallbackParams.push(jobVersionIds)}::uuid[])`
       : "";
@@ -488,7 +486,16 @@ export async function runLaneRouter(
          WHERE c.workspace_id = $1
            AND (
              COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-             OR (${jobVersionIds.length > 0 ? "COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'" : "COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED' AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'"})
+             OR (${hasExplicitTargets ? "COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')" : `COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')
+                 AND (
+                   c.latest_lane_decision_id IS NULL
+                   OR NOT EXISTS (
+                     SELECT 1 FROM lane_decisions ld
+                     WHERE ld.workspace_id = c.workspace_id
+                       AND ld.id = c.latest_lane_decision_id
+                       AND LEFT(ld.model_version, LENGTH($2)) = $2
+                   )
+                 )`})
            )
           ${fallbackJobVersionFilter}
           ${fallbackCanonicalJobFilter}
@@ -1117,11 +1124,11 @@ export async function runLaneRouter(
           });
           const secondaryLanes = secondaryCandidates.map((c) => c.laneKey);
 
-          const processingStatus =
-            bestLane === "UNCLASSIFIED" ? "ROUTING_DEFERRED" : "LANE_ROUTED";
+          const noActiveLaneMatch = bestLane === "UNCLASSIFIED";
+          const processingStatus = noActiveLaneMatch ? "UNMATCHED" : "LANE_ROUTED";
           const finalLaneEvidence =
-            bestLane === "UNCLASSIFIED"
-              ? laneEvidence
+            noActiveLaneMatch
+              ? [...laneEvidence, "NO_ACTIVE_LANE_MATCH"]
               : [
                   ...laneEvidence,
                   `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
@@ -1154,8 +1161,20 @@ export async function runLaneRouter(
                  lane_evidence      = $6::jsonb,
                  routing_disposition = CASE
                    WHEN $3::varchar = 'LANE_ROUTED' THEN 'ROUTED'
-                   WHEN $6::jsonb @> '["ROUTING_POLICY_NO_MATCH"]'::jsonb THEN 'POLICY_NO_MATCH'
+                   WHEN $10::boolean THEN 'POLICY_NO_MATCH'
                    ELSE 'TECHNICAL_DEFERRED'
+                 END,
+                 rejection_reason = CASE
+                   WHEN $10::boolean THEN 'NO_ACTIVE_LANE_MATCH'
+                   ELSE rejection_reason
+                 END,
+                 recommendation_eligibility = CASE
+                   WHEN $10::boolean THEN 'INELIGIBLE'
+                   ELSE recommendation_eligibility
+                 END,
+                 recommendation_outcome = CASE
+                   WHEN $10::boolean THEN 'SKIP'
+                   ELSE recommendation_outcome
                  END,
                  updated_at         = NOW()
              WHERE workspace_id = $7
@@ -1171,6 +1190,7 @@ export async function runLaneRouter(
               ctx.workspaceId,
               job.id,
               job.latest_version_id,
+              noActiveLaneMatch,
             ]
           );
 
@@ -1192,10 +1212,10 @@ export async function runLaneRouter(
           }
 
           await client.query("COMMIT");
-          if (bestLane === "UNCLASSIFIED") deferredCount++; else routedCount++;
-          const scoreLabel = bestLane === "UNCLASSIFIED" ? "BestScore" : "Score";
+          if (processingStatus === "LANE_ROUTED") routedCount++;
+          const scoreLabel = noActiveLaneMatch ? "BestScore" : "Score";
           const reasonLabel =
-            bestLane === "UNCLASSIFIED" && finalLaneEvidence.length > 0
+            noActiveLaneMatch && finalLaneEvidence.length > 0
               ? `, Reason: ${finalLaneEvidence[0]}`
               : "";
           console.log(

@@ -423,6 +423,47 @@
           "type": "integer",
           "minimum": 0,
           "default": 0
+        },
+        "requires_user_action": {
+          "type": "boolean",
+          "default": false
+        },
+        "user_action_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "user_action_category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "user_action_status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "technical_error_count": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "pipeline_display_category": {
+          "type": "string",
+          "enum": [
+            "USER_ACTION_REQUIRED",
+            "PROCESSING_AUTOMATICALLY",
+            "TECHNICAL_ERROR",
+            "REJECTED_UNMATCHED",
+            "COMPLETED"
+          ],
+          "default": "PROCESSING_AUTOMATICALLY"
         }
       },
       "required": [

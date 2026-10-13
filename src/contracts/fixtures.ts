@@ -212,5 +212,11 @@ export const sampleEvaluatedShortlistRow: ShortlistRow = {
   document_ready: true,
   current_artifact_status: "CURRENT_OR_NOT_APPLICABLE",
   current_artifact_reason: null,
-  blocked_task_count: 0
+  blocked_task_count: 0,
+  requires_user_action: false,
+  user_action_type: null,
+  user_action_category: null,
+  user_action_status: null,
+  technical_error_count: 0,
+  pipeline_display_category: "COMPLETED"
 };

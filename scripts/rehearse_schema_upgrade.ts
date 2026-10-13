@@ -3,8 +3,8 @@ import pg from "pg";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { runMigrations, getMigrationStatus } from "../src/db/migrate.js";
 import {
-  getProductionDatabaseUrl,
-  requireProductionWriteConfirmation,
+  getRehearsalDatabaseTarget,
+  requireRehearsalWriteConfirmation,
 } from "./productionRehearsalTarget.js";
 
 interface SchemaSnapshot {
@@ -73,14 +73,14 @@ async function captureSnapshot(client: pg.Client): Promise<SchemaSnapshot> {
 }
 
 async function main() {
-  requireProductionWriteConfirmation();
-  const productionUrl = getProductionDatabaseUrl();
+  const target = getRehearsalDatabaseTarget();
+  requireRehearsalWriteConfirmation(target);
 
   console.log("==================================================");
-  console.log("PHASE 2: PRODUCTION SCHEMA UPGRADE REHEARSAL");
+  console.log(`PHASE 2: ${target.environment} SCHEMA UPGRADE REHEARSAL`);
   console.log("==================================================");
 
-  const client = new pg.Client(pgConnectionConfig(productionUrl));
+  const client = new pg.Client(pgConnectionConfig(target.databaseUrl));
   await client.connect();
 
   console.log("\n[1] Capturing PRE-MIGRATION schema snapshot...");
@@ -131,12 +131,14 @@ async function main() {
     '053_gate_decision_pipeline_run_id.sql',
     '054_repair_rejected_read_model_views.sql',
     '055_repair_shortlist_nullable_priority.sql',
+    '056_authoritative_user_action_projection.sql',
+    '057_pipeline_reliability_fixture_isolation.sql',
   ];
   const missingFromApplied = expectedPending.filter((m) => !postStatus.applied.includes(m));
   if (missingFromApplied.length > 0) {
     throw new Error(`FAIL: Missing migrations from schema_migrations: ${missingFromApplied.join(', ')}`);
   }
-  console.log("✓ All 6 pending migrations recorded in schema_migrations.");
+  console.log("✓ All expected release migrations recorded in schema_migrations.");
 
   // 2. Budget tables exist
   const budgetTables = ['ai_evaluation_budget_runs', 'ai_evaluation_budget_usage', 'evaluation_budget_deferrals'];
@@ -193,6 +195,9 @@ async function main() {
     'v_rejected_jobs_audit_scoped',
     'v_canonical_shortlist',
     'v_canonical_shortlist_scoped',
+    'v_current_user_actions',
+    'v_canonical_shortlist_actions_scoped',
+    'v_pipeline_task_queue_health',
     'v_matchable_nodes',
     'v_published_semantic_embeddings',
     'v_application_tracker',
@@ -228,6 +233,7 @@ async function main() {
     'embedding_inputs',
     'embedding_batches',
     'semantic_embeddings',
+    'pipeline_run_reports',
   ];
   for (const tbl of coreTables) {
     const preCount = preSnapshot.rowCounts[tbl] ?? 0;

@@ -76,13 +76,14 @@ describe("Funnel V3 Independent Test Suite — Lanes & Routing", () => {
 
     const result = await runLaneRouting(harness.client, { context: TEST_CONTEXT });
 
-    expect(result).toEqual({ routed: 0, deferred: 3 });
+    expect(result).toEqual({ routed: 0, deferred: 0 });
     for (const fixture of fixtures) {
       const update = harness.updates.find((candidate) => candidate.jobId === fixture.id);
       expect(update).toBeDefined();
       expect(update?.primaryLane).toBe("UNCLASSIFIED");
-      expect(update?.processingState).toBe("ROUTING_DEFERRED");
+      expect(update?.processingState).toBe("UNMATCHED");
       expect(update?.laneEvidence[0]).toBe("ROUTING_POLICY_NO_MATCH");
+      expect(update?.laneEvidence).toContain("NO_ACTIVE_LANE_MATCH");
     }
 
     const hospitalityUpdate = harness.updates.find((update) => update.jobId === "L14");

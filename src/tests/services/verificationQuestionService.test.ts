@@ -25,6 +25,8 @@ describe("verificationQuestionService", () => {
           rows: [
             {
               id: "job-1",
+              job_version_id: "version-1",
+              gate_decision_id: "gate-1",
               title: "Senior AI Engineer",
               workplace_type: "HYBRID",
               gate_decision: "NEEDS_VERIFICATION",
@@ -33,6 +35,8 @@ describe("verificationQuestionService", () => {
             },
             {
               id: "job-2",
+              job_version_id: "version-2",
+              gate_decision_id: "gate-2",
               title: "Staff ML Engineer",
               workplace_type: "HYBRID",
               gate_decision: "NEEDS_VERIFICATION",
@@ -41,6 +45,8 @@ describe("verificationQuestionService", () => {
             },
             {
               id: "job-3",
+              job_version_id: "version-3",
+              gate_decision_id: "gate-3",
               title: "Bioinformatics Scientist",
               workplace_type: "REMOTE",
               gate_decision: "NEEDS_VERIFICATION",
@@ -51,7 +57,7 @@ describe("verificationQuestionService", () => {
         };
       }
       if (sql.includes("INSERT INTO verification_questions")) {
-        return { rows: [], rowCount: 1 };
+        return { rows: [{ id: "question-id" }], rowCount: 1 };
       }
       return { rows: [] };
     });
@@ -66,6 +72,31 @@ describe("verificationQuestionService", () => {
     expect(summary.topQuestions[0].impactJobCount).toBe(2);
     expect(summary.topQuestions[1].category).toBe("DEGREE_SUBJECT");
     expect(summary.topQuestions[1].impactJobCount).toBe(1);
+    expect(executedQueries.some((sql) => sql.includes("INSERT INTO verification_question_job_links"))).toBe(true);
+  });
+
+  it("does not generate a work-auth question for ordinary remote eligibility evidence", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM canonical_jobs c") && sql.includes("NEEDS_VERIFICATION")) {
+        return {
+          rows: [{
+            id: "job-auth",
+            job_version_id: "version-auth",
+            gate_decision_id: "gate-auth",
+            title: "Remote AI Engineer",
+            workplace_type: "REMOTE",
+            gate_decision: "NEEDS_VERIFICATION",
+            rejection_reason_codes: ["NEEDS_VERIFICATION_WORK_AUTH"],
+            evidence_quotes: ["Remote role supporting US customers from anywhere"],
+          }],
+        };
+      }
+      return { rows: [] };
+    });
+
+    const summary = await aggregateVerificationQuestions({ query, release: vi.fn() } as any, { context });
+
+    expect(summary.generatedQuestions).toBe(0);
   });
 
   it("answers a verification question and resumes linked jobs to RAW_STAGED", async () => {

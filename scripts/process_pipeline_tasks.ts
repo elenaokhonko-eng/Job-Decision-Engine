@@ -3,9 +3,12 @@ import dotenv from "dotenv";
 import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
 import {
   PipelineWorkerCancelledError,
+  parsePipelineStageTaskLimits,
   parsePipelineTaskTypes,
   runPipelineStageTaskWorker,
 } from "../src/tasks/stageTaskWorker.js";
+import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
+import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -40,6 +43,51 @@ function parseBooleanEnv(name: string, fallback: boolean): boolean {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
+interface QueueHealthRow {
+  task_type: string;
+  status: string;
+  task_count: number;
+  oldest_age_seconds: number | null;
+}
+
+interface QueueHealth {
+  pending: number;
+  retryWait: number;
+  blockedDependency: number;
+  deadLetter: number;
+  oldestPendingAgeSeconds: number;
+  oldestRetryWaitAgeSeconds: number;
+  byType: QueueHealthRow[];
+}
+
+async function readQueueHealth(pool: pg.Pool): Promise<QueueHealth> {
+  // The pool exposes the query surface required by the workspace resolver.
+  const ctx = await resolveWorkspaceContext(pool as unknown as pg.PoolClient);
+  const result = await pool.query<QueueHealthRow>(
+    `SELECT task_type, status, task_count, oldest_age_seconds
+     FROM v_pipeline_task_queue_health
+     WHERE workspace_id = $1
+     ORDER BY task_type, status`,
+    [ctx.workspaceId],
+  );
+  const byStatus = (status: string) => result.rows
+    .filter((row) => row.status === status)
+    .reduce((total, row) => total + Number(row.task_count), 0);
+  const oldestAge = (status: string) => result.rows
+    .filter((row) => row.status === status)
+    .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+
+  return {
+    pending: byStatus("PENDING"),
+    retryWait: byStatus("RETRY_WAIT"),
+    blockedDependency: byStatus("BLOCKED_DEPENDENCY"),
+    deadLetter: byStatus("DEAD_LETTER"),
+    oldestPendingAgeSeconds: oldestAge("PENDING"),
+    oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
+    byType: result.rows,
+  };
 }
 
 function requestShutdown(signal: NodeJS.Signals): void {
@@ -122,9 +170,11 @@ export async function processPipelineTasks(): Promise<void> {
     const summary = await runPipelineStageTaskWorker(pool, {
       taskTypes: activeTaskTypes,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
-      includeRoutingDeferred: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED", false),
+      includeRoutingDeferred: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED", true),
+      includeTestFixtures: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES", false),
       routingDeferredReplayVersion: process.env.PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION || "routing_deferred_replay_v1",
-      maxTasks: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_TASKS", 100, 1000),
+      maxTasks: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_TASKS", 100, 10000),
+      maxTasksByType: parsePipelineStageTaskLimits(process.env.PIPELINE_TASK_WORKER_STAGE_MAX_TASKS),
       claimBatchSize: parsePositiveIntEnv("PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE", 1, 25),
       leaseSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_LEASE_SECONDS", 300, 3600),
       heartbeatSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS", 60, 600),
@@ -136,21 +186,53 @@ export async function processPipelineTasks(): Promise<void> {
 
     console.log("Pipeline task worker summary:", JSON.stringify(summary, null, 2));
 
+    const queueHealth = await readQueueHealth(pool);
+    console.log("Pipeline task queue health:", JSON.stringify(queueHealth, null, 2));
+    if (queueHealth.retryWait > 0) {
+      console.warn(`Pipeline has ${queueHealth.retryWait} RETRY_WAIT task(s); automatic recovery remains scheduled.`);
+    }
+    if (queueHealth.blockedDependency > 0) {
+      console.warn(`Pipeline has ${queueHealth.blockedDependency} BLOCKED_DEPENDENCY task(s) awaiting repair artifacts.`);
+    }
+
+    const activeQueueRows = queueHealth.byType.filter((row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]));
+    const activePending = activeQueueRows
+      .filter((row) => row.status === "PENDING")
+      .reduce((total, row) => total + Number(row.task_count), 0);
+    const oldestActivePendingAgeSeconds = activeQueueRows
+      .filter((row) => row.status === "PENDING")
+      .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+    const maxRetryWaitCount = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT", 500, 100000);
+    const maxRetryWaitAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_AGE_SECONDS", 21600, 604800);
+    const maxPendingAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS", 7200, 604800);
+    const noProgressPendingThreshold = parsePositiveIntEnv(
+      "PIPELINE_TASK_WORKER_NO_FORWARD_PROGRESS_PENDING_THRESHOLD",
+      1,
+      100000,
+    );
+    const failOnRetryWait = parseBooleanEnv("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT", true);
+    enforcePipelineWorkerExitPolicy({
+      claimedThisRun: summary.claimed,
+      failedThisRun: summary.failed,
+      deadLetteredThisRun: summary.deadLettered,
+      deadLetterCount: queueHealth.deadLetter,
+      retryWaitCount: queueHealth.retryWait,
+      oldestRetryWaitAgeSeconds: queueHealth.oldestRetryWaitAgeSeconds,
+      activePendingCount: activePending,
+      oldestActivePendingAgeSeconds,
+      failOnRetryWait,
+      maxRetryWaitCount,
+      maxRetryWaitAgeSeconds,
+      maxPendingAgeSeconds,
+      noProgressPendingThreshold,
+    });
+
     if (shutdownController.signal.aborted) {
       throw new PipelineWorkerCancelledError(
         `Pipeline task worker cancelled by ${shutdownSignal || "shutdown signal"}.`
       );
     }
 
-    const failOnRetryWait = parseBooleanEnv("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT", true);
-    if (summary.deadLettered > 0) {
-      throw new Error(`Pipeline task worker dead-lettered ${summary.deadLettered} task(s).`);
-    }
-    if (failOnRetryWait && summary.failed > 0) {
-      throw new Error(
-        `Pipeline task worker moved ${summary.failed} task(s) to RETRY_WAIT. See task errors above.`
-      );
-    }
   } catch (err: any) {
     workerError = err instanceof Error ? err : new Error(String(err));
     console.error("Pipeline task worker failed:", workerError.message);

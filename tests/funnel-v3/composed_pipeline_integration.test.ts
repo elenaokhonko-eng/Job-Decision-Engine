@@ -341,7 +341,7 @@ describe("Composed Pipeline Integration — Gate Separation & Qualification Stag
     const update = harness.jobUpdates.find((u) => u.id === "10000000-0000-4000-8000-000000000005");
     expect(update?.gate_decision).toBe("HARD_REJECT");
     expect(update?.processing_status).toBe("HARD_REJECTED");
-    expect(update?.rejection_reason).toContain("GATE_LOCATION_RESTRICTED");
+    expect(update?.rejection_reason).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
   });
 
   it("owner hard rules (onsite > 3 days, travel > 20%, FDE) veto with HARD_REJECT", async () => {
@@ -455,12 +455,13 @@ describe("Composed Pipeline Integration — Six Lane Routes & Multi-Lane Selecti
     const result = await runLaneRouter(harness.client, { context: TEST_CONTEXT });
 
     expect(result.routed).toBe(0);
-    expect(result.deferred).toBe(1);
+    expect(result.deferred).toBe(0);
 
     const update = harness.updates.find((u) => u.jobId === excludedJob.id);
     expect(update?.primaryLane).toBe("UNCLASSIFIED");
-    expect(update?.processingState).toBe("ROUTING_DEFERRED");
+    expect(update?.processingState).toBe("UNMATCHED");
     expect(update?.laneEvidence[0]).toBe("ROUTING_POLICY_NO_MATCH");
+    expect(update?.laneEvidence).toContain("NO_ACTIVE_LANE_MATCH");
   });
 });
 

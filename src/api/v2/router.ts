@@ -269,8 +269,14 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             s.document_ready,
             s.current_artifact_status,
             s.current_artifact_reason,
-            s.blocked_task_count
-          FROM v_canonical_shortlist_scoped s
+            s.blocked_task_count,
+            s.requires_user_action,
+            s.user_action_type,
+            s.user_action_category,
+            s.user_action_status,
+            s.technical_error_count,
+            s.pipeline_display_category
+          FROM v_canonical_shortlist_actions_scoped s
           WHERE s.workspace_id = $1
           ${cursorClause}
           ORDER BY s.observed_at DESC, s.canonical_job_id DESC
@@ -834,6 +840,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
              AND current_shortlist.job_version_id = jv.id
             WHERE c.workspace_id = $1
               AND c.id = $2::uuid
+              AND c.is_test_fixture = FALSE
             LIMIT 1
           `,
           [ctx.workspaceId, canonicalJobId, requestedJobVersionId]

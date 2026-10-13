@@ -4,7 +4,9 @@ import type { PipelineTaskRow, SourceHealthRow } from "../sdk/index.js";
 export interface DesktopCounts {
   totalJobs: number;
   priorityJobs: number;
-  needsVerificationJobs: number;
+  manualActionJobs: number;
+  processingAutomaticallyJobs: number;
+  technicalErrorJobs: number;
   activeApplications: number;
   submittedApplications: number;
   runningTasks: number;
@@ -23,12 +25,25 @@ export function safeExternalHref(value: string | null | undefined): string | nul
   }
 }
 
-export function jobOutcomeLabel(job: Pick<ShortlistRow, "recommendation_outcome" | "gate_status" | "processing_state" | "current_artifact_status">): string {
-  if (job.current_artifact_status !== "CURRENT_OR_NOT_APPLICABLE") {
-    return "VERIFY";
+export function jobOutcomeLabel(job: Pick<
+  ShortlistRow,
+  | "recommendation_outcome"
+  | "gate_status"
+  | "processing_state"
+  | "current_artifact_status"
+  | "requires_user_action"
+  | "pipeline_display_category"
+>): string {
+  if (job.requires_user_action) return "ACTION REQUIRED";
+  if (job.pipeline_display_category === "TECHNICAL_ERROR") return "ERROR";
+  if (
+    job.pipeline_display_category === "PROCESSING_AUTOMATICALLY" ||
+    job.current_artifact_status !== "CURRENT_OR_NOT_APPLICABLE"
+  ) {
+    return "PROCESSING";
   }
+  if (job.processing_state === "UNMATCHED") return "UNMATCHED";
   if (job.recommendation_outcome) return job.recommendation_outcome;
-  if (job.gate_status === "NEEDS_VERIFICATION") return "VERIFY";
   if (job.gate_status === "HARD_REJECT") return "SKIP";
   return job.processing_state || "TRACK";
 }
@@ -43,10 +58,14 @@ export function summarizeDesktopCounts(
   return {
     totalJobs: jobs.length,
     priorityJobs: jobs.filter((job) =>
-      job.current_artifact_status === "CURRENT_OR_NOT_APPLICABLE" && job.recommendation_outcome === "PRIORITY"
+      job.pipeline_display_category === "COMPLETED" && job.recommendation_outcome === "PRIORITY"
     ).length,
-    needsVerificationJobs: jobs.filter((job) =>
-      job.gate_status === "NEEDS_VERIFICATION" || job.current_artifact_status !== "CURRENT_OR_NOT_APPLICABLE"
+    manualActionJobs: jobs.filter((job) => job.requires_user_action).length,
+    processingAutomaticallyJobs: jobs.filter((job) =>
+      job.pipeline_display_category === "PROCESSING_AUTOMATICALLY"
+    ).length,
+    technicalErrorJobs: jobs.filter((job) =>
+      job.pipeline_display_category === "TECHNICAL_ERROR"
     ).length,
     activeApplications: applications.filter((application) =>
       activeApplicationStatuses.has(application.application_status)

@@ -110,7 +110,7 @@ describe("verification answer context", () => {
       source_type: "PROFILE_FACT" as const,
     }];
 
-    expect(applyExactProfileGates(authRequirement, []).status).toBe("NEEDS_VERIFICATION");
+    expect(applyExactProfileGates(authRequirement, []).status).toBe("PASS");
     expect(applyExactProfileGates(authRequirement, [], singaporeAnswer).status).toBe("PASS");
     expect(applyExactProfileGates(authRequirement, [], usAnswer).status).toBe("HARD_REJECT");
     expect(applyExactProfileGates(authRequirement, conflictingProfileFact, singaporeAnswer).status).toBe("HARD_REJECT");
@@ -198,7 +198,7 @@ describe("verification answer context", () => {
       [requirement("WORK_AUTH", "Authorized to work in the United States")],
       loadWorkabilityPolicy(),
       unknownAuthorization,
-    ).status).toBe("NEEDS_VERIFICATION");
+    ).status).toBe("HARD_REJECT");
   });
 
   it("loads a requested revision with both identities and maps JSON content", async () => {

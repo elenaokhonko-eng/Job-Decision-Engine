@@ -109,18 +109,24 @@ jobs:
           REQUIREMENTS_PROVIDER_FAILURE_LIMIT: ${{ vars.REQUIREMENTS_PROVIDER_FAILURE_LIMIT || '1' }}
           REQUIREMENTS_DB_STATEMENT_TIMEOUT_MS: ${{ vars.REQUIREMENTS_DB_STATEMENT_TIMEOUT_MS || '60000' }}
           REQUIREMENTS_ENABLE_QUOTED: 'true'
-          PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '40' }}
+          PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '2500' }}
+          PIPELINE_TASK_WORKER_STAGE_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_STAGE_MAX_TASKS || 'NORMALIZE_OBSERVATION=800,EXTRACT_DETERMINISTIC_REQUIREMENTS=800,APPLY_HARD_GATES=800,PUBLISH_EMBEDDING=400,ROUTE_LANE=400,MATCH_PROFILE_EVIDENCE=400,DECIDE_RECOMMENDATION=800,ENQUEUE_EXPLANATION=400' }}
           PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '720000' }}
           PIPELINE_TASK_WORKER_LEASE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_LEASE_SECONDS || '300' }}
           PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS || '60' }}
           PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE: ${{ vars.PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE || '1' }}
-          PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '500' }}
+          PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '1000' }}
           PIPELINE_TASK_WORKER_TASK_TYPES: ${{ vars.PIPELINE_TASK_WORKER_TASK_TYPES || '' }}
           PIPELINE_TASK_WORKER_SEED: ${{ vars.PIPELINE_TASK_WORKER_SEED || 'true' }}
+          PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'
           # Deferred routing replay is opt-in; keep normal scheduled drains conservative.
-          PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED: ${{ vars.PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED || 'false' }}
+          PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED: ${{ vars.PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED || 'true' }}
           PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION: ${{ vars.PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION || 'routing_deferred_replay_v1' }}
-          PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: ${{ vars.PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT || 'true' }}
+          PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'
+          PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT: ${{ vars.PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT || '500' }}
+          PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_AGE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_AGE_SECONDS || '21600' }}
+          PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS || '7200' }}
+          PIPELINE_TASK_WORKER_NO_FORWARD_PROGRESS_PENDING_THRESHOLD: ${{ vars.PIPELINE_TASK_WORKER_NO_FORWARD_PROGRESS_PENDING_THRESHOLD || '1' }}
           PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '60000' }}
         run: npx tsx scripts/process_pipeline_tasks.ts
 
@@ -130,6 +136,22 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json
+
+      - name: Report source and pipeline stage status
+        if: ${{ always() }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PIPELINE_WORKFLOW_NAME: Process Discovery Backlog
+          PIPELINE_STATUS_REPORT_FILE: pipeline-status-backlog.json
+        run: npx tsx scripts/report_pipeline_status.ts
+
+      - name: Upload pipeline status report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-status-backlog-${{ github.run_id }}
+          path: pipeline-status-backlog.json
+          if-no-files-found: error
 
       - name: Upload pipeline reconciliation evidence
         if: ${{ always() }}

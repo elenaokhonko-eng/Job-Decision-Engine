@@ -104,8 +104,8 @@ function scorePercent(value: number | null | undefined): string {
 function statusTone(value: string | null | undefined): string {
   const status = (value || "").toUpperCase();
   if (["ACTIVE", "COMPLETED", "SUBMITTED", "PRIORITY", "PASS", "ELIGIBLE"].includes(status)) return "good";
-  if (["PENDING", "RUNNING", "RETRY_WAIT", "BLOCKED_DEPENDENCY", "MATCH_STALE", "DECISION_STALE", "EVALUATION_MISSING", "EVALUATION_STALE", "READY_TO_APPLY", "FOLLOW_UP", "VERIFY", "NEEDS_VERIFICATION"].includes(status)) return "warn";
-  if (["FAILED", "DEAD_LETTER", "HARD_REJECT", "REJECTED", "WITHDRAWN"].includes(status)) return "bad";
+  if (["PENDING", "RUNNING", "RETRY_WAIT", "BLOCKED_DEPENDENCY", "MATCH_STALE", "DECISION_STALE", "EVALUATION_MISSING", "EVALUATION_STALE", "READY_TO_APPLY", "FOLLOW_UP", "PROCESSING", "PROCESSING_AUTOMATICALLY", "ACTION REQUIRED", "USER_ACTION_REQUIRED"].includes(status)) return "warn";
+  if (["FAILED", "DEAD_LETTER", "HARD_REJECT", "REJECTED", "WITHDRAWN", "ERROR", "TECHNICAL_ERROR", "UNMATCHED"].includes(status)) return "bad";
   return "muted";
 }
 
@@ -404,8 +404,10 @@ export default function App() {
 
         {activeView === "overview" ? (
           <section className="overview-grid">
-            <Metric label="Shortlist" value={counts.totalJobs} detail={`${counts.priorityJobs} priority`} />
-            <Metric label="Verification" value={counts.needsVerificationJobs} detail="needs review" />
+            <Metric label="Recommended" value={counts.priorityJobs} detail="priority opportunities" />
+            <Metric label="Processing automatically" value={counts.processingAutomaticallyJobs} detail="no user action needed" />
+            <Metric label="User action" value={counts.manualActionJobs} detail="open verified questions only" />
+            <Metric label="Technical errors" value={counts.technicalErrorJobs} detail="support follow-up" />
             <Metric label="Applications" value={counts.activeApplications} detail={`${counts.submittedApplications} submitted`} />
             <Metric label="Tasks" value={counts.runningTasks} detail="active or waiting" />
             <div className="panel wide">

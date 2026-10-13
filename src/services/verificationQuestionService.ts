@@ -4,6 +4,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { upsertConfigRevision } from "../config/registry.js";
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
+import { extractTerritories } from "../pipeline/workabilityPolicy.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -21,6 +22,12 @@ export interface VerificationQuestionSummary {
     suggestedOptions: string[];
     linkedJobIds?: string[];
   }>;
+}
+
+interface VerificationQuestionJobLink {
+  canonicalJobId: string;
+  jobVersionId: string;
+  gateDecisionId: string;
 }
 
 export interface VerificationQuestionRow {
@@ -56,6 +63,8 @@ export async function aggregateVerificationQuestions(
     // Discover jobs currently in NEEDS_VERIFICATION with authoritative quotes and rejection codes
     const { rows: verificationJobs } = await client.query<{
       id: string;
+      job_version_id: string;
+      gate_decision_id: string;
       title: string;
       workplace_type: string;
       gate_decision: string | null;
@@ -63,30 +72,59 @@ export async function aggregateVerificationQuestions(
       rejection_reason_codes: string[] | null;
       evidence_quotes: string[] | null;
     }>(
-      `SELECT c.id, c.normalized_title AS title, c.workplace_type,
-              c.gate_decision, c.rejection_reason,
+      `SELECT c.id,
+              c.latest_job_version_id AS job_version_id,
+              gd.id AS gate_decision_id,
+              c.normalized_title AS title,
+              c.workplace_type,
+              c.gate_decision,
+              c.rejection_reason,
               c.gate_evidence_quotes AS evidence_quotes,
               COALESCE(gd.rejection_codes, '[]'::jsonb) AS rejection_reason_codes
        FROM canonical_jobs c
-       LEFT JOIN LATERAL (
-         SELECT rejection_codes
+       JOIN LATERAL (
+         SELECT id, rejection_codes
          FROM gate_decisions
-         WHERE canonical_job_id = c.id
+         WHERE workspace_id = c.workspace_id
+           AND canonical_job_id = c.id
+           AND job_version_id = c.latest_job_version_id
          ORDER BY created_at DESC, id DESC
          LIMIT 1
        ) gd ON TRUE
        WHERE c.workspace_id = $1
+         AND c.latest_job_version_id IS NOT NULL
+         AND gd.id IS NOT NULL
+         AND gd.decision = 'NEEDS_VERIFICATION'
          AND COALESCE(c.processing_state, c.processing_status) = 'NEEDS_VERIFICATION'
        ORDER BY c.created_at DESC`,
       [ctx.workspaceId]
     );
 
-    const countsByCategory: Record<string, { count: number; sampleQuotes: string[]; jobIds: string[] }> = {
-      WORKPLACE_MODEL: { count: 0, sampleQuotes: [], jobIds: [] },
-      DEGREE_SUBJECT: { count: 0, sampleQuotes: [], jobIds: [] },
-      WORK_AUTH: { count: 0, sampleQuotes: [], jobIds: [] },
-      EXPERIENCE_SCOPE: { count: 0, sampleQuotes: [], jobIds: [] },
-      TRAVEL_PREFERENCE: { count: 0, sampleQuotes: [], jobIds: [] },
+    const countsByCategory: Record<string, {
+      count: number;
+      sampleQuotes: string[];
+      jobIds: string[];
+      links: VerificationQuestionJobLink[];
+    }> = {
+      WORKPLACE_MODEL: { count: 0, sampleQuotes: [], jobIds: [], links: [] },
+      DEGREE_SUBJECT: { count: 0, sampleQuotes: [], jobIds: [], links: [] },
+      WORK_AUTH: { count: 0, sampleQuotes: [], jobIds: [], links: [] },
+      EXPERIENCE_SCOPE: { count: 0, sampleQuotes: [], jobIds: [], links: [] },
+      TRAVEL_PREFERENCE: { count: 0, sampleQuotes: [], jobIds: [], links: [] },
+    };
+
+    const addJobToCategory = (category: keyof typeof countsByCategory, job: typeof verificationJobs[number], quotes: string): void => {
+      const bucket = countsByCategory[category];
+      bucket.count += 1;
+      bucket.jobIds.push(job.id);
+      bucket.links.push({
+        canonicalJobId: job.id,
+        jobVersionId: job.job_version_id,
+        gateDecisionId: job.gate_decision_id,
+      });
+      if (bucket.sampleQuotes.length < 3 && quotes) {
+        bucket.sampleQuotes.push(quotes);
+      }
     };
 
     for (const job of verificationJobs) {
@@ -96,38 +134,22 @@ export async function aggregateVerificationQuestions(
         : String(job.evidence_quotes || "");
 
       if (codes.includes("OFFICE_DAYS") || codes.includes("WORKPLACE") || /office|hybrid/i.test(quotes)) {
-        countsByCategory.WORKPLACE_MODEL.count++;
-        countsByCategory.WORKPLACE_MODEL.jobIds.push(job.id);
-        if (countsByCategory.WORKPLACE_MODEL.sampleQuotes.length < 3 && quotes) {
-          countsByCategory.WORKPLACE_MODEL.sampleQuotes.push(quotes);
-        }
+        addJobToCategory("WORKPLACE_MODEL", job, quotes);
       } else if (codes.includes("DEGREE") || /degree|major/i.test(quotes)) {
-        countsByCategory.DEGREE_SUBJECT.count++;
-        countsByCategory.DEGREE_SUBJECT.jobIds.push(job.id);
-        if (countsByCategory.DEGREE_SUBJECT.sampleQuotes.length < 3 && quotes) {
-          countsByCategory.DEGREE_SUBJECT.sampleQuotes.push(quotes);
-        }
+        addJobToCategory("DEGREE_SUBJECT", job, quotes);
       } else if (codes.includes("WORK_AUTH") || /authorization|visa|citizen|pr\b/i.test(quotes)) {
-        countsByCategory.WORK_AUTH.count++;
-        countsByCategory.WORK_AUTH.jobIds.push(job.id);
-        if (countsByCategory.WORK_AUTH.sampleQuotes.length < 3 && quotes) {
-          countsByCategory.WORK_AUTH.sampleQuotes.push(quotes);
+        // Normal remote eligibility is resolved automatically from the active
+        // Singapore authorization policy. Ask only if the employer text itself
+        // contains contradictory territory requirements.
+        if (new Set(extractTerritories(quotes)).size > 1) {
+          addJobToCategory("WORK_AUTH", job, quotes);
         }
       } else if (codes.includes("TRAVEL") || /travel|relocat/i.test(quotes)) {
-        countsByCategory.TRAVEL_PREFERENCE.count++;
-        countsByCategory.TRAVEL_PREFERENCE.jobIds.push(job.id);
-        if (countsByCategory.TRAVEL_PREFERENCE.sampleQuotes.length < 3 && quotes) {
-          countsByCategory.TRAVEL_PREFERENCE.sampleQuotes.push(quotes);
-        }
+        addJobToCategory("TRAVEL_PREFERENCE", job, quotes);
       } else if (codes.includes("EXPERIENCE") || /experience/i.test(quotes)) {
-        countsByCategory.EXPERIENCE_SCOPE.count++;
-        countsByCategory.EXPERIENCE_SCOPE.jobIds.push(job.id);
-        if (countsByCategory.EXPERIENCE_SCOPE.sampleQuotes.length < 3 && quotes) {
-          countsByCategory.EXPERIENCE_SCOPE.sampleQuotes.push(quotes);
-        }
+        addJobToCategory("EXPERIENCE_SCOPE", job, quotes);
       } else {
-        countsByCategory.WORKPLACE_MODEL.count++;
-        countsByCategory.WORKPLACE_MODEL.jobIds.push(job.id);
+        addJobToCategory("WORKPLACE_MODEL", job, quotes);
       }
     }
 
@@ -195,11 +217,32 @@ export async function aggregateVerificationQuestions(
           impactJobCount: data.count,
           suggestedOptions: tmpl.options,
           linkedJobIds: data.jobIds,
+          links: data.links,
         };
       });
 
+    const activeProfile = await client.query<{ id: string }>(
+      `SELECT id
+       FROM profile_versions
+       WHERE workspace_id = $1 AND status = 'ACTIVE'
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [ctx.workspaceId]
+    );
+    const activePreferenceMode = await client.query<{ id: string }>(
+      `SELECT id
+       FROM workspace_user_preference_modes
+       WHERE workspace_id = $1
+         AND user_id = $2
+         AND is_active = TRUE
+       LIMIT 1`,
+      [ctx.workspaceId, ctx.userId]
+    );
+    const profileVersionId = activeProfile.rows[0]?.id ?? null;
+    const preferenceModeId = activePreferenceMode.rows[0]?.id ?? null;
+
     for (const q of topList) {
-      await client.query(
+      const questionResult = await client.query<{ id: string }>(
         `INSERT INTO verification_questions (
            workspace_id, question_key, category, question_text,
            impact_job_count, suggested_options, linked_job_ids, status, updated_at
@@ -212,7 +255,8 @@ export async function aggregateVerificationQuestions(
            suggested_options = EXCLUDED.suggested_options,
            linked_job_ids = EXCLUDED.linked_job_ids,
            updated_at = NOW()
-         WHERE verification_questions.status = 'PENDING'`,
+         WHERE verification_questions.status = 'PENDING'
+         RETURNING id`,
         [
           ctx.workspaceId,
           q.questionKey,
@@ -223,6 +267,44 @@ export async function aggregateVerificationQuestions(
           JSON.stringify(q.linkedJobIds),
         ]
       );
+      const questionId = questionResult.rows[0]?.id;
+      if (!questionId) continue;
+
+      await client.query(
+        `UPDATE verification_question_job_links
+         SET status = 'OBSOLETE',
+             resolved_at = NOW()
+         WHERE workspace_id = $1
+           AND verification_question_id = $2
+           AND status = 'OPEN'
+           AND NOT (canonical_job_id = ANY($3::uuid[]))`,
+        [ctx.workspaceId, questionId, q.linkedJobIds]
+      );
+
+      for (const link of q.links) {
+        await client.query(
+          `INSERT INTO verification_question_job_links (
+             workspace_id, verification_question_id, canonical_job_id, job_version_id,
+             gate_decision_id, profile_version_id, preference_mode_id, status
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'OPEN')
+           ON CONFLICT (workspace_id, verification_question_id, canonical_job_id, job_version_id)
+           DO UPDATE SET
+             gate_decision_id = EXCLUDED.gate_decision_id,
+             profile_version_id = EXCLUDED.profile_version_id,
+             preference_mode_id = EXCLUDED.preference_mode_id,
+             status = 'OPEN',
+             resolved_at = NULL`,
+          [
+            ctx.workspaceId,
+            questionId,
+            link.canonicalJobId,
+            link.jobVersionId,
+            link.gateDecisionId,
+            profileVersionId,
+            preferenceModeId,
+          ]
+        );
+      }
     }
 
     return {
@@ -295,6 +377,15 @@ export async function answerVerificationQuestion(
              updated_at = NOW()
          WHERE workspace_id = $1 AND question_key = $2`,
         [ctx.workspaceId, normalizedKey, JSON.stringify(answer)]
+      );
+      await client.query(
+        `UPDATE verification_question_job_links
+         SET status = 'RESOLVED',
+             resolved_at = NOW()
+         WHERE workspace_id = $1
+           AND verification_question_id = $2
+           AND status = 'OPEN'`,
+        [ctx.workspaceId, question.id]
       );
 
       // Persist the answer through the immutable configuration registry while

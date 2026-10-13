@@ -35,3 +35,40 @@ export function requireProductionWriteConfirmation(
     );
   }
 }
+
+export interface RehearsalDatabaseTarget {
+  databaseUrl: string;
+  environment: "STAGING" | "PRODUCTION";
+}
+
+/**
+ * A supplied STAGING_DB_URL is an explicit isolated target. Production is the
+ * fallback and retains an explicit command-line write confirmation.
+ */
+export function getRehearsalDatabaseTarget(environment: Environment = process.env): RehearsalDatabaseTarget {
+  const stagingUrl = environment.STAGING_DB_URL?.trim();
+  if (stagingUrl) {
+    if (isPooled(stagingUrl)) {
+      throw new Error("Staging migrations and replays require a direct, non-pooler STAGING_DB_URL.");
+    }
+    return { databaseUrl: stagingUrl, environment: "STAGING" };
+  }
+  return { databaseUrl: getProductionDatabaseUrl(environment), environment: "PRODUCTION" };
+}
+
+export function requireRehearsalWriteConfirmation(
+  target: RehearsalDatabaseTarget,
+  args: readonly string[] = process.argv.slice(2),
+): void {
+  if (target.environment === "PRODUCTION") {
+    requireProductionWriteConfirmation(args);
+  }
+}
+
+function isPooled(value: string): boolean {
+  try {
+    return new URL(value).hostname.includes("-pooler");
+  } catch {
+    throw new Error("STAGING_DB_URL must be a valid PostgreSQL connection URL.");
+  }
+}

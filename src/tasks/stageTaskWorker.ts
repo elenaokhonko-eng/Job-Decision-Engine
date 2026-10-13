@@ -8,6 +8,7 @@ import { runRequirementsExtraction as defaultRunRequirementsExtraction } from ".
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
 import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback } from "../embeddings/batchCoordinator.js";
 import { runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
+import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
@@ -58,6 +59,29 @@ export function parsePipelineTaskTypes(raw: string | undefined): PipelineStageTa
   return requested as PipelineStageTaskType[];
 }
 
+export function parsePipelineStageTaskLimits(
+  raw: string | undefined,
+): Partial<Record<PipelineStageTaskType, number>> {
+  if (!raw || raw.trim() === "") return {};
+
+  const limits: Partial<Record<PipelineStageTaskType, number>> = {};
+  for (const entry of raw.split(",").map((value) => value.trim()).filter(Boolean)) {
+    const [rawTaskType, rawLimit, ...unexpected] = entry.split("=").map((value) => value.trim());
+    if (unexpected.length > 0 || !rawTaskType || !rawLimit) {
+      throw new Error(`Invalid pipeline stage limit "${entry}". Use TASK_TYPE=POSITIVE_INTEGER.`);
+    }
+    if (!PIPELINE_STAGE_TASK_TYPES.includes(rawTaskType as PipelineStageTaskType)) {
+      throw new Error(`Unsupported pipeline stage limit task type: ${rawTaskType}`);
+    }
+    const limit = Number.parseInt(rawLimit, 10);
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new Error(`Pipeline stage limit for ${rawTaskType} must be a positive integer.`);
+    }
+    limits[rawTaskType as PipelineStageTaskType] = limit;
+  }
+  return limits;
+}
+
 export interface PipelineStageWorkerDependencies {
   runNormalization: typeof defaultRunNormalization;
   runRequirementsExtraction: typeof defaultRunRequirementsExtraction;
@@ -92,9 +116,13 @@ export interface PipelineStageWorkerOptions {
   seed?: boolean;
   /** Explicitly opt into bounded replay of ROUTING_DEFERRED jobs. */
   includeRoutingDeferred?: boolean;
+  /** Release and rehearsal paths can opt in; scheduled production work excludes fixtures. */
+  includeTestFixtures?: boolean;
   routingDeferredReplayVersion?: string;
   maxSeedPerType?: number;
   maxTasks?: number;
+  /** Per-stage drain caps applied in predecessor-first order. */
+  maxTasksByType?: Partial<Record<PipelineStageTaskType, number>>;
   claimBatchSize?: number;
   leaseSeconds?: number;
   heartbeatSeconds?: number;
@@ -379,6 +407,14 @@ function stageVersion(taskType: PipelineStageTaskType): string {
   }
 }
 
+function requiredSeedValue(row: Record<string, unknown>, field: string): string {
+  const value = row[field];
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`Seed query did not return required ${field} for a pipeline task.`);
+  }
+  return value;
+}
+
 async function selectAndEnqueue(
   client: QueryClient,
   ctx: WorkspaceContext,
@@ -386,13 +422,33 @@ async function selectAndEnqueue(
   taskType: PipelineStageTaskType,
   sql: string,
   params: unknown[],
-  build: (row: any) => { id: string; payload: Record<string, unknown> },
-  enabledTypes?: Set<PipelineStageTaskType>
+  build: (row: Record<string, unknown>) => { id: string; payload: Record<string, unknown> },
+  enabledTypes?: Set<PipelineStageTaskType>,
+  includeTestFixtures = false,
 ): Promise<void> {
   if (enabledTypes && !enabledTypes.has(taskType)) return;
-  const { rows } = await client.query(sql, params);
-  for (const row of rows) {
-    const task = build(row);
+  const { rows } = await client.query<Record<string, unknown>>(sql, params);
+  const candidates = rows.map(build);
+  const canonicalJobIds = [...new Set(candidates
+    .map((candidate) => candidate.payload.canonical_job_id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0))];
+  const fixtureIds = new Set<string>();
+
+  if (!includeTestFixtures && canonicalJobIds.length > 0) {
+    const fixtures = await client.query<{ id: string }>(
+      `SELECT id
+       FROM canonical_jobs
+       WHERE workspace_id = $1
+         AND is_test_fixture = TRUE
+         AND id = ANY($2::uuid[])`,
+      [ctx.workspaceId, canonicalJobIds],
+    );
+    for (const fixture of fixtures.rows) fixtureIds.add(fixture.id);
+  }
+
+  for (const task of candidates) {
+    const canonicalJobId = task.payload.canonical_job_id;
+    if (!includeTestFixtures && typeof canonicalJobId === "string" && fixtureIds.has(canonicalJobId)) continue;
     const inserted = await enqueueStageTask(taskType, task.id, task.payload, client as any, ctx);
     incrementSeed(summary, taskType, inserted);
   }
@@ -405,6 +461,7 @@ export async function seedRecoverablePipelineTasks(
     maxSeedPerType?: number;
     taskTypes?: PipelineStageTaskType[];
     includeRoutingDeferred?: boolean;
+    includeTestFixtures?: boolean;
     routingDeferredReplayVersion?: string;
   } = {}
 ): Promise<SeedPipelineTasksSummary> {
@@ -413,14 +470,21 @@ export async function seedRecoverablePipelineTasks(
   const client = ownsClient ? await pool.connect() : pool;
   const summary: SeedPipelineTasksSummary = { inserted: 0, existing: 0, byType: {} };
   const maxPerType = options.maxSeedPerType ?? 500;
-  const includeRoutingDeferred = options.includeRoutingDeferred === true;
-  const routingDeferredReplayVersion = options.routingDeferredReplayVersion?.trim() || "routing_deferred_replay_v1";
+  // Technical routing failures are machine-recoverable by default. Terminal
+  // POLICY_NO_MATCH outcomes are excluded below unless a lane revision changed.
+  const includeRoutingDeferred = options.includeRoutingDeferred !== false;
+  const includeTestFixtures = options.includeTestFixtures === true;
+  let routingDeferredReplayVersion = options.routingDeferredReplayVersion?.trim() || "";
   const enabledTypes: Set<PipelineStageTaskType> | undefined = options.taskTypes
     ? new Set<PipelineStageTaskType>(options.taskTypes)
     : undefined;
 
   try {
     const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
+    if (!routingDeferredReplayVersion) {
+      const lanes = await loadWorkspaceLanesConfig(client as any, { context: ctx, seedIfEmpty: true });
+      routingDeferredReplayVersion = lanes.config.version || "routing_deferred_replay_v1";
+    }
 
     await selectAndEnqueue(
       client as any,
@@ -436,10 +500,11 @@ export async function seedRecoverablePipelineTasks(
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
-        id: row.observation_id,
-        payload: { observation_id: row.observation_id },
+        id: requiredSeedValue(row, "observation_id"),
+        payload: { observation_id: requiredSeedValue(row, "observation_id") },
       }),
-      enabledTypes
+      enabledTypes,
+      includeTestFixtures,
     );
 
     await selectAndEnqueue(
@@ -485,14 +550,15 @@ export async function seedRecoverablePipelineTasks(
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
-        id: row.job_version_id,
+        id: requiredSeedValue(row, "job_version_id"),
         payload: {
-          canonical_job_id: row.canonical_job_id,
-          job_version_id: row.job_version_id,
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
           ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
         },
       }),
-      enabledTypes
+      enabledTypes,
+      includeTestFixtures,
     );
 
     await selectAndEnqueue(
@@ -533,14 +599,15 @@ export async function seedRecoverablePipelineTasks(
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
-        id: row.job_version_id,
+        id: requiredSeedValue(row, "job_version_id"),
         payload: {
-          canonical_job_id: row.canonical_job_id,
-          job_version_id: row.job_version_id,
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
         },
       }),
-      enabledTypes
+      enabledTypes,
+      includeTestFixtures,
     );
 
     await selectAndEnqueue(
@@ -572,10 +639,11 @@ export async function seedRecoverablePipelineTasks(
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
-        id: row.job_version_id,
-        payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: { canonical_job_id: requiredSeedValue(row, "canonical_job_id"), job_version_id: requiredSeedValue(row, "job_version_id") },
       }),
-      enabledTypes
+      enabledTypes,
+      includeTestFixtures,
     );
 
     await selectAndEnqueue(
@@ -588,7 +656,13 @@ export async function seedRecoverablePipelineTasks(
        FROM canonical_jobs c
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
-          AND COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED')
+          AND (
+            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+            OR (
+              COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+              AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'
+            )
+          )
          AND EXISTS (
            SELECT 1
            FROM job_version_pipeline_state ps
@@ -629,14 +703,15 @@ export async function seedRecoverablePipelineTasks(
         process.env.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001',
       ],
       (row) => ({
-        id: row.job_version_id,
+        id: requiredSeedValue(row, "job_version_id"),
         payload: {
-          canonical_job_id: row.canonical_job_id,
-          job_version_id: row.job_version_id,
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
         },
       }),
-      enabledTypes
+      enabledTypes,
+      includeTestFixtures,
     );
 
     await selectAndEnqueue(
@@ -654,8 +729,16 @@ export async function seedRecoverablePipelineTasks(
            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
            OR (
             $2::boolean
-             AND COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
-             AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'
+             AND (
+               (
+                 COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+                 AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'
+               )
+               OR (
+                 COALESCE(c.processing_state, c.processing_status) = 'UNMATCHED'
+                 AND c.routing_disposition = 'POLICY_NO_MATCH'
+               )
+             )
              AND NOT EXISTS (
                SELECT 1
                  FROM pipeline_tasks replay_task
@@ -680,17 +763,22 @@ export async function seedRecoverablePipelineTasks(
        LIMIT $4`,
       [ctx.workspaceId, includeRoutingDeferred, routingDeferredReplayVersion, maxPerType],
       (row) => ({
-        id: row.job_version_id,
+        id: requiredSeedValue(row, "job_version_id"),
         payload: {
-          canonical_job_id: row.canonical_job_id,
-          job_version_id: row.job_version_id,
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
-          ...(includeRoutingDeferred && row.processing_state === "ROUTING_DEFERRED"
-            ? { routing_deferred_replay_version: routingDeferredReplayVersion }
-            : {}),
+          ...(
+            includeRoutingDeferred &&
+            typeof row.processing_state === "string" &&
+            ["ROUTING_DEFERRED", "UNMATCHED"].includes(row.processing_state)
+              ? { routing_deferred_replay_version: routingDeferredReplayVersion }
+              : {}
+          ),
         },
       }),
-      enabledTypes
+      enabledTypes,
+      includeTestFixtures,
     );
 
     await selectAndEnqueue(
@@ -767,15 +855,16 @@ export async function seedRecoverablePipelineTasks(
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
-        id: row.job_version_id,
+        id: requiredSeedValue(row, "job_version_id"),
         payload: {
-          canonical_job_id: row.canonical_job_id,
-          job_version_id: row.job_version_id,
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
           profile_version_id: row.profile_version_id,
           ...(row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
         },
       }),
-      enabledTypes
+      enabledTypes,
+      includeTestFixtures,
     );
 
     await selectAndEnqueue(
@@ -838,15 +927,16 @@ export async function seedRecoverablePipelineTasks(
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
-        id: row.job_version_id,
+        id: requiredSeedValue(row, "job_version_id"),
         payload: {
-          canonical_job_id: row.canonical_job_id,
-          job_version_id: row.job_version_id,
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
           ...(row.profile_version_id ? { profile_version_id: row.profile_version_id } : {}),
           ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
         },
       }),
-      enabledTypes
+      enabledTypes,
+      includeTestFixtures,
     );
 
     await selectAndEnqueue(
@@ -922,10 +1012,11 @@ export async function seedRecoverablePipelineTasks(
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
       (row) => ({
-        id: row.job_version_id,
-        payload: { canonical_job_id: row.canonical_job_id, job_version_id: row.job_version_id },
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: { canonical_job_id: requiredSeedValue(row, "canonical_job_id"), job_version_id: requiredSeedValue(row, "job_version_id") },
       }),
-      enabledTypes
+      enabledTypes,
+      includeTestFixtures,
     );
 
     return summary;
@@ -961,6 +1052,39 @@ async function lookupObservationVersion(
   };
 }
 
+async function taskTargetsTestFixture(
+  task: ClaimedPipelineTask,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<boolean> {
+  const canonicalJobId = optionalStringPayload(task, "canonical_job_id");
+  const jobVersionId = optionalStringPayload(task, "job_version_id");
+  const observationId = optionalStringPayload(task, "observation_id");
+  if (!canonicalJobId && !jobVersionId && !observationId) return false;
+
+  const { rows } = await (clientOrPool as QueryClient).query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM canonical_jobs c
+       LEFT JOIN job_versions jv
+         ON jv.workspace_id = c.workspace_id
+        AND jv.canonical_job_id = c.id
+       LEFT JOIN raw_job_observations observation
+         ON observation.workspace_id = c.workspace_id
+        AND observation.job_version_id = jv.id
+       WHERE c.workspace_id = $1
+         AND c.is_test_fixture = TRUE
+         AND (
+           c.id::text = $2
+           OR jv.id::text = $3
+           OR observation.id::text = $4
+         )
+     ) AS exists`,
+    [ctx.workspaceId, canonicalJobId ?? "", jobVersionId ?? "", observationId ?? ""],
+  );
+  return Boolean(rows[0]?.exists);
+}
+
 async function lookupJobState(
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
@@ -971,6 +1095,7 @@ async function lookupJobState(
   primaryLane: string | null;
   laneEvidence: string | null;
   routingDisposition: string | null;
+  profileMatchStatus: string | null;
   recommendationEligibility: string | null;
   recommendationOutcome: string | null;
   gateDecision: string | null;
@@ -982,6 +1107,7 @@ async function lookupJobState(
     primary_lane: string | null;
     lane_evidence: string | null;
     routing_disposition: string | null;
+    profile_match_status: string | null;
     gate_decision: string | null;
     recommendation_eligibility: string | null;
     recommendation_outcome: string | null;
@@ -992,6 +1118,7 @@ async function lookupJobState(
             c.primary_lane,
             c.lane_evidence,
             c.routing_disposition,
+            c.profile_match_status,
             c.gate_decision,
             c.recommendation_eligibility,
             c.recommendation_outcome,
@@ -1012,6 +1139,7 @@ async function lookupJobState(
     primaryLane: row?.primary_lane ?? null,
     laneEvidence: row?.lane_evidence ?? null,
     routingDisposition: row?.routing_disposition ?? null,
+    profileMatchStatus: row?.profile_match_status ?? null,
     gateDecision: row?.gate_decision ?? null,
     recommendationEligibility: row?.recommendation_eligibility ?? null,
     recommendationOutcome: row?.recommendation_outcome ?? null,
@@ -1122,7 +1250,193 @@ function isTechnicalRoutingDeferral(state: {
   ].some((marker) => evidence.includes(marker));
 }
 
-async function markTaskTargetNeedsManualReview(
+interface AutomaticDependency {
+  code:
+    | "JOB_EMBEDDING_MISSING"
+    | "REQUIREMENT_EMBEDDING_MISSING"
+    | "PROFILE_FACT_EMBEDDING_MISSING"
+    | "LANE_PROTOTYPE_EMBEDDING_MISSING"
+    | "EMBEDDING_SPACE_INCOMPATIBLE"
+    | "PROVIDER_TEMPORARILY_UNAVAILABLE"
+    | "REQUIREMENT_EXTRACTION_INCOMPLETE";
+  repairTaskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS" | "PUBLISH_EMBEDDING";
+}
+
+function classifyRoutingDependency(laneEvidence: string | null): AutomaticDependency {
+  const evidence = String(laneEvidence || "").toUpperCase();
+  if (evidence.includes("EMBEDDING_DIM_MISMATCH")) {
+    return { code: "EMBEDDING_SPACE_INCOMPATIBLE", repairTaskType: "PUBLISH_EMBEDDING" };
+  }
+  if (evidence.includes("PROTOTYPE") || evidence.includes("LANE_PROTOTYPE")) {
+    return { code: "LANE_PROTOTYPE_EMBEDDING_MISSING", repairTaskType: "PUBLISH_EMBEDDING" };
+  }
+  if (evidence.includes("ROUTING_ERROR") || evidence.includes("PROVIDER") || evidence.includes("UNAVAILABLE")) {
+    return { code: "PROVIDER_TEMPORARILY_UNAVAILABLE", repairTaskType: "PUBLISH_EMBEDDING" };
+  }
+  return { code: "JOB_EMBEDDING_MISSING", repairTaskType: "PUBLISH_EMBEDDING" };
+}
+
+async function classifySemanticMatchDependency(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<AutomaticDependency> {
+  const { rows } = await (clientOrPool as QueryClient).query<{
+    has_active_space: boolean;
+    requirements_complete: boolean;
+    profile_facts_complete: boolean;
+    complete_cohort: boolean;
+  }>(
+    `WITH active_spaces AS (
+       SELECT id
+       FROM embedding_spaces
+       WHERE workspace_id = $1 AND active = TRUE
+     ),
+     requirements AS (
+       SELECT requirement.id::text AS node_id
+       FROM job_versions version
+       JOIN job_requirements requirement
+         ON requirement.workspace_id = version.workspace_id
+        AND requirement.requirement_set_id = version.active_requirement_set_id
+        AND requirement.status = 'VALIDATED'
+       WHERE version.workspace_id = $1
+         AND version.id = $2
+     ),
+     profile_facts AS (
+       SELECT COALESCE(fact.fact_revision_id, fact.id)::text AS node_id
+       FROM profile_versions profile
+       JOIN profile_facts fact
+         ON fact.workspace_id = profile.workspace_id
+        AND fact.profile_version_id = profile.id
+       WHERE profile.workspace_id = $1
+         AND profile.status = 'ACTIVE'
+     )
+     SELECT
+       EXISTS (SELECT 1 FROM active_spaces) AS has_active_space,
+       EXISTS (
+         SELECT 1
+         FROM active_spaces space
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM requirements requirement
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM v_matchable_nodes node
+             WHERE node.workspace_id = $1
+               AND node.embedding_space_id = space.id
+               AND node.node_type = 'JOB_REQUIREMENT'
+               AND node.node_id::text = requirement.node_id
+           )
+         )
+       ) AS requirements_complete,
+       EXISTS (
+         SELECT 1
+         FROM active_spaces space
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM profile_facts fact
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM v_matchable_nodes node
+             WHERE node.workspace_id = $1
+               AND node.embedding_space_id = space.id
+               AND node.node_type = 'PROFILE_FACT'
+               AND node.node_id::text = fact.node_id
+           )
+         )
+       ) AS profile_facts_complete,
+       EXISTS (
+         SELECT 1
+         FROM active_spaces space
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM requirements requirement
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM v_matchable_nodes node
+             WHERE node.workspace_id = $1
+               AND node.embedding_space_id = space.id
+               AND node.node_type = 'JOB_REQUIREMENT'
+               AND node.node_id::text = requirement.node_id
+           )
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM profile_facts fact
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM v_matchable_nodes node
+             WHERE node.workspace_id = $1
+               AND node.embedding_space_id = space.id
+               AND node.node_type = 'PROFILE_FACT'
+               AND node.node_id::text = fact.node_id
+           )
+         )
+       ) AS complete_cohort`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  const result = rows[0];
+  if (!result?.has_active_space || result.complete_cohort) {
+    return { code: "EMBEDDING_SPACE_INCOMPATIBLE", repairTaskType: "PUBLISH_EMBEDDING" };
+  }
+  if (!result.requirements_complete) {
+    return { code: "REQUIREMENT_EMBEDDING_MISSING", repairTaskType: "PUBLISH_EMBEDDING" };
+  }
+  if (!result.profile_facts_complete) {
+    return { code: "PROFILE_FACT_EMBEDDING_MISSING", repairTaskType: "PUBLISH_EMBEDDING" };
+  }
+  return { code: "EMBEDDING_SPACE_INCOMPATIBLE", repairTaskType: "PUBLISH_EMBEDDING" };
+}
+
+async function enqueueDependencyRepair(
+  dependency: AutomaticDependency,
+  task: ClaimedPipelineTask,
+  jobVersionId: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<void> {
+  const payload = task.payload as Record<string, unknown> | null;
+  const repairPayload = {
+    canonical_job_id: payload?.canonical_job_id,
+    job_version_id: jobVersionId,
+    repair_dependency: dependency.code,
+    repair_attempt: task.attemptNumber,
+    ...(dependency.repairTaskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS"
+      ? { repair_existing_state: true }
+      : { reprocess_existing_state: true }),
+  };
+  await enqueueStageTask(dependency.repairTaskType, jobVersionId, repairPayload, clientOrPool, ctx);
+}
+
+async function reactivateBlockedDependencyTasks(
+  repairTaskType: AutomaticDependency["repairTaskType"],
+  jobVersionId: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<void> {
+  await (clientOrPool as QueryClient).query(
+    `UPDATE pipeline_tasks
+     SET status = 'PENDING',
+         available_at = NOW(),
+         lease_id = NULL,
+         lease_expires_at = NULL,
+         heartbeat_at = NULL,
+         claimed_by = NULL,
+         last_error = NULL,
+         blocked_on = NULL,
+         blocked_reason = NULL,
+         repair_action = NULL,
+         completed_at = NULL,
+         updated_at = NOW()
+     WHERE workspace_id = $1
+       AND status = 'BLOCKED_DEPENDENCY'
+       AND repair_action = $2
+       AND payload->>'job_version_id' = $3`,
+    [ctx.workspaceId, repairTaskType, jobVersionId],
+  );
+}
+
+async function markTaskTargetProcessingError(
   task: ClaimedPipelineTask,
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
@@ -1139,14 +1453,14 @@ async function markTaskTargetNeedsManualReview(
 
   await (clientOrPool as QueryClient).query(
     `UPDATE canonical_jobs
-     SET processing_state = 'NEEDS_MANUAL_REVIEW',
-         processing_status = 'NEEDS_MANUAL_REVIEW',
+     SET processing_state = 'PROCESSING_ERROR',
+         processing_status = 'PROCESSING_ERROR',
          rejection_reason = COALESCE(rejection_reason, $3),
          updated_at = NOW()
      WHERE workspace_id = $1
        AND id = $2
        AND COALESCE(processing_state, processing_status) <> 'MANUALLY_REMOVED'`,
-    [ctx.workspaceId, canonicalJobId, `Task ${task.taskKey} exhausted retries: ${errorMessage}`]
+    [ctx.workspaceId, canonicalJobId, `ENGINE_ERROR: task ${task.taskKey} exhausted automatic retries: ${errorMessage}`]
   );
 }
 
@@ -1177,6 +1491,12 @@ async function maybeEnqueueAfterTask(
   if (!jobVersionId) return;
 
   if (taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS") {
+    await reactivateBlockedDependencyTasks(
+      "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      jobVersionId,
+      clientOrPool,
+      ctx,
+    );
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     const repairExistingState = payload.repair_existing_state === true;
     const rematchableStates = new Set([
@@ -1242,6 +1562,7 @@ async function maybeEnqueueAfterTask(
   }
 
   if (taskType === "PUBLISH_EMBEDDING") {
+    await reactivateBlockedDependencyTasks("PUBLISH_EMBEDDING", jobVersionId, clientOrPool, ctx);
     await enqueueStageTask("ROUTE_LANE", jobVersionId, stagePayload, clientOrPool, ctx);
     return;
   }
@@ -1471,6 +1792,7 @@ async function executeStageTask(
     if (
       [
         "LANE_ROUTED",
+        "UNMATCHED",
         "MATCHED",
         "QUEUED_FOR_AI",
         "EVALUATING",
@@ -1479,7 +1801,13 @@ async function executeStageTask(
       ].includes(processingState ?? "")
     ) return;
     if (isTechnicalRoutingDeferral(state)) {
-      throw new Error(`Lane routing deferred due to technical evidence for job_version_id=${jobVersionId}.`);
+      const dependency = classifyRoutingDependency(state.laneEvidence);
+      await enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx);
+      throw new PipelineTaskDependencyBlockedError(
+        `${dependency.code}:${jobVersionId}`,
+        dependency.repairTaskType,
+        `Lane routing is blocked by ${dependency.code} for job_version_id=${jobVersionId}.`,
+      );
     }
     if (state.processingState === "ROUTING_DEFERRED" && summary.deferred >= 0) return;
     throw new Error(`Lane routing did not advance job_version_id=${jobVersionId}; state=${state.processingState}.`);
@@ -1497,6 +1825,7 @@ async function executeStageTask(
       ![
         "LANE_ROUTED",
         "MATCHED",
+        "UNMATCHED",
         "QUEUED_FOR_AI",
         "EVALUATING",
         "AI_EVALUATED",
@@ -1506,6 +1835,9 @@ async function executeStageTask(
       // ROUTING_DEFERRED and NEEDS_VERIFICATION intentionally have no profile
       // match to perform. Complete stale tasks without converting a holding or
       // verification state into a retry/manual-review failure.
+      return;
+    }
+    if (["MATCHED", "UNMATCHED"].includes(matchState.processingState || "")) {
       return;
     }
     const hasCompletedDeterministicRun = await jobVersionHasCompletedRequirementsExtraction(
@@ -1528,7 +1860,7 @@ async function executeStageTask(
       );
       throw new PipelineTaskDependencyBlockedError(
         `EXTRACT_DETERMINISTIC_REQUIREMENTS:${jobVersionId}`,
-        "Run deterministic requirement extraction, then resume MATCH_PROFILE_EVIDENCE.",
+        "EXTRACT_DETERMINISTIC_REQUIREMENTS",
         `Matching is blocked until deterministic requirements are current for job_version_id=${jobVersionId}.`
       );
     }
@@ -1541,10 +1873,19 @@ async function executeStageTask(
       throw new Error(`Deterministic matching reported ${summary.errors} error(s).`);
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
-    if (state.processingState !== "MATCHED") {
-      throw new Error(`Deterministic matching left job_version_id=${jobVersionId} in state ${state.processingState}.`);
+    if (["MATCHED", "UNMATCHED"].includes(state.processingState || "")) {
+      return;
     }
-    return;
+    if (state.processingState === "LANE_ROUTED" && state.profileMatchStatus === "UNKNOWN") {
+      const dependency = await classifySemanticMatchDependency(clientOrPool, ctx, jobVersionId);
+      await enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx);
+      throw new PipelineTaskDependencyBlockedError(
+        `${dependency.code}:${jobVersionId}`,
+        dependency.repairTaskType,
+        `Matching is blocked by ${dependency.code} for job_version_id=${jobVersionId}.`,
+      );
+    }
+    throw new Error(`Deterministic matching left job_version_id=${jobVersionId} in state ${state.processingState}.`);
   }
 
   if (taskType === "DECIDE_RECOMMENDATION") {
@@ -1622,13 +1963,17 @@ async function processClaimedTask(
   task: ClaimedPipelineTask,
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
-  options: Required<Pick<PipelineStageWorkerOptions, "heartbeatSeconds">> & { budgetRunId: string },
+  options: Required<Pick<PipelineStageWorkerOptions, "heartbeatSeconds">> & {
+    budgetRunId: string;
+    includeTestFixtures: boolean;
+  },
   dependencies: PipelineStageWorkerDependencies
 ): Promise<void> {
   const taskType = task.taskType as PipelineStageTaskType;
   if (!PIPELINE_STAGE_TASK_TYPES.includes(taskType)) {
     throw new Error(`Unsupported pipeline task type: ${task.taskType}`);
   }
+  const isTestFixture = !options.includeTestFixtures && await taskTargetsTestFixture(task, clientOrPool, ctx);
 
   let heartbeatTimer: NodeJS.Timeout | null = null;
   if (options.heartbeatSeconds > 0) {
@@ -1644,6 +1989,12 @@ async function processClaimedTask(
   }
 
   try {
+    if (isTestFixture) {
+      // Preserve the durable task history but do not execute or seed successor
+      // work for release-only canaries in an operational worker.
+      await completePipelineTaskAndRun(task, clientOrPool, { context: ctx });
+      return;
+    }
     await executeStageTask(taskType, task, clientOrPool, ctx, dependencies, options.budgetRunId);
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
@@ -1675,6 +2026,7 @@ export async function runPipelineStageTaskWorker(
   const wallClockMs = options.wallClockMs ?? 55 * 60 * 1000;
   const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
   const budgetRunId = options.budgetRunId?.trim() || crypto.randomUUID();
+  const claimedByType: Partial<Record<PipelineStageTaskType, number>> = {};
   const startedAt = Date.now();
   const summary: PipelineStageWorkerSummary = {
     seeded: null,
@@ -1695,6 +2047,7 @@ export async function runPipelineStageTaskWorker(
         context: ctx,
         taskTypes,
         includeRoutingDeferred: options.includeRoutingDeferred,
+        includeTestFixtures: options.includeTestFixtures,
         routingDeferredReplayVersion: options.routingDeferredReplayVersion,
         maxSeedPerType: options.maxSeedPerType,
       });
@@ -1703,89 +2056,111 @@ export async function runPipelineStageTaskWorker(
     while (summary.claimed < maxTasks && Date.now() - startedAt < wallClockMs) {
       throwIfWorkerCancelled(options.abortSignal);
       let madeProgress = false;
+
+      // Drain predecessor stages before later stages so fresh normalization and
+      // requirements work cannot be perpetually outrun by downstream tasks.
       for (const taskType of taskTypes) {
-        throwIfWorkerCancelled(options.abortSignal);
-        if (summary.claimed >= maxTasks || Date.now() - startedAt >= wallClockMs) break;
-        const claimLimit = Math.min(claimBatchSize, maxTasks - summary.claimed);
-        const claimedTasks = await claimPipelineTasks(
-          {
-            taskType,
-            limit: claimLimit,
-            leaseSeconds,
-            claimedBy,
-          },
-          client as any,
-          { context: ctx }
-        );
+        const stageLimit = Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks));
+        while (
+          summary.claimed < maxTasks &&
+          (claimedByType[taskType] ?? 0) < stageLimit &&
+          Date.now() - startedAt < wallClockMs
+        ) {
+          throwIfWorkerCancelled(options.abortSignal);
+          const claimLimit = Math.min(
+            claimBatchSize,
+            maxTasks - summary.claimed,
+            stageLimit - (claimedByType[taskType] ?? 0),
+          );
+          const claimedTasks = await claimPipelineTasks(
+            {
+              taskType,
+              limit: claimLimit,
+              leaseSeconds,
+              claimedBy,
+            },
+            client as any,
+            { context: ctx }
+          );
 
-        if (claimedTasks.length === 0) continue;
-        madeProgress = true;
+          if (claimedTasks.length === 0) break;
+          madeProgress = true;
 
-        for (const task of claimedTasks) {
-          summary.claimed += 1;
-          incrementWorker(summary, task.taskType, "claimed");
-          try {
-            // Keep the cancellation check inside the lease-release catch:
-            // aborting immediately after claim must never strand a RUNNING
-            // task until its lease expires.
-            throwIfWorkerCancelled(options.abortSignal);
-            await processClaimedTask(
-              task,
-              client as any,
-              ctx,
-              { heartbeatSeconds, budgetRunId },
-              dependencies
-            );
-            summary.completed += 1;
-            incrementWorker(summary, task.taskType, "completed");
-            throwIfWorkerCancelled(options.abortSignal);
-          } catch (error) {
-            if (error instanceof PipelineWorkerCancelledError) {
-              await releasePipelineTaskForRetry(
+          for (const task of claimedTasks) {
+            summary.claimed += 1;
+            claimedByType[taskType] = (claimedByType[taskType] ?? 0) + 1;
+            incrementWorker(summary, task.taskType, "claimed");
+            try {
+              // Keep the cancellation check inside the lease-release catch:
+              // aborting immediately after claim must never strand a RUNNING
+              // task until its lease expires.
+              throwIfWorkerCancelled(options.abortSignal);
+              await processClaimedTask(
                 task,
-                error.message,
                 client as any,
-                { context: ctx }
-              ).catch((releaseError) => {
-                summary.errors.push({
-                  taskType: task.taskType,
-                  taskKey: task.taskKey,
-                  error: `Cancellation lease release failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
-                });
-              });
-              throw error;
-            }
-            if (error instanceof PipelineTaskDependencyBlockedError) {
-              await blockPipelineTask(
-                task,
+                ctx,
                 {
-                  blockedOn: error.blockedOn,
-                  reason: error.message,
-                  repairAction: error.repairAction,
+                  heartbeatSeconds,
+                  budgetRunId,
+                  includeTestFixtures: options.includeTestFixtures === true,
                 },
-                client as any,
-                { context: ctx }
+                dependencies
               );
-              summary.blocked += 1;
-              incrementWorker(summary, task.taskType, "blocked");
-              continue;
+              summary.completed += 1;
+              incrementWorker(summary, task.taskType, "completed");
+              throwIfWorkerCancelled(options.abortSignal);
+            } catch (error) {
+              if (error instanceof PipelineWorkerCancelledError) {
+                await releasePipelineTaskForRetry(
+                  task,
+                  error.message,
+                  client as any,
+                  { context: ctx }
+                ).catch((releaseError) => {
+                  summary.errors.push({
+                    taskType: task.taskType,
+                    taskKey: task.taskKey,
+                    error: `Cancellation lease release failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+                  });
+                });
+                throw error;
+              }
+              if (error instanceof PipelineTaskDependencyBlockedError) {
+                await blockPipelineTask(
+                  task,
+                  {
+                    blockedOn: error.blockedOn,
+                    reason: error.message,
+                    repairAction: error.repairAction,
+                  },
+                  client as any,
+                  { context: ctx }
+                );
+                summary.blocked += 1;
+                incrementWorker(summary, task.taskType, "blocked");
+                continue;
+              }
+              const message = error instanceof Error ? error.message : String(error);
+              const exhausted = task.attemptNumber >= task.maxAttempts;
+              await failPipelineTask(task, message, client as any, { context: ctx });
+              if (exhausted) {
+                await markTaskTargetProcessingError(task, client as any, ctx, message);
+                summary.deadLettered += 1;
+                incrementWorker(summary, task.taskType, "deadLettered");
+              }
+              summary.failed += 1;
+              incrementWorker(summary, task.taskType, "failed");
+              summary.errors.push({ taskType: task.taskType, taskKey: task.taskKey, error: message });
             }
-            const message = error instanceof Error ? error.message : String(error);
-            const exhausted = task.attemptNumber >= task.maxAttempts;
-            await failPipelineTask(task, message, client as any, { context: ctx });
-            if (exhausted) {
-              await markTaskTargetNeedsManualReview(task, client as any, ctx, message);
-              summary.deadLettered += 1;
-              incrementWorker(summary, task.taskType, "deadLettered");
-            }
-            summary.failed += 1;
-            incrementWorker(summary, task.taskType, "failed");
-            summary.errors.push({ taskType: task.taskType, taskKey: task.taskKey, error: message });
           }
         }
       }
 
-      if (!madeProgress) break;
+      if (!madeProgress || taskTypes.every((taskType) =>
+        (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
+      )) {
+        break;
+      }
     }
 
     return summary;

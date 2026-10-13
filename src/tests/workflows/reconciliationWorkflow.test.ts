@@ -16,6 +16,8 @@ describe("pipeline reconciliation safety", () => {
     expect(script).toContain("current_evaluation_queue");
     expect(script).toContain("stale_evaluation_queue");
     expect(script).toContain("context_fingerprint IS NOT NULL");
+    expect(script).toContain("is_test_fixture = FALSE");
+    expect(script).toContain("v_pipeline_task_queue_health");
     expect(script).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i);
   });
 });
