@@ -12,6 +12,7 @@ import {
   AFFECTED_HISTORICAL_REPLAY_STATES,
   EARLY_PIPELINE_REPLAY_STATES,
   haveSameNumericCounts,
+  isCanariesOnlyMode,
   MATCH_REVALIDATION_REPLAY_STATES,
   shouldReplayAffectedHistoricalJobs,
 } from "./historicalReplayScope.js";
@@ -591,6 +592,7 @@ async function stageRehearsalCanaries(client: pg.PoolClient, ctx: WorkspaceConte
 async function main() {
   requireProductionWriteConfirmation();
   const productionUrl = getProductionDatabaseUrl();
+  const canariesOnly = isCanariesOnlyMode();
 
   console.log("================================================================================");
   console.log(" PHASE 3 — HISTORICAL JOB RECOVERY & PRODUCTION REHEARSAL");
@@ -983,6 +985,10 @@ async function main() {
     }
 
     console.log("✅ ALL CANARY INVARIANTS AND CRITICAL ASSERTIONS VERIFIED CLEANLY.");
+    if (canariesOnly) {
+      console.log("Canary-only mode complete; no historical records were selected or replayed.");
+      return;
+    }
 
     // 4. Affected Historical Cohort Replay (with controlled AI evaluation budget)
     // Never reprocess a record merely because it exists. This selector includes only

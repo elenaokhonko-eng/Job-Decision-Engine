@@ -8,6 +8,8 @@ export const EARLY_PIPELINE_REPLAY_STATES = [
 
 export const MATCH_REVALIDATION_REPLAY_STATES = ["MATCHED", "UNMATCHED"];
 
+export const CANARIES_ONLY_FLAG = "--canaries-only";
+
 export const AFFECTED_HISTORICAL_REPLAY_STATES = [
   ...EARLY_PIPELINE_REPLAY_STATES,
   ...MATCH_REVALIDATION_REPLAY_STATES,
@@ -15,6 +17,10 @@ export const AFFECTED_HISTORICAL_REPLAY_STATES = [
 
 export function shouldReplayAffectedHistoricalJobs(jobIds: readonly string[]): boolean {
   return jobIds.length > 0;
+}
+
+export function isCanariesOnlyMode(args: readonly string[] = process.argv.slice(2)): boolean {
+  return args.includes(CANARIES_ONLY_FLAG);
 }
 
 export function haveSameNumericCounts(
