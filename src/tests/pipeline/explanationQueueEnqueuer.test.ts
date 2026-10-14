@@ -85,7 +85,7 @@ describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
     const calls = (mPool.query as any).mock.calls as Array<[string, unknown[]?]>;
     const mainQuery = calls.find(([sql]) => sql.includes("INSERT INTO evaluation_queue"));
     expect(mainQuery?.[0]).toContain("evaluation_budget_deferrals");
-    expect(mainQuery?.[0]).toContain("DEFERRED_BUDGET");
+    expect(mainQuery?.[0]).not.toContain("SET processing_state = 'DEFERRED_BUDGET'");
     expect(mainQuery?.[0]).toContain("LEFT JOIN lane_budgets lb");
     expect(mainQuery?.[0]).toContain("'TRACK'");
     expect(mainQuery?.[0]).toContain("AI_BUDGET_UNCONFIGURED_LANE");

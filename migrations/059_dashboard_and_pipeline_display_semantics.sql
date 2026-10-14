@@ -31,7 +31,7 @@ SELECT
     -- Priority 6: Genuinely in-flight machine states
     WHEN shortlist.processing_state IN (
       'RAW_STAGED', 'PREQUALIFIED', 'ROUTING_DEFERRED', 'LANE_ROUTED',
-      'QUEUED_FOR_AI', 'EVALUATING', 'RETRY_WAIT', 'NEEDS_VERIFICATION'
+      'QUEUED_FOR_AI', 'EVALUATING', 'RETRY_WAIT', 'NEEDS_VERIFICATION', 'DEFERRED_BUDGET'
     ) THEN 'PROCESSING_AUTOMATICALLY'
     ELSE 'COMPLETED'
   END AS pipeline_display_category
@@ -75,7 +75,7 @@ SELECT
       AND c.recommendation_outcome IS NULL
       AND COALESCE(c.processing_state, c.processing_status) IN (
         'RAW_STAGED', 'PREQUALIFIED', 'ROUTING_DEFERRED', 'LANE_ROUTED',
-        'QUEUED_FOR_AI', 'EVALUATING', 'RETRY_WAIT', 'NEEDS_VERIFICATION'
+        'QUEUED_FOR_AI', 'EVALUATING', 'RETRY_WAIT', 'NEEDS_VERIFICATION', 'DEFERRED_BUDGET'
       )
   )::int AS processing,
   COALESCE(err.error_count, 0)::int AS technical_errors,

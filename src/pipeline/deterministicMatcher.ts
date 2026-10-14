@@ -1103,12 +1103,19 @@ export async function runDeterministicMatcher(
                END,
                recommendation_eligibility = CASE
                  WHEN $9::boolean THEN 'INELIGIBLE'
+                 WHEN $8::boolean THEN NULL
                  ELSE recommendation_eligibility
                END,
                recommendation_outcome = CASE
                  WHEN $9::boolean THEN 'SKIP'
+                 WHEN $8::boolean THEN NULL
                  ELSE recommendation_outcome
                END,
+               recommendation_requirement_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_requirement_score END,
+               recommendation_coverage_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_coverage_score END,
+               recommendation_evidence_completeness = CASE WHEN $8::boolean THEN NULL ELSE recommendation_evidence_completeness END,
+               recommendation_decided_at = CASE WHEN $8::boolean THEN NULL ELSE recommendation_decided_at END,
+               latest_deterministic_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_deterministic_decision_id END,
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = $5

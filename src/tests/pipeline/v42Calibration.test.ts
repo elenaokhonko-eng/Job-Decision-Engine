@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { applyGlobalGates, evaluateWorkability } from "../../services/criteria.js";
-import { containsConcept, hasRequiredInstitutionalContext, loadLanesConfig } from "../../pipeline/laneRouter.js";
+import { containsConcept, hasApprovedLaneFunction, hasCoreTechnicalFunction, hasRequiredInstitutionalContext, loadLanesConfig } from "../../pipeline/laneRouter.js";
 import { loadWorkabilityPolicy } from "../../pipeline/workabilityPolicy.js";
 
 describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
@@ -246,6 +246,56 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
       const coreLane = lanes.CORE_AI_DATA;
       expect(coreLane.negative_concepts).toContain("ios developer");
       expect(coreLane.negative_concepts).toContain("android developer");
+    });
+
+    it("requires an approved technical function before CORE_AI_DATA eligibility", () => {
+      const technicalTitles = [
+        "Senior AI Engineer",
+        "Lead AI Data Engineer",
+        "Machine Learning Architect",
+        "Technical Product Manager - ML Platform",
+        "Research Scientist - Generative AI",
+      ];
+      const nonTechnicalTitles = [
+        "Licensed Professional Counselor",
+        "Director, Sales",
+        "Business Development Manager",
+        "Product Designer",
+        "People Business Partner",
+        "FP&A Associate",
+        "Customer Success Manager",
+      ];
+
+      for (const title of technicalTitles) expect(hasCoreTechnicalFunction(title)).toBe(true);
+      for (const title of nonTechnicalTitles) expect(hasCoreTechnicalFunction(title)).toBe(false);
+    });
+
+    it("blocks nontechnical role families from every lane before routing", () => {
+      const lanesToCheck = [
+        "CORE_AI_DATA",
+        "LEGAL_REGTECH",
+        "HEALTH_BIO_PHARMA",
+        "INVESTMENT_MARKETS_FINTECH",
+      ];
+      const nonTechnicalTitles = [
+        "Enterprise Sales Director",
+        "Licensed Clinical Social Worker",
+        "Financial Crimes Investigator",
+        "Conceptual Art Director",
+        "Customer Success Manager",
+      ];
+
+      for (const laneKey of lanesToCheck) {
+        for (const title of nonTechnicalTitles) {
+          expect(hasApprovedLaneFunction(laneKey, title)).toBe(false);
+        }
+      }
+
+      expect(hasApprovedLaneFunction("HEALTH_BIO_PHARMA", "Clinical Data Scientist")).toBe(true);
+      expect(hasApprovedLaneFunction("LEGAL_REGTECH", "Compliance Automation Engineer")).toBe(true);
+      expect(hasCoreTechnicalFunction("Technical Consultant")).toBe(false);
+      expect(hasCoreTechnicalFunction("Principal Architect")).toBe(true);
+      expect(hasCoreTechnicalFunction("Research Scientist")).toBe(true);
     });
   });
 });

@@ -28,7 +28,7 @@ dotenv.config({ path: ".env.local" });
 
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
-const LANE_ROUTER_RULE_VERSION = "lane_router_v2.2.1";
+const LANE_ROUTER_RULE_VERSION = "lane_router_v2.3.2";
 
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
@@ -511,6 +511,24 @@ function conceptVariants(concept: string): string[] {
 function conceptScopeScore(description: string, concepts: string[] | undefined): number {
   if (!concepts || concepts.length === 0) return 1;
   return concepts.some((concept) => containsConcept(description, concept)) ? 1 : 0;
+}
+
+const NON_TECHNICAL_ROLE_FAMILY = /\b(?:sales|business\s+development|account\s+(?:executive|manager|cto)|customer\s+success|counselor|social\s+worker|people\s+(?:partner|business)|human\s+resources|hr\b|brand(?:s)?|marketing|finance|fp\s*&\s*a|accounting|tax|designer|design\s+director|art\s+director|leather|investigator|recruiter|talent|operations?)\b/i;
+
+export function hasNonTechnicalRoleFamily(title: string): boolean {
+  return NON_TECHNICAL_ROLE_FAMILY.test(String(title || ""));
+}
+
+export function hasCoreTechnicalFunction(title: string): boolean {
+  const value = String(title || "").toLowerCase();
+  if (!value || hasNonTechnicalRoleFamily(value)) return false;
+
+  return /\b(?:software|data|machine\s+learning|ml|ai|platform|cloud|devops|sre|site\s+reliability|backend|back-end|frontend|front-end|full[- ]stack|engineering|engineer|developer|architect|scientist|researcher|quantitative|bioinformatics|mlops|technical\s+(?:product|program|programme|project|delivery)|automation|cyber\s+security|security\s+engineer)\b/i.test(value);
+}
+
+export function hasApprovedLaneFunction(laneKey: string, title: string): boolean {
+  if (hasNonTechnicalRoleFamily(title)) return false;
+  return laneKey === "CORE_AI_DATA" ? hasCoreTechnicalFunction(title) : true;
 }
 
 export function hasRequiredInstitutionalContext(laneKey: string, text: string): boolean {
@@ -1347,7 +1365,9 @@ export async function runLaneRouter(
             const score = cosineSimilarity(jobEmbedding, laneEmbeddings[laneKey]);
             scoreMap[laneKey] = score;
             domainScoreMap[laneKey] = laneDomainScopeScore(descText, laneKey, laneDef.included_domain_concepts);
-            functionScoreMap[laneKey] = conceptScopeScore(descText, laneDef.required_function_concepts);
+            functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, job.normalized_title || "")
+              ? 0
+              : conceptScopeScore(descText, laneDef.required_function_concepts);
             if (score > bestScore) {
               bestScore = score;
               bestLane = laneKey;
@@ -1487,6 +1507,7 @@ export async function runLaneRouter(
                    ELSE 'TECHNICAL_DEFERRED'
                  END,
                  rejection_reason = CASE
+                   WHEN $3::varchar = 'LANE_ROUTED' THEN NULL
                    WHEN $10::boolean THEN 'NO_ACTIVE_LANE_MATCH'
                    ELSE rejection_reason
                  END,
