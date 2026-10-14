@@ -1644,7 +1644,7 @@ async function executeStageTask(
       // the current version's funnel state.
       return;
     }
-    if (["HARD_REJECTED", "MANUALLY_REMOVED"].includes(currentState.processingState || "")) {
+    if (["HARD_REJECTED", "MANUALLY_REMOVED", "UNMATCHED"].includes(currentState.processingState || "")) {
       // Deterministic requirements are not a prerequisite for a terminal
       // hard rejection. Old extraction tasks can remain queued after a gate
       // recalculation; complete them as harmless no-ops rather than creating
@@ -1903,6 +1903,10 @@ async function executeStageTask(
       // must not create a permanent blocked/manual-review record.
       return;
     }
+    if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) {
+      // Terminal jobs with recorded recommendation outcomes are complete.
+      return;
+    }
     const matchDependentStates = new Set([
       "LANE_ROUTED",
       "MATCHED",
@@ -1912,8 +1916,10 @@ async function executeStageTask(
       "EVALUATED",
     ]);
     const isRoutingDeferred = decisionState.processingState === "ROUTING_DEFERRED";
+    const isUnmatched = decisionState.processingState === "UNMATCHED";
     const requiresCurrentMatch =
       !isRoutingDeferred &&
+      !isUnmatched &&
       (decisionState.gateDecision === "PASS" || matchDependentStates.has(decisionState.processingState || ""));
     if (requiresCurrentMatch && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId))) {
       const payload = (task.payload || {}) as Record<string, unknown>;
