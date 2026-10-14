@@ -830,12 +830,13 @@ export async function runHardGates(
         // Update canonical job with gate outcome + structured workability facts + evidence
         await client.query(
           `UPDATE canonical_jobs
-           SET gate_decision      = $1,
+           SET gate_decision      = $1::varchar,
                processing_state   = $2,
                processing_status  = $2,
                rejection_reason   = $3,
                gate_evidence_quotes = $4,
                workability_facts  = $5,
+               workplace_type = CASE WHEN $1::varchar = 'PASS' AND ($5::jsonb->>'workplace_type') = 'ASSUMED_HYBRID' THEN 'ASSUMED_HYBRID' ELSE workplace_type END,
                primary_lane = CASE WHEN $8::boolean THEN NULL ELSE primary_lane END,
                secondary_lanes = CASE WHEN $8::boolean THEN NULL ELSE secondary_lanes END,
                lane_confidence = CASE WHEN $8::boolean THEN NULL ELSE lane_confidence END,

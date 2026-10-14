@@ -7,8 +7,33 @@ import { extractHybridAttendance, type HybridAttendanceFacts } from "./criteria.
 const EXTRACTOR_VERSION = "work_mode_enrichment_v1";
 const FETCH_TIMEOUT_MS = 15_000;
 
+function isSingaporeUnknownWorkModeEligible(location: string | null | undefined, description: string | null | undefined): boolean {
+  const loc = String(location || "").toLowerCase();
+  const desc = String(description || "").toLowerCase();
+  const isSingapore = /\b(?:singapore|sg)\b/i.test(loc)
+    || /\b(?:based\s+in\s+singapore|location\s*:\s*singapore|office\s+in\s+singapore)\b/i.test(desc);
+  const explicitOnsite = /\b(?:100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(desc)
+    || /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i.test(desc);
+  return isSingapore && !explicitOnsite;
+}
+
+function makeSingaporeAssumedHybridResult(fingerprint: string): WorkModeEnrichmentResult {
+  return {
+    workplace_type: "ASSUMED_HYBRID",
+    office_days_min: 3,
+    office_days_max: 3,
+    attendance_basis: "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE",
+    territory_restriction: null,
+    work_auth_restriction: null,
+    evidence_quote: null,
+    source_type: "CACHED",
+    status: "ENRICHED",
+    fingerprint,
+  };
+}
+
 export interface WorkModeEnrichmentResult {
-  workplace_type: "REMOTE" | "HYBRID" | "ONSITE" | "UNKNOWN";
+  workplace_type: "REMOTE" | "HYBRID" | "ONSITE" | "ASSUMED_HYBRID" | "UNKNOWN";
   office_days_min: number | null;
   office_days_max: number | null;
   attendance_basis: string;
@@ -325,7 +350,7 @@ export async function enrichWorkModeIfNeeded(
   // 1. Check existing cached enrichment record for idempotency
   try {
     const { rows: cached } = await clientOrPool.query<{
-      workplace_type: "REMOTE" | "HYBRID" | "ONSITE" | "UNKNOWN";
+      workplace_type: "REMOTE" | "HYBRID" | "ONSITE" | "ASSUMED_HYBRID" | "UNKNOWN";
       office_days_min: number | null;
       office_days_max: number | null;
       attendance_basis: string;
@@ -344,6 +369,33 @@ export async function enrichWorkModeIfNeeded(
     );
 
     if (cached.length > 0) {
+      if (
+        cached[0].workplace_type === "UNKNOWN"
+        && isSingaporeUnknownWorkModeEligible(job.location, job.description_text)
+      ) {
+        const assumed = makeSingaporeAssumedHybridResult(fingerprint);
+        await clientOrPool.query(
+          `UPDATE work_mode_enrichments
+           SET workplace_type = $1,
+               office_days_min = $2,
+               office_days_max = $3,
+               attendance_basis = $4,
+               status = $5,
+               evidence_quote = NULL,
+               attempted_at = NOW()
+           WHERE workspace_id = $6 AND fingerprint = $7`,
+          [
+            assumed.workplace_type,
+            assumed.office_days_min,
+            assumed.office_days_max,
+            assumed.attendance_basis,
+            assumed.status,
+            context.workspaceId,
+            fingerprint,
+          ]
+        );
+        return assumed;
+      }
       return {
         ...cached[0],
         source_type: "CACHED",
@@ -435,13 +487,28 @@ export async function enrichWorkModeIfNeeded(
   // 4. Fetch canonical posting URL
   if (job.canonical_url) {
     const fetched = await fetchCanonicalWorkMode(job.canonical_url);
-    const result: WorkModeEnrichmentResult = {
-      ...fetched,
-      source_type: "CANONICAL_PAGE",
-      fingerprint,
+    if (fetched.workplace_type !== "UNKNOWN") {
+      const result: WorkModeEnrichmentResult = {
+        ...fetched,
+        source_type: "CANONICAL_PAGE",
+        fingerprint,
+      };
+      await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => undefined);
+      return result;
+    }
+  }
+
+  // 5. Requirement J: Singapore unknown-work-mode policy
+  // After automatic enrichment has been attempted:
+  // Singapore role + workplace mode still UNKNOWN + no explicit 4/5-day onsite requirement
+  // + no explicit onsite-only statement -> ASSUMED_HYBRID_3_2 -> PASS
+  if (isSingaporeUnknownWorkModeEligible(job.location, job.description_text)) {
+    const sgResult: WorkModeEnrichmentResult = {
+      ...makeSingaporeAssumedHybridResult(fingerprint),
+      source_type: "STORED_DESCRIPTION",
     };
-    await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => undefined);
-    return result;
+    await persistEnrichmentResult(clientOrPool, context, job, sgResult).catch(() => undefined);
+    return sgResult;
   }
 
   const fallbackResult: WorkModeEnrichmentResult = {

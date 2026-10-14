@@ -446,7 +446,6 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "public digital infrastructure",
     "digital public goods",
     "civic tech",
-    "govtech",
   ],
   "social impact": [
     "social impact",
@@ -485,21 +484,22 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "research institute",
     "research lab",
     "research laboratory",
-    "laboratory",
-    "ai laboratory",
-    "faculty",
+    "academic laboratory",
+    "academic department",
+    "faculty research",
     "higher education",
-    "conference publication",
-    "arxiv",
-    "neurips",
-    "icml",
-    "cvpr",
-    "iclr",
-    "acl",
     "research fellow",
     "postdoctoral",
     "postdoc",
     "phd",
+  ],
+  "academic laboratory": [
+    "academic laboratory",
+    "academic lab",
+    "university laboratory",
+    "university lab",
+    "faculty laboratory",
+    "ai laboratory",
   ],
 };
 
@@ -511,6 +511,28 @@ function conceptVariants(concept: string): string[] {
 function conceptScopeScore(description: string, concepts: string[] | undefined): number {
   if (!concepts || concepts.length === 0) return 1;
   return concepts.some((concept) => containsConcept(description, concept)) ? 1 : 0;
+}
+
+export function hasRequiredInstitutionalContext(laneKey: string, text: string): boolean {
+  const normalizedLane = laneKey.toUpperCase();
+  const value = String(text || "");
+
+  if (normalizedLane === "UNIVERSITY_AI_RESEARCH") {
+    const explicitInstitution = /\b(?:academic\s+institution|research\s+institute|academic\s+(?:lab|laboratory)|university\s+(?:lab|laboratory)|faculty\s+research|academic\s+appointment|formal\s+academic\s+research\s+(?:program|programme)|independent\s+research\s+laboratory|public\s+research\s+institute)\b/i.test(value);
+    const roleInstitutionPair = /\b(?:research|scientist|engineer|fellow|professor)\b.{0,60}\b(?:university|institute|lab|laboratory|faculty)\b|\b(?:university|institute|lab|laboratory|faculty)\b.{0,60}\b(?:research|scientist|engineer|fellow|professor)\b/i.test(value);
+    return explicitInstitution || roleInstitutionPair;
+  }
+
+  if (normalizedLane === "SOCIAL_IMPACT_MULTILATERAL") {
+    return /\b(?:multilateral|international\s+development|development\s+bank|world\s+bank|united\s+nations|\bUN\b\s+(?:entity|agency|programme|program)|government\s+(?:agency|ministry|department)|public\s+agency|non[- ]profit|nonprofit|humanitarian|climate\s+(?:initiative|program|programme)|digital\s+public\s+infrastructure|digital\s+public\s+goods|civic\s+tech|public\s+interest\s+tech|social\s+impact)\b/i.test(value);
+  }
+
+  return true;
+}
+
+function laneDomainScopeScore(description: string, laneKey: string, concepts: string[] | undefined): number {
+  if (!hasRequiredInstitutionalContext(laneKey, description)) return 0;
+  return conceptScopeScore(description, concepts);
 }
 
 type LaneCandidateEvaluation = {
@@ -600,8 +622,17 @@ function extractCoreJobText(title: string, description: string): string {
     "benefits & perks",
     "benefits",
     "about us",
+    "about the company",
+    "about our company",
+    "who we are",
+    "our mission",
+    "company overview",
+    "company description",
     "diversity & inclusion",
     "diversity and inclusion",
+    "what we offer",
+    "perks",
+    "our story",
   ]);
 
   const sections: Array<{ heading: string | null; body: string[] }> = [];
@@ -646,6 +677,7 @@ export async function runLaneRouting(
     jobVersionIds?: string[];
     canonicalJobIds?: string[];
     limit?: number;
+    reprocessExisting?: boolean;
   }
 ): Promise<{ routed: number; deferred: number }> {
   return runLaneRouter(clientOrPool, options);
@@ -658,6 +690,7 @@ export async function runLaneRouter(
     jobVersionIds?: string[];
     canonicalJobIds?: string[];
     limit?: number;
+    reprocessExisting?: boolean;
   }
 ): Promise<{ routed: number; deferred: number }> {
   const pool = clientOrPool || defaultPool;
@@ -680,13 +713,14 @@ export async function runLaneRouter(
   const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
   const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
   const hasExplicitTargets = jobVersionIds.length > 0 || canonicalJobIds.length > 0;
+  const reprocessExisting = options?.reprocessExisting === true;
   const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
     ? Number(options?.limit)
     : null;
   // Explicit repair/backfill targets may replay a prior policy no-match.
   // Normal scans may only reopen one after the lane policy/model revision changes.
   const params: unknown[] = [ctx.workspaceId];
-  if (!hasExplicitTargets) params.push(currentLaneRouterModelPrefix);
+  if (!hasExplicitTargets || reprocessExisting) params.push(currentLaneRouterModelPrefix);
   const jobVersionFilter = jobVersionIds.length > 0
     ? `AND jv.id = ANY($${params.push(jobVersionIds)}::uuid[])`
     : "";
@@ -694,6 +728,38 @@ export async function runLaneRouter(
     ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])`
     : "";
   const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
+  const replayableStateFilter = reprocessExisting
+    ? `COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED', 'UNMATCHED', 'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED')`
+    : `COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+           OR (
+             COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')
+             AND (
+               ${hasExplicitTargets ? "TRUE" : `
+                 COALESCE(c.primary_lane, 'UNCLASSIFIED') = 'UNCLASSIFIED'
+                 AND (
+                   c.latest_lane_decision_id IS NULL
+                   OR NOT EXISTS (
+                     SELECT 1
+                     FROM lane_decisions ld
+                     WHERE ld.workspace_id = c.workspace_id
+                       AND ld.id = c.latest_lane_decision_id
+                       AND LEFT(ld.model_version, LENGTH($2)) = $2
+                   )
+                 )
+               `}
+             )
+           )`;
+  const replayExistingDecisionFilter = reprocessExisting
+    ? `AND (
+         c.latest_lane_decision_id IS NULL
+         OR NOT EXISTS (
+           SELECT 1 FROM lane_decisions ld
+           WHERE ld.workspace_id = c.workspace_id
+             AND ld.id = c.latest_lane_decision_id
+             AND LEFT(ld.model_version, LENGTH($2)) = $2
+         )
+       )`
+    : "";
 
   let jobs: any[] = [];
   try {
@@ -714,30 +780,8 @@ export async function runLaneRouter(
           LIMIT 1
         ) jv ON TRUE
         WHERE c.workspace_id = $1
-          AND (
-            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-           OR (
-             COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')
-             AND (
-               -- Explicit recovery/backfill targets may replay either a
-               -- technical deferral or a terminal no-match. Normal scans only
-               -- reopen after the lane policy/model revision changes.
-               ${hasExplicitTargets ? "TRUE" : `
-                 COALESCE(c.primary_lane, 'UNCLASSIFIED') = 'UNCLASSIFIED'
-                 AND (
-                   c.latest_lane_decision_id IS NULL
-                   OR NOT EXISTS (
-                     SELECT 1
-                     FROM lane_decisions ld
-                     WHERE ld.workspace_id = c.workspace_id
-                       AND ld.id = c.latest_lane_decision_id
-                       AND LEFT(ld.model_version, LENGTH($2)) = $2
-                   )
-                 )
-               `}
-             )
-           )
-          )
+          AND (${replayableStateFilter})
+          ${replayExistingDecisionFilter}
           ${jobVersionFilter}
           ${canonicalJobFilter}
         ORDER BY c.created_at ASC, c.id ASC
@@ -751,7 +795,7 @@ export async function runLaneRouter(
       throw error;
     }
     const fallbackParams: unknown[] = [ctx.workspaceId];
-    if (!hasExplicitTargets) fallbackParams.push(currentLaneRouterModelPrefix);
+    if (!hasExplicitTargets || reprocessExisting) fallbackParams.push(currentLaneRouterModelPrefix);
     const fallbackJobVersionFilter = jobVersionIds.length > 0
       ? `AND jv.id = ANY($${fallbackParams.push(jobVersionIds)}::uuid[])`
       : "";
@@ -773,19 +817,8 @@ export async function runLaneRouter(
           LIMIT 1
         ) jv ON TRUE
          WHERE c.workspace_id = $1
-           AND (
-             COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-             OR (${hasExplicitTargets ? "COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')" : `COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')
-                 AND (
-                   c.latest_lane_decision_id IS NULL
-                   OR NOT EXISTS (
-                     SELECT 1 FROM lane_decisions ld
-                     WHERE ld.workspace_id = c.workspace_id
-                       AND ld.id = c.latest_lane_decision_id
-                       AND LEFT(ld.model_version, LENGTH($2)) = $2
-                   )
-                 )`})
-           )
+           AND (${replayableStateFilter})
+          ${replayExistingDecisionFilter}
           ${fallbackJobVersionFilter}
           ${fallbackCanonicalJobFilter}
         ORDER BY c.created_at ASC, c.id ASC
@@ -1313,7 +1346,7 @@ export async function runLaneRouter(
             }
             const score = cosineSimilarity(jobEmbedding, laneEmbeddings[laneKey]);
             scoreMap[laneKey] = score;
-            domainScoreMap[laneKey] = conceptScopeScore(descText, laneDef.included_domain_concepts);
+            domainScoreMap[laneKey] = laneDomainScopeScore(descText, laneKey, laneDef.included_domain_concepts);
             functionScoreMap[laneKey] = conceptScopeScore(descText, laneDef.required_function_concepts);
             if (score > bestScore) {
               bestScore = score;

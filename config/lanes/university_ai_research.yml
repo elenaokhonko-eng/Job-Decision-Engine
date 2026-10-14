@@ -26,15 +26,9 @@ scope:
     any:
       - UNIVERSITY
       - ACADEMIC_RESEARCH
-      - AI_RESEARCH
-      - MACHINE_LEARNING_RESEARCH
-      - RESPONSIBLE_AI
-      - SCIENTIFIC_COMPUTING
       - RESEARCH_INSTITUTE
       - HIGHER_EDUCATION
-      - RESEARCH_SOFTWARE
-      - COMPUTATIONAL_SCIENCE
-      - DIGITAL_HUMANITIES
+      - ACADEMIC_LABORATORY
 
 prototypes:
   - prototype_key: university_ai_research

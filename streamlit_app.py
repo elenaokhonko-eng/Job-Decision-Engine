@@ -198,6 +198,41 @@ REJECTED_READ_MODEL_QUERY = """
     LIMIT %s
 """
 
+DASHBOARD_SUMMARY_READ_MODEL_QUERY = """
+    SELECT
+      s.total_jobs,
+      s.gate_passed,
+      s.hard_rejected,
+      s.unmatched,
+      s.processing,
+      s.technical_errors,
+      s.user_action_required,
+      s.priority_count,
+      s.review_count,
+      s.track_count,
+      s.skip_count,
+      s.recommended_count,
+      s.apply_now_count,
+      s.prequalified_count,
+      s.lane_routed_count,
+      s.matched_count,
+      s.ai_evaluated_count,
+      s.decision_complete_count
+    FROM v_job_engine_dashboard_summary_scoped s
+    WHERE s.workspace_id = %s
+    LIMIT 1
+"""
+
+
+def fetch_dashboard_summary_from_postgres_read_model():
+    workspace_connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(workspace_connection)
+    finally:
+        workspace_connection.close()
+    rows = _read_model_query(DASHBOARD_SUMMARY_READ_MODEL_QUERY, (workspace_id,))
+    return rows[0] if rows else {}
+
 
 def fetch_jobs_from_postgres_read_model():
     workspace_connection = _open_read_only_connection()
@@ -1120,29 +1155,39 @@ if api_base_url:
 else:
     st.sidebar.caption("📦 PostgreSQL Direct Read Model (Live)")
 
-# Metrics
-total_jobs = len(jobs_list)
-evaluated_count = sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED" and not j.get("version_mismatch"))
-recommended_count = sum(
-    1 for j in jobs_list
-    if j.get("pipeline_display_category") == "COMPLETED"
-    and j.get("decision_outcome") in ("PRIORITY", "REVIEW", "TRACK")
-)
-manual_action_count = sum(1 for j in jobs_list if j.get("requires_user_action") is True)
-automatic_processing_count = sum(1 for j in jobs_list if j.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY")
-unmatched_count = sum(1 for j in jobs_list if j.get("pipeline_display_category") == "REJECTED_UNMATCHED")
-rejected_count = len(rejected_jobs_audit) + unmatched_count
-technical_error_count = sum(1 for j in jobs_list if j.get("pipeline_display_category") == "TECHNICAL_ERROR")
+# Authoritative aggregate metrics from read model with fallback
+dashboard_summary = {}
+try:
+    dashboard_summary = fetch_dashboard_summary_from_postgres_read_model()
+except Exception:
+    pass
+
+total_jobs = dashboard_summary.get("total_jobs") if dashboard_summary.get("total_jobs") is not None else len(jobs_list)
+gate_passed_count = dashboard_summary.get("gate_passed") if dashboard_summary.get("gate_passed") is not None else sum(1 for j in jobs_list if j.get("gate_status") == "PASS")
+apply_now_count = dashboard_summary.get("apply_now_count") if dashboard_summary.get("apply_now_count") is not None else sum(1 for j in jobs_list if j.get("decision_outcome") in ("PRIORITY", "REVIEW"))
+track_count = dashboard_summary.get("track_count") if dashboard_summary.get("track_count") is not None else sum(1 for j in jobs_list if j.get("decision_outcome") == "TRACK")
+recommended_count = dashboard_summary.get("recommended_count") if dashboard_summary.get("recommended_count") is not None else (apply_now_count + track_count)
+processing_count = dashboard_summary.get("processing") if dashboard_summary.get("processing") is not None else sum(1 for j in jobs_list if j.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY")
+automatic_processing_count = processing_count
+rejected_count = ((dashboard_summary.get("hard_rejected") or 0) + (dashboard_summary.get("unmatched") or 0)) if (dashboard_summary.get("hard_rejected") is not None) else (len(rejected_jobs_audit) + sum(1 for j in jobs_list if j.get("pipeline_display_category") == "REJECTED_UNMATCHED"))
+technical_error_count = dashboard_summary.get("technical_errors") if dashboard_summary.get("technical_errors") is not None else sum(1 for j in jobs_list if j.get("pipeline_display_category") == "TECHNICAL_ERROR")
+manual_action_count = dashboard_summary.get("user_action_required") if dashboard_summary.get("user_action_required") is not None else sum(1 for j in jobs_list if j.get("requires_user_action") is True)
+decision_complete_count = dashboard_summary.get("decision_complete_count") if dashboard_summary.get("decision_complete_count") is not None else sum(1 for j in jobs_list if j.get("decision_outcome") is not None)
+ai_evaluated_count = dashboard_summary.get("ai_evaluated_count") if dashboard_summary.get("ai_evaluated_count") is not None else sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED")
 toxic_count = sum(1 for j in jobs_list if isinstance(j.get("politics_stress_score"), (int, float)) and j.get("politics_stress_score") >= 70)
 
 st.sidebar.subheader("📊 Engine Statistics")
 st.sidebar.metric("Total Vault Jobs", total_jobs)
-st.sidebar.metric("Fully Evaluated", evaluated_count)
+st.sidebar.metric("Gate Passed", gate_passed_count)
+st.sidebar.metric("🏆 Apply Now", apply_now_count)
+st.sidebar.metric("👀 Track", track_count)
 st.sidebar.metric("Recommended", recommended_count)
 st.sidebar.metric("Processing", automatic_processing_count)
 st.sidebar.metric("Rejected", rejected_count)
 st.sidebar.metric("Error", technical_error_count)
-st.sidebar.metric("User action required", manual_action_count)
+st.sidebar.metric("⚠️ User action required", manual_action_count)
+st.sidebar.metric("Decision Complete", decision_complete_count)
+st.sidebar.metric("AI Evaluated", ai_evaluated_count)
 st.sidebar.metric("Toxicity Flags", toxic_count)
 
 st.sidebar.markdown("---")
@@ -1272,21 +1317,20 @@ with tab_dashboard:
             escape_text(j.get("title")),
         )
 
-    # Deterministic Top Recommended list (LLM next_action is displayed but not authoritative).
-    top_recommended = [
+    # Deterministic Top Recommended list (Apply Now: PRIORITY + REVIEW)
+    apply_now_jobs = [
         j for j in jobs_list
-        if j.get("pipeline_display_category") == "COMPLETED"
-        and not j.get("version_mismatch")
+        if not j.get("version_mismatch")
         and j.get("decision_outcome") in ("PRIORITY", "REVIEW")
     ]
-    top_recommended = sorted(top_recommended, key=top_rec_sort_key)[:10]
+    apply_now_jobs = sorted(apply_now_jobs, key=top_rec_sort_key)[:15]
 
-    st.subheader("🏆 Top Recommended Opportunities")
-    if not top_recommended:
+    st.subheader(f"🏆 Top Recommended Opportunities — Apply Now ({len(apply_now_jobs)})")
+    if not apply_now_jobs:
         st.info("No deterministic priority or review recommendations found yet. Run the discovery & evaluation pipeline.")
     else:
         cols = st.columns(2)
-        for idx, rjob in enumerate(top_recommended):
+        for idx, rjob in enumerate(apply_now_jobs):
             col_idx = idx % 2
             with cols[col_idx]:
                 version_warn = " ⚠️ Stale Evaluation" if rjob.get("version_mismatch") else ""
@@ -1335,6 +1379,66 @@ with tab_dashboard:
                 else:
                     st.write("Verify Job Ad & Apply URL unavailable.")
 
+    # Worth Tracking list (TRACK)
+    track_jobs = [
+        j for j in jobs_list
+        if not j.get("version_mismatch")
+        and j.get("decision_outcome") == "TRACK"
+    ]
+    track_jobs = sorted(track_jobs, key=top_rec_sort_key)[:15]
+
+    if track_jobs:
+        st.subheader(f"👀 Worth Tracking ({len(track_jobs)})")
+        cols_track = st.columns(2)
+        for idx, rjob in enumerate(track_jobs):
+            col_idx = idx % 2
+            with cols_track[col_idx]:
+                version_warn = " ⚠️ Stale Evaluation" if rjob.get("version_mismatch") else ""
+
+                title = escape_text(rjob.get("title") or "")
+                company = escape_text(rjob.get("company") or "")
+                lane = escape_text(rjob.get("primary_lane") or "UNCLASSIFIED")
+                location = escape_text(rjob.get("location") or "Unknown")
+                workplace = escape_text(rjob.get("workplace_type") or "UNKNOWN")
+
+                outcome = escape_text(rjob.get("decision_outcome") or "TRACK")
+                eligibility = escape_text(rjob.get("decision_eligibility") or "VERIFY")
+
+                match_score = rjob.get("deterministic_match_score")
+                coverage = rjob.get("deterministic_match_coverage")
+                match_str = f"{float(match_score):.1f}/100" if isinstance(match_score, (int, float)) else "N/A"
+                cov_str = f"{float(coverage):.1f}%" if isinstance(coverage, (int, float)) else "N/A"
+
+                evidence_pct = rjob.get("decision_evidence_completeness")
+                evidence_str = f"{int(float(evidence_pct) * 100)}%" if isinstance(evidence_pct, (int, float)) else "N/A"
+
+                llm_action = escape_text(rjob.get("next_action") or "N/A")
+                lane_conf = escape_text(rjob.get("lane_confidence") or "None")
+
+                nd = rjob.get("nd_friendly_score")
+                pol = rjob.get("politics_stress_score")
+                nd_str = f"{int(nd)}%" if isinstance(nd, (int, float)) else "N/A"
+                pol_str = f"{int(pol)}%" if isinstance(pol, (int, float)) else "N/A"
+
+                summary = escape_text(rjob.get("evaluation_summary") or "N/A")
+
+                st.markdown(f"""
+                <div class="top-rec-card">
+                    <h4>👀 #{idx+1} {title} {version_warn}</h4>
+                    <p><b>Company:</b> {company} | <b>Lane:</b> <code>{lane}</code></p>
+                    <p><b>Location:</b> {location} ({workplace})</p>
+                    <p><b>Deterministic:</b> <code>{outcome}</code> ({eligibility}) | <b>Match:</b> {match_str} | <b>Coverage:</b> {cov_str} | <b>Evidence:</b> {evidence_str}</p>
+                    <p><b>LLM suggestion:</b> <code style='color:#22c55e;'>{llm_action}</code> | <b>Lane confidence:</b> {lane_conf}</p>
+                    <p><b>Workplace Culture:</b> Autonomy: {nd_str} | Politics: {pol_str}</p>
+                    <p><b>Summary:</b> {summary}</p>
+                </div>
+                """, unsafe_allow_html=True)
+                url = safe_http_url(rjob.get("canonical_url") or rjob.get("careers_portal_url"))
+                if url:
+                    st.markdown(f"🔗 [Verify Job Ad & Apply]({url})")
+                else:
+                    st.write("Verify Job Ad & Apply URL unavailable.")
+
     processing_jobs = [
         job for job in jobs_list
         if job.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY"
@@ -1349,7 +1453,7 @@ with tab_dashboard:
     ]
 
     st.markdown("---")
-    with st.expander(f"⚙️ Processing automatically ({len(processing_jobs)})", expanded=False):
+    with st.expander(f"⚙️ Processing automatically ({processing_count})", expanded=False):
         st.caption("These jobs are advancing or retrying automatically. No user action is required.")
         if processing_jobs:
             st.dataframe([
@@ -1364,7 +1468,7 @@ with tab_dashboard:
         else:
             st.info("No jobs are awaiting automatic pipeline work.")
 
-    with st.expander(f"🔴 Rejected / Unmatched ({len(rejected_jobs_audit) + len(unmatched_jobs)})", expanded=False):
+    with st.expander(f"🔴 Rejected / Unmatched ({rejected_count})", expanded=False):
         st.caption("Terminal career outcomes. These are not retry queues.")
         if unmatched_jobs:
             st.dataframe([
@@ -1378,7 +1482,7 @@ with tab_dashboard:
         else:
             st.info("No unmatched jobs in the current shortlist.")
 
-    with st.expander(f"🛠️ Technical errors requiring support ({len(technical_error_jobs)})", expanded=False):
+    with st.expander(f"🛠️ Technical errors requiring support ({technical_error_count})", expanded=False):
         st.caption("These are dead-lettered processing dependencies, not career-review items.")
         if technical_error_jobs:
             st.dataframe([
