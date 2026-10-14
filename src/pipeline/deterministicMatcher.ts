@@ -131,6 +131,13 @@ function buildFactText(fact: FactRow): string {
     .trim();
 }
 
+function toProfileFactForeignKey(fact: { id?: string | null; source_type?: string | null } | null | undefined): string | null {
+  if (!fact || !fact.id) return null;
+  if (fact.source_type === "CREDENTIAL" || fact.source_type === "ENGAGEMENT") return null;
+  if (typeof fact.id === "string" && fact.id.startsWith("experience:")) return null;
+  return fact.id;
+}
+
 function requirementWeight(importance: RequirementRow["importance"]): number {
   if (importance === "MUST") {
     return 1.0;
@@ -847,7 +854,7 @@ export async function runDeterministicMatcher(
                 ctx.workspaceId,
                 matchRunId,
                 req.id,
-                structuredComparison.fact?.id || null,
+                toProfileFactForeignKey(structuredComparison.fact),
                 coverage,
                 structuredComparison.rationale,
                 JSON.stringify({
@@ -886,7 +893,7 @@ export async function runDeterministicMatcher(
                 ctx.workspaceId,
                 matchRunId,
                 req.id,
-                structuredComparison.fact?.id || null,
+                toProfileFactForeignKey(structuredComparison.fact),
                 structuredComparison.rationale,
                 JSON.stringify({
                   requirement_key: req.requirement_key,
@@ -911,7 +918,7 @@ export async function runDeterministicMatcher(
                 ctx.workspaceId,
                 matchRunId,
                 req.id,
-                structuredComparison.fact?.id || null,
+                toProfileFactForeignKey(structuredComparison.fact),
                 structuredComparison.rationale,
                 JSON.stringify({
                   requirement_key: req.requirement_key,
@@ -982,10 +989,7 @@ export async function runDeterministicMatcher(
             matchedCount += 1;
           }
 
-          const profileFactId =
-            bestFact?.source_type === "CREDENTIAL" || bestFact?.source_type === "ENGAGEMENT"
-              ? null
-              : bestFact?.id || null;
+          const profileFactId = toProfileFactForeignKey(bestFact);
 
           await client.query(
             `INSERT INTO requirement_evidence_matches (

@@ -464,4 +464,105 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
       )
     ).toBe(true);
   });
+
+  it('sanitizes engagement and credential facts to null for requirement_evidence_matches.profile_fact_id', async () => {
+    (mPool.query as any).mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM profile_versions") && sql.includes("pv.status = 'ACTIVE'")) {
+        return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
+      }
+      if (sql.includes('FROM profile_facts pf')) {
+        return { rows: [] };
+      }
+      if (sql.includes('FROM profile_credentials pc')) {
+        return {
+          rows: [
+            {
+              id: 'cred-1',
+              credential_name: 'AWS Solutions Architect',
+              issuer: 'AWS',
+              credential_type: 'CREDENTIAL',
+              level: 'Associate',
+            },
+          ],
+        };
+      }
+      if (sql.includes('FROM profile_engagements')) {
+        return {
+          rows: [
+            {
+              id: 'eng-1',
+              start_date: '2020-01-01',
+              end_date: null,
+              is_current: true,
+              experience_class: 'PROFESSIONAL_PRODUCTION',
+              engagement_type: 'EMPLOYMENT',
+              role_title: 'Software Engineer',
+              summary: 'Built cloud backend systems',
+              operating_model: 'HYBRID',
+            },
+          ],
+        };
+      }
+      if (sql.includes('FROM canonical_jobs c')) {
+        return {
+          rows: [
+            {
+              id: '33333333-3333-4333-8333-333333333333',
+              latest_job_version_id: '44444444-4444-4444-8444-444444444444',
+              resolved_job_version_id: '44444444-4444-4444-8444-444444444444',
+            },
+          ],
+        };
+      }
+      if (sql.includes('INSERT INTO match_runs') && sql.includes('RETURNING id')) {
+        return { rows: [{ id: '55555555-5555-4555-8555-555555555555' }] };
+      }
+      if (sql.includes('JOIN job_requirements jr')) {
+        return {
+          rows: [
+            {
+              id: '66666666-6666-4666-8666-666666666666',
+              requirement_key: 'R-001',
+              requirement_type: 'EXPERIENCE_YEARS',
+              importance: 'MUST',
+              requirement_text: 'Requires 10 years experience in overall professional production',
+              quote_text: '10 years experience in overall professional production',
+              structured_value: { minimum_years: 10, experience_scope: 'overall professional production' },
+            },
+            {
+              id: '77777777-7777-4777-8777-777777777777',
+              requirement_key: 'R-002',
+              requirement_type: 'CREDENTIAL',
+              importance: 'MUST',
+              requirement_text: 'CISSP mandatory',
+              quote_text: 'CISSP mandatory',
+              structured_value: { is_required: true, credential_name: 'CISSP' },
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const summary = await runDeterministicMatcher(undefined, { context });
+    expect(summary.errors).toBe(0);
+
+    const matchInserts = (mPool.query as any).mock.calls.filter(
+      (call: any[]) =>
+        typeof call[0] === 'string' && call[0].includes('INSERT INTO requirement_evidence_matches')
+    );
+    expect(matchInserts.length).toBe(2);
+    // Both structured comparison mismatches against credential and engagement must set profile_fact_id to null
+    for (const insert of matchInserts) {
+      expect(insert[1][3]).toBeNull();
+    }
+  });
 });
