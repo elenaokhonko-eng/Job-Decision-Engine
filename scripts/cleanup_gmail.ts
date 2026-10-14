@@ -10,6 +10,10 @@ dotenv.config({ path: ".env.local", override: true });
 
 const databaseUrl = process.env.DATABASE_URL;
 const isDryRun = process.argv.includes("--dry-run");
+const inProcessingFolderName =
+  process.env.GMAIL_IN_PROCESSING_FOLDER || "Jobs-Alerts-In-Processing";
+const legacyProcessedFolderName =
+  process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
 
 export async function cleanupGmail(options: { dryRun?: boolean } = {}): Promise<void> {
   const dryRun = options.dryRun ?? isDryRun;
@@ -22,11 +26,15 @@ export async function cleanupGmail(options: { dryRun?: boolean } = {}): Promise<
   }
 
   let gmailClient: GmailApiClient | undefined;
-  try {
+  const hasClientId = Boolean(process.env.GMAIL_OAUTH_CLIENT_ID?.trim());
+  const hasClientSecret = Boolean(process.env.GMAIL_OAUTH_CLIENT_SECRET?.trim());
+  const hasRefreshToken = Boolean(process.env.GMAIL_OAUTH_REFRESH_TOKEN?.trim());
+
+  if (hasClientId || hasClientSecret || hasRefreshToken) {
+    // Credentials provided: load strictly
     gmailClient = new GmailApiClient(loadGmailApiCredentials());
-  } catch (err: any) {
-    console.warn("Gmail OAuth credentials not configured or incomplete:", err?.message || err);
-    console.log("Proceeding with Postgres-only reconciliation (messages will not be trashed via Gmail API).");
+  } else {
+    console.log("No Gmail OAuth credentials provided; running Postgres-only terminal reconciliation.");
   }
 
   const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
@@ -40,18 +48,25 @@ export async function cleanupGmail(options: { dryRun?: boolean } = {}): Promise<
       gmailClient,
       dryRun,
       limit: 500,
+      inProcessingFolderName,
+      legacyProcessedFolderName,
     });
 
     console.log(`\nReconciliation Summary:`);
-    console.log(`- Total email alerts inspected: ${result.inspectedAlerts}`);
-    console.log(`- In-flight alerts (retained):    ${result.inFlightAlerts}`);
-    console.log(`- Eligible terminal alerts:      ${result.eligibleTerminalAlerts}`);
-    console.log(`- Alerts moved to Trash:         ${result.trashedAlerts} ${dryRun ? "(dry-run)" : ""}`);
+    console.log(`- Total email alerts inspected:          ${result.inspectedAlerts}`);
+    console.log(`- Terminal eligible:                      ${result.eligibleTerminalAlerts}`);
+    console.log(`- In-flight retained:                     ${result.inFlightAlerts}`);
+    console.log(`- Zero-lineage retained:                  ${result.zeroLineageAlerts}`);
+    console.log(`- Missing-lineage retained:               ${result.missingLineageAlerts}`);
+    console.log(`- Legacy Processed -> In-Processing:      ${result.legacyProcessedToInProcessing}`);
+    console.log(`- Terminal legacy Processed -> Trash eligible: ${result.legacyProcessedTerminalEligible}`);
+    console.log(`- Alerts moved to Trash:                  ${result.trashedAlerts} ${dryRun ? "(dry-run)" : ""}`);
     if (result.errors.length > 0) {
-      console.warn(`- Errors encountered:             ${result.errors.length}`);
+      console.error(`- Errors encountered:                     ${result.errors.length}`);
       for (const err of result.errors.slice(0, 10)) {
-        console.warn(`  * ${err}`);
+        console.error(`  * ${err}`);
       }
+      throw new Error(`Gmail terminal reconciliation encountered ${result.errors.length} systemic error(s).`);
     }
   } finally {
     await pool.end();

@@ -282,6 +282,22 @@ export class GmailApiClient {
     });
   }
 
+  async modifyMessageLabels(
+    messageId: string,
+    options: {
+      addLabelIds?: string[];
+      removeLabelIds?: string[];
+    }
+  ): Promise<void> {
+    await this.requestJson(`/messages/${encodeURIComponent(messageId)}/modify`, {
+      method: "POST",
+      body: JSON.stringify({
+        addLabelIds: options.addLabelIds || [],
+        removeLabelIds: options.removeLabelIds || [],
+      }),
+    });
+  }
+
   async markRead(messageId: string): Promise<void> {
     await this.requestJson(`/messages/${encodeURIComponent(messageId)}/modify`, {
       method: "POST",

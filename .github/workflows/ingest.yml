@@ -45,6 +45,7 @@ jobs:
           GMAIL_OAUTH_CLIENT_SECRET: ${{ secrets.GMAIL_OAUTH_CLIENT_SECRET }}
           GMAIL_OAUTH_REFRESH_TOKEN: ${{ secrets.GMAIL_OAUTH_REFRESH_TOKEN }}
           GMAIL_FOLDER: ${{ vars.GMAIL_FOLDER || 'Jobs-Alerts' }}
+          GMAIL_IN_PROCESSING_FOLDER: ${{ vars.GMAIL_IN_PROCESSING_FOLDER || 'Jobs-Alerts-In-Processing' }}
           GMAIL_PROCESSED_FOLDER: ${{ vars.GMAIL_PROCESSED_FOLDER || 'Jobs-Alerts-Processed' }}
           GMAIL_READ_ONLY: ${{ vars.GMAIL_READ_ONLY || 'false' }}
           GMAIL_INGEST_MAX_ATTEMPTS: ${{ vars.GMAIL_INGEST_MAX_ATTEMPTS || '3' }}
@@ -202,6 +203,17 @@ jobs:
           MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
         run: npx tsx scripts/evaluate_queue.ts
+      - name: Reconcile terminal Gmail job alerts
+        timeout-minutes: 5
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          GMAIL_OAUTH_CLIENT_ID: ${{ secrets.GMAIL_OAUTH_CLIENT_ID }}
+          GMAIL_OAUTH_CLIENT_SECRET: ${{ secrets.GMAIL_OAUTH_CLIENT_SECRET }}
+          GMAIL_OAUTH_REFRESH_TOKEN: ${{ secrets.GMAIL_OAUTH_REFRESH_TOKEN }}
+          GMAIL_IN_PROCESSING_FOLDER: ${{ vars.GMAIL_IN_PROCESSING_FOLDER || 'Jobs-Alerts-In-Processing' }}
+          GMAIL_PROCESSED_FOLDER: ${{ vars.GMAIL_PROCESSED_FOLDER || 'Jobs-Alerts-Processed' }}
+        run: npx tsx scripts/cleanup_gmail.ts
       - name: Report source and pipeline stage status
         if: ${{ always() }}
         env:

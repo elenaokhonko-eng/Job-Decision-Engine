@@ -62,7 +62,7 @@ export async function ingestGmail(): Promise<number> {
         await dbClient.query("BEGIN");
         await dbClient.query(
           `INSERT INTO raw_email_alerts (workspace_id, subject, body, gmail_message_id, processed, lifecycle_status, in_processing_at, marked_read_at)
-           VALUES ($1, $2, $3, $4, FALSE, 'IN_PROCESSING', NOW(), NOW())
+           VALUES ($1, $2, $3, $4, FALSE, 'IN_PROCESSING', NOW(), NULL)
            ON CONFLICT (workspace_id, gmail_message_id) DO NOTHING`,
           [ctx.workspaceId, message.subject, message.raw, message.id]
         );
@@ -75,12 +75,13 @@ export async function ingestGmail(): Promise<number> {
       }
 
       // Gmail is changed only after the raw message is durably staged in Postgres.
+      // Messages remain UNREAD during raw staging while derived jobs are in-flight.
       if (!gmailReadOnly) {
         try {
           await gmailClient.moveToInProcessing(message.id, {
             sourceLabelId: label.id,
             inProcessingLabelName: gmailInProcessingFolder,
-            markAsRead: true,
+            markAsRead: false,
           });
         } catch (labelError) {
           console.warn(`Warning: Could not move message ${message.id} to "${gmailInProcessingFolder}":`, labelError);
