@@ -1,6 +1,8 @@
 import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
+
+export { normalizeWorkMode };
 import {
   applyVerificationAnswerOverrides,
   extractTerritories,
@@ -37,22 +39,25 @@ export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\b(human resources?|hr|recruiter|talent acquisition|people operations?|people partner)\b/i,
   /\b(executive assistant|office manager|receptionist|admin assistant|administrative assistant)\b/i,
   /\b(legal counsel|attorney|lawyer|m&a|paralegal|contracts? manager)\b/i,
-  /\b(sales manager|account executive|business development representative|bdr|sdr|(?<!technical\s+)account manager)\b/i,
+  /\b(sales\s+(?:manager|representative|rep|director|lead)|account executive|business development representative|bdr|sdr|(?<!technical\s+)account manager|customer\s+(?:success|support|service))\b/i,
   /\b(marketing manager|social media|content writer|pr manager|brand manager)\b/i,
   /\b(quality assurance coordinator|manual tester|qa tester)\b/i,
-  /\b(brain researcher|neuroscientist|wet lab|postdoctoral fellow)\b/i,
+  /\b(brain researcher|neuroscientist|wet lab)\b/i,
+  /\b(postdoctoral\s+(?:fellow|researcher|associate)|postdoc)\b(?!.*?\b(ai|ml|machine\s+learning|artificial\s+intelligence|data|computing|computer\s+science|nlp|robotics|computational)\b)/i,
+  /\b(adjunct\s+professor|tenure\s+track|assistant\s+professor|associate\s+professor)\b/i,
+  /\b(store\s+manager|cashier|retail\s+associate)\b/i,
 ];
 
 // 2. Axis 1: Target Technical Functions (Must pass)
 export const TECHNICAL_FUNCTION_KEYWORDS: RegExp[] = [
   /\b(software engineer|data engineer|ml engineer|machine learning engineer|ai engineer)\b/i,
   /\b(full[\s-]stack|backend engineer|distributed systems|platform engineer|cloud engineer)\b/i,
-  /\b(research engineer|quantitative developer|quant engineer|system architect|ai architect)\b/i,
-  /\b(engineering|technology|technical|software|data|analytics?|ai|ml|digital|transformation|scientific)\s+(program|programme|project|portfolio|delivery|transformation)?\s*(manager|director|lead|head|officer|vp|vice president)\b/i,
+  /\b(research engineer|quantitative developer|quant engineer|system architect|ai architect|solution architect|solutions architect)\b/i,
+  /\b(engineering|technology|technical|software|data|analytics?|ai|ml|digital|transformation|scientific)\s+(program|programme|project|product|portfolio|delivery|transformation)?\s*(manager|director|lead|head|officer|vp|vice president|owner)\b/i,
   /\b(manager|director|lead|head|officer|vp|vice president)\s+of\s+(engineering|technology|software|data|analytics?|ai|ml|platform|cloud|systems?|digital|transformation|research|science)\b/i,
   /\b(software development|software delivery|application development|data science|data platform|data architecture|data analytics|technology transformation|digital transformation|data transformation|technical delivery|engineering delivery|engineering program|technical roadmap|product development|systems design|release management|cloud platform|platform engineering|software development lifecycle|sdlc)\b/i,
   /\b(python|typescript|go|c\+\+|rust|sql|postgres|fastapi|docker|kubernetes)\b/i,
-  /\b(applied scientist|research scientist|bioinformatics|computational biolog(y|ist)|genomics?|biotech|drug discovery)\b/i,
+  /\b(applied scientist|research scientist|research associate|research fellow|applied researcher|bioinformatics|computational biolog(y|ist)|genomics?|biotech|drug discovery)\b/i,
   /\b(regtech|legaltech|compliance automation|contract analytics|knowledge engineer(ing)?|llm|agents?|rag|nlp|foundation models?|data pipeline)\b/i,
 ];
 
@@ -64,9 +69,9 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
   const d = (description || "").toLowerCase();
 
   // Lane-aware technical title families, including technical leadership and delivery roles.
-  const isTechnicalTitle = /\b(engineer|engineering|developer|architect|data scientist|data analyst|analytics engineer|business intelligence|machine learning|applied scientist|research scientist|scientist|quantitative researcher|quant researcher|quant developer|quantitative developer|quantitative engineer|ai researcher|software engineer|data engineer|ml platform|systems engineer|systems analyst|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?|test automation|automation engineer|qa automation)\b/i.test(t);
+  const isTechnicalTitle = /\b(engineer|engineering|developer|architect|data scientist|data analyst|analytics engineer|business intelligence|machine learning|applied scientist|research scientist|research associate|research fellow|applied researcher|scientist|quantitative researcher|quant researcher|quant developer|quantitative developer|quantitative engineer|ai researcher|software engineer|data engineer|ml platform|systems engineer|systems analyst|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?|test automation|automation engineer|qa automation|technical consultant|technology consultant|solutions? consultant|ai consultant|data consultant)\b/i.test(t);
   const hasTechnicalLeadershipTitle = /\b(manager|director|lead|head|officer|vp|vice president)\b/i.test(t) && /\b(engineer(?:ing)?|technology|technical|software|data|analytics?|ai|ml|machine learning|platform|cloud|systems?|digital|transformation|research|scientific|science)\b/i.test(t);
-  const hasTechnicalProgramTitle = /\b(technical|technology|engineering|software|data|ai|ml|digital|transformation)\s+(program|programme|project|portfolio|delivery|transformation)\s+(manager|director|lead|head|officer|vp|vice president)\b/i.test(t);
+  const hasTechnicalProgramTitle = /\b(technical|technology|engineering|software|data|ai|ml|digital|transformation)\s+(program|programme|project|product|portfolio|delivery|transformation)\s+(manager|director|lead|head|officer|vp|vice president|owner)\b/i.test(t);
 
   // Technical building / engineering / data / modeling keywords
   const buildingKeywords = [
@@ -606,6 +611,25 @@ function findNonNegatedEvidence(d: string, keywords: string[]): string[] {
   return quotes;
 }
 
+export function isConsultancyRole(title: string, description: string = ""): boolean {
+  const t = (title || "").toLowerCase();
+  const d = (description || "").toLowerCase();
+  const consultancyTitle = /\b(consult(?:ant|ancy)|advis(?:er|ory))\b/i.test(t);
+  if (!consultancyTitle) return false;
+
+  const hasArchitectOrEngineerTitle = /\b(engineer(?:ing)?|architect(?:ure)?|developer|scientist|specialist)\b/i.test(t);
+  const hasApprovedTechnicalConsultancyTitle =
+    /\b(?:technical|technology|engineering|software|data|ai|ml|solution|solutions|digital|transformation|cloud|systems?|platform)\s+(?:consult(?:ant|ancy)|advis(?:er|ory))\b/i.test(t) ||
+    (/\b(?:technical|technology|engineering|software|data|ai|ml|digital|transformation)\b/i.test(t) &&
+      /\b(?:program(?:me)?|project|product|delivery|transformation)\b/i.test(t));
+  const isApprovedTechnicalConsultancy =
+    hasArchitectOrEngineerTitle ||
+    hasApprovedTechnicalConsultancyTitle ||
+    isTechnicalRole(title, d).hasBuildingEvidence;
+
+  return !isApprovedTechnicalConsultancy;
+}
+
 export function applyGlobalGates(
   job: RawJob & { location?: string; workplace_type?: string; employment_type?: string },
   policy: WorkabilityPolicy = loadWorkabilityPolicy(),
@@ -640,11 +664,8 @@ export function applyGlobalGates(
   }
 
   // Generic consultancy/advisory work is outside the target role families;
-  // technically substantive delivery and transformation titles remain eligible.
-  const consultancyTitle = /\b(consult(?:ant|ancy)|advis(?:er|ory))\b/i.test(t);
-  const approvedTechnicalConsultancy = /\b(?:technical|technology|engineering|software|data|ai|ml|digital|transformation)\b/i.test(t)
-    && /\b(?:engineer(?:ing)?|architect(?:ure)?|program(?:me)?|project|product|delivery|transformation)\b/i.test(t);
-  if (consultancyTitle && !approvedTechnicalConsultancy) {
+  // technically substantive delivery, architecture, and technology consulting roles remain eligible.
+  if (isConsultancyRole(job.title || "", d)) {
     return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Generic consultancy/advisory title: "${job.title}"`]);
   }
 

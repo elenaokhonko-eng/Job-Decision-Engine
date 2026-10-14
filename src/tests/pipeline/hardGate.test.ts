@@ -79,6 +79,7 @@ describe('Pipeline Stage: Hard Gates', () => {
           company_name: 'Test Corp',
           normalized_title: 'AI Eng',
           canonical_url: 'https://test.com',
+          workplace_type: 'REMOTE',
           description_text: 'Good job',
           job_version_id: 'aeb6feb4-aaed-4602-bb58-5efff54e5bcf'
         }
@@ -142,6 +143,7 @@ describe('Pipeline Stage: Hard Gates', () => {
           id: '4cdafe74-6b33-480f-b0d5-e3609b2306bc',
           normalized_title: 'AI Eng',
           company_name: 'Test Corp 2',
+          workplace_type: 'REMOTE',
           description_text: 'Missing remote keywords',
           canonical_url: 'http://test.com/2',
           job_version_id: '0d90b7bf-039b-4c12-9d41-11513e75c990'

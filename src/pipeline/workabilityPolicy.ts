@@ -487,10 +487,29 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
     .filter(Boolean);
   return sentences.some((sentence) => {
     const hasTerritory = aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(sentence));
-    // A company HQ, client reference, or generic "remote" mention is not a
-    // work-authorization fact. Require a mandatory or physical-residency
-    // qualifier before treating a foreign territory as a gate conflict.
-    return hasTerritory && /\b(only|required|must|mandatory|work\s+(?:in|from)|working\s+(?:in|from)|based\s+in|located\s+in|location\s*[:=-]\s*|office\s+in|on[- ]?site\s+in|authorization|authorised|authorized|eligible|rights|citizen(?:ship)?|visa|residen(?:cy|tial))\b/i.test(sentence);
+    if (!hasTerritory) return false;
+
+    // A company HQ, employer background, client mention, or generic display location
+    // is not a worker territory restriction.
+    const isEmployerOrContext = /\b(?:we\s+are\b|our\s+(?:company|team|office|headquarters|hq|firm|business|clients?|customers?)\b|headquartered|head\s+office|employer\s+based|startup\s+based|company\s+based|firm\s+based|company\s+location|hq\s*[:=-]|headquarters\s*[:=-]|founded\s+in|serve\s+(?:[\w-]+\s+){0,3}clients?|working\s+with\s+(?:[\w-]+\s+){0,3}clients?)\b/i.test(sentence);
+    const hasExplicitWorkerConstraint = /\b(authorization|authorised|authorized|work\s+permit|visa|citizen(?:ship)?|residen(?:cy|tial|ts?)|right\s+to\s+work|eligible\s+to\s+work)\b/i.test(sentence)
+      || /\b(?:must\s+(?:be\s+)?(?:residing|living|based|located|authorized)|must\s+reside|must\s+live)\b/i.test(sentence)
+      || /\b(?:only\s+(?:open\s+to|applicants?|candidates?|engineers?|developers?|people|individuals)\s+(?:in|from|based|located|residing))\b/i.test(sentence)
+      || /\b(?:remote\s+(?:only\s+in|only\s+from|eligible\s+only\s+in))\b/i.test(sentence)
+      || /\b(?:open\s+only\s+to|eligible\s+only\s+in|based\s+in\s+[\w\s]+\s+only)\b/i.test(sentence);
+
+    if (isEmployerOrContext) {
+      return hasExplicitWorkerConstraint;
+    }
+
+    // Generic location headers or mentions (e.g. "Location: New York", "Remote — United States")
+    // must not reject unless there is an explicit worker constraint or residency/only requirement.
+    if (/\b(?:location\s*[:=-]|remote\s*[-–—:]\s*)/i.test(sentence) && !/\b(?:only|must|authorized|authorization|permit|visa|citizen|reside)\b/i.test(sentence)) {
+      return false;
+    }
+
+    return hasExplicitWorkerConstraint
+      || /\b(only|required|must|mandatory|work\s+(?:in|from)\s+(?:only\b|exclusively\b)|reside\s+in|living\s+in)\b/i.test(sentence);
   });
 }
 
