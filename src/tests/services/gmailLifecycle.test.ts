@@ -108,7 +108,7 @@ describe("Gmail Alert Lifecycle & Terminal Reconciliation", () => {
     it("2. terminal single-job email: marks read, removes In-Processing, trashes, and persists timestamps", async () => {
       const mockRows = [
         {
-          id: 101,
+          id: "10000000-0000-0000-0000-000000000101",
           gmail_message_id: "msg-terminal-single",
           subject: "Single Job Alert",
           lifecycle_status: "IN_PROCESSING",
@@ -210,7 +210,7 @@ describe("Gmail Alert Lifecycle & Terminal Reconciliation", () => {
     it("6. already-read terminal email: cleanup is idempotent", async () => {
       const mockRows = [
         {
-          id: 102,
+          id: "10000000-0000-0000-0000-000000000102",
           gmail_message_id: "msg-already-read",
           subject: "Read Job Alert",
           lifecycle_status: "IN_PROCESSING",
@@ -255,7 +255,7 @@ describe("Gmail Alert Lifecycle & Terminal Reconciliation", () => {
     it("7. already-trashed message: cleanup is idempotent", async () => {
       const mockRows = [
         {
-          id: 103,
+          id: "10000000-0000-0000-0000-000000000103",
           gmail_message_id: "msg-already-trashed",
           subject: "Trashed Job Alert",
           lifecycle_status: "IN_PROCESSING",
@@ -304,7 +304,7 @@ describe("Gmail Alert Lifecycle & Terminal Reconciliation", () => {
             return {
               rows: [
                 {
-                  id: 201,
+                  id: "10000000-0000-0000-0000-000000000201",
                   gmail_message_id: "msg-legacy-inflight",
                   subject: "Legacy Alert",
                   lifecycle_status: "PROCESSED",
@@ -357,7 +357,7 @@ describe("Gmail Alert Lifecycle & Terminal Reconciliation", () => {
             return {
               rows: [
                 {
-                  id: 202,
+                  id: "10000000-0000-0000-0000-000000000202",
                   gmail_message_id: "msg-legacy-terminal",
                   subject: "Legacy Alert Terminal",
                   lifecycle_status: "PROCESSED",

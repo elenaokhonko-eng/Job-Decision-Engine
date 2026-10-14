@@ -10,7 +10,7 @@ export type LineageClassification =
   | "PROCESSING_ERROR";
 
 export interface EmailAlertLineage {
-  id: number;
+  id: string;
   gmailMessageId: string | null;
   subject: string;
   lifecycleStatus: string;
@@ -139,7 +139,7 @@ export async function checkEmailAlertLineage(
     const { classification, isEligibleForTrash } = classifyLineage(row);
 
     return {
-      id: Number(row.id),
+      id: String(row.id),
       gmailMessageId: row.gmail_message_id,
       subject: row.subject,
       lifecycleStatus: row.lifecycle_status,
@@ -208,7 +208,7 @@ export async function checkSingleEmailAlertLineage(
   const { classification, isEligibleForTrash } = classifyLineage(row);
 
   return {
-    id: Number(row.id),
+    id: String(row.id),
     gmailMessageId: row.gmail_message_id,
     subject: row.subject,
     lifecycleStatus: row.lifecycle_status,
