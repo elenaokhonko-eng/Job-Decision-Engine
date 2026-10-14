@@ -9,7 +9,10 @@ dotenv.config({ path: ".env.local", override: true });
 
 const databaseUrl = process.env.DATABASE_URL;
 const gmailFolder = process.env.GMAIL_FOLDER || "Jobs-Alerts";
-const gmailProcessedFolder = process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
+const gmailInProcessingFolder =
+  process.env.GMAIL_IN_PROCESSING_FOLDER ||
+  process.env.GMAIL_PROCESSED_FOLDER ||
+  "Jobs-Alerts-In-Processing";
 const gmailReadOnly = process.env.GMAIL_READ_ONLY === "true";
 const rawMaxMessages = process.env.GMAIL_MAX_MESSAGES_PER_RUN;
 const maxMessagesPerRun = rawMaxMessages && Number.isInteger(Number(rawMaxMessages)) && Number(rawMaxMessages) > 0
@@ -58,8 +61,8 @@ export async function ingestGmail(): Promise<number> {
       try {
         await dbClient.query("BEGIN");
         await dbClient.query(
-          `INSERT INTO raw_email_alerts (workspace_id, subject, body, gmail_message_id, processed)
-           VALUES ($1, $2, $3, $4, FALSE)
+          `INSERT INTO raw_email_alerts (workspace_id, subject, body, gmail_message_id, processed, lifecycle_status, in_processing_at, marked_read_at)
+           VALUES ($1, $2, $3, $4, FALSE, 'IN_PROCESSING', NOW(), NULL)
            ON CONFLICT (workspace_id, gmail_message_id) DO NOTHING`,
           [ctx.workspaceId, message.subject, message.raw, message.id]
         );
@@ -72,11 +75,16 @@ export async function ingestGmail(): Promise<number> {
       }
 
       // Gmail is changed only after the raw message is durably staged in Postgres.
+      // Messages remain UNREAD during raw staging while derived jobs are in-flight.
       if (!gmailReadOnly) {
         try {
-          await gmailClient.markProcessed(message.id, label.id, gmailProcessedFolder);
+          await gmailClient.moveToInProcessing(message.id, {
+            sourceLabelId: label.id,
+            inProcessingLabelName: gmailInProcessingFolder,
+            markAsRead: false,
+          });
         } catch (labelError) {
-          console.warn(`Warning: Could not apply Gmail processed label to message ${message.id}:`, labelError);
+          console.warn(`Warning: Could not move message ${message.id} to "${gmailInProcessingFolder}":`, labelError);
         }
       }
       ingestedCount += 1;

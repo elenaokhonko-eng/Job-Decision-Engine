@@ -137,7 +137,11 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
               canonicalApplyUrl: job.canonical_apply_url,
               sourceLane: "UNKNOWN",
               searchPlanVersion: "1.0",
-              rawPayload: job
+              rawPayload: {
+                ...job,
+                raw_email_alert_id: email.id,
+                gmail_message_id: email.gmail_message_id,
+              }
             },
             job,
             dbClient
@@ -152,7 +156,7 @@ export async function parseEmails(): Promise<{ parsedEmails: number; extractedJo
         // Only mark processed = TRUE when all staging succeeded
         await dbClient.query(
           `UPDATE raw_email_alerts
-           SET processed = TRUE, last_error = NULL
+           SET processed = TRUE, lifecycle_status = 'PARSED', last_error = NULL
            WHERE workspace_id = $1 AND id = $2`,
           [ctx.workspaceId, email.id]
         );

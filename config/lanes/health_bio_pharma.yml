@@ -6,8 +6,11 @@ description: "Life sciences, health, pharmaceutical AI, bioinformatics, computat
 scope:
   required_function_concepts:
     any:
+      - AI_ENGINEERING
       - ML_ENGINEERING
       - DATA_ENGINEERING
+      - SOFTWARE_ENGINEERING
+      - PLATFORM_ENGINEERING
       - SCIENTIFIC_ML
       - RESEARCH_ENGINEERING
       - BIOINFORMATICS

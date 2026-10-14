@@ -9,6 +9,8 @@ import {
   isTechnicalRole,
   type GateResult,
 } from "../services/criteria.js";
+import { normalizeWorkMode } from "./workModeNormalizer.js";
+import { enrichWorkModeIfNeeded } from "../services/workModeEnrichment.js";
 import { PersistedGateDecisionSchema } from "../contracts/index.js";
 import { GATE_VERSION } from "../contracts/version.js";
 import { pgPoolConfig } from "../db/pgSsl.js";
@@ -764,6 +766,26 @@ export async function runHardGates(
           .filter(Boolean)
           .slice(0, 60)
           .join("\n");
+
+        if (normalizeWorkMode(rawJobAdapter.workplace_type) === "UNKNOWN") {
+          const enriched = await enrichWorkModeIfNeeded(client, ctx, {
+            canonical_job_id: job.id,
+            job_version_id: job.job_version_id,
+            canonical_url: job.canonical_url,
+            workplace_type: job.workplace_type,
+            location: job.location,
+            description_text: job.description_text,
+          });
+          if (enriched.workplace_type !== "UNKNOWN") {
+            rawJobAdapter.workplace_type = enriched.workplace_type;
+            await client.query(
+              `UPDATE canonical_jobs
+               SET workplace_type = $1, updated_at = NOW()
+               WHERE workspace_id = $2 AND id = $3`,
+              [enriched.workplace_type, ctx.workspaceId, job.id]
+            );
+          }
+        }
 
         const globalGateResult = applyGlobalGates({
           ...(rawJobAdapter as any),

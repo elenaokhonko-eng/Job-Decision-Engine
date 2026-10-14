@@ -137,6 +137,18 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json
 
+      - name: Reconcile terminal Gmail job alerts
+        timeout-minutes: 5
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          GMAIL_OAUTH_CLIENT_ID: ${{ secrets.GMAIL_OAUTH_CLIENT_ID }}
+          GMAIL_OAUTH_CLIENT_SECRET: ${{ secrets.GMAIL_OAUTH_CLIENT_SECRET }}
+          GMAIL_OAUTH_REFRESH_TOKEN: ${{ secrets.GMAIL_OAUTH_REFRESH_TOKEN }}
+          GMAIL_IN_PROCESSING_FOLDER: ${{ vars.GMAIL_IN_PROCESSING_FOLDER || 'Jobs-Alerts-In-Processing' }}
+          GMAIL_PROCESSED_FOLDER: ${{ vars.GMAIL_PROCESSED_FOLDER || 'Jobs-Alerts-Processed' }}
+        run: npx tsx scripts/cleanup_gmail.ts
+
       - name: Report source and pipeline stage status
         if: ${{ always() }}
         env:

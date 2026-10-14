@@ -245,14 +245,71 @@ export class GmailApiClient {
     return { label, messages };
   }
 
-  async markProcessed(messageId: string, sourceLabelId: string, processedLabelName: string): Promise<void> {
-    const processedLabel = await this.ensureLabel(processedLabelName);
+  async moveToInProcessing(
+    messageId: string,
+    options: {
+      sourceLabelId?: string;
+      inProcessingLabelName?: string;
+      markAsRead?: boolean;
+    } = {}
+  ): Promise<void> {
+    const targetLabelName = options.inProcessingLabelName || "Jobs-Alerts-In-Processing";
+    const inProcessingLabel = await this.ensureLabel(targetLabelName);
+    const addLabelIds = [inProcessingLabel.id];
+    const removeLabelIds: string[] = [];
+
+    if (options.sourceLabelId) {
+      removeLabelIds.push(options.sourceLabelId);
+    }
+    if (options.markAsRead) {
+      removeLabelIds.push("UNREAD");
+    }
+
     await this.requestJson(`/messages/${encodeURIComponent(messageId)}/modify`, {
       method: "POST",
       body: JSON.stringify({
-        addLabelIds: [processedLabel.id],
-        removeLabelIds: [sourceLabelId],
+        addLabelIds,
+        removeLabelIds,
       }),
+    });
+  }
+
+  async markProcessed(messageId: string, sourceLabelId: string, processedLabelName: string): Promise<void> {
+    await this.moveToInProcessing(messageId, {
+      sourceLabelId,
+      inProcessingLabelName: processedLabelName,
+      markAsRead: false,
+    });
+  }
+
+  async modifyMessageLabels(
+    messageId: string,
+    options: {
+      addLabelIds?: string[];
+      removeLabelIds?: string[];
+    }
+  ): Promise<void> {
+    await this.requestJson(`/messages/${encodeURIComponent(messageId)}/modify`, {
+      method: "POST",
+      body: JSON.stringify({
+        addLabelIds: options.addLabelIds || [],
+        removeLabelIds: options.removeLabelIds || [],
+      }),
+    });
+  }
+
+  async markRead(messageId: string): Promise<void> {
+    await this.requestJson(`/messages/${encodeURIComponent(messageId)}/modify`, {
+      method: "POST",
+      body: JSON.stringify({
+        removeLabelIds: ["UNREAD"],
+      }),
+    });
+  }
+
+  async trashMessage(messageId: string): Promise<void> {
+    await this.requestJson(`/messages/${encodeURIComponent(messageId)}/trash`, {
+      method: "POST",
     });
   }
 

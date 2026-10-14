@@ -3,45 +3,71 @@ import dotenv from "dotenv";
 import { GmailApiClient, loadGmailApiCredentials } from "../src/services/gmailApi.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { reconcileTerminalGmailAlerts } from "../src/services/gmailLifecycle.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
 const databaseUrl = process.env.DATABASE_URL;
-const gmailFolder = process.env.GMAIL_FOLDER || "Jobs-Alerts";
-const gmailProcessedFolder = process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
+const isDryRun = process.argv.includes("--dry-run");
+const inProcessingFolderName =
+  process.env.GMAIL_IN_PROCESSING_FOLDER || "Jobs-Alerts-In-Processing";
+const legacyProcessedFolderName =
+  process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
 
-async function cleanupGmail(): Promise<void> {
+export async function cleanupGmail(options: { dryRun?: boolean } = {}): Promise<void> {
+  const dryRun = options.dryRun ?? isDryRun;
+  console.log("====================================================");
+  console.log(`     GMAIL TERMINAL RECONCILIATION & CLEANUP        ${dryRun ? "[DRY RUN]" : ""}`);
+  console.log("====================================================");
+
   if (!databaseUrl) {
     throw new Error("Missing required DATABASE_URL.");
   }
 
-  const gmailClient = new GmailApiClient(loadGmailApiCredentials());
+  let gmailClient: GmailApiClient | undefined;
+  const hasClientId = Boolean(process.env.GMAIL_OAUTH_CLIENT_ID?.trim());
+  const hasClientSecret = Boolean(process.env.GMAIL_OAUTH_CLIENT_SECRET?.trim());
+  const hasRefreshToken = Boolean(process.env.GMAIL_OAUTH_REFRESH_TOKEN?.trim());
+
+  if (hasClientId || hasClientSecret || hasRefreshToken) {
+    // Credentials provided: load strictly
+    gmailClient = new GmailApiClient(loadGmailApiCredentials());
+  } else {
+    console.log("No Gmail OAuth credentials provided; running Postgres-only terminal reconciliation.");
+  }
+
   const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
 
   try {
     const ctx = await resolveWorkspaceContext(pool as any);
-    const databaseResult = await pool.query(
-      "SELECT subject FROM raw_email_alerts WHERE workspace_id = $1",
-      [ctx.workspaceId]
-    );
-    const ingestedSubjects = new Set(databaseResult.rows.map((row) => row.subject));
-    const source = await gmailClient.readMessagesByLabel(gmailFolder);
+    console.log(`Reconciling terminal email alerts for workspace ${ctx.workspaceId}...`);
 
-    let relabeledCount = 0;
-    for (const message of source.messages) {
-      if (ingestedSubjects.has(message.subject)) {
-        await gmailClient.markProcessed(message.id, source.label.id, gmailProcessedFolder);
-        relabeledCount += 1;
+    const result = await reconcileTerminalGmailAlerts({
+      pool,
+      gmailClient,
+      dryRun,
+      limit: 500,
+      inProcessingFolderName,
+      legacyProcessedFolderName,
+    });
+
+    console.log(`\nReconciliation Summary:`);
+    console.log(`- Total email alerts inspected:          ${result.inspectedAlerts}`);
+    console.log(`- Terminal eligible:                      ${result.eligibleTerminalAlerts}`);
+    console.log(`- In-flight retained:                     ${result.inFlightAlerts}`);
+    console.log(`- Zero-lineage retained:                  ${result.zeroLineageAlerts}`);
+    console.log(`- Missing-lineage retained:               ${result.missingLineageAlerts}`);
+    console.log(`- Legacy Processed -> In-Processing:      ${result.legacyProcessedToInProcessing}`);
+    console.log(`- Terminal legacy Processed -> Trash eligible: ${result.legacyProcessedTerminalEligible}`);
+    console.log(`- Alerts moved to Trash:                  ${result.trashedAlerts} ${dryRun ? "(dry-run)" : ""}`);
+    if (result.errors.length > 0) {
+      console.error(`- Errors encountered:                     ${result.errors.length}`);
+      for (const err of result.errors.slice(0, 10)) {
+        console.error(`  * ${err}`);
       }
+      throw new Error(`Gmail terminal reconciliation encountered ${result.errors.length} systemic error(s).`);
     }
-    console.log(`Applied the processed label to ${relabeledCount} already-staged messages.`);
-
-    const processed = await gmailClient.readMessagesByLabel(gmailProcessedFolder);
-    for (const message of processed.messages) {
-      await gmailClient.deleteMessage(message.id);
-    }
-    console.log(`Deleted ${processed.messages.length} messages from "${gmailProcessedFolder}".`);
   } finally {
     await pool.end();
   }

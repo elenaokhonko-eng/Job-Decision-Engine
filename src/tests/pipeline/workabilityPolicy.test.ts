@@ -11,7 +11,23 @@ import type { WorkspaceContext } from "../../workspace/context.js";
 describe("workspace workability policy", () => {
   it("recognizes dotted territory abbreviations in work-location text", () => {
     expect(extractTerritories("Location: 100% Remote (U.S.)")).toContain("UNITED_STATES");
-    expect(hasExplicitTerritoryRestriction("Location: 100% Remote (U.S.)", "UNITED_STATES")).toBe(true);
+    expect(hasExplicitTerritoryRestriction("Location: 100% Remote (U.S. only)", "UNITED_STATES")).toBe(true);
+    expect(hasExplicitTerritoryRestriction("Serve U.S. clients from anywhere", "UNITED_STATES")).toBe(false);
+  });
+
+  it("distinguishes worker territory restrictions from employer/company locations", () => {
+    expect(hasExplicitTerritoryRestriction("Must be authorized to work in the United States", "UNITED_STATES")).toBe(true);
+    expect(hasExplicitTerritoryRestriction("Candidates must reside in Canada", "CANADA")).toBe(true);
+    expect(hasExplicitTerritoryRestriction("Only applicants based in Germany", "GERMANY")).toBe(true);
+    expect(hasExplicitTerritoryRestriction("US work authorization required", "UNITED_STATES")).toBe(true);
+    expect(hasExplicitTerritoryRestriction("Remote eligible only in Bulgaria", "BULGARIA")).toBe(true);
+    expect(hasExplicitTerritoryRestriction("UK right to work required", "UNITED_KINGDOM")).toBe(true);
+
+    expect(hasExplicitTerritoryRestriction("Company location: New York", "UNITED_STATES")).toBe(false);
+    expect(hasExplicitTerritoryRestriction("Remote — United States", "UNITED_STATES")).toBe(false);
+    expect(hasExplicitTerritoryRestriction("HQ: California", "UNITED_STATES")).toBe(false);
+    expect(hasExplicitTerritoryRestriction("We are an early-stage startup based in Canada", "CANADA")).toBe(false);
+    expect(hasExplicitTerritoryRestriction("Employer based in Canada", "CANADA")).toBe(false);
     expect(hasExplicitTerritoryRestriction("Serve U.S. clients from anywhere", "UNITED_STATES")).toBe(false);
   });
 
