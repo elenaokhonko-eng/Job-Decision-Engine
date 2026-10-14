@@ -31,17 +31,17 @@ describe("pipeline status report", () => {
       blocked_dependency: 0,
     });
     expect(stages.find((stage) => stage.stage === "EMBEDDINGS")).toMatchObject({
-      status: "WARNING",
+      status: "RETRYING",
       retry_wait: 2,
       dead_letter: 0,
     });
     expect(stages.find((stage) => stage.stage === "PROFILE_MATCH")).toMatchObject({
-      status: "WARNING",
+      status: "BLOCKED",
       blocked_dependency: 1,
       dead_letter: 0,
     });
     expect(stages.find((stage) => stage.stage === "NORMALIZATION")).toMatchObject({
-      status: "SUCCESS",
+      status: "BACKLOG_HEALTHY",
       pending: 4,
     });
   });

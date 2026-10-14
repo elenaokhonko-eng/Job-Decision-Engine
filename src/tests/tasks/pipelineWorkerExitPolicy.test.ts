@@ -38,6 +38,16 @@ describe("pipeline worker exit policy", () => {
     })).toThrow("moved 1 task(s) to RETRY_WAIT");
   });
 
+  it("permits healthy bounded progress with an older remaining pending queue", () => {
+    expect(() => enforcePipelineWorkerExitPolicy({
+      ...healthyInput,
+      claimedThisRun: 12,
+      activePendingCount: 100,
+      oldestActivePendingAgeSeconds: 100000,
+      exitReason: "WALL_CLOCK_BUDGET_REACHED",
+    })).not.toThrow();
+  });
+
   it("fails for dead letters, SLO breaches, and no forward progress", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,

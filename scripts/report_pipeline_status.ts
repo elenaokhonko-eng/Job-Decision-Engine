@@ -43,7 +43,7 @@ interface SourceConnectorRow {
 
 interface StageSummary {
   stage: PipelineStage;
-  status: "SUCCESS" | "WARNING" | "ERROR" | "IDLE";
+  status: "SUCCESS" | "BACKLOG_HEALTHY" | "RETRYING" | "BLOCKED" | "ERROR" | "IDLE";
   pending: number;
   retry_wait: number;
   blocked_dependency: number;
@@ -96,10 +96,9 @@ export function summarizeTaskStages(rows: readonly TaskHealthRow[]): StageSummar
   return STAGES.map((stage) => {
     const summary = stages.get(stage) ?? initialStageSummary(stage);
     if (summary.dead_letter > 0) return { ...summary, status: "ERROR" };
-    if (summary.retry_wait > 0 || summary.blocked_dependency > 0) {
-      return { ...summary, status: "WARNING" };
-    }
-    if (summary.pending > 0) return { ...summary, status: "SUCCESS" };
+    if (summary.retry_wait > 0) return { ...summary, status: "RETRYING" };
+    if (summary.blocked_dependency > 0) return { ...summary, status: "BLOCKED" };
+    if (summary.pending > 0) return { ...summary, status: "BACKLOG_HEALTHY" };
     return summary;
   });
 }

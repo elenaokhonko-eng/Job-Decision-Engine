@@ -99,6 +99,12 @@ export interface SeedPipelineTasksSummary {
   byType: Record<string, { inserted: number; existing: number }>;
 }
 
+export type PipelineWorkerExitReason =
+  | "QUEUE_DRAINED"
+  | "MAX_TASKS_REACHED"
+  | "WALL_CLOCK_BUDGET_REACHED"
+  | "STAGE_LIMIT_REACHED";
+
 export interface PipelineStageWorkerSummary {
   seeded: SeedPipelineTasksSummary | null;
   claimed: number;
@@ -106,6 +112,8 @@ export interface PipelineStageWorkerSummary {
   blocked: number;
   failed: number;
   deadLettered: number;
+  exitReason: PipelineWorkerExitReason;
+  durationMs: number;
   byType: Record<string, { claimed: number; completed: number; blocked: number; failed: number; deadLettered: number }>;
   errors: Array<{ taskType: string; taskKey: string; error: string }>;
 }
@@ -127,6 +135,7 @@ export interface PipelineStageWorkerOptions {
   leaseSeconds?: number;
   heartbeatSeconds?: number;
   wallClockMs?: number;
+  minTimeToStartTaskMs?: number;
   claimedBy?: string;
   /** Reuse one durable AI budget identity across all explanation tasks in this worker run. */
   budgetRunId?: string;
@@ -2030,10 +2039,16 @@ export async function runPipelineStageTaskWorker(
   const leaseSeconds = options.leaseSeconds ?? 300;
   const heartbeatSeconds = options.heartbeatSeconds ?? Math.max(15, Math.floor(leaseSeconds / 3));
   const wallClockMs = options.wallClockMs ?? 55 * 60 * 1000;
+  const minTimeToStartTaskMs = Math.max(
+    0,
+    Math.min(options.minTimeToStartTaskMs ?? 120_000, Math.max(0, wallClockMs - 1)),
+  );
   const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
   const budgetRunId = options.budgetRunId?.trim() || crypto.randomUUID();
   const claimedByType: Partial<Record<PipelineStageTaskType, number>> = {};
   const startedAt = Date.now();
+  const deadlineAt = startedAt + wallClockMs;
+  const canStartAnotherTask = () => Date.now() + minTimeToStartTaskMs < deadlineAt;
   const summary: PipelineStageWorkerSummary = {
     seeded: null,
     claimed: 0,
@@ -2041,6 +2056,8 @@ export async function runPipelineStageTaskWorker(
     blocked: 0,
     failed: 0,
     deadLettered: 0,
+    exitReason: "QUEUE_DRAINED",
+    durationMs: 0,
     byType: {},
     errors: [],
   };
@@ -2059,7 +2076,7 @@ export async function runPipelineStageTaskWorker(
       });
     }
 
-    while (summary.claimed < maxTasks && Date.now() - startedAt < wallClockMs) {
+    while (summary.claimed < maxTasks && canStartAnotherTask()) {
       throwIfWorkerCancelled(options.abortSignal);
       let madeProgress = false;
 
@@ -2070,7 +2087,7 @@ export async function runPipelineStageTaskWorker(
         while (
           summary.claimed < maxTasks &&
           (claimedByType[taskType] ?? 0) < stageLimit &&
-          Date.now() - startedAt < wallClockMs
+          canStartAnotherTask()
         ) {
           throwIfWorkerCancelled(options.abortSignal);
           const claimLimit = Math.min(
@@ -2168,6 +2185,19 @@ export async function runPipelineStageTaskWorker(
         break;
       }
     }
+
+    const durationMs = Date.now() - startedAt;
+    const stageLimitsReached = taskTypes.every((taskType) =>
+      (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
+    );
+    summary.durationMs = durationMs;
+    summary.exitReason = summary.claimed >= maxTasks
+      ? "MAX_TASKS_REACHED"
+      : durationMs >= wallClockMs || !canStartAnotherTask()
+        ? "WALL_CLOCK_BUDGET_REACHED"
+        : stageLimitsReached
+          ? "STAGE_LIMIT_REACHED"
+          : "QUEUE_DRAINED";
 
     return summary;
   } finally {

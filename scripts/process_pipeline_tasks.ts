@@ -178,7 +178,8 @@ export async function processPipelineTasks(): Promise<void> {
       claimBatchSize: parsePositiveIntEnv("PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE", 1, 25),
       leaseSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_LEASE_SECONDS", 300, 3600),
       heartbeatSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS", 60, 600),
-      wallClockMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_WALL_CLOCK_MS", 55 * 60 * 1000, 23 * 60 * 60 * 1000),
+      wallClockMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_WALL_CLOCK_MS", 10 * 60 * 1000, 23 * 60 * 60 * 1000),
+      minTimeToStartTaskMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS", 120000, 600000),
       maxSeedPerType: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE", 500, 5000),
       claimedBy: process.env.PIPELINE_TASK_WORKER_CLAIMED_BY || `gha-stage-worker:${process.pid}`,
       abortSignal: shutdownController.signal,
@@ -188,6 +189,15 @@ export async function processPipelineTasks(): Promise<void> {
 
     const queueHealth = await readQueueHealth(pool);
     console.log("Pipeline task queue health:", JSON.stringify(queueHealth, null, 2));
+    console.log("Pipeline bounded-run result:", JSON.stringify({
+      exit_reason: summary.exitReason,
+      claimed: summary.claimed,
+      completed: summary.completed,
+      failed: summary.failed,
+      dead_lettered: summary.deadLettered,
+      remaining_pending: queueHealth.pending,
+      duration_ms: summary.durationMs,
+    }, null, 2));
     if (queueHealth.retryWait > 0) {
       console.warn(`Pipeline has ${queueHealth.retryWait} RETRY_WAIT task(s); automatic recovery remains scheduled.`);
     }
@@ -214,6 +224,7 @@ export async function processPipelineTasks(): Promise<void> {
     enforcePipelineWorkerExitPolicy({
       claimedThisRun: summary.claimed,
       failedThisRun: summary.failed,
+      exitReason: summary.exitReason,
       deadLetteredThisRun: summary.deadLettered,
       deadLetterCount: queueHealth.deadLetter,
       retryWaitCount: queueHealth.retryWait,
