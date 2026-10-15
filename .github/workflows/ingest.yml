@@ -105,7 +105,7 @@ jobs:
     # Drain staged work whenever at least one discovery source ran without cancellation.
     # An ingestion error will be surfaced at the end so partial work is processed.
     if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && !cancelled() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success' || needs.gmail_ingestion.result == 'failure' || needs.public_source_ingestion.result == 'failure') }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -207,10 +207,11 @@ jobs:
         run: npx tsx scripts/evaluate_queue.ts
       - name: Reconcile terminal Gmail job alerts
         if: ${{ always() && steps.database_migrations.outcome == 'success' }}
-        timeout-minutes: 15
+        timeout-minutes: 20
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          GMAIL_RECONCILIATION_LIMIT: ${{ vars.GMAIL_RECONCILIATION_LIMIT || '2000' }}
           GMAIL_OAUTH_CLIENT_ID: ${{ secrets.GMAIL_OAUTH_CLIENT_ID }}
           GMAIL_OAUTH_CLIENT_SECRET: ${{ secrets.GMAIL_OAUTH_CLIENT_SECRET }}
           GMAIL_OAUTH_REFRESH_TOKEN: ${{ secrets.GMAIL_OAUTH_REFRESH_TOKEN }}
