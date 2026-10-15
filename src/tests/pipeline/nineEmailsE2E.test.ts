@@ -54,7 +54,7 @@ type FixtureLane =
   | "UNCLASSIFIED";
 type FixtureAction = "PRIORITY_APPLY" | "APPLY_AFTER_VERIFICATION" | "HARD_REJECT";
 type RecommendationOutcome = "PRIORITY" | "REVIEW" | "TRACK" | "SKIP";
-type LifecycleStatus = "QUEUED_FOR_AI" | "DEFERRED_BUDGET" | "HARD_REJECTED";
+type LifecycleStatus = "QUEUED_FOR_AI" | "MATCHED" | "HARD_REJECTED";
 
 interface NineEmailFixture {
   readonly id: string;
@@ -522,7 +522,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(rejectedWithLane).toBe(0);
   });
 
-  it("Stage 4 — deterministic decisions persist and budget overflow is deferred durably", async () => {
+  it("Stage 4 — deterministic decisions persist and budget overflow remains auditable", async () => {
     const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
     const { runExplanationQueueEnqueuer } = await import("../../pipeline/explanationQueueEnqueuer.js");
 
@@ -607,8 +607,8 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(deferral.rows).toHaveLength(1);
     expect(deferral.rows[0].fixture_id).toBe("fixture-email-008");
     expect(deferral.rows[0].normalized_title).toBe("fourth junior data engineer");
-    expect(deferral.rows[0].processing_state).toBe("DEFERRED_BUDGET");
-    expect(deferral.rows[0].processing_status).toBe("DEFERRED_BUDGET");
+    expect(deferral.rows[0].processing_state).toBe("MATCHED");
+    expect(deferral.rows[0].processing_status).toBe("MATCHED");
     expect(deferral.rows[0].lane).toBe("CORE_AI_DATA");
     expect(deferral.rows[0].budget_limit).toBe(expectedEligibleLaneBudgets.CORE_AI_DATA);
     expect(deferral.rows[0].reason_code).toBe("AI_BUDGET_EXHAUSTED");
