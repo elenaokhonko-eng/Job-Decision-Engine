@@ -30,8 +30,9 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain("PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '60000' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '200' }}");
     const gmailCleanupStep = workflow.split("name: Reconcile terminal Gmail job alerts")[1] ?? "";
-    expect(gmailCleanupStep.slice(0, 180)).toContain("timeout-minutes: 15");
-    expect(workflow).toContain("timeout-minutes: 40");
+    expect(gmailCleanupStep.slice(0, 220)).toContain("timeout-minutes: 20");
+    expect(gmailCleanupStep).toContain("GMAIL_RECONCILIATION_LIMIT: ${{ vars.GMAIL_RECONCILIATION_LIMIT || '2000' }}");
+    expect(workflow).toContain("timeout-minutes: 55");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_WALL_CLOCK_MS');
     expect(workflow).toContain("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'");

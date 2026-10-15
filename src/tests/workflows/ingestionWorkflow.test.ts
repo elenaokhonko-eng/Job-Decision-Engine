@@ -13,7 +13,9 @@ describe("discovery ingestion workflow", () => {
     expect(workflow).toContain("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '200' }}");
     const gmailCleanupStep = workflow.split("name: Reconcile terminal Gmail job alerts")[1] ?? "";
-    expect(gmailCleanupStep.slice(0, 180)).toContain("timeout-minutes: 15");
+    expect(gmailCleanupStep.slice(0, 220)).toContain("timeout-minutes: 20");
+    expect(gmailCleanupStep).toContain("GMAIL_RECONCILIATION_LIMIT: ${{ vars.GMAIL_RECONCILIATION_LIMIT || '2000' }}");
+    expect(workflow).toContain("timeout-minutes: 60");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_STAGE_MAX_TASKS');
     expect(workflow).toContain('scripts/report_pipeline_status.ts');
   });

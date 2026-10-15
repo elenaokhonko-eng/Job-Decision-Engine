@@ -28,7 +28,7 @@ jobs:
     name: Drain saved discovery backlog
     runs-on: ubuntu-latest
     if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled') }}
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -141,10 +141,11 @@ jobs:
 
       - name: Reconcile terminal Gmail job alerts
         if: ${{ always() && steps.database_migrations.outcome == 'success' }}
-        timeout-minutes: 15
+        timeout-minutes: 20
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          GMAIL_RECONCILIATION_LIMIT: ${{ vars.GMAIL_RECONCILIATION_LIMIT || '2000' }}
           GMAIL_OAUTH_CLIENT_ID: ${{ secrets.GMAIL_OAUTH_CLIENT_ID }}
           GMAIL_OAUTH_CLIENT_SECRET: ${{ secrets.GMAIL_OAUTH_CLIENT_SECRET }}
           GMAIL_OAUTH_REFRESH_TOKEN: ${{ secrets.GMAIL_OAUTH_REFRESH_TOKEN }}

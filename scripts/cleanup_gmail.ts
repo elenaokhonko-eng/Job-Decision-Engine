@@ -14,9 +14,21 @@ const inProcessingFolderName =
   process.env.GMAIL_IN_PROCESSING_FOLDER || "Jobs-Alerts-In-Processing";
 const legacyProcessedFolderName =
   process.env.GMAIL_PROCESSED_FOLDER || "Jobs-Alerts-Processed";
+const DEFAULT_RECONCILIATION_LIMIT = 2000;
+const MAX_RECONCILIATION_LIMIT = 5000;
 
-export async function cleanupGmail(options: { dryRun?: boolean } = {}): Promise<void> {
+export function parseGmailReconciliationLimit(raw: string | undefined): number {
+  if (!raw?.trim()) return DEFAULT_RECONCILIATION_LIMIT;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error("GMAIL_RECONCILIATION_LIMIT must be a positive integer.");
+  }
+  return Math.min(parsed, MAX_RECONCILIATION_LIMIT);
+}
+
+export async function cleanupGmail(options: { dryRun?: boolean; limit?: number } = {}): Promise<void> {
   const dryRun = options.dryRun ?? isDryRun;
+  const limit = options.limit ?? parseGmailReconciliationLimit(process.env.GMAIL_RECONCILIATION_LIMIT);
   console.log("====================================================");
   console.log(`     GMAIL TERMINAL RECONCILIATION & CLEANUP        ${dryRun ? "[DRY RUN]" : ""}`);
   console.log("====================================================");
@@ -47,7 +59,7 @@ export async function cleanupGmail(options: { dryRun?: boolean } = {}): Promise<
       pool,
       gmailClient,
       dryRun,
-      limit: 500,
+      limit,
       inProcessingFolderName,
       legacyProcessedFolderName,
     });
