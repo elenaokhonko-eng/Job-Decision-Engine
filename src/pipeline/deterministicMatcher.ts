@@ -1051,12 +1051,16 @@ export async function runDeterministicMatcher(
 
         await client.query(
           `UPDATE match_runs
-           SET status = 'COMPLETED',
+           SET status = CASE WHEN $7::boolean THEN 'FAILED' ELSE 'COMPLETED' END,
                requirement_count = $2,
                matched_count = $3,
                coverage_score = $4,
                overall_match_score = $5,
                embedding_space_id = $6,
+               error_message = CASE
+                 WHEN $7::boolean THEN 'EMBEDDING_DEPENDENCY_INCOMPLETE'
+                 ELSE NULL
+               END,
                completed_at = NOW()
            WHERE id = $1`,
           [
@@ -1066,6 +1070,7 @@ export async function runDeterministicMatcher(
             coverageScore,
             overallScore,
             usedEmbeddings ? semanticEmbeddingSpaceId : null,
+            semanticEvidenceIncomplete,
           ]
         );
 

@@ -349,7 +349,7 @@ export async function runExplanationQueueEnqueuer(
             AND c.id = i.canonical_job_id
             AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'DEFERRED_BUDGET')
           RETURNING c.id
-        ),
+        )
         SELECT
           (SELECT COUNT(*)::int FROM inserted) AS enqueued,
           (SELECT COUNT(*)::int FROM updated_jobs) AS updated,

@@ -881,6 +881,40 @@ describe("stageTaskWorker", () => {
     expect(decisionSeed?.sql).toContain("current_match.context_fingerprint IS NOT NULL");
   });
 
+  it("seeds embedding repair for semantic match orphans before matching", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql.includes("mr.status <> 'COMPLETED'") && sql.includes("c.profile_match_status = 'UNKNOWN'")) {
+        return {
+          rows: [{
+            canonical_job_id: "job-orphan",
+            job_version_id: "version-orphan",
+            repair_match_run_id: "match-orphan",
+          }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-embedding-repair" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    const summary = await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["PUBLISH_EMBEDDING"],
+      maxSeedPerType: 1,
+    });
+
+    expect(summary.byType.PUBLISH_EMBEDDING).toEqual({ inserted: 1, existing: 0 });
+    const orphanSeed = calls.find(
+      (call) => call.sql.includes("mr.status <> 'COMPLETED'") && call.sql.includes("c.profile_match_status = 'UNKNOWN'")
+    );
+    expect(orphanSeed?.sql).toContain("COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'");
+    expect(orphanSeed?.sql).toContain("mr.embedding_space_id IS NULL");
+  });
+
   it("does not seed unrelated provider stages during a stage-scoped recovery", async () => {
     const calls: string[] = [];
     const query = vi.fn(async (sql: string) => {

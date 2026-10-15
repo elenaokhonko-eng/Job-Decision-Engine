@@ -417,14 +417,14 @@ def normalize_workability_facts(raw):
     }
 
 def derive_deterministic_recommendation(job):
-    # The backend projection is authoritative. A stale/incomplete pipeline
-    # artifact is automatic processing, not a career-review instruction.
+    # The backend projection is authoritative. Artifact freshness describes
+    # optional AI/document work and must not overwrite a current deterministic
+    # recommendation exposed by a COMPLETED read-model row.
     if job.get("requires_user_action") is True:
         return "VERIFY", "TRACK", None, None, job.get("recommendation_evidence_completeness")
 
     pipeline_category = str(job.get("pipeline_display_category") or "PROCESSING_AUTOMATICALLY")
-    artifact_status = str(job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN")
-    if pipeline_category in ("PROCESSING_AUTOMATICALLY", "TECHNICAL_ERROR") or artifact_status != "CURRENT_OR_NOT_APPLICABLE":
+    if pipeline_category in ("PROCESSING_AUTOMATICALLY", "TECHNICAL_ERROR"):
         return "ELIGIBLE", "TRACK", None, None, job.get("recommendation_evidence_completeness")
 
     eligibility = job.get("recommendation_eligibility")
@@ -1325,7 +1325,7 @@ with tab_dashboard:
     ]
     apply_now_jobs = sorted(apply_now_jobs, key=top_rec_sort_key)[:15]
 
-    st.subheader(f"🏆 Top Recommended Opportunities — Apply Now ({len(apply_now_jobs)})")
+    st.subheader(f"🏆 Top Recommended Opportunities — Apply Now ({apply_now_count})")
     if not apply_now_jobs:
         st.info("No deterministic priority or review recommendations found yet. Run the discovery & evaluation pipeline.")
     else:
@@ -1388,7 +1388,7 @@ with tab_dashboard:
     track_jobs = sorted(track_jobs, key=top_rec_sort_key)[:15]
 
     if track_jobs:
-        st.subheader(f"👀 Worth Tracking ({len(track_jobs)})")
+        st.subheader(f"👀 Worth Tracking ({track_count})")
         cols_track = st.columns(2)
         for idx, rjob in enumerate(track_jobs):
             col_idx = idx % 2
