@@ -62,4 +62,26 @@ describe("pipeline artifact context", () => {
     });
     expect(first).not.toBe(second);
   });
+
+  it("changes when a semantic repair generation changes", () => {
+    const first = buildPipelineTaskContextFingerprint({
+      ...base,
+      payload: {
+        ...base.payload,
+        repair_dependency: "REQUIREMENT_EMBEDDING_MISSING",
+        repair_generation: "semantic_match_repair_v1",
+        repair_match_run_id: "match-1",
+      },
+    });
+    const second = buildPipelineTaskContextFingerprint({
+      ...base,
+      payload: {
+        ...base.payload,
+        repair_dependency: "REQUIREMENT_EMBEDDING_MISSING",
+        repair_generation: "semantic_match_repair_v2",
+        repair_match_run_id: "match-1",
+      },
+    });
+    expect(first).not.toBe(second);
+  });
 });

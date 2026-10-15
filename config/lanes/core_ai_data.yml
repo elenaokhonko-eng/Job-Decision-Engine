@@ -36,6 +36,17 @@ scope:
       - MLOPS
       - AI_INFRASTRUCTURE
 
+  excluded_domain_concepts:
+    any:
+      - "ios developer"
+      - "ios engineer"
+      - "android developer"
+      - "android engineer"
+      - "mobile developer"
+      - "mobile engineer"
+      - "react native developer"
+      - "flutter developer"
+
 prototypes:
   - prototype_key: ai_systems_building
     text: "Building production AI/ML systems, LLM applications, data platforms and MLOps infrastructure."
@@ -83,4 +94,12 @@ negative_concepts:
   - technical account management
   - programme governance
   - people-management-heavy
+  - ios developer
+  - ios engineer
+  - android developer
+  - android engineer
+  - mobile developer
+  - mobile engineer
+  - react native developer
+  - flutter developer
 semantic_threshold: 0.35

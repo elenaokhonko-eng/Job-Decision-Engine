@@ -1,6 +1,7 @@
 export interface PipelineWorkerExitPolicyInput {
   claimedThisRun: number;
   failedThisRun: number;
+  exitReason?: "QUEUE_DRAINED" | "MAX_TASKS_REACHED" | "WALL_CLOCK_BUDGET_REACHED" | "STAGE_LIMIT_REACHED";
   deadLetteredThisRun: number;
   deadLetterCount: number;
   retryWaitCount: number;
@@ -31,7 +32,10 @@ export function enforcePipelineWorkerExitPolicy(input: PipelineWorkerExitPolicyI
       `Retry backlog age exceeded SLO: ${input.oldestRetryWaitAgeSeconds}s > ${input.maxRetryWaitAgeSeconds}s.`,
     );
   }
-  if (input.oldestActivePendingAgeSeconds > input.maxPendingAgeSeconds) {
+  const boundedProgressExit =
+    input.claimedThisRun > 0
+    && ["MAX_TASKS_REACHED", "WALL_CLOCK_BUDGET_REACHED", "STAGE_LIMIT_REACHED"].includes(input.exitReason || "");
+  if (!boundedProgressExit && input.oldestActivePendingAgeSeconds > input.maxPendingAgeSeconds) {
     throw new Error(
       `Pending queue age exceeded SLO: ${input.oldestActivePendingAgeSeconds}s > ${input.maxPendingAgeSeconds}s.`,
     );

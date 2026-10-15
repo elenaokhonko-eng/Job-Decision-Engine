@@ -881,6 +881,40 @@ describe("stageTaskWorker", () => {
     expect(decisionSeed?.sql).toContain("current_match.context_fingerprint IS NOT NULL");
   });
 
+  it("seeds embedding repair for semantic match orphans before matching", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql.includes("mr.status <> 'COMPLETED'") && sql.includes("c.profile_match_status = 'UNKNOWN'")) {
+        return {
+          rows: [{
+            canonical_job_id: "job-orphan",
+            job_version_id: "version-orphan",
+            repair_match_run_id: "match-orphan",
+          }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-embedding-repair" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    const summary = await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["PUBLISH_EMBEDDING"],
+      maxSeedPerType: 1,
+    });
+
+    expect(summary.byType.PUBLISH_EMBEDDING).toEqual({ inserted: 1, existing: 0 });
+    const orphanSeed = calls.find(
+      (call) => call.sql.includes("mr.status <> 'COMPLETED'") && call.sql.includes("c.profile_match_status = 'UNKNOWN'")
+    );
+    expect(orphanSeed?.sql).toContain("COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'");
+    expect(orphanSeed?.sql).toContain("mr.embedding_space_id IS NULL");
+  });
+
   it("does not seed unrelated provider stages during a stage-scoped recovery", async () => {
     const calls: string[] = [];
     const query = vi.fn(async (sql: string) => {
@@ -1702,5 +1736,82 @@ describe("stageTaskWorker", () => {
       limit: 1,
       budgetRunId: "budget-run-1",
     });
+  });
+
+  it("stops claiming before the absolute deadline and safely completes a slow current task", async () => {
+    vi.useFakeTimers();
+    const start = new Date("2026-10-14T00:00:00.000Z");
+    vi.setSystemTime(start);
+    let claimCalls = 0;
+
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        claimCalls += 1;
+        if (claimCalls > 1) return { rows: [], rowCount: 0 };
+        return {
+          rows: [{
+            id: "task-slow",
+            workspace_id: ctx.workspaceId,
+            task_type: "ENQUEUE_EXPLANATION",
+            task_key: "ENQUEUE_EXPLANATION:version-slow:explanation_v1",
+            payload: { canonical_job_id: "job-slow", job_version_id: "version-slow" },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 3,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("SELECT EXISTS")) return { rows: [{ exists: false }], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-slow" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+
+    const slowExplanation = vi.fn(async () => {
+      // Simulate a 1.5s operation against a 1s worker deadline.
+      vi.setSystemTime(new Date(start.getTime() + 1500));
+      return { enqueued: 0, updated: 0, deferred: 0 };
+    });
+
+    try {
+      const summary = await runPipelineStageTaskWorker(
+        { query } as any,
+        {
+          context: ctx,
+          seed: false,
+          taskTypes: ["ENQUEUE_EXPLANATION"],
+          maxTasks: 2,
+          claimBatchSize: 1,
+          heartbeatSeconds: 0,
+          wallClockMs: 1000,
+          minTimeToStartTaskMs: 200,
+          claimedBy: "worker:test",
+        },
+        dependencies({ runExplanationQueueEnqueuer: slowExplanation })
+      );
+
+      expect(summary.claimed).toBe(1);
+      expect(summary.completed).toBe(1);
+      expect(summary.failed).toBe(0);
+      expect(summary.exitReason).toBe("WALL_CLOCK_BUDGET_REACHED");
+      expect(summary.durationMs).toBeGreaterThanOrEqual(1500);
+      expect(claimCalls).toBe(1);
+      expect(query.mock.calls.some(([sql]) => String(sql).includes("UPDATE pipeline_tasks"))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

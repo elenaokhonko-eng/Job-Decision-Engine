@@ -391,6 +391,15 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     expect(canonicalUpdate?.[1][7]).toBe(true);
     expect(canonicalUpdate?.[0]).toContain("THEN 'LANE_ROUTED'");
     expect(canonicalUpdate?.[0]).not.toContain("processing_state = 'MATCHED'");
+    const matchRunUpdate = (mPool.query as any).mock.calls.find(
+      (call: any[]) => typeof call[0] === 'string' && call[0].includes('UPDATE match_runs') && call[0].includes('status = CASE')
+    );
+    expect(matchRunUpdate?.[0]).toContain("WHEN $7::boolean THEN 'FAILED'");
+    expect(matchRunUpdate?.[0]).toContain("EMBEDDING_DEPENDENCY_INCOMPLETE");
+    expect(canonicalUpdate?.[0]).toContain("recommendation_outcome = CASE");
+    expect(canonicalUpdate?.[0]).toContain("WHEN $8::boolean THEN NULL");
+    expect(canonicalUpdate?.[0]).toContain("recommendation_decided_at = CASE WHEN $8::boolean THEN NULL ELSE recommendation_decided_at END");
+    expect(canonicalUpdate?.[0]).toContain("latest_deterministic_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_deterministic_decision_id END");
   });
 
   it('records a completed zero-coverage match when deterministic extraction completed with no requirements', async () => {

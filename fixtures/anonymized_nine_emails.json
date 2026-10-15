@@ -119,7 +119,7 @@
     "expected_gate": "PASS",
     "expected_action": "APPLY_AFTER_VERIFICATION",
     "expected_recommendation_outcome": "REVIEW",
-    "expected_status": "DEFERRED_BUDGET",
+    "expected_status": "MATCHED",
     "expected_version": 1
   },
   {

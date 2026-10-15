@@ -31,6 +31,9 @@ const CONTEXT_PAYLOAD_KEYS = [
   "force_policy_recalculation",
   "reprocess",
   "repair_existing_state",
+  "repair_dependency",
+  "repair_generation",
+  "repair_match_run_id",
   "reassessment_reason",
   "verification_answer_revision_id",
 ] as const;

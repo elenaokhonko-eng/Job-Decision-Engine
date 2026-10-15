@@ -248,6 +248,22 @@ export function evaluateWorkability(
     };
   }
 
+  // 1a. Assumed hybrid from owner policy (e.g. Singapore unknown work-mode default)
+  const isAssumedHybrid = String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID";
+  if (isAssumedHybrid) {
+    return {
+      workable: true,
+      needsVerify: false,
+      facts: {
+        ...baseFacts,
+        workplace_type: "ASSUMED_HYBRID",
+        office_days_min: 3,
+        office_days_max: 3,
+        attendance_basis: "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE",
+      },
+    };
+  }
+
   // 1. Explicit ONSITE structured field or work-mode heading/text -> HARD REJECT.
   // Source adapters frequently leave workplace_type UNKNOWN while the posting
   // itself says "Full-time · Onsite" or "Location: On-site". Those are still
@@ -480,7 +496,8 @@ export interface GateResult {
     travel_pct_max: number | null;
     employment_type: "PERMANENT" | "CONTRACT" | "UNKNOWN";
     location_restriction: string | null;
-    attendance_basis?: "EMPLOYER_STATED" | "POLICY_HYBRID_3_2" | "REMOTE" | "UNKNOWN";
+    attendance_basis?: "EMPLOYER_STATED" | "POLICY_HYBRID_3_2" | "REMOTE" | "UNKNOWN" | "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE";
+    workplace_type?: "REMOTE" | "HYBRID" | "ONSITE" | "ASSUMED_HYBRID" | "UNKNOWN";
   };
 }
 
@@ -656,11 +673,13 @@ export function applyGlobalGates(
     }
   }
 
-  // FDE is a global exclusion, even when the posting also contains strong AI
-  // engineering signals.
-  if (/\b(?:fde|forward[- ]deployed(?:\s+engineer(?:ing)?)?)\b/i.test(`${t} ${d}`)) {
-    const evidence = findNonNegatedEvidence(d, ["forward deployed", "fde"]);
-    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], evidence.length > 0 ? evidence : [`FDE role: "${job.title}"`]);
+  // FDE is a global exclusion when the role itself is an FDE-family role.
+  // Do NOT reject merely because FDE is an adjacent team, collaborator, or prior background.
+  const isFdeTitle = /\b(?:fde|forward[- ]deployed(?:\s+(?:software\s+)?(?:engineer(?:ing)?|architect|specialist|lead|manager|director))?)\b/i.test(t);
+  const isFdeRoleIdentity = /\b(?:this\s+role\s+is|hiring\s+for\s+(?:an?|the)\s+role\s+of|looking\s+for\s+an?|seeking\s+an?)\s+(?:forward[- ]deployed\s+(?:software\s+)?engineer|fde)\b/i.test(d);
+  if (isFdeTitle || isFdeRoleIdentity) {
+    const titleMatch = (job.title || "").match(/\b(?:fde|forward[- ]deployed(?:\s+(?:software\s+)?(?:engineer(?:ing)?|architect|specialist|lead|manager|director))?)\b/i);
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [titleMatch ? `FDE title: "${titleMatch[0]}"` : `FDE role identity detected in description for "${job.title}"`]);
   }
 
   // Generic consultancy/advisory work is outside the target role families;
@@ -790,11 +809,11 @@ export function applyGlobalGates(
   }
 
   // ── 2. Title-level intern/trainee guard ──
-  const juniorTitleKw = ["intern", "internship", "graduate trainee", "apprentice", "apprenticeship"];
-  for (const kw of juniorTitleKw) {
-    if (t.includes(kw)) {
-      return makeReject(["GATE_EXPERIENCE_TOO_LOW"], [`Title contains: "${kw}"`]);
-    }
+  // Use word-boundary token matching to avoid false positives on 'internal' or 'international'.
+  const juniorTitleRegex = /\b(?:intern|internship|graduate\s+trainee|apprentice|apprenticeship)\b/i;
+  const juniorMatch = (job.title || "").match(juniorTitleRegex);
+  if (juniorMatch) {
+    return makeReject(["GATE_EXPERIENCE_TOO_LOW"], [`Title contains junior role term: "${juniorMatch[0]}"`]);
   }
 
   // ── 3. Office days / on-site detection (100% on-premises strictly rejected) ──
@@ -888,6 +907,20 @@ export function applyGlobalGates(
       if (!isShiftConflict && !isOnCallConflict && !isTravelConflict) continue;
       const evidence = findNonNegatedEvidence(d, [kw]);
       if (evidence.length === 0) continue; // Negated or optional occurrence
+
+      // Filter out retrospective/historical on-call experience ("has been on-call previously", "leadership through incidents")
+      let activeEvidence = evidence;
+      if (isOnCallConflict) {
+        activeEvidence = evidence.filter((snippet) => {
+          const lower = snippet.toLowerCase();
+          const isHistorical =
+            /\b(?:previously|prior\s+experience|has\s+been|past\s+experience|experience\s+(?:participating|with|in))\s+(?:on[- ]call|an\s+on[- ]call)/i.test(lower) ||
+            /\b(?:leadership|experience)\s+(?:through|with|during)\s+production\s+incidents\b/i.test(lower);
+          return !isHistorical;
+        });
+        if (activeEvidence.length === 0) continue;
+      }
+
       const travelPct = kw.includes("50%") ? 50 : kw.includes("25%") ? 25 : null;
       const hasTravelAnswer = answerContext?.overrides.travelPercentageCap !== null
         && answerContext?.overrides.travelPercentageCap !== undefined
@@ -903,7 +936,7 @@ export function applyGlobalGates(
       // answer-adjusted maxTravelPct above; do not apply the legacy generic
       // frequent-travel reject a second time.
       if (hasTravelAnswer && travelPct !== null) continue;
-      return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], evidence, { travel_pct_max: travelPct });
+      return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], activeEvidence, { travel_pct_max: travelPct });
     }
   }
 
@@ -932,9 +965,10 @@ export function applyGlobalGates(
   }
 
   // ── 8. FDE (Forward Deployed Engineering) ──
-  const fdeKw = ["forward deployed", "fde "];
-  if (t.includes("fde") || fdeKw.some(k => t.includes(k) || d.includes(k))) {
-    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], findEvidence(d, fdeKw));
+  // Check title or explicit role identity rather than arbitrary description mentions.
+  if (isFdeTitle || isFdeRoleIdentity) {
+    const titleMatch = (job.title || "").match(/\b(?:fde|forward[- ]deployed(?:\s+(?:software\s+)?(?:engineer(?:ing)?|architect|specialist|lead|manager|director))?)\b/i);
+    return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [titleMatch ? `FDE title: "${titleMatch[0]}"` : `FDE role identity detected in description for "${job.title}"`]);
   }
 
   // ── 9. Consulting firms ──

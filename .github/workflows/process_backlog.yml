@@ -43,6 +43,7 @@ jobs:
         run: npm ci
 
       - name: Run database migrations
+        id: database_migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
@@ -111,7 +112,8 @@ jobs:
           REQUIREMENTS_ENABLE_QUOTED: 'true'
           PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '2500' }}
           PIPELINE_TASK_WORKER_STAGE_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_STAGE_MAX_TASKS || 'NORMALIZE_OBSERVATION=800,EXTRACT_DETERMINISTIC_REQUIREMENTS=800,APPLY_HARD_GATES=800,PUBLISH_EMBEDDING=400,ROUTE_LANE=400,MATCH_PROFILE_EVIDENCE=400,DECIDE_RECOMMENDATION=800,ENQUEUE_EXPLANATION=400' }}
-          PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '720000' }}
+          PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '600000' }}
+          PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS: ${{ vars.PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS || '120000' }}
           PIPELINE_TASK_WORKER_LEASE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_LEASE_SECONDS || '300' }}
           PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS || '60' }}
           PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE: ${{ vars.PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE || '1' }}
@@ -138,6 +140,7 @@ jobs:
         run: npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json
 
       - name: Reconcile terminal Gmail job alerts
+        if: ${{ always() && steps.database_migrations.outcome == 'success' }}
         timeout-minutes: 5
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

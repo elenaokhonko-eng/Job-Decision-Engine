@@ -349,17 +349,6 @@ export async function runExplanationQueueEnqueuer(
             AND c.id = i.canonical_job_id
             AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'DEFERRED_BUDGET')
           RETURNING c.id
-        ),
-        updated_deferred_jobs AS (
-          UPDATE canonical_jobs c
-          SET processing_state = 'DEFERRED_BUDGET',
-              processing_status = 'DEFERRED_BUDGET',
-              updated_at = NOW()
-          FROM deferred_candidates d
-          WHERE c.workspace_id = $1::uuid
-            AND c.id = d.canonical_job_id
-            AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
-          RETURNING c.id
         )
         SELECT
           (SELECT COUNT(*)::int FROM inserted) AS enqueued,

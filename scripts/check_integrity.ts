@@ -64,6 +64,8 @@ async function runIntegrityChecks() {
       "RETRY_WAIT",
       "NEEDS_MANUAL_REVIEW",
       "MANUALLY_REMOVED",
+      "UNMATCHED",
+      "PROCESSING_ERROR",
     ];
 
     const { rows: invalidState } = await pool.query(
@@ -71,6 +73,7 @@ async function runIntegrityChecks() {
       SELECT id, COALESCE(processing_state, processing_status) AS processing_state
       FROM canonical_jobs
       WHERE workspace_id = $2
+        AND NOT is_test_fixture
         AND COALESCE(processing_state, processing_status) != ALL($1::varchar[])
     `,
       [validStates, ctx.workspaceId]
@@ -111,6 +114,63 @@ async function runIntegrityChecks() {
       errors++;
     } else {
       console.log("OK: All evaluation queue items are linked to a canonical job.");
+    }
+
+    // Check 6: Semantic match runs cannot complete without a compatible embedding space.
+    const { rows: semanticOrphans } = await pool.query(`
+      SELECT c.id
+      FROM canonical_jobs c
+      JOIN match_runs mr
+        ON mr.workspace_id = c.workspace_id
+       AND mr.id = c.latest_match_run_id
+       AND mr.canonical_job_id = c.id
+      WHERE c.workspace_id = $1
+        AND NOT c.is_test_fixture
+        AND COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+        AND c.profile_match_status = 'UNKNOWN'
+        AND mr.status = 'COMPLETED'
+        AND mr.embedding_space_id IS NULL
+    `, [ctx.workspaceId]);
+    if (semanticOrphans.length > 0) {
+      console.error(`Found ${semanticOrphans.length} completed semantic match orphan(s) without an embedding space.`);
+      errors++;
+    } else {
+      console.log("OK: No completed semantic match orphans found.");
+    }
+
+    // Check 7: Automatic nonterminal jobs must have recoverable work attached.
+    const { rows: strandedNonterminal } = await pool.query(`
+      SELECT c.id
+      FROM canonical_jobs c
+      WHERE c.workspace_id = $1
+        AND NOT c.is_test_fixture
+        AND COALESCE(c.processing_state, c.processing_status) IN (
+          'RAW_STAGED', 'PREQUALIFIED', 'ROUTING_DEFERRED', 'LANE_ROUTED',
+          'QUEUED_FOR_AI', 'EVALUATING', 'RETRY_WAIT'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM pipeline_tasks task
+          WHERE task.workspace_id = c.workspace_id
+            AND task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+            AND (
+              task.payload->>'canonical_job_id' = c.id::text
+              OR task.payload->>'job_version_id' = c.latest_job_version_id::text
+            )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM evaluation_queue evaluation
+          WHERE evaluation.workspace_id = c.workspace_id
+            AND evaluation.canonical_job_id = c.id
+            AND evaluation.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT')
+        )
+    `, [ctx.workspaceId]);
+    if (strandedNonterminal.length > 0) {
+      console.error(`Found ${strandedNonterminal.length} nonterminal job(s) without active recovery tasks.`);
+      errors++;
+    } else {
+      console.log("OK: Every automatic nonterminal job has active recovery work.");
     }
 
     if (errors === 0) {

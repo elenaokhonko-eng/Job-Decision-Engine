@@ -18,9 +18,11 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json');
     expect(workflow).toContain('actions/upload-artifact@v4');
     expect(workflow).toContain('timeout-minutes: 15');
+    expect(workflow).toContain("if: ${{ always() && steps.database_migrations.outcome == 'success' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '2500' }}");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_STAGE_MAX_TASKS');
-    expect(workflow).toContain("PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '720000' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '600000' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS: ${{ vars.PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS || '120000' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_TASK_TYPES: ${{ vars.PIPELINE_TASK_WORKER_TASK_TYPES || '' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_SEED: ${{ vars.PIPELINE_TASK_WORKER_SEED || 'true' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED: ${{ vars.PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED || 'true' }}");

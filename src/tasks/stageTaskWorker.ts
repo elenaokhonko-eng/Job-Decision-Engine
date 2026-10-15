@@ -41,6 +41,8 @@ export const PIPELINE_STAGE_TASK_TYPES = [
   "ENQUEUE_EXPLANATION",
 ] as const;
 
+const SEMANTIC_MATCH_REPAIR_GENERATION = "semantic_match_repair_v2";
+
 export type PipelineStageTaskType = (typeof PIPELINE_STAGE_TASK_TYPES)[number];
 
 export function parsePipelineTaskTypes(raw: string | undefined): PipelineStageTaskType[] {
@@ -99,6 +101,12 @@ export interface SeedPipelineTasksSummary {
   byType: Record<string, { inserted: number; existing: number }>;
 }
 
+export type PipelineWorkerExitReason =
+  | "QUEUE_DRAINED"
+  | "MAX_TASKS_REACHED"
+  | "WALL_CLOCK_BUDGET_REACHED"
+  | "STAGE_LIMIT_REACHED";
+
 export interface PipelineStageWorkerSummary {
   seeded: SeedPipelineTasksSummary | null;
   claimed: number;
@@ -106,6 +114,8 @@ export interface PipelineStageWorkerSummary {
   blocked: number;
   failed: number;
   deadLettered: number;
+  exitReason: PipelineWorkerExitReason;
+  durationMs: number;
   byType: Record<string, { claimed: number; completed: number; blocked: number; failed: number; deadLettered: number }>;
   errors: Array<{ taskType: string; taskKey: string; error: string }>;
 }
@@ -127,6 +137,7 @@ export interface PipelineStageWorkerOptions {
   leaseSeconds?: number;
   heartbeatSeconds?: number;
   wallClockMs?: number;
+  minTimeToStartTaskMs?: number;
   claimedBy?: string;
   /** Reuse one durable AI budget identity across all explanation tasks in this worker run. */
   budgetRunId?: string;
@@ -641,6 +652,63 @@ export async function seedRecoverablePipelineTasks(
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
         payload: { canonical_job_id: requiredSeedValue(row, "canonical_job_id"), job_version_id: requiredSeedValue(row, "job_version_id") },
+      }),
+      enabledTypes,
+      includeTestFixtures,
+    );
+
+    await selectAndEnqueue(
+      client as any,
+      ctx,
+      summary,
+      "PUBLISH_EMBEDDING",
+      `SELECT c.id AS canonical_job_id,
+              jv.id AS job_version_id,
+              c.latest_match_run_id AS repair_match_run_id
+       FROM canonical_jobs c
+       JOIN job_versions jv
+         ON jv.workspace_id = c.workspace_id
+        AND jv.id = c.latest_job_version_id
+       JOIN match_runs mr
+         ON mr.workspace_id = c.workspace_id
+        AND mr.id = c.latest_match_run_id
+        AND mr.canonical_job_id = c.id
+        AND mr.job_version_id = jv.id
+       WHERE c.workspace_id = $1
+         AND COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+         AND c.profile_match_status = 'UNKNOWN'
+         AND (
+           mr.status <> 'COMPLETED'
+           OR mr.embedding_space_id IS NULL
+         )
+         AND EXISTS (
+           SELECT 1
+           FROM job_version_pipeline_state ps
+           JOIN requirement_extraction_runs rer
+             ON rer.workspace_id = ps.workspace_id
+            AND rer.job_version_id = ps.job_version_id
+            AND rer.run_type = 'DETERMINISTIC'
+            AND rer.status = 'COMPLETED'
+            AND jv.active_requirement_set_id IS NOT NULL
+            AND rer.requirement_set_id = jv.active_requirement_set_id
+           WHERE ps.workspace_id = c.workspace_id
+             AND ps.job_version_id = jv.id
+             AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+             AND ps.stage_status = 'COMPLETED'
+         )
+       ORDER BY c.updated_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, maxPerType],
+      (row) => ({
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          repair_dependency: "SEMANTIC_MATCH_EMBEDDING_INCOMPLETE",
+          repair_generation: SEMANTIC_MATCH_REPAIR_GENERATION,
+          repair_match_run_id: requiredSeedValue(row, "repair_match_run_id"),
+          reprocess_existing_state: true,
+        },
       }),
       enabledTypes,
       includeTestFixtures,
@@ -1400,6 +1468,7 @@ async function enqueueDependencyRepair(
     canonical_job_id: payload?.canonical_job_id,
     job_version_id: jobVersionId,
     repair_dependency: dependency.code,
+    repair_generation: SEMANTIC_MATCH_REPAIR_GENERATION,
     repair_attempt: task.attemptNumber,
     ...(dependency.repairTaskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS"
       ? { repair_existing_state: true }
@@ -1541,6 +1610,9 @@ async function maybeEnqueueAfterTask(
     canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
     job_version_id: jobVersionId,
     ...(payload.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}),
+    ...(typeof payload.repair_dependency === "string" ? { repair_dependency: payload.repair_dependency } : {}),
+    ...(typeof payload.repair_generation === "string" ? { repair_generation: payload.repair_generation } : {}),
+    ...(typeof payload.repair_match_run_id === "string" ? { repair_match_run_id: payload.repair_match_run_id } : {}),
   };
 
   if (taskType === "APPLY_HARD_GATES") {
@@ -2030,10 +2102,16 @@ export async function runPipelineStageTaskWorker(
   const leaseSeconds = options.leaseSeconds ?? 300;
   const heartbeatSeconds = options.heartbeatSeconds ?? Math.max(15, Math.floor(leaseSeconds / 3));
   const wallClockMs = options.wallClockMs ?? 55 * 60 * 1000;
+  const minTimeToStartTaskMs = Math.max(
+    0,
+    Math.min(options.minTimeToStartTaskMs ?? 120_000, Math.max(0, wallClockMs - 1)),
+  );
   const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
   const budgetRunId = options.budgetRunId?.trim() || crypto.randomUUID();
   const claimedByType: Partial<Record<PipelineStageTaskType, number>> = {};
   const startedAt = Date.now();
+  const deadlineAt = startedAt + wallClockMs;
+  const canStartAnotherTask = () => Date.now() + minTimeToStartTaskMs < deadlineAt;
   const summary: PipelineStageWorkerSummary = {
     seeded: null,
     claimed: 0,
@@ -2041,6 +2119,8 @@ export async function runPipelineStageTaskWorker(
     blocked: 0,
     failed: 0,
     deadLettered: 0,
+    exitReason: "QUEUE_DRAINED",
+    durationMs: 0,
     byType: {},
     errors: [],
   };
@@ -2059,7 +2139,7 @@ export async function runPipelineStageTaskWorker(
       });
     }
 
-    while (summary.claimed < maxTasks && Date.now() - startedAt < wallClockMs) {
+    while (summary.claimed < maxTasks && canStartAnotherTask()) {
       throwIfWorkerCancelled(options.abortSignal);
       let madeProgress = false;
 
@@ -2070,7 +2150,7 @@ export async function runPipelineStageTaskWorker(
         while (
           summary.claimed < maxTasks &&
           (claimedByType[taskType] ?? 0) < stageLimit &&
-          Date.now() - startedAt < wallClockMs
+          canStartAnotherTask()
         ) {
           throwIfWorkerCancelled(options.abortSignal);
           const claimLimit = Math.min(
@@ -2168,6 +2248,19 @@ export async function runPipelineStageTaskWorker(
         break;
       }
     }
+
+    const durationMs = Date.now() - startedAt;
+    const stageLimitsReached = taskTypes.every((taskType) =>
+      (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
+    );
+    summary.durationMs = durationMs;
+    summary.exitReason = summary.claimed >= maxTasks
+      ? "MAX_TASKS_REACHED"
+      : durationMs >= wallClockMs || !canStartAnotherTask()
+        ? "WALL_CLOCK_BUDGET_REACHED"
+        : stageLimitsReached
+          ? "STAGE_LIMIT_REACHED"
+          : "QUEUE_DRAINED";
 
     return summary;
   } finally {
