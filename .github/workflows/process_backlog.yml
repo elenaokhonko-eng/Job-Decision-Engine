@@ -28,7 +28,7 @@ jobs:
     name: Drain saved discovery backlog
     runs-on: ubuntu-latest
     if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled') }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -117,7 +117,7 @@ jobs:
           PIPELINE_TASK_WORKER_LEASE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_LEASE_SECONDS || '300' }}
           PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS || '60' }}
           PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE: ${{ vars.PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE || '1' }}
-          PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '1000' }}
+          PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '200' }}
           PIPELINE_TASK_WORKER_TASK_TYPES: ${{ vars.PIPELINE_TASK_WORKER_TASK_TYPES || '' }}
           PIPELINE_TASK_WORKER_SEED: ${{ vars.PIPELINE_TASK_WORKER_SEED || 'true' }}
           PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'
@@ -141,7 +141,7 @@ jobs:
 
       - name: Reconcile terminal Gmail job alerts
         if: ${{ always() && steps.database_migrations.outcome == 'success' }}
-        timeout-minutes: 5
+        timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}

@@ -28,6 +28,10 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED: ${{ vars.PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED || 'true' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION: ${{ vars.PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION || 'routing_deferred_replay_v1' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '60000' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '200' }}");
+    const gmailCleanupStep = workflow.split("name: Reconcile terminal Gmail job alerts")[1] ?? "";
+    expect(gmailCleanupStep.slice(0, 180)).toContain("timeout-minutes: 15");
+    expect(workflow).toContain("timeout-minutes: 40");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_WALL_CLOCK_MS');
     expect(workflow).toContain("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'");

@@ -183,7 +183,7 @@ jobs:
           PIPELINE_TASK_WORKER_LEASE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_LEASE_SECONDS || '300' }}
           PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS || '60' }}
           PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE: ${{ vars.PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE || '1' }}
-          PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '1000' }}
+          PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '200' }}
           PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'
           PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'
           PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT: ${{ vars.PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT || '500' }}
@@ -207,7 +207,7 @@ jobs:
         run: npx tsx scripts/evaluate_queue.ts
       - name: Reconcile terminal Gmail job alerts
         if: ${{ always() && steps.database_migrations.outcome == 'success' }}
-        timeout-minutes: 5
+        timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
