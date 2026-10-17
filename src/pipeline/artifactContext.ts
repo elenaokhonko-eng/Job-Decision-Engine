@@ -36,6 +36,7 @@ const CONTEXT_PAYLOAD_KEYS = [
   "repair_match_run_id",
   "reassessment_reason",
   "verification_answer_revision_id",
+  "queue_budget_run_id",
 ] as const;
 
 function contextPayload(payload: Record<string, unknown>): Record<string, unknown> {

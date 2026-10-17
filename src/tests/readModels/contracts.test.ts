@@ -24,16 +24,16 @@ describe('readModels contracts', () => {
       primary_lane: 'CORE_AI_DATA',
       secondary_lanes: ['LEGAL_REGTECH'],
       lane_confidence: 'Medium',
-      priority_score: 88,
-      deterministic_match_score: 86,
-      deterministic_match_coverage: 71,
+      priority_score: "88.00",
+      deterministic_match_score: "86.00",
+      deterministic_match_coverage: "71.00",
       processing_state: 'AI_EVALUATED',
       processing_status: 'AI_EVALUATED',
       recommendation_eligibility: 'ELIGIBLE',
       recommendation_outcome: 'PRIORITY',
-      recommendation_requirement_score: 0.86,
-      recommendation_coverage_score: 0.71,
-      recommendation_evidence_completeness: 0.75,
+      recommendation_requirement_score: "0.86",
+      recommendation_coverage_score: "0.71",
+      recommendation_evidence_completeness: "0.75",
       recommendation_decided_at: '2026-09-02T10:30:00.000Z',
       nd_friendly_score: 78,
       politics_stress_score: 31,
@@ -55,8 +55,16 @@ describe('readModels contracts', () => {
     });
 
     expect(parsed.document_ready).toBe(true);
+    expect(parsed.priority_score).toBe(88);
     expect(parsed.deterministic_match_score).toBe(86);
+    expect(parsed.deterministic_match_coverage).toBe(71);
+    expect(parsed.recommendation_requirement_score).toBe(0.86);
+    expect(parsed.recommendation_evidence_completeness).toBe(0.75);
     expect(parsed.current_artifact_status).toBe("CURRENTNESS_UNKNOWN");
+    expect(ShortlistRowV2Schema.safeParse({
+      ...parsed,
+      deterministic_match_score: "not-a-postgresql-number",
+    }).success).toBe(false);
   });
 
   it('preserves a missing shortlist priority score as null', () => {

@@ -23,6 +23,7 @@ import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
+import { validateDocumentCurrentContext, type DocumentCurrentContext } from "../src/documents/currentContext.js";
 import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
@@ -266,13 +267,10 @@ function collectCvClaims(finalCv: any): DocumentClaimInput[] {
   return claims.filter((claim) => claim.claimText.trim().length > 0 && claim.profileFactIds.length > 0);
 }
 
-type JobRow = {
+type JobRow = Omit<DocumentCurrentContext, "selected_profile_version_id"> & {
   canonical_job_id: string;
-  latest_match_run_id: string | null;
-  recommendation_outcome: string | null;
   title: string | null;
   company_name: string | null;
-  job_version_id: string;
   raw_description: string | null;
   location: string | null;
 };
@@ -341,11 +339,38 @@ async function generateTailoredCV(): Promise<void> {
     const jobRes = await pool.query<JobRow>(
       `SELECT
          c.id AS canonical_job_id,
+         COALESCE(c.latest_job_version_id, (
+           SELECT jv_current.id
+           FROM job_versions jv_current
+           WHERE jv_current.canonical_job_id = c.id
+             AND jv_current.workspace_id = c.workspace_id
+           ORDER BY jv_current.observed_at DESC
+           LIMIT 1
+         )) AS current_job_version_id,
          c.latest_match_run_id,
-         c.recommendation_outcome,
+         c.latest_deterministic_decision_id,
+         current_shortlist.gate_status,
+         current_shortlist.recommendation_eligibility,
+         current_shortlist.recommendation_outcome,
          c.normalized_title as title,
          c.company_name,
-         v.id AS job_version_id,
+         v.id AS selected_job_version_id,
+         v.active_requirement_set_id,
+         v.content_hash AS current_job_content_hash,
+         active_profile.id AS active_profile_version_id,
+         mr.id AS match_run_id,
+         mr.job_version_id AS match_run_job_version_id,
+         mr.profile_version_id AS match_run_profile_version_id,
+         mr.status AS match_run_status,
+         mr.requirement_set_id AS match_run_requirement_set_id,
+         mr.job_content_hash AS match_run_job_content_hash,
+         mr.context_fingerprint AS match_run_context_fingerprint,
+         dd.id AS deterministic_decision_id,
+         dd.job_version_id AS decision_job_version_id,
+         dd.match_run_id AS decision_match_run_id,
+         dd.context_fingerprint AS decision_context_fingerprint,
+         dd.recommendation_eligibility AS decision_recommendation_eligibility,
+         dd.recommendation_outcome AS decision_recommendation_outcome,
          v.description_text as raw_description,
          COALESCE(c.location, c.location_summary, '') as location
        FROM canonical_jobs c
@@ -362,6 +387,26 @@ async function generateTailoredCV(): Promise<void> {
          )
        )
         AND v.workspace_id = c.workspace_id
+       LEFT JOIN v_canonical_shortlist_scoped AS current_shortlist
+         ON current_shortlist.workspace_id = c.workspace_id
+        AND current_shortlist.canonical_job_id = c.id
+        AND current_shortlist.job_version_id = v.id
+       LEFT JOIN LATERAL (
+         SELECT pv.id
+         FROM profile_versions pv
+         WHERE pv.workspace_id = c.workspace_id
+           AND pv.status = 'ACTIVE'
+         ORDER BY pv.created_at DESC
+         LIMIT 1
+       ) active_profile ON TRUE
+       LEFT JOIN match_runs mr
+         ON mr.workspace_id = c.workspace_id
+        AND mr.id = c.latest_match_run_id
+        AND mr.canonical_job_id = c.id
+       LEFT JOIN deterministic_decisions dd
+         ON dd.workspace_id = c.workspace_id
+        AND dd.id = c.latest_deterministic_decision_id
+        AND dd.canonical_job_id = c.id
        WHERE c.workspace_id = $3
          AND c.id = $1
          AND v.canonical_job_id = c.id
@@ -379,20 +424,6 @@ async function generateTailoredCV(): Promise<void> {
     const jdTitle = job.title || "Unknown Role";
     const jdCompany = job.company_name || "Unknown Company";
     const jdLocation = job.location || "";
-    const resolvedJobVersionId = job.job_version_id;
-    const matchRunId = job.latest_match_run_id;
-
-    if (!matchRunId) {
-      throw new Error(
-        "No latest_match_run_id found for this job. Run deterministic matching before generating documents."
-      );
-    }
-
-    if (!['PRIORITY', 'REVIEW'].includes(String(job.recommendation_outcome || ''))) {
-      throw new Error(
-        `Deterministic recommendation_outcome=${job.recommendation_outcome || 'NULL'}; documents require PRIORITY or REVIEW.`
-      );
-    }
 
     const profileRes = await pool.query<ProfileRow>(
       `SELECT
@@ -405,9 +436,10 @@ async function generateTailoredCV(): Promise<void> {
         AND cp.workspace_id = pv.workspace_id
        WHERE pv.workspace_id = $1
          AND pv.status = 'ACTIVE'
+         AND pv.id = $2
        ORDER BY pv.created_at DESC
        LIMIT 1`,
-      [ctx.workspaceId]
+      [ctx.workspaceId, job.active_profile_version_id]
     );
 
     if (profileRes.rows.length === 0) {
@@ -415,6 +447,30 @@ async function generateTailoredCV(): Promise<void> {
     }
 
     const profile = profileRes.rows[0];
+    const currentness = validateDocumentCurrentContext({
+      ...job,
+      selected_profile_version_id: profile.profile_version_id,
+    });
+    if (!currentness.ok) {
+      throw new Error(`Document generation rejected stale context: ${currentness.reason}.`);
+    }
+    if (!job.selected_job_version_id) {
+      throw new Error("Document generation rejected a missing selected job version.");
+    }
+    const resolvedJobVersionId = job.selected_job_version_id;
+
+    const matchRunId = job.latest_match_run_id;
+    if (!matchRunId) {
+      throw new Error(
+        "No latest_match_run_id found for this job. Run deterministic matching before generating documents."
+      );
+    }
+    if (!['PRIORITY', 'REVIEW'].includes(String(job.recommendation_outcome || ''))) {
+      throw new Error(
+        `Deterministic recommendation_outcome=${job.recommendation_outcome || 'NULL'}; documents require PRIORITY or REVIEW.`
+      );
+    }
+
     const profileVersionId = profile.profile_version_id;
     const candidateName = String(profile.display_name || "").trim();
     const profileVersionNumber = String(profile.version_number || "").trim() || "unknown";
@@ -787,6 +843,9 @@ async function generateTailoredCV(): Promise<void> {
         canonicalJobId: jobId,
         jobVersionId: resolvedJobVersionId,
         matchRunId: matchRunId,
+        profileVersionId: profileVersionId,
+        deterministicDecisionId: job.deterministic_decision_id,
+        contextFingerprint: job.decision_context_fingerprint,
         documentType: "CV",
         policyVersion: "documents_v2",
         generatorVersion: "cv_generator_deterministic_v1",

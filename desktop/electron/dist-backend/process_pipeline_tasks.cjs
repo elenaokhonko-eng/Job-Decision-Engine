@@ -45,6 +45,8 @@ js_yaml = __toESM(js_yaml, 1);
 let path = require("path");
 path = __toESM(path, 1);
 let zod = require("zod");
+let node_crypto = require("node:crypto");
+node_crypto = __toESM(node_crypto, 1);
 let _google_genai = require("@google/genai");
 let fs = require("fs");
 fs = __toESM(fs, 1);
@@ -700,7 +702,12 @@ function hasExplicitTerritoryRestriction(value, territory) {
 	if (!canonical) return false;
 	const aliases = (TERRITORY_ALIASES.find(([key]) => key === canonical)?.[1] ?? [canonical.toLowerCase()]).map(normalizeTerritorySearchText);
 	return normalizeTerritorySearchText(value).split(/[.!?;\n]+/).map((sentence) => sentence.trim()).filter(Boolean).some((sentence) => {
-		return aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(sentence)) && /\b(only|required|must|mandatory|work\s+(?:in|from)|working\s+(?:in|from)|based\s+in|located\s+in|location\s*[:=-]\s*|office\s+in|on[- ]?site\s+in|authorization|authorised|authorized|eligible|rights|citizen(?:ship)?|visa|residen(?:cy|tial))\b/i.test(sentence);
+		if (!aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(sentence))) return false;
+		const isEmployerOrContext = /\b(?:we\s+are\b|our\s+(?:company|team|office|headquarters|hq|firm|business|clients?|customers?)\b|headquartered|head\s+office|employer\s+based|startup\s+based|company\s+based|firm\s+based|company\s+location|hq\s*[:=-]|headquarters\s*[:=-]|founded\s+in|serve\s+(?:[\w-]+\s+){0,3}clients?|working\s+with\s+(?:[\w-]+\s+){0,3}clients?)\b/i.test(sentence);
+		const hasExplicitWorkerConstraint = /\b(authorization|authorised|authorized|work\s+permit|visa|citizen(?:ship)?|residen(?:cy|tial|ts?)|right\s+to\s+work|eligible\s+to\s+work)\b/i.test(sentence) || /\b(?:must\s+(?:be\s+)?(?:residing|living|based|located|authorized)|must\s+reside|must\s+live)\b/i.test(sentence) || /\b(?:only\s+(?:open\s+to|applicants?|candidates?|engineers?|developers?|people|individuals)\s+(?:in|from|based|located|residing))\b/i.test(sentence) || /\b(?:remote\s+(?:only\s+in|only\s+from|eligible\s+only\s+in))\b/i.test(sentence) || /\b(?:open\s+only\s+to|eligible\s+only\s+in|based\s+in\s+[\w\s]+\s+only)\b/i.test(sentence);
+		if (isEmployerOrContext) return hasExplicitWorkerConstraint;
+		if (/\b(?:location\s*[:=-]|remote\s*[-–—:]\s*)/i.test(sentence) && !/\b(?:only|must|authorized|authorization|permit|visa|citizen|reside)\b/i.test(sentence)) return false;
+		return hasExplicitWorkerConstraint || /\b(only|required|must|mandatory|work\s+(?:in|from)\s+(?:only\b|exclusively\b)|reside\s+in|living\s+in)\b/i.test(sentence);
 	});
 }
 function finiteNumber(value, fallback) {
@@ -1050,20 +1057,23 @@ var GLOBAL_TITLE_EXCLUSIONS = [
 	/\b(human resources?|hr|recruiter|talent acquisition|people operations?|people partner)\b/i,
 	/\b(executive assistant|office manager|receptionist|admin assistant|administrative assistant)\b/i,
 	/\b(legal counsel|attorney|lawyer|m&a|paralegal|contracts? manager)\b/i,
-	/\b(sales manager|account executive|business development representative|bdr|sdr|(?<!technical\s+)account manager)\b/i,
+	/\b(sales\s+(?:manager|representative|rep|director|lead)|account executive|business development representative|bdr|sdr|(?<!technical\s+)account manager|customer\s+(?:success|support|service))\b/i,
 	/\b(marketing manager|social media|content writer|pr manager|brand manager)\b/i,
 	/\b(quality assurance coordinator|manual tester|qa tester)\b/i,
-	/\b(brain researcher|neuroscientist|wet lab|postdoctoral fellow)\b/i
+	/\b(brain researcher|neuroscientist|wet lab)\b/i,
+	/\b(postdoctoral\s+(?:fellow|researcher|associate)|postdoc)\b(?!.*?\b(ai|ml|machine\s+learning|artificial\s+intelligence|data|computing|computer\s+science|nlp|robotics|computational)\b)/i,
+	/\b(adjunct\s+professor|tenure\s+track|assistant\s+professor|associate\s+professor)\b/i,
+	/\b(store\s+manager|cashier|retail\s+associate)\b/i
 ];
 var TECHNICAL_FUNCTION_KEYWORDS = [
 	/\b(software engineer|data engineer|ml engineer|machine learning engineer|ai engineer)\b/i,
 	/\b(full[\s-]stack|backend engineer|distributed systems|platform engineer|cloud engineer)\b/i,
-	/\b(research engineer|quantitative developer|quant engineer|system architect|ai architect)\b/i,
-	/\b(engineering|technology|technical|software|data|analytics?|ai|ml|digital|transformation|scientific)\s+(program|programme|project|portfolio|delivery|transformation)?\s*(manager|director|lead|head|officer|vp|vice president)\b/i,
+	/\b(research engineer|quantitative developer|quant engineer|system architect|ai architect|solution architect|solutions architect)\b/i,
+	/\b(engineering|technology|technical|software|data|analytics?|ai|ml|digital|transformation|scientific)\s+(program|programme|project|product|portfolio|delivery|transformation)?\s*(manager|director|lead|head|officer|vp|vice president|owner)\b/i,
 	/\b(manager|director|lead|head|officer|vp|vice president)\s+of\s+(engineering|technology|software|data|analytics?|ai|ml|platform|cloud|systems?|digital|transformation|research|science)\b/i,
 	/\b(software development|software delivery|application development|data science|data platform|data architecture|data analytics|technology transformation|digital transformation|data transformation|technical delivery|engineering delivery|engineering program|technical roadmap|product development|systems design|release management|cloud platform|platform engineering|software development lifecycle|sdlc)\b/i,
 	/\b(python|typescript|go|c\+\+|rust|sql|postgres|fastapi|docker|kubernetes)\b/i,
-	/\b(applied scientist|research scientist|bioinformatics|computational biolog(y|ist)|genomics?|biotech|drug discovery)\b/i,
+	/\b(applied scientist|research scientist|research associate|research fellow|applied researcher|bioinformatics|computational biolog(y|ist)|genomics?|biotech|drug discovery)\b/i,
 	/\b(regtech|legaltech|compliance automation|contract analytics|knowledge engineer(ing)?|llm|agents?|rag|nlp|foundation models?|data pipeline)\b/i
 ];
 /**
@@ -1072,9 +1082,9 @@ var TECHNICAL_FUNCTION_KEYWORDS = [
 function isTechnicalRole(title, description) {
 	const t = (title || "").toLowerCase();
 	const d = (description || "").toLowerCase();
-	const isTechnicalTitle = /\b(engineer|engineering|developer|architect|data scientist|data analyst|analytics engineer|business intelligence|machine learning|applied scientist|research scientist|scientist|quantitative researcher|quant researcher|quant developer|quantitative developer|quantitative engineer|ai researcher|software engineer|data engineer|ml platform|systems engineer|systems analyst|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?|test automation|automation engineer|qa automation)\b/i.test(t);
+	const isTechnicalTitle = /\b(engineer|engineering|developer|architect|data scientist|data analyst|analytics engineer|business intelligence|machine learning|applied scientist|research scientist|research associate|research fellow|applied researcher|scientist|quantitative researcher|quant researcher|quant developer|quantitative developer|quantitative engineer|ai researcher|software engineer|data engineer|ml platform|systems engineer|systems analyst|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?|test automation|automation engineer|qa automation|technical consultant|technology consultant|solutions? consultant|ai consultant|data consultant)\b/i.test(t);
 	const hasTechnicalLeadershipTitle = /\b(manager|director|lead|head|officer|vp|vice president)\b/i.test(t) && /\b(engineer(?:ing)?|technology|technical|software|data|analytics?|ai|ml|machine learning|platform|cloud|systems?|digital|transformation|research|scientific|science)\b/i.test(t);
-	const hasTechnicalProgramTitle = /\b(technical|technology|engineering|software|data|ai|ml|digital|transformation)\s+(program|programme|project|portfolio|delivery|transformation)\s+(manager|director|lead|head|officer|vp|vice president)\b/i.test(t);
+	const hasTechnicalProgramTitle = /\b(technical|technology|engineering|software|data|ai|ml|digital|transformation)\s+(program|programme|project|product|portfolio|delivery|transformation)\s+(manager|director|lead|head|officer|vp|vice president|owner)\b/i.test(t);
 	const buildingKeywords = [
 		"python",
 		"typescript",
@@ -1237,7 +1247,6 @@ function extractTravelRequirement(description) {
 function evaluateWorkability(location, workplaceType, description, employmentType, policy = loadWorkabilityPolicy(), answerContext) {
 	const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
 	const officeDaysAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.workplaceOfficeDays) && answerContext?.overrides.workplaceOfficeDaysCap === null;
-	const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.workAuthorization) && answerContext?.overrides.workAuthorizationRegions.length === 0;
 	const wp = normalizeWorkMode(workplaceType);
 	const loc = (location || "").toLowerCase().trim();
 	const d = (description || "").toLowerCase().trim();
@@ -1258,6 +1267,17 @@ function evaluateWorkability(location, workplaceType, description, employmentTyp
 		reason: "Contract employment detected",
 		reasonCode: "GATE_CONTRACT_ROLE",
 		facts: baseFacts
+	};
+	if (String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID") return {
+		workable: true,
+		needsVerify: false,
+		facts: {
+			...baseFacts,
+			workplace_type: "ASSUMED_HYBRID",
+			office_days_min: 3,
+			office_days_max: 3,
+			attendance_basis: "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE"
+		}
 	};
 	const officeDaysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i) || d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
 	const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d) || /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i.test(d) || /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i.test(d) || /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i.test(d) || officeDaysMatch !== null && Number(officeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek;
@@ -1284,20 +1304,11 @@ function evaluateWorkability(location, workplaceType, description, employmentTyp
 	const explicitlyDisallowed = effectivePolicy.rejectExplicitForeignTerritory ? [...isRemote ? [] : locationTerritories, ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory))].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory)) : [];
 	if (explicitlyDisallowed.length > 0) {
 		const territory = explicitlyDisallowed[0];
-		if (workAuthorizationAnswerUnknown) return {
-			workable: true,
-			needsVerify: true,
-			reason: `Work authorization for ${territory} is unknown; needs manual verification`,
-			facts: {
-				...baseFacts,
-				location_restriction: territory
-			}
-		};
 		return {
 			workable: false,
 			needsVerify: false,
-			reason: `Geographic restriction detected: ${territory}`,
-			reasonCode: "GATE_LOCATION_RESTRICTED",
+			reason: `Explicit work-authorization restriction detected: ${territory}`,
+			reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
 			facts: {
 				...baseFacts,
 				location_restriction: territory
@@ -1580,11 +1591,18 @@ function findNonNegatedEvidence(d, keywords) {
 	}
 	return quotes;
 }
+function isConsultancyRole(title, description = "") {
+	const t = (title || "").toLowerCase();
+	const d = (description || "").toLowerCase();
+	if (!/\b(consult(?:ant|ancy)|advis(?:er|ory))\b/i.test(t)) return false;
+	const hasArchitectOrEngineerTitle = /\b(engineer(?:ing)?|architect(?:ure)?|developer|scientist|specialist)\b/i.test(t);
+	const hasApprovedTechnicalConsultancyTitle = /\b(?:technical|technology|engineering|software|data|ai|ml|solution|solutions|digital|transformation|cloud|systems?|platform)\s+(?:consult(?:ant|ancy)|advis(?:er|ory))\b/i.test(t) || /\b(?:technical|technology|engineering|software|data|ai|ml|digital|transformation)\b/i.test(t) && /\b(?:program(?:me)?|project|product|delivery|transformation)\b/i.test(t);
+	return !(hasArchitectOrEngineerTitle || hasApprovedTechnicalConsultancyTitle || isTechnicalRole(title, d).hasBuildingEvidence);
+}
 function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) {
 	const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
 	const travelAnswerProvided = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.travelPercentage);
 	const travelAnswerUnknown = travelAnswerProvided && answerContext?.overrides.travelPercentageCap === null;
-	const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.workAuthorization) && answerContext?.overrides.workAuthorizationRegions.length === 0;
 	const t = (job.title || "").toLowerCase();
 	const c = (job.company_name || "").toLowerCase();
 	const d = extractDescriptionText(job);
@@ -1593,17 +1611,18 @@ function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) 
 	(job.employment_type || "").toUpperCase();
 	let pendingVerification = null;
 	for (const pattern of GLOBAL_TITLE_EXCLUSIONS) if (pattern.test(job.title || "")) return makeReject$1(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title exclusion: "${job.title}"`]);
-	if (/\b(?:fde|forward[- ]deployed(?:\s+engineer(?:ing)?)?)\b/i.test(`${t} ${d}`)) {
-		const evidence = findNonNegatedEvidence(d, ["forward deployed", "fde"]);
-		return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], evidence.length > 0 ? evidence : [`FDE role: "${job.title}"`]);
+	const isFdeTitle = /\b(?:fde|forward[- ]deployed(?:\s+(?:software\s+)?(?:engineer(?:ing)?|architect|specialist|lead|manager|director))?)\b/i.test(t);
+	const isFdeRoleIdentity = /\b(?:this\s+role\s+is|hiring\s+for\s+(?:an?|the)\s+role\s+of|looking\s+for\s+an?|seeking\s+an?)\s+(?:forward[- ]deployed\s+(?:software\s+)?engineer|fde)\b/i.test(d);
+	if (isFdeTitle || isFdeRoleIdentity) {
+		const titleMatch = (job.title || "").match(/\b(?:fde|forward[- ]deployed(?:\s+(?:software\s+)?(?:engineer(?:ing)?|architect|specialist|lead|manager|director))?)\b/i);
+		return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], [titleMatch ? `FDE title: "${titleMatch[0]}"` : `FDE role identity detected in description for "${job.title}"`]);
 	}
-	const consultancyTitle = /\b(consult(?:ant|ancy)|advis(?:er|ory))\b/i.test(t);
-	const approvedTechnicalConsultancy = /\b(?:technical|technology|engineering|software|data|ai|ml|digital|transformation)\b/i.test(t) && /\b(?:engineer(?:ing)?|architect(?:ure)?|program(?:me)?|project|product|delivery|transformation)\b/i.test(t);
-	if (consultancyTitle && !approvedTechnicalConsultancy) return makeReject$1(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Generic consultancy/advisory title: "${job.title}"`]);
+	if (isConsultancyRole(job.title || "", d)) return makeReject$1(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Generic consultancy/advisory title: "${job.title}"`]);
 	const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d, job.employment_type || "", effectivePolicy, answerContext);
 	if (!workability.workable) {
 		if (workability.reasonCode === "GATE_CONTRACT_ROLE") return makeReject$1(["GATE_CONTRACT_ROLE"], [workability.reason || "Contract role is not eligible"], workability.facts);
 		if (workability.reasonCode === "GATE_LOCATION_RESTRICTED") return makeReject$1(["GATE_LOCATION_RESTRICTED"], [workability.reason || "Geographic restriction detected"], workability.facts);
+		if (workability.reasonCode === "WORK_AUTHORIZATION_INCOMPATIBLE") return makeReject$1(["WORK_AUTHORIZATION_INCOMPATIBLE"], [workability.reason || "Explicit work-authorization restriction detected"], workability.facts);
 		if (workability.reasonCode === "GATE_UNKNOWN_WORK_MODE") return makeReject$1(["GATE_UNKNOWN_WORK_MODE"], [workability.reason || "Workplace model is unspecified"], workability.facts);
 		return makeReject$1(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], [workability.reason || "Unworkable location/workplace model"], workability.facts);
 	}
@@ -1641,13 +1660,8 @@ function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) 
 	if (/\b(account executive|sales manager|sales director|business development manager|business development executive|bdr|sdr|marketing manager|marketing director|product marketing manager|growth marketing|event coordinator)\b/i.test(t) && !techCheck.isTechnical) return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Sales / Marketing "${job.title}"`]);
 	if (/\b(quality assurance coordinator|qa coordinator|compliance coordinator|operations coordinator|administrative coordinator|logistics coordinator)\b/i.test(t) && !techCheck.isTechnical) return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Non-technical Coordinator "${job.title}"`]);
 	if (/\b(private equity associate|private equity analyst|investment banking analyst|investment banking associate|m&a analyst|m&a associate|deal advisory|commercial banker|loan officer|credit underwriter)\b/i.test(t) && !techCheck.isTechnical) return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical title: Traditional Finance / Banking "${job.title}"`]);
-	for (const kw of [
-		"intern",
-		"internship",
-		"graduate trainee",
-		"apprentice",
-		"apprenticeship"
-	]) if (t.includes(kw)) return makeReject$1(["GATE_EXPERIENCE_TOO_LOW"], [`Title contains: "${kw}"`]);
+	const juniorMatch = (job.title || "").match(/\b(?:intern|internship|graduate\s+trainee|apprentice|apprenticeship)\b/i);
+	if (juniorMatch) return makeReject$1(["GATE_EXPERIENCE_TOO_LOW"], [`Title contains junior role term: "${juniorMatch[0]}"`]);
 	const hardOnsiteKw = [
 		"100% onsite",
 		"100% on-site",
@@ -1708,14 +1722,11 @@ function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) 
 	const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
 	const locationTerritories = extractTerritories(String(job.location || ""));
 	const descriptionTerritories = extractTerritories(d);
-	const disallowedTerritories = effectivePolicy.rejectExplicitForeignTerritory ? [...locationTerritories, ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory))].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory)) : [];
+	const explicitlyRemote = wp === "REMOTE" || /\b(fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|work\s+from\s+home|work\s+remotely)\b/i.test(d);
+	const disallowedTerritories = effectivePolicy.rejectExplicitForeignTerritory ? [...explicitlyRemote ? [] : locationTerritories, ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory))].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory)) : [];
 	if (disallowedTerritories.length > 0) {
 		const territory = disallowedTerritories[0];
-		if (!workAuthorizationAnswerUnknown) return makeReject$1(["GATE_LOCATION_RESTRICTED"], [`Explicit work territory restriction: ${territory}`], { location_restriction: territory });
-		pendingVerification = {
-			reason: `Work authorization for ${territory} is unknown; needs manual verification`,
-			facts: { location_restriction: territory }
-		};
+		return makeReject$1(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit work territory restriction: ${territory}`], { location_restriction: territory });
 	}
 	for (const kw of [
 		"shift work",
@@ -1742,6 +1753,14 @@ function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) 
 		if (!isShiftConflict && !isOnCallConflict && !isTravelConflict) continue;
 		const evidence = findNonNegatedEvidence(d, [kw]);
 		if (evidence.length === 0) continue;
+		let activeEvidence = evidence;
+		if (isOnCallConflict) {
+			activeEvidence = evidence.filter((snippet) => {
+				const lower = snippet.toLowerCase();
+				return !(/\b(?:previously|prior\s+experience|has\s+been|past\s+experience|experience\s+(?:participating|with|in))\s+(?:on[- ]call|an\s+on[- ]call)/i.test(lower) || /\b(?:leadership|experience)\s+(?:through|with|during)\s+production\s+incidents\b/i.test(lower));
+			});
+			if (activeEvidence.length === 0) continue;
+		}
 		const travelPct = kw.includes("50%") ? 50 : kw.includes("25%") ? 25 : null;
 		const hasTravelAnswer = answerContext?.overrides.travelPercentageCap !== null && answerContext?.overrides.travelPercentageCap !== void 0 || isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.travelPercentage);
 		if (hasTravelAnswer && travelPct === null) {
@@ -1752,7 +1771,7 @@ function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) 
 			continue;
 		}
 		if (hasTravelAnswer && travelPct !== null) continue;
-		return makeReject$1(["GATE_LIFESTYLE_INCOMPATIBLE"], evidence, { travel_pct_max: travelPct });
+		return makeReject$1(["GATE_LIFESTYLE_INCOMPATIBLE"], activeEvidence, { travel_pct_max: travelPct });
 	}
 	for (const kw of [
 		"sales engineering",
@@ -1784,8 +1803,10 @@ function applyGlobalGates(job, policy = loadWorkabilityPolicy(), answerContext) 
 	];
 	for (const kw of hardwareStrictTitle) if (t.includes(kw)) return makeReject$1(["GATE_HARDWARE_INFRASTRUCTURE"], [`Title contains: "${kw}"`]);
 	for (const kw of hardwareStrictDesc) if (d.includes(kw)) return makeReject$1(["GATE_HARDWARE_INFRASTRUCTURE"], findEvidence(d, [kw]));
-	const fdeKw = ["forward deployed", "fde "];
-	if (t.includes("fde") || fdeKw.some((k) => t.includes(k) || d.includes(k))) return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], findEvidence(d, fdeKw));
+	if (isFdeTitle || isFdeRoleIdentity) {
+		const titleMatch = (job.title || "").match(/\b(?:fde|forward[- ]deployed(?:\s+(?:software\s+)?(?:engineer(?:ing)?|architect|specialist|lead|manager|director))?)\b/i);
+		return makeReject$1(["GATE_OUT_OF_SCOPE_DOMAIN"], [titleMatch ? `FDE title: "${titleMatch[0]}"` : `FDE role identity detected in description for "${job.title}"`]);
+	}
 	for (const firm of [
 		"accenture",
 		"kpmg",
@@ -2318,7 +2339,7 @@ var QuotedRequirementExtractorResponseSchema = zod.z.object({
 });
 //#endregion
 //#region src/requirements/deterministicExtractors.ts
-var EXTRACTOR_VERSION = "deterministic_v3";
+var EXTRACTOR_VERSION$1 = "deterministic_v3";
 var MIN_QUOTE_LENGTH = 5;
 function isQuoteBoundary(char) {
 	return /[\s<>"'.,;:()[\]{}]/.test(char);
@@ -2451,7 +2472,7 @@ function buildRequirement(input, sequence, type, requirementText, quote, structu
 		quote_end_offset: evidence.quote_end_offset,
 		structured_value: structuredValue,
 		extractor_type: "DETERMINISTIC",
-		extractor_version: EXTRACTOR_VERSION,
+		extractor_version: EXTRACTOR_VERSION$1,
 		confidence
 	});
 }
@@ -3338,6 +3359,386 @@ async function runRequirementsExtraction(clientOrPool, options = {}) {
 	return summary;
 }
 //#endregion
+//#region src/services/workModeEnrichment.ts
+var EXTRACTOR_VERSION = "work_mode_enrichment_v1";
+var FETCH_TIMEOUT_MS = 15e3;
+function isSingaporeUnknownWorkModeEligible(location, description) {
+	const loc = String(location || "").toLowerCase();
+	const desc = String(description || "").toLowerCase();
+	const isSingapore = /\b(?:singapore|sg)\b/i.test(loc) || /\b(?:based\s+in\s+singapore|location\s*:\s*singapore|office\s+in\s+singapore)\b/i.test(desc);
+	const explicitOnsite = /\b(?:100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(desc) || /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i.test(desc);
+	return isSingapore && !explicitOnsite;
+}
+function makeSingaporeAssumedHybridResult(fingerprint) {
+	return {
+		workplace_type: "ASSUMED_HYBRID",
+		office_days_min: 3,
+		office_days_max: 3,
+		attendance_basis: "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE",
+		territory_restriction: null,
+		work_auth_restriction: null,
+		evidence_quote: null,
+		source_type: "CACHED",
+		status: "ENRICHED",
+		fingerprint
+	};
+}
+function generateEnrichmentFingerprint(canonicalUrl, jobVersionId, extractorVersion = EXTRACTOR_VERSION) {
+	const normalized = (canonicalUrl || "").trim().toLowerCase();
+	return node_crypto.default.createHash("sha256").update(`${jobVersionId}:${normalized}:${extractorVersion}`).digest("hex");
+}
+function safeHttpUrl(value) {
+	if (!value) return null;
+	try {
+		const url = new URL(value.trim());
+		if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+		const hostname = url.hostname.toLowerCase();
+		if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".internal") || hostname === "127.0.0.1" || hostname === "::1" || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)) return null;
+		return url;
+	} catch {
+		return null;
+	}
+}
+function isAuthenticatedSource(url) {
+	return url.hostname === "linkedin.com" || url.hostname.endsWith(".linkedin.com");
+}
+function extractWorkModeFromText(text) {
+	const d = (text || "").toLowerCase();
+	const officeDaysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i) || d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
+	if (/\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d) || /(?:^|[|·•:,])\s*(?:on-?site|onsite)\b/i.test(d) || /\b(?:workplace|work\s+model|workplace\s+type|work\s+type)\s*:\s*(?:on-?site|onsite)\b/i.test(d) || officeDaysMatch !== null && Number(officeDaysMatch[1]) >= 4) {
+		const days = officeDaysMatch ? Number(officeDaysMatch[1]) : 5;
+		return {
+			workplace_type: "ONSITE",
+			office_days_min: days,
+			office_days_max: days,
+			attendance_basis: "EMPLOYER_STATED",
+			evidence_quote: officeDaysMatch?.[0] || "On-site requirement detected"
+		};
+	}
+	if (/\bhybrid\b/i.test(d)) {
+		const attendance = extractHybridAttendance(d);
+		return {
+			workplace_type: "HYBRID",
+			office_days_min: attendance?.office_days_min ?? 3,
+			office_days_max: attendance?.office_days_max ?? 3,
+			attendance_basis: attendance?.basis ?? "POLICY_HYBRID_3_2",
+			evidence_quote: attendance?.evidence?.[0] || "Hybrid model specified"
+		};
+	}
+	const remoteMatch = d.match(/\b(fully\s+remote|100%\s+remote|remote[- ]first|work\s+from\s+home|work\s+remotely|telecommute)\b/i) || d.match(/(?:^|[|·•:,])\s*remote\b/i) || d.match(/\b(?:workplace|work\s+model|workplace\s+type|work\s+type|location)\s*:\s*remote\b/i);
+	if (remoteMatch) return {
+		workplace_type: "REMOTE",
+		office_days_min: 0,
+		office_days_max: 0,
+		attendance_basis: "REMOTE",
+		evidence_quote: remoteMatch[0].trim()
+	};
+	return {
+		workplace_type: "UNKNOWN",
+		office_days_min: null,
+		office_days_max: null,
+		attendance_basis: "UNKNOWN",
+		evidence_quote: null
+	};
+}
+function parseJsonLdWorkMode(html) {
+	const scripts = html.match(/<script\b[^>]+type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script\b[^>]*>/gi) || [];
+	for (const script of scripts) {
+		const body = script.replace(/^<script\b[^>]*>/i, "").replace(/<\/script\b[^>]*>$/i, "").trim();
+		try {
+			const parsed = JSON.parse(body);
+			const values = Array.isArray(parsed) ? parsed : [parsed];
+			for (const item of values) {
+				if (!item || typeof item !== "object") continue;
+				const record = item;
+				const rawLoc = record.jobLocationType ?? record.workplaceType ?? record.workLocationType;
+				const locationType = Array.isArray(rawLoc) ? rawLoc.map(String).join(" ").toUpperCase() : String(rawLoc || "").toUpperCase();
+				if (locationType.includes("TELECOMMUTE") || locationType.includes("REMOTE")) return {
+					workplace_type: "REMOTE",
+					territory_restriction: record.applicantLocationRequirements ? JSON.stringify(record.applicantLocationRequirements) : null,
+					evidence_quote: `JSON-LD jobLocationType: ${locationType}`
+				};
+				if (locationType.includes("HYBRID")) return {
+					workplace_type: "HYBRID",
+					territory_restriction: null,
+					evidence_quote: `JSON-LD workplaceType: ${locationType}`
+				};
+				if (locationType.includes("ONSITE") || locationType.includes("ON-SITE") || locationType.includes("ON_SITE")) return {
+					workplace_type: "ONSITE",
+					territory_restriction: null,
+					evidence_quote: `JSON-LD workplaceType: ${locationType}`
+				};
+			}
+		} catch {}
+	}
+	return null;
+}
+async function fetchCanonicalWorkMode(sourceUrl) {
+	const url = safeHttpUrl(sourceUrl);
+	if (!url) return {
+		workplace_type: "UNKNOWN",
+		office_days_min: null,
+		office_days_max: null,
+		attendance_basis: "UNKNOWN",
+		territory_restriction: null,
+		work_auth_restriction: null,
+		evidence_quote: null,
+		status: "SKIPPED"
+	};
+	if (isAuthenticatedSource(url)) return {
+		workplace_type: "UNKNOWN",
+		office_days_min: null,
+		office_days_max: null,
+		attendance_basis: "UNKNOWN",
+		territory_restriction: null,
+		work_auth_restriction: null,
+		evidence_quote: null,
+		status: "SKIPPED"
+	};
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+	try {
+		const response = await fetch(url, {
+			signal: controller.signal,
+			redirect: "follow",
+			headers: {
+				Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.1",
+				"User-Agent": "JobDecisionEngine/2.2 (work-mode-enricher)"
+			}
+		});
+		if (!response.ok) return {
+			workplace_type: "UNKNOWN",
+			office_days_min: null,
+			office_days_max: null,
+			attendance_basis: "UNKNOWN",
+			territory_restriction: null,
+			work_auth_restriction: null,
+			evidence_quote: `HTTP ${response.status}`,
+			status: "FAILED"
+		};
+		const html = await response.text();
+		const jsonLd = parseJsonLdWorkMode(html);
+		if (jsonLd && jsonLd.workplace_type !== "UNKNOWN") return {
+			workplace_type: jsonLd.workplace_type,
+			office_days_min: 0,
+			office_days_max: 0,
+			attendance_basis: "REMOTE",
+			territory_restriction: jsonLd.territory_restriction,
+			work_auth_restriction: null,
+			evidence_quote: jsonLd.evidence_quote,
+			status: "ENRICHED"
+		};
+		const textExtraction = extractWorkModeFromText(stripHtmlToText(html));
+		if (textExtraction.workplace_type !== "UNKNOWN") return {
+			...textExtraction,
+			territory_restriction: null,
+			work_auth_restriction: null,
+			status: "ENRICHED"
+		};
+		return {
+			workplace_type: "UNKNOWN",
+			office_days_min: null,
+			office_days_max: null,
+			attendance_basis: "UNKNOWN",
+			territory_restriction: null,
+			work_auth_restriction: null,
+			evidence_quote: null,
+			status: "GENUINELY_UNKNOWN"
+		};
+	} catch {
+		return {
+			workplace_type: "UNKNOWN",
+			office_days_min: null,
+			office_days_max: null,
+			attendance_basis: "UNKNOWN",
+			territory_restriction: null,
+			work_auth_restriction: null,
+			evidence_quote: "Fetch timeout or network error",
+			status: "FAILED"
+		};
+	} finally {
+		clearTimeout(timer);
+	}
+}
+async function enrichWorkModeIfNeeded(clientOrPool, context, job) {
+	String(job.workplace_type || "").trim().toUpperCase();
+	const fingerprint = generateEnrichmentFingerprint(job.canonical_url ?? null, job.job_version_id);
+	try {
+		const { rows: cached } = await clientOrPool.query(`SELECT workplace_type, office_days_min, office_days_max, attendance_basis,
+              territory_restriction, work_auth_restriction, evidence_quote, source_type, status
+       FROM work_mode_enrichments
+       WHERE workspace_id = $1 AND fingerprint = $2
+       LIMIT 1`, [context.workspaceId, fingerprint]);
+		if (cached.length > 0) {
+			if (cached[0].workplace_type === "UNKNOWN" && isSingaporeUnknownWorkModeEligible(job.location, job.description_text)) {
+				const assumed = makeSingaporeAssumedHybridResult(fingerprint);
+				await clientOrPool.query(`UPDATE work_mode_enrichments
+           SET workplace_type = $1,
+               office_days_min = $2,
+               office_days_max = $3,
+               attendance_basis = $4,
+               status = $5,
+               evidence_quote = NULL,
+               attempted_at = NOW()
+           WHERE workspace_id = $6 AND fingerprint = $7`, [
+					assumed.workplace_type,
+					assumed.office_days_min,
+					assumed.office_days_max,
+					assumed.attendance_basis,
+					assumed.status,
+					context.workspaceId,
+					fingerprint
+				]);
+				return assumed;
+			}
+			return {
+				...cached[0],
+				source_type: "CACHED",
+				fingerprint
+			};
+		}
+	} catch (error) {
+		console.error("Enrichment cache lookup failed at line 333:", error?.message || error, "code:", error?.code);
+		if (error?.code !== "42P01") throw error;
+	}
+	if (job.description_text) {
+		const fromDesc = extractWorkModeFromText(job.description_text);
+		if (fromDesc.workplace_type !== "UNKNOWN") {
+			const result = {
+				...fromDesc,
+				territory_restriction: null,
+				work_auth_restriction: null,
+				source_type: "STORED_DESCRIPTION",
+				status: "ENRICHED",
+				fingerprint
+			};
+			await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => void 0);
+			return result;
+		}
+	}
+	try {
+		const { rows: observations } = await clientOrPool.query(`SELECT workplace_type_raw, location_raw, raw_payload
+       FROM raw_job_observations
+       WHERE workspace_id = $1 AND job_version_id = $2
+       ORDER BY retrieved_at DESC
+       LIMIT 3`, [context.workspaceId, job.job_version_id]);
+		for (const obs of observations) {
+			const rawWp = String(obs.workplace_type_raw || "").trim().toUpperCase();
+			if ([
+				"REMOTE",
+				"HYBRID",
+				"ONSITE"
+			].includes(rawWp)) {
+				const result = {
+					workplace_type: rawWp,
+					office_days_min: rawWp === "REMOTE" ? 0 : rawWp === "HYBRID" ? 3 : 5,
+					office_days_max: rawWp === "REMOTE" ? 0 : rawWp === "HYBRID" ? 3 : 5,
+					attendance_basis: rawWp === "REMOTE" ? "REMOTE" : rawWp === "HYBRID" ? "POLICY_HYBRID_3_2" : "EMPLOYER_STATED",
+					territory_restriction: null,
+					work_auth_restriction: null,
+					evidence_quote: `Observation workplace_type_raw: ${obs.workplace_type_raw}`,
+					source_type: "STRUCTURED_METADATA",
+					status: "ENRICHED",
+					fingerprint
+				};
+				await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => void 0);
+				return result;
+			}
+			if (obs.raw_payload && typeof obs.raw_payload === "object") {
+				const p = obs.raw_payload;
+				const payloadWp = String(p.workplaceType || p.workplace_type || p.workMode || p.work_mode || "").trim().toUpperCase();
+				if ([
+					"REMOTE",
+					"HYBRID",
+					"ONSITE"
+				].includes(payloadWp)) {
+					const result = {
+						workplace_type: payloadWp,
+						office_days_min: payloadWp === "REMOTE" ? 0 : payloadWp === "HYBRID" ? 3 : 5,
+						office_days_max: payloadWp === "REMOTE" ? 0 : payloadWp === "HYBRID" ? 3 : 5,
+						attendance_basis: payloadWp === "REMOTE" ? "REMOTE" : payloadWp === "HYBRID" ? "POLICY_HYBRID_3_2" : "EMPLOYER_STATED",
+						territory_restriction: null,
+						work_auth_restriction: null,
+						evidence_quote: `Payload workplaceType: ${payloadWp}`,
+						source_type: "STRUCTURED_METADATA",
+						status: "ENRICHED",
+						fingerprint
+					};
+					await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => void 0);
+					return result;
+				}
+			}
+		}
+	} catch (err) {
+		if (err?.code !== "42P01") throw err;
+	}
+	if (job.canonical_url) {
+		const fetched = await fetchCanonicalWorkMode(job.canonical_url);
+		if (fetched.workplace_type !== "UNKNOWN") {
+			const result = {
+				...fetched,
+				source_type: "CANONICAL_PAGE",
+				fingerprint
+			};
+			await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => void 0);
+			return result;
+		}
+	}
+	if (isSingaporeUnknownWorkModeEligible(job.location, job.description_text)) {
+		const sgResult = {
+			...makeSingaporeAssumedHybridResult(fingerprint),
+			source_type: "STORED_DESCRIPTION"
+		};
+		await persistEnrichmentResult(clientOrPool, context, job, sgResult).catch(() => void 0);
+		return sgResult;
+	}
+	const fallbackResult = {
+		workplace_type: "UNKNOWN",
+		office_days_min: null,
+		office_days_max: null,
+		attendance_basis: "UNKNOWN",
+		territory_restriction: null,
+		work_auth_restriction: null,
+		evidence_quote: null,
+		source_type: "CANONICAL_PAGE",
+		status: "GENUINELY_UNKNOWN",
+		fingerprint
+	};
+	await persistEnrichmentResult(clientOrPool, context, job, fallbackResult).catch(() => void 0);
+	return fallbackResult;
+}
+async function persistEnrichmentResult(clientOrPool, context, job, result) {
+	try {
+		await clientOrPool.query(`INSERT INTO work_mode_enrichments (
+         workspace_id, canonical_job_id, job_version_id, fingerprint,
+         source_url, source_type, status, workplace_type,
+         office_days_min, office_days_max, attendance_basis,
+         territory_restriction, work_auth_restriction, evidence_quote,
+         extractor_version, attempted_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+       ON CONFLICT (workspace_id, fingerprint) DO NOTHING`, [
+			context.workspaceId,
+			job.canonical_job_id,
+			job.job_version_id,
+			result.fingerprint,
+			job.canonical_url || null,
+			result.source_type,
+			result.status,
+			result.workplace_type,
+			result.office_days_min,
+			result.office_days_max,
+			result.attendance_basis,
+			result.territory_restriction,
+			result.work_auth_restriction,
+			result.evidence_quote,
+			EXTRACTOR_VERSION
+		]);
+	} catch (error) {
+		console.error("persistEnrichmentResult failed:", error?.message || error);
+		if (error?.code !== "42P01") throw error;
+	}
+}
+//#endregion
 //#region src/contracts/sourcePlugin.ts
 var SourceKeySchema = zod.z.string().regex(/^[a-z][a-z0-9_]{2,63}$/);
 var SourcePluginKindSchema = zod.z.enum([
@@ -3575,6 +3976,8 @@ zod.z.object({
 		"ROUTING_DEFERRED",
 		"LANE_ROUTED",
 		"MATCHED",
+		"UNMATCHED",
+		"PROCESSING_ERROR",
 		"SEMANTIC_SHORTLISTED",
 		"QUEUED_FOR_AI",
 		"DEFERRED_BUDGET",
@@ -3594,6 +3997,8 @@ zod.z.object({
 		"ROUTING_DEFERRED",
 		"LANE_ROUTED",
 		"MATCHED",
+		"UNMATCHED",
+		"PROCESSING_ERROR",
 		"SEMANTIC_SHORTLISTED",
 		"QUEUED_FOR_AI",
 		"DEFERRED_BUDGET",
@@ -3708,6 +4113,56 @@ var PersistedEvaluationQueueItemSchema = zod.z.object({
 	enqueued_at: zod.z.string().datetime(),
 	updated_at: zod.z.string().datetime()
 }).extend({ schema_version: SchemaVersionSchema });
+/** New V5 scores default to null so missing evidence never becomes a fabricated zero. */
+var EvaluationScoreSchema = zod.z.number().int().min(0).max(100).nullable().default(null);
+var LegacyEvaluationScoreSchema = zod.z.number().int().min(0).max(100).nullable();
+var LegacyFiniteMeasurementSchema = zod.z.number().finite().min(0).max(100).nullable();
+var PolicyConflictEvidenceSchema = zod.z.object({
+	policy: zod.z.enum([
+		"RESIDENCY",
+		"WORK_AUTHORIZATION",
+		"ONSITE",
+		"TRAVEL",
+		"ON_CALL"
+	]),
+	candidate_constraint: zod.z.string().min(1),
+	role_requirement: zod.z.string().min(1),
+	evidence: zod.z.string().min(1)
+});
+var CultureEvidenceSchema = zod.z.object({
+	signal: zod.z.enum([
+		"AUTONOMY",
+		"POLITICS_RISK",
+		"SENSORY_WORKLOAD_RISK",
+		"FOCUS_PROTECTION"
+	]),
+	score: zod.z.union([zod.z.number().int().min(0).max(100), zod.z.literal("UNKNOWN")]).nullable().default(null),
+	quote: zod.z.string().nullable().default(null),
+	score_derivation_version: zod.z.string().min(1).optional()
+}).superRefine((evidence, context) => {
+	const isUnmeasured = evidence.score === null || evidence.score === "UNKNOWN";
+	if (isUnmeasured && evidence.quote !== null) context.addIssue({
+		code: zod.z.ZodIssueCode.custom,
+		path: ["quote"],
+		message: "Unavailable culture measurements must not include a quote."
+	});
+	if (!isUnmeasured && (!evidence.quote || evidence.quote.trim().length === 0)) context.addIssue({
+		code: zod.z.ZodIssueCode.custom,
+		path: ["quote"],
+		message: "Measured culture signals require a job-description quote."
+	});
+});
+var CultureEvidenceArraySchema = zod.z.array(CultureEvidenceSchema).max(4).superRefine((evidence, context) => {
+	const seenSignals = /* @__PURE__ */ new Set();
+	for (const [index, item] of evidence.entries()) {
+		if (seenSignals.has(item.signal)) context.addIssue({
+			code: zod.z.ZodIssueCode.custom,
+			path: [index, "signal"],
+			message: `Culture evidence signal ${item.signal} may appear only once.`
+		});
+		seenSignals.add(item.signal);
+	}
+});
 zod.z.object({
 	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
 	canonical_job_id: zod.z.string().uuid(),
@@ -3732,12 +4187,32 @@ zod.z.object({
 		"Low"
 	]),
 	lane_evidence: zod.z.string().default(""),
-	nd_score: zod.z.number().int().min(0).max(100),
-	nd_friendly_score: zod.z.number().int().min(0).max(100),
-	politics_stress_score: zod.z.number().int().min(0).max(100),
-	sensory_overload_index: zod.z.number().int().min(0).max(100),
-	building_research_ratio: zod.z.number().int().min(0).max(100),
-	interaction_load: zod.z.number().int().min(0).max(100),
+	nd_score: LegacyEvaluationScoreSchema,
+	nd_friendly_score: LegacyEvaluationScoreSchema,
+	politics_stress_score: LegacyEvaluationScoreSchema,
+	sensory_overload_index: LegacyEvaluationScoreSchema,
+	focus_protection_score: EvaluationScoreSchema,
+	building_research_ratio: LegacyFiniteMeasurementSchema,
+	interaction_load: LegacyFiniteMeasurementSchema,
+	strategic_value_score: EvaluationScoreSchema,
+	career_trajectory: zod.z.enum([
+		"ADVANCING",
+		"LATERAL",
+		"DETOUR",
+		"UNKNOWN"
+	]).default("UNKNOWN"),
+	technical_depth_score: EvaluationScoreSchema,
+	role_ownership_score: EvaluationScoreSchema,
+	ambiguity_burden: EvaluationScoreSchema,
+	meeting_burden: EvaluationScoreSchema,
+	travel_burden: EvaluationScoreSchema,
+	on_call_burden: EvaluationScoreSchema,
+	strengths: zod.z.array(zod.z.string()).default([]),
+	gaps: zod.z.array(zod.z.string()).default([]),
+	risk_flags: zod.z.array(zod.z.string()).default([]),
+	policy_conflicts: zod.z.array(PolicyConflictEvidenceSchema).default([]),
+	culture_score_derivation_version: zod.z.string().min(1).nullable().default(null),
+	culture_evidence: CultureEvidenceArraySchema.default([]),
 	rejection_codes: zod.z.array(zod.z.string()).default([]),
 	strategic_value: zod.z.string().default(""),
 	recommended_cv_version: zod.z.string().default("None"),
@@ -3750,11 +4225,14 @@ zod.z.object({
 	evaluated_at: zod.z.string().datetime()
 });
 var ApplicationStatusSchema = zod.z.enum([
+	"TO_APPLY",
 	"INTENT",
 	"READY_TO_APPLY",
+	"APPLIED",
 	"SUBMITTED",
 	"FOLLOW_UP",
 	"INTERVIEW",
+	"ASSESSMENT",
 	"OFFER",
 	"REJECTED",
 	"WITHDRAWN",
@@ -3879,7 +4357,19 @@ zod.z.object({
 	document_ready: zod.z.boolean().default(false),
 	current_artifact_status: zod.z.string().default("CURRENTNESS_UNKNOWN"),
 	current_artifact_reason: zod.z.string().nullable().default(null),
-	blocked_task_count: zod.z.number().int().min(0).default(0)
+	blocked_task_count: zod.z.number().int().min(0).default(0),
+	requires_user_action: zod.z.boolean().default(false),
+	user_action_type: zod.z.string().nullable().default(null),
+	user_action_category: zod.z.string().nullable().default(null),
+	user_action_status: zod.z.string().nullable().default(null),
+	technical_error_count: zod.z.number().int().min(0).default(0),
+	pipeline_display_category: zod.z.enum([
+		"USER_ACTION_REQUIRED",
+		"PROCESSING_AUTOMATICALLY",
+		"TECHNICAL_ERROR",
+		"REJECTED_UNMATCHED",
+		"COMPLETED"
+	]).default("PROCESSING_AUTOMATICALLY")
 });
 //#endregion
 //#region src/pipeline/requirementComparators.ts
@@ -4333,7 +4823,58 @@ function explicitAuthorizationText(fact) {
 	const structuredAuthorization = Object.entries(structured).filter(([key]) => /auth|eligib|jurisdiction|country|visa|citizen|right/i.test(key)).map(([, value]) => String(value)).join(" ");
 	return `${fact.statement} ${structuredAuthorization}`.toLowerCase();
 }
-function compareStructuredRequirement(requirement, facts) {
+function verificationDegreeSubject(value) {
+	const text = value.toLowerCase().replace(/[_-]+/g, " ");
+	if (/\b(computer\s+science|computing|informatics|software\s+engineering)\b/i.test(text)) return "computer_science";
+	if (/\b(data\s+science|analytics?|statistics?)\b/i.test(text)) return "data_science";
+	if (/\b(mathematics?|mathematical|quantitative)\b/i.test(text)) return "mathematics";
+	if (/\b(electrical|systems?)\s+engineering\b|\bengineering\b/i.test(text) && !/software\s+engineering/i.test(text)) return "engineering";
+	if (/\bphysics?|computational\s+science\b/i.test(text)) return "physics";
+	if (/\b(biology|biological|biomedical|biochemistry)\b/i.test(text)) return "biology";
+	if (/\b(finance|financial|economics?)\b/i.test(text)) return "finance";
+	if (/\b(business|management)\b/i.test(text)) return "business";
+	if (/\b(law|legal\s+studies|jurisprudence)\b/i.test(text)) return "law";
+	return null;
+}
+function degreeRequirementSubject(requirement) {
+	return verificationDegreeSubject([
+		requirement.requirement_text,
+		requirement.quote_text || "",
+		JSON.stringify(requirement.structured_value || {})
+	].join(" "));
+}
+function removeDegreeSubject(requirement) {
+	const structured = Object.fromEntries(Object.entries(requirement.structured_value || {}).filter(([key]) => !/(subject|major|discipline|field)/i.test(key)));
+	const level = (requirement.requirement_text || requirement.quote_text || "").match(/\b(phd|doctorate|doctoral|master'?s?|msc|ma|mba|bachelor'?s?|undergraduate|bsc|ba)\b/i)?.[0];
+	return {
+		...requirement,
+		requirement_text: level ? `${level} degree` : requirement.requirement_text,
+		quote_text: level ? `${level} degree` : requirement.quote_text,
+		structured_value: structured
+	};
+}
+function expandExperienceScope(requirement, domains) {
+	const structured = { ...requirement.structured_value || {} };
+	const existing = structured.experience_scope ?? structured.experience_scopes ?? structured.scope ?? structured.domain;
+	structured.experience_scope = [...Array.isArray(existing) ? existing : existing ? [existing] : [], ...domains];
+	return {
+		...requirement,
+		structured_value: structured
+	};
+}
+function compareStructuredRequirement(requirement, facts, answerContext) {
+	if (answerContext) {
+		if (requirement.requirement_type === "DEGREE" && answerContext.overrides?.degreeSubjects?.length > 0) {
+			const subject = degreeRequirementSubject(requirement);
+			if (subject && !answerContext.overrides.degreeSubjects.includes(subject)) return {
+				status: "MISMATCH",
+				rationale: `Verification answer does not accept the required ${subject.replace(/_/g, " ")} degree subject.`,
+				fact: null,
+				qualificationCode: "MATCH_QUALIFICATION_DEGREE_GAP"
+			};
+			else if (subject) requirement = removeDegreeSubject(requirement);
+		} else if (requirement.requirement_type === "EXPERIENCE_YEARS" && answerContext.overrides?.experienceDomains?.length > 0) requirement = expandExperienceScope(requirement, answerContext.overrides.experienceDomains);
+	}
 	const requirementText = textForRequirement(requirement);
 	if (requirement.requirement_type === "EXPERIENCE_YEARS") {
 		const required = requiredYears(requirement);
@@ -4382,14 +4923,22 @@ function compareStructuredRequirement(requirement, facts) {
 			fact: null
 		};
 		const scopeSuffix = requiredScope ? ` for ${requiredScope}` : "";
+		const coverage = required > 0 ? Number(Math.min(1, Math.max(0, totalYears / required)).toFixed(3)) : 1;
 		return totalYears >= required ? {
 			status: "MATCH",
-			rationale: `Combined profile experience ${totalYears.toFixed(1)} years meets the ${required}-year requirement${scopeSuffix}.`,
-			fact: representative.fact
+			rationale: `Combined profile experience ${totalYears.toFixed(1)} years meets the ${required}-year requirement${scopeSuffix} (coverage: 1.000).`,
+			fact: representative.fact,
+			coverage: 1,
+			requiredYears: required,
+			evidencedYears: Number(totalYears.toFixed(1))
 		} : {
 			status: "MISMATCH",
-			rationale: `Combined profile experience ${totalYears.toFixed(1)} years is below the ${required}-year requirement${scopeSuffix}.`,
-			fact: representative.fact
+			rationale: `Combined profile experience ${totalYears.toFixed(1)} years is below the ${required}-year requirement${scopeSuffix} (coverage: ${coverage.toFixed(3)}).`,
+			fact: representative.fact,
+			coverage,
+			requiredYears: required,
+			evidencedYears: Number(totalYears.toFixed(1)),
+			qualificationCode: "MATCH_QUALIFICATION_EXPERIENCE_GAP"
 		};
 	}
 	if (requirement.requirement_type === "DEGREE") {
@@ -4423,7 +4972,8 @@ function compareStructuredRequirement(requirement, facts) {
 		return degreeEvidence ? {
 			status: "MISMATCH",
 			rationale: requiredSubject ? `Profile degree evidence does not meet the required ${requiredSubject} degree level/subject.` : "Profile degree evidence does not meet the required degree level.",
-			fact: degreeEvidence
+			fact: degreeEvidence,
+			qualificationCode: "MATCH_QUALIFICATION_DEGREE_GAP"
 		} : {
 			status: "UNKNOWN",
 			rationale: "No profile degree evidence is available.",
@@ -4441,7 +4991,8 @@ function compareStructuredRequirement(requirement, facts) {
 		if (explicitAbsence) return {
 			status: "MISMATCH",
 			rationale: "Profile evidence explicitly confirms that the required credential is not held.",
-			fact: explicitAbsence
+			fact: explicitAbsence,
+			qualificationCode: "MATCH_QUALIFICATION_MANDATORY_CERT_MISSING"
 		};
 		const matching = facts.find((fact) => factCredentialIdentifiers(fact).some((value) => value.includes(specificCredential)));
 		if (matching) return {
@@ -4453,7 +5004,8 @@ function compareStructuredRequirement(requirement, facts) {
 		return credentialEvidence ? {
 			status: "MISMATCH",
 			rationale: "Profile credential evidence does not match the required credential.",
-			fact: credentialEvidence
+			fact: credentialEvidence,
+			qualificationCode: "MATCH_QUALIFICATION_MANDATORY_CERT_MISSING"
 		} : {
 			status: "UNKNOWN",
 			rationale: "No profile credential evidence is available.",
@@ -4597,7 +5149,6 @@ function applyPersistedRequirementGates(job, deterministicRequirements, policy =
 	const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
 	const officeDaysAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.workplaceOfficeDays) && answerContext?.overrides.workplaceOfficeDaysCap === null;
 	const travelAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.travelPercentage) && answerContext?.overrides.travelPercentageCap === null;
-	const workAuthorizationAnswerUnknown = isVerificationAnswerProvided(answerContext, VERIFICATION_ANSWER_KEYS.workAuthorization) && answerContext?.overrides.workAuthorizationRegions.length === 0;
 	const title = job.title || "";
 	let pendingVerification = null;
 	let inferredWorkabilityFacts = {};
@@ -4710,14 +5261,10 @@ function applyPersistedRequirementGates(job, deterministicRequirements, policy =
 	if (shiftReq && !effectivePolicy.shiftWorkAllowed) return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(shiftReq)]);
 	const workAuthReq = deterministicRequirements.find((r) => r.requirement_type === "WORK_AUTH");
 	if (workAuthReq) {
-		const requiredTerritories = extractTerritories(quoteOrText(workAuthReq).toLowerCase());
+		const authText = quoteOrText(workAuthReq);
 		const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
-		const foreignRequired = requiredTerritories.filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory));
-		if (effectivePolicy.rejectExplicitForeignTerritory && foreignRequired.length > 0 && !workAuthorizationAnswerUnknown) return makeReject(["GATE_LOCATION_RESTRICTED"], [quoteOrText(workAuthReq)], { location_restriction: foreignRequired[0] });
-		if ((requiredTerritories.length === 0 || workAuthorizationAnswerUnknown && foreignRequired.length > 0) && effectivePolicy.unknownWorkAuthorizationNeedsVerification) pendingVerification = {
-			codes: ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_WORK_AUTH"],
-			evidence: [quoteOrText(workAuthReq)]
-		};
+		const incompatibleTerritory = extractTerritories(authText).filter((territory) => hasExplicitTerritoryRestriction(authText, territory)).find((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory));
+		if (effectivePolicy.rejectExplicitForeignTerritory && incompatibleTerritory) return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [authText], { location_restriction: incompatibleTerritory });
 	}
 	if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {
 		const attendance = extractHybridAttendance(quoteOrText(workModeReq));
@@ -4785,90 +5332,31 @@ function combineGateResults(results) {
 		workability_facts: workabilityFacts
 	};
 }
-function verificationDegreeSubject(value) {
-	const text = value.toLowerCase().replace(/[_-]+/g, " ");
-	if (/\b(computer\s+science|computing|informatics|software\s+engineering)\b/i.test(text)) return "computer_science";
-	if (/\b(data\s+science|analytics?|statistics?)\b/i.test(text)) return "data_science";
-	if (/\b(mathematics?|mathematical|quantitative)\b/i.test(text)) return "mathematics";
-	if (/\b(electrical|systems?)\s+engineering\b|\bengineering\b/i.test(text) && !/software\s+engineering/i.test(text)) return "engineering";
-	if (/\bphysics?|computational\s+science\b/i.test(text)) return "physics";
-	if (/\b(biology|biological|biomedical|biochemistry)\b/i.test(text)) return "biology";
-	if (/\b(finance|financial|economics?)\b/i.test(text)) return "finance";
-	if (/\b(business|management)\b/i.test(text)) return "business";
-	if (/\b(law|legal\s+studies|jurisprudence)\b/i.test(text)) return "law";
-	return null;
-}
-function degreeRequirementSubject(requirement) {
-	return verificationDegreeSubject([
-		requirement.requirement_text,
-		requirement.quote_text || "",
-		JSON.stringify(requirement.structured_value || {})
-	].join(" "));
-}
-function removeDegreeSubject(requirement) {
-	const structured = Object.fromEntries(Object.entries(requirement.structured_value || {}).filter(([key]) => !/(subject|major|discipline|field)/i.test(key)));
-	const level = (requirement.requirement_text || requirement.quote_text || "").match(/\b(phd|doctorate|doctoral|master'?s?|msc|ma|mba|bachelor'?s?|undergraduate|bsc|ba)\b/i)?.[0];
-	return {
-		...requirement,
-		requirement_text: level ? `${level} degree` : requirement.requirement_text,
-		quote_text: level ? `${level} degree` : requirement.quote_text,
-		structured_value: structured
-	};
-}
-function expandExperienceScope(requirement, domains) {
-	const structured = { ...requirement.structured_value || {} };
-	const existing = structured.experience_scope ?? structured.experience_scopes ?? structured.scope ?? structured.domain;
-	structured.experience_scope = [...Array.isArray(existing) ? existing : existing ? [existing] : [], ...domains];
-	return {
-		...requirement,
-		structured_value: structured
-	};
-}
 function applyExactProfileGates(deterministicRequirements, profileFacts, answerContext) {
-	const exactRequirements = deterministicRequirements.filter((requirement) => [
-		"EXPERIENCE_YEARS",
-		"CREDENTIAL",
-		"DEGREE",
-		"WORK_AUTH"
-	].includes(requirement.requirement_type));
+	const exactRequirements = deterministicRequirements.filter((requirement) => ["WORK_AUTH"].includes(requirement.requirement_type));
 	if (exactRequirements.length === 0) return makePass();
 	const mismatches = [];
 	const mismatchEvidence = [];
-	const unknowns = [];
-	const unknownEvidence = [];
 	for (const requirement of exactRequirements) {
 		if (isRequirementOptional(requirement)) continue;
-		let comparison = compareStructuredRequirement(requirement, profileFacts);
+		let comparison = compareStructuredRequirement(requirement, profileFacts, answerContext);
 		if (comparison.status === "UNKNOWN" && answerContext) {
-			if (requirement.requirement_type === "DEGREE" && answerContext.overrides.degreeSubjects.length > 0) {
-				const subject = degreeRequirementSubject(requirement);
-				if (subject && !answerContext.overrides.degreeSubjects.includes(subject)) comparison = {
-					status: "MISMATCH",
-					rationale: `Verification answer does not accept the required ${subject.replace(/_/g, " ")} degree subject.`,
-					fact: null
-				};
-				else if (subject) comparison = compareStructuredRequirement(removeDegreeSubject(requirement), profileFacts);
-			} else if (requirement.requirement_type === "EXPERIENCE_YEARS" && answerContext.overrides.experienceDomains.length > 0) comparison = compareStructuredRequirement(expandExperienceScope(requirement, answerContext.overrides.experienceDomains), profileFacts);
-			else if (requirement.requirement_type === "WORK_AUTH" && answerContext.overrides.workAuthorizationRegions.length > 0) {
+			if (requirement.requirement_type === "WORK_AUTH" && answerContext.overrides.workAuthorizationRegions.length > 0) {
 				const answerFact = {
 					id: `verification-answer:${answerContext.answerRevisionId || "unversioned"}`,
 					statement: `Verification answer explicitly authorizes work in ${answerContext.overrides.workAuthorizationRegions.join(", ")}.`,
 					structured_value: { authorized_regions: answerContext.overrides.workAuthorizationRegions },
 					source_type: "PROFILE_FACT"
 				};
-				comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact]);
+				comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact], answerContext);
 			}
 		}
 		if (comparison.status === "MISMATCH") {
-			mismatches.push(`GATE_${requirement.requirement_type}_MISMATCH`);
+			mismatches.push("WORK_AUTHORIZATION_INCOMPATIBLE");
 			mismatchEvidence.push(comparison.rationale);
-		} else if (comparison.status === "UNKNOWN") {
-			unknowns.push(`NEEDS_VERIFICATION_${requirement.requirement_type}`);
-			unknownEvidence.push(comparison.rationale);
 		}
 	}
 	if (mismatches.length > 0) return makeReject(mismatches, mismatchEvidence);
-	if (unknowns.length > 0) return makeVerification(unknowns, unknownEvidence);
 	return makePass();
 }
 async function runHardGates(clientOrPool, options) {
@@ -4960,12 +5448,7 @@ async function runHardGates(clientOrPool, options) {
            ORDER BY jr.requirement_key ASC`, [ctx.workspaceId, job.job_version_id]);
 				const deterministicRequirements = requirementRows;
 				let profileFacts = [];
-				if (deterministicRequirements.some((requirement) => [
-					"EXPERIENCE_YEARS",
-					"CREDENTIAL",
-					"DEGREE",
-					"WORK_AUTH"
-				].includes(requirement.requirement_type))) {
+				if (deterministicRequirements.some((requirement) => ["WORK_AUTH"].includes(requirement.requirement_type))) {
 					const { rows: activeProfileRows } = await client.query(`SELECT id
              FROM profile_versions
              WHERE workspace_id = $1
@@ -4978,57 +5461,28 @@ async function runHardGates(clientOrPool, options) {
              WHERE pf.workspace_id = $1
              ${activeProfileVersionId ? "AND pf.profile_version_id = $2" : "AND FALSE"}`, activeProfileVersionId ? [ctx.workspaceId, activeProfileVersionId] : [ctx.workspaceId]);
 					profileFacts = profileFactRows;
-					const { rows: credentialRows } = await client.query(`SELECT pc.id, pc.credential_name, pc.issuer, pc.credential_type, pc.level
-             FROM profile_credentials pc
-             WHERE pc.workspace_id = $1
-               ${activeProfileVersionId ? "AND pc.profile_version_id = $2" : "AND FALSE"}
-             AND pc.status = 'ACTIVE'`, activeProfileVersionId ? [ctx.workspaceId, activeProfileVersionId] : [ctx.workspaceId]);
-					profileFacts = profileFacts.concat(credentialRows.map((credential) => ({
-						id: credential.id,
-						statement: `${credential.credential_name} ${credential.issuer} ${credential.level || ""}`.trim(),
-						structured_value: {
-							credential_type: credential.credential_type,
-							level: credential.level
-						},
-						source_type: "CREDENTIAL"
-					})));
-					const { rows: engagementRows } = await client.query(`SELECT id, start_date, end_date, is_current, experience_class,
-                    engagement_type, role_title, summary, operating_model
-             FROM profile_engagements
-             WHERE profile_version_id = $1`, [activeProfileVersionId]);
-					const experienceYears = calculateProfessionalExperienceYears(engagementRows);
-					for (const engagement of engagementRows) {
-						if (engagement.experience_class !== "PROFESSIONAL_PRODUCTION") continue;
-						const start = new Date(engagement.start_date).getTime();
-						const end = engagement.is_current || !engagement.end_date ? Date.now() : new Date(engagement.end_date).getTime();
-						if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
-						const years = (end - start) / 315576e5;
-						profileFacts.push({
-							id: engagement.id,
-							statement: `${engagement.role_title}: ${engagement.summary}`,
-							structured_value: {
-								experience_years: years,
-								experience_scope: `${engagement.role_title} ${engagement.summary}`,
-								engagement_type: engagement.engagement_type,
-								operating_model: engagement.operating_model,
-								experience_start_date: new Date(engagement.start_date).toISOString(),
-								experience_end_date: new Date(end).toISOString(),
-								engagement_is_current: engagement.is_current
-							},
-							source_type: "PROFILE_FACT"
-						});
-					}
-					if (experienceYears > 0) profileFacts.push({
-						id: `experience:${ctx.workspaceId}`,
-						statement: `${experienceYears.toFixed(1)} years of professional production experience`,
-						structured_value: {
-							professional_years: experienceYears,
-							experience_scope: "overall professional production"
-						},
-						source_type: "CREDENTIAL"
-					});
 				}
 				const requirementHints = deterministicRequirements.map((r) => r.quote_text || r.requirement_text).filter(Boolean).slice(0, 60).join("\n");
+				if (normalizeWorkMode(rawJobAdapter.workplace_type) === "UNKNOWN") {
+					const enriched = await enrichWorkModeIfNeeded(client, ctx, {
+						canonical_job_id: job.id,
+						job_version_id: job.job_version_id,
+						canonical_url: job.canonical_url,
+						workplace_type: job.workplace_type,
+						location: job.location,
+						description_text: job.description_text
+					});
+					if (enriched.workplace_type !== "UNKNOWN") {
+						rawJobAdapter.workplace_type = enriched.workplace_type;
+						await client.query(`UPDATE canonical_jobs
+               SET workplace_type = $1, updated_at = NOW()
+               WHERE workspace_id = $2 AND id = $3`, [
+							enriched.workplace_type,
+							ctx.workspaceId,
+							job.id
+						]);
+					}
+				}
 				const gateResult = combineGateResults([
 					applyGlobalGates({
 						...rawJobAdapter,
@@ -5058,12 +5512,13 @@ async function runHardGates(clientOrPool, options) {
 						passedCount++;
 				}
 				await client.query(`UPDATE canonical_jobs
-           SET gate_decision      = $1,
+           SET gate_decision      = $1::varchar,
                processing_state   = $2,
                processing_status  = $2,
                rejection_reason   = $3,
                gate_evidence_quotes = $4,
                workability_facts  = $5,
+               workplace_type = CASE WHEN $1::varchar = 'PASS' AND ($5::jsonb->>'workplace_type') = 'ASSUMED_HYBRID' THEN 'ASSUMED_HYBRID' ELSE workplace_type END,
                primary_lane = CASE WHEN $8::boolean THEN NULL ELSE primary_lane END,
                secondary_lanes = CASE WHEN $8::boolean THEN NULL ELSE secondary_lanes END,
                lane_confidence = CASE WHEN $8::boolean THEN NULL ELSE lane_confidence END,
@@ -8105,7 +8560,7 @@ async function failPipelineTask(task, errorMessage, clientOrPool, options) {
 	const isPool = (value) => typeof value.connect === "function" && !("release" in value);
 	const ownsClient = isPool(clientOrPool);
 	const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
-	const delaySeconds = Math.min(3600, 30 * Math.pow(2, Math.max(0, task.attemptNumber - 1)));
+	const delaySeconds = task.attemptNumber <= 1 ? 0 : Math.min(3600, 30 * Math.pow(2, task.attemptNumber - 2));
 	const availableAt = new Date(Date.now() + delaySeconds * 1e3).toISOString();
 	try {
 		const ctx = options?.context ?? await resolveWorkspaceContext(client);
@@ -8292,12 +8747,13 @@ async function loadWorkspaceLanesConfig(clientOrPool, options) {
 		const ctx = options?.context ?? await resolveWorkspaceContext(client);
 		try {
 			let active = await listActiveLaneRevisions(client, { context: ctx });
-			if (active.length === 0 && options?.seedIfEmpty) try {
-				const registryPath = path.default.resolve(__dirname$1, "../../config/lanes/registry.yml");
-				if (!fs.default.existsSync(registryPath)) throw new Error(`Lane registry not found at ${registryPath}`);
+			const registryPath = path.default.resolve(__dirname$1, "../../config/lanes/registry.yml");
+			if (fs.default.existsSync(registryPath) && options?.seedIfEmpty) try {
 				const registry = parseYamlFile(registryPath);
+				const activeKeys = new Set(active.map((l) => l.laneKey));
+				let seededAny = false;
 				for (const entry of registry.lanes || []) {
-					if (entry.enabled_by_default === false) continue;
+					if (entry.enabled_by_default === false || activeKeys.has(entry.lane_key)) continue;
 					const lanePath = path.default.resolve(__dirname$1, `../../config/lanes/${entry.config_file}`);
 					if (!fs.default.existsSync(lanePath)) throw new Error(`Lane config file not found for ${entry.lane_key}: ${lanePath}`);
 					const laneConfig = LaneFileConfigSchema.parse(parseYamlFile(lanePath));
@@ -8308,8 +8764,9 @@ async function loadWorkspaceLanesConfig(clientOrPool, options) {
 						context: ctx,
 						note: `seed from ${entry.config_file}`
 					});
+					seededAny = true;
 				}
-				active = await listActiveLaneRevisions(client, { context: ctx });
+				if (seededAny) active = await listActiveLaneRevisions(client, { context: ctx });
 			} catch (seedErr) {
 				console.warn(`⚠️ Failed to seed workspace lane registry from files; falling back to FILES. ${seedErr instanceof Error ? seedErr.message : String(seedErr)}`);
 				return {
@@ -8359,7 +8816,7 @@ async function loadWorkspaceLanesConfig(clientOrPool, options) {
 dotenv.default.config();
 dotenv.default.config({ path: ".env.local" });
 var defaultPool$4 = new pg.default.Pool(pgPoolConfig(process.env.DATABASE_URL));
-var LANE_ROUTER_RULE_VERSION = "lane_router_v2.2.1";
+var LANE_ROUTER_RULE_VERSION = "lane_router_v2.3.2";
 var cosineSimilarity$1 = (vecA, vecB) => {
 	if (vecA.length === 0 || vecB.length === 0 || vecA.length !== vecB.length) return 0;
 	let dotProduct = 0, normA = 0, normB = 0;
@@ -8395,11 +8852,21 @@ var CONCEPT_ALIASES = {
 		"applied ai",
 		"applied ai engineer",
 		"agentic ai",
+		"agentic systems",
+		"ai agent",
+		"ai agents",
+		"autonomous agents",
 		"ai platform engineer",
 		"ai/ml engineer",
 		"llm engineering",
 		"llm engineer",
-		"ai infrastructure engineer"
+		"ai infrastructure engineer",
+		"generative ai",
+		"genai",
+		"foundation model",
+		"foundation models",
+		"pytorch",
+		"deep learning engineer"
 	],
 	"ml engineering": [
 		"ml",
@@ -8411,7 +8878,10 @@ var CONCEPT_ALIASES = {
 		"applied ml",
 		"applied machine learning",
 		"machine learning scientist",
-		"ai/ml"
+		"ai/ml",
+		"mlops",
+		"model training",
+		"deep learning"
 	],
 	"data engineering": [
 		"data engineer",
@@ -8419,19 +8889,79 @@ var CONCEPT_ALIASES = {
 		"data pipeline",
 		"data pipelines",
 		"etl",
-		"data platform"
+		"elt",
+		"data platform",
+		"data platform engineer",
+		"snowflake",
+		"iceberg",
+		"databricks",
+		"bigquery",
+		"spark",
+		"dbt",
+		"kafka",
+		"lakehouse",
+		"data warehouse",
+		"data lake",
+		"data infrastructure"
+	],
+	"software engineering": [
+		"software engineer",
+		"software engineering",
+		"software developer",
+		"developer",
+		"full stack engineer",
+		"full-stack engineer",
+		"full stack developer",
+		"full-stack developer",
+		"backend engineer",
+		"backend developer",
+		"front-end engineer",
+		"frontend engineer",
+		"frontend developer",
+		"systems engineer",
+		"systems developer",
+		"platform engineer",
+		"infrastructure engineer",
+		"staff engineer",
+		"principal engineer",
+		"lead engineer",
+		"senior software engineer"
+	],
+	"platform engineering": [
+		"platform engineer",
+		"platform engineering",
+		"cloud infrastructure",
+		"cloud engineer",
+		"cloud engineering",
+		"infrastructure engineer",
+		"infrastructure lead",
+		"cloud lead",
+		"infrastructure",
+		"devops",
+		"sre",
+		"site reliability engineer",
+		"distributed systems"
 	],
 	"ai data architecture": [
 		"ai data architecture",
 		"data architecture",
 		"ai architecture",
-		"data platform architecture"
+		"data platform architecture",
+		"data architect",
+		"solutions architect",
+		"solution architect",
+		"cloud architect",
+		"enterprise architect"
 	],
 	"ai systems architecture": [
 		"ai systems architect",
 		"ai systems architecture",
 		"ai architecture",
-		"ml systems architect"
+		"ml systems architect",
+		"chief architect",
+		"principal architect",
+		"systems architect",
+		"software architect"
 	],
 	"llm infrastructure": [
 		"llm infrastructure",
@@ -8441,7 +8971,9 @@ var CONCEPT_ALIASES = {
 		"llm engineering",
 		"inference platform",
 		"model serving",
-		"foundation model infrastructure"
+		"foundation model infrastructure",
+		"rag",
+		"retrieval augmented generation"
 	],
 	"ai research": [
 		"ai research",
@@ -8449,51 +8981,93 @@ var CONCEPT_ALIASES = {
 		"deep learning research",
 		"ai researcher",
 		"ml researcher",
-		"ai scientist"
+		"ai scientist",
+		"research scientist",
+		"applied scientist",
+		"applied researcher",
+		"research fellow"
+	],
+	"applied research": [
+		"applied research",
+		"applied researcher",
+		"applied scientist",
+		"research associate",
+		"research fellow",
+		"research engineer",
+		"research software engineer"
 	],
 	"legal ai": [
 		"legal ai",
 		"legaltech",
 		"legal technology",
 		"legal nlp",
-		"contract analytics"
+		"contract analytics",
+		"contract intelligence",
+		"legal document intelligence",
+		"computational law"
 	],
 	"compliance automation": [
 		"compliance automation",
 		"compliance engineering",
 		"regtech",
-		"regulatory technology"
+		"regulatory technology",
+		"regulatory compliance",
+		"policy automation",
+		"sanctions",
+		"due diligence"
 	],
 	"fraud detection": [
 		"fraud detection",
 		"fraud analytics",
-		"financial crime technology"
+		"fraud",
+		"scams",
+		"anti-fraud",
+		"financial crime technology",
+		"financial crime",
+		"transaction monitoring"
 	],
 	"document intelligence": [
 		"document intelligence",
 		"document ai",
 		"contract analytics",
-		"intelligent document processing"
+		"intelligent document processing",
+		"idp",
+		"nlp document",
+		"text extraction"
 	],
 	"scientific ml": [
 		"scientific ml",
 		"scientific machine learning",
-		"machine learning for science"
+		"machine learning for science",
+		"computational science",
+		"ai for science"
 	],
 	"research engineering": [
 		"research engineering",
 		"research engineer",
-		"research software engineer"
+		"research software engineer",
+		"rse",
+		"scientific computing"
 	],
 	"bioinformatics": [
 		"bioinformatics",
 		"bioinformatics scientist",
-		"computational biology"
+		"bioinformatician",
+		"bioinformaticians",
+		"computational biology",
+		"computational genomics",
+		"genomics",
+		"genomic",
+		"biostatistics"
 	],
 	"clinical informatics": [
 		"clinical informatics",
 		"clinical data science",
-		"health data science"
+		"health data science",
+		"clinical nlp",
+		"healthcare ai",
+		"medical ai",
+		"health data"
 	],
 	"quantitative research": [
 		"quantitative research",
@@ -8505,7 +9079,11 @@ var CONCEPT_ALIASES = {
 		"quantitative architect",
 		"quant systems architect",
 		"quantitative engineer",
-		"algorithmic trading"
+		"algorithmic trading",
+		"quant",
+		"quantitative",
+		"time-series",
+		"portfolio analytics"
 	],
 	"investment data platform": [
 		"investment data platform",
@@ -8513,14 +9091,29 @@ var CONCEPT_ALIASES = {
 		"market data platform",
 		"market data feeds",
 		"market data infrastructure",
-		"portfolio data platform"
+		"portfolio data platform",
+		"trading platform",
+		"capital markets data"
 	],
 	"time series modelling": [
 		"time series modelling",
 		"time-series modelling",
 		"time series modeling",
 		"time-series modeling",
+		"time series",
+		"time-series",
 		"forecasting"
+	],
+	"capital markets": [
+		"capital markets",
+		"trading",
+		"market data",
+		"market data feeds",
+		"algorithmic trading",
+		"trading systems",
+		"execution systems",
+		"trading infrastructure",
+		"electronic trading"
 	],
 	"ai": [
 		"artificial intelligence",
@@ -8528,19 +9121,38 @@ var CONCEPT_ALIASES = {
 		"ml",
 		"deep learning",
 		"llm",
-		"nlp"
+		"nlp",
+		"genai",
+		"generative ai",
+		"ai agents",
+		"agentic"
 	],
 	"machine learning": [
 		"machine learning",
 		"ml",
-		"deep learning"
+		"deep learning",
+		"statistical learning"
 	],
 	"data platform": [
 		"data platform",
 		"data warehouse",
 		"data lake",
 		"lakehouse",
-		"data pipeline"
+		"data pipeline",
+		"snowflake",
+		"databricks",
+		"iceberg",
+		"data architecture",
+		"bigquery"
+	],
+	"data intelligence": [
+		"data intelligence",
+		"data platform",
+		"business intelligence",
+		"analytics engineering",
+		"data analytics",
+		"data products",
+		"data science"
 	],
 	"data science": [
 		"data science",
@@ -8548,54 +9160,69 @@ var CONCEPT_ALIASES = {
 		"ai/ml data scientist",
 		"applied statistics",
 		"predictive modelling",
-		"predictive modeling"
+		"predictive modeling",
+		"statistical modeling"
 	],
 	"regtech": [
 		"regtech",
 		"regulatory technology",
 		"compliance automation",
 		"aml",
-		"kyc"
+		"kyc",
+		"anti-money laundering",
+		"know your customer",
+		"financial crime",
+		"sanctions"
 	],
 	"legaltech": [
 		"legaltech",
 		"legal technology",
 		"legal ai",
-		"contract analytics"
+		"contract analytics",
+		"contract intelligence"
 	],
 	"healthcare": [
 		"healthcare",
 		"health data",
 		"clinical",
-		"medical"
+		"medical",
+		"life sciences"
 	],
 	"biotech": [
 		"biotech",
 		"biotechnology",
 		"drug discovery",
-		"bioinformatics"
+		"bioinformatics",
+		"computational biology",
+		"genomics"
 	],
 	"pharmaceutical": [
 		"pharmaceutical",
 		"pharma",
-		"drug discovery"
+		"drug discovery",
+		"therapeutics"
 	],
 	"investment management": [
 		"investment management",
 		"asset management",
 		"fund management",
-		"portfolio management"
+		"portfolio management",
+		"institutional investing"
 	],
 	"asset management": [
 		"asset management",
 		"investment management",
-		"fund management"
+		"fund management",
+		"portfolio management"
 	],
 	"market data": [
 		"market data",
 		"financial data",
 		"securities data",
-		"order book"
+		"order book",
+		"market data platform",
+		"market feeds",
+		"market data feeds"
 	],
 	"trading infrastructure": [
 		"trading infrastructure",
@@ -8625,15 +9252,21 @@ var CONCEPT_ALIASES = {
 	"technical product delivery": [
 		"technical product",
 		"technical product manager",
-		"technical product owner"
+		"technical product owner",
+		"ai product manager",
+		"data product manager"
 	],
 	"technical architecture": [
 		"technical architect",
 		"solution architect",
+		"solutions architect",
 		"systems architect",
 		"software architect",
 		"data architect",
-		"ai architect"
+		"ai architect",
+		"cloud architect",
+		"enterprise architect",
+		"platform architect"
 	],
 	"technical delivery": [
 		"technical delivery",
@@ -8644,13 +9277,63 @@ var CONCEPT_ALIASES = {
 	"digital public infrastructure": [
 		"digital public infrastructure",
 		"digital government infrastructure",
-		"public digital infrastructure"
+		"public digital infrastructure",
+		"digital public goods",
+		"civic tech"
+	],
+	"social impact": [
+		"social impact",
+		"international development",
+		"multilateral",
+		"climate tech",
+		"environmental data",
+		"biodiversity",
+		"public interest tech",
+		"sustainable development",
+		"humanitarian"
 	],
 	"machine learning research": [
 		"machine learning research",
 		"ml research",
 		"ai research",
-		"research scientist"
+		"research scientist",
+		"neural architectures"
+	],
+	"university": [
+		"university",
+		"institute",
+		"research institute",
+		"faculty",
+		"academic",
+		"higher education",
+		"campus",
+		"college"
+	],
+	"academic research": [
+		"academic research",
+		"university research",
+		"university",
+		"academic",
+		"academic institution",
+		"research institute",
+		"research lab",
+		"research laboratory",
+		"academic laboratory",
+		"academic department",
+		"faculty research",
+		"higher education",
+		"research fellow",
+		"postdoctoral",
+		"postdoc",
+		"phd"
+	],
+	"academic laboratory": [
+		"academic laboratory",
+		"academic lab",
+		"university laboratory",
+		"university lab",
+		"faculty laboratory",
+		"ai laboratory"
 	]
 };
 function conceptVariants(concept) {
@@ -8660,6 +9343,34 @@ function conceptVariants(concept) {
 function conceptScopeScore(description, concepts) {
 	if (!concepts || concepts.length === 0) return 1;
 	return concepts.some((concept) => containsConcept(description, concept)) ? 1 : 0;
+}
+var NON_TECHNICAL_ROLE_FAMILY = /\b(?:sales|business\s+development|account\s+(?:executive|manager|cto)|customer\s+success|counselor|social\s+worker|people\s+(?:partner|business)|human\s+resources|hr\b|brand(?:s)?|marketing|finance|fp\s*&\s*a|accounting|tax|designer|design\s+director|art\s+director|leather|investigator|recruiter|talent|operations?)\b/i;
+function hasNonTechnicalRoleFamily(title) {
+	return NON_TECHNICAL_ROLE_FAMILY.test(String(title || ""));
+}
+function hasCoreTechnicalFunction(title) {
+	const value = String(title || "").toLowerCase();
+	if (!value || hasNonTechnicalRoleFamily(value)) return false;
+	return /\b(?:software|data|machine\s+learning|ml|ai|platform|cloud|devops|sre|site\s+reliability|backend|back-end|frontend|front-end|full[- ]stack|engineering|engineer|developer|architect|scientist|researcher|quantitative|bioinformatics|mlops|technical\s+(?:product|program|programme|project|delivery)|automation|cyber\s+security|security\s+engineer)\b/i.test(value);
+}
+function hasApprovedLaneFunction(laneKey, title) {
+	if (hasNonTechnicalRoleFamily(title)) return false;
+	return laneKey === "CORE_AI_DATA" ? hasCoreTechnicalFunction(title) : true;
+}
+function hasRequiredInstitutionalContext(laneKey, text) {
+	const normalizedLane = laneKey.toUpperCase();
+	const value = String(text || "");
+	if (normalizedLane === "UNIVERSITY_AI_RESEARCH") {
+		const explicitInstitution = /\b(?:academic\s+institution|research\s+institute|academic\s+(?:lab|laboratory)|university\s+(?:lab|laboratory)|faculty\s+research|academic\s+appointment|formal\s+academic\s+research\s+(?:program|programme)|independent\s+research\s+laboratory|public\s+research\s+institute)\b/i.test(value);
+		const roleInstitutionPair = /\b(?:research|scientist|engineer|fellow|professor)\b.{0,60}\b(?:university|institute|lab|laboratory|faculty)\b|\b(?:university|institute|lab|laboratory|faculty)\b.{0,60}\b(?:research|scientist|engineer|fellow|professor)\b/i.test(value);
+		return explicitInstitution || roleInstitutionPair;
+	}
+	if (normalizedLane === "SOCIAL_IMPACT_MULTILATERAL") return /\b(?:multilateral|international\s+development|development\s+bank|world\s+bank|united\s+nations|\bUN\b\s+(?:entity|agency|programme|program)|government\s+(?:agency|ministry|department)|public\s+agency|non[- ]profit|nonprofit|humanitarian|climate\s+(?:initiative|program|programme)|digital\s+public\s+infrastructure|digital\s+public\s+goods|civic\s+tech|public\s+interest\s+tech|social\s+impact)\b/i.test(value);
+	return true;
+}
+function laneDomainScopeScore(description, laneKey, concepts) {
+	if (!hasRequiredInstitutionalContext(laneKey, description)) return 0;
+	return conceptScopeScore(description, concepts);
 }
 function formatRoutingScore(value) {
 	return Number.isFinite(value) ? value.toFixed(3) : "n/a";
@@ -8704,8 +9415,17 @@ function extractCoreJobText(title, description) {
 		"benefits & perks",
 		"benefits",
 		"about us",
+		"about the company",
+		"about our company",
+		"who we are",
+		"our mission",
+		"company overview",
+		"company description",
 		"diversity & inclusion",
-		"diversity and inclusion"
+		"diversity and inclusion",
+		"what we offer",
+		"perks",
+		"our story"
 	]);
 	const sections = [];
 	let current = {
@@ -8749,12 +9469,42 @@ async function runLaneRouter(clientOrPool, options) {
 	const currentLaneRouterModelPrefix = `${LANE_ROUTER_RULE_VERSION}|${config.version ?? "lanes_unknown"}|`;
 	const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
 	const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
+	const hasExplicitTargets = jobVersionIds.length > 0 || canonicalJobIds.length > 0;
+	const reprocessExisting = options?.reprocessExisting === true;
 	const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0 ? Number(options?.limit) : null;
 	const params = [ctx.workspaceId];
-	if (jobVersionIds.length === 0) params.push(currentLaneRouterModelPrefix);
+	if (!hasExplicitTargets || reprocessExisting) params.push(currentLaneRouterModelPrefix);
 	const jobVersionFilter = jobVersionIds.length > 0 ? `AND jv.id = ANY($${params.push(jobVersionIds)}::uuid[])` : "";
 	const canonicalJobFilter = canonicalJobIds.length > 0 ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])` : "";
 	const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
+	const replayableStateFilter = reprocessExisting ? `COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED', 'UNMATCHED', 'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED')` : `COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+           OR (
+             COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')
+             AND (
+               ${hasExplicitTargets ? "TRUE" : `
+                 COALESCE(c.primary_lane, 'UNCLASSIFIED') = 'UNCLASSIFIED'
+                 AND (
+                   c.latest_lane_decision_id IS NULL
+                   OR NOT EXISTS (
+                     SELECT 1
+                     FROM lane_decisions ld
+                     WHERE ld.workspace_id = c.workspace_id
+                       AND ld.id = c.latest_lane_decision_id
+                       AND LEFT(ld.model_version, LENGTH($2)) = $2
+                   )
+                 )
+               `}
+             )
+           )`;
+	const replayExistingDecisionFilter = reprocessExisting ? `AND (
+         c.latest_lane_decision_id IS NULL
+         OR NOT EXISTS (
+           SELECT 1 FROM lane_decisions ld
+           WHERE ld.workspace_id = c.workspace_id
+             AND ld.id = c.latest_lane_decision_id
+             AND LEFT(ld.model_version, LENGTH($2)) = $2
+         )
+       )` : "";
 	let jobs = [];
 	try {
 		jobs = (await pool.query(`
@@ -8770,33 +9520,8 @@ async function runLaneRouter(clientOrPool, options) {
           LIMIT 1
         ) jv ON TRUE
         WHERE c.workspace_id = $1
-          AND (
-            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-           OR (
-             COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
-             AND (
-               -- Explicit replay targets are allowed through even when a
-               -- previous lane decision exists. This is required to repair
-               -- technical/threshold deferrals after embedding or policy
-               -- changes without weakening the normal idempotent scan.
-               ${jobVersionIds.length > 0 ? "TRUE" : `
-                 COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'
-                 AND
-                 COALESCE(c.primary_lane, 'UNCLASSIFIED') = 'UNCLASSIFIED'
-                 AND (
-                   c.latest_lane_decision_id IS NULL
-                   OR NOT EXISTS (
-                     SELECT 1
-                     FROM lane_decisions ld
-                     WHERE ld.workspace_id = c.workspace_id
-                       AND ld.id = c.latest_lane_decision_id
-                       AND LEFT(ld.model_version, LENGTH($2)) = $2
-                   )
-                 )
-               `}
-             )
-           )
-          )
+          AND (${replayableStateFilter})
+          ${replayExistingDecisionFilter}
           ${jobVersionFilter}
           ${canonicalJobFilter}
         ORDER BY c.created_at ASC, c.id ASC
@@ -8805,6 +9530,7 @@ async function runLaneRouter(clientOrPool, options) {
 	} catch (error) {
 		if (error?.code !== "42P01" && error?.code !== "42703") throw error;
 		const fallbackParams = [ctx.workspaceId];
+		if (!hasExplicitTargets || reprocessExisting) fallbackParams.push(currentLaneRouterModelPrefix);
 		const fallbackJobVersionFilter = jobVersionIds.length > 0 ? `AND jv.id = ANY($${fallbackParams.push(jobVersionIds)}::uuid[])` : "";
 		const fallbackCanonicalJobFilter = canonicalJobIds.length > 0 ? `AND c.id = ANY($${fallbackParams.push(canonicalJobIds)}::uuid[])` : "";
 		const fallbackLimitClause = limit ? `LIMIT $${fallbackParams.push(limit)}` : "";
@@ -8821,10 +9547,8 @@ async function runLaneRouter(clientOrPool, options) {
           LIMIT 1
         ) jv ON TRUE
          WHERE c.workspace_id = $1
-           AND (
-             COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
-             OR (${jobVersionIds.length > 0 ? "COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'" : "COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED' AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'"})
-           )
+           AND (${replayableStateFilter})
+          ${replayExistingDecisionFilter}
           ${fallbackJobVersionFilter}
           ${fallbackCanonicalJobFilter}
         ORDER BY c.created_at ASC, c.id ASC
@@ -8936,10 +9660,9 @@ async function runLaneRouter(clientOrPool, options) {
 				const jobEmbeddings = /* @__PURE__ */ new Map();
 				for (const job of jobs) {
 					const vector = byNode.get(`JOB_VERSION:${job.latest_version_id}`);
-					if (!vector || vector.length !== dimensions) complete = false;
-					else jobEmbeddings.set(job.id, vector);
+					if (vector && vector.length === dimensions) jobEmbeddings.set(job.id, vector);
 				}
-				if (complete && Object.keys(laneEmbeddings).length === laneNodeIds.length && jobEmbeddings.size === jobs.length) publishedEmbeddingSets.set(provider, {
+				if (complete && Object.keys(laneEmbeddings).length === laneNodeIds.length) publishedEmbeddingSets.set(provider, {
 					laneEmbeddings,
 					jobEmbeddings,
 					dimensions,
@@ -9090,18 +9813,15 @@ async function runLaneRouter(clientOrPool, options) {
 			const jobEmbeddings = new Map(publishedSet?.jobEmbeddings || []);
 			if (publishedSet) console.log(`Using published ${provider} embedding batch for lane routing.`);
 			for (const job of jobs) {
-				if (publishedSet) break;
+				if (jobEmbeddings.has(job.id)) continue;
 				const coreText = extractCoreJobText(job.normalized_title, job.description_text || "");
 				let jobEmbedding;
 				try {
 					jobEmbedding = await generateEmbeddingWithProvider(coreText, provider);
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					throw new EmbeddingRunError(provider, `job embedding failed: ${message}`, job.id);
-				}
-				if (jobEmbedding.length === 0 || jobEmbedding.every((value) => value === 0)) throw new EmbeddingRunError(provider, "job embedding was empty or zero-valued", job.id);
-				if (prototypeDimensions !== null && jobEmbedding.length !== prototypeDimensions) throw new EmbeddingRunError(provider, `job embedding dimension mismatch: expected ${prototypeDimensions} got ${jobEmbedding.length}`, job.id);
-				jobEmbeddings.set(job.id, jobEmbedding);
+					if (jobEmbedding.length === 0 || jobEmbedding.every((value) => value === 0)) continue;
+					if (prototypeDimensions !== null && jobEmbedding.length !== prototypeDimensions) continue;
+					jobEmbeddings.set(job.id, jobEmbedding);
+				} catch {}
 			}
 			let routedCount = 0;
 			let deferredCount = 0;
@@ -9109,58 +9829,43 @@ async function runLaneRouter(clientOrPool, options) {
 				await client.query("BEGIN");
 				try {
 					const jobEmbedding = jobEmbeddings.get(job.id);
-					if (!jobEmbedding) throw new EmbeddingRunError(provider, "job embedding was not prepared", job.id);
-					if (jobEmbedding.every((v) => v === 0)) {
-						console.warn(`⚠️ Zero embedding for job ${job.id}. Deferring (never default lane).`);
+					if (!jobEmbedding || jobEmbedding.every((v) => v === 0)) {
+						console.warn(`⚠️ Embedding unavailable for job ${job.id}. Deferring (never default lane).`);
 						const evaluatedAt = (/* @__PURE__ */ new Date()).toISOString();
 						const laneDecisionId = await persistLaneDecision({
 							canonicalJobId: job.id,
 							jobVersionId: job.latest_version_id,
 							embeddingProvider: provider,
 							embeddingModel: publishedSet?.model,
-							embeddingDimensions: jobEmbedding.length,
+							embeddingDimensions: jobEmbedding?.length ?? 0,
 							primaryLane: "UNCLASSIFIED",
 							secondaryLanes: [],
 							laneConfidence: "None",
 							semanticScores: {},
-							laneEvidence: ["ZERO_VECTOR_EMBEDDING"],
+							laneEvidence: ["ROUTING_POLICY_NO_MATCH", "EMBEDDING_UNAVAILABLE"],
 							evaluatedAt
 						});
-						if ((await client.query(`UPDATE canonical_jobs
+						await client.query(`UPDATE canonical_jobs
                SET primary_lane = 'UNCLASSIFIED',
                    semantic_score = 0.0,
                    lane_confidence = 'None',
-                   secondary_lanes = $3::jsonb,
-                   lane_evidence = $4::jsonb,
+                   secondary_lanes = '[]'::jsonb,
+                   lane_evidence = 'ROUTING_POLICY_NO_MATCH',
                    routing_disposition = 'TECHNICAL_DEFERRED',
                    processing_state = 'ROUTING_DEFERRED',
                    processing_status = 'ROUTING_DEFERRED',
+                   latest_lane_decision_id = $4,
                    updated_at = NOW()
                WHERE workspace_id = $1
                  AND id = $2
-                 AND latest_job_version_id = $5`, [
+                 AND (latest_job_version_id IS NULL OR latest_job_version_id = $3)`, [
 							ctx.workspaceId,
 							job.id,
-							JSON.stringify([]),
-							JSON.stringify(["ZERO_VECTOR_EMBEDDING"]),
-							job.latest_version_id
-						]))?.rowCount === 0) {
-							await client.query("COMMIT");
-							continue;
-						}
-						if (laneDecisionId) await client.query(`UPDATE canonical_jobs
-                 SET latest_lane_decision_id = $3,
-                     updated_at = NOW()
-                 WHERE workspace_id = $1
-                   AND id = $2
-                   AND latest_job_version_id = $4`, [
-							ctx.workspaceId,
-							job.id,
-							laneDecisionId,
-							job.latest_version_id
+							job.latest_version_id,
+							laneDecisionId
 						]);
 						await client.query("COMMIT");
-						deferredCount++;
+						deferredCount += 1;
 						continue;
 					}
 					if (prototypeDimensions != null && jobEmbedding.length !== prototypeDimensions) {
@@ -9234,8 +9939,8 @@ async function runLaneRouter(clientOrPool, options) {
 						}
 						const score = cosineSimilarity$1(jobEmbedding, laneEmbeddings[laneKey]);
 						scoreMap[laneKey] = score;
-						domainScoreMap[laneKey] = conceptScopeScore(descText, laneDef.included_domain_concepts);
-						functionScoreMap[laneKey] = conceptScopeScore(descText, laneDef.required_function_concepts);
+						domainScoreMap[laneKey] = laneDomainScopeScore(descText, laneKey, laneDef.included_domain_concepts);
+						functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, job.normalized_title || "") ? 0 : conceptScopeScore(descText, laneDef.required_function_concepts);
 						if (score > bestScore) {
 							bestScore = score;
 							bestLane = laneKey;
@@ -9300,8 +10005,9 @@ async function runLaneRouter(clientOrPool, options) {
 						return a.rank - b.rank;
 					});
 					const secondaryLanes = secondaryCandidates.map((c) => c.laneKey);
-					const processingStatus = bestLane === "UNCLASSIFIED" ? "ROUTING_DEFERRED" : "LANE_ROUTED";
-					const finalLaneEvidence = bestLane === "UNCLASSIFIED" ? laneEvidence : [
+					const noActiveLaneMatch = bestLane === "UNCLASSIFIED";
+					const processingStatus = noActiveLaneMatch ? "UNMATCHED" : "LANE_ROUTED";
+					const finalLaneEvidence = noActiveLaneMatch ? [...laneEvidence, "NO_ACTIVE_LANE_MATCH"] : [
 						...laneEvidence,
 						`${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
 						`${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`
@@ -9330,8 +10036,21 @@ async function runLaneRouter(clientOrPool, options) {
                  lane_evidence      = $6::jsonb,
                  routing_disposition = CASE
                    WHEN $3::varchar = 'LANE_ROUTED' THEN 'ROUTED'
-                   WHEN $6::jsonb @> '["ROUTING_POLICY_NO_MATCH"]'::jsonb THEN 'POLICY_NO_MATCH'
+                   WHEN $10::boolean THEN 'POLICY_NO_MATCH'
                    ELSE 'TECHNICAL_DEFERRED'
+                 END,
+                 rejection_reason = CASE
+                   WHEN $3::varchar = 'LANE_ROUTED' THEN NULL
+                   WHEN $10::boolean THEN 'NO_ACTIVE_LANE_MATCH'
+                   ELSE rejection_reason
+                 END,
+                 recommendation_eligibility = CASE
+                   WHEN $10::boolean THEN 'INELIGIBLE'
+                   ELSE recommendation_eligibility
+                 END,
+                 recommendation_outcome = CASE
+                   WHEN $10::boolean THEN 'SKIP'
+                   ELSE recommendation_outcome
                  END,
                  updated_at         = NOW()
              WHERE workspace_id = $7
@@ -9345,7 +10064,8 @@ async function runLaneRouter(clientOrPool, options) {
 						JSON.stringify(finalLaneEvidence),
 						ctx.workspaceId,
 						job.id,
-						job.latest_version_id
+						job.latest_version_id,
+						noActiveLaneMatch
 					]))?.rowCount === 0) {
 						await client.query("COMMIT");
 						continue;
@@ -9362,10 +10082,9 @@ async function runLaneRouter(clientOrPool, options) {
 						job.latest_version_id
 					]);
 					await client.query("COMMIT");
-					if (bestLane === "UNCLASSIFIED") deferredCount++;
-					else routedCount++;
-					const scoreLabel = bestLane === "UNCLASSIFIED" ? "BestScore" : "Score";
-					const reasonLabel = bestLane === "UNCLASSIFIED" && finalLaneEvidence.length > 0 ? `, Reason: ${finalLaneEvidence[0]}` : "";
+					if (processingStatus === "LANE_ROUTED") routedCount++;
+					const scoreLabel = noActiveLaneMatch ? "BestScore" : "Score";
+					const reasonLabel = noActiveLaneMatch && finalLaneEvidence.length > 0 ? `, Reason: ${finalLaneEvidence[0]}` : "";
 					console.log(`  -> Job ${job.id} ("${job.normalized_title}"): ${bestLane} (${scoreLabel}: ${bestScore.toFixed(3)}, Status: ${processingStatus}${reasonLabel})`);
 				} catch (jobErr) {
 					await client.query("ROLLBACK");
@@ -9610,8 +10329,12 @@ var CONTEXT_PAYLOAD_KEYS = [
 	"force_policy_recalculation",
 	"reprocess",
 	"repair_existing_state",
+	"repair_dependency",
+	"repair_generation",
+	"repair_match_run_id",
 	"reassessment_reason",
-	"verification_answer_revision_id"
+	"verification_answer_revision_id",
+	"queue_budget_run_id"
 ];
 function contextPayload(payload) {
 	return Object.fromEntries(CONTEXT_PAYLOAD_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(payload, key)).map((key) => [key, payload[key]]));
@@ -9701,6 +10424,12 @@ function buildFactText(fact) {
 		fact.verification_status,
 		flattenStructuredValue(fact.structured_value)
 	].join(" ").trim();
+}
+function toProfileFactForeignKey(fact) {
+	if (!fact || !fact.id) return null;
+	if (fact.source_type === "CREDENTIAL" || fact.source_type === "ENGAGEMENT") return null;
+	if (typeof fact.id === "string" && fact.id.startsWith("experience:")) return null;
+	return fact.id;
 }
 function requirementWeight(importance) {
 	if (importance === "MUST") return 1;
@@ -9891,7 +10620,7 @@ async function runDeterministicMatcher(clientOrPool, options) {
 						experience_end_date: new Date(end).toISOString(),
 						engagement_is_current: engagement.is_current
 					},
-					source_type: "PROFILE_FACT"
+					source_type: "ENGAGEMENT"
 				});
 			}
 			if (experienceYears > 0) credentialFacts.push({
@@ -10082,6 +10811,7 @@ async function runDeterministicMatcher(clientOrPool, options) {
 				let weightedScoreSum = 0;
 				let weightSum = 0;
 				let matchedCount = 0;
+				const mandatoryQualificationFailures = [];
 				for (const req of reqRes.rows) {
 					if (!isCapabilityRequirementType(req.requirement_type)) {
 						await client.query(`INSERT INTO requirement_evidence_matches (
@@ -10152,6 +10882,58 @@ async function runDeterministicMatcher(clientOrPool, options) {
 						]);
 						continue;
 					}
+					if (req.requirement_type === "EXPERIENCE_YEARS" && structuredComparison.status === "MISMATCH") {
+						const coverage = structuredComparison.coverage ?? 0;
+						const weightedScore = coverage * weight;
+						weightedScoreSum += weightedScore;
+						if (coverage >= .5) matchedCount += 1;
+						await client.query(`INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, $4, 'NO_MATCH', $5, $6, $7)`, [
+							ctx.workspaceId,
+							matchRunId,
+							req.id,
+							toProfileFactForeignKey(structuredComparison.fact),
+							coverage,
+							structuredComparison.rationale,
+							JSON.stringify({
+								requirement_key: req.requirement_key,
+								requirement_type: req.requirement_type,
+								comparator: "STRUCTURED_EXACT",
+								required_years: structuredComparison.requiredYears ?? null,
+								evidenced_years: structuredComparison.evidencedYears ?? null,
+								experience_coverage: coverage,
+								match_qualification_code: "MATCH_QUALIFICATION_EXPERIENCE_GAP",
+								semantic_ready: usedEmbeddings
+							})
+						]);
+						continue;
+					}
+					if ((req.requirement_type === "CREDENTIAL" || req.requirement_type === "DEGREE") && structuredComparison.status === "MISMATCH") {
+						const isOptional = isRequirementOptional(req);
+						const qualCode = req.requirement_type === "DEGREE" ? "MATCH_QUALIFICATION_DEGREE_GAP" : isOptional ? "MATCH_QUALIFICATION_PREFERRED_CERT_GAP" : "MATCH_QUALIFICATION_MANDATORY_CERT_MISSING";
+						if (!isOptional && req.importance === "MUST") mandatoryQualificationFailures.push(qualCode);
+						await client.query(`INSERT INTO requirement_evidence_matches (
+                 workspace_id, match_run_id, requirement_id, profile_fact_id,
+                 match_type, match_score, rationale, evidence
+               ) VALUES ($1, $2, $3, $4, 'NO_MATCH', 0, $5, $6)`, [
+							ctx.workspaceId,
+							matchRunId,
+							req.id,
+							toProfileFactForeignKey(structuredComparison.fact),
+							structuredComparison.rationale,
+							JSON.stringify({
+								requirement_key: req.requirement_key,
+								requirement_type: req.requirement_type,
+								comparator: "STRUCTURED_EXACT",
+								optional: isOptional,
+								match_qualification_code: qualCode,
+								semantic_ready: usedEmbeddings
+							})
+						]);
+						continue;
+					}
 					if (structuredComparison.status === "MISMATCH") {
 						await client.query(`INSERT INTO requirement_evidence_matches (
                  workspace_id, match_run_id, requirement_id, profile_fact_id,
@@ -10160,7 +10942,7 @@ async function runDeterministicMatcher(clientOrPool, options) {
 							ctx.workspaceId,
 							matchRunId,
 							req.id,
-							structuredComparison.fact?.id || null,
+							toProfileFactForeignKey(structuredComparison.fact),
 							structuredComparison.rationale,
 							JSON.stringify({
 								requirement_key: req.requirement_key,
@@ -10203,7 +10985,7 @@ async function runDeterministicMatcher(clientOrPool, options) {
 					const weightedScore = isCountedMatch ? bestScore * evidenceStrength : 0;
 					weightedScoreSum += weightedScore * weight;
 					if (isCountedMatch) matchedCount += 1;
-					const profileFactId = bestFact?.source_type === "CREDENTIAL" ? null : bestFact?.id || null;
+					const profileFactId = toProfileFactForeignKey(bestFact);
 					await client.query(`INSERT INTO requirement_evidence_matches (
                workspace_id,
                match_run_id,
@@ -10242,12 +11024,16 @@ async function runDeterministicMatcher(clientOrPool, options) {
 				const overallScore = weightSum > 0 ? weightedScoreSum / weightSum * 100 : 0;
 				const coverageScore = reqCount > 0 ? matchedCount / reqCount * 100 : 0;
 				await client.query(`UPDATE match_runs
-           SET status = 'COMPLETED',
+           SET status = CASE WHEN $7::boolean THEN 'FAILED' ELSE 'COMPLETED' END,
                requirement_count = $2,
                matched_count = $3,
                coverage_score = $4,
                overall_match_score = $5,
                embedding_space_id = $6,
+               error_message = CASE
+                 WHEN $7::boolean THEN 'EMBEDDING_DEPENDENCY_INCOMPLETE'
+                 ELSE NULL
+               END,
                completed_at = NOW()
            WHERE id = $1`, [
 					matchRunId,
@@ -10255,16 +11041,45 @@ async function runDeterministicMatcher(clientOrPool, options) {
 					matchedCount,
 					coverageScore,
 					overallScore,
-					usedEmbeddings ? semanticEmbeddingSpaceId : null
+					usedEmbeddings ? semanticEmbeddingSpaceId : null,
+					semanticEvidenceIncomplete
 				]);
-				const profileMatchStatus = semanticEvidenceIncomplete ? "UNKNOWN" : matchedCount > 0 ? "POSITIVE_MATCH" : usedEmbeddings ? "NO_PROFILE_MATCH" : "UNKNOWN";
+				const hasMandatoryQualFailure = mandatoryQualificationFailures.length > 0;
+				const profileMatchStatus = hasMandatoryQualFailure ? "NO_PROFILE_MATCH" : semanticEvidenceIncomplete ? "UNKNOWN" : matchedCount > 0 ? "POSITIVE_MATCH" : usedEmbeddings ? "NO_PROFILE_MATCH" : "UNKNOWN";
 				const canonicalUpdate = await client.query(`UPDATE canonical_jobs
            SET deterministic_match_score = CASE WHEN $8::boolean THEN NULL ELSE $2::numeric END,
                deterministic_match_coverage = CASE WHEN $8::boolean THEN NULL ELSE $3::numeric END,
                latest_match_run_id = $4,
                profile_match_status = $6,
-               processing_state = CASE WHEN $8::boolean THEN 'LANE_ROUTED' ELSE 'MATCHED' END,
-               processing_status = CASE WHEN $8::boolean THEN 'LANE_ROUTED' ELSE 'MATCHED' END,
+               processing_state = CASE
+                 WHEN $9::boolean THEN 'UNMATCHED'
+                 WHEN $8::boolean THEN 'LANE_ROUTED'
+                 ELSE 'MATCHED'
+               END,
+               processing_status = CASE
+                 WHEN $9::boolean THEN 'UNMATCHED'
+                 WHEN $8::boolean THEN 'LANE_ROUTED'
+                 ELSE 'MATCHED'
+               END,
+               rejection_reason = CASE
+                 WHEN $9::boolean THEN $10
+                 ELSE rejection_reason
+               END,
+               recommendation_eligibility = CASE
+                 WHEN $9::boolean THEN 'INELIGIBLE'
+                 WHEN $8::boolean THEN NULL
+                 ELSE recommendation_eligibility
+               END,
+               recommendation_outcome = CASE
+                 WHEN $9::boolean THEN 'SKIP'
+                 WHEN $8::boolean THEN NULL
+                 ELSE recommendation_outcome
+               END,
+               recommendation_requirement_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_requirement_score END,
+               recommendation_coverage_score = CASE WHEN $8::boolean THEN NULL ELSE recommendation_coverage_score END,
+               recommendation_evidence_completeness = CASE WHEN $8::boolean THEN NULL ELSE recommendation_evidence_completeness END,
+               recommendation_decided_at = CASE WHEN $8::boolean THEN NULL ELSE recommendation_decided_at END,
+               latest_deterministic_decision_id = CASE WHEN $8::boolean THEN NULL ELSE latest_deterministic_decision_id END,
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = $5
@@ -10276,11 +11091,13 @@ async function runDeterministicMatcher(clientOrPool, options) {
 					job.id,
 					profileMatchStatus,
 					versionId,
-					semanticEvidenceIncomplete
+					semanticEvidenceIncomplete,
+					hasMandatoryQualFailure,
+					mandatoryQualificationFailures.join(", ")
 				]);
 				await client.query("COMMIT");
-				if (canonicalUpdate?.rowCount !== 0 && !semanticEvidenceIncomplete) matchedJobs += 1;
-				if (canonicalUpdate?.rowCount !== 0 && semanticEvidenceIncomplete) skippedJobs += 1;
+				if (canonicalUpdate?.rowCount !== 0 && !semanticEvidenceIncomplete && !hasMandatoryQualFailure) matchedJobs += 1;
+				if (canonicalUpdate?.rowCount !== 0 && (semanticEvidenceIncomplete || hasMandatoryQualFailure)) skippedJobs += 1;
 			} catch (error) {
 				await client.query("ROLLBACK");
 				errors += 1;
@@ -11415,17 +12232,6 @@ async function runExplanationQueueEnqueuer(clientOrPool, options) {
             AND c.id = i.canonical_job_id
             AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'DEFERRED_BUDGET')
           RETURNING c.id
-        ),
-        updated_deferred_jobs AS (
-          UPDATE canonical_jobs c
-          SET processing_state = 'DEFERRED_BUDGET',
-              processing_status = 'DEFERRED_BUDGET',
-              updated_at = NOW()
-          FROM deferred_candidates d
-          WHERE c.workspace_id = $1::uuid
-            AND c.id = d.canonical_job_id
-            AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
-          RETURNING c.id
         )
         SELECT
           (SELECT COUNT(*)::int FROM inserted) AS enqueued,
@@ -11500,6 +12306,7 @@ var PIPELINE_STAGE_TASK_TYPES = [
 	"DECIDE_RECOMMENDATION",
 	"ENQUEUE_EXPLANATION"
 ];
+var SEMANTIC_MATCH_REPAIR_GENERATION = "semantic_match_repair_v2";
 function parsePipelineTaskTypes(raw) {
 	if (!raw || raw.trim() === "") return [...PIPELINE_STAGE_TASK_TYPES];
 	const requested = [...new Set(raw.split(",").map((value) => value.trim()).filter(Boolean))];
@@ -11507,6 +12314,19 @@ function parsePipelineTaskTypes(raw) {
 	if (unsupported.length > 0) throw new Error(`Unsupported PIPELINE_TASK_WORKER_TASK_TYPES value(s): ${unsupported.join(", ")}`);
 	if (requested.length === 0) throw new Error("PIPELINE_TASK_WORKER_TASK_TYPES must contain at least one task type when set.");
 	return requested;
+}
+function parsePipelineStageTaskLimits(raw) {
+	if (!raw || raw.trim() === "") return {};
+	const limits = {};
+	for (const entry of raw.split(",").map((value) => value.trim()).filter(Boolean)) {
+		const [rawTaskType, rawLimit, ...unexpected] = entry.split("=").map((value) => value.trim());
+		if (unexpected.length > 0 || !rawTaskType || !rawLimit) throw new Error(`Invalid pipeline stage limit "${entry}". Use TASK_TYPE=POSITIVE_INTEGER.`);
+		if (!PIPELINE_STAGE_TASK_TYPES.includes(rawTaskType)) throw new Error(`Unsupported pipeline stage limit task type: ${rawTaskType}`);
+		const limit = Number.parseInt(rawLimit, 10);
+		if (!Number.isInteger(limit) || limit <= 0) throw new Error(`Pipeline stage limit for ${rawTaskType} must be a positive integer.`);
+		limits[rawTaskType] = limit;
+	}
+	return limits;
 }
 var defaultDependencies = {
 	runNormalization,
@@ -11674,14 +12494,31 @@ function stageVersion(taskType) {
 		case "ROUTE_LANE": return "lane_router_v1";
 		case "MATCH_PROFILE_EVIDENCE": return "deterministic_matcher_v1";
 		case "DECIDE_RECOMMENDATION": return "recommendation_decider_v1";
-		case "ENQUEUE_EXPLANATION": return "explanation_queue_v1";
+		case "ENQUEUE_EXPLANATION": return "explanation_queue_v2";
 	}
 }
-async function selectAndEnqueue(client, ctx, summary, taskType, sql, params, build, enabledTypes) {
+function requiredSeedValue(row, field) {
+	const value = row[field];
+	if (typeof value !== "string" || value.trim() === "") throw new Error(`Seed query did not return required ${field} for a pipeline task.`);
+	return value;
+}
+async function selectAndEnqueue(client, ctx, summary, taskType, sql, params, build, enabledTypes, includeTestFixtures = false) {
 	if (enabledTypes && !enabledTypes.has(taskType)) return;
 	const { rows } = await client.query(sql, params);
-	for (const row of rows) {
-		const task = build(row);
+	const candidates = rows.map(build);
+	const canonicalJobIds = [...new Set(candidates.map((candidate) => candidate.payload.canonical_job_id).filter((id) => typeof id === "string" && id.length > 0))];
+	const fixtureIds = /* @__PURE__ */ new Set();
+	if (!includeTestFixtures && canonicalJobIds.length > 0) {
+		const fixtures = await client.query(`SELECT id
+       FROM canonical_jobs
+       WHERE workspace_id = $1
+         AND is_test_fixture = TRUE
+         AND id = ANY($2::uuid[])`, [ctx.workspaceId, canonicalJobIds]);
+		for (const fixture of fixtures.rows) fixtureIds.add(fixture.id);
+	}
+	for (const task of candidates) {
+		const canonicalJobId = task.payload.canonical_job_id;
+		if (!includeTestFixtures && typeof canonicalJobId === "string" && fixtureIds.has(canonicalJobId)) continue;
 		incrementSeed(summary, taskType, await enqueueStageTask(taskType, task.id, task.payload, client, ctx));
 	}
 }
@@ -11695,11 +12532,16 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
 		byType: {}
 	};
 	const maxPerType = options.maxSeedPerType ?? 500;
-	const includeRoutingDeferred = options.includeRoutingDeferred === true;
-	const routingDeferredReplayVersion = options.routingDeferredReplayVersion?.trim() || "routing_deferred_replay_v1";
+	const includeRoutingDeferred = options.includeRoutingDeferred !== false;
+	const includeTestFixtures = options.includeTestFixtures === true;
+	let routingDeferredReplayVersion = options.routingDeferredReplayVersion?.trim() || "";
 	const enabledTypes = options.taskTypes ? new Set(options.taskTypes) : void 0;
 	try {
 		const ctx = options.context ?? await resolveWorkspaceContext(client);
+		if (!routingDeferredReplayVersion) routingDeferredReplayVersion = (await loadWorkspaceLanesConfig(client, {
+			context: ctx,
+			seedIfEmpty: true
+		})).config.version || "routing_deferred_replay_v1";
 		await selectAndEnqueue(client, ctx, summary, "NORMALIZE_OBSERVATION", `SELECT obs.id AS observation_id
        FROM raw_job_observations obs
        WHERE obs.workspace_id = $1
@@ -11707,9 +12549,9 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
          AND COALESCE(obs.processing_status, 'PENDING') = 'PENDING'
        ORDER BY obs.retrieved_at ASC, obs.id ASC
        LIMIT $2`, [ctx.workspaceId, maxPerType], (row) => ({
-			id: row.observation_id,
-			payload: { observation_id: row.observation_id }
-		}), enabledTypes);
+			id: requiredSeedValue(row, "observation_id"),
+			payload: { observation_id: requiredSeedValue(row, "observation_id") }
+		}), enabledTypes, includeTestFixtures);
 		await selectAndEnqueue(client, ctx, summary, "EXTRACT_DETERMINISTIC_REQUIREMENTS", `SELECT c.id AS canonical_job_id,
               jv.id AS job_version_id,
               COALESCE(c.processing_state, c.processing_status) <> 'RAW_STAGED' AS repair_existing_state
@@ -11746,13 +12588,13 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`, [ctx.workspaceId, maxPerType], (row) => ({
-			id: row.job_version_id,
+			id: requiredSeedValue(row, "job_version_id"),
 			payload: {
-				canonical_job_id: row.canonical_job_id,
-				job_version_id: row.job_version_id,
+				canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+				job_version_id: requiredSeedValue(row, "job_version_id"),
 				...row.repair_existing_state === true ? { repair_existing_state: true } : {}
 			}
-		}), enabledTypes);
+		}), enabledTypes, includeTestFixtures);
 		await selectAndEnqueue(client, ctx, summary, "APPLY_HARD_GATES", `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
        FROM canonical_jobs c
        JOIN job_versions jv
@@ -11784,13 +12626,13 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`, [ctx.workspaceId, maxPerType], (row) => ({
-			id: row.job_version_id,
+			id: requiredSeedValue(row, "job_version_id"),
 			payload: {
-				canonical_job_id: row.canonical_job_id,
-				job_version_id: row.job_version_id,
+				canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+				job_version_id: requiredSeedValue(row, "job_version_id"),
 				...row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}
 			}
-		}), enabledTypes);
+		}), enabledTypes, includeTestFixtures);
 		await selectAndEnqueue(client, ctx, summary, "EXTRACT_QUOTED_REQUIREMENTS", `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
        FROM canonical_jobs c
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
@@ -11813,18 +12655,70 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`, [ctx.workspaceId, maxPerType], (row) => ({
-			id: row.job_version_id,
+			id: requiredSeedValue(row, "job_version_id"),
 			payload: {
-				canonical_job_id: row.canonical_job_id,
-				job_version_id: row.job_version_id
+				canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+				job_version_id: requiredSeedValue(row, "job_version_id")
 			}
-		}), enabledTypes);
+		}), enabledTypes, includeTestFixtures);
+		await selectAndEnqueue(client, ctx, summary, "PUBLISH_EMBEDDING", `SELECT c.id AS canonical_job_id,
+              jv.id AS job_version_id,
+              c.latest_match_run_id AS repair_match_run_id
+       FROM canonical_jobs c
+       JOIN job_versions jv
+         ON jv.workspace_id = c.workspace_id
+        AND jv.id = c.latest_job_version_id
+       JOIN match_runs mr
+         ON mr.workspace_id = c.workspace_id
+        AND mr.id = c.latest_match_run_id
+        AND mr.canonical_job_id = c.id
+        AND mr.job_version_id = jv.id
+       WHERE c.workspace_id = $1
+         AND COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+         AND c.profile_match_status = 'UNKNOWN'
+         AND (
+           mr.status <> 'COMPLETED'
+           OR mr.embedding_space_id IS NULL
+         )
+         AND EXISTS (
+           SELECT 1
+           FROM job_version_pipeline_state ps
+           JOIN requirement_extraction_runs rer
+             ON rer.workspace_id = ps.workspace_id
+            AND rer.job_version_id = ps.job_version_id
+            AND rer.run_type = 'DETERMINISTIC'
+            AND rer.status = 'COMPLETED'
+            AND jv.active_requirement_set_id IS NOT NULL
+            AND rer.requirement_set_id = jv.active_requirement_set_id
+           WHERE ps.workspace_id = c.workspace_id
+             AND ps.job_version_id = jv.id
+             AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
+             AND ps.stage_status = 'COMPLETED'
+         )
+       ORDER BY c.updated_at ASC
+       LIMIT $2`, [ctx.workspaceId, maxPerType], (row) => ({
+			id: requiredSeedValue(row, "job_version_id"),
+			payload: {
+				canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+				job_version_id: requiredSeedValue(row, "job_version_id"),
+				repair_dependency: "SEMANTIC_MATCH_EMBEDDING_INCOMPLETE",
+				repair_generation: SEMANTIC_MATCH_REPAIR_GENERATION,
+				repair_match_run_id: requiredSeedValue(row, "repair_match_run_id"),
+				reprocess_existing_state: true
+			}
+		}), enabledTypes, includeTestFixtures);
 		await selectAndEnqueue(client, ctx, summary, "PUBLISH_EMBEDDING", `SELECT c.id AS canonical_job_id, jv.id AS job_version_id,
               TRUE AS reprocess_existing_state
        FROM canonical_jobs c
        JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.id = c.latest_job_version_id
        WHERE c.workspace_id = $1
-          AND COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED')
+          AND (
+            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+            OR (
+              COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+              AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'
+            )
+          )
          AND EXISTS (
            SELECT 1
            FROM job_version_pipeline_state ps
@@ -11863,13 +12757,13 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
 			process.env.EMBEDDING_PRIMARY_PROVIDER || "gemini",
 			process.env.EMBEDDING_PRIMARY_MODEL || "gemini-embedding-001"
 		], (row) => ({
-			id: row.job_version_id,
+			id: requiredSeedValue(row, "job_version_id"),
 			payload: {
-				canonical_job_id: row.canonical_job_id,
-				job_version_id: row.job_version_id,
+				canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+				job_version_id: requiredSeedValue(row, "job_version_id"),
 				...row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}
 			}
-		}), enabledTypes);
+		}), enabledTypes, includeTestFixtures);
 		await selectAndEnqueue(client, ctx, summary, "ROUTE_LANE", `SELECT c.id AS canonical_job_id, jv.id AS job_version_id,
               COALESCE(c.processing_state, c.processing_status) AS processing_state,
               TRUE AS reprocess_existing_state
@@ -11880,8 +12774,16 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
            OR (
             $2::boolean
-             AND COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
-             AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') <> 'POLICY_NO_MATCH'
+             AND (
+               (
+                 COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
+                 AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'
+               )
+               OR (
+                 COALESCE(c.processing_state, c.processing_status) = 'UNMATCHED'
+                 AND c.routing_disposition = 'POLICY_NO_MATCH'
+               )
+             )
              AND NOT EXISTS (
                SELECT 1
                  FROM pipeline_tasks replay_task
@@ -11909,14 +12811,14 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
 			routingDeferredReplayVersion,
 			maxPerType
 		], (row) => ({
-			id: row.job_version_id,
+			id: requiredSeedValue(row, "job_version_id"),
 			payload: {
-				canonical_job_id: row.canonical_job_id,
-				job_version_id: row.job_version_id,
+				canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+				job_version_id: requiredSeedValue(row, "job_version_id"),
 				...row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {},
-				...includeRoutingDeferred && row.processing_state === "ROUTING_DEFERRED" ? { routing_deferred_replay_version: routingDeferredReplayVersion } : {}
+				...includeRoutingDeferred && typeof row.processing_state === "string" && ["ROUTING_DEFERRED", "UNMATCHED"].includes(row.processing_state) ? { routing_deferred_replay_version: routingDeferredReplayVersion } : {}
 			}
-		}), enabledTypes);
+		}), enabledTypes, includeTestFixtures);
 		await selectAndEnqueue(client, ctx, summary, "MATCH_PROFILE_EVIDENCE", `SELECT c.id AS canonical_job_id,
               COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
               active_profile.id AS profile_version_id,
@@ -11984,14 +12886,14 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
          )
        ORDER BY c.updated_at ASC
        LIMIT $2`, [ctx.workspaceId, maxPerType], (row) => ({
-			id: row.job_version_id,
+			id: requiredSeedValue(row, "job_version_id"),
 			payload: {
-				canonical_job_id: row.canonical_job_id,
-				job_version_id: row.job_version_id,
+				canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+				job_version_id: requiredSeedValue(row, "job_version_id"),
 				profile_version_id: row.profile_version_id,
 				...row.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}
 			}
-		}), enabledTypes);
+		}), enabledTypes, includeTestFixtures);
 		await selectAndEnqueue(client, ctx, summary, "DECIDE_RECOMMENDATION", `SELECT c.id AS canonical_job_id,
               COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
               active_profile.id AS profile_version_id,
@@ -12045,14 +12947,14 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
          )
        ORDER BY c.updated_at ASC
        LIMIT $2`, [ctx.workspaceId, maxPerType], (row) => ({
-			id: row.job_version_id,
+			id: requiredSeedValue(row, "job_version_id"),
 			payload: {
-				canonical_job_id: row.canonical_job_id,
-				job_version_id: row.job_version_id,
+				canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+				job_version_id: requiredSeedValue(row, "job_version_id"),
 				...row.profile_version_id ? { profile_version_id: row.profile_version_id } : {},
 				...row.repair_existing_state === true ? { repair_existing_state: true } : {}
 			}
-		}), enabledTypes);
+		}), enabledTypes, includeTestFixtures);
 		await selectAndEnqueue(client, ctx, summary, "ENQUEUE_EXPLANATION", `SELECT c.id AS canonical_job_id, COALESCE(c.latest_job_version_id, jv.id) AS job_version_id
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
@@ -12119,12 +13021,13 @@ async function seedRecoverablePipelineTasks(clientOrPool, options = {}) {
          )
        ORDER BY c.updated_at ASC
        LIMIT $2`, [ctx.workspaceId, maxPerType], (row) => ({
-			id: row.job_version_id,
+			id: requiredSeedValue(row, "job_version_id"),
 			payload: {
-				canonical_job_id: row.canonical_job_id,
-				job_version_id: row.job_version_id
+				canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+				job_version_id: requiredSeedValue(row, "job_version_id"),
+				...options.budgetRunId ? { queue_budget_run_id: options.budgetRunId } : {}
 			}
-		}), enabledTypes);
+		}), enabledTypes, includeTestFixtures);
 		return summary;
 	} finally {
 		if (ownsClient && typeof client.release === "function") client.release();
@@ -12144,12 +13047,42 @@ async function lookupObservationVersion(clientOrPool, ctx, observationId) {
 		jobVersionId: rows[0]?.job_version_id ?? null
 	};
 }
+async function taskTargetsTestFixture(task, clientOrPool, ctx) {
+	const canonicalJobId = optionalStringPayload(task, "canonical_job_id");
+	const jobVersionId = optionalStringPayload(task, "job_version_id");
+	const observationId = optionalStringPayload(task, "observation_id");
+	if (!canonicalJobId && !jobVersionId && !observationId) return false;
+	const { rows } = await clientOrPool.query(`SELECT EXISTS (
+       SELECT 1
+       FROM canonical_jobs c
+       LEFT JOIN job_versions jv
+         ON jv.workspace_id = c.workspace_id
+        AND jv.canonical_job_id = c.id
+       LEFT JOIN raw_job_observations observation
+         ON observation.workspace_id = c.workspace_id
+        AND observation.job_version_id = jv.id
+       WHERE c.workspace_id = $1
+         AND c.is_test_fixture = TRUE
+         AND (
+           c.id::text = $2
+           OR jv.id::text = $3
+           OR observation.id::text = $4
+         )
+     ) AS exists`, [
+		ctx.workspaceId,
+		canonicalJobId ?? "",
+		jobVersionId ?? "",
+		observationId ?? ""
+	]);
+	return Boolean(rows[0]?.exists);
+}
 async function lookupJobState(clientOrPool, ctx, jobVersionId) {
 	const { rows } = await clientOrPool.query(`SELECT c.id AS canonical_job_id,
             COALESCE(c.processing_state, c.processing_status) AS processing_state,
             c.primary_lane,
             c.lane_evidence,
             c.routing_disposition,
+            c.profile_match_status,
             c.gate_decision,
             c.recommendation_eligibility,
             c.recommendation_outcome,
@@ -12168,6 +13101,7 @@ async function lookupJobState(clientOrPool, ctx, jobVersionId) {
 		primaryLane: row?.primary_lane ?? null,
 		laneEvidence: row?.lane_evidence ?? null,
 		routingDisposition: row?.routing_disposition ?? null,
+		profileMatchStatus: row?.profile_match_status ?? null,
 		gateDecision: row?.gate_decision ?? null,
 		recommendationEligibility: row?.recommendation_eligibility ?? null,
 		recommendationOutcome: row?.recommendation_outcome ?? null,
@@ -12254,15 +13188,173 @@ function isTechnicalRoutingDeferral(state) {
 		"EMBEDDING_DIM_MISMATCH"
 	].some((marker) => evidence.includes(marker));
 }
-async function markTaskTargetNeedsManualReview(task, clientOrPool, ctx, errorMessage) {
+function classifyRoutingDependency(laneEvidence) {
+	const evidence = String(laneEvidence || "").toUpperCase();
+	if (evidence.includes("EMBEDDING_DIM_MISMATCH")) return {
+		code: "EMBEDDING_SPACE_INCOMPATIBLE",
+		repairTaskType: "PUBLISH_EMBEDDING"
+	};
+	if (evidence.includes("PROTOTYPE") || evidence.includes("LANE_PROTOTYPE")) return {
+		code: "LANE_PROTOTYPE_EMBEDDING_MISSING",
+		repairTaskType: "PUBLISH_EMBEDDING"
+	};
+	if (evidence.includes("ROUTING_ERROR") || evidence.includes("PROVIDER") || evidence.includes("UNAVAILABLE")) return {
+		code: "PROVIDER_TEMPORARILY_UNAVAILABLE",
+		repairTaskType: "PUBLISH_EMBEDDING"
+	};
+	return {
+		code: "JOB_EMBEDDING_MISSING",
+		repairTaskType: "PUBLISH_EMBEDDING"
+	};
+}
+async function classifySemanticMatchDependency(clientOrPool, ctx, jobVersionId) {
+	const { rows } = await clientOrPool.query(`WITH active_spaces AS (
+       SELECT id
+       FROM embedding_spaces
+       WHERE workspace_id = $1 AND active = TRUE
+     ),
+     requirements AS (
+       SELECT requirement.id::text AS node_id
+       FROM job_versions version
+       JOIN job_requirements requirement
+         ON requirement.workspace_id = version.workspace_id
+        AND requirement.requirement_set_id = version.active_requirement_set_id
+        AND requirement.status = 'VALIDATED'
+       WHERE version.workspace_id = $1
+         AND version.id = $2
+     ),
+     profile_facts AS (
+       SELECT COALESCE(fact.fact_revision_id, fact.id)::text AS node_id
+       FROM profile_versions profile
+       JOIN profile_facts fact
+         ON fact.workspace_id = profile.workspace_id
+        AND fact.profile_version_id = profile.id
+       WHERE profile.workspace_id = $1
+         AND profile.status = 'ACTIVE'
+     )
+     SELECT
+       EXISTS (SELECT 1 FROM active_spaces) AS has_active_space,
+       EXISTS (
+         SELECT 1
+         FROM active_spaces space
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM requirements requirement
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM v_matchable_nodes node
+             WHERE node.workspace_id = $1
+               AND node.embedding_space_id = space.id
+               AND node.node_type = 'JOB_REQUIREMENT'
+               AND node.node_id::text = requirement.node_id
+           )
+         )
+       ) AS requirements_complete,
+       EXISTS (
+         SELECT 1
+         FROM active_spaces space
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM profile_facts fact
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM v_matchable_nodes node
+             WHERE node.workspace_id = $1
+               AND node.embedding_space_id = space.id
+               AND node.node_type = 'PROFILE_FACT'
+               AND node.node_id::text = fact.node_id
+           )
+         )
+       ) AS profile_facts_complete,
+       EXISTS (
+         SELECT 1
+         FROM active_spaces space
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM requirements requirement
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM v_matchable_nodes node
+             WHERE node.workspace_id = $1
+               AND node.embedding_space_id = space.id
+               AND node.node_type = 'JOB_REQUIREMENT'
+               AND node.node_id::text = requirement.node_id
+           )
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM profile_facts fact
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM v_matchable_nodes node
+             WHERE node.workspace_id = $1
+               AND node.embedding_space_id = space.id
+               AND node.node_type = 'PROFILE_FACT'
+               AND node.node_id::text = fact.node_id
+           )
+         )
+       ) AS complete_cohort`, [ctx.workspaceId, jobVersionId]);
+	const result = rows[0];
+	if (!result?.has_active_space || result.complete_cohort) return {
+		code: "EMBEDDING_SPACE_INCOMPATIBLE",
+		repairTaskType: "PUBLISH_EMBEDDING"
+	};
+	if (!result.requirements_complete) return {
+		code: "REQUIREMENT_EMBEDDING_MISSING",
+		repairTaskType: "PUBLISH_EMBEDDING"
+	};
+	if (!result.profile_facts_complete) return {
+		code: "PROFILE_FACT_EMBEDDING_MISSING",
+		repairTaskType: "PUBLISH_EMBEDDING"
+	};
+	return {
+		code: "EMBEDDING_SPACE_INCOMPATIBLE",
+		repairTaskType: "PUBLISH_EMBEDDING"
+	};
+}
+async function enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx) {
+	const repairPayload = {
+		canonical_job_id: task.payload?.canonical_job_id,
+		job_version_id: jobVersionId,
+		repair_dependency: dependency.code,
+		repair_generation: SEMANTIC_MATCH_REPAIR_GENERATION,
+		repair_attempt: task.attemptNumber,
+		...dependency.repairTaskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS" ? { repair_existing_state: true } : { reprocess_existing_state: true }
+	};
+	await enqueueStageTask(dependency.repairTaskType, jobVersionId, repairPayload, clientOrPool, ctx);
+}
+async function reactivateBlockedDependencyTasks(repairTaskType, jobVersionId, clientOrPool, ctx) {
+	await clientOrPool.query(`UPDATE pipeline_tasks
+     SET status = 'PENDING',
+         available_at = NOW(),
+         lease_id = NULL,
+         lease_expires_at = NULL,
+         heartbeat_at = NULL,
+         claimed_by = NULL,
+         last_error = NULL,
+         blocked_on = NULL,
+         blocked_reason = NULL,
+         repair_action = NULL,
+         completed_at = NULL,
+         updated_at = NOW()
+     WHERE workspace_id = $1
+       AND status = 'BLOCKED_DEPENDENCY'
+       AND repair_action = $2
+       AND payload->>'job_version_id' = $3`, [
+		ctx.workspaceId,
+		repairTaskType,
+		jobVersionId
+	]);
+}
+async function markTaskTargetProcessingError(task, clientOrPool, ctx, errorMessage) {
 	const payload = task.payload || {};
 	let canonicalJobId = typeof payload.canonical_job_id === "string" ? payload.canonical_job_id : null;
 	const jobVersionId = typeof payload.job_version_id === "string" ? payload.job_version_id : null;
 	if (!canonicalJobId && jobVersionId) canonicalJobId = (await lookupJobState(clientOrPool, ctx, jobVersionId)).canonicalJobId;
 	if (!canonicalJobId) return;
 	await clientOrPool.query(`UPDATE canonical_jobs
-     SET processing_state = 'NEEDS_MANUAL_REVIEW',
-         processing_status = 'NEEDS_MANUAL_REVIEW',
+     SET processing_state = 'PROCESSING_ERROR',
+         processing_status = 'PROCESSING_ERROR',
          rejection_reason = COALESCE(rejection_reason, $3),
          updated_at = NOW()
      WHERE workspace_id = $1
@@ -12270,7 +13362,7 @@ async function markTaskTargetNeedsManualReview(task, clientOrPool, ctx, errorMes
        AND COALESCE(processing_state, processing_status) <> 'MANUALLY_REMOVED'`, [
 		ctx.workspaceId,
 		canonicalJobId,
-		`Task ${task.taskKey} exhausted retries: ${errorMessage}`
+		`ENGINE_ERROR: task ${task.taskKey} exhausted automatic retries: ${errorMessage}`
 	]);
 }
 async function maybeEnqueueAfterTask(taskType, task, clientOrPool, ctx) {
@@ -12286,6 +13378,7 @@ async function maybeEnqueueAfterTask(taskType, task, clientOrPool, ctx) {
 	}
 	if (!jobVersionId) return;
 	if (taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS") {
+		await reactivateBlockedDependencyTasks("EXTRACT_DETERMINISTIC_REQUIREMENTS", jobVersionId, clientOrPool, ctx);
 		const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
 		const repairExistingState = payload.repair_existing_state === true;
 		if (repairExistingState && (/* @__PURE__ */ new Set([
@@ -12316,7 +13409,10 @@ async function maybeEnqueueAfterTask(taskType, task, clientOrPool, ctx) {
 	const stagePayload = {
 		canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
 		job_version_id: jobVersionId,
-		...payload.reprocess_existing_state === true ? { reprocess_existing_state: true } : {}
+		...payload.reprocess_existing_state === true ? { reprocess_existing_state: true } : {},
+		...typeof payload.repair_dependency === "string" ? { repair_dependency: payload.repair_dependency } : {},
+		...typeof payload.repair_generation === "string" ? { repair_generation: payload.repair_generation } : {},
+		...typeof payload.repair_match_run_id === "string" ? { repair_match_run_id: payload.repair_match_run_id } : {}
 	};
 	if (taskType === "APPLY_HARD_GATES") {
 		if (state.processingState === "PREQUALIFIED") await enqueueStageTask("PUBLISH_EMBEDDING", jobVersionId, stagePayload, clientOrPool, ctx);
@@ -12328,6 +13424,7 @@ async function maybeEnqueueAfterTask(taskType, task, clientOrPool, ctx) {
 		return;
 	}
 	if (taskType === "PUBLISH_EMBEDDING") {
+		await reactivateBlockedDependencyTasks("PUBLISH_EMBEDDING", jobVersionId, clientOrPool, ctx);
 		await enqueueStageTask("ROUTE_LANE", jobVersionId, stagePayload, clientOrPool, ctx);
 		return;
 	}
@@ -12366,7 +13463,11 @@ async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies,
 		const reprocess = (task.payload || {}).reprocess === true;
 		const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
 		if (currentState.latestJobVersionId && currentState.latestJobVersionId !== jobVersionId) return;
-		if (["HARD_REJECTED", "MANUALLY_REMOVED"].includes(currentState.processingState || "")) return;
+		if ([
+			"HARD_REJECTED",
+			"MANUALLY_REMOVED",
+			"UNMATCHED"
+		].includes(currentState.processingState || "")) return;
 		if ((await dependencies.runRequirementsExtraction(clientOrPool, {
 			context: ctx,
 			jobVersionIds: [jobVersionId],
@@ -12400,6 +13501,29 @@ async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies,
 			"HARD_REJECTED",
 			"NEEDS_VERIFICATION"
 		].includes(state.processingState || "")) throw new Error(`Hard gate left job_version_id=${jobVersionId} in unexpected state ${state.processingState}.`);
+		const policyRecheckRequestId = optionalStringPayload(task, "policy_recheck_request_id");
+		if (policyRecheckRequestId) {
+			const canonicalJobId = state.canonicalJobId ?? optionalStringPayload(task, "canonical_job_id");
+			if (!canonicalJobId) throw new Error(`Policy recheck task is missing canonical_job_id for request ${policyRecheckRequestId}.`);
+			if (((await clientOrPool.query(`UPDATE policy_recheck_requests
+         SET status = 'RESOLVED',
+             resolution_outcome = $5,
+             resolved_at = NOW()
+         WHERE workspace_id = $1
+           AND id = $2::uuid
+           AND canonical_job_id = $3::uuid
+           AND job_version_id = $4::uuid
+           AND status = 'PENDING'
+         RETURNING id`, [
+				ctx.workspaceId,
+				policyRecheckRequestId,
+				canonicalJobId,
+				jobVersionId,
+				`DETERMINISTIC_GATE_RECHECK_COMPLETED:${state.processingState}`
+			])).rowCount ?? 0) === 0) {
+				if (!(await clientOrPool.query(`SELECT status FROM policy_recheck_requests WHERE workspace_id = $1 AND id = $2::uuid LIMIT 1`, [ctx.workspaceId, policyRecheckRequestId])).rows[0]) throw new Error(`Policy recheck request ${policyRecheckRequestId} disappeared before resolution.`);
+			}
+		}
 		return;
 	}
 	if (taskType === "EXTRACT_QUOTED_REQUIREMENTS") {
@@ -12437,13 +13561,18 @@ async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies,
 		const processingState = state.processingState;
 		if ([
 			"LANE_ROUTED",
+			"UNMATCHED",
 			"MATCHED",
 			"QUEUED_FOR_AI",
 			"EVALUATING",
 			"AI_EVALUATED",
 			"EVALUATED"
 		].includes(processingState ?? "")) return;
-		if (isTechnicalRoutingDeferral(state)) throw new Error(`Lane routing deferred due to technical evidence for job_version_id=${jobVersionId}.`);
+		if (isTechnicalRoutingDeferral(state)) {
+			const dependency = classifyRoutingDependency(state.laneEvidence);
+			await enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx);
+			throw new PipelineTaskDependencyBlockedError(`${dependency.code}:${jobVersionId}`, dependency.repairTaskType, `Lane routing is blocked by ${dependency.code} for job_version_id=${jobVersionId}.`);
+		}
 		if (state.processingState === "ROUTING_DEFERRED" && summary.deferred >= 0) return;
 		throw new Error(`Lane routing did not advance job_version_id=${jobVersionId}; state=${state.processingState}.`);
 	}
@@ -12453,18 +13582,20 @@ async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies,
 		if (![
 			"LANE_ROUTED",
 			"MATCHED",
+			"UNMATCHED",
 			"QUEUED_FOR_AI",
 			"EVALUATING",
 			"AI_EVALUATED",
 			"EVALUATED"
 		].includes(matchState.processingState || "")) return;
+		if (["MATCHED", "UNMATCHED"].includes(matchState.processingState || "")) return;
 		if (!await jobVersionHasCompletedRequirementsExtraction(clientOrPool, ctx, jobVersionId, "DETERMINISTIC")) {
 			await enqueueStageTask("EXTRACT_DETERMINISTIC_REQUIREMENTS", jobVersionId, {
 				canonical_job_id: task.payload?.canonical_job_id,
 				job_version_id: jobVersionId,
 				repair_existing_state: true
 			}, clientOrPool, ctx);
-			throw new PipelineTaskDependencyBlockedError(`EXTRACT_DETERMINISTIC_REQUIREMENTS:${jobVersionId}`, "Run deterministic requirement extraction, then resume MATCH_PROFILE_EVIDENCE.", `Matching is blocked until deterministic requirements are current for job_version_id=${jobVersionId}.`);
+			throw new PipelineTaskDependencyBlockedError(`EXTRACT_DETERMINISTIC_REQUIREMENTS:${jobVersionId}`, "EXTRACT_DETERMINISTIC_REQUIREMENTS", `Matching is blocked until deterministic requirements are current for job_version_id=${jobVersionId}.`);
 		}
 		const summary = await dependencies.runDeterministicMatcher(clientOrPool, {
 			context: ctx,
@@ -12473,13 +13604,19 @@ async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies,
 		});
 		if (summary.errors > 0) throw new Error(`Deterministic matching reported ${summary.errors} error(s).`);
 		const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
-		if (state.processingState !== "MATCHED") throw new Error(`Deterministic matching left job_version_id=${jobVersionId} in state ${state.processingState}.`);
-		return;
+		if (["MATCHED", "UNMATCHED"].includes(state.processingState || "")) return;
+		if (state.processingState === "LANE_ROUTED" && state.profileMatchStatus === "UNKNOWN") {
+			const dependency = await classifySemanticMatchDependency(clientOrPool, ctx, jobVersionId);
+			await enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx);
+			throw new PipelineTaskDependencyBlockedError(`${dependency.code}:${jobVersionId}`, dependency.repairTaskType, `Matching is blocked by ${dependency.code} for job_version_id=${jobVersionId}.`);
+		}
+		throw new Error(`Deterministic matching left job_version_id=${jobVersionId} in state ${state.processingState}.`);
 	}
 	if (taskType === "DECIDE_RECOMMENDATION") {
 		const decisionState = await lookupJobState(clientOrPool, ctx, jobVersionId);
 		if (decisionState.latestJobVersionId && decisionState.latestJobVersionId !== jobVersionId) return;
 		if (["RAW_STAGED", "PREQUALIFIED"].includes(decisionState.processingState || "")) return;
+		if (decisionState.recommendationOutcome && ["HARD_REJECTED", "UNMATCHED"].includes(decisionState.processingState || "")) return;
 		const matchDependentStates = /* @__PURE__ */ new Set([
 			"LANE_ROUTED",
 			"MATCHED",
@@ -12488,7 +13625,9 @@ async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies,
 			"AI_EVALUATED",
 			"EVALUATED"
 		]);
-		if (!(decisionState.processingState === "ROUTING_DEFERRED") && (decisionState.gateDecision === "PASS" || matchDependentStates.has(decisionState.processingState || "")) && !await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId)) {
+		const isRoutingDeferred = decisionState.processingState === "ROUTING_DEFERRED";
+		const isUnmatched = decisionState.processingState === "UNMATCHED";
+		if (!isRoutingDeferred && !isUnmatched && (decisionState.gateDecision === "PASS" || matchDependentStates.has(decisionState.processingState || "")) && !await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId)) {
 			await enqueueStageTask("MATCH_PROFILE_EVIDENCE", jobVersionId, {
 				canonical_job_id: (task.payload || {}).canonical_job_id,
 				job_version_id: jobVersionId
@@ -12514,6 +13653,7 @@ async function executeStageTask(taskType, task, clientOrPool, ctx, dependencies,
 async function processClaimedTask(task, clientOrPool, ctx, options, dependencies) {
 	const taskType = task.taskType;
 	if (!PIPELINE_STAGE_TASK_TYPES.includes(taskType)) throw new Error(`Unsupported pipeline task type: ${task.taskType}`);
+	const isTestFixture = !options.includeTestFixtures && await taskTargetsTestFixture(task, clientOrPool, ctx);
 	let heartbeatTimer = null;
 	if (options.heartbeatSeconds > 0) {
 		heartbeatTimer = setInterval(() => {
@@ -12527,6 +13667,10 @@ async function processClaimedTask(task, clientOrPool, ctx, options, dependencies
 		heartbeatTimer.unref?.();
 	}
 	try {
+		if (isTestFixture) {
+			await completePipelineTaskAndRun(task, clientOrPool, { context: ctx });
+			return;
+		}
 		await executeStageTask(taskType, task, clientOrPool, ctx, dependencies, options.budgetRunId);
 		await completePipelineTaskAndRun(task, clientOrPool, {
 			context: ctx,
@@ -12549,9 +13693,13 @@ async function runPipelineStageTaskWorker(clientOrPool, options = {}, dependenci
 	const leaseSeconds = options.leaseSeconds ?? 300;
 	const heartbeatSeconds = options.heartbeatSeconds ?? Math.max(15, Math.floor(leaseSeconds / 3));
 	const wallClockMs = options.wallClockMs ?? 33e5;
+	const minTimeToStartTaskMs = Math.max(0, Math.min(options.minTimeToStartTaskMs ?? 12e4, Math.max(0, wallClockMs - 1)));
 	const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
 	const budgetRunId = options.budgetRunId?.trim() || crypto.default.randomUUID();
+	const claimedByType = {};
 	const startedAt = Date.now();
+	const deadlineAt = startedAt + wallClockMs;
+	const canStartAnotherTask = () => Date.now() + minTimeToStartTaskMs < deadlineAt;
 	const summary = {
 		seeded: null,
 		claimed: 0,
@@ -12559,6 +13707,8 @@ async function runPipelineStageTaskWorker(clientOrPool, options = {}, dependenci
 		blocked: 0,
 		failed: 0,
 		deadLettered: 0,
+		exitReason: "QUEUE_DRAINED",
+		durationMs: 0,
 		byType: {},
 		errors: []
 	};
@@ -12568,80 +13718,104 @@ async function runPipelineStageTaskWorker(clientOrPool, options = {}, dependenci
 			context: ctx,
 			taskTypes,
 			includeRoutingDeferred: options.includeRoutingDeferred,
+			includeTestFixtures: options.includeTestFixtures,
 			routingDeferredReplayVersion: options.routingDeferredReplayVersion,
+			budgetRunId,
 			maxSeedPerType: options.maxSeedPerType
 		});
-		while (summary.claimed < maxTasks && Date.now() - startedAt < wallClockMs) {
+		while (summary.claimed < maxTasks && canStartAnotherTask()) {
 			throwIfWorkerCancelled(options.abortSignal);
 			let madeProgress = false;
 			for (const taskType of taskTypes) {
-				throwIfWorkerCancelled(options.abortSignal);
-				if (summary.claimed >= maxTasks || Date.now() - startedAt >= wallClockMs) break;
-				const claimedTasks = await claimPipelineTasks({
-					taskType,
-					limit: Math.min(claimBatchSize, maxTasks - summary.claimed),
-					leaseSeconds,
-					claimedBy
-				}, client, { context: ctx });
-				if (claimedTasks.length === 0) continue;
-				madeProgress = true;
-				for (const task of claimedTasks) {
-					summary.claimed += 1;
-					incrementWorker(summary, task.taskType, "claimed");
-					try {
-						throwIfWorkerCancelled(options.abortSignal);
-						await processClaimedTask(task, client, ctx, {
-							heartbeatSeconds,
-							budgetRunId
-						}, dependencies);
-						summary.completed += 1;
-						incrementWorker(summary, task.taskType, "completed");
-						throwIfWorkerCancelled(options.abortSignal);
-					} catch (error) {
-						if (error instanceof PipelineWorkerCancelledError) {
-							await releasePipelineTaskForRetry(task, error.message, client, { context: ctx }).catch((releaseError) => {
-								summary.errors.push({
-									taskType: task.taskType,
-									taskKey: task.taskKey,
-									error: `Cancellation lease release failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`
+				const stageLimit = Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks));
+				while (summary.claimed < maxTasks && (claimedByType[taskType] ?? 0) < stageLimit && canStartAnotherTask()) {
+					throwIfWorkerCancelled(options.abortSignal);
+					const claimedTasks = await claimPipelineTasks({
+						taskType,
+						limit: Math.min(claimBatchSize, maxTasks - summary.claimed, stageLimit - (claimedByType[taskType] ?? 0)),
+						leaseSeconds,
+						claimedBy
+					}, client, { context: ctx });
+					if (claimedTasks.length === 0) break;
+					madeProgress = true;
+					for (const task of claimedTasks) {
+						summary.claimed += 1;
+						claimedByType[taskType] = (claimedByType[taskType] ?? 0) + 1;
+						incrementWorker(summary, task.taskType, "claimed");
+						try {
+							throwIfWorkerCancelled(options.abortSignal);
+							await processClaimedTask(task, client, ctx, {
+								heartbeatSeconds,
+								budgetRunId,
+								includeTestFixtures: options.includeTestFixtures === true
+							}, dependencies);
+							summary.completed += 1;
+							incrementWorker(summary, task.taskType, "completed");
+							throwIfWorkerCancelled(options.abortSignal);
+						} catch (error) {
+							if (error instanceof PipelineWorkerCancelledError) {
+								await releasePipelineTaskForRetry(task, error.message, client, { context: ctx }).catch((releaseError) => {
+									summary.errors.push({
+										taskType: task.taskType,
+										taskKey: task.taskKey,
+										error: `Cancellation lease release failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`
+									});
 								});
+								throw error;
+							}
+							if (error instanceof PipelineTaskDependencyBlockedError) {
+								await blockPipelineTask(task, {
+									blockedOn: error.blockedOn,
+									reason: error.message,
+									repairAction: error.repairAction
+								}, client, { context: ctx });
+								summary.blocked += 1;
+								incrementWorker(summary, task.taskType, "blocked");
+								continue;
+							}
+							const message = error instanceof Error ? error.message : String(error);
+							const exhausted = task.attemptNumber >= task.maxAttempts;
+							await failPipelineTask(task, message, client, { context: ctx });
+							if (exhausted) {
+								await markTaskTargetProcessingError(task, client, ctx, message);
+								summary.deadLettered += 1;
+								incrementWorker(summary, task.taskType, "deadLettered");
+							}
+							summary.failed += 1;
+							incrementWorker(summary, task.taskType, "failed");
+							summary.errors.push({
+								taskType: task.taskType,
+								taskKey: task.taskKey,
+								error: message
 							});
-							throw error;
 						}
-						if (error instanceof PipelineTaskDependencyBlockedError) {
-							await blockPipelineTask(task, {
-								blockedOn: error.blockedOn,
-								reason: error.message,
-								repairAction: error.repairAction
-							}, client, { context: ctx });
-							summary.blocked += 1;
-							incrementWorker(summary, task.taskType, "blocked");
-							continue;
-						}
-						const message = error instanceof Error ? error.message : String(error);
-						const exhausted = task.attemptNumber >= task.maxAttempts;
-						await failPipelineTask(task, message, client, { context: ctx });
-						if (exhausted) {
-							await markTaskTargetNeedsManualReview(task, client, ctx, message);
-							summary.deadLettered += 1;
-							incrementWorker(summary, task.taskType, "deadLettered");
-						}
-						summary.failed += 1;
-						incrementWorker(summary, task.taskType, "failed");
-						summary.errors.push({
-							taskType: task.taskType,
-							taskKey: task.taskKey,
-							error: message
-						});
 					}
 				}
 			}
-			if (!madeProgress) break;
+			if (!madeProgress || taskTypes.every((taskType) => (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks)))) break;
 		}
+		const durationMs = Date.now() - startedAt;
+		const stageLimitsReached = taskTypes.every((taskType) => (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks)));
+		summary.durationMs = durationMs;
+		summary.exitReason = summary.claimed >= maxTasks ? "MAX_TASKS_REACHED" : durationMs >= wallClockMs || !canStartAnotherTask() ? "WALL_CLOCK_BUDGET_REACHED" : stageLimitsReached ? "STAGE_LIMIT_REACHED" : "QUEUE_DRAINED";
 		return summary;
 	} finally {
 		if (ownsClient && typeof client.release === "function") client.release();
 	}
+}
+//#endregion
+//#region src/tasks/pipelineWorkerExitPolicy.ts
+function enforcePipelineWorkerExitPolicy(input) {
+	if (input.deadLetterCount > 0 || input.deadLetteredThisRun > 0) throw new Error(`Pipeline task worker has ${input.deadLetterCount} DEAD_LETTER task(s).`);
+	if (input.failOnRetryWait && input.failedThisRun > 0) throw new Error(`Pipeline task worker moved ${input.failedThisRun} task(s) to RETRY_WAIT. See task errors above.`);
+	if (input.retryWaitCount > input.maxRetryWaitCount) throw new Error(`Retry backlog exceeded SLO: ${input.retryWaitCount} > ${input.maxRetryWaitCount}.`);
+	if (input.oldestRetryWaitAgeSeconds > input.maxRetryWaitAgeSeconds) throw new Error(`Retry backlog age exceeded SLO: ${input.oldestRetryWaitAgeSeconds}s > ${input.maxRetryWaitAgeSeconds}s.`);
+	if (!(input.claimedThisRun > 0 && [
+		"MAX_TASKS_REACHED",
+		"WALL_CLOCK_BUDGET_REACHED",
+		"STAGE_LIMIT_REACHED"
+	].includes(input.exitReason || "")) && input.oldestActivePendingAgeSeconds > input.maxPendingAgeSeconds) throw new Error(`Pending queue age exceeded SLO: ${input.oldestActivePendingAgeSeconds}s > ${input.maxPendingAgeSeconds}s.`);
+	if (input.claimedThisRun === 0 && input.activePendingCount >= input.noProgressPendingThreshold) throw new Error(`No forward progress: ${input.activePendingCount} active PENDING task(s) remain claimable after the worker run.`);
 }
 //#endregion
 //#region scripts/process_pipeline_tasks.ts
@@ -12672,6 +13846,24 @@ function parseBooleanEnv(name, fallback) {
 		"yes",
 		"on"
 	].includes(raw.trim().toLowerCase());
+}
+async function readQueueHealth(pool) {
+	const ctx = await resolveWorkspaceContext(pool);
+	const result = await pool.query(`SELECT task_type, status, task_count, oldest_age_seconds
+     FROM v_pipeline_task_queue_health
+     WHERE workspace_id = $1
+     ORDER BY task_type, status`, [ctx.workspaceId]);
+	const byStatus = (status) => result.rows.filter((row) => row.status === status).reduce((total, row) => total + Number(row.task_count), 0);
+	const oldestAge = (status) => result.rows.filter((row) => row.status === status).reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+	return {
+		pending: byStatus("PENDING"),
+		retryWait: byStatus("RETRY_WAIT"),
+		blockedDependency: byStatus("BLOCKED_DEPENDENCY"),
+		deadLetter: byStatus("DEAD_LETTER"),
+		oldestPendingAgeSeconds: oldestAge("PENDING"),
+		oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
+		byType: result.rows
+	};
 }
 function requestShutdown(signal) {
 	if (shutdownController.signal.aborted) return;
@@ -12726,22 +13918,59 @@ async function processPipelineTasks() {
 		const summary = await runPipelineStageTaskWorker(pool, {
 			taskTypes: activeTaskTypes,
 			seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
-			includeRoutingDeferred: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED", false),
+			includeRoutingDeferred: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED", true),
+			includeTestFixtures: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES", false),
 			routingDeferredReplayVersion: process.env.PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION || "routing_deferred_replay_v1",
-			maxTasks: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_TASKS", 100, 1e3),
+			maxTasks: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_TASKS", 100, 1e4),
+			maxTasksByType: parsePipelineStageTaskLimits(process.env.PIPELINE_TASK_WORKER_STAGE_MAX_TASKS),
 			claimBatchSize: parsePositiveIntEnv("PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE", 1, 25),
 			leaseSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_LEASE_SECONDS", 300, 3600),
 			heartbeatSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS", 60, 600),
-			wallClockMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_WALL_CLOCK_MS", 33e5, 828e5),
+			wallClockMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_WALL_CLOCK_MS", 6e5, 828e5),
+			minTimeToStartTaskMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS", 12e4, 6e5),
 			maxSeedPerType: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE", 500, 5e3),
 			claimedBy: process.env.PIPELINE_TASK_WORKER_CLAIMED_BY || `gha-stage-worker:${process.pid}`,
 			abortSignal: shutdownController.signal
 		});
 		console.log("Pipeline task worker summary:", JSON.stringify(summary, null, 2));
-		if (shutdownController.signal.aborted) throw new PipelineWorkerCancelledError(`Pipeline task worker cancelled by ${shutdownSignal || "shutdown signal"}.`);
+		const queueHealth = await readQueueHealth(pool);
+		console.log("Pipeline task queue health:", JSON.stringify(queueHealth, null, 2));
+		console.log("Pipeline bounded-run result:", JSON.stringify({
+			exit_reason: summary.exitReason,
+			claimed: summary.claimed,
+			completed: summary.completed,
+			failed: summary.failed,
+			dead_lettered: summary.deadLettered,
+			remaining_pending: queueHealth.pending,
+			duration_ms: summary.durationMs
+		}, null, 2));
+		if (queueHealth.retryWait > 0) console.warn(`Pipeline has ${queueHealth.retryWait} RETRY_WAIT task(s); automatic recovery remains scheduled.`);
+		if (queueHealth.blockedDependency > 0) console.warn(`Pipeline has ${queueHealth.blockedDependency} BLOCKED_DEPENDENCY task(s) awaiting repair artifacts.`);
+		const activeQueueRows = queueHealth.byType.filter((row) => activeTaskTypes.includes(row.task_type));
+		const activePending = activeQueueRows.filter((row) => row.status === "PENDING").reduce((total, row) => total + Number(row.task_count), 0);
+		const oldestActivePendingAgeSeconds = activeQueueRows.filter((row) => row.status === "PENDING").reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+		const maxRetryWaitCount = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT", 500, 1e5);
+		const maxRetryWaitAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_AGE_SECONDS", 21600, 604800);
+		const maxPendingAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS", 7200, 604800);
+		const noProgressPendingThreshold = parsePositiveIntEnv("PIPELINE_TASK_WORKER_NO_FORWARD_PROGRESS_PENDING_THRESHOLD", 1, 1e5);
 		const failOnRetryWait = parseBooleanEnv("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT", true);
-		if (summary.deadLettered > 0) throw new Error(`Pipeline task worker dead-lettered ${summary.deadLettered} task(s).`);
-		if (failOnRetryWait && summary.failed > 0) throw new Error(`Pipeline task worker moved ${summary.failed} task(s) to RETRY_WAIT. See task errors above.`);
+		enforcePipelineWorkerExitPolicy({
+			claimedThisRun: summary.claimed,
+			failedThisRun: summary.failed,
+			exitReason: summary.exitReason,
+			deadLetteredThisRun: summary.deadLettered,
+			deadLetterCount: queueHealth.deadLetter,
+			retryWaitCount: queueHealth.retryWait,
+			oldestRetryWaitAgeSeconds: queueHealth.oldestRetryWaitAgeSeconds,
+			activePendingCount: activePending,
+			oldestActivePendingAgeSeconds,
+			failOnRetryWait,
+			maxRetryWaitCount,
+			maxRetryWaitAgeSeconds,
+			maxPendingAgeSeconds,
+			noProgressPendingThreshold
+		});
+		if (shutdownController.signal.aborted) throw new PipelineWorkerCancelledError(`Pipeline task worker cancelled by ${shutdownSignal || "shutdown signal"}.`);
 	} catch (err) {
 		workerError = err instanceof Error ? err : new Error(String(err));
 		console.error("Pipeline task worker failed:", workerError.message);

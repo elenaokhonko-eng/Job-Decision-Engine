@@ -1,17 +1,33 @@
-import os
-import sys
-import subprocess
-import urllib.request
-import json
-import html
-import glob
-import time
 import datetime
+import glob
+import html
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+from io import BytesIO
+
+import docx
 import pandas as pd
 import streamlit as st
-import docx
 from fpdf import FPDF
-from io import BytesIO
+from streamlit_application_workflow import is_document_generation_eligible
+from streamlit_formatters import as_number, format_percent, format_score, format_signal
+from streamlit_workspace_contracts import (
+    validate_application_row,
+    validate_application_workspace_summary,
+    validate_apply_now_row,
+    validate_company_culture_coverage_summary,
+    validate_company_culture_evidence_row,
+    validate_company_culture_row,
+    validate_profile_coverage_row,
+    validate_profile_evidence_row,
+    validate_ranked_job_row,
+    validate_track_row,
+)
+
 
 # Load environment variables from Streamlit secrets, .env, and .env.local
 def load_dotenv():
@@ -20,7 +36,7 @@ def load_dotenv():
         if hasattr(st, "secrets") and st.secrets:
             for key, val in st.secrets.items():
                 if isinstance(val, str):
-                    os.environ[key] = val
+                    os.environ.setdefault(key, val)
     except Exception:
         pass
 
@@ -35,7 +51,7 @@ def load_dotenv():
                     if line and not line.startswith("#") and "=" in line:
                         key, val = line.split("=", 1)
                         val = val.strip("'\"")
-                        os.environ[key.strip()] = val
+                        os.environ.setdefault(key.strip(), val)
 
 load_dotenv()
 
@@ -63,11 +79,17 @@ def _open_read_only_connection():
         raise RuntimeError("DATABASE_URL is not configured for the read-only Streamlit fallback.")
 
     try:
+        import certifi
         import psycopg2
     except ImportError as exc:
-        raise RuntimeError("psycopg2-binary is required for the Streamlit read-only fallback.") from exc
+        raise RuntimeError("psycopg2-binary and certifi are required for the verified Streamlit read-only fallback.") from exc
 
-    connection = psycopg2.connect(database_url, connect_timeout=10)
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=10,
+        sslmode="verify-full",
+        sslrootcert=certifi.where(),
+    )
     connection.set_session(readonly=True, autocommit=True)
     return connection
 
@@ -195,43 +217,315 @@ REJECTED_READ_MODEL_QUERY = """
     FROM v_rejected_jobs_audit_scoped a
     WHERE a.workspace_id = %s
     ORDER BY observed_at DESC NULLS LAST, a.id DESC
-    LIMIT %s
+    LIMIT %s OFFSET %s
 """
 
-DASHBOARD_SUMMARY_READ_MODEL_QUERY = """
-    SELECT
-      s.total_jobs,
-      s.gate_passed,
-      s.hard_rejected,
-      s.unmatched,
-      s.processing,
-      s.technical_errors,
-      s.user_action_required,
-      s.priority_count,
-      s.review_count,
-      s.track_count,
-      s.skip_count,
-      s.recommended_count,
-      s.apply_now_count,
-      s.prequalified_count,
-      s.lane_routed_count,
-      s.matched_count,
-      s.ai_evaluated_count,
-      s.decision_complete_count
-    FROM v_job_engine_dashboard_summary_scoped s
-    WHERE s.workspace_id = %s
+APPLICATION_WORKSPACE_SUMMARY_QUERY = """
+    SELECT workspace_id, user_id, total_jobs, apply_now_count, track_count,
+           processing_count, rejected_unmatched_count, applied_count, technical_errors,
+           top_ten_ready_count, skip_count, user_key
+    FROM v_application_workspace_summary_scoped
+    WHERE workspace_id = %s AND user_key = %s
     LIMIT 1
 """
 
+TOP_TEN_READY_QUERY = """
+    SELECT workspace_id, canonical_job_id, job_version_id, profile_version_id,
+           match_run_id, deterministic_decision_id, ai_evaluation_id,
+           ranking_policy_version, ranking_context_fingerprint, ranking_position,
+           overall_rank_score, ranking_confidence, is_top_ten_ready,
+           policy_recheck_required, recommendation_eligibility, recommendation_outcome,
+           gate_status, primary_lane, title, company, canonical_url, location,
+           workplace_type, lane_confidence, deterministic_match_score,
+           deterministic_match_coverage, recommendation_evidence_completeness,
+           evaluation_summary, requirement_fit_score, requirement_coverage_score,
+           evidence_completeness_score, lane_confidence_score, autonomy_score,
+           politics_risk_score, sensory_workload_risk_score, strategic_value_score,
+           focus_protection_score, building_ratio_score, interaction_burden_score,
+           current_artifact_status, version_mismatch
+    FROM v_top_ten_ready_jobs_scoped
+    WHERE workspace_id = %s
+    ORDER BY ranking_position ASC
+    LIMIT 10
+"""
 
-def fetch_dashboard_summary_from_postgres_read_model():
-    workspace_connection = _open_read_only_connection()
+APPLY_NOW_JOBS_QUERY = """
+    SELECT workspace_id, canonical_job_id, job_version_id, title, company,
+           canonical_url, source, location, workplace_type, employment_type,
+           description, gate_status, rejection_codes, gate_evidence_quotes,
+           primary_lane, secondary_lanes, lane_confidence, priority_score,
+           deterministic_match_score, deterministic_match_coverage,
+           processing_state, processing_status, recommendation_eligibility,
+           recommendation_outcome, recommendation_requirement_score,
+           recommendation_coverage_score, recommendation_evidence_completeness,
+           recommendation_decided_at, nd_friendly_score, politics_stress_score,
+           sensory_overload_index, next_action, strategic_value, evaluation_summary,
+           eval_provider, eval_is_fallback, version_mismatch, observed_at, evaluated_at,
+           latest_match_run_id, current_artifact_status, current_artifact_reason,
+           blocked_task_count, overall_rank_score, ranking_confidence,
+           ranking_snapshot_id, policy_recheck_required
+    FROM v_apply_now_jobs_scoped
+    WHERE workspace_id = %s
+    ORDER BY overall_rank_score DESC NULLS LAST,
+             CASE recommendation_outcome WHEN 'PRIORITY' THEN 0 ELSE 1 END,
+             deterministic_match_score DESC NULLS LAST,
+             observed_at DESC NULLS LAST
+    LIMIT 5000
+"""
+
+TRACK_JOBS_QUERY = """
+    SELECT workspace_id, canonical_job_id, job_version_id, title, company,
+           canonical_url, source, location, workplace_type, employment_type,
+           description, gate_status, primary_lane, lane_confidence,
+           deterministic_match_score, deterministic_match_coverage,
+           recommendation_eligibility, recommendation_outcome, version_mismatch,
+           current_artifact_status, current_artifact_reason, blocked_task_count,
+           deterministic_decision_id, deterministic_context_fingerprint,
+           deterministic_trace_notes
+    FROM v_track_jobs_scoped
+    WHERE workspace_id = %s
+    ORDER BY deterministic_match_score DESC NULLS LAST, observed_at DESC NULLS LAST
+    LIMIT 5000
+"""
+
+APPLICATIONS_READ_MODEL_QUERY = """
+    SELECT workspace_id, user_id, application_record_id, canonical_job_id,
+           job_version_id, application_status, submission_url, cv_document_run_id,
+           cover_letter_document_run_id, notes, target_submit_at, submitted_at,
+           follow_up_at, last_action_at, created_at, updated_at, title, company,
+           canonical_url, processing_state, recommendation_eligibility,
+           recommendation_outcome, primary_lane, secondary_lanes, is_current_job_version,
+           cv_document_status, cover_letter_document_status
+    FROM v_application_workspace_scoped
+    WHERE workspace_id = %s AND user_id = %s
+    ORDER BY updated_at DESC, application_record_id DESC
+    LIMIT %s
+"""
+
+PROFILE_EVIDENCE_READ_MODEL_QUERY = """
+    SELECT workspace_id, canonical_job_id, job_version_id, profile_version_id,
+           match_run_id, requirement_id, requirement_key, requirement_type,
+           importance, requirement_text, requirement_quote, match_type, match_score,
+           profile_fact_id, fact_type, profile_fact_statement, evidence_tier,
+           fact_verification_status, engagement_id, engagement_type,
+           experience_class, role_title, engagement_evidence,
+           engagement_verification_status, project_evidence
+    FROM v_job_profile_evidence_scoped
+    WHERE workspace_id = %s AND canonical_job_id = %s AND job_version_id = %s
+    ORDER BY CASE importance WHEN 'MUST' THEN 0 WHEN 'PREFERRED' THEN 1 ELSE 2 END,
+             CASE match_type WHEN 'EXACT' THEN 0 WHEN 'SEMANTIC' THEN 1 ELSE 2 END,
+             requirement_key
+"""
+
+PROFILE_COVERAGE_READ_MODEL_QUERY = """
+    SELECT workspace_id, canonical_job_id, job_version_id, profile_version_id,
+           profile_version_number, match_run_id, exact_match_count, semantic_match_count,
+           must_exact_matched_count, must_semantic_matched_count,
+           preferred_exact_matched_count, preferred_semantic_matched_count,
+           must_requirement_count, must_matched_count, must_missing_count,
+           preferred_requirement_count, preferred_matched_count, preferred_missing_count,
+           professional_production_evidence_count, deployed_open_source_evidence_count,
+           applied_project_evidence_count, course_project_evidence_count,
+           knowledge_only_evidence_count, profile_fact_count, achievement_count,
+           responsibility_count, project_count, skill_count, technology_count,
+           domain_count, publication_count, open_source_count, active_credential_count,
+           engagement_count
+    FROM v_profile_coverage_scoped
+    WHERE workspace_id = %s AND canonical_job_id = %s AND job_version_id = %s
+    LIMIT 1
+"""
+
+COMPANY_CULTURE_READ_MODEL_QUERY = """
+    SELECT workspace_id, workspace_company_id, company_name, normalized_company_name,
+           company_job_count, observation_count, autonomy_score, autonomy_score_available,
+           autonomy_observation_count, politics_risk_score, politics_risk_score_available,
+           politics_risk_observation_count, sensory_workload_risk_score,
+           sensory_workload_risk_score_available, sensory_workload_risk_observation_count,
+           strategic_value_score, strategic_value_score_available,
+           strategic_value_observation_count, focus_protection_score,
+           focus_protection_score_available, focus_protection_observation_count,
+           autonomy_score_status, politics_risk_score_status,
+           sensory_workload_risk_score_status, strategic_value_score_status,
+           focus_protection_score_status, confidence_level, last_updated
+    FROM v_company_culture_analytics_scoped
+    WHERE workspace_id = %s
+    ORDER BY observation_count DESC, company_name ASC
+    LIMIT %s
+"""
+
+COMPANY_CULTURE_EVIDENCE_QUERY = """
+    SELECT workspace_id, workspace_company_id, company_name, canonical_job_id,
+           job_version_id, ai_evaluation_id, role_title, observed_at, autonomy_signal,
+           politics_risk_signal, sensory_workload_risk_signal, focus_protection_signal,
+           evidence_by_signal, source_type, source_url, evidence_quote
+    FROM v_company_culture_evidence_scoped
+    WHERE workspace_id = %s AND workspace_company_id = %s
+    ORDER BY observed_at DESC, ai_evaluation_id
+    LIMIT %s
+"""
+
+COMPANY_CULTURE_COVERAGE_QUERY = """
+    SELECT %s::uuid AS workspace_id,
+           count(*)::integer AS companies_represented,
+           count(*) FILTER (WHERE company_job_count > 0)::integer AS companies_with_jobs,
+           count(*) FILTER (WHERE observation_count > 0)::integer AS companies_with_culture_observations,
+           count(*) FILTER (WHERE confidence_level IN ('MEDIUM', 'HIGH'))::integer AS companies_with_medium_high_confidence
+    FROM v_company_culture_analytics_scoped
+    WHERE workspace_id = %s
+"""
+
+
+def _read_model_user_id(connection, workspace_id):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT u.id
+            FROM workspace_users u
+            JOIN workspace_memberships m ON m.user_id = u.id
+            WHERE m.workspace_id = %s AND u.user_key = %s AND m.status = 'ACTIVE'
+            LIMIT 1
+            """,
+            (workspace_id, get_workspace_user_key()),
+        )
+        row = cursor.fetchone()
+    if not row:
+        raise RuntimeError("No active database membership for the configured workspace user.")
+    return row[0]
+
+
+def _validate_workspace_rows(rows, workspace_id, validator, *scope_args):
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Workspace read model returned a non-object row.")
+        validator(row, workspace_id, *scope_args)
+    return rows
+
+
+def fetch_application_workspace_summary():
+    connection = _open_read_only_connection()
     try:
-        workspace_id = _read_model_workspace_id(workspace_connection)
+        workspace_id = _read_model_workspace_id(connection)
     finally:
-        workspace_connection.close()
-    rows = _read_model_query(DASHBOARD_SUMMARY_READ_MODEL_QUERY, (workspace_id,))
-    return rows[0] if rows else {}
+        connection.close()
+    rows = _read_model_query(
+        APPLICATION_WORKSPACE_SUMMARY_QUERY,
+        (workspace_id, get_workspace_user_key()),
+    )
+    if not rows:
+        raise RuntimeError("No authoritative application workspace summary is available.")
+    return _validate_workspace_rows(
+        rows,
+        workspace_id,
+        validate_application_workspace_summary,
+        get_workspace_user_key(),
+    )[0]
+
+
+def fetch_top_ten_ready_jobs():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(TOP_TEN_READY_QUERY, (workspace_id,))
+    return _validate_workspace_rows(rows, workspace_id, validate_ranked_job_row)
+
+
+def fetch_apply_now_jobs():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(APPLY_NOW_JOBS_QUERY, (workspace_id,))
+    return _validate_workspace_rows(rows, workspace_id, validate_apply_now_row)
+
+
+def fetch_track_jobs():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(TRACK_JOBS_QUERY, (workspace_id,))
+    return _validate_workspace_rows(rows, workspace_id, validate_track_row)
+
+
+def fetch_applications_from_read_model(limit=250):
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+        user_id = _read_model_user_id(connection, workspace_id)
+    finally:
+        connection.close()
+    rows = _read_model_query(APPLICATIONS_READ_MODEL_QUERY, (workspace_id, user_id, limit))
+    return _validate_workspace_rows(rows, workspace_id, validate_application_row, user_id)
+
+
+def fetch_job_profile_evidence(canonical_job_id, job_version_id):
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(
+        PROFILE_EVIDENCE_READ_MODEL_QUERY,
+        (workspace_id, canonical_job_id, job_version_id),
+    )
+    return _validate_workspace_rows(rows, workspace_id, validate_profile_evidence_row)
+
+
+def fetch_profile_coverage(canonical_job_id, job_version_id):
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(
+        PROFILE_COVERAGE_READ_MODEL_QUERY,
+        (workspace_id, canonical_job_id, job_version_id),
+    )
+    validated = _validate_workspace_rows(rows, workspace_id, validate_profile_coverage_row)
+    if not validated:
+        raise RuntimeError("No current profile coverage row is available for this job.")
+    return validated[0]
+
+
+def fetch_company_analytics_from_db():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(COMPANY_CULTURE_READ_MODEL_QUERY, (workspace_id, 2000))
+    return _validate_workspace_rows(rows, workspace_id, validate_company_culture_row)
+
+
+def fetch_company_culture_coverage():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(COMPANY_CULTURE_COVERAGE_QUERY, (workspace_id, workspace_id))
+    if not rows:
+        raise RuntimeError("Company culture coverage summary is unavailable.")
+    return _validate_workspace_rows(
+        rows, workspace_id, validate_company_culture_coverage_summary
+    )[0]
+
+
+def fetch_company_culture_evidence(workspace_company_id):
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(
+        COMPANY_CULTURE_EVIDENCE_QUERY,
+        (workspace_id, workspace_company_id, 100),
+    )
+    return _validate_workspace_rows(rows, workspace_id, validate_company_culture_evidence_row)
 
 
 def fetch_jobs_from_postgres_read_model():
@@ -243,13 +537,13 @@ def fetch_jobs_from_postgres_read_model():
     return _read_model_query(SHORTLIST_READ_MODEL_QUERY, (workspace_id, 5000))
 
 
-def fetch_rejected_jobs_from_postgres_read_model():
+def fetch_rejected_jobs_from_postgres_read_model(limit=200, offset=0):
     workspace_connection = _open_read_only_connection()
     try:
         workspace_id = _read_model_workspace_id(workspace_connection)
     finally:
         workspace_connection.close()
-    return _read_model_query(REJECTED_READ_MODEL_QUERY, (workspace_id, 200))
+    return _read_model_query(REJECTED_READ_MODEL_QUERY, (workspace_id, limit, offset))
 
 
 def fetch_preference_modes_from_postgres_read_model():
@@ -263,15 +557,16 @@ def fetch_preference_modes_from_postgres_read_model():
           created_at,
           updated_at
         FROM workspace_user_preference_modes
-        WHERE workspace_id = %s
+        WHERE workspace_id = %s AND user_id = %s
         ORDER BY is_active DESC, updated_at DESC
     """
     workspace_connection = _open_read_only_connection()
     try:
         workspace_id = _read_model_workspace_id(workspace_connection)
+        user_id = _read_model_user_id(workspace_connection, workspace_id)
     finally:
         workspace_connection.close()
-    return _read_model_query(query, (workspace_id,))
+    return _read_model_query(query, (workspace_id, user_id))
 
 def api_request(method, path, params=None, body=None, timeout=30):
     import urllib.parse
@@ -408,10 +703,11 @@ def normalize_workability_facts(raw):
     travel_pct = raw.get("travelPercentage")
     is_contract = raw.get("isContract")
     location_elig = raw.get("locationEligibility")
+    travel_number = as_number(travel_pct)
     return {
         "office_days_min": office_days if isinstance(office_days, int) else None,
         "office_days_max": office_days if isinstance(office_days, int) else None,
-        "travel_pct_max": travel_pct if isinstance(travel_pct, (int, float)) else None,
+        "travel_pct_max": float(travel_number) if travel_number is not None else None,
         "employment_type": "CONTRACT" if is_contract is True else "UNKNOWN",
         "location_restriction": None if location_elig in ("PASS", "UNKNOWN", None) else "RESTRICTED",
     }
@@ -445,7 +741,7 @@ def derive_deterministic_recommendation(job):
 
 # Configure the page setting with modern style
 st.set_page_config(
-    page_title="Job Decision Engine - High-Autonomy Career Architect",
+    page_title="Job Decision Engine — Application Command Centre",
     page_icon="💼",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -901,18 +1197,69 @@ def ingest_linkedin_saved_json(jobs):
         st.error(f"LinkedIn import failed: {e}")
         return 0, 0
 
-def fetch_company_analytics_from_db():
+def save_application_status(job, status, application=None):
     if not get_api_base_url():
-        return []
-    try:
-        resp = api_request("GET", "/api/v2/analytics/companies", timeout=60)
-        rows = resp.get("companies") or []
-        if not isinstance(rows, list):
-            raise Exception("API returned invalid companies payload (companies is not a list).")
-        return [dict(r) for r in rows if isinstance(r, dict)]
-    except Exception as e:
-        st.error(f"Failed to fetch company analytics: {e}")
-        return []
+        st.error("Application tracking changes require the managed API. Configure JDEC_API_BASE_URL and JDEC_API_TOKEN.")
+        return
+
+    if application and application.get("application_record_id"):
+        response = api_request(
+            "PATCH",
+            f"/applications/{application['application_record_id']}",
+            body={"status": status},
+        )
+    else:
+        response = api_request(
+            "POST",
+            "/applications",
+            body={
+                "canonical_job_id": job["canonical_job_id"],
+                "job_version_id": job["job_version_id"],
+                "status": status,
+                "submission_url": job.get("canonical_url"),
+            },
+        )
+    if not isinstance(response, dict) or not response.get("ok"):
+        raise RuntimeError("The application tracker did not confirm the status change.")
+    st.success(f"Application tracker updated to {status}.")
+    st.rerun()
+
+
+def render_job_document_actions(job, key_prefix):
+    cv_col, letter_col = st.columns(2)
+    with cv_col:
+        if st.button("Generate CV", key=f"{key_prefix}_cv", width="stretch"):
+            with st.spinner("Generating a current, evidence-grounded CV..."):
+                started_at = time.time()
+                run_checked_command(
+                    [
+                        "npx",
+                        "tsx",
+                        "scripts/generate_cv.ts",
+                        str(job["canonical_job_id"]),
+                        str(job["job_version_id"]),
+                    ],
+                    "generate_cv",
+                )
+                st.success("CV generated from the current profile and match evidence.")
+                show_generated_document_downloads(started_at, f"{key_prefix}_cv_download")
+    with letter_col:
+        if st.button("Generate cover letter", key=f"{key_prefix}_letter", width="stretch"):
+            with st.spinner("Generating a current, evidence-grounded cover letter..."):
+                started_at = time.time()
+                run_checked_command(
+                    [
+                        "npx",
+                        "tsx",
+                        "scripts/generate_cover_letter.ts",
+                        str(job["canonical_job_id"]),
+                        str(job["job_version_id"]),
+                    ],
+                    "generate_cover_letter",
+                )
+                st.success("Cover letter generated from current requirement evidence.")
+                show_generated_document_downloads(started_at, f"{key_prefix}_letter_download")
+
 
 # Fetch data
 jobs_list = fetch_jobs_from_db()
@@ -927,8 +1274,8 @@ for job in jobs_list:
     job["decision_evidence_completeness"] = evidence_completeness
 
 # Title
-st.title("💼 Job Decision Engine — Streamlit Console (v4.1)")
-st.markdown("### *Multi-Stage Weighted High-Autonomy Technical Architect & Builder Console*")
+st.title("Job Decision Engine — Application Command Centre")
+st.caption("Discover, rank, prepare, and track grounded job applications.")
 st.markdown("---")
 
 # Sidebar - Filters & Stats
@@ -1155,40 +1502,58 @@ if api_base_url:
 else:
     st.sidebar.caption("📦 PostgreSQL Direct Read Model (Live)")
 
-# Authoritative aggregate metrics from read model with fallback
-dashboard_summary = {}
+# Unpaginated counts come only from the authoritative V5 workspace read model.
+application_workspace_summary = {}
+summary_error = None
 try:
-    dashboard_summary = fetch_dashboard_summary_from_postgres_read_model()
-except Exception:
-    pass
+    application_workspace_summary = fetch_application_workspace_summary()
+except Exception as exc:
+    summary_error = str(exc)
 
-total_jobs = dashboard_summary.get("total_jobs") if dashboard_summary.get("total_jobs") is not None else len(jobs_list)
-gate_passed_count = dashboard_summary.get("gate_passed") if dashboard_summary.get("gate_passed") is not None else sum(1 for j in jobs_list if j.get("gate_status") == "PASS")
-apply_now_count = dashboard_summary.get("apply_now_count") if dashboard_summary.get("apply_now_count") is not None else sum(1 for j in jobs_list if j.get("decision_outcome") in ("PRIORITY", "REVIEW"))
-track_count = dashboard_summary.get("track_count") if dashboard_summary.get("track_count") is not None else sum(1 for j in jobs_list if j.get("decision_outcome") == "TRACK")
-recommended_count = dashboard_summary.get("recommended_count") if dashboard_summary.get("recommended_count") is not None else (apply_now_count + track_count)
-processing_count = dashboard_summary.get("processing") if dashboard_summary.get("processing") is not None else sum(1 for j in jobs_list if j.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY")
-automatic_processing_count = processing_count
-rejected_count = ((dashboard_summary.get("hard_rejected") or 0) + (dashboard_summary.get("unmatched") or 0)) if (dashboard_summary.get("hard_rejected") is not None) else (len(rejected_jobs_audit) + sum(1 for j in jobs_list if j.get("pipeline_display_category") == "REJECTED_UNMATCHED"))
-technical_error_count = dashboard_summary.get("technical_errors") if dashboard_summary.get("technical_errors") is not None else sum(1 for j in jobs_list if j.get("pipeline_display_category") == "TECHNICAL_ERROR")
-manual_action_count = dashboard_summary.get("user_action_required") if dashboard_summary.get("user_action_required") is not None else sum(1 for j in jobs_list if j.get("requires_user_action") is True)
-decision_complete_count = dashboard_summary.get("decision_complete_count") if dashboard_summary.get("decision_complete_count") is not None else sum(1 for j in jobs_list if j.get("decision_outcome") is not None)
-ai_evaluated_count = dashboard_summary.get("ai_evaluated_count") if dashboard_summary.get("ai_evaluated_count") is not None else sum(1 for j in jobs_list if j.get("processing_state") == "AI_EVALUATED")
-toxic_count = sum(1 for j in jobs_list if isinstance(j.get("politics_stress_score"), (int, float)) and j.get("politics_stress_score") >= 70)
+if summary_error:
+    st.sidebar.error(f"Application workspace summary is unavailable: {summary_error}")
+    metric_values = {label: "Unavailable" for label in (
+        "Top 10 Ready", "Apply Now", "Track", "Processing",
+        "Rejected / Unmatched", "Applied", "Technical Errors",
+    )}
+else:
+    metric_values = {
+        "Top 10 Ready": application_workspace_summary["top_ten_ready_count"],
+        "Apply Now": application_workspace_summary["apply_now_count"],
+        "Track": application_workspace_summary["track_count"],
+        "Processing": application_workspace_summary["processing_count"],
+        "Rejected / Unmatched": application_workspace_summary["rejected_unmatched_count"],
+        "Applied": application_workspace_summary["applied_count"],
+        "Technical Errors": application_workspace_summary["technical_errors"],
+    }
 
-st.sidebar.subheader("📊 Engine Statistics")
-st.sidebar.metric("Total Vault Jobs", total_jobs)
-st.sidebar.metric("Gate Passed", gate_passed_count)
-st.sidebar.metric("🏆 Apply Now", apply_now_count)
-st.sidebar.metric("👀 Track", track_count)
-st.sidebar.metric("Recommended", recommended_count)
-st.sidebar.metric("Processing", automatic_processing_count)
-st.sidebar.metric("Rejected", rejected_count)
-st.sidebar.metric("Error", technical_error_count)
-st.sidebar.metric("⚠️ User action required", manual_action_count)
-st.sidebar.metric("Decision Complete", decision_complete_count)
-st.sidebar.metric("AI Evaluated", ai_evaluated_count)
-st.sidebar.metric("Toxicity Flags", toxic_count)
+processing_count = metric_values["Processing"]
+rejected_count = metric_values["Rejected / Unmatched"]
+technical_error_count = metric_values["Technical Errors"]
+
+st.sidebar.subheader("Application workspace")
+for metric_label, metric_value in metric_values.items():
+    st.sidebar.metric(metric_label, metric_value)
+
+try:
+    top_ten_ready_jobs = fetch_top_ten_ready_jobs()
+except Exception as exc:
+    top_ten_ready_jobs = None
+    st.error(f"Top 10 Ranked is unavailable: {exc}")
+
+try:
+    application_records = fetch_applications_from_read_model()
+except Exception as exc:
+    application_records = None
+    st.error(f"Application tracker is unavailable: {exc}")
+
+application_by_job = None
+if application_records is not None:
+    application_by_job = {
+        (record["canonical_job_id"], record["job_version_id"]): record
+        for record in application_records
+    }
+
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📅 Automated Schedules")
@@ -1294,150 +1659,199 @@ if track_filter != "All Tracks":
         filtered_jobs = [j for j in filtered_jobs if j.get("primary_lane") == track_filter]
 
 # Main Dashboard Layout tabs
-tab_dashboard, tab_add_job, tab_linkedin, tab_analytics, tab_cv = st.tabs(["📁 Postgres Job Vault", "➕ Add Job Ad", "🔗 LinkedIn Saved Jobs", "🔥 ND Culture Analytics", "📄 CV Customizer"])
+tab_dashboard, tab_applications, tab_add_job, tab_linkedin, tab_analytics, tab_cv = st.tabs([
+    "Application command centre",
+    "Application tracker",
+    "Add job",
+    "LinkedIn saved jobs",
+    "Company culture analytics",
+    "CV customizer",
+])
 
 with tab_dashboard:
-    def top_rec_sort_key(j):
-        outcome_rank = 0 if j.get("decision_outcome") == "PRIORITY" else 1
-        eligibility_rank = 0 if j.get("decision_eligibility") == "ELIGIBLE" else 1
-        req = j.get("decision_requirement_score")
-        cov = j.get("decision_coverage_score")
-        evidence = j.get("decision_evidence_completeness")
-        nd = j.get("nd_friendly_score")
-        pol = j.get("politics_stress_score")
-        return (
-            outcome_rank,
-            eligibility_rank,
-            -(req if isinstance(req, (int, float)) else -1),
-            -(cov if isinstance(cov, (int, float)) else -1),
-            -(evidence if isinstance(evidence, (int, float)) else 0),
-            -(nd if isinstance(nd, (int, float)) else -1),
-            (pol if isinstance(pol, (int, float)) else 999),
-            escape_text(j.get("company")),
-            escape_text(j.get("title")),
-        )
+    st.header("Application command centre")
+    st.caption("PRIORITY = strongest opportunity; REVIEW = apply after review; TRACK = more fit evidence needed; SKIP = completed negative decision.")
+    st.markdown("## Top 10 — apply first")
 
-    # Deterministic Top Recommended list (Apply Now: PRIORITY + REVIEW)
-    apply_now_jobs = [
-        j for j in jobs_list
-        if not j.get("version_mismatch")
-        and j.get("decision_outcome") in ("PRIORITY", "REVIEW")
-    ]
-    apply_now_jobs = sorted(apply_now_jobs, key=top_rec_sort_key)[:15]
-
-    st.subheader(f"🏆 Top Recommended Opportunities — Apply Now ({apply_now_count})")
-    if not apply_now_jobs:
-        st.info("No deterministic priority or review recommendations found yet. Run the discovery & evaluation pipeline.")
+    if top_ten_ready_jobs is None:
+        st.error("Ranked opportunities could not be loaded from the current ranking read model.")
+    elif not top_ten_ready_jobs:
+        st.info("No jobs currently meet the current-context Top 10 ranking readiness requirements.")
     else:
-        cols = st.columns(2)
-        for idx, rjob in enumerate(apply_now_jobs):
-            col_idx = idx % 2
-            with cols[col_idx]:
-                version_warn = " ⚠️ Stale Evaluation" if rjob.get("version_mismatch") else ""
+        for rank_position, ranked_job in enumerate(top_ten_ready_jobs, start=1):
+            title = ranked_job.get("title") or "Untitled role"
+            company = ranked_job.get("company") or "Unknown company"
+            job_key = (ranked_job.get("canonical_job_id"), ranked_job.get("job_version_id"))
+            application_record = application_by_job.get(job_key) if application_by_job is not None else None
+            ranked_job["decision_eligibility"] = ranked_job.get("recommendation_eligibility")
+            ranked_job["decision_outcome"] = ranked_job.get("recommendation_outcome")
+            with st.container(border=True):
+                st.subheader(f"#{rank_position} {title}")
+                st.caption(f"{company} · {ranked_job.get('location') or 'Location unknown'} · {ranked_job.get('primary_lane') or 'Lane unknown'}")
+                score_columns = st.columns(4)
+                score_columns[0].metric("Overall rank", format_score(ranked_job.get("overall_rank_score")))
+                score_columns[1].metric("Ranking confidence", format_percent(ranked_job.get("ranking_confidence")))
+                score_columns[2].metric("Requirement fit", format_score(ranked_job.get("requirement_fit_score")))
+                score_columns[3].metric("Coverage", format_percent(ranked_job.get("requirement_coverage_score")))
+                detail_columns = st.columns(4)
+                detail_columns[0].metric("Evidence completeness", format_percent(ranked_job.get("evidence_completeness_score")))
+                detail_columns[1].metric("Autonomy", format_signal(ranked_job.get("autonomy_score")))
+                detail_columns[2].metric("Politics risk", format_signal(ranked_job.get("politics_risk_score")))
+                detail_columns[3].metric("Sensory/workload risk", format_signal(ranked_job.get("sensory_workload_risk_score")))
+                st.caption(
+                    f"Focus protection: {format_signal(ranked_job.get('focus_protection_score'))} · "
+                    f"Building/research: {format_percent(ranked_job.get('building_ratio_score'))} · "
+                    f"Interaction burden: {format_percent(ranked_job.get('interaction_burden_score'))} · "
+                    f"Strategic value: {format_percent(ranked_job.get('strategic_value_score'))}"
+                )
+                st.caption(
+                    f"Decision: {ranked_job.get('recommendation_outcome')} · "
+                    f"{ranked_job.get('evaluation_summary') or 'No concise evaluation summary is available.'}"
+                )
+                action_columns = st.columns(3)
+                posting_url = safe_http_url(ranked_job.get("canonical_url"))
+                with action_columns[0]:
+                    if posting_url:
+                        st.link_button("Open application", posting_url, width="stretch")
+                    else:
+                        st.caption("Posting URL unavailable")
+                with action_columns[1]:
+                    if application_records is None:
+                        st.button("Tracker unavailable", key=f"top_{rank_position}_tracker_unavailable", disabled=True)
+                    elif application_record is None:
+                        if st.button("Add to tracker", key=f"top_{rank_position}_to_apply", width="stretch"):
+                            try:
+                                save_application_status(ranked_job, "TO_APPLY")
+                            except Exception as exc:
+                                st.error(f"Could not update the application tracker: {exc}")
+                    elif application_record.get("application_status") != "APPLIED":
+                        if st.button("Mark applied", key=f"top_{rank_position}_applied", width="stretch"):
+                            try:
+                                save_application_status(ranked_job, "APPLIED", application_record)
+                            except Exception as exc:
+                                st.error(f"Could not update the application tracker: {exc}")
+                    else:
+                        st.success("Applied")
+                with action_columns[2]:
+                    current_status = application_record.get("application_status") if application_record else "Not tracked"
+                    cv_status = application_record.get("cv_document_status") if application_record else "NOT_GENERATED"
+                    letter_status = application_record.get("cover_letter_document_status") if application_record else "NOT_GENERATED"
+                    st.caption(f"Application: {current_status} · CV: {cv_status} · Cover letter: {letter_status}")
+                try:
+                    render_job_document_actions(ranked_job, f"top_{rank_position}")
+                except subprocess.CalledProcessError as exc:
+                    st.error(f"Document generation failed with exit code {exc.returncode}.")
+                    if exc.stderr:
+                        st.code(exc.stderr, language="text")
+                except Exception as exc:
+                    st.error(f"Document generation failed: {exc}")
 
-                title = escape_text(rjob.get("title") or "")
-                company = escape_text(rjob.get("company") or "")
-                lane = escape_text(rjob.get("primary_lane") or "UNCLASSIFIED")
-                location = escape_text(rjob.get("location") or "Unknown")
-                workplace = escape_text(rjob.get("workplace_type") or "UNKNOWN")
-
-                outcome = escape_text(rjob.get("decision_outcome") or "TRACK")
-                eligibility = escape_text(rjob.get("decision_eligibility") or "VERIFY")
-
-                match_score = rjob.get("deterministic_match_score")
-                coverage = rjob.get("deterministic_match_coverage")
-                match_str = f"{float(match_score):.1f}/100" if isinstance(match_score, (int, float)) else "N/A"
-                cov_str = f"{float(coverage):.1f}%" if isinstance(coverage, (int, float)) else "N/A"
-
-                evidence_pct = rjob.get("decision_evidence_completeness")
-                evidence_str = f"{int(float(evidence_pct) * 100)}%" if isinstance(evidence_pct, (int, float)) else "N/A"
-
-                llm_action = escape_text(rjob.get("next_action") or "N/A")
-                lane_conf = escape_text(rjob.get("lane_confidence") or "None")
-
-                nd = rjob.get("nd_friendly_score")
-                pol = rjob.get("politics_stress_score")
-                nd_str = f"{int(nd)}%" if isinstance(nd, (int, float)) else "N/A"
-                pol_str = f"{int(pol)}%" if isinstance(pol, (int, float)) else "N/A"
-
-                summary = escape_text(rjob.get("evaluation_summary") or "N/A")
-
-                st.markdown(f"""
-                <div class="top-rec-card">
-                    <h4>⭐ #{idx+1} {title} {version_warn}</h4>
-                    <p><b>Company:</b> {company} | <b>Lane:</b> <code>{lane}</code></p>
-                    <p><b>Location:</b> {location} ({workplace})</p>
-                    <p><b>Deterministic:</b> <code>{outcome}</code> ({eligibility}) | <b>Match:</b> {match_str} | <b>Coverage:</b> {cov_str} | <b>Evidence:</b> {evidence_str}</p>
-                    <p><b>LLM suggestion:</b> <code style='color:#22c55e;'>{llm_action}</code> | <b>Lane confidence:</b> {lane_conf}</p>
-                    <p><b>Workplace Culture:</b> Autonomy: {nd_str} | Politics: {pol_str}</p>
-                    <p><b>Summary:</b> {summary}</p>
-                </div>
-                """, unsafe_allow_html=True)
-                url = safe_http_url(rjob.get("canonical_url") or rjob.get("careers_portal_url"))
-                if url:
-                    st.markdown(f"🔗 [Verify Job Ad & Apply]({url})")
+    evidence_options = {}
+    if top_ten_ready_jobs is not None:
+        evidence_options = {
+            f"#{index} {job.get('title') or 'Untitled role'} — {job.get('company') or 'Unknown company'}": job
+            for index, job in enumerate(top_ten_ready_jobs, start=1)
+        }
+    if evidence_options:
+        with st.expander("Why I fit — inspect requirement and profile evidence", expanded=False):
+            selected_evidence_label = st.selectbox("Ranked job", list(evidence_options), key="top_ten_evidence_job")
+            selected_evidence_job = evidence_options[selected_evidence_label]
+            try:
+                evidence_rows = fetch_job_profile_evidence(
+                    selected_evidence_job["canonical_job_id"], selected_evidence_job["job_version_id"]
+                )
+                if evidence_rows:
+                    st.dataframe(evidence_rows, hide_index=True, alt="Current job requirements matched to verified profile evidence")
                 else:
-                    st.write("Verify Job Ad & Apply URL unavailable.")
+                    st.info("No current requirement-to-profile evidence rows are available for this job.")
+                coverage = fetch_profile_coverage(
+                    selected_evidence_job["canonical_job_id"], selected_evidence_job["job_version_id"]
+                )
+                if coverage:
+                    st.write({
+                        "Active profile version": coverage.get("profile_version_number"),
+                        "Profile facts": coverage.get("profile_fact_count"),
+                        "Credentials": coverage.get("active_credential_count"),
+                        "Engagements": coverage.get("engagement_count"),
+                        "Skills": coverage.get("skill_count"),
+                        "Technologies": coverage.get("technology_count"),
+                        "Domains": coverage.get("domain_count"),
+                        "Projects": coverage.get("project_count"),
+                        "Achievements": coverage.get("achievement_count"),
+                        "Publications": coverage.get("publication_count"),
+                        "MUST matched": coverage.get("must_matched_count"),
+                        "MUST missing": coverage.get("must_missing_count"),
+                        "PREFERRED matched": coverage.get("preferred_matched_count"),
+                        "PREFERRED missing": coverage.get("preferred_missing_count"),
+                        "Exact evidence": coverage.get("exact_match_count"),
+                        "Semantic evidence": coverage.get("semantic_match_count"),
+                        "Professional evidence": coverage.get("professional_production_evidence_count"),
+                        "Applied-project evidence": coverage.get("applied_project_evidence_count"),
+                        "Course evidence": coverage.get("course_project_evidence_count"),
+                    })
+            except Exception as exc:
+                st.error(f"Current profile evidence could not be loaded: {exc}")
 
-    # Worth Tracking list (TRACK)
-    track_jobs = [
-        j for j in jobs_list
-        if not j.get("version_mismatch")
-        and j.get("decision_outcome") == "TRACK"
-    ]
-    track_jobs = sorted(track_jobs, key=top_rec_sort_key)[:15]
+    category_options = ["Top 10", "Apply Now", "Track", "Processing", "Applied", "Skip", "Rejected / Unmatched", "All"]
+    workspace_category = st.selectbox("Opportunity category", category_options, index=1, key="application_workspace_category")
+    category_counts = {
+        "Top 10": application_workspace_summary.get("top_ten_ready_count"),
+        "Apply Now": application_workspace_summary.get("apply_now_count"),
+        "Track": application_workspace_summary.get("track_count"),
+        "Processing": application_workspace_summary.get("processing_count"),
+        "Applied": application_workspace_summary.get("applied_count"),
+        "Skip": application_workspace_summary.get("skip_count"),
+        "Rejected / Unmatched": application_workspace_summary.get("rejected_unmatched_count"),
+        "All": application_workspace_summary.get("total_jobs"),
+    }
+    category_count = category_counts.get(workspace_category)
+    st.subheader(f"{workspace_category} ({category_count if category_count is not None else 'unavailable'})")
+    page_size = 25
+    total_pages = max(1, ((int(category_count) + page_size - 1) // page_size) if category_count is not None else 1)
+    category_page = st.number_input(
+        "Page", min_value=1, max_value=total_pages, value=1, step=1,
+        key=f"application_workspace_page_{workspace_category}",
+    )
+    category_offset = (int(category_page) - 1) * page_size
 
-    if track_jobs:
-        st.subheader(f"👀 Worth Tracking ({track_count})")
-        cols_track = st.columns(2)
-        for idx, rjob in enumerate(track_jobs):
-            col_idx = idx % 2
-            with cols_track[col_idx]:
-                version_warn = " ⚠️ Stale Evaluation" if rjob.get("version_mismatch") else ""
+    try:
+        if workspace_category == "Top 10":
+            category_rows = fetch_top_ten_ready_jobs()
+        elif workspace_category == "Apply Now":
+            category_rows = fetch_apply_now_jobs()
+        elif workspace_category == "Track":
+            category_rows = fetch_track_jobs()
+        elif workspace_category == "Applied":
+            category_rows = None if application_records is None else [
+                record for record in application_records
+                if record.get("application_status") in (
+                    "APPLIED", "ASSESSMENT", "SUBMITTED", "FOLLOW_UP", "INTERVIEW",
+                    "OFFER", "REJECTED", "WITHDRAWN"
+                )
+            ]
+        elif workspace_category == "Rejected / Unmatched":
+            category_rows = fetch_rejected_jobs_from_postgres_read_model(page_size, category_offset)
+        elif workspace_category == "Processing":
+            category_rows = [job for job in jobs_list if job.get("pipeline_display_category") == "PROCESSING_AUTOMATICALLY"]
+        elif workspace_category == "Skip":
+            category_rows = [job for job in jobs_list if job.get("decision_outcome") == "SKIP"]
+        else:
+            category_rows = jobs_list
+    except Exception as exc:
+        category_rows = None
+        st.error(f"{workspace_category} read model is unavailable: {exc}")
 
-                title = escape_text(rjob.get("title") or "")
-                company = escape_text(rjob.get("company") or "")
-                lane = escape_text(rjob.get("primary_lane") or "UNCLASSIFIED")
-                location = escape_text(rjob.get("location") or "Unknown")
-                workplace = escape_text(rjob.get("workplace_type") or "UNKNOWN")
-
-                outcome = escape_text(rjob.get("decision_outcome") or "TRACK")
-                eligibility = escape_text(rjob.get("decision_eligibility") or "VERIFY")
-
-                match_score = rjob.get("deterministic_match_score")
-                coverage = rjob.get("deterministic_match_coverage")
-                match_str = f"{float(match_score):.1f}/100" if isinstance(match_score, (int, float)) else "N/A"
-                cov_str = f"{float(coverage):.1f}%" if isinstance(coverage, (int, float)) else "N/A"
-
-                evidence_pct = rjob.get("decision_evidence_completeness")
-                evidence_str = f"{int(float(evidence_pct) * 100)}%" if isinstance(evidence_pct, (int, float)) else "N/A"
-
-                llm_action = escape_text(rjob.get("next_action") or "N/A")
-                lane_conf = escape_text(rjob.get("lane_confidence") or "None")
-
-                nd = rjob.get("nd_friendly_score")
-                pol = rjob.get("politics_stress_score")
-                nd_str = f"{int(nd)}%" if isinstance(nd, (int, float)) else "N/A"
-                pol_str = f"{int(pol)}%" if isinstance(pol, (int, float)) else "N/A"
-
-                summary = escape_text(rjob.get("evaluation_summary") or "N/A")
-
-                st.markdown(f"""
-                <div class="top-rec-card">
-                    <h4>👀 #{idx+1} {title} {version_warn}</h4>
-                    <p><b>Company:</b> {company} | <b>Lane:</b> <code>{lane}</code></p>
-                    <p><b>Location:</b> {location} ({workplace})</p>
-                    <p><b>Deterministic:</b> <code>{outcome}</code> ({eligibility}) | <b>Match:</b> {match_str} | <b>Coverage:</b> {cov_str} | <b>Evidence:</b> {evidence_str}</p>
-                    <p><b>LLM suggestion:</b> <code style='color:#22c55e;'>{llm_action}</code> | <b>Lane confidence:</b> {lane_conf}</p>
-                    <p><b>Workplace Culture:</b> Autonomy: {nd_str} | Politics: {pol_str}</p>
-                    <p><b>Summary:</b> {summary}</p>
-                </div>
-                """, unsafe_allow_html=True)
-                url = safe_http_url(rjob.get("canonical_url") or rjob.get("careers_portal_url"))
-                if url:
-                    st.markdown(f"🔗 [Verify Job Ad & Apply]({url})")
-                else:
-                    st.write("Verify Job Ad & Apply URL unavailable.")
+    if category_rows is None:
+        st.error("This category is unavailable because its authoritative read model could not be loaded.")
+        filtered_jobs = []
+    else:
+        if workspace_category not in ("Applied", "Rejected / Unmatched"):
+            for category_job in category_rows:
+                category_job["decision_eligibility"] = category_job.get("recommendation_eligibility")
+                category_job["decision_outcome"] = category_job.get("recommendation_outcome")
+            global_job_ids = {job.get("canonical_job_id") for job in filtered_jobs}
+            category_rows = [job for job in category_rows if job.get("canonical_job_id") in global_job_ids]
+        filtered_jobs = category_rows
 
     processing_jobs = [
         job for job in jobs_list
@@ -1464,7 +1878,7 @@ with tab_dashboard:
                     "Reason": job.get("current_artifact_reason") or "Automatic pipeline work",
                 }
                 for job in processing_jobs[:100]
-            ], use_container_width=True)
+            ], width="stretch")
         else:
             st.info("No jobs are awaiting automatic pipeline work.")
 
@@ -1478,7 +1892,7 @@ with tab_dashboard:
                     "Reason": job.get("rejection_reason") or "UNMATCHED",
                 }
                 for job in unmatched_jobs[:100]
-            ], use_container_width=True)
+            ], width="stretch")
         else:
             st.info("No unmatched jobs in the current shortlist.")
 
@@ -1493,7 +1907,7 @@ with tab_dashboard:
                     "Reason": job.get("current_artifact_reason") or job.get("rejection_reason"),
                 }
                 for job in technical_error_jobs[:100]
-            ], use_container_width=True)
+            ], width="stretch")
         else:
             st.info("No technical support items.")
 
@@ -1531,19 +1945,33 @@ with tab_dashboard:
                 "ROUTING_DEFERRED": 7,
             }.get(status, 99)
 
-            match_score = j.get("deterministic_match_score")
-            match_sort = -(float(match_score) if isinstance(match_score, (int, float)) else -1.0)
+            match_score = as_number(j.get("deterministic_match_score"))
+            match_sort = -(match_score if match_score is not None else -1)
 
-            priority_score = j.get("priority_score")
-            priority_sort = -(float(priority_score) if isinstance(priority_score, (int, float)) else -1.0)
+            priority_score = as_number(j.get("priority_score"))
+            priority_sort = -(priority_score if priority_score is not None else -1)
+            rank_score = as_number(j.get("overall_rank_score"))
+            rank_sort = -(rank_score if rank_score is not None else -1)
+            rank_missing = 1 if rank_score is None else 0
 
-            return (outcome_rank, eligibility_rank, status_rank, match_sort, priority_sort)
+            return (rank_missing, rank_sort, outcome_rank, eligibility_rank, status_rank, match_sort, priority_sort)
 
         sorted_filtered_jobs = sorted(filtered_jobs, key=status_sort_key)
-        active_jobs = sorted_filtered_jobs
-        rejected_jobs = rejected_jobs_audit
+        listing_page_size = 25
+        listing_page_count = max(1, (len(sorted_filtered_jobs) + listing_page_size - 1) // listing_page_size)
+        listing_page = st.number_input(
+            "Listings page",
+            min_value=1,
+            max_value=listing_page_count,
+            value=1,
+            step=1,
+            key=f"application_listing_page_{workspace_category}",
+        )
+        start_index = (int(listing_page) - 1) * listing_page_size
+        active_jobs = sorted_filtered_jobs[start_index:start_index + listing_page_size]
+        rejected_jobs = [] if workspace_category == "Rejected / Unmatched" else rejected_jobs_audit
 
-        st.subheader("📋 Available Listings Vault")
+        st.subheader(f"{workspace_category} opportunities")
         if not active_jobs and not rejected_jobs:
             st.info("No matching jobs in the current Postgres database.")
         else:
@@ -1593,11 +2021,11 @@ with tab_dashboard:
 
                         match_score = job.get("deterministic_match_score")
                         coverage = job.get("deterministic_match_coverage")
-                        match_str = f"{float(match_score):.1f}/100" if isinstance(match_score, (int, float)) else "N/A"
-                        cov_str = f"{float(coverage):.1f}%" if isinstance(coverage, (int, float)) else "N/A"
+                        match_str = format_score(match_score)
+                        cov_str = format_percent(coverage)
 
                         evidence_pct = job.get("decision_evidence_completeness")
-                        evidence_str = f"{int(float(evidence_pct) * 100)}%" if isinstance(evidence_pct, (int, float)) else "N/A"
+                        evidence_str = format_percent(evidence_pct, fraction=True, decimals=0)
 
                         st.markdown(f"**Deterministic match:** `{match_str}` | **Coverage:** `{cov_str}` | **Evidence completeness:** `{evidence_str}`")
 
@@ -1605,11 +2033,18 @@ with tab_dashboard:
                         pol = job.get("politics_stress_score")
                         env = job.get("sensory_overload_index")
 
-                        aut_str = f"{int(aut)}%" if isinstance(aut, (int, float)) else "N/A"
-                        pol_str = f"{int(pol)}%" if isinstance(pol, (int, float)) else "N/A"
-                        env_str = f"{int(env)}%" if isinstance(env, (int, float)) else "N/A"
+                        aut_str = format_percent(aut, decimals=0)
+                        pol_str = format_percent(pol, decimals=0)
+                        env_str = format_percent(env, decimals=0)
 
                         st.markdown(f"**Workplace signals:** Autonomy {aut_str} | Politics {pol_str} | Sensory {env_str}")
+                        if outcome == "TRACK":
+                            trace_notes = job.get("deterministic_trace_notes")
+                            if isinstance(trace_notes, list) and trace_notes:
+                                st.info(f"Why this is TRACK: {'; '.join(str(note) for note in trace_notes)}")
+                            else:
+                                st.info("Worth tracking: current deterministic fit/evidence is not yet sufficient for Apply Now. No gate or recommendation thresholds are changed by ranking.")
+                            st.caption("Revisit when stronger current requirement coverage or profile evidence is available.")
                         st.markdown(f"**LLM suggestion:** `{job.get('next_action') or 'N/A'}` (display only)")
                         
                         desc_text = job.get("description", "")
@@ -1624,6 +2059,32 @@ with tab_dashboard:
                             except Exception:
                                 pass
                         st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"active_desc_{idx}")
+
+                        if is_document_generation_eligible(job):
+                            application_key = (job.get("canonical_job_id"), job.get("job_version_id"))
+                            application_record = application_by_job.get(application_key) if application_by_job is not None else None
+                            if application_records is None:
+                                st.warning("Application tracker is unavailable; document generation remains available.")
+                            elif application_record is None:
+                                if st.button("Add to tracker", key=f"active_to_apply_{job.get('canonical_job_id')}"):
+                                    try:
+                                        save_application_status(job, "TO_APPLY")
+                                    except Exception as exc:
+                                        st.error(f"Could not update the application tracker: {exc}")
+                            elif application_record.get("application_status") != "APPLIED":
+                                if st.button("Mark applied", key=f"active_applied_{job.get('canonical_job_id')}"):
+                                    try:
+                                        save_application_status(job, "APPLIED", application_record)
+                                    except Exception as exc:
+                                        st.error(f"Could not update the application tracker: {exc}")
+                            try:
+                                render_job_document_actions(job, f"active_{job.get('canonical_job_id')}")
+                            except subprocess.CalledProcessError as exc:
+                                st.error(f"Document generation failed with exit code {exc.returncode}.")
+                                if exc.stderr:
+                                    st.code(exc.stderr, language="text")
+                            except Exception as exc:
+                                st.error(f"Document generation failed: {exc}")
                         
                         if st.button("🗑️ Delete Listing", key=f"active_del_{job.get('canonical_job_id') or idx}"):
                             if delete_job_from_db(job.get("canonical_job_id")):
@@ -1656,9 +2117,9 @@ with tab_dashboard:
                             st.markdown(f"**Reason Codes:** {', '.join(job.get('rejection_codes') or []) or 'N/A'}")
                             st.markdown(f"**Evidence:** {'; '.join(job.get('gate_evidence_quotes') or []) or job.get('rejection_reason') or 'N/A'}")
                             st.markdown(
-                                f"**Autonomy:** {job.get('nd_friendly_score') or 'N/A'} | "
-                                f"**Politics:** {job.get('politics_stress_score') or 'N/A'} | "
-                                f"**Sensory:** {job.get('sensory_overload_index') or 'N/A'}"
+                                f"**Autonomy:** {format_signal(job.get('nd_friendly_score'))} | "
+                                f"**Politics:** {format_signal(job.get('politics_stress_score'))} | "
+                                f"**Sensory:** {format_signal(job.get('sensory_overload_index'))}"
                             )
                             
                             desc_text = job.get("description", "")
@@ -1725,9 +2186,9 @@ with tab_dashboard:
             coverage = job_to_show.get("deterministic_match_coverage")
             evidence_pct = job_to_show.get("decision_evidence_completeness")
 
-            match_str = f"{float(match_score):.1f}/100" if isinstance(match_score, (int, float)) else "N/A"
-            cov_str = f"{float(coverage):.1f}%" if isinstance(coverage, (int, float)) else "N/A"
-            evidence_str = f"{int(float(evidence_pct) * 100)}%" if isinstance(evidence_pct, (int, float)) else "N/A"
+            match_str = format_score(match_score)
+            cov_str = format_percent(coverage)
+            evidence_str = format_percent(evidence_pct, fraction=True, decimals=0)
             
             metric_a, metric_b, metric_c = st.columns(3)
             with metric_a:
@@ -1742,9 +2203,9 @@ with tab_dashboard:
             pol = job_to_show.get("politics_stress_score")
             env = job_to_show.get("sensory_overload_index")
 
-            aut_str = f"{int(aut)}%" if isinstance(aut, (int, float)) else "N/A"
-            pol_str = f"{int(pol)}%" if isinstance(pol, (int, float)) else "N/A"
-            env_str = f"{int(env)}%" if isinstance(env, (int, float)) else "N/A"
+            aut_str = format_percent(aut, decimals=0)
+            pol_str = format_percent(pol, decimals=0)
+            env_str = format_percent(env, decimals=0)
 
             sig1, sig2, sig3 = st.columns(3)
             with sig1:
@@ -2015,7 +2476,7 @@ with tab_linkedin:
                         {"Title": j.get("title"), "Company": j.get("company"), "Location": j.get("location"), "URL": j.get("url")}
                         for j in jobs_data[:10]
                     ])
-                    st.dataframe(preview_df, use_container_width=True)
+                    st.dataframe(preview_df, width="stretch")
                     if len(jobs_data) > 10:
                         st.write(f"*... and {len(jobs_data) - 10} more jobs.*")
                     
@@ -2028,38 +2489,167 @@ with tab_linkedin:
             except Exception as e:
                 st.error(f"Error reading JSON file: {e}")
 
-with tab_analytics:
-    st.subheader("🔥 Company Autonomy & Culture Analytics")
-    st.write("Consolidated employer ratings compiled directly from Postgres database tables.")
-
-    analytics_data = fetch_company_analytics_from_db()
-
-    if analytics_data:
-        df = pd.DataFrame(analytics_data)
-        
-        # Map safety verdicts
-        def get_verdict(row):
-            st = row.get("Status")
-            if row.get("Approved"):
-                return "🟢 HIGH AUTONOMY / OPTIMAL FOCUS"
-            if st in ("STRONG MATCH", "PRIORITY_APPLY", "HIGH_FIT_HIGH_RISK"):
-                return "✅ PRIORITY"
-            elif st in ("REVIEW REQUIRED", "APPLY_AFTER_VERIFICATION"):
-                return "⚠️ REVIEW REQUIRED"
-            elif row.get("Toxic"):
-                return "🔴 HIGH POLITICS / BUREAUCRATIC"
-            else:
-                return "🟡 REVIEW REQUIRED"
-                
-        df["Safety Verdict"] = df.apply(get_verdict, axis=1)
-        
-        # Display table
-        st.dataframe(df[["Company", "Industry", "Avg Autonomy Score", "Avg Politics Score", "Avg Sensory Index", "Avg Focus Score", "Safety Verdict"]], use_container_width=True)
-        
-        st.markdown("### 🏆 Top High-Autonomy Environments vs. ⚠️ Stress Alerts")
-        st.bar_chart(df.set_index("Company")[["Avg Autonomy Score", "Avg Politics Score"]])
+with tab_applications:
+    st.subheader("Application tracker")
+    if application_records is None:
+        st.error("Application tracker data is unavailable from the current workspace read model.")
+    elif not application_records:
+        st.info("No application records yet. Add a current Apply Now job to your tracker from the ranked list.")
     else:
-        st.info("No compiled analytics are available. Please run the evaluation engine pipeline to score listings.")
+        st.caption("Status changes are written through the managed API and recorded as append-only application events.")
+        tracker_rows = [
+            {
+                "Company": record.get("company"),
+                "Role": record.get("title"),
+                "Status": record.get("application_status"),
+                "Recommendation": record.get("recommendation_outcome"),
+                "Rank context": "Current job version" if record.get("is_current_job_version") else "Historical job version",
+                "CV": record.get("cv_document_status") or "NOT_GENERATED",
+                "Cover letter": record.get("cover_letter_document_status") or "NOT_GENERATED",
+                "Last updated": record.get("updated_at"),
+            }
+            for record in application_records
+        ]
+        st.dataframe(tracker_rows, hide_index=True, alt="Current and historical application tracker records")
+        tracker_labels = {
+            f"{record.get('company') or 'Unknown company'} — {record.get('title') or 'Untitled role'} ({record.get('application_status')})": record
+            for record in application_records
+        }
+        selected_tracker_label = st.selectbox("Update application status", list(tracker_labels), key="application_tracker_record")
+        selected_tracker_record = tracker_labels[selected_tracker_label]
+        tracker_statuses = [
+            "TO_APPLY", "APPLIED", "ASSESSMENT", "INTERVIEW", "OFFER",
+            "REJECTED", "WITHDRAWN", "CLOSED", "INTENT", "READY_TO_APPLY",
+            "SUBMITTED", "FOLLOW_UP",
+        ]
+        next_status = st.selectbox(
+            "Status",
+            tracker_statuses,
+            index=tracker_statuses.index(selected_tracker_record["application_status"]),
+            key=f"application_tracker_status_{selected_tracker_record['application_record_id']}",
+        )
+        if st.button("Save application status", key="save_application_tracker_status"):
+            try:
+                save_application_status({}, next_status, selected_tracker_record)
+            except Exception as exc:
+                st.error(f"Application status update failed: {exc}")
+        st.caption(f"CV linked: {'yes' if selected_tracker_record.get('cv_document_run_id') else 'not generated'} · Cover letter linked: {'yes' if selected_tracker_record.get('cover_letter_document_run_id') else 'not generated'}")
+        if get_api_base_url():
+            try:
+                event_response = api_request(
+                    "GET",
+                    f"/applications/{selected_tracker_record['application_record_id']}/events",
+                    params={"limit": 50},
+                )
+                events = event_response.get("events") if isinstance(event_response, dict) else None
+                if isinstance(events, list) and events:
+                    st.dataframe(events, hide_index=True, alt="Application status-change event history")
+            except Exception as exc:
+                st.warning(f"Application history is temporarily unavailable: {exc}")
+
+with tab_analytics:
+    st.subheader("Company autonomy and culture analytics")
+    st.write("Company culture scores are aggregated only from persisted, job-linked evaluation observations. Missing signals remain UNKNOWN.")
+
+    try:
+        analytics_data = fetch_company_analytics_from_db()
+    except Exception as exc:
+        analytics_data = None
+        st.error(f"Company culture read model is unavailable: {exc}")
+
+    if analytics_data is not None and analytics_data:
+        try:
+            company_coverage = fetch_company_culture_coverage()
+            with st.container(horizontal=True):
+                st.metric("Companies represented", company_coverage["companies_represented"])
+                st.metric("Companies with jobs", company_coverage["companies_with_jobs"])
+                st.metric("Culture observations present", company_coverage["companies_with_culture_observations"])
+                st.metric("Medium/high confidence", company_coverage["companies_with_medium_high_confidence"])
+        except Exception as exc:
+            st.warning(f"Company coverage summary is unavailable: {exc}")
+        display_rows = []
+        chart_rows = []
+        for row in analytics_data:
+            display_rows.append({
+                "Company": row.get("company_name"),
+                "Jobs represented": row.get("company_job_count"),
+                "Roles assessed": row.get("observation_count"),
+                "Autonomy": format_signal(row.get("autonomy_score")),
+                "Politics risk": format_signal(row.get("politics_risk_score")),
+                "Sensory/workload risk": format_signal(row.get("sensory_workload_risk_score")),
+                "Focus protection": format_signal(row.get("focus_protection_score")),
+                "Evidence confidence": row.get("confidence_level") or "UNKNOWN",
+                "Safety / compatibility assessment": (
+                    "UNKNOWN" if row.get("confidence_level") in (None, "UNKNOWN", "LOW")
+                    else "Evidence available — human review"
+                ),
+                "Last updated": row.get("last_updated"),
+            })
+            autonomy = as_number(row.get("autonomy_score"))
+            politics = as_number(row.get("politics_risk_score"))
+            if autonomy is not None or politics is not None:
+                chart_rows.append({
+                    "Company": row.get("company_name"),
+                    "Autonomy": float(autonomy) if autonomy is not None else None,
+                    "Politics risk": float(politics) if politics is not None else None,
+                })
+
+        st.dataframe(
+            display_rows,
+            hide_index=True,
+            alt="Company culture estimates with role coverage, confidence, and last updated time",
+        )
+        company_options = {
+            row["company_name"]: row
+            for row in analytics_data
+            if row.get("company_name") and row.get("workspace_company_id")
+        }
+        if company_options:
+            selected_company_name = st.selectbox(
+                "Inspect company-level evidence",
+                list(company_options),
+                key="company_culture_evidence_company",
+            )
+            try:
+                observations = fetch_company_culture_evidence(
+                    company_options[selected_company_name]["workspace_company_id"]
+                )
+                observation_rows = []
+                for observation in observations:
+                    evidence_map = observation.get("evidence_by_signal")
+                    if isinstance(evidence_map, str):
+                        evidence_map = json.loads(evidence_map)
+                    if not isinstance(evidence_map, dict):
+                        evidence_map = {}
+                    def culture_quote(signal):
+                        evidence = evidence_map.get(signal)
+                        return evidence.get("quote") if isinstance(evidence, dict) else None
+                    observation_rows.append({
+                        "Role": observation.get("role_title"),
+                        "Observed": observation.get("observed_at"),
+                        "Autonomy evidence": culture_quote("AUTONOMY"),
+                        "Politics evidence": culture_quote("POLITICS_RISK"),
+                        "Sensory/workload evidence": culture_quote("SENSORY_WORKLOAD_RISK"),
+                        "Focus evidence": culture_quote("FOCUS_PROTECTION"),
+                        "Source": observation.get("source_type"),
+                    })
+                if observation_rows:
+                    st.dataframe(
+                        observation_rows,
+                        hide_index=True,
+                        alt="Job-description evidence supporting the selected company culture signals",
+                    )
+                else:
+                    st.info("No job-level culture evidence is available for this company yet.")
+            except Exception as exc:
+                st.error(f"Company culture evidence could not be loaded: {exc}")
+        if chart_rows:
+            st.subheader("Observed autonomy and politics-risk scores")
+            st.bar_chart(pd.DataFrame(chart_rows).set_index("Company"), alt="Observed company autonomy and politics-risk scores")
+        else:
+            st.info("Culture observations exist, but no numeric company signal is available yet.")
+    elif analytics_data is not None:
+        st.info("No company culture observations have been materialized yet. Unassessed companies remain UNKNOWN.")
 
     st.markdown("---")
     st.subheader("Source Health (Compliance-Aware)")
@@ -2070,7 +2660,7 @@ with tab_analytics:
             sources = resp.get("sources") if isinstance(resp, dict) else None
             if isinstance(resp, dict) and resp.get("ok") and isinstance(sources, list) and sources:
                 sdf = pd.DataFrame(sources)
-                st.dataframe(sdf, use_container_width=True)
+                st.dataframe(sdf, width="stretch")
             elif isinstance(resp, dict) and resp.get("ok") and isinstance(sources, list) and not sources:
                 st.info("No source plugin rows found yet. Run `npm run sources:sync` and ingest at least one source.")
             else:
@@ -2109,15 +2699,42 @@ with tab_cv:
         if len(fact_ids) == 0:
             st.warning("The optional local profile ledger has no IDs; the document generator will use the active database profile.")
 
+    include_track_jobs = st.checkbox(
+        "Include TRACK jobs",
+        value=False,
+        help="Add current TRACK opportunities to document generation choices.",
+        key="include_track_documents",
+    )
     eligible_jobs = [
-        j
-        for j in jobs_list
-        if j.get("canonical_job_id")
-        and j.get("job_version_id")
-        and j.get("processing_state")
-        in ("AI_EVALUATED", "QUEUED_FOR_AI", "LANE_ROUTED", "PREQUALIFIED")
-        and j.get("decision_outcome") in ("PRIORITY", "REVIEW")
+        job
+        for job in jobs_list
+        if is_document_generation_eligible(job, include_track=include_track_jobs)
     ]
+    try:
+        ranked_application_jobs = fetch_apply_now_jobs()
+        rank_by_job_version = {
+            (job["canonical_job_id"], job["job_version_id"]): as_number(job.get("overall_rank_score"))
+            for job in ranked_application_jobs
+        }
+    except Exception as exc:
+        ranked_application_jobs = None
+        rank_by_job_version = {}
+        st.warning(f"Final ranking data is unavailable for CV selection: {exc}")
+    top_ten_positions = {
+        (job["canonical_job_id"], job["job_version_id"]): position
+        for position, job in enumerate(top_ten_ready_jobs or [], start=1)
+    } if top_ten_ready_jobs is not None else {}
+    def document_job_sort_key(job):
+        job_version = (job.get("canonical_job_id"), job.get("job_version_id"))
+        final_rank = rank_by_job_version.get(job_version)
+        return (
+            0 if job_version in top_ten_positions else 1,
+            0 if job.get("decision_outcome") == "PRIORITY" else 1,
+            top_ten_positions.get(job_version, 999),
+            -(final_rank if final_rank is not None else -1),
+        )
+
+    eligible_jobs.sort(key=document_job_sort_key)
 
     if not eligible_jobs:
         st.info("No canonical shortlist jobs with version IDs are currently available.")
@@ -2145,7 +2762,7 @@ with tab_cv:
 
         btn_col1, btn_col2 = st.columns(2)
         with btn_col1:
-            if st.button("Generate customized CV", use_container_width=True):
+            if st.button("Generate customized CV", width="stretch"):
                 with st.spinner("Generating CV from canonical job/version..."):
                     try:
                         started_at = time.time()
@@ -2169,7 +2786,7 @@ with tab_cv:
                             st.error(e.stderr)
 
         with btn_col2:
-            if st.button("Generate cover letter", use_container_width=True):
+            if st.button("Generate cover letter", width="stretch"):
                 with st.spinner("Generating cover letter from canonical job/version..."):
                     try:
                         started_at = time.time()
@@ -2194,4 +2811,4 @@ with tab_cv:
 
 # Footer section
 st.markdown("---")
-st.markdown("<p class='disclaimer'>Job Decision Engine v4.0 • Powered by Neon Postgres & GitHub Actions Automation</p>", unsafe_allow_html=True)
+st.markdown("<p class='disclaimer'>Job Decision Engine V5 • Recommendations and documents remain human-reviewed</p>", unsafe_allow_html=True)

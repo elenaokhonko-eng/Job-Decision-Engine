@@ -48,6 +48,46 @@ describe("application tracker contracts", () => {
     expect(event.to_status).toBe("READY_TO_APPLY");
   });
 
+  it.each([
+    "INTENT",
+    "READY_TO_APPLY",
+    "SUBMITTED",
+    "FOLLOW_UP",
+    "INTERVIEW",
+    "OFFER",
+    "REJECTED",
+    "WITHDRAWN",
+    "CLOSED",
+    "TO_APPLY",
+    "APPLIED",
+    "ASSESSMENT",
+  ])("accepts application status %s in records and events", (status) => {
+    const record = ApplicationRecordSchema.parse({
+      application_record_id: "11111111-1111-4111-8111-111111111111",
+      canonical_job_id: "22222222-2222-4222-8222-222222222222",
+      job_version_id: "33333333-3333-4333-8333-333333333333",
+      title: "AI Platform Engineer",
+      company: "Example Co",
+      application_status: status,
+      last_action_at: "2026-09-08T00:00:00.000Z",
+      created_at: "2026-09-08T00:00:00.000Z",
+      updated_at: "2026-09-08T00:00:00.000Z",
+    });
+    const event = ApplicationEventSchema.parse({
+      id: "44444444-4444-4444-8444-444444444444",
+      application_record_id: record.application_record_id,
+      event_type: "STATUS_CHANGED",
+      from_status: "INTENT",
+      to_status: status,
+      note: "Status accepted by the tracker contract.",
+      event_payload: {},
+      created_at: "2026-09-08T00:01:00.000Z",
+    });
+
+    expect(record.application_status).toBe(status);
+    expect(event.to_status).toBe(status);
+  });
+
   it("rejects unsupported application statuses", () => {
     expect(() =>
       ApplicationRecordSchema.parse({

@@ -51,3 +51,10 @@ jobs:
           MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
         run: npx tsx scripts/evaluate_queue.ts
+
+      - name: Materialize current application rankings
+        if: ${{ success() }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+        run: npx tsx scripts/materialize_application_rankings.ts

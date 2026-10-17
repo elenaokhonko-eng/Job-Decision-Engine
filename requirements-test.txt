@@ -1,0 +1,3 @@
+# Test-only tooling; production dependencies remain in requirements.txt.
+pytest==9.1.1
+ruff==0.17.1

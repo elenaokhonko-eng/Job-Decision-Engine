@@ -299,9 +299,59 @@ export const PersistedEvaluationQueueItemSchema = EvaluationQueueItemSchema.exte
   schema_version: SchemaVersionSchema,
 });
 
+/** New V5 scores default to null so missing evidence never becomes a fabricated zero. */
+const EvaluationScoreSchema = z.number().int().min(0).max(100).nullable().default(null);
+const LegacyEvaluationScoreSchema = z.number().int().min(0).max(100).nullable();
+const LegacyFiniteMeasurementSchema = z.number().finite().min(0).max(100).nullable();
+
+const PolicyConflictEvidenceSchema = z.object({
+  policy: z.enum(["RESIDENCY", "WORK_AUTHORIZATION", "ONSITE", "TRAVEL", "ON_CALL"]),
+  candidate_constraint: z.string().min(1),
+  role_requirement: z.string().min(1),
+  evidence: z.string().min(1),
+});
+
+const CultureEvidenceSchema = z.object({
+  signal: z.enum(["AUTONOMY", "POLITICS_RISK", "SENSORY_WORKLOAD_RISK", "FOCUS_PROTECTION"]),
+  score: z.union([z.number().int().min(0).max(100), z.literal("UNKNOWN")]).nullable().default(null),
+  quote: z.string().nullable().default(null),
+  score_derivation_version: z.string().min(1).optional(),
+}).superRefine((evidence, context) => {
+  const isUnmeasured = evidence.score === null || evidence.score === "UNKNOWN";
+  if (isUnmeasured && evidence.quote !== null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["quote"],
+      message: "Unavailable culture measurements must not include a quote.",
+    });
+  }
+  if (!isUnmeasured && (!evidence.quote || evidence.quote.trim().length === 0)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["quote"],
+      message: "Measured culture signals require a job-description quote.",
+    });
+  }
+});
+
+const CultureEvidenceArraySchema = z.array(CultureEvidenceSchema).max(4).superRefine((evidence, context) => {
+  const seenSignals = new Set<string>();
+  for (const [index, item] of evidence.entries()) {
+    if (seenSignals.has(item.signal)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [index, "signal"],
+        message: `Culture evidence signal ${item.signal} may appear only once.`,
+      });
+    }
+    seenSignals.add(item.signal);
+  }
+});
+
 /**
  * 8. Evaluation Result
- * Full structured LLM output with cultural, risk, and career scoring.
+ * Versioned full structured LLM output. Unknown signals remain null/UNKNOWN;
+ * the advisory signals never determine hard gates or recommendation policy.
  */
 export const EvaluationResultSchema = z.object({
   schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
@@ -318,12 +368,27 @@ export const EvaluationResultSchema = z.object({
   secondary_lanes: z.array(LaneKeySchema).default([]),
   lane_confidence: z.enum(["High", "Medium", "Low"]),
   lane_evidence: z.string().default(""),
-  nd_score: z.number().int().min(0).max(100),
-  nd_friendly_score: z.number().int().min(0).max(100),
-  politics_stress_score: z.number().int().min(0).max(100),
-  sensory_overload_index: z.number().int().min(0).max(100),
-  building_research_ratio: z.number().int().min(0).max(100),
-  interaction_load: z.number().int().min(0).max(100),
+  nd_score: LegacyEvaluationScoreSchema,
+  nd_friendly_score: LegacyEvaluationScoreSchema,
+  politics_stress_score: LegacyEvaluationScoreSchema,
+  sensory_overload_index: LegacyEvaluationScoreSchema,
+  focus_protection_score: EvaluationScoreSchema,
+  building_research_ratio: LegacyFiniteMeasurementSchema,
+  interaction_load: LegacyFiniteMeasurementSchema,
+  strategic_value_score: EvaluationScoreSchema,
+  career_trajectory: z.enum(["ADVANCING", "LATERAL", "DETOUR", "UNKNOWN"]).default("UNKNOWN"),
+  technical_depth_score: EvaluationScoreSchema,
+  role_ownership_score: EvaluationScoreSchema,
+  ambiguity_burden: EvaluationScoreSchema,
+  meeting_burden: EvaluationScoreSchema,
+  travel_burden: EvaluationScoreSchema,
+  on_call_burden: EvaluationScoreSchema,
+  strengths: z.array(z.string()).default([]),
+  gaps: z.array(z.string()).default([]),
+  risk_flags: z.array(z.string()).default([]),
+  policy_conflicts: z.array(PolicyConflictEvidenceSchema).default([]),
+  culture_score_derivation_version: z.string().min(1).nullable().default(null),
+  culture_evidence: CultureEvidenceArraySchema.default([]),
   rejection_codes: z.array(z.string()).default([]),
   strategic_value: z.string().default(""),
   recommended_cv_version: z.string().default("None"),
@@ -333,11 +398,14 @@ export const EvaluationResultSchema = z.object({
 export type EvaluationResult = z.infer<typeof EvaluationResultSchema>;
 
 export const ApplicationStatusSchema = z.enum([
+  "TO_APPLY",
   "INTENT",
   "READY_TO_APPLY",
+  "APPLIED",
   "SUBMITTED",
   "FOLLOW_UP",
   "INTERVIEW",
+  "ASSESSMENT",
   "OFFER",
   "REJECTED",
   "WITHDRAWN",

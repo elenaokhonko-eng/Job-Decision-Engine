@@ -413,7 +413,7 @@ describe('evaluateSingleCanonicalJob output validation', () => {
     await expect(evaluateSingleCanonicalJob(job)).rejects.toThrow(/MAYBE_APPLY/);
   });
 
-  it('preserves explicit zero scores when the model returns valid output', async () => {
+  it('ignores unsupported model-proposed culture scores while preserving other explicit zeros', async () => {
     configureOpenAiOnlyEvaluation();
     const fetchMock = stubOpenAiEvaluationResponse(
       validEvaluationPayload({
@@ -434,7 +434,11 @@ describe('evaluateSingleCanonicalJob output validation', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.evaluatedJob.nd_score).toBe(0);
-    expect(result.evaluatedJob.nd_friendly_score).toBe(0);
+    expect(result.evaluatedJob.nd_friendly_score).toBeNull();
+    expect(result.evaluatedJob.politics_stress_score).toBeNull();
+    expect(result.evaluatedJob.sensory_overload_index).toBeNull();
+    expect(result.evaluatedJob.building_research_ratio).toBe(0);
+    expect(result.evaluatedJob.interaction_load).toBe(0);
     expect(result.evaluatedJob.primary_lane).toBeNull();
     expect(result.provider).toBe('openai');
   });

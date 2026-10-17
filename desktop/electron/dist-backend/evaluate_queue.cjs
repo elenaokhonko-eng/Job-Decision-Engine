@@ -272,6 +272,8 @@ zod.z.object({
 		"ROUTING_DEFERRED",
 		"LANE_ROUTED",
 		"MATCHED",
+		"UNMATCHED",
+		"PROCESSING_ERROR",
 		"SEMANTIC_SHORTLISTED",
 		"QUEUED_FOR_AI",
 		"DEFERRED_BUDGET",
@@ -291,6 +293,8 @@ zod.z.object({
 		"ROUTING_DEFERRED",
 		"LANE_ROUTED",
 		"MATCHED",
+		"UNMATCHED",
+		"PROCESSING_ERROR",
 		"SEMANTIC_SHORTLISTED",
 		"QUEUED_FOR_AI",
 		"DEFERRED_BUDGET",
@@ -411,9 +415,60 @@ zod.z.object({
 	enqueued_at: zod.z.string().datetime(),
 	updated_at: zod.z.string().datetime()
 }).extend({ schema_version: SchemaVersionSchema });
+/** New V5 scores default to null so missing evidence never becomes a fabricated zero. */
+var EvaluationScoreSchema = zod.z.number().int().min(0).max(100).nullable().default(null);
+var LegacyEvaluationScoreSchema = zod.z.number().int().min(0).max(100).nullable();
+var LegacyFiniteMeasurementSchema = zod.z.number().finite().min(0).max(100).nullable();
+var PolicyConflictEvidenceSchema = zod.z.object({
+	policy: zod.z.enum([
+		"RESIDENCY",
+		"WORK_AUTHORIZATION",
+		"ONSITE",
+		"TRAVEL",
+		"ON_CALL"
+	]),
+	candidate_constraint: zod.z.string().min(1),
+	role_requirement: zod.z.string().min(1),
+	evidence: zod.z.string().min(1)
+});
+var CultureEvidenceSchema = zod.z.object({
+	signal: zod.z.enum([
+		"AUTONOMY",
+		"POLITICS_RISK",
+		"SENSORY_WORKLOAD_RISK",
+		"FOCUS_PROTECTION"
+	]),
+	score: zod.z.union([zod.z.number().int().min(0).max(100), zod.z.literal("UNKNOWN")]).nullable().default(null),
+	quote: zod.z.string().nullable().default(null),
+	score_derivation_version: zod.z.string().min(1).optional()
+}).superRefine((evidence, context) => {
+	const isUnmeasured = evidence.score === null || evidence.score === "UNKNOWN";
+	if (isUnmeasured && evidence.quote !== null) context.addIssue({
+		code: zod.z.ZodIssueCode.custom,
+		path: ["quote"],
+		message: "Unavailable culture measurements must not include a quote."
+	});
+	if (!isUnmeasured && (!evidence.quote || evidence.quote.trim().length === 0)) context.addIssue({
+		code: zod.z.ZodIssueCode.custom,
+		path: ["quote"],
+		message: "Measured culture signals require a job-description quote."
+	});
+});
+var CultureEvidenceArraySchema = zod.z.array(CultureEvidenceSchema).max(4).superRefine((evidence, context) => {
+	const seenSignals = /* @__PURE__ */ new Set();
+	for (const [index, item] of evidence.entries()) {
+		if (seenSignals.has(item.signal)) context.addIssue({
+			code: zod.z.ZodIssueCode.custom,
+			path: [index, "signal"],
+			message: `Culture evidence signal ${item.signal} may appear only once.`
+		});
+		seenSignals.add(item.signal);
+	}
+});
 /**
 * 8. Evaluation Result
-* Full structured LLM output with cultural, risk, and career scoring.
+* Versioned full structured LLM output. Unknown signals remain null/UNKNOWN;
+* the advisory signals never determine hard gates or recommendation policy.
 */
 var EvaluationResultSchema = zod.z.object({
 	schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
@@ -439,12 +494,32 @@ var EvaluationResultSchema = zod.z.object({
 		"Low"
 	]),
 	lane_evidence: zod.z.string().default(""),
-	nd_score: zod.z.number().int().min(0).max(100),
-	nd_friendly_score: zod.z.number().int().min(0).max(100),
-	politics_stress_score: zod.z.number().int().min(0).max(100),
-	sensory_overload_index: zod.z.number().int().min(0).max(100),
-	building_research_ratio: zod.z.number().int().min(0).max(100),
-	interaction_load: zod.z.number().int().min(0).max(100),
+	nd_score: LegacyEvaluationScoreSchema,
+	nd_friendly_score: LegacyEvaluationScoreSchema,
+	politics_stress_score: LegacyEvaluationScoreSchema,
+	sensory_overload_index: LegacyEvaluationScoreSchema,
+	focus_protection_score: EvaluationScoreSchema,
+	building_research_ratio: LegacyFiniteMeasurementSchema,
+	interaction_load: LegacyFiniteMeasurementSchema,
+	strategic_value_score: EvaluationScoreSchema,
+	career_trajectory: zod.z.enum([
+		"ADVANCING",
+		"LATERAL",
+		"DETOUR",
+		"UNKNOWN"
+	]).default("UNKNOWN"),
+	technical_depth_score: EvaluationScoreSchema,
+	role_ownership_score: EvaluationScoreSchema,
+	ambiguity_burden: EvaluationScoreSchema,
+	meeting_burden: EvaluationScoreSchema,
+	travel_burden: EvaluationScoreSchema,
+	on_call_burden: EvaluationScoreSchema,
+	strengths: zod.z.array(zod.z.string()).default([]),
+	gaps: zod.z.array(zod.z.string()).default([]),
+	risk_flags: zod.z.array(zod.z.string()).default([]),
+	policy_conflicts: zod.z.array(PolicyConflictEvidenceSchema).default([]),
+	culture_score_derivation_version: zod.z.string().min(1).nullable().default(null),
+	culture_evidence: CultureEvidenceArraySchema.default([]),
 	rejection_codes: zod.z.array(zod.z.string()).default([]),
 	strategic_value: zod.z.string().default(""),
 	recommended_cv_version: zod.z.string().default("None"),
@@ -457,11 +532,14 @@ var EvaluationResultSchema = zod.z.object({
 	evaluated_at: zod.z.string().datetime()
 });
 var ApplicationStatusSchema = zod.z.enum([
+	"TO_APPLY",
 	"INTENT",
 	"READY_TO_APPLY",
+	"APPLIED",
 	"SUBMITTED",
 	"FOLLOW_UP",
 	"INTERVIEW",
+	"ASSESSMENT",
 	"OFFER",
 	"REJECTED",
 	"WITHDRAWN",
@@ -586,7 +664,19 @@ zod.z.object({
 	document_ready: zod.z.boolean().default(false),
 	current_artifact_status: zod.z.string().default("CURRENTNESS_UNKNOWN"),
 	current_artifact_reason: zod.z.string().nullable().default(null),
-	blocked_task_count: zod.z.number().int().min(0).default(0)
+	blocked_task_count: zod.z.number().int().min(0).default(0),
+	requires_user_action: zod.z.boolean().default(false),
+	user_action_type: zod.z.string().nullable().default(null),
+	user_action_category: zod.z.string().nullable().default(null),
+	user_action_status: zod.z.string().nullable().default(null),
+	technical_error_count: zod.z.number().int().min(0).default(0),
+	pipeline_display_category: zod.z.enum([
+		"USER_ACTION_REQUIRED",
+		"PROCESSING_AUTOMATICALLY",
+		"TECHNICAL_ERROR",
+		"REJECTED_UNMATCHED",
+		"COMPLETED"
+	]).default("PROCESSING_AUTOMATICALLY")
 });
 //#endregion
 //#region src/db/pgSsl.ts
@@ -694,7 +784,7 @@ async function evaluateQueue() {
 	console.log("====================================================");
 	console.log("         STAGE 0: AI EVALUATION PROCESSOR           ");
 	console.log("====================================================");
-	const { evaluateSingleCanonicalJob, checkModelRegistryPreflight } = await Promise.resolve().then(() => require("./agent-BLJ8laJm.cjs"));
+	const { evaluateSingleCanonicalJob, checkModelRegistryPreflight } = await Promise.resolve().then(() => require("./agent-t5yUcFhf.cjs"));
 	const pipelineRunId = crypto.default.randomUUID();
 	const client = await pool.connect();
 	let processedCount = 0;

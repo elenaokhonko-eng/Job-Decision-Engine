@@ -1745,8 +1745,12 @@ var CONTEXT_PAYLOAD_KEYS = [
 	"force_policy_recalculation",
 	"reprocess",
 	"repair_existing_state",
+	"repair_dependency",
+	"repair_generation",
+	"repair_match_run_id",
 	"reassessment_reason",
-	"verification_answer_revision_id"
+	"verification_answer_revision_id",
+	"queue_budget_run_id"
 ];
 function contextPayload(payload) {
 	return Object.fromEntries(CONTEXT_PAYLOAD_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(payload, key)).map((key) => [key, payload[key]]));
@@ -1801,6 +1805,12 @@ async function answerVerificationQuestion(clientOrPool, questionKey, answer, opt
 				normalizedKey,
 				JSON.stringify(answer)
 			]);
+			await client.query(`UPDATE verification_question_job_links
+         SET status = 'RESOLVED',
+             resolved_at = NOW()
+         WHERE workspace_id = $1
+           AND verification_question_id = $2
+           AND status = 'OPEN'`, [ctx.workspaceId, question.id]);
 			const activeAnswer = await client.query(`SELECT cr.content
          FROM config_definitions cd
          JOIN config_active_revisions car ON car.config_definition_id = cd.id
@@ -1924,6 +1934,10 @@ var SchemaVersionSchema = zod.z.enum(schemaVersions);
 * @version 2.2.0
 */
 var READ_MODEL_SCHEMA_VERSION = SCHEMA_VERSION;
+var PostgresNumericInputSchema = zod.z.union([zod.z.number().finite(), zod.z.string().trim().regex(/^-?(?:\d+(?:\.\d*)?|\.\d+)$/).transform(Number)]);
+var NullablePostgresNumericSchema = PostgresNumericInputSchema.pipe(zod.z.number().finite()).nullable().default(null);
+var PostgresUnitIntervalSchema = PostgresNumericInputSchema.pipe(zod.z.number().finite().min(0).max(1)).nullable().default(null);
+var PostgresPercentIntegerSchema = PostgresNumericInputSchema.pipe(zod.z.number().finite().int().min(0).max(100)).nullable().default(null);
 var ShortlistRowV2Schema = zod.z.object({
 	canonical_job_id: zod.z.string().uuid(),
 	job_version_id: zod.z.string().uuid(),
@@ -1945,9 +1959,9 @@ var ShortlistRowV2Schema = zod.z.object({
 	primary_lane: zod.z.string().nullable(),
 	secondary_lanes: zod.z.array(zod.z.string()).nullable().default([]),
 	lane_confidence: zod.z.string().nullable().default("None"),
-	priority_score: zod.z.number().nullable().default(null),
-	deterministic_match_score: zod.z.number().nullable().default(null),
-	deterministic_match_coverage: zod.z.number().nullable().default(null),
+	priority_score: NullablePostgresNumericSchema,
+	deterministic_match_score: NullablePostgresNumericSchema,
+	deterministic_match_coverage: NullablePostgresNumericSchema,
 	processing_state: zod.z.string(),
 	processing_status: zod.z.string(),
 	recommendation_eligibility: zod.z.enum([
@@ -1961,13 +1975,13 @@ var ShortlistRowV2Schema = zod.z.object({
 		"TRACK",
 		"SKIP"
 	]).nullable().default(null),
-	recommendation_requirement_score: zod.z.number().min(0).max(1).nullable().default(null),
-	recommendation_coverage_score: zod.z.number().min(0).max(1).nullable().default(null),
-	recommendation_evidence_completeness: zod.z.number().min(0).max(1).nullable().default(null),
+	recommendation_requirement_score: PostgresUnitIntervalSchema,
+	recommendation_coverage_score: PostgresUnitIntervalSchema,
+	recommendation_evidence_completeness: PostgresUnitIntervalSchema,
 	recommendation_decided_at: zod.z.coerce.date().nullable(),
-	nd_friendly_score: zod.z.number().nullable().default(null),
-	politics_stress_score: zod.z.number().nullable().default(null),
-	sensory_overload_index: zod.z.number().nullable().default(null),
+	nd_friendly_score: PostgresPercentIntegerSchema,
+	politics_stress_score: PostgresPercentIntegerSchema,
+	sensory_overload_index: PostgresPercentIntegerSchema,
 	next_action: zod.z.string().nullable().default(null),
 	strategic_value: zod.z.string().nullable().default(null),
 	recommended_cv_version: zod.z.string().nullable().default(null),
@@ -1984,7 +1998,19 @@ var ShortlistRowV2Schema = zod.z.object({
 	document_ready: zod.z.boolean().default(false),
 	current_artifact_status: zod.z.string().default("CURRENTNESS_UNKNOWN"),
 	current_artifact_reason: zod.z.string().nullable().default(null),
-	blocked_task_count: zod.z.number().int().min(0).default(0)
+	blocked_task_count: zod.z.number().int().min(0).default(0),
+	requires_user_action: zod.z.boolean().default(false),
+	user_action_type: zod.z.string().nullable().default(null),
+	user_action_category: zod.z.string().nullable().default(null),
+	user_action_status: zod.z.string().nullable().default(null),
+	technical_error_count: zod.z.number().int().min(0).default(0),
+	pipeline_display_category: zod.z.enum([
+		"USER_ACTION_REQUIRED",
+		"PROCESSING_AUTOMATICALLY",
+		"TECHNICAL_ERROR",
+		"REJECTED_UNMATCHED",
+		"COMPLETED"
+	]).default("PROCESSING_AUTOMATICALLY")
 }).passthrough();
 var RejectedJobRowSchema = zod.z.object({
 	canonical_job_id: zod.z.string().uuid(),
@@ -2074,11 +2100,14 @@ function isUuid(value) {
 	return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 var APPLICATION_STATUSES = [
+	"TO_APPLY",
 	"INTENT",
 	"READY_TO_APPLY",
+	"APPLIED",
 	"SUBMITTED",
 	"FOLLOW_UP",
 	"INTERVIEW",
+	"ASSESSMENT",
 	"OFFER",
 	"REJECTED",
 	"WITHDRAWN",
@@ -2229,8 +2258,14 @@ function createApiV2Router(deps = {}) {
             s.document_ready,
             s.current_artifact_status,
             s.current_artifact_reason,
-            s.blocked_task_count
-          FROM v_canonical_shortlist_scoped s
+            s.blocked_task_count,
+            s.requires_user_action,
+            s.user_action_type,
+            s.user_action_category,
+            s.user_action_status,
+            s.technical_error_count,
+            s.pipeline_display_category
+          FROM v_canonical_shortlist_actions_scoped s
           WHERE s.workspace_id = $1
           ${cursorClause}
           ORDER BY s.observed_at DESC, s.canonical_job_id DESC
@@ -2730,7 +2765,9 @@ function createApiV2Router(deps = {}) {
                    c.canonical_url,
                    current_shortlist.current_artifact_status,
                    current_shortlist.current_artifact_reason,
-                   current_shortlist.recommendation_eligibility
+                   current_shortlist.gate_status,
+                   current_shortlist.recommendation_eligibility,
+                   current_shortlist.recommendation_outcome
             FROM canonical_jobs c
             JOIN job_versions jv
               ON jv.workspace_id = c.workspace_id
@@ -2752,6 +2789,7 @@ function createApiV2Router(deps = {}) {
              AND current_shortlist.job_version_id = jv.id
             WHERE c.workspace_id = $1
               AND c.id = $2::uuid
+              AND c.is_test_fixture = FALSE
             LIMIT 1
           `, [
 				ctx.workspaceId,
@@ -2759,15 +2797,23 @@ function createApiV2Router(deps = {}) {
 				requestedJobVersionId
 			])).rows[0];
 			if (!job) return null;
-			if (job.current_artifact_status !== "CURRENT_OR_NOT_APPLICABLE") return {
+			if (![
+				"CURRENT_OR_NOT_APPLICABLE",
+				"EVALUATION_MISSING",
+				"EVALUATION_STALE"
+			].includes(job.current_artifact_status ?? "")) return {
 				handoffBlocked: true,
-				error: "The job does not have a current decision artifact. Re-run the pipeline before creating an application handoff.",
+				error: "The job does not have a current deterministic decision artifact. Re-run matching and decision stages before creating an application handoff.",
 				reason: job.current_artifact_reason ?? job.current_artifact_status ?? "CURRENT_ARTIFACT_UNAVAILABLE"
 			};
-			if (job.recommendation_eligibility !== "ELIGIBLE") return {
+			let handoffBlockReason = null;
+			if (job.gate_status !== "PASS") handoffBlockReason = job.gate_status ?? "GATE_NOT_PASSED";
+			else if (job.recommendation_eligibility !== "ELIGIBLE") handoffBlockReason = job.recommendation_eligibility ?? "RECOMMENDATION_NOT_ELIGIBLE";
+			else if (!["PRIORITY", "REVIEW"].includes(job.recommendation_outcome ?? "")) handoffBlockReason = job.recommendation_outcome ?? "RECOMMENDATION_NOT_APPLY_NOW";
+			if (handoffBlockReason !== null) return {
 				handoffBlocked: true,
-				error: "The job is not deterministically eligible for application handoff.",
-				reason: job.recommendation_eligibility ?? "RECOMMENDATION_NOT_ELIGIBLE"
+				error: "Application handoffs require a current Apply Now decision (PRIORITY or REVIEW).",
+				reason: handoffBlockReason
 			};
 			const previous = (await client.query(`
             SELECT id, status
@@ -2804,7 +2850,7 @@ function createApiV2Router(deps = {}) {
             VALUES (
               $1, $2, $3, $4, $5, COALESCE($6, $7), $8, $9, $10, $11::jsonb,
               $12::timestamptz,
-              CASE WHEN $5 = 'SUBMITTED' THEN NOW() ELSE NULL END,
+              CASE WHEN $5 IN ('SUBMITTED', 'APPLIED') THEN NOW() ELSE NULL END,
               $13::timestamptz,
               NOW(),
               NOW()
@@ -2822,7 +2868,7 @@ function createApiV2Router(deps = {}) {
               END,
               target_submit_at = COALESCE(EXCLUDED.target_submit_at, application_records.target_submit_at),
               submitted_at = CASE
-                WHEN EXCLUDED.status = 'SUBMITTED' THEN COALESCE(application_records.submitted_at, NOW())
+                WHEN EXCLUDED.status IN ('SUBMITTED', 'APPLIED') THEN COALESCE(application_records.submitted_at, NOW())
                 ELSE application_records.submitted_at
               END,
               follow_up_at = COALESCE(EXCLUDED.follow_up_at, application_records.follow_up_at),
@@ -2986,7 +3032,7 @@ function createApiV2Router(deps = {}) {
                 notes = COALESCE($5, notes),
                 follow_up_at = COALESCE($6::timestamptz, follow_up_at),
                 submitted_at = CASE
-                  WHEN $4 = 'SUBMITTED' THEN COALESCE(submitted_at, NOW())
+                  WHEN $4 IN ('SUBMITTED', 'APPLIED') THEN COALESCE(submitted_at, NOW())
                   ELSE submitted_at
                 END,
                 last_action_at = NOW(),

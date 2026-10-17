@@ -150,6 +150,440 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("055_repair_shortlist_nullable_priority.sql");
     expect(versions).toContain("056_authoritative_user_action_projection.sql");
     expect(versions).toContain("057_pipeline_reliability_fixture_isolation.sql");
+    expect(versions).toContain("066_application_command_centre_v5.sql");
+    expect(versions).toContain("067_application_profile_coverage_completeness.sql");
+    expect(versions).toContain("068_allow_unknown_optional_rank_signals.sql");
+    expect(versions).toContain("069_validate_application_document_context.sql");
+    expect(versions).toContain("070_verified_culture_observations.sql");
+    expect(versions).toContain("071_expose_ranking_lineage.sql");
+    expect(versions).toContain("072_expose_top_ten_component_scores.sql");
+    expect(versions).toContain("073_preserve_culture_observation_immutability.sql");
+    expect(versions).toContain("074_rebalance_optional_ranking_confidence.sql");
+  });
+
+  it("V5 creates the ranking, culture, and workspace-scoped application read models", async () => {
+    const { rows: tables } = await realPool.query<{ table_name: string }>(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+        AND table_type = 'BASE TABLE'
+        AND table_name IN (
+          'ranking_policies',
+          'job_ranking_snapshots',
+          'company_culture_observations',
+          'workspace_companies',
+          'policy_recheck_requests'
+        )
+      ORDER BY table_name
+    `);
+    expect(tables.map((row) => row.table_name)).toEqual([
+      'company_culture_observations',
+      'job_ranking_snapshots',
+      'policy_recheck_requests',
+      'ranking_policies',
+      'workspace_companies',
+    ]);
+
+    const { rows: views } = await realPool.query<{ table_name: string }>(`
+      SELECT table_name
+      FROM information_schema.views
+      WHERE table_schema = 'public'
+        AND table_name IN (
+          'v_apply_now_jobs_scoped',
+          'v_track_jobs_scoped',
+          'v_top_ten_ready_jobs_scoped',
+          'v_application_workspace_scoped',
+          'v_company_culture_analytics_scoped',
+          'v_company_culture_evidence_scoped',
+          'v_job_profile_evidence_scoped',
+          'v_profile_coverage_scoped',
+          'v_application_workspace_summary_scoped'
+        )
+      ORDER BY table_name
+    `);
+    expect(views.map((row) => row.table_name)).toEqual([
+      'v_application_workspace_scoped',
+      'v_application_workspace_summary_scoped',
+      'v_apply_now_jobs_scoped',
+      'v_company_culture_analytics_scoped',
+      'v_company_culture_evidence_scoped',
+      'v_job_profile_evidence_scoped',
+      'v_profile_coverage_scoped',
+      'v_top_ten_ready_jobs_scoped',
+      'v_track_jobs_scoped',
+    ]);
+  });
+
+  it("V5 materializes culture evidence and deterministic recheck tasks from validated current evaluations", async () => {
+    const { rows } = await realPool.query<{ trigger_name: string }>(`
+      SELECT trigger_row.tgname AS trigger_name
+      FROM pg_trigger AS trigger_row
+      WHERE trigger_row.tgrelid = to_regclass('public.ai_evaluations')
+        AND NOT trigger_row.tgisinternal
+        AND trigger_row.tgname = 'trg_ai_evaluations_materialize_v5_signals'
+    `);
+    expect(rows.map((row) => row.trigger_name)).toContain('trg_ai_evaluations_materialize_v5_signals');
+  });
+
+  it("culture analytics exclude unverified model-proposed scores", async () => {
+    const { rows: triggerRows } = await realPool.query<{ trigger_name: string }>(`
+      SELECT trigger_row.tgname AS trigger_name
+      FROM pg_trigger AS trigger_row
+      WHERE trigger_row.tgrelid = to_regclass('public.ai_evaluations')
+        AND NOT trigger_row.tgisinternal
+        AND trigger_row.tgname = 'trg_z_ai_evaluations_validated_culture_observation'
+    `);
+    expect(triggerRows.map((row) => row.trigger_name)).toContain(
+      "trg_z_ai_evaluations_validated_culture_observation"
+    );
+    const { rows: insertGuards } = await realPool.query<{ trigger_name: string }>(`
+      SELECT trigger_row.tgname AS trigger_name
+      FROM pg_trigger AS trigger_row
+      WHERE trigger_row.tgrelid = to_regclass('public.company_culture_observations')
+        AND NOT trigger_row.tgisinternal
+        AND trigger_row.tgname = 'trg_skip_unverified_culture_observation_insert'
+    `);
+    expect(insertGuards.map((row) => row.trigger_name)).toContain(
+      "trg_skip_unverified_culture_observation_insert"
+    );
+
+    const { rows: viewDefinitions } = await realPool.query<{ definition: string | null }>(`
+      SELECT pg_get_viewdef(to_regclass('public.v_company_culture_analytics_scoped'), TRUE) AS definition
+    `);
+    const definition = (viewDefinitions[0]?.definition ?? "").replace(/\s+/g, " ");
+    expect(definition).toContain("observation.source_type = 'DETERMINISTIC_QUOTE_RULES_V1'");
+  });
+
+  it("policy recheck requests retain current context, evidence, and status", async () => {
+    const expectedColumns = [
+      'workspace_id',
+      'canonical_job_id',
+      'job_version_id',
+      'profile_version_id',
+      'match_run_id',
+      'deterministic_decision_id',
+      'ai_evaluation_id',
+      'ranking_policy_version',
+      'context_fingerprint',
+      'reason_code',
+      'evidence_payload',
+      'status',
+      'created_at',
+    ];
+    const { rows } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'policy_recheck_requests'
+        AND column_name = ANY($1::text[])
+    `, [expectedColumns]);
+
+    expect(rows.map((row) => row.column_name)).toEqual(expect.arrayContaining(expectedColumns));
+  });
+
+  it("apply-now exposes policy recheck state and Top-10 excludes pending rechecks", async () => {
+    const { rows: recheckColumns } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'v_apply_now_jobs_scoped'
+        AND column_name = 'policy_recheck_required'
+    `);
+    expect(recheckColumns).toHaveLength(1);
+
+    const { rows: definitions } = await realPool.query<{ definition: string | null }>(`
+      SELECT pg_get_viewdef(to_regclass('public.v_top_ten_ready_jobs_scoped'), TRUE) AS definition
+    `);
+    expect(definitions).toHaveLength(1);
+    const definition = (definitions[0].definition ?? '').replace(/\s+/g, ' ');
+    expect(definition).toMatch(/NOT\s*(?:\(\s*)?EXISTS\s*\([\s\S]*policy_recheck_requests[\s\S]*status\s*=\s*'PENDING'/i);
+    expect(definition).toContain("recommendation_outcome");
+    expect(definition).not.toMatch(/autonomy_score\s+IS\s+NOT\s+NULL/i);
+    expect(definition).not.toMatch(/strategic_value_score\s+IS\s+NOT\s+NULL/i);
+  });
+
+  it("workspace company identity is unique within a workspace, not globally", async () => {
+    const { rows: uniqueIndexes } = await realPool.query<{ columns: string[] }>(`
+      SELECT ARRAY_AGG(attribute.attname ORDER BY attribute.attname) AS columns
+      FROM pg_index AS index_row
+      CROSS JOIN LATERAL unnest(index_row.indkey) WITH ORDINALITY
+        AS key_column(attnum, ordinal_position)
+      JOIN pg_attribute AS attribute
+        ON attribute.attrelid = index_row.indrelid
+       AND attribute.attnum = key_column.attnum
+      WHERE index_row.indrelid = to_regclass('public.workspace_companies')
+        AND index_row.indisunique
+        AND index_row.indisvalid
+        AND index_row.indpred IS NULL
+        AND key_column.ordinality <= index_row.indnkeyatts
+      GROUP BY index_row.indexrelid
+    `);
+    const uniqueColumnSets = uniqueIndexes.map((index) => index.columns);
+
+    expect(uniqueColumnSets).toContainEqual(['normalized_company_name', 'workspace_id']);
+    expect(uniqueColumnSets).not.toContainEqual(['normalized_company_name']);
+  });
+
+  it("V5 document provenance pins profile, deterministic decision, and context fingerprints", async () => {
+    const { rows } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'document_runs'
+        AND column_name = ANY($1::text[])
+    `, [["profile_version_id", "deterministic_decision_id", "context_fingerprint"]]);
+    expect(rows.map((row) => row.column_name)).toEqual(expect.arrayContaining([
+      "profile_version_id",
+      "deterministic_decision_id",
+      "context_fingerprint",
+    ]));
+
+    const { rows: applicationColumns } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'v_application_workspace_scoped'
+        AND column_name IN ('cv_document_status', 'cover_letter_document_status')
+    `);
+    expect(applicationColumns.map((row) => row.column_name)).toEqual(expect.arrayContaining([
+      "cv_document_status",
+      "cover_letter_document_status",
+    ]));
+
+    const { rows: viewDefinitions } = await realPool.query<{ definition: string | null }>(`
+      SELECT pg_get_viewdef(to_regclass('public.v_application_workspace_scoped'), TRUE) AS definition
+    `);
+    const definition = (viewDefinitions[0]?.definition ?? "").replace(/\s+/g, " ");
+    expect(definition).toContain("job_version.active_requirement_set_id IS NOT NULL");
+    expect(definition).toContain("current_match.requirement_set_id = job_version.active_requirement_set_id");
+    expect(definition).toContain("current_match.job_content_hash = job_version.content_hash");
+    expect(definition).toContain("current_shortlist.gate_status = 'PASS'");
+    expect(definition).toContain("current_shortlist.recommendation_outcome IN ('PRIORITY', 'REVIEW')");
+    expect(definition).toContain("cv_document.context_fingerprint = current_match.context_fingerprint");
+    expect(definition).toContain("cover_letter_document.context_fingerprint = current_match.context_fingerprint");
+  });
+
+  it("Top 10 read model exposes all persisted ranking lineage identities", async () => {
+    const requiredColumns = [
+      "profile_version_id",
+      "match_run_id",
+      "deterministic_decision_id",
+      "ai_evaluation_id",
+      "requirement_fit_score",
+      "requirement_coverage_score",
+      "evidence_completeness_score",
+      "lane_confidence_score",
+      "autonomy_score",
+      "politics_risk_score",
+      "sensory_workload_risk_score",
+      "strategic_value_score",
+      "focus_protection_score",
+      "building_ratio_score",
+      "interaction_burden_score",
+    ];
+    const { rows } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'v_top_ten_ready_jobs_scoped'
+        AND column_name = ANY($1::text[])
+    `, [requiredColumns]);
+
+    expect(rows.map((row) => row.column_name)).toEqual(expect.arrayContaining(requiredColumns));
+  });
+
+  it("active V5 ranking policy permits Top 10 with optional strategic value unknown", async () => {
+    const { rows } = await realPool.query<{
+      weights: Record<string, number>;
+      minimum_ranking_confidence: number;
+    }>(`
+      SELECT weights, minimum_ranking_confidence::FLOAT8 AS minimum_ranking_confidence
+      FROM ranking_policies
+      WHERE schema_version = '5.2.0'
+      ORDER BY policy_version DESC
+    `);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const policy of rows) {
+      expect(policy.weights.strategicValue).toBeLessThanOrEqual(5);
+      expect(policy.minimum_ranking_confidence).toBe(95);
+    }
+  });
+
+  it("V5 ranking snapshots retain the full current decision context", async () => {
+    const { rows } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'job_ranking_snapshots'
+        AND column_name = ANY($1::text[])
+    `, [[
+      'workspace_id',
+      'canonical_job_id',
+      'job_version_id',
+      'profile_version_id',
+      'match_run_id',
+      'deterministic_decision_id',
+      'ai_evaluation_id',
+      'ranking_policy_version',
+      'context_fingerprint',
+      'overall_rank_score',
+      'ranking_confidence',
+      'created_at',
+    ]]);
+    expect(rows.map((row) => row.column_name)).toEqual(expect.arrayContaining([
+      'workspace_id',
+      'canonical_job_id',
+      'job_version_id',
+      'profile_version_id',
+      'match_run_id',
+      'deterministic_decision_id',
+      'ai_evaluation_id',
+      'ranking_policy_version',
+      'context_fingerprint',
+      'overall_rank_score',
+      'ranking_confidence',
+      'created_at',
+    ]));
+  });
+
+  it("V5 culture observations store nullable structured signals and evidence provenance", async () => {
+    const signalColumns = [
+      'autonomy_signal',
+      'politics_risk_signal',
+      'sensory_workload_risk_signal',
+      'strategic_value_signal',
+      'focus_protection_signal',
+    ];
+    const evidenceColumns = [
+      'source_type',
+      'source_url',
+      'evidence_quote',
+      'evidence_hash',
+      'observed_at',
+    ];
+    const { rows } = await realPool.query<{ column_name: string; is_nullable: string }>(`
+      SELECT column_name, is_nullable
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'company_culture_observations'
+        AND column_name = ANY($1::text[])
+    `, [[...signalColumns, ...evidenceColumns]]);
+    const actualColumns = rows.map((row) => row.column_name);
+
+    expect(actualColumns).toEqual(expect.arrayContaining([...signalColumns, ...evidenceColumns]));
+    expect(rows.filter((row) => signalColumns.includes(row.column_name))).toHaveLength(signalColumns.length);
+    expect(rows
+      .filter((row) => signalColumns.includes(row.column_name))
+      .every((row) => row.is_nullable === 'YES')).toBe(true);
+  });
+
+  it("culture analytics and profile coverage expose signal and match-count summaries", async () => {
+    const companyAnalyticsColumns = [
+      'focus_protection_score_status',
+      'focus_protection_observation_count',
+      'last_updated',
+      'company_job_count',
+    ];
+    const { rows: companyAnalytics } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'v_company_culture_analytics_scoped'
+        AND column_name = ANY($1::text[])
+    `, [companyAnalyticsColumns]);
+    expect(companyAnalytics.map((row) => row.column_name)).toEqual(
+      expect.arrayContaining(companyAnalyticsColumns)
+    );
+
+    const profileCoverageColumns = [
+      'must_exact_matched_count',
+      'must_semantic_matched_count',
+      'preferred_exact_matched_count',
+      'preferred_semantic_matched_count',
+      'profile_fact_count',
+      'active_credential_count',
+      'engagement_count',
+      'skill_count',
+      'technology_count',
+      'domain_count',
+      'project_count',
+      'achievement_count',
+      'publication_count',
+    ];
+    const { rows: profileCoverage } = await realPool.query<{ column_name: string }>(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'v_profile_coverage_scoped'
+        AND column_name = ANY($1::text[])
+    `, [profileCoverageColumns]);
+    expect(profileCoverage.map((row) => row.column_name)).toEqual(
+      expect.arrayContaining(profileCoverageColumns)
+    );
+  });
+
+  it("V5 seeds a versioned ranking policy with weights totaling 100", async () => {
+    const { rows } = await realPool.query<{
+      policy_version: string | number;
+      weights: Record<string, number>;
+      minimum_ranking_confidence: number;
+    }>(`
+      SELECT policy_version, weights, minimum_ranking_confidence::float8 AS minimum_ranking_confidence
+      FROM ranking_policies
+      ORDER BY policy_version
+    `);
+    expect(rows.length).toBeGreaterThan(0);
+
+    const requiredWeights = [
+      'requirementFit',
+      'requirementCoverage',
+      'evidenceCompleteness',
+      'laneConfidence',
+      'autonomy',
+      'politicsRisk',
+      'sensoryWorkloadRisk',
+      'strategicValue',
+    ];
+    for (const policy of rows) {
+      expect(policy.policy_version).toBeTruthy();
+      expect(policy.minimum_ranking_confidence).toBe(95);
+      expect(Object.keys(policy.weights)).toEqual(expect.arrayContaining(requiredWeights));
+      const weights = Object.values(policy.weights);
+      expect(weights.every((weight) => Number.isFinite(weight) && weight >= 0)).toBe(true);
+      expect(weights.reduce((total, weight) => total + weight, 0)).toBeCloseTo(100, 8);
+    }
+  });
+
+  it("V5 application status accepts the new workflow states and retains legacy states", async () => {
+    const { rows } = await realPool.query<{ definition: string }>(`
+      SELECT pg_get_constraintdef(constraint_row.oid) AS definition
+      FROM pg_constraint AS constraint_row
+      JOIN pg_class AS relation ON relation.oid = constraint_row.conrelid
+      JOIN pg_namespace AS namespace_row ON namespace_row.oid = relation.relnamespace
+      WHERE namespace_row.nspname = 'public'
+        AND relation.relname = 'application_records'
+        AND constraint_row.contype = 'c'
+        AND pg_get_constraintdef(constraint_row.oid) ILIKE '%status%'
+    `);
+    const statusConstraint = rows.find((row) => row.definition.includes("'TO_APPLY'"));
+    expect(statusConstraint).toBeDefined();
+
+    for (const status of [
+      'TO_APPLY',
+      'APPLIED',
+      'ASSESSMENT',
+      'INTENT',
+      'READY_TO_APPLY',
+      'SUBMITTED',
+      'FOLLOW_UP',
+      'INTERVIEW',
+      'OFFER',
+      'REJECTED',
+      'WITHDRAWN',
+      'CLOSED',
+    ]) {
+      expect(statusConstraint?.definition).toContain(`'${status}'`);
+    }
   });
 
   it("embedding inputs preserve history with current-row uniqueness and current-only views", async () => {

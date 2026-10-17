@@ -32,7 +32,22 @@ Job searching often presents overwhelming cognitive fatigue, rejection trauma fr
    - `SOCIAL_IMPACT_MULTILATERAL`
    - `UNIVERSITY_AI_RESEARCH`
 6. **Bring Your Own Keys (BYOK)**: Connect your own Google Gemini or OpenAI API keys. Generative AI evaluation runs automatically as part of the bounded E2E pipeline after deterministic gates pass.
-7. **Factual Evidence-Grounded Documents**: Automatically generates customized DOCX resumes and cover letters mapped strictly to your factual career ledger. Zero hallucinations.
+7. **Factual Evidence-Grounded Documents**: Generates customized DOCX resumes and cover letters from verified profile evidence and the current job match context.
+
+## Application Command Centre
+
+The Streamlit workspace separates current application opportunities from pipeline and negative-decision records.
+
+* `Apply Now` contains only current `PRIORITY` and `REVIEW` decisions with deterministic eligibility and a passing hard gate.
+* `Top 10 Ready` is the persisted, versioned ranking of current Apply Now jobs. Missing optional signals remain `UNKNOWN` and reduce ranking confidence. Strategic value remains unknown without independent evidence and has a 5% policy weight, so the 95% confidence threshold remains reachable when it is the only missing signal. A rank cannot change a deterministic gate or recommendation.
+* Culture signal scores are derived from bounded phrase rules over exact job-description evidence. Unsupported or conflicting evidence remains `UNKNOWN`; model-proposed numeric culture scores are not accepted as persisted scores.
+* `Track` contains current `TRACK` decisions. The decision trace explains why a job is not currently in Apply Now.
+* Application handoffs require a current `PRIORITY` or `REVIEW` decision. Application status, generated CV and cover-letter links, and status history are stored in the tracker. Submitting an application remains a human action.
+* A generated document is `READY` only while its active profile, requirement set, job-content hash, match, and deterministic-decision context remain current.
+* The `Why I Fit` view links job requirements to non-private profile evidence in the current match context.
+* Company culture averages include observation counts and confidence. Missing signals remain `UNKNOWN` instead of appearing as zero.
+
+The Streamlit fallback uses workspace-scoped PostgreSQL read models in read-only mode. Application status changes require the managed API.
 
 ---
 

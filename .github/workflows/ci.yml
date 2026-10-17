@@ -43,6 +43,26 @@ jobs:
     - name: Install dependencies
       run: npm ci
 
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        cache-dependency-glob: requirements-test.txt
+
+    - name: Install Python test dependencies
+      run: uv pip install --system -r requirements-test.txt
+
+    - name: Run Python tests and Ruff
+      run: |
+        python -m pytest tests/python
+        ruff check --isolated --ignore I001 tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_workspace_contracts.py
+        ruff format --check --isolated tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_workspace_contracts.py
+
     - name: Reject UTF-8 BOM in executable and migration sources
       shell: bash
       run: |

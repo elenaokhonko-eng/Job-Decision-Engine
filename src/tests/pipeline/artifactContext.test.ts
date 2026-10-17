@@ -63,6 +63,23 @@ describe("pipeline artifact context", () => {
     expect(first).not.toBe(second);
   });
 
+  it("changes when a fresh AI evaluation budget run is requested", () => {
+    const first = buildPipelineTaskContextFingerprint({
+      ...base,
+      taskType: "ENQUEUE_EXPLANATION",
+      taskVersion: "explanation_queue_v2",
+      payload: { canonical_job_id: "job-1", job_version_id: "version-1", queue_budget_run_id: "budget-1" },
+    });
+    const second = buildPipelineTaskContextFingerprint({
+      ...base,
+      taskType: "ENQUEUE_EXPLANATION",
+      taskVersion: "explanation_queue_v2",
+      payload: { canonical_job_id: "job-1", job_version_id: "version-1", queue_budget_run_id: "budget-2" },
+    });
+
+    expect(first).not.toBe(second);
+  });
+
   it("changes when a semantic repair generation changes", () => {
     const first = buildPipelineTaskContextFingerprint({
       ...base,

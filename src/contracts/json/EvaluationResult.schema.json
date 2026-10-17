@@ -86,34 +86,210 @@
           "default": ""
         },
         "nd_score": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "nd_friendly_score": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
+          "$ref": "#/definitions/EvaluationResult/properties/nd_score"
         },
         "politics_stress_score": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
+          "$ref": "#/definitions/EvaluationResult/properties/nd_score"
         },
         "sensory_overload_index": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
+          "$ref": "#/definitions/EvaluationResult/properties/nd_score"
+        },
+        "focus_protection_score": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "building_research_ratio": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "interaction_load": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
+          "$ref": "#/definitions/EvaluationResult/properties/building_research_ratio"
+        },
+        "strategic_value_score": {
+          "$ref": "#/definitions/EvaluationResult/properties/focus_protection_score"
+        },
+        "career_trajectory": {
+          "type": "string",
+          "enum": [
+            "ADVANCING",
+            "LATERAL",
+            "DETOUR",
+            "UNKNOWN"
+          ],
+          "default": "UNKNOWN"
+        },
+        "technical_depth_score": {
+          "$ref": "#/definitions/EvaluationResult/properties/focus_protection_score"
+        },
+        "role_ownership_score": {
+          "$ref": "#/definitions/EvaluationResult/properties/focus_protection_score"
+        },
+        "ambiguity_burden": {
+          "$ref": "#/definitions/EvaluationResult/properties/focus_protection_score"
+        },
+        "meeting_burden": {
+          "$ref": "#/definitions/EvaluationResult/properties/focus_protection_score"
+        },
+        "travel_burden": {
+          "$ref": "#/definitions/EvaluationResult/properties/focus_protection_score"
+        },
+        "on_call_burden": {
+          "$ref": "#/definitions/EvaluationResult/properties/focus_protection_score"
+        },
+        "strengths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "risk_flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "policy_conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "type": "string",
+                "enum": [
+                  "RESIDENCY",
+                  "WORK_AUTHORIZATION",
+                  "ONSITE",
+                  "TRAVEL",
+                  "ON_CALL"
+                ]
+              },
+              "candidate_constraint": {
+                "type": "string",
+                "minLength": 1
+              },
+              "role_requirement": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "policy",
+              "candidate_constraint",
+              "role_requirement",
+              "evidence"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "culture_score_derivation_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "culture_evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "signal": {
+                "type": "string",
+                "enum": [
+                  "AUTONOMY",
+                  "POLITICS_RISK",
+                  "SENSORY_WORKLOAD_RISK",
+                  "FOCUS_PROTECTION"
+                ]
+              },
+              "score": {
+                "anyOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100
+                      },
+                      {
+                        "type": "string",
+                        "const": "UNKNOWN"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "quote": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "score_derivation_version": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "signal"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 4,
+          "default": []
         },
         "rejection_codes": {
           "type": "array",
