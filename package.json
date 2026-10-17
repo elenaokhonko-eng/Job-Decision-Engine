@@ -25,6 +25,7 @@
     "db:init": "tsx scripts/db_init.ts",
     "eval:run": "tsx scripts/evaluate_jobs.ts",
     "profile:import": "tsx scripts/import_profile.ts",
+    "profile:stage1": "tsx scripts/stage1_capability_profile.ts",
     "docs:cv": "tsx scripts/generate_cv.ts",
     "docs:cover-letter": "tsx scripts/generate_cover_letter.ts",
     "docs:compliance": "tsx scripts/generate_source_compliance_matrix.ts",

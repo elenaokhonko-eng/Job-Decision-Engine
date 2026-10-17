@@ -46,6 +46,12 @@ export const ConfidentialitySchema = z.enum([
   'PRIVATE_INTERNAL',
 ]);
 
+export type EngagementType = z.infer<typeof EngagementTypeSchema>;
+export type ExperienceClass = z.infer<typeof ExperienceClassSchema>;
+export type HoursPerWeekBand = z.infer<typeof HoursPerWeekBandSchema>;
+export type VerificationStatus = z.infer<typeof VerificationStatusSchema>;
+export type Confidentiality = z.infer<typeof ConfidentialitySchema>;
+
 export const FactTypeSchema = z.enum([
   'ACHIEVEMENT',
   'RESPONSIBILITY',
@@ -69,6 +75,66 @@ export const CredentialStatusSchema = z.enum([
   'EXPIRED',
   'IN_PROGRESS',
   'REVOKED',
+]);
+
+export type FactType = z.infer<typeof FactTypeSchema>;
+export type CredentialType = z.infer<typeof CredentialTypeSchema>;
+export type CredentialStatus = z.infer<typeof CredentialStatusSchema>;
+
+export const ProficiencyLevelSchema = z.enum([
+  'EXPERT',
+  'ADVANCED',
+  'PRODUCTION_CAPABLE',
+  'INDEPENDENT',
+  'FOUNDATIONAL',
+  'KNOWLEDGE_ONLY',
+  'LEARNING',
+]);
+
+export const HandsOnLevelSchema = z.enum([
+  'PRODUCTION',
+  'APPLIED_PROJECT',
+  'COURSE_PROJECT',
+  'CONCEPTUAL',
+  'NONE',
+]);
+
+export const InterestLevelSchema = z.enum([
+  'TARGET',
+  'STRONG',
+  'ACCEPTABLE',
+  'SUPPORTING',
+  'AVOID',
+  'NO_INTEREST',
+]);
+
+export const RecencyLevelSchema = z.enum([
+  'CURRENT',
+  'RECENT',
+  'HISTORICAL',
+]);
+
+export const DevelopmentStatusSchema = z.enum([
+  'CURRENT',
+  'DEVELOPING',
+  'PLANNED',
+]);
+
+export const CapabilityFamilySchema = z.enum([
+  'SYSTEMS_ARCHITECTURE',
+  'AI_ENGINEERING',
+  'SOFTWARE_ENGINEERING',
+  'DATA_ANALYTICS',
+  'PRODUCT',
+  'TECHNICAL_DELIVERY',
+  'RESEARCH',
+  'GOVERNANCE_RISK',
+  'DOMAIN_EXPERTISE',
+  'LEADERSHIP',
+  'COMMUNICATION',
+  'FOUNDER_OPERATOR',
+  'LANGUAGES_GEOGRAPHY',
+  'SIGNATURE_STRENGTHS',
 ]);
 
 export const ProfileVersionStatusSchema = z.enum([
@@ -375,3 +441,205 @@ export const LanePreferencesJsonSchema = z.object({
   profile_key: z.string().regex(/^[a-z_][a-z0-9_]{0,63}$/),
   lanes: z.array(LanePreferenceSchema),
 });
+
+// ============================================================================
+// Capability metadata and derived capability profile schemas
+// ============================================================================
+
+export type ProficiencyLevel = z.infer<typeof ProficiencyLevelSchema>;
+export type HandsOnLevel = z.infer<typeof HandsOnLevelSchema>;
+export type InterestLevel = z.infer<typeof InterestLevelSchema>;
+export type RecencyLevel = z.infer<typeof RecencyLevelSchema>;
+export type DevelopmentStatus = z.infer<typeof DevelopmentStatusSchema>;
+export type CapabilityFamily = z.infer<typeof CapabilityFamilySchema>;
+
+export const CapabilityFactMetadataSchema = z
+  .object({
+    capability_family: CapabilityFamilySchema.optional(),
+    capability_name: z.string().optional(),
+    proficiency: ProficiencyLevelSchema.optional(),
+    hands_on_level: HandsOnLevelSchema.optional(),
+    interest: InterestLevelSchema.optional(),
+    evidence_strength: ExperienceClassSchema.optional(),
+    recency: RecencyLevelSchema.optional(),
+    ai_assisted: z.boolean().optional(),
+    development_status: DevelopmentStatusSchema.optional(),
+    rating: z.number().min(1).max(5).optional(),
+    self_rating: z.string().optional(),
+    speaking: z.string().optional(),
+    reading: z.string().optional(),
+    writing: z.string().optional(),
+    years_experience: z.number().optional(),
+    ceiling_pct: z.number().optional(),
+    target_pct_min: z.number().optional(),
+    target_pct_max: z.number().optional(),
+  })
+  .passthrough();
+
+export type CapabilityFactMetadata = z.infer<typeof CapabilityFactMetadataSchema>;
+
+export const CapabilityEntrySchema = z.object({
+  capability_name: z.string(),
+  display_label: z.string(),
+  proficiency: ProficiencyLevelSchema,
+  hands_on_level: HandsOnLevelSchema,
+  interest: InterestLevelSchema,
+  evidence_strength: ExperienceClassSchema,
+  recency: RecencyLevelSchema,
+  ai_assisted: z.boolean().optional(),
+  development_status: DevelopmentStatusSchema,
+  statement: z.string(),
+  source_fact_keys: z.string().array(),
+  engagement_keys: z.string().array().optional(),
+  credential_keys: z.string().array().optional(),
+  notes: z.string().optional(),
+});
+
+export type CapabilityEntry = z.infer<typeof CapabilityEntrySchema>;
+
+export const CapabilityFamilyGroupSchema = z.object({
+  family: CapabilityFamilySchema,
+  display_title: z.string(),
+  description: z.string(),
+  capabilities: z.array(CapabilityEntrySchema),
+});
+
+export type CapabilityFamilyGroup = z.infer<typeof CapabilityFamilyGroupSchema>;
+
+export const DomainExpertiseEntrySchema = z.object({
+  domain: z.string(),
+  display_label: z.string(),
+  rating: z.number().min(1).max(5),
+  self_rating: z.string(),
+  proficiency: ProficiencyLevelSchema,
+  interest: InterestLevelSchema,
+  source_fact_keys: z.string().array(),
+  development_status: DevelopmentStatusSchema.optional(),
+  notes: z.string().optional(),
+});
+
+export type DomainExpertiseEntry = z.infer<typeof DomainExpertiseEntrySchema>;
+
+export const SignatureStrengthEntrySchema = z.object({
+  strength_key: z.string(),
+  name: z.string(),
+  description: z.string(),
+  source_fact_keys: z.string().array(),
+});
+
+export type SignatureStrengthEntry = z.infer<typeof SignatureStrengthEntrySchema>;
+
+export const LanguageProficiencySchema = z.object({
+  language: z.string(),
+  speaking: z.string(),
+  reading: z.string(),
+  writing: z.string(),
+  source_fact_keys: z.string().array(),
+});
+
+export type LanguageProficiency = z.infer<typeof LanguageProficiencySchema>;
+
+export const ProfessionalGeographySchema = z.object({
+  region: z.string(),
+  familiarity: z.string(),
+  source_fact_keys: z.string().array(),
+});
+
+export type ProfessionalGeography = z.infer<typeof ProfessionalGeographySchema>;
+
+export const LeadershipProfileSchema = z.object({
+  target_modes: z.array(
+    z.object({
+      mode: z.string(),
+      description: z.string(),
+      source_fact_keys: z.string().array(),
+    })
+  ),
+  non_target_modes: z.array(
+    z.object({
+      mode: z.string(),
+      reason: z.string(),
+      source_fact_keys: z.string().array(),
+    })
+  ),
+});
+
+export type LeadershipProfile = z.infer<typeof LeadershipProfileSchema>;
+
+export const DevelopmentPipelineEntrySchema = z.object({
+  item_type: z.enum(['CREDENTIAL', 'CAPABILITY']),
+  name: z.string(),
+  issuer_or_domain: z.string().optional(),
+  status: z.enum(['IN_PROGRESS', 'PLANNED']),
+  priority: z.enum(['HIGHEST', 'HIGH', 'MEDIUM', 'ROADMAP']),
+  credential_key: z.string().optional(),
+  source_fact_keys: z.string().array().optional(),
+  target_timeline: z.string().optional(),
+});
+
+export type DevelopmentPipelineEntry = z.infer<typeof DevelopmentPipelineEntrySchema>;
+
+export const CareerDirectionSchema = z.object({
+  trajectories: z.string().array(),
+  target_work_environments: z.string().array(),
+  future_identity: z.string(),
+  notes: z.string(),
+});
+
+export type CareerDirection = z.infer<typeof CareerDirectionSchema>;
+
+export const WorkPreferencesProfileSchema = z.object({
+  ideal_composition: z.record(
+    z.string(),
+    z.object({
+      target_band: z.string(),
+      min_pct: z.number().optional(),
+      max_pct: z.number().optional(),
+      ceiling_pct: z.number().optional(),
+    })
+  ),
+  explicit_non_target_work: z.string().array(),
+  interaction_constraints: z.record(z.string(), z.string()),
+});
+
+export type WorkPreferencesProfile = z.infer<typeof WorkPreferencesProfileSchema>;
+
+export const EvidenceIndexEntrySchema = z.object({
+  fact_key: z.string(),
+  statement: z.string(),
+  fact_type: FactTypeSchema,
+  evidence_tier: ExperienceClassSchema,
+  verification_status: VerificationStatusSchema,
+  engagement_key: z.string().nullable(),
+  proficiency: ProficiencyLevelSchema.optional(),
+  interest: InterestLevelSchema.optional(),
+  evidence_strength: ExperienceClassSchema.optional(),
+});
+
+export type EvidenceIndexEntry = z.infer<typeof EvidenceIndexEntrySchema>;
+
+export const CapabilityProfileSchema = z.object({
+  schema_version: z.string().default('1.0'),
+  profile_version_id: z.string(),
+  profile_key: z.string(),
+  generated_at: z.string(),
+  identity: z.object({
+    display_name: z.string(),
+    professional_summary: z.string(),
+    signature: z.string(),
+    role_identity_verbatim: z.string().optional(),
+  }),
+  capability_families: z.array(CapabilityFamilyGroupSchema),
+  domain_expertise: z.array(DomainExpertiseEntrySchema),
+  signature_strengths: z.array(SignatureStrengthEntrySchema),
+  languages: z.array(LanguageProficiencySchema),
+  professional_geographies: z.array(ProfessionalGeographySchema),
+  leadership: LeadershipProfileSchema,
+  development_pipeline: z.array(DevelopmentPipelineEntrySchema),
+  career_direction: CareerDirectionSchema,
+  work_preferences: WorkPreferencesProfileSchema,
+  evidence_index: z.record(z.string(), EvidenceIndexEntrySchema),
+});
+
+export type CapabilityProfile = z.infer<typeof CapabilityProfileSchema>;
+

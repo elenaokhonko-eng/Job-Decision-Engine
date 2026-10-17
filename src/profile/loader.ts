@@ -16,7 +16,9 @@ import {
   LanePreferencesJsonSchema,
 } from './contracts.js';
 
-const PROFILE_DIR = process.env.PROFILE_DIR || 'private/profile';
+function getProfileDir(dir?: string): string {
+  return dir || process.env.PROFILE_DIR || 'private/profile';
+}
 
 export interface LoadedProfile {
   profile: z.infer<typeof ProfileJsonSchema>;
@@ -32,9 +34,10 @@ export interface LoadedProfile {
  */
 async function loadProfileFile<S extends z.ZodTypeAny>(
   fileName: string,
-  schema: S
+  schema: S,
+  dir?: string
 ): Promise<z.output<S>> {
-  const filePath = path.join(PROFILE_DIR, fileName);
+  const filePath = path.join(getProfileDir(dir), fileName);
 
   try {
     const content = await fs.readFile(filePath, 'utf-8');
@@ -59,13 +62,14 @@ async function loadProfileFile<S extends z.ZodTypeAny>(
 /**
  * Load all profile data files and validate them
  */
-export async function loadProfile(): Promise<LoadedProfile> {
-  const profile = await loadProfileFile('profile.json', ProfileJsonSchema);
-  const engagements = await loadProfileFile('engagements.json', EngagementJsonSchema);
-  const facts = await loadProfileFile('facts.json', FactJsonSchema);
+export async function loadProfile(profileDir?: string): Promise<LoadedProfile> {
+  const profile = await loadProfileFile('profile.json', ProfileJsonSchema, profileDir);
+  const engagements = await loadProfileFile('engagements.json', EngagementJsonSchema, profileDir);
+  const facts = await loadProfileFile('facts.json', FactJsonSchema, profileDir);
   const credentials = await loadProfileFile(
     'credentials.json',
-    CredentialJsonSchema
+    CredentialJsonSchema,
+    profileDir
   );
 
   // Work preferences and lane preferences are optional
@@ -75,7 +79,8 @@ export async function loadProfile(): Promise<LoadedProfile> {
   try {
     workPreferences = await loadProfileFile(
       'work_preferences.json',
-      WorkPreferencesJsonSchema
+      WorkPreferencesJsonSchema,
+      profileDir
     );
   } catch (error) {
     // Optional file, warn but continue
@@ -85,7 +90,8 @@ export async function loadProfile(): Promise<LoadedProfile> {
   try {
     lanePreferences = await loadProfileFile(
       'lane_preferences.json',
-      LanePreferencesJsonSchema
+      LanePreferencesJsonSchema,
+      profileDir
     );
   } catch (error) {
     // Optional file, warn but continue
@@ -194,6 +200,6 @@ export async function validateProfileCoherence(
 /**
  * Get profile directory for debugging
  */
-export function getProfileDirectory(): string {
-  return path.resolve(PROFILE_DIR);
+export function getProfileDirectory(dir?: string): string {
+  return path.resolve(getProfileDir(dir));
 }
