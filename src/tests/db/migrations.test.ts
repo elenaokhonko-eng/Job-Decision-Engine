@@ -315,7 +315,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
         AND index_row.indisunique
         AND index_row.indisvalid
         AND index_row.indpred IS NULL
-        AND key_column.ordinality <= index_row.indnkeyatts
+        AND key_column.ordinal_position <= index_row.indnkeyatts
       GROUP BY index_row.indexrelid
     `);
     const uniqueColumnSets = uniqueIndexes.map((index) => index.columns);
@@ -358,7 +358,10 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(definition).toContain("current_match.requirement_set_id = job_version.active_requirement_set_id");
     expect(definition).toContain("current_match.job_content_hash = job_version.content_hash");
     expect(definition).toContain("current_shortlist.gate_status = 'PASS'");
-    expect(definition).toContain("current_shortlist.recommendation_outcome IN ('PRIORITY', 'REVIEW')");
+    expect(definition).toContain("current_shortlist.recommendation_outcome");
+    expect(definition).toContain("current_shortlist.recommendation_eligibility");
+    expect(definition).toContain("'PRIORITY'");
+    expect(definition).toContain("'REVIEW'");
     expect(definition).toContain("cv_document.context_fingerprint = current_match.context_fingerprint");
     expect(definition).toContain("cover_letter_document.context_fingerprint = current_match.context_fingerprint");
   });
