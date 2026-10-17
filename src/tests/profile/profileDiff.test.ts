@@ -13,8 +13,8 @@ describe('Profile Diff & Upgrade Reporting', () => {
     expect(report.old_version).toBe(5);
     expect(report.new_version).toBe(6);
     expect(report.facts_added.length).toBeGreaterThan(0);
-    expect(report.credentials_added.length).toBe(5); // 5 in-progress Google certs
-    expect(report.credentials_removed.length).toBe(1); // cred.aws.sa removed
+    expect(report.credentials_added.length).toBe(6); // 5 in-progress Google certs + AWS Certified AI Specialist
+    expect(report.credentials_removed.length).toBe(1); // cred.aws.sa removed / realigned to roadmap
     expect(report.engagement_summaries_changed.length).toBe(7);
 
     // Verify proficiency breakdown totals match new facts count
@@ -23,6 +23,7 @@ describe('Profile Diff & Upgrade Reporting', () => {
 
     // Verify markdown structure
     expect(markdown).toContain('# Profile Difference & Capability Upgrade Report');
+    expect(markdown).toContain('AWS Certified AI Specialist');
     expect(markdown).toContain('Google Professional Cloud Architect');
     expect(markdown).toContain('AWS Certified Solutions Architect');
     expect(markdown).toContain('auDHD Research Lab');

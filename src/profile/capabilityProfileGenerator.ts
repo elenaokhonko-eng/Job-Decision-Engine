@@ -283,6 +283,26 @@ export function generateCapabilityProfile(
     }
   }
 
+  // Add planned cloud & architecture certifications on development roadmap
+  developmentPipeline.push(
+    {
+      item_type: 'CREDENTIAL',
+      name: 'AWS Certified Solutions Architect',
+      issuer_or_domain: 'Amazon Web Services',
+      status: 'PLANNED',
+      priority: 'ROADMAP',
+      target_timeline: 'Planned development roadmap',
+    },
+    {
+      item_type: 'CREDENTIAL',
+      name: 'Microsoft Certified: Azure Solutions Architect Expert',
+      issuer_or_domain: 'Microsoft',
+      status: 'PLANNED',
+      priority: 'ROADMAP',
+      target_timeline: 'Planned development roadmap',
+    }
+  );
+
   // Add learning/planned capabilities from facts
   for (const f of facts) {
     const meta = (f.structured_value || {}) as Record<string, any>;

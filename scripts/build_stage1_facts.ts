@@ -466,6 +466,29 @@ export function buildStage1Facts(): FactInput[] {
   // 3. AI ENGINEERING & AGENTIC SYSTEMS
   // ==========================================================================
   addFact({
+    fact_key: 'fact.cred.aws_ai_specialist',
+    fact_type: 'SKILL',
+    statement: 'AWS Certified AI Specialist: certified competency in AWS artificial intelligence services, foundational models, prompt engineering, generative AI workflows, and responsible AI guardrails.',
+    structured_value: {
+      capability_family: 'AI_ENGINEERING',
+      capability_name: 'aws_ai_specialist',
+      display_label: 'AWS Certified AI Specialist',
+      proficiency: 'ADVANCED',
+      hands_on_level: 'APPLIED_PROJECT',
+      interest: 'TARGET',
+      evidence_strength: 'PROFESSIONAL_PRODUCTION',
+      recency: 'CURRENT',
+      development_status: 'CURRENT',
+    },
+    evidence_tier: 'PROFESSIONAL_PRODUCTION',
+    verification_status: 'VERIFIED',
+    start_date: '2024-07-01',
+    is_current: true,
+    confidentiality: 'PUBLIC',
+    evidence_source_keys: ['src.certificate'],
+  });
+
+  addFact({
     fact_key: 'fact.ai.rag_architectures.hands_on',
     engagement_key: 'guidebuoy.ai.founder_architect',
     fact_type: 'SKILL',
