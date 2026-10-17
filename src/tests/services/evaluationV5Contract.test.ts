@@ -422,7 +422,7 @@ describe("V5 evaluation contract and prompt", () => {
     ]);
   });
 
-  it("rejects fabricated culture quotes that are not substrings of the job description", async () => {
+  it("safely handles unsupported optional culture quotes that are not substrings of the job description", async () => {
     configureOpenAiOnlyEvaluation();
     stubOpenAiEvaluationResponse(
       evaluationPayload({
@@ -432,6 +432,17 @@ describe("V5 evaluation contract and prompt", () => {
       })
     );
 
-    await expect(evaluateSingleCanonicalJob(job)).rejects.toThrow(/not a verbatim substring of the job description/);
+    const result = await evaluateSingleCanonicalJob(job);
+
+    expect(result.evaluatedJob.culture_score_derivation_version).toBe("quote_phrase_rules_v1");
+    expect(result.evaluatedJob.culture_evidence).toEqual([
+      {
+        signal: "AUTONOMY",
+        score: null,
+        quote: null,
+        score_derivation_version: "quote_phrase_rules_v1",
+      },
+    ]);
+    expect(result.evaluatedJob.nd_friendly_score).toBeNull();
   });
 });

@@ -2,6 +2,7 @@ export type RepairCategory =
   | "LEGACY_BUDGET_CAP"
   | "QUOTED_PROVIDER_FAILURE"
   | "ROUTING_TASK_IDEMPOTENCY_RACE"
+  | "CULTURE_QUOTE_VERBATIM_FAILURE"
   | "GATE_NULL"
   | "RAW_STAGED_HARD_REJECT"
   | "FALSE_NEGATIVE_NEGATED_LIFESTYLE"
@@ -13,6 +14,7 @@ export interface RepairClassificationInput {
   gate_decision: string | null;
   primary_lane: string | null;
   rejection_reason: string | null;
+  last_error?: string | null;
   evidence_quotes?: string[] | null;
   rejection_reason_codes?: string[] | null;
   profile_match_status?: string | null;
@@ -55,6 +57,16 @@ export function classifyRepairCategory(
     reason.includes("state=MATCHED")
   ) {
     return "ROUTING_TASK_IDEMPOTENCY_RACE";
+  }
+
+  const combinedError = `${row.rejection_reason || ""} ${row.last_error || ""}`;
+  if (
+    row.processing_state === "NEEDS_MANUAL_REVIEW" &&
+    row.gate_decision === "PASS" &&
+    combinedError.includes("culture evidence quote") &&
+    combinedError.includes("not a verbatim substring")
+  ) {
+    return "CULTURE_QUOTE_VERBATIM_FAILURE";
   }
 
   if (

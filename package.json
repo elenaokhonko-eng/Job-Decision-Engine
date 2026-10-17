@@ -24,6 +24,7 @@
     "dev:setup": "tsx scripts/dev_setup.ts",
     "db:init": "tsx scripts/db_init.ts",
     "eval:run": "tsx scripts/evaluate_jobs.ts",
+    "eval:requeue-manual-review": "tsx scripts/requeue_manual_review_evaluations.ts",
     "profile:import": "tsx scripts/import_profile.ts",
     "profile:stage1": "tsx scripts/stage1_capability_profile.ts",
     "docs:cv": "tsx scripts/generate_cv.ts",
