@@ -3,6 +3,7 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { validateDocumentCurrentContext } from './currentContext.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -20,6 +21,9 @@ export interface DocumentProvenanceInput {
   canonicalJobId: string;
   jobVersionId: string;
   matchRunId?: string | null;
+  profileVersionId?: string | null;
+  deterministicDecisionId?: string | null;
+  contextFingerprint?: string | null;
   documentType: 'CV' | 'COVER_LETTER';
   policyVersion: string;
   generatorVersion: string;
@@ -147,6 +151,103 @@ async function assertDocumentInputsInWorkspace(
   }
 }
 
+async function assertDocumentCurrentContext(
+  client: { query: pg.PoolClient['query'] },
+  workspaceId: string,
+  input: DocumentProvenanceInput
+): Promise<void> {
+  const currentContextFields = [
+    input.profileVersionId,
+    input.deterministicDecisionId,
+    input.contextFingerprint,
+  ];
+  if (currentContextFields.every((value) => value == null)) {
+    return;
+  }
+  if (currentContextFields.some((value) => !value || value.trim().length === 0)) {
+    throw new Error("Document provenance requires the active profile, deterministic decision, and context fingerprint together.");
+  }
+
+  const { rows } = await client.query(
+    `SELECT
+       COALESCE(job.latest_job_version_id, current_job_version.id) AS current_job_version_id,
+       job.latest_match_run_id,
+       job.latest_deterministic_decision_id,
+       profile.id AS active_profile_version_id,
+       match_run.id AS match_run_id,
+       match_run.job_version_id AS match_run_job_version_id,
+       match_run.profile_version_id AS match_run_profile_version_id,
+       match_run.status AS match_run_status,
+       match_run.requirement_set_id AS match_run_requirement_set_id,
+       current_job_version.active_requirement_set_id,
+       match_run.job_content_hash AS match_run_job_content_hash,
+       current_job_version.content_hash AS current_job_content_hash,
+       match_run.context_fingerprint AS match_run_context_fingerprint,
+       decision.id AS deterministic_decision_id,
+       decision.job_version_id AS decision_job_version_id,
+       decision.match_run_id AS decision_match_run_id,
+       decision.context_fingerprint AS decision_context_fingerprint,
+       decision.recommendation_eligibility AS decision_recommendation_eligibility,
+       decision.recommendation_outcome AS decision_recommendation_outcome,
+       current_shortlist.gate_status,
+       current_shortlist.recommendation_eligibility,
+       job.recommendation_outcome
+     FROM canonical_jobs AS job
+     LEFT JOIN job_versions AS current_job_version
+       ON current_job_version.workspace_id = job.workspace_id
+      AND current_job_version.canonical_job_id = job.id
+      AND current_job_version.id = COALESCE(job.latest_job_version_id, (
+        SELECT version.id
+        FROM job_versions AS version
+        WHERE version.workspace_id = job.workspace_id
+          AND version.canonical_job_id = job.id
+        ORDER BY version.observed_at DESC, version.id DESC
+        LIMIT 1
+      ))
+     LEFT JOIN v_canonical_shortlist_scoped AS current_shortlist
+       ON current_shortlist.workspace_id = job.workspace_id
+      AND current_shortlist.canonical_job_id = job.id
+      AND current_shortlist.job_version_id = current_job_version.id
+     LEFT JOIN LATERAL (
+       SELECT profile_version.id
+       FROM profile_versions AS profile_version
+       WHERE profile_version.workspace_id = job.workspace_id
+         AND profile_version.status = 'ACTIVE'
+       ORDER BY profile_version.created_at DESC, profile_version.id DESC
+       LIMIT 1
+     ) AS profile ON TRUE
+     LEFT JOIN match_runs AS match_run
+       ON match_run.workspace_id = job.workspace_id
+      AND match_run.id = job.latest_match_run_id
+      AND match_run.canonical_job_id = job.id
+     LEFT JOIN deterministic_decisions AS decision
+       ON decision.workspace_id = job.workspace_id
+      AND decision.id = job.latest_deterministic_decision_id
+      AND decision.canonical_job_id = job.id
+     WHERE job.workspace_id = $1 AND job.id = $2
+     LIMIT 1`,
+    [workspaceId, input.canonicalJobId]
+  );
+  const current = rows[0];
+  if (!current) {
+    throw new Error("Document generation rejected stale context: canonical job is no longer available.");
+  }
+  const currentness = validateDocumentCurrentContext({
+    ...current,
+    selected_job_version_id: input.jobVersionId,
+    selected_profile_version_id: input.profileVersionId!,
+  });
+  if (!currentness.ok) {
+    throw new Error(`Document generation rejected stale context: ${currentness.reason}.`);
+  }
+  if (input.matchRunId !== current.match_run_id || input.deterministicDecisionId !== current.deterministic_decision_id) {
+    throw new Error("Document generation rejected stale context: selected match or decision changed during rendering.");
+  }
+  if (input.contextFingerprint !== current.decision_context_fingerprint) {
+    throw new Error("Document generation rejected stale context: decision fingerprint changed during rendering.");
+  }
+}
+
 export async function persistDocumentProvenance(
   input: DocumentProvenanceInput,
   clientOrPool?: pg.Pool | pg.PoolClient,
@@ -164,6 +265,7 @@ export async function persistDocumentProvenance(
     await client.query('BEGIN');
 
     await assertDocumentInputsInWorkspace(client, ctx.workspaceId, input);
+    await assertDocumentCurrentContext(client, ctx.workspaceId, input);
 
     const claimRows = input.claims.filter(
       (claim) => claim.claimText.trim().length > 0 && uniqueStrings(claim.profileFactIds).length > 0
@@ -177,6 +279,9 @@ export async function persistDocumentProvenance(
            canonical_job_id,
            job_version_id,
            match_run_id,
+           profile_version_id,
+           deterministic_decision_id,
+           context_fingerprint,
            document_type,
            status,
            policy_version,
@@ -189,13 +294,16 @@ export async function persistDocumentProvenance(
            error_message,
            completed_at
          )
-         VALUES ($1, $2, $3, $4, $5, 'COMPLETED', $6, $7, $8, $9, $10, $11, $12, $13, NULL, NOW())
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'COMPLETED', $9, $10, $11, $12, $13, $14, $15, NULL, NOW())
          RETURNING id`,
         [
           ctx.workspaceId,
           input.canonicalJobId,
           input.jobVersionId,
           input.matchRunId || null,
+          input.profileVersionId || null,
+          input.deterministicDecisionId || null,
+          input.contextFingerprint || null,
           input.documentType,
           input.policyVersion,
           input.generatorVersion,
@@ -210,11 +318,16 @@ export async function persistDocumentProvenance(
         ]
       );
     } catch (error: any) {
-      if (error?.code !== '42703') {
+      if (
+        error?.code !== '42703' ||
+        input.profileVersionId ||
+        input.deterministicDecisionId ||
+        input.contextFingerprint
+      ) {
         throw error;
       }
 
-      // Backward compatibility when migration 030 has not been applied.
+      // Backward compatibility for older callers that do not provide V5 context.
       runRes = await client.query<{ id: string }>(
         `INSERT INTO document_runs (
            workspace_id,
@@ -250,6 +363,38 @@ export async function persistDocumentProvenance(
     }
 
     const documentRunId = runRes.rows[0].id;
+    const documentLinkColumn = input.documentType === 'CV'
+      ? 'cv_document_run_id'
+      : 'cover_letter_document_run_id';
+    const linkedApplications = await client.query<{ id: string }>(
+      `UPDATE application_records
+       SET ${documentLinkColumn} = $5,
+           last_action_at = NOW(),
+           updated_at = NOW()
+       WHERE workspace_id = $1
+         AND user_id = $2
+         AND canonical_job_id = $3
+         AND job_version_id = $4
+       RETURNING id`,
+      [ctx.workspaceId, ctx.userId, input.canonicalJobId, input.jobVersionId, documentRunId]
+    );
+    for (const application of linkedApplications.rows) {
+      await client.query(
+        `INSERT INTO application_events (
+           workspace_id,
+           application_record_id,
+           event_type,
+           event_payload,
+           created_by_user_id
+         ) VALUES ($1, $2, 'DOCUMENT_LINKED', $3::jsonb, $4)`,
+        [
+          ctx.workspaceId,
+          application.id,
+          JSON.stringify({ document_type: input.documentType, document_run_id: documentRunId }),
+          ctx.userId,
+        ]
+      );
+    }
 
     const allRequirementKeys = uniqueStrings(
       claimRows.flatMap((claim) => claim.requirementKeys || [])

@@ -132,6 +132,14 @@ jobs:
           PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '60000' }}
         run: npx tsx scripts/process_pipeline_tasks.ts
 
+      - name: Materialize current application rankings
+        if: ${{ always() && steps.database_migrations.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+        run: npx tsx scripts/materialize_application_rankings.ts
+
       - name: Reconcile pipeline after drain
         if: ${{ always() }}
         timeout-minutes: 5

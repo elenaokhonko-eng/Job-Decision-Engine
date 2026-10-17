@@ -152,18 +152,23 @@ async function run() {
 		const jobStates = await countRows(client, `SELECT COALESCE(processing_state, processing_status) AS key, COUNT(*)::int AS count
        FROM canonical_jobs
        WHERE workspace_id = $1
+         AND is_test_fixture = FALSE
        GROUP BY COALESCE(processing_state, processing_status)
        ORDER BY key`, [ctx.workspaceId]);
-		const taskStates = await countRows(client, `SELECT status AS key, COUNT(*)::int AS count
-       FROM pipeline_tasks
+		const taskStates = await countRows(client, `SELECT status AS key, SUM(task_count)::int AS count
+       FROM v_pipeline_task_queue_health
        WHERE workspace_id = $1
        GROUP BY status
        ORDER BY status`, [ctx.workspaceId]);
-		const evaluationQueueStates = await countRows(client, `SELECT status AS key, COUNT(*)::int AS count
-       FROM evaluation_queue
-       WHERE workspace_id = $1
-       GROUP BY status
-       ORDER BY status`, [ctx.workspaceId]);
+		const evaluationQueueStates = await countRows(client, `SELECT queue.status AS key, COUNT(*)::int AS count
+       FROM evaluation_queue queue
+       JOIN canonical_jobs canonical
+         ON canonical.workspace_id = queue.workspace_id
+        AND canonical.id = queue.canonical_job_id
+       WHERE queue.workspace_id = $1
+         AND canonical.is_test_fixture = FALSE
+       GROUP BY queue.status
+       ORDER BY queue.status`, [ctx.workspaceId]);
 		const evaluationQueueCurrentness = await client.query(`WITH latest_versions AS (
          SELECT c.id AS canonical_job_id,
                 COALESCE(c.latest_job_version_id, lv.id) AS job_version_id,
@@ -181,6 +186,7 @@ async function run() {
            ON target_jv.workspace_id = $1
           AND target_jv.id = COALESCE(c.latest_job_version_id, lv.id)
          WHERE c.workspace_id = $1
+           AND c.is_test_fixture = FALSE
        ),
        current_evaluation_queue AS (
          SELECT DISTINCT eq.id
@@ -222,9 +228,13 @@ async function run() {
        )
        SELECT
          (SELECT COUNT(*)::int
-          FROM evaluation_queue
-          WHERE workspace_id = $1
-            AND status IN ('PENDING', 'EVALUATING', 'RETRY_WAIT')) AS active_evaluation_queue,
+          FROM evaluation_queue queue
+          JOIN canonical_jobs canonical
+            ON canonical.workspace_id = queue.workspace_id
+           AND canonical.id = queue.canonical_job_id
+          WHERE queue.workspace_id = $1
+            AND canonical.is_test_fixture = FALSE
+            AND queue.status IN ('PENDING', 'EVALUATING', 'RETRY_WAIT')) AS active_evaluation_queue,
          (SELECT COUNT(*)::int FROM current_evaluation_queue) AS current_evaluation_queue`, [ctx.workspaceId]);
 		const funnel = await client.query(`WITH latest_versions AS (
          SELECT c.id AS canonical_job_id,
@@ -243,6 +253,7 @@ async function run() {
            ON target_jv.workspace_id = $1
           AND target_jv.id = COALESCE(c.latest_job_version_id, lv.id)
          WHERE c.workspace_id = $1
+           AND c.is_test_fixture = FALSE
        ),
        current_requirements AS (
          SELECT DISTINCT jv.job_version_id
@@ -316,21 +327,22 @@ async function run() {
          JOIN match_runs mr
            ON mr.workspace_id = $1 AND mr.id = c.latest_match_run_id
          WHERE c.workspace_id = $1
+           AND c.is_test_fixture = FALSE
            AND (mr.status = 'COMPLETED' OR mr.status IS NULL)
            AND COALESCE(mr.matched_count, 0) > 0
            AND NOT EXISTS (SELECT 1 FROM current_matches cm WHERE cm.canonical_job_id = c.id)
        ),
        task_counts AS (
          SELECT
-           COUNT(*) FILTER (WHERE status = 'BLOCKED_DEPENDENCY')::int AS blocked_tasks,
-           COUNT(*) FILTER (WHERE status = 'RETRY_WAIT')::int AS retrying_tasks,
-           COUNT(*) FILTER (WHERE status = 'DEAD_LETTER')::int AS dead_letter_tasks
-         FROM pipeline_tasks
+           COALESCE(SUM(task_count) FILTER (WHERE status = 'BLOCKED_DEPENDENCY'), 0)::int AS blocked_tasks,
+           COALESCE(SUM(task_count) FILTER (WHERE status = 'RETRY_WAIT'), 0)::int AS retrying_tasks,
+           COALESCE(SUM(task_count) FILTER (WHERE status = 'DEAD_LETTER'), 0)::int AS dead_letter_tasks
+         FROM v_pipeline_task_queue_health
          WHERE workspace_id = $1
        )
        SELECT
-         (SELECT COUNT(*)::int FROM canonical_jobs WHERE workspace_id = $1) AS canonical_jobs,
-         (SELECT COUNT(*)::int FROM canonical_jobs WHERE workspace_id = $1 AND gate_decision = 'PASS') AS gate_passed,
+         (SELECT COUNT(*)::int FROM canonical_jobs WHERE workspace_id = $1 AND is_test_fixture = FALSE) AS canonical_jobs,
+         (SELECT COUNT(*)::int FROM canonical_jobs WHERE workspace_id = $1 AND is_test_fixture = FALSE AND gate_decision = 'PASS') AS gate_passed,
          (SELECT COUNT(*)::int FROM current_requirements) AS current_requirements,
          (SELECT COUNT(*)::int FROM current_matches) AS current_matches,
          (SELECT COUNT(*)::int FROM current_decisions) AS current_decisions,

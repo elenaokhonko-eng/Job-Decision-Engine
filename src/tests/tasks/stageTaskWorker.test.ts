@@ -959,6 +959,100 @@ describe("stageTaskWorker", () => {
     expect(routeSeed?.params?.[3]).toBe(103);
   });
 
+  it("resolves advisory policy rechecks only after a deterministic hard-gate rerun completes", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [{
+            id: "task-policy-recheck",
+            workspace_id: ctx.workspaceId,
+            task_type: "APPLY_HARD_GATES",
+            task_key: "policy-recheck:request-1",
+            payload: {
+              canonical_job_id: "job-1",
+              job_version_id: "version-1",
+              policy_recheck_request_id: "request-1",
+              force_policy_recalculation: true,
+              reprocess: true,
+            },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 8,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return {
+          rows: [{
+            canonical_job_id: "job-1",
+            processing_state: "PREQUALIFIED",
+            primary_lane: null,
+            lane_evidence: null,
+            gate_decision: null,
+            recommendation_eligibility: null,
+            recommendation_outcome: null,
+          }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("UPDATE policy_recheck_requests")) {
+        return { rows: [{ id: "request-1" }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        return { rows: [{ id: "task-next" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts") || sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-policy-recheck" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["APPLY_HARD_GATES"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps
+    );
+
+    expect(summary.errors).toEqual([]);
+    expect(summary.completed).toBe(1);
+    expect(deps.runHardGates).toHaveBeenCalledWith(fakeClient, expect.objectContaining({
+      jobVersionIds: ["version-1"],
+      reprocess: true,
+    }));
+    const resolution = calls.find((call) => call.sql.includes("UPDATE policy_recheck_requests"));
+    expect(resolution?.params?.slice(0, 4)).toEqual([ctx.workspaceId, "request-1", "job-1", "version-1"]);
+    expect(resolution?.params?.[4]).toBe("DETERMINISTIC_GATE_RECHECK_COMPLETED:PREQUALIFIED");
+  });
+
   it("passes forced preference recalculation through hard-gate tasks", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
@@ -1686,7 +1780,7 @@ describe("stageTaskWorker", () => {
               id: "task-explanation",
               workspace_id: ctx.workspaceId,
               task_type: "ENQUEUE_EXPLANATION",
-              task_key: "ENQUEUE_EXPLANATION:version-1:explanation_v1",
+              task_key: "ENQUEUE_EXPLANATION:version-1:explanation_v2",
               payload: { canonical_job_id: "job-1", job_version_id: "version-1" },
               status: "RUNNING",
               available_at: new Date().toISOString(),
@@ -1756,7 +1850,7 @@ describe("stageTaskWorker", () => {
             id: "task-slow",
             workspace_id: ctx.workspaceId,
             task_type: "ENQUEUE_EXPLANATION",
-            task_key: "ENQUEUE_EXPLANATION:version-slow:explanation_v1",
+            task_key: "ENQUEUE_EXPLANATION:version-slow:explanation_v2",
             payload: { canonical_job_id: "job-slow", job_version_id: "version-slow" },
             status: "RUNNING",
             available_at: new Date().toISOString(),

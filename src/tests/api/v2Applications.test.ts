@@ -56,7 +56,7 @@ describe("api/v2 application tracker", () => {
     return { baseUrl: `http://127.0.0.1:${address.port}/api/v2`, server };
   }
 
-  it("creates a human application handoff with an event trail", async () => {
+  it("creates an APPLIED handoff when the deterministic decision is current but AI evaluation is missing", async () => {
     const txQueries: Array<{ sql: string; params?: any[] }> = [];
     const tx = {
       query: vi.fn(async (sql: string, params?: any[]) => {
@@ -71,9 +71,12 @@ describe("api/v2 application tracker", () => {
                 canonical_job_id: "22222222-2222-4222-8222-222222222222",
                 job_version_id: "33333333-3333-4333-8333-333333333333",
                 canonical_url: "https://example.test/apply",
-                current_artifact_status: "CURRENT_OR_NOT_APPLICABLE",
-                current_artifact_reason: null,
+                // EVALUATION_MISSING means the read model found current match and decision artifacts.
+                current_artifact_status: "EVALUATION_MISSING",
+                current_artifact_reason: "NO_CURRENT_AI_EVALUATION",
+                gate_status: "PASS",
                 recommendation_eligibility: "ELIGIBLE",
+                recommendation_outcome: "PRIORITY",
               },
             ],
           };
@@ -88,7 +91,10 @@ describe("api/v2 application tracker", () => {
           return { rows: [], rowCount: 1 };
         }
         if (sql.includes("FROM v_application_tracker")) {
-          return { rows: [trackerRow()] };
+          return { rows: [trackerRow({
+            application_status: "APPLIED",
+            submitted_at: "2026-09-08T01:00:00.000Z",
+          })] };
         }
         return { rows: [] };
       }),
@@ -105,25 +111,30 @@ describe("api/v2 application tracker", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           canonical_job_id: "22222222-2222-4222-8222-222222222222",
-          status: "READY_TO_APPLY",
-          notes: "Ready",
+          status: "APPLIED",
+          notes: "Submitted via company portal",
           handoff_payload: { checklist: ["cv", "cover_letter"] },
         }),
       });
       const body = await response.json() as any;
 
       expect(response.status).toBe(201);
-      expect(body.application.application_status).toBe("READY_TO_APPLY");
-      expect(txQueries.some((call) => call.sql.includes("INSERT INTO application_records"))).toBe(true);
+      expect(body.application.application_status).toBe("APPLIED");
+      expect(body.application.submitted_at).toBe("2026-09-08T01:00:00.000Z");
+      const insertCall = txQueries.find((call) => call.sql.includes("INSERT INTO application_records"));
+      expect(insertCall?.sql).toContain("CASE WHEN $5 IN ('SUBMITTED', 'APPLIED') THEN NOW() ELSE NULL END");
       const eventCall = txQueries.find((call) => call.sql.includes("INSERT INTO application_events"));
       expect(eventCall?.params?.[2]).toBe("CREATED");
-      expect(eventCall?.params?.[4]).toBe("READY_TO_APPLY");
+      expect(eventCall?.params?.[4]).toBe("APPLIED");
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
     }
   });
 
-  it("rejects application handoff when the decision artifact is stale", async () => {
+  it.each([
+    { artifactStatus: "MATCH_STALE", reason: "MATCH_PROFILE_VERSION_STALE" },
+    { artifactStatus: "DECISION_STALE", reason: "DECISION_MATCH_RUN_STALE" },
+  ])("rejects APPLIED handoff when the decision artifact is $artifactStatus", async ({ artifactStatus, reason }) => {
     const txQueries: string[] = [];
     const tx = {
       query: vi.fn(async (sql: string) => {
@@ -137,8 +148,8 @@ describe("api/v2 application tracker", () => {
               canonical_job_id: "22222222-2222-4222-8222-222222222222",
               job_version_id: "33333333-3333-4333-8333-333333333333",
               canonical_url: "https://example.test/apply",
-              current_artifact_status: "MATCH_STALE",
-              current_artifact_reason: "MATCH_PROFILE_VERSION_STALE",
+              current_artifact_status: artifactStatus,
+              current_artifact_reason: reason,
               recommendation_eligibility: "ELIGIBLE",
             }],
           };
@@ -158,13 +169,67 @@ describe("api/v2 application tracker", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           canonical_job_id: "22222222-2222-4222-8222-222222222222",
-          status: "READY_TO_APPLY",
+          status: "APPLIED",
         }),
       });
       const body = await response.json() as any;
 
       expect(response.status).toBe(409);
-      expect(body.reason).toBe("MATCH_PROFILE_VERSION_STALE");
+      expect(body.reason).toBe(reason);
+      expect(txQueries.some((sql) => sql.includes("INSERT INTO application_records"))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
+  it.each([
+    { gate_status: "HARD_REJECT", recommendation_outcome: "PRIORITY", reason: "HARD_REJECT" },
+    { gate_status: "PASS", recommendation_outcome: "TRACK", reason: "TRACK" },
+  ])("rejects application handoffs outside current Apply Now outcomes", async ({ gate_status, recommendation_outcome, reason }) => {
+    const txQueries: string[] = [];
+    const tx = {
+      query: vi.fn(async (sql: string) => {
+        txQueries.push(sql);
+        if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+          return { rows: [] };
+        }
+        if (sql.includes("FROM canonical_jobs c") && sql.includes("JOIN job_versions jv")) {
+          return {
+            rows: [{
+              canonical_job_id: "22222222-2222-4222-8222-222222222222",
+              job_version_id: "33333333-3333-4333-8333-333333333333",
+              canonical_url: "https://example.test/apply",
+              current_artifact_status: "EVALUATION_MISSING",
+              current_artifact_reason: "NO_CURRENT_AI_EVALUATION",
+              gate_status,
+              recommendation_eligibility: "ELIGIBLE",
+              recommendation_outcome,
+            }],
+          };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const pool = {
+      connect: vi.fn(async () => tx),
+      query: vi.fn(async () => ({ rows: [] })),
+    };
+    const { baseUrl, server } = await startApp(pool);
+    try {
+      const response = await fetch(`${baseUrl}/applications`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          canonical_job_id: "22222222-2222-4222-8222-222222222222",
+          status: "INTENT",
+        }),
+      });
+      // HTTP JSON is an external boundary; narrow to the response field under test.
+      const body = await response.json() as { reason?: string };
+
+      expect(response.status).toBe(409);
+      expect(body.reason).toBe(reason);
       expect(txQueries.some((sql) => sql.includes("INSERT INTO application_records"))).toBe(false);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
@@ -196,7 +261,7 @@ describe("api/v2 application tracker", () => {
     }
   });
 
-  it("updates an application status and appends a status-change event", async () => {
+  it.each(["SUBMITTED", "APPLIED"])("updates an application to %s and appends a status-change event", async (status) => {
     const txQueries: Array<{ sql: string; params?: any[] }> = [];
     const tx = {
       query: vi.fn(async (sql: string, params?: any[]) => {
@@ -214,7 +279,7 @@ describe("api/v2 application tracker", () => {
           return { rows: [], rowCount: 1 };
         }
         if (sql.includes("FROM v_application_tracker")) {
-          return { rows: [trackerRow({ application_status: "SUBMITTED", submitted_at: "2026-09-08T01:00:00.000Z" })] };
+          return { rows: [trackerRow({ application_status: status, submitted_at: "2026-09-08T01:00:00.000Z" })] };
         }
         return { rows: [] };
       }),
@@ -230,18 +295,22 @@ describe("api/v2 application tracker", () => {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          status: "SUBMITTED",
+          status,
           notes: "Submitted via company portal",
         }),
       });
       const body = await response.json() as any;
 
       expect(response.status).toBe(200);
-      expect(body.application.application_status).toBe("SUBMITTED");
+      expect(body.application.application_status).toBe(status);
+      expect(body.application.submitted_at).toBe("2026-09-08T01:00:00.000Z");
+      const updateCall = txQueries.find((call) => call.sql.includes("UPDATE application_records"));
+      expect(updateCall?.sql).toContain("WHEN $4 IN ('SUBMITTED', 'APPLIED') THEN COALESCE(submitted_at, NOW())");
+      expect(updateCall?.params?.[3]).toBe(status);
       const eventCall = txQueries.find((call) => call.sql.includes("INSERT INTO application_events"));
       expect(eventCall?.params?.[2]).toBe("STATUS_CHANGED");
       expect(eventCall?.params?.[3]).toBe("READY_TO_APPLY");
-      expect(eventCall?.params?.[4]).toBe("SUBMITTED");
+      expect(eventCall?.params?.[4]).toBe(status);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
     }

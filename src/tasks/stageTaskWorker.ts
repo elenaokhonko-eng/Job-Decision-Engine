@@ -414,7 +414,7 @@ function stageVersion(taskType: PipelineStageTaskType): string {
     case "DECIDE_RECOMMENDATION":
       return "recommendation_decider_v1";
     case "ENQUEUE_EXPLANATION":
-      return "explanation_queue_v1";
+      return "explanation_queue_v2";
   }
 }
 
@@ -474,6 +474,7 @@ export async function seedRecoverablePipelineTasks(
     includeRoutingDeferred?: boolean;
     includeTestFixtures?: boolean;
     routingDeferredReplayVersion?: string;
+    budgetRunId?: string;
   } = {}
 ): Promise<SeedPipelineTasksSummary> {
   const pool = clientOrPool || defaultPool;
@@ -1081,7 +1082,11 @@ export async function seedRecoverablePipelineTasks(
       [ctx.workspaceId, maxPerType],
       (row) => ({
         id: requiredSeedValue(row, "job_version_id"),
-        payload: { canonical_job_id: requiredSeedValue(row, "canonical_job_id"), job_version_id: requiredSeedValue(row, "job_version_id") },
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          ...(options.budgetRunId ? { queue_budget_run_id: options.budgetRunId } : {}),
+        },
       }),
       enabledTypes,
       includeTestFixtures,
@@ -1792,6 +1797,42 @@ async function executeStageTask(
     if (!["PREQUALIFIED", "HARD_REJECTED", "NEEDS_VERIFICATION"].includes(state.processingState || "")) {
       throw new Error(`Hard gate left job_version_id=${jobVersionId} in unexpected state ${state.processingState}.`);
     }
+
+    const policyRecheckRequestId = optionalStringPayload(task, "policy_recheck_request_id");
+    if (policyRecheckRequestId) {
+      const canonicalJobId = state.canonicalJobId ?? optionalStringPayload(task, "canonical_job_id");
+      if (!canonicalJobId) {
+        throw new Error(`Policy recheck task is missing canonical_job_id for request ${policyRecheckRequestId}.`);
+      }
+      const resolved = await clientOrPool.query(
+        `UPDATE policy_recheck_requests
+         SET status = 'RESOLVED',
+             resolution_outcome = $5,
+             resolved_at = NOW()
+         WHERE workspace_id = $1
+           AND id = $2::uuid
+           AND canonical_job_id = $3::uuid
+           AND job_version_id = $4::uuid
+           AND status = 'PENDING'
+         RETURNING id`,
+        [
+          ctx.workspaceId,
+          policyRecheckRequestId,
+          canonicalJobId,
+          jobVersionId,
+          `DETERMINISTIC_GATE_RECHECK_COMPLETED:${state.processingState}`,
+        ]
+      );
+      if ((resolved.rowCount ?? 0) === 0) {
+        const existing = await clientOrPool.query<{ status: string }>(
+          `SELECT status FROM policy_recheck_requests WHERE workspace_id = $1 AND id = $2::uuid LIMIT 1`,
+          [ctx.workspaceId, policyRecheckRequestId]
+        );
+        if (!existing.rows[0]) {
+          throw new Error(`Policy recheck request ${policyRecheckRequestId} disappeared before resolution.`);
+        }
+      }
+    }
     return;
   }
 
@@ -2135,6 +2176,7 @@ export async function runPipelineStageTaskWorker(
         includeRoutingDeferred: options.includeRoutingDeferred,
         includeTestFixtures: options.includeTestFixtures,
         routingDeferredReplayVersion: options.routingDeferredReplayVersion,
+        budgetRunId,
         maxSeedPerType: options.maxSeedPerType,
       });
     }

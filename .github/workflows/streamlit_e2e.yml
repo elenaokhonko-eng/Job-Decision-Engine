@@ -69,7 +69,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: streamlit-accessibility-snapshot
-          path: scripts/exports/streamlit_accessibility_snapshot.json
+          name: application-command-centre-browser-smoke
+          path: |
+            scripts/exports/streamlit_accessibility_snapshot.json
+            scripts/exports/application_command_centre_smoke.png
           if-no-files-found: warn
           retention-days: 7

@@ -75,11 +75,14 @@ function isUuid(value: string): boolean {
 }
 
 const APPLICATION_STATUSES = [
+  "TO_APPLY",
   "INTENT",
   "READY_TO_APPLY",
+  "APPLIED",
   "SUBMITTED",
   "FOLLOW_UP",
   "INTERVIEW",
+  "ASSESSMENT",
   "OFFER",
   "REJECTED",
   "WITHDRAWN",
@@ -810,7 +813,9 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
           canonical_url: string | null;
           current_artifact_status: string | null;
           current_artifact_reason: string | null;
+          gate_status: string | null;
           recommendation_eligibility: string | null;
+          recommendation_outcome: string | null;
         }>(
           `
             SELECT c.id AS canonical_job_id,
@@ -818,7 +823,9 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
                    c.canonical_url,
                    current_shortlist.current_artifact_status,
                    current_shortlist.current_artifact_reason,
-                   current_shortlist.recommendation_eligibility
+                   current_shortlist.gate_status,
+                   current_shortlist.recommendation_eligibility,
+                   current_shortlist.recommendation_outcome
             FROM canonical_jobs c
             JOIN job_versions jv
               ON jv.workspace_id = c.workspace_id
@@ -847,18 +854,30 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         );
         const job = jobRes.rows[0];
         if (!job) return null;
-        if (job.current_artifact_status !== "CURRENT_OR_NOT_APPLICABLE") {
+        if (![
+          "CURRENT_OR_NOT_APPLICABLE",
+          "EVALUATION_MISSING",
+          "EVALUATION_STALE",
+        ].includes(job.current_artifact_status ?? "")) {
           return {
             handoffBlocked: true,
-            error: "The job does not have a current decision artifact. Re-run the pipeline before creating an application handoff.",
+            error: "The job does not have a current deterministic decision artifact. Re-run matching and decision stages before creating an application handoff.",
             reason: job.current_artifact_reason ?? job.current_artifact_status ?? "CURRENT_ARTIFACT_UNAVAILABLE",
           };
         }
-        if (job.recommendation_eligibility !== "ELIGIBLE") {
+        let handoffBlockReason: string | null = null;
+        if (job.gate_status !== "PASS") {
+          handoffBlockReason = job.gate_status ?? "GATE_NOT_PASSED";
+        } else if (job.recommendation_eligibility !== "ELIGIBLE") {
+          handoffBlockReason = job.recommendation_eligibility ?? "RECOMMENDATION_NOT_ELIGIBLE";
+        } else if (!["PRIORITY", "REVIEW"].includes(job.recommendation_outcome ?? "")) {
+          handoffBlockReason = job.recommendation_outcome ?? "RECOMMENDATION_NOT_APPLY_NOW";
+        }
+        if (handoffBlockReason !== null) {
           return {
             handoffBlocked: true,
-            error: "The job is not deterministically eligible for application handoff.",
-            reason: job.recommendation_eligibility ?? "RECOMMENDATION_NOT_ELIGIBLE",
+            error: "Application handoffs require a current Apply Now decision (PRIORITY or REVIEW).",
+            reason: handoffBlockReason,
           };
         }
 
@@ -898,7 +917,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             VALUES (
               $1, $2, $3, $4, $5, COALESCE($6, $7), $8, $9, $10, $11::jsonb,
               $12::timestamptz,
-              CASE WHEN $5 = 'SUBMITTED' THEN NOW() ELSE NULL END,
+              CASE WHEN $5 IN ('SUBMITTED', 'APPLIED') THEN NOW() ELSE NULL END,
               $13::timestamptz,
               NOW(),
               NOW()
@@ -916,7 +935,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
               END,
               target_submit_at = COALESCE(EXCLUDED.target_submit_at, application_records.target_submit_at),
               submitted_at = CASE
-                WHEN EXCLUDED.status = 'SUBMITTED' THEN COALESCE(application_records.submitted_at, NOW())
+                WHEN EXCLUDED.status IN ('SUBMITTED', 'APPLIED') THEN COALESCE(application_records.submitted_at, NOW())
                 ELSE application_records.submitted_at
               END,
               follow_up_at = COALESCE(EXCLUDED.follow_up_at, application_records.follow_up_at),
@@ -1079,7 +1098,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
                 notes = COALESCE($5, notes),
                 follow_up_at = COALESCE($6::timestamptz, follow_up_at),
                 submitted_at = CASE
-                  WHEN $4 = 'SUBMITTED' THEN COALESCE(submitted_at, NOW())
+                  WHEN $4 IN ('SUBMITTED', 'APPLIED') THEN COALESCE(submitted_at, NOW())
                   ELSE submitted_at
                 END,
                 last_action_at = NOW(),

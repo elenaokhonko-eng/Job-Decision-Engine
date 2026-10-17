@@ -27,6 +27,7 @@ import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
+import { validateDocumentCurrentContext } from "../src/documents/currentContext.js";
 import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
 import {
   loadProfileFactsByIds,
@@ -135,13 +136,40 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const jobRes = await pool.query(
       `SELECT
          c.id,
-        c.latest_match_run_id,
+         COALESCE(c.latest_job_version_id, (
+           SELECT jv_current.id
+           FROM job_versions jv_current
+           WHERE jv_current.canonical_job_id = c.id
+             AND jv_current.workspace_id = c.workspace_id
+           ORDER BY jv_current.observed_at DESC
+           LIMIT 1
+         )) AS current_job_version_id,
+         c.latest_match_run_id,
+         c.latest_deterministic_decision_id,
          c.normalized_title   AS title,
          c.company_name,
-         c.recommendation_outcome,
+         current_shortlist.gate_status,
+         current_shortlist.recommendation_eligibility,
+         current_shortlist.recommendation_outcome,
          c.primary_lane,
          c.secondary_lanes,
-         jv.id                AS job_version_id,
+         jv.id                AS selected_job_version_id,
+         jv.active_requirement_set_id,
+         jv.content_hash      AS current_job_content_hash,
+         active_profile.id    AS active_profile_version_id,
+         mr.id                AS match_run_id,
+         mr.job_version_id    AS match_run_job_version_id,
+         mr.profile_version_id AS match_run_profile_version_id,
+         mr.status            AS match_run_status,
+         mr.requirement_set_id AS match_run_requirement_set_id,
+         mr.job_content_hash  AS match_run_job_content_hash,
+         mr.context_fingerprint AS match_run_context_fingerprint,
+         dd.id                AS deterministic_decision_id,
+         dd.job_version_id    AS decision_job_version_id,
+         dd.match_run_id      AS decision_match_run_id,
+         dd.context_fingerprint AS decision_context_fingerprint,
+         dd.recommendation_eligibility AS decision_recommendation_eligibility,
+         dd.recommendation_outcome AS decision_recommendation_outcome,
          jv.description_text  AS raw_description,
          ae.lane_matches,
          ae.workability_facts,
@@ -163,13 +191,38 @@ async function generateTailoredCoverLetter(): Promise<void> {
          )
        )
         AND jv.workspace_id = c.workspace_id
+       LEFT JOIN v_canonical_shortlist_scoped AS current_shortlist
+         ON current_shortlist.workspace_id = c.workspace_id
+        AND current_shortlist.canonical_job_id = c.id
+        AND current_shortlist.job_version_id = jv.id
+       LEFT JOIN LATERAL (
+         SELECT pv.id
+         FROM profile_versions pv
+         WHERE pv.workspace_id = c.workspace_id
+           AND pv.status = 'ACTIVE'
+         ORDER BY pv.created_at DESC
+         LIMIT 1
+       ) active_profile ON TRUE
+       LEFT JOIN match_runs mr
+         ON mr.workspace_id = c.workspace_id
+        AND mr.id = c.latest_match_run_id
+        AND mr.canonical_job_id = c.id
+       LEFT JOIN deterministic_decisions dd
+         ON dd.workspace_id = c.workspace_id
+        AND dd.id = c.latest_deterministic_decision_id
+        AND dd.canonical_job_id = c.id
        LEFT JOIN LATERAL (
          SELECT lane_matches, workability_facts, full_evaluation_payload, is_fallback, provider, evaluated_at
-         FROM ai_evaluations
-         WHERE workspace_id = $3
-           AND canonical_job_id = c.id
-           AND job_version_id = jv.id
-         ORDER BY evaluated_at DESC
+         FROM ai_evaluations ae
+         WHERE ae.workspace_id = $3
+           AND ae.canonical_job_id = c.id
+           AND ae.job_version_id = jv.id
+           AND ae.profile_version_id = active_profile.id
+           AND ae.match_run_id = mr.id
+           AND ae.deterministic_decision_id = dd.id
+           AND ae.job_content_hash = jv.content_hash
+           AND ae.context_fingerprint = dd.context_fingerprint
+         ORDER BY ae.evaluated_at DESC
          LIMIT 1
        ) ae ON TRUE
        WHERE c.workspace_id = $3
@@ -188,19 +241,13 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const jdCompany = job.company_name || "Unknown Company";
     const jdDescription = job.raw_description || "";
     const primaryLane = job.primary_lane || "UNKNOWN";
-    const resolvedJobVersionId = job.job_version_id;
+    const resolvedJobVersionId = job.selected_job_version_id;
     const latestMatchRunId = job.latest_match_run_id || null;
-
-    if (!['PRIORITY', 'REVIEW'].includes(String(job.recommendation_outcome || ''))) {
-      throw new Error(
-        `Deterministic recommendation_outcome=${job.recommendation_outcome || 'NULL'}; documents require PRIORITY or REVIEW.`
-      );
-    }
 
     // Pull structured fields out of full_evaluation_payload if available
     const evalPayload = job.full_evaluation_payload || {};
     const evaluationSummary: string = evalPayload.evaluation_summary || "";
-    const ndScore: number = evalPayload.nd_score ?? evalPayload.nd_friendly_score ?? 0;
+    const ndScore: number | null = evalPayload.nd_friendly_score ?? evalPayload.nd_score ?? null;
     const recommendedCvVersion: string = evalPayload.recommended_cv_version || primaryLane;
     const nextAction: string = evalPayload.next_action || "REVIEW";
     const laneEvidence: string = evalPayload.lane_evidence || "";
@@ -209,22 +256,64 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const laneMatches = job.lane_matches ?? [];
     const workabilityFacts = job.workability_facts ?? {};
 
-    console.log(`✅ Job loaded: "${jdTitle}" at ${jdCompany} (${primaryLane}, ND=${ndScore})`);
+    console.log(`✅ Job loaded: "${jdTitle}" at ${jdCompany} (${primaryLane}, ND=${ndScore ?? "UNKNOWN"})`);
     if (job.is_fallback) {
       console.log(`  ℹ️  AI evaluation used fallback provider: ${job.eval_provider}`);
     }
 
     // ── Step 2: Resolve document contact info (no master_profile evidence dependency) ──
-    const profileNameRes = await pool.query<{ display_name: string }>(
-      `SELECT cp.display_name
+    const profileNameRes = await pool.query<{ profile_version_id: string; display_name: string }>(
+      `SELECT pv.id AS profile_version_id, cp.display_name
        FROM profile_versions pv
        JOIN candidate_profiles cp ON cp.id = pv.candidate_profile_id
        WHERE pv.workspace_id = $1
          AND pv.status = 'ACTIVE'
+         AND pv.id = $2
        ORDER BY pv.created_at DESC
        LIMIT 1`,
-      [ctx.workspaceId]
+      [ctx.workspaceId, job.active_profile_version_id]
     );
+    const selectedProfileVersionId = profileNameRes.rows[0]?.profile_version_id ?? null;
+    const currentness = validateDocumentCurrentContext({
+      current_job_version_id: job.current_job_version_id,
+      selected_job_version_id: job.selected_job_version_id,
+      active_profile_version_id: job.active_profile_version_id,
+      selected_profile_version_id: selectedProfileVersionId,
+      latest_match_run_id: job.latest_match_run_id,
+      match_run_id: job.match_run_id,
+      match_run_job_version_id: job.match_run_job_version_id,
+      match_run_profile_version_id: job.match_run_profile_version_id,
+      match_run_status: job.match_run_status,
+      match_run_requirement_set_id: job.match_run_requirement_set_id,
+      active_requirement_set_id: job.active_requirement_set_id,
+      match_run_job_content_hash: job.match_run_job_content_hash,
+      current_job_content_hash: job.current_job_content_hash,
+      match_run_context_fingerprint: job.match_run_context_fingerprint,
+      latest_deterministic_decision_id: job.latest_deterministic_decision_id,
+      deterministic_decision_id: job.deterministic_decision_id,
+      decision_job_version_id: job.decision_job_version_id,
+      decision_match_run_id: job.decision_match_run_id,
+      decision_context_fingerprint: job.decision_context_fingerprint,
+      decision_recommendation_eligibility: job.decision_recommendation_eligibility,
+      decision_recommendation_outcome: job.decision_recommendation_outcome,
+      gate_status: job.gate_status,
+      recommendation_eligibility: job.recommendation_eligibility,
+      recommendation_outcome: job.recommendation_outcome,
+    });
+    if (!currentness.ok) {
+      throw new Error(`Document generation rejected stale context: ${currentness.reason}.`);
+    }
+    if (!latestMatchRunId) {
+      throw new Error(
+        "No latest_match_run_id found for this job. Run deterministic matching before generating documents."
+      );
+    }
+    if (!['PRIORITY', 'REVIEW'].includes(String(job.recommendation_outcome || ''))) {
+      throw new Error(
+        `Deterministic recommendation_outcome=${job.recommendation_outcome || 'NULL'}; documents require PRIORITY or REVIEW.`
+      );
+    }
+
     const candidateName = String(profileNameRes.rows[0]?.display_name || "").trim();
 
     let contactInfo: any = {};
@@ -447,6 +536,9 @@ ${JSON.stringify(coverLetterSchema)}`;
         canonicalJobId: jobId,
         jobVersionId: resolvedJobVersionId,
         matchRunId: latestMatchRunId,
+        profileVersionId: selectedProfileVersionId,
+        deterministicDecisionId: job.deterministic_decision_id,
+        contextFingerprint: job.decision_context_fingerprint,
         documentType: 'COVER_LETTER',
         policyVersion: 'documents_v2',
         generatorVersion: 'cover_letter_generator_v2',

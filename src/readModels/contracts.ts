@@ -9,6 +9,21 @@ import { SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION, SchemaVersionSchema } from '
 
 export const READ_MODEL_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
+const PostgresNumericInputSchema = z.union([
+  z.number().finite(),
+  z.string().trim().regex(/^-?(?:\d+(?:\.\d*)?|\.\d+)$/).transform(Number),
+]);
+const PostgresNumericSchema = PostgresNumericInputSchema.pipe(z.number().finite());
+const NullablePostgresNumericSchema = PostgresNumericSchema.nullable().default(null);
+const PostgresUnitIntervalSchema = PostgresNumericInputSchema
+  .pipe(z.number().finite().min(0).max(1))
+  .nullable()
+  .default(null);
+const PostgresPercentIntegerSchema = PostgresNumericInputSchema
+  .pipe(z.number().finite().int().min(0).max(100))
+  .nullable()
+  .default(null);
+
 export const ShortlistRowV2Schema = z.object({
   canonical_job_id: z.string().uuid(),
   job_version_id: z.string().uuid(),
@@ -26,20 +41,20 @@ export const ShortlistRowV2Schema = z.object({
   primary_lane: z.string().nullable(),
   secondary_lanes: z.array(z.string()).nullable().default([]),
   lane_confidence: z.string().nullable().default('None'),
-  priority_score: z.number().nullable().default(null),
-  deterministic_match_score: z.number().nullable().default(null),
-  deterministic_match_coverage: z.number().nullable().default(null),
+  priority_score: NullablePostgresNumericSchema,
+  deterministic_match_score: NullablePostgresNumericSchema,
+  deterministic_match_coverage: NullablePostgresNumericSchema,
   processing_state: z.string(),
   processing_status: z.string(),
   recommendation_eligibility: z.enum(["ELIGIBLE", "VERIFY", "INELIGIBLE"]).nullable().default(null),
   recommendation_outcome: z.enum(["PRIORITY", "REVIEW", "TRACK", "SKIP"]).nullable().default(null),
-  recommendation_requirement_score: z.number().min(0).max(1).nullable().default(null),
-  recommendation_coverage_score: z.number().min(0).max(1).nullable().default(null),
-  recommendation_evidence_completeness: z.number().min(0).max(1).nullable().default(null),
+  recommendation_requirement_score: PostgresUnitIntervalSchema,
+  recommendation_coverage_score: PostgresUnitIntervalSchema,
+  recommendation_evidence_completeness: PostgresUnitIntervalSchema,
   recommendation_decided_at: z.coerce.date().nullable(),
-  nd_friendly_score: z.number().nullable().default(null),
-  politics_stress_score: z.number().nullable().default(null),
-  sensory_overload_index: z.number().nullable().default(null),
+  nd_friendly_score: PostgresPercentIntegerSchema,
+  politics_stress_score: PostgresPercentIntegerSchema,
+  sensory_overload_index: PostgresPercentIntegerSchema,
   next_action: z.string().nullable().default(null),
   strategic_value: z.string().nullable().default(null),
   recommended_cv_version: z.string().nullable().default(null),

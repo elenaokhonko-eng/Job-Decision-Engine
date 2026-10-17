@@ -409,6 +409,97 @@ function sha256Hex(input) {
 	return crypto.default.createHash("sha256").update(input).digest("hex");
 }
 //#endregion
+//#region src/services/cultureEvidenceScoring.ts
+var CULTURE_SCORE_DERIVATION_VERSION = "quote_phrase_rules_v1";
+var CULTURE_EVIDENCE_INDICATORS = {
+	AUTONOMY: {
+		positive: [
+			"work independently",
+			"independent work",
+			"minimal supervision",
+			"self-directed",
+			"end-to-end ownership"
+		],
+		negative: [
+			"close supervision",
+			"micromanaged",
+			"micromanagement",
+			"approval required for each"
+		]
+	},
+	POLITICS_RISK: {
+		positive: [
+			"navigate competing priorities",
+			"influence without authority",
+			"competing stakeholder priorities",
+			"matrixed environment",
+			"stakeholder alignment",
+			"political environment"
+		],
+		negative: [
+			"clear decision-making",
+			"well-defined decision-making",
+			"single decision-maker",
+			"low-politics"
+		]
+	},
+	SENSORY_WORKLOAD_RISK: {
+		positive: [
+			"fast-paced environment",
+			"high-volume environment",
+			"frequent interruptions",
+			"rapidly changing priorities",
+			"multiple competing demands",
+			"high-pressure environment",
+			"on-call rotation",
+			"24/7"
+		],
+		negative: [
+			"quiet work environment",
+			"limited interruptions",
+			"predictable schedule",
+			"low-stimulation",
+			"low stimulation"
+		]
+	},
+	FOCUS_PROTECTION: {
+		positive: [
+			"uninterrupted focus time",
+			"protected focus time",
+			"dedicated focus time",
+			"deep work",
+			"no-meeting days",
+			"focus blocks"
+		],
+		negative: [
+			"frequent meetings",
+			"constant context switching",
+			"frequent interruptions",
+			"meetings throughout the day",
+			"high meeting load"
+		]
+	}
+};
+function hasUnnegatedIndicator(text, phrase) {
+	let index = text.indexOf(phrase);
+	while (index !== -1) {
+		const precedingText = (text.slice(0, index).split(/[.!?;:]/).at(-1) ?? "").slice(-64);
+		if (!/(?:\bnot|\bno|\bnever|\bwithout|\bavoid(?:s|ing)?|\bisn't|\baren't|\bdoesn't|\bdon't)\b(?:\s+\w+){0,3}\s*$/i.test(precedingText)) return true;
+		index = text.indexOf(phrase, index + phrase.length);
+	}
+	return false;
+}
+function scoreCultureEvidenceFromQuote(signal, quote) {
+	const normalizedQuote = quote.toLowerCase();
+	const indicators = CULTURE_EVIDENCE_INDICATORS[signal];
+	const positiveCount = indicators.positive.filter((phrase) => hasUnnegatedIndicator(normalizedQuote, phrase)).length;
+	const negativeCount = indicators.negative.filter((phrase) => hasUnnegatedIndicator(normalizedQuote, phrase)).length;
+	if (positiveCount > 0 && negativeCount > 0) return null;
+	if (positiveCount > 0) return Math.min(90, 60 + positiveCount * 10);
+	if (negativeCount > 0) return Math.max(10, 40 - negativeCount * 10);
+	return null;
+}
+//#endregion
 //#region src/modelRoutes/registry.ts
 function asPurpose(value) {
 	const normalized = (value || "").toUpperCase();
@@ -1513,8 +1604,16 @@ function requirePresentField(value, field) {
 	if (!hasOwnField(value, field)) throw new Error(`Evaluation output missing required field "${field}".`);
 }
 function requireScoreField(value, field) {
+	if (!hasOwnField(value, field)) throw new Error(`Evaluation output missing required score field "${field}".`);
+	if (value[field] === null) return;
 	const score = value[field];
-	if (!Number.isInteger(score) || score < 0 || score > 100) throw new Error(`Evaluation output field "${field}" must be an integer from 0 to 100.`);
+	if (!Number.isInteger(score) || score < 0 || score > 100) throw new Error(`Evaluation output field "${field}" must be null or an integer from 0 to 100.`);
+}
+function requireFiniteMeasurementField(value, field) {
+	if (!hasOwnField(value, field)) throw new Error(`Evaluation output missing required measurement field "${field}".`);
+	if (value[field] === null) return;
+	const measurement = value[field];
+	if (typeof measurement !== "number" || !Number.isFinite(measurement) || measurement < 0 || measurement > 100) throw new Error(`Evaluation output field "${field}" must be null or a finite number from 0 to 100.`);
 }
 function parseStrictSingleEvaluationPayload(rawText, job) {
 	let parsed;
@@ -1549,10 +1648,10 @@ function parseStrictSingleEvaluationPayload(rawText, job) {
 		"nd_score",
 		"nd_friendly_score",
 		"politics_stress_score",
-		"sensory_overload_index",
-		"building_research_ratio",
-		"interaction_load"
+		"sensory_overload_index"
 	]) requireScoreField(jobPayload, field);
+	requireFiniteMeasurementField(jobPayload, "building_research_ratio");
+	requireFiniteMeasurementField(jobPayload, "interaction_load");
 	return {
 		root,
 		jobPayload
@@ -1561,7 +1660,7 @@ function parseStrictSingleEvaluationPayload(rawText, job) {
 function buildEvaluationResultFromValidatedPayload(validated, job, pipelineRunId, attemptNum, response) {
 	const { root, jobPayload } = validated;
 	const evaluationSummary = typeof root.evaluation_summary === "string" ? root.evaluation_summary : jobPayload.evaluation_summary;
-	return require_evaluate_queue.EvaluationResultSchema.parse({
+	const result = require_evaluate_queue.EvaluationResultSchema.parse({
 		schema_version: require_evaluate_queue.SCHEMA_VERSION,
 		canonical_job_id: jobPayload.canonical_job_id,
 		job_version_id: jobPayload.job_version_id,
@@ -1582,12 +1681,57 @@ function buildEvaluationResultFromValidatedPayload(validated, job, pipelineRunId
 		sensory_overload_index: jobPayload.sensory_overload_index,
 		building_research_ratio: jobPayload.building_research_ratio,
 		interaction_load: jobPayload.interaction_load,
+		focus_protection_score: jobPayload.focus_protection_score,
+		strategic_value_score: jobPayload.strategic_value_score,
+		career_trajectory: jobPayload.career_trajectory,
+		technical_depth_score: jobPayload.technical_depth_score,
+		role_ownership_score: jobPayload.role_ownership_score,
+		ambiguity_burden: jobPayload.ambiguity_burden,
+		meeting_burden: jobPayload.meeting_burden,
+		travel_burden: jobPayload.travel_burden,
+		on_call_burden: jobPayload.on_call_burden,
+		strengths: jobPayload.strengths,
+		gaps: jobPayload.gaps,
+		risk_flags: jobPayload.risk_flags,
+		policy_conflicts: jobPayload.policy_conflicts,
+		culture_score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
+		culture_evidence: jobPayload.culture_evidence,
 		rejection_codes: jobPayload.rejection_codes,
 		strategic_value: jobPayload.strategic_value,
 		recommended_cv_version: jobPayload.recommended_cv_version,
 		next_action: jobPayload.next_action,
 		evaluated_at: (/* @__PURE__ */ new Date()).toISOString()
 	});
+	result.culture_evidence = result.culture_evidence.map((evidence) => {
+		if (evidence.quote === null) return {
+			...evidence,
+			score: null,
+			score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION
+		};
+		if (!job.descriptionText.includes(evidence.quote)) throw new Error(`Evaluation culture evidence quote for ${evidence.signal} is not a verbatim substring of the job description.`);
+		const supportedScore = scoreCultureEvidenceFromQuote(evidence.signal, evidence.quote);
+		return supportedScore === null ? {
+			...evidence,
+			score: null,
+			quote: null,
+			score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION
+		} : {
+			...evidence,
+			score: supportedScore,
+			score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION
+		};
+	});
+	const scoreForSignal = (signal) => {
+		const score = result.culture_evidence.find((evidence) => evidence.signal === signal)?.score;
+		return typeof score === "number" ? score : null;
+	};
+	result.nd_friendly_score = scoreForSignal("AUTONOMY");
+	result.politics_stress_score = scoreForSignal("POLITICS_RISK");
+	result.sensory_overload_index = scoreForSignal("SENSORY_WORKLOAD_RISK");
+	result.focus_protection_score = scoreForSignal("FOCUS_PROTECTION");
+	result.strategic_value_score = null;
+	for (const conflict of result.policy_conflicts) if (!job.descriptionText.includes(conflict.evidence)) throw new Error(`Evaluation policy-conflict evidence quote for ${conflict.policy} is not a verbatim substring of the job description.`);
+	return result;
 }
 /**
 * Pure evaluation function for a single canonical job version.
@@ -1595,7 +1739,7 @@ function buildEvaluationResultFromValidatedPayload(validated, job, pipelineRunId
 * - No side-effect database writes
 * - Exactly one result returned
 * - Strict canonical_job_id and job_version_id identity validation
-* - Requires explicit score fields so missing model output cannot become synthetic defaults
+* - Requires explicit legacy score fields while allowing null for unavailable measurements
 */
 async function evaluateSingleCanonicalJob(job, pipelineRunId = crypto.default.randomUUID(), attemptNum = 1) {
 	if (!job.candidateProfileContext || job.candidateProfileContext.trim().length === 0) throw new Error("AI evaluation requires an active database-backed candidateProfileContext; refusing fixed in-code profile fallback.");
@@ -1624,12 +1768,17 @@ ${job.descriptionText}
 
 ### MANDATED INSTRUCTIONS:
 1. Classify into primary_lane ("CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", or null).
-2. Score nd_score, nd_friendly_score, politics_stress_score, sensory_overload_index, building_research_ratio, interaction_load as integers (0-100).
-3. Set next_action to one of: "PRIORITY_APPLY", "APPLY_AFTER_VERIFICATION", "LOW_STRATEGIC_VALUE", "REJECTED".
-4. Echo canonical_job_id and job_version_id exactly as supplied above.
-5. Output EXACTLY ONE JSON object conforming to this shape:
+2. For every 0-100 score, return null when evidence is unavailable. Never use 0 to mean unknown or unavailable. Use integer scores for the other metrics. For building_research_ratio and interaction_load, return a finite number from 0 to 100 when evidence supports a measurement or null when unavailable; these two measurements need not be integers. A zero is valid only when the evidence supports an actual zero.
+3. Use higher focus_protection_score for protected, uninterrupted work. building_research_ratio is the estimated percent of hands-on building/research; higher interaction_load means more interaction. Higher strategic_value_score, technical_depth_score, and role_ownership_score mean stronger value, technical depth, and end-to-end ownership. For ambiguity_burden, meeting_burden, travel_burden, and on_call_burden, 0 is low burden and 100 is high burden.
+4. Set career_trajectory to ADVANCING, LATERAL, DETOUR, or UNKNOWN; use UNKNOWN when candidate-profile or role evidence is insufficient. Keep evaluation_summary concise (one or two short sentences) and list evidence-based strengths, gaps, and risk_flags.
+5. Return one culture_evidence entry for each signal: AUTONOMY, POLITICS_RISK, SENSORY_WORKLOAD_RISK, and FOCUS_PROTECTION. Each entry has signal, provisional score (0-100, null, or UNKNOWN), and quote. The quote must be an exact verbatim job-description quote; never paraphrase, cite candidate-profile text, or fabricate quotes. When the job description does not support a measurement, set score to null or UNKNOWN and quote to null. Local deterministic phrase rules replace all provisional culture scores; a numeric score requires a direct quote from the job description.
+6. Include policy_conflicts only for explicit conflicts between a candidate constraint and a role requirement. Provide the exact constraint, requirement, and a supporting quote that is an exact verbatim substring of the job description; do not infer a conflict from missing information or fabricate quotes.
+7. policy_conflicts are advisory only. Do not change next_action, hard gates, recommendation outcome, budget policy, queue eligibility, or persistence behavior because of these signals. Do not change next_action based on policy_conflicts.
+8. Set next_action to one of: "PRIORITY_APPLY", "APPLY_AFTER_VERIFICATION", "LOW_STRATEGIC_VALUE", "REJECTED".
+9. Echo canonical_job_id and job_version_id exactly as supplied above.
+10. Output EXACTLY ONE JSON object conforming to this shape:
 {
-  "evaluation_summary": "Overall synthesis",
+  "evaluation_summary": "One or two concise sentences",
   "evaluated_jobs": [
     {
       "canonical_job_id": "${job.canonicalJobId}",
@@ -1638,14 +1787,40 @@ ${job.descriptionText}
       "secondary_lanes": ["string"],
       "lane_confidence": "High | Medium | Low",
       "lane_evidence": "string",
-      "nd_score": 0,
-      "nd_friendly_score": 0,
-      "politics_stress_score": 0,
-      "sensory_overload_index": 0,
-      "building_research_ratio": 0,
-      "interaction_load": 0,
+      "nd_score": 78,
+      "nd_friendly_score": 80,
+      "politics_stress_score": 20,
+      "sensory_overload_index": 25,
+      "focus_protection_score": 85,
+      "building_research_ratio": null,
+      "interaction_load": null,
+      "strategic_value_score": 82,
+      "career_trajectory": "ADVANCING | LATERAL | DETOUR | UNKNOWN",
+      "technical_depth_score": 90,
+      "role_ownership_score": 80,
+      "ambiguity_burden": 30,
+      "meeting_burden": 25,
+      "travel_burden": 10,
+      "on_call_burden": null,
+      "strengths": ["string"],
+      "gaps": ["string"],
+      "risk_flags": ["string"],
+      "policy_conflicts": [
+        {
+          "policy": "RESIDENCY | WORK_AUTHORIZATION | ONSITE | TRAVEL | ON_CALL",
+          "candidate_constraint": "Explicit candidate constraint",
+          "role_requirement": "Explicit role requirement",
+          "evidence": "Exact verbatim job-description quote"
+        }
+      ],
+      "culture_evidence": [
+        { "signal": "AUTONOMY", "score": null, "quote": null },
+        { "signal": "POLITICS_RISK", "score": null, "quote": null },
+        { "signal": "SENSORY_WORKLOAD_RISK", "score": null, "quote": null },
+        { "signal": "FOCUS_PROTECTION", "score": null, "quote": null }
+      ],
       "rejection_codes": ["string"],
-      "strategic_value": "string",
+      "strategic_value": "Present-day value of the role",
       "recommended_cv_version": "HEALTH_BIO_PHARMA | LEGAL_REGTECH | INVESTMENT_MARKETS_FINTECH | CORE_AI_DATA | None",
       "next_action": "PRIORITY_APPLY | APPLY_AFTER_VERIFICATION | LOW_STRATEGIC_VALUE | REJECTED"
     }
