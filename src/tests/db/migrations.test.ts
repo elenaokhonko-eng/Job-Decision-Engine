@@ -304,7 +304,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
 
   it("workspace company identity is unique within a workspace, not globally", async () => {
     const { rows: uniqueIndexes } = await realPool.query<{ columns: string[] }>(`
-      SELECT ARRAY_AGG(attribute.attname ORDER BY attribute.attname) AS columns
+      SELECT ARRAY_AGG(attribute.attname::TEXT ORDER BY attribute.attname::TEXT) AS columns
       FROM pg_index AS index_row
       CROSS JOIN LATERAL unnest(index_row.indkey) WITH ORDINALITY
         AS key_column(attnum, ordinal_position)
@@ -362,8 +362,8 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(definition).toContain("current_shortlist.recommendation_eligibility");
     expect(definition).toContain("'PRIORITY'");
     expect(definition).toContain("'REVIEW'");
-    expect(definition).toContain("cv_document.context_fingerprint = current_match.context_fingerprint");
-    expect(definition).toContain("cover_letter_document.context_fingerprint = current_match.context_fingerprint");
+    expect(definition).toContain("current_match.context_fingerprint = cv_document.context_fingerprint");
+    expect(definition).toContain("current_match.context_fingerprint = cover_letter_document.context_fingerprint");
   });
 
   it("Top 10 read model exposes all persisted ranking lineage identities", async () => {
