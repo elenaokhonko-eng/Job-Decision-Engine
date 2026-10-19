@@ -7,6 +7,7 @@
 
 import type { LoadedProfile } from './loader.js';
 import type { ProficiencyLevel, InterestLevel } from './contracts.js';
+import { escapeMarkdownTableCell } from './markdownEscaping.js';
 
 export interface FieldChange {
   field: string;
@@ -371,7 +372,7 @@ function renderProfileDiffMarkdown(report: ProfileDiffReport): string {
   lines.push(`| Fact Key | Proficiency | Interest | Statement |`);
   lines.push(`| --- | --- | --- | --- |`);
   for (const f of report.facts_added) {
-    lines.push(`| \`${f.fact_key}\` | \`${f.proficiency || '—'}\` | \`${f.interest || '—'}\` | ${f.statement.replace(/\|/g, '\\|')} |`);
+    lines.push(`| \`${f.fact_key}\` | \`${f.proficiency || '—'}\` | \`${f.interest || '—'}\` | ${escapeMarkdownTableCell(f.statement)} |`);
   }
   lines.push(``);
 

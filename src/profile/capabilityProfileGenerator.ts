@@ -20,6 +20,7 @@ import {
   type EvidenceIndexEntry,
   CapabilityProfileSchema,
 } from './contracts.js';
+import { escapeMarkdownTableCell } from './markdownEscaping.js';
 
 export interface GenerationOptions {
   profileVersionId?: string;
@@ -546,7 +547,7 @@ function renderSkillsMarkdown(profile: CapabilityProfile, loaded: LoadedProfile)
   lines.push(`| Fact Key | Type | Tier | Verification | Statement |`);
   lines.push(`| --- | --- | --- | --- | --- |`);
   for (const f of Object.values(profile.evidence_index)) {
-    lines.push(`| \`${f.fact_key}\` | \`${f.fact_type}\` | \`${f.evidence_tier}\` | \`${f.verification_status}\` | ${f.statement.replace(/\|/g, '\\|')} |`);
+    lines.push(`| \`${f.fact_key}\` | \`${f.fact_type}\` | \`${f.evidence_tier}\` | \`${f.verification_status}\` | ${escapeMarkdownTableCell(f.statement)} |`);
   }
   lines.push(``);
 
