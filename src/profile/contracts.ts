@@ -423,7 +423,13 @@ export const WorkPreferencesJsonSchema = z.object({
   work_composition: WorkCompositionPreferenceSchema.optional(),
   operations: OperationsPreferenceSchema.optional(),
   employment: EmploymentPreferenceSchema.optional(),
-});
+  mobility: z.record(z.unknown()).optional(),
+  employment_structure: z.record(z.unknown()).optional(),
+  compensation: z.record(z.unknown()).optional(),
+  freshness: z.record(z.unknown()).optional(),
+  watchlist: z.record(z.unknown()).optional(),
+  culture_priorities: z.array(z.record(z.unknown())).optional(),
+}).passthrough();
 
 // ============================================================================
 // Lane preferences (which lanes candidate is interested in)

@@ -170,3 +170,46 @@ export function calculateRanking(
 
   return { overallRankScore, rankingConfidence, topTenReady };
 }
+
+// ============================================================================
+// Stage 3: Freshness & Remote Freedom Priority Scoring
+// ============================================================================
+
+export interface Stage3RankingFactors {
+  readonly freshnessScore: number | null;
+  readonly remoteFreedomScore: number | null;
+  readonly watchlistBonusScore?: number | null;
+  readonly stabilityScore?: number | null;
+}
+
+export interface Stage3PriorityWeights {
+  readonly baseRankWeight: number;
+  readonly freshnessWeight: number;
+  readonly remoteFreedomWeight: number;
+}
+
+/**
+ * Incorporates freshness (10-15%) and remote freedom into final application priority
+ * without altering deterministic matching or core V5 gate passed requirements.
+ */
+export function calculateStage3PriorityScore(
+  baseRankScore: number | null,
+  factors: Stage3RankingFactors,
+  weights: Stage3PriorityWeights = {
+    baseRankWeight: 0.75,
+    freshnessWeight: 0.125, // 12.5% of overall application priority
+    remoteFreedomWeight: 0.125, // 12.5% of overall application priority
+  }
+): number | null {
+  if (baseRankScore === null) return null;
+  const freshness = factors.freshnessScore ?? 50;
+  const remoteFreedom = factors.remoteFreedomScore ?? 50;
+
+  const composite =
+    baseRankScore * weights.baseRankWeight +
+    freshness * weights.freshnessWeight +
+    remoteFreedom * weights.remoteFreedomWeight;
+
+  return Math.max(0, Math.min(100, Number(composite.toFixed(2))));
+}
+

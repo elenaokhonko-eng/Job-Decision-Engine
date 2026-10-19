@@ -32,6 +32,12 @@ import {
   type WorkabilityPolicy,
 } from "./workabilityPolicy.js";
 
+import {
+  evaluateJobFreshness,
+  evaluateEmployerExclusions,
+  evaluateCompensationPolicy,
+} from "../policy/stage3PolicyEngine.js";
+
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
@@ -167,6 +173,14 @@ export function applyPersistedRequirementGates(
     employment_type?: string;
     workplace_type?: string;
     description?: string;
+    posted_at?: string | Date | null;
+    reposted_at?: string | Date | null;
+    source_updated_at?: string | Date | null;
+    salary_min?: number | null;
+    salary_max?: number | null;
+    salary_currency?: string | null;
+    is_startup?: boolean;
+    opportunity_category?: any;
   },
   deterministicRequirements: PersistedRequirement[],
   policy: WorkabilityPolicy = loadWorkabilityPolicy(),
@@ -184,6 +198,53 @@ export function applyPersistedRequirementGates(
   const title = job.title || "";
   let pendingVerification: { codes: string[]; evidence: string[]; facts?: Partial<GateResult["workability_facts"]> } | null = null;
   let inferredWorkabilityFacts: Partial<GateResult["workability_facts"]> = {};
+
+  // Stage 3: Authoritative Job Freshness Gate (>60 days -> GATE_STALE_POSTING -> HARD_REJECT)
+  if (job.posted_at || job.reposted_at || job.source_updated_at) {
+    const freshness = evaluateJobFreshness({
+      posted_at: job.posted_at,
+      reposted_at: job.reposted_at,
+      source_updated_at: job.source_updated_at,
+      is_repost: Boolean(job.reposted_at),
+    });
+    if (freshness.is_hard_reject) {
+      return makeReject(
+        [freshness.rejection_code || "GATE_STALE_POSTING"],
+        [freshness.evidence]
+      );
+    }
+  }
+
+  // Stage 3: Employer Exclusion & Outsourcing Model Check
+  if (job.company_name) {
+    const exclusion = evaluateEmployerExclusions(job.company_name, job.description || "");
+    if (exclusion.is_excluded) {
+      return makeReject(
+        [exclusion.rejection_code || "GATE_EXCLUDED_EMPLOYER"],
+        [exclusion.reason || `Excluded employer: ${job.company_name}`]
+      );
+    }
+  }
+
+  // Stage 3: Compensation Floor Check (e.g. startup cash salary < SGD 10k/month)
+  if (job.salary_min !== null && job.salary_min !== undefined) {
+    const compEval = evaluateCompensationPolicy(
+      {
+        salary_min: job.salary_min,
+        salary_max: job.salary_max,
+        salary_currency: job.salary_currency,
+        is_startup: job.is_startup,
+      },
+      job.opportunity_category || "COMMERCIAL"
+    );
+    if (compEval.prevents_apply_now && compEval.is_hard_reject) {
+      return makeReject(
+        [compEval.rejection_code || "COMPENSATION_BELOW_USER_FLOOR"],
+        [compEval.evidence]
+      );
+    }
+  }
+
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
     if (pattern.test(title)) {
       return makeReject(
