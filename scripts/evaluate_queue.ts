@@ -7,9 +7,10 @@ import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.j
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
+import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
 
 dotenv.config();
-dotenv.config({ path: ".env.local", override: true });
+dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
 
@@ -458,21 +459,27 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
 }
 
 if (process.argv[1] && process.argv[1].includes("evaluate_queue")) {
-  evaluateQueue()
-    .then((stats) => {
-      const strictExitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
-      if (stats.failed > 0 && strictExitOnRetryWait) {
-        // Invariant 7: exit non-zero when any required stage fails
-        console.error(`❌ ${stats.failed} evaluation(s) failed and were moved to RETRY_WAIT. Exiting non-zero.`);
-        process.exit(1);
+  const exitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
+  runEvaluationQueueWithExitPolicy(evaluateQueue, exitOnRetryWait)
+    .then((outcome) => {
+      if (!outcome.ok) {
+        console.error("Fatal queue evaluation error:", outcome.error);
+        process.exit(outcome.exitCode);
       }
-      if (stats.failed > 0 && !strictExitOnRetryWait) {
-        console.warn(`⚠️ ${stats.failed} evaluation(s) moved to RETRY_WAIT; exiting zero for retry-drain worker mode.`);
+      if (outcome.stats.failed > 0 && outcome.exitCode === 1) {
+        console.error(
+          `❌ ${outcome.stats.failed} evaluation(s) failed and were moved to RETRY_WAIT. Exiting non-zero.`
+        );
       }
-      process.exit(0);
+      if (outcome.stats.failed > 0 && outcome.exitCode === 0) {
+        console.warn(
+          `⚠️ ${outcome.stats.failed} evaluation(s) moved to RETRY_WAIT; exiting zero for scheduled retry-drain mode.`
+        );
+      }
+      process.exit(outcome.exitCode);
     })
-    .catch((err) => {
-      console.error("Fatal queue evaluation error:", err);
+    .catch((error: unknown) => {
+      console.error("Fatal queue evaluation error:", error);
       process.exit(1);
     });
 }

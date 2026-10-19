@@ -12,6 +12,18 @@ describe("evaluation queue workflow", () => {
     expect(workflow).toContain("npx tsx scripts/evaluate_queue.ts");
     expect(workflow).toContain("DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}");
     expect(workflow).toContain("npx tsx scripts/preflight_database.ts");
+    expect(workflow).toContain('EVALUATION_EXIT_ON_RETRY_WAIT: "false"');
+    expect(workflow).toContain('EVALUATION_EXIT_ON_RETRY_WAIT: "false"');
+  });
+
+  it("keeps recoverable retries green while fatal queue failures remain non-zero", () => {
+    const script = readFileSync(resolve("scripts/evaluate_queue.ts"), "utf8");
+    const exitPolicy = readFileSync(resolve("src/pipeline/evaluationQueueExitPolicy.ts"), "utf8");
+
+    expect(script).toContain('process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false"');
+    expect(script).toContain('runEvaluationQueueWithExitPolicy(evaluateQueue, exitOnRetryWait)');
+    expect(script).toContain('process.exit(1)');
+    expect(exitPolicy).toContain('stats.failed > 0 && exitOnRetryWait ? 1 : 0');
   });
 
   it("requires queue context to match the current deterministic artifacts", () => {

@@ -29,7 +29,22 @@ const RequiredLaneWeightsSchema = z.object({
   }
 });
 
+const DirectResearchShareRangeSchema = z.object({
+  minimum_pct: z.number().min(0).max(100),
+  maximum_pct: z.number().min(0).max(100),
+}).superRefine((range, context) => {
+  if (range.minimum_pct > range.maximum_pct) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Minimum direct-research share cannot exceed the maximum.',
+    });
+  }
+});
+
+// Array order is meaningful within each preference tier; these are preferences, not gates.
 export const LanePreferenceTaxonomySchema = z.object({
+  interest_rating: z.number().int().min(1).max(5).optional(),
+  acceptable_direct_research_share_pct: DirectResearchShareRangeSchema.optional(),
   preferred_role_families: z.array(z.string()).default([]),
   acceptable_role_families: z.array(z.string()).default([]),
   excluded_role_families: z.array(z.string()).default([]),
