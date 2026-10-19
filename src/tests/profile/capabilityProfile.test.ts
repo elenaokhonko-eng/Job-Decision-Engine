@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { loadProfile } from '../../profile/loader.js';
+import { createCapabilityProfileFixture } from './profileFixtures.js';
 import { generateCapabilityProfile } from '../../profile/capabilityProfileGenerator.js';
 import { validateDocumentCurrentContext, type DocumentCurrentContext } from '../../documents/currentContext.js';
 import { computeProficiencyFactor } from '../../pipeline/deterministicMatcher.js';
 import type { LoadedProfile } from '../../profile/loader.js';
 
 describe('Stage 1 Capability Profile V1', () => {
-  it('demonstrates one capability can have high proficiency but low future interest', async () => {
-    const loaded = await loadProfile();
+  it('demonstrates one capability can have high proficiency but low future interest', () => {
+    const loaded = createCapabilityProfileFixture();
     const { capabilityProfile } = generateCapabilityProfile(loaded);
 
     // Routine programme coordination: high proficiency (EXPERT), but interest is AVOID
@@ -20,8 +20,8 @@ describe('Stage 1 Capability Profile V1', () => {
     expect(progCoord?.interest).toBe('AVOID');
   });
 
-  it('demonstrates one capability can have high interest but only LEARNING evidence', async () => {
-    const loaded = await loadProfile();
+  it('demonstrates one capability can have high interest but only LEARNING evidence', () => {
+    const loaded = createCapabilityProfileFixture();
     const { capabilityProfile } = generateCapabilityProfile(loaded);
 
     // Observability or fine-tuning: learning proficiency, knowledge-only or applied, strong/target interest
@@ -36,8 +36,8 @@ describe('Stage 1 Capability Profile V1', () => {
     expect(observability?.interest).toBe('SUPPORTING');
   });
 
-  it('demonstrates knowledge-only does not become production experience', async () => {
-    const loaded = await loadProfile();
+  it('demonstrates knowledge-only does not become production experience', () => {
+    const loaded = createCapabilityProfileFixture();
     const { capabilityProfile } = generateCapabilityProfile(loaded);
 
     // Cloud architecture: developing/conceptual, knowledge-only
@@ -78,8 +78,8 @@ describe('Stage 1 Capability Profile V1', () => {
     expect(factor).toBeLessThan(0.35); // Strongly discounted, cannot satisfy production requirement
   });
 
-  it('demonstrates AI-assisted software engineering remains accurately labelled', async () => {
-    const loaded = await loadProfile();
+  it('demonstrates AI-assisted software engineering remains accurately labelled', () => {
+    const loaded = createCapabilityProfileFixture();
     const { capabilityProfile, markdown } = generateCapabilityProfile(loaded);
 
     const pythonCap = capabilityProfile.capability_families
@@ -101,8 +101,8 @@ describe('Stage 1 Capability Profile V1', () => {
     expect(markdown).toContain('*(AI-assisted)*');
   });
 
-  it('demonstrates derived skills.md and JSON contain only canonical source facts', async () => {
-    const loaded = await loadProfile();
+  it('demonstrates derived skills.md and JSON contain only canonical source facts', () => {
+    const loaded = createCapabilityProfileFixture();
     const { capabilityProfile } = generateCapabilityProfile(loaded);
 
     const sourceFactKeys = new Set(loaded.facts.facts.map((f) => f.fact_key));
@@ -129,8 +129,8 @@ describe('Stage 1 Capability Profile V1', () => {
     }
   });
 
-  it('demonstrates deleting or changing a fact changes derived output', async () => {
-    const loaded = await loadProfile();
+  it('demonstrates deleting or changing a fact changes derived output', () => {
+    const loaded = createCapabilityProfileFixture();
     const original = generateCapabilityProfile(loaded);
 
     // Deep clone loaded profile and change a statement and proficiency
@@ -165,8 +165,8 @@ describe('Stage 1 Capability Profile V1', () => {
     expect(afterDelete.capabilityProfile.evidence_index['fact.arch.ai_llm_solution_architecture']).toBeUndefined();
   });
 
-  it('demonstrates derived outputs never create new unsupported claims', async () => {
-    const loaded = await loadProfile();
+  it('demonstrates derived outputs never create new unsupported claims', () => {
+    const loaded = createCapabilityProfileFixture();
     const { capabilityProfile } = generateCapabilityProfile(loaded);
 
     // Check that every capability statement is directly sourced from a canonical statement
