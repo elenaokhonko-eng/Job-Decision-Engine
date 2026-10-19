@@ -468,24 +468,24 @@ export function buildStage1Facts(): FactInput[] {
   addFact({
     fact_key: 'fact.cred.aws_ai_specialist',
     fact_type: 'SKILL',
-    statement: 'AWS Certified AI Specialist: certified competency in AWS artificial intelligence services, foundational models, prompt engineering, generative AI workflows, and responsible AI guardrails.',
+    statement: 'Candidate reports earning the AWS Certified AI Specialist certificate as part of the sponsored NTU Data Science and AI paid certificate programme.',
     structured_value: {
       capability_family: 'AI_ENGINEERING',
       capability_name: 'aws_ai_specialist',
       display_label: 'AWS Certified AI Specialist',
-      proficiency: 'ADVANCED',
-      hands_on_level: 'APPLIED_PROJECT',
+      proficiency: 'FOUNDATIONAL',
+      hands_on_level: 'COURSE_PROJECT',
       interest: 'TARGET',
-      evidence_strength: 'PROFESSIONAL_PRODUCTION',
+      evidence_strength: 'COURSE_PROJECT',
       recency: 'CURRENT',
       development_status: 'CURRENT',
+      notes: 'Credential confirmed by candidate; course provenance recorded. Do not infer production engineering experience or an issue date.',
     },
-    evidence_tier: 'PROFESSIONAL_PRODUCTION',
-    verification_status: 'VERIFIED',
-    start_date: '2024-07-01',
+    evidence_tier: 'COURSE_PROJECT',
+    verification_status: 'SELF_ATTESTED',
     is_current: true,
     confidentiality: 'PUBLIC',
-    evidence_source_keys: ['src.certificate'],
+    evidence_source_keys: ['src.ntu.aws_ai_specialist'],
   });
 
   addFact({

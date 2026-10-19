@@ -6,6 +6,18 @@
 
 import { z } from 'zod';
 import { SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION, SchemaVersionSchema } from '../contracts/version.js';
+import {
+  MobilityPreferencesSchema,
+  EmploymentStructurePreferencesSchema,
+  CompensationPolicySchema,
+  FreshnessPolicySchema,
+  EmployerWatchlistPreferencesSchema,
+  Stage3ApplicationPriorityWeightsSchema,
+  CompanyStagePreferencesSchema,
+  MarketOpportunityPreferencesSchema,
+  ResearchGeographyPreferencesSchema,
+} from '../policy/stage3Contracts.js';
+import { LaneIntentPreferencesSchema } from '../policy/laneIntentContracts.js';
 
 export const SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
@@ -423,12 +435,21 @@ export const WorkPreferencesJsonSchema = z.object({
   work_composition: WorkCompositionPreferenceSchema.optional(),
   operations: OperationsPreferenceSchema.optional(),
   employment: EmploymentPreferenceSchema.optional(),
-  mobility: z.record(z.unknown()).optional(),
-  employment_structure: z.record(z.unknown()).optional(),
-  compensation: z.record(z.unknown()).optional(),
-  freshness: z.record(z.unknown()).optional(),
-  watchlist: z.record(z.unknown()).optional(),
-  culture_priorities: z.array(z.record(z.unknown())).optional(),
+  lane_intent: LaneIntentPreferencesSchema.optional(),
+  mobility: MobilityPreferencesSchema.optional(),
+  employment_structure: EmploymentStructurePreferencesSchema.optional(),
+  compensation: CompensationPolicySchema.optional(),
+  freshness: FreshnessPolicySchema.optional(),
+  application_priority_weights: Stage3ApplicationPriorityWeightsSchema.optional(),
+  company_stage_preferences: CompanyStagePreferencesSchema.optional(),
+  market_opportunities: MarketOpportunityPreferencesSchema.optional(),
+  research_geographies: ResearchGeographyPreferencesSchema.optional(),
+  watchlist: EmployerWatchlistPreferencesSchema.optional(),
+  culture_priorities: z.array(z.object({
+    priority_order: z.number().int().positive(),
+    name: z.string().min(1),
+    configured_weight: z.number().min(0).max(100),
+  })).optional(),
 }).passthrough();
 
 // ============================================================================

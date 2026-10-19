@@ -6,6 +6,8 @@ import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { RecommendationDecisionSchema } from "../decision/contracts.js";
 import { evaluateDecisionPolicy } from "../policy/decisionPolicy.js";
 import { resolveWorkspacePolicySnapshot } from "../policy/policySnapshot.js";
+import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
+import { evaluateCompensationPolicy, inferOpportunityCategory, parseCompensationEvidence } from "../policy/stage3PolicyEngine.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 
 dotenv.config();
@@ -108,6 +110,7 @@ export async function runRecommendationDecider(
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['stage3']);
     const snapshot = await resolveWorkspacePolicySnapshot(client as any, { context: ctx });
 
     const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
@@ -154,6 +157,10 @@ export async function runRecommendationDecider(
       recommendation_evidence_completeness: any;
       recommendation_decided_at: Date | null;
       latest_deterministic_decision_id: string | null;
+      company_name: string;
+      normalized_title: string;
+      description_text: string | null;
+      compensation_raw: string | null;
     }>(
       `
       SELECT
@@ -185,7 +192,11 @@ export async function runRecommendationDecider(
         c.recommendation_coverage_score,
         c.recommendation_evidence_completeness,
         c.recommendation_decided_at,
-        c.latest_deterministic_decision_id
+        c.latest_deterministic_decision_id,
+        c.company_name,
+        c.normalized_title,
+        lv.description_text,
+        source_observation.compensation_raw
       FROM canonical_jobs c
       LEFT JOIN match_runs mr
         ON mr.workspace_id = c.workspace_id
@@ -199,7 +210,7 @@ export async function runRecommendationDecider(
         LIMIT 1
       ) active_profile ON TRUE
       LEFT JOIN LATERAL (
-        SELECT id, active_requirement_set_id, content_hash
+        SELECT id, active_requirement_set_id, content_hash, description_text
         FROM job_versions
         WHERE canonical_job_id = c.id
           AND workspace_id = $1
@@ -207,6 +218,14 @@ export async function runRecommendationDecider(
         ORDER BY observed_at DESC
         LIMIT 1
       ) lv ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT observation.compensation_raw
+        FROM raw_job_observations AS observation
+        WHERE observation.workspace_id = c.workspace_id
+          AND observation.job_version_id = lv.id
+        ORDER BY observation.retrieved_at DESC, observation.id DESC
+        LIMIT 1
+      ) AS source_observation ON TRUE
       WHERE c.workspace_id = $1
         AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
         ${jobVersionFilter}
@@ -229,7 +248,6 @@ export async function runRecommendationDecider(
         );
         continue;
       }
-
       await client.query("BEGIN");
       try {
         const normalizedGateDecision =
@@ -280,6 +298,7 @@ export async function runRecommendationDecider(
           adjustedNotes.push(`gate_decision_inferred_from_state:${normalizedGateDecision}`);
         }
         let adjustedOutcome = evaluation.outcome;
+        let adjustedEligibility = evaluation.eligibility;
         const noPositiveProfileMatch =
           requiresCurrentMatch &&
           currentMatch &&
@@ -308,6 +327,23 @@ export async function runRecommendationDecider(
           adjustedNotes.push("priority_downgraded_semantic_pending");
         }
 
+        const compensationInput = parseCompensationEvidence(job.compensation_raw);
+        if (compensationInput && preferenceContext.stage3?.compensation) {
+          const compensation = evaluateCompensationPolicy(
+            compensationInput,
+            inferOpportunityCategory(job.company_name, job.normalized_title, job.description_text || ""),
+            preferenceContext.stage3.compensation
+          );
+          if (compensation.is_hard_reject) {
+            adjustedEligibility = "INELIGIBLE";
+            adjustedOutcome = "SKIP";
+            adjustedNotes.push(compensation.rejection_code || "COMPENSATION_BELOW_USER_FLOOR");
+          } else if (compensation.prevents_apply_now) {
+            adjustedOutcome = "TRACK";
+            adjustedNotes.push(compensation.rejection_code || "COMPENSATION_BELOW_USER_FLOOR");
+          }
+        }
+
         const decisionJson = RecommendationDecisionSchema.parse({
           canonical_job_id: job.canonical_job_id,
           job_version_id: job.job_version_id,
@@ -319,7 +355,7 @@ export async function runRecommendationDecider(
             evidence_completeness: evidenceCompleteness,
           },
           outputs: {
-            eligibility: evaluation.eligibility,
+            eligibility: adjustedEligibility,
             outcome: adjustedOutcome,
             recommendation_requirement_score: requirementScore,
             recommendation_coverage_score: coverageScore,
@@ -335,7 +371,10 @@ export async function runRecommendationDecider(
           },
         });
 
-        const decisionHash = sha256Hex(stableStringify(decisionJson));
+        const decisionHash = sha256Hex(stableStringify({
+          decision: decisionJson,
+          preference_context_id: preferenceContext.contextId,
+        }));
         const decisionContextFingerprint = buildPipelineTaskContextFingerprint({
           workspaceId: ctx.workspaceId,
           taskType: "DECIDE_RECOMMENDATION",
@@ -349,6 +388,7 @@ export async function runRecommendationDecider(
             match_run_id: job.latest_match_run_id,
             policy_snapshot_id: snapshot.snapshotId,
             policy_hash: snapshot.snapshotHash,
+            preference_context_id: preferenceContext.contextId,
           },
         });
 
@@ -366,9 +406,11 @@ export async function runRecommendationDecider(
               decision_json,
               recommendation_eligibility,
               recommendation_outcome,
-              created_by_user_id
+              created_by_user_id,
+              preference_user_id,
+              preference_context_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (
               workspace_id,
               canonical_job_id,
@@ -399,9 +441,11 @@ export async function runRecommendationDecider(
             decisionContextFingerprint,
             decisionHash,
             JSON.stringify(decisionJson),
-            evaluation.eligibility,
+            adjustedEligibility,
             adjustedOutcome,
             ctx.userId,
+            preferenceContext.contextId ? ctx.userId : null,
+            preferenceContext.contextId,
           ]
         );
 
@@ -441,7 +485,7 @@ export async function runRecommendationDecider(
           `,
           [
             ctx.workspaceId,
-            evaluation.eligibility,
+            adjustedEligibility,
             adjustedOutcome,
             requirementScore,
             coverageScore,

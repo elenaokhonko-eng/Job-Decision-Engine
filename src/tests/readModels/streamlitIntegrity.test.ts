@@ -36,8 +36,11 @@ describe('streamlit read-model integrity', () => {
     expect(content).toContain('from streamlit_formatters import as_number, format_percent, format_score, format_signal');
     expect(content).toContain('from streamlit_application_workflow import is_document_generation_eligible');
     expect(content).toContain('FROM v_application_workspace_summary_scoped');
-    expect(content).toContain('FROM v_top_ten_ready_jobs_scoped');
-    expect(content).toContain('FROM v_apply_now_jobs_scoped');
+    expect(content).toContain('FROM v_top_ten_ready_jobs_stage3_scoped');
+    expect(content).toContain('FROM v_apply_now_jobs_stage3_scoped');
+    expect(content).toContain('final_application_priority_score');
+    expect(content).toContain('stage3_preference_context_id');
+    expect(content).toContain('employment_verifiability_score');
     expect(content).toContain('FROM v_track_jobs_scoped');
     expect(content).toContain('FROM v_job_profile_evidence_scoped');
     expect(content).toContain('FROM v_profile_coverage_scoped');

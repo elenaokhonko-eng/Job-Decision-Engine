@@ -5,6 +5,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { generateContentHash } from "../services/criteria.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { classifyDescriptionQuality, MIN_COMPLETE_DESCRIPTION_CHARS } from "./descriptionQuality.js";
+import { extractFreshnessEvidence } from "../ingestion/freshnessEvidence.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -78,13 +79,24 @@ export async function runNormalization(
           obs.title,
           obs.description_raw
         );
+        const freshnessEvidence = extractFreshnessEvidence({
+          rawPayload: obs.raw_payload,
+          sourceName: String(obs.source_name || ''),
+          sourceExternalId: typeof obs.source_external_id === 'string' ? obs.source_external_id : null,
+          canonicalUrl: typeof (obs.canonical_apply_url || obs.source_url) === 'string'
+            ? String(obs.canonical_apply_url || obs.source_url)
+            : null,
+          contentHash: normalizedContentHash,
+        });
         let canonicalJobId: string | null = null;
         let isExistingJob = false;
+        let existingVersionId: string | null = null;
+        let sourcePostingIdentitySeen = false;
         
         // Identity precedence: source/requisition ID, canonical URL, company+title+location,
         // then company+title only as a deliberately low-confidence fallback.
         const checkExt = await client.query(
-          `SELECT jv.canonical_job_id, jv.id AS job_version_id
+          `          SELECT jv.canonical_job_id, jv.id AS job_version_id, jv.content_hash
            FROM raw_job_observations rjo
            JOIN job_versions jv ON jv.id = rjo.job_version_id
            WHERE rjo.workspace_id = $1
@@ -96,11 +108,13 @@ export async function runNormalization(
           [ctx.workspaceId, obs.source_name, obs.source_external_id]
         );
 
-        let existingVersionId: string | null = null;
-        
         if (checkExt.rows.length > 0) {
           canonicalJobId = checkExt.rows[0].canonical_job_id;
           isExistingJob = true;
+          sourcePostingIdentitySeen = true;
+          if (checkExt.rows[0].content_hash === normalizedContentHash) {
+            existingVersionId = checkExt.rows[0].job_version_id;
+          }
         } else {
           const checkUrl = await client.query(
             `SELECT id FROM canonical_jobs
@@ -156,30 +170,102 @@ export async function runNormalization(
           canonicalJobId = insertCanon.rows[0].id;
         }
         
-        // A content hash duplicate is a new source observation, not a new version.
+        // A repeated source posting identity reuses its version; a verified new posting
+        // identity can create a new version even when the description content hash is equal.
         if (!existingVersionId) {
-          const existingVersion = await client.query(
-            `SELECT id
-             FROM job_versions
-             WHERE workspace_id = $1
-               AND canonical_job_id = $2
-               AND content_hash = $3
-             LIMIT 1`,
-            [ctx.workspaceId, canonicalJobId, normalizedContentHash]
-          );
+          const existingVersion = freshnessEvidence.postingIdentityHash
+            ? await client.query(
+                `SELECT id
+                 FROM job_versions
+                 WHERE workspace_id = $1
+                   AND canonical_job_id = $2
+                   AND source_posting_identity_hash = $3
+                 LIMIT 1`,
+                [ctx.workspaceId, canonicalJobId, freshnessEvidence.postingIdentityHash]
+              )
+            : await client.query(
+                `SELECT id
+                 FROM job_versions
+                 WHERE workspace_id = $1
+                   AND canonical_job_id = $2
+                   AND content_hash = $3
+                   AND source_posting_identity_hash IS NULL
+                 LIMIT 1`,
+                [ctx.workspaceId, canonicalJobId, normalizedContentHash]
+              );
           existingVersionId = existingVersion.rows[0]?.id || null;
         }
+
+        const newSourcePostingIdentity =
+          isExistingJob &&
+          !sourcePostingIdentitySeen &&
+          !existingVersionId &&
+          typeof obs.source_external_id === 'string' &&
+          obs.source_external_id.trim().length > 0;
+        const effectiveFreshnessBasis = freshnessEvidence.repostedAt
+          ? 'REPOSTED_AT'
+          : newSourcePostingIdentity
+            ? 'NEW_POSTING_ID'
+            : freshnessEvidence.freshnessBasis;
+        const effectiveFreshnessConfidence = newSourcePostingIdentity
+          ? 75
+          : freshnessEvidence.freshnessConfidence;
 
         let resolvedVersionId = existingVersionId;
         let createdNewVersion = false;
         if (!resolvedVersionId) {
-          const verInsert = await client.query(
-            `INSERT INTO job_versions (workspace_id, canonical_job_id, content_hash, description_text, observed_at)
-             VALUES ($1, $2, $3, $4, NOW()) RETURNING id`,
-            [ctx.workspaceId, canonicalJobId, normalizedContentHash, obs.description_raw]
+          const verInsert = await client.query<{ id: string }>(
+            `INSERT INTO job_versions (
+               workspace_id, canonical_job_id, content_hash, description_text, observed_at,
+               source_published_at, source_updated_at, reposted_at,
+               source_posting_identity_hash, first_seen_at, last_seen_at,
+               freshness_basis, freshness_confidence
+             ) VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7, $8, $9, $9, $10, $11)
+             RETURNING id`,
+            [
+              ctx.workspaceId,
+              canonicalJobId,
+              normalizedContentHash,
+              obs.description_raw,
+              freshnessEvidence.sourcePublishedAt,
+              freshnessEvidence.sourceUpdatedAt,
+              freshnessEvidence.repostedAt,
+              freshnessEvidence.postingIdentityHash,
+              obs.retrieved_at,
+              effectiveFreshnessBasis,
+              effectiveFreshnessConfidence,
+            ]
           );
           resolvedVersionId = verInsert.rows[0].id;
           createdNewVersion = true;
+        } else {
+          await client.query(
+            `UPDATE job_versions
+             SET first_seen_at = COALESCE(first_seen_at, $1),
+                 last_seen_at = GREATEST(COALESCE(last_seen_at, $1), $1),
+                 source_published_at = COALESCE(source_published_at, $2),
+                 source_updated_at = CASE
+                   WHEN $3::timestamptz IS NULL THEN source_updated_at
+                   WHEN source_updated_at IS NULL OR source_updated_at < $3::timestamptz THEN $3::timestamptz
+                   ELSE source_updated_at
+                 END,
+                 reposted_at = COALESCE(reposted_at, $4),
+                 freshness_basis = COALESCE(freshness_basis, $5),
+                 freshness_confidence = COALESCE(freshness_confidence, $6),
+                 source_posting_identity_hash = COALESCE(source_posting_identity_hash, $7)
+             WHERE workspace_id = $8 AND id = $9`,
+            [
+              obs.retrieved_at,
+              freshnessEvidence.sourcePublishedAt,
+              freshnessEvidence.sourceUpdatedAt,
+              freshnessEvidence.repostedAt,
+              effectiveFreshnessBasis,
+              effectiveFreshnessConfidence,
+              freshnessEvidence.postingIdentityHash,
+              ctx.workspaceId,
+              resolvedVersionId,
+            ]
+          );
         }
 
         if (createdNewVersion) {

@@ -59,7 +59,7 @@ async function readDashboardMetrics(
     const row = summary.rows[0];
     if (!row) throw new Error("No SQL dashboard summary exists for the configured workspace member.");
     const topTen = await client.query<{ count: number }>(
-      "SELECT COUNT(*)::INTEGER AS count FROM v_top_ten_ready_jobs_scoped WHERE workspace_id = $1",
+      "SELECT COUNT(*)::INTEGER AS count FROM v_top_ten_ready_jobs_stage3_scoped WHERE workspace_id = $1",
       [row.workspace_id]
     );
     await client.query("COMMIT");

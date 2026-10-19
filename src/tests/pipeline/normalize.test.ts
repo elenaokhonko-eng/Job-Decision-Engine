@@ -40,6 +40,7 @@ describe('Pipeline Stage: Normalization', () => {
       rows: [
         {
           id: 'obs-uuid-1',
+          retrieved_at: '2026-10-18T00:00:00.000Z',
           source_name: 'test-source',
           source_external_id: '123',
           company_name: 'Test Corp',
@@ -87,11 +88,18 @@ describe('Pipeline Stage: Normalization', () => {
     // Check job_versions insertion
     const insertVersionCall = calls.find((call: any[]) => call[0].includes('INSERT INTO job_versions'));
     expect(insertVersionCall[0]).toContain('INSERT INTO job_versions');
-    expect(insertVersionCall[1]).toEqual([
+    expect(insertVersionCall[1].slice(0, 4)).toEqual([
       context.workspaceId,
       'canon-uuid-1',
       generateContentHash('Test Corp', 'AI Engineer', 'Test description'),
       'Test description'
+    ]);
+    expect(insertVersionCall[1].slice(4, 7)).toEqual([null, null, null]);
+    expect(insertVersionCall[1][7]).toMatch(/^[0-9a-f]{64}$/);
+    expect(insertVersionCall[1].slice(8)).toEqual([
+      '2026-10-18T00:00:00.000Z',
+      null,
+      null,
     ]);
 
     // Check latest_job_version_id update on canonical job

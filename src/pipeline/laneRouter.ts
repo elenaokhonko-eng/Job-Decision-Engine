@@ -19,6 +19,7 @@ import {
 } from "./laneConfigLoader.js";
 import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
 import { PersistedLaneDecisionSchema, SCHEMA_VERSION } from "../contracts/index.js";
+import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
 
 export { loadGlobalLanesConfig, loadLanesConfig };
 export type { GlobalLanesConfig, LaneDefinition };
@@ -908,6 +909,8 @@ export async function runLaneRouter(
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
   try {
+    const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['lane_intent']);
+
     // Route only with the currently configured primary/fallback provider-model
     // pairs. Older spaces remain immutable audit history, but must not silently
     // win just because they happen to have a complete vector corpus.
@@ -1020,12 +1023,23 @@ export async function runLaneRouter(
           content_hash: lane.contentHash,
           activated_at: lane.activatedAt,
         })) ?? [],
+      preference_context_id: preferenceContext.contextId,
+      lane_intent_revision_id: preferenceContext.revisionsByDomain.lane_intent ?? null,
     };
 
     const loadPreferenceOrdering = async (): Promise<{
       laneRankByKey: Record<string, number>;
       laneEnabledByKey: Record<string, boolean>;
     }> => {
+      const versionedWeights = preferenceContext.laneIntent?.lane_weights;
+      if (versionedWeights) {
+        const ranked = Object.entries(versionedWeights)
+          .sort(([laneA, weightA], [laneB, weightB]) => weightB - weightA || laneA.localeCompare(laneB));
+        return {
+          laneRankByKey: Object.fromEntries(ranked.map(([laneKey], index) => [laneKey, index])),
+          laneEnabledByKey: Object.fromEntries(ranked.map(([laneKey]) => [laneKey, true])),
+        };
+      }
       if (!useWorkspaceLaneTables) {
         return { laneRankByKey: {}, laneEnabledByKey: {} };
       }
@@ -1113,7 +1127,10 @@ export async function runLaneRouter(
         evaluated_at: params.evaluatedAt,
       });
 
-      const decisionHash = sha256Hex(stableStringify(decisionJson));
+      const decisionHash = sha256Hex(stableStringify({
+        decision: decisionJson,
+        preference_context_id: preferenceContext.contextId,
+      }));
 
       try {
         const inserted = await client.query<{ id: string }>(
@@ -1128,9 +1145,11 @@ export async function runLaneRouter(
               lane_snapshot,
               decision_json,
               created_by_user_id,
+              preference_user_id,
+              preference_context_id,
               created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
             ON CONFLICT (workspace_id, decision_hash)
             DO NOTHING
             RETURNING id
@@ -1145,6 +1164,8 @@ export async function runLaneRouter(
             laneSnapshot,
             decisionJson,
             ctx.userId,
+            preferenceContext.contextId ? ctx.userId : null,
+            preferenceContext.contextId,
           ]
         );
 

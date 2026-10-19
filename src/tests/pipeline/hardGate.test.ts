@@ -71,6 +71,7 @@ describe('Pipeline Stage: Hard Gates', () => {
       role: 'OWNER',
     };
 
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // preference revision lookup
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // SELECT active preference mode
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
@@ -87,6 +88,7 @@ describe('Pipeline Stage: Hard Gates', () => {
     });
 
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // BEGIN
+    (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE job_versions freshness
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -113,16 +115,16 @@ describe('Pipeline Stage: Hard Gates', () => {
     const gateCallArg = (criteria.applyGlobalGates as any).mock.calls[0]?.[0];
     expect(String(gateCallArg?.raw_description || "")).toContain("Extracted requirements");
     expect(String(gateCallArg?.raw_description || "")).toContain("2 days per week in office");
-    expect(mPool.query).toHaveBeenCalledTimes(7); // policy SELECT + jobs SELECT + BEGIN + requirements + UPDATE + INSERT + COMMIT
+    expect(mPool.query).toHaveBeenCalledTimes(9); // preference + policy + jobs + BEGIN + freshness + requirements + UPDATE + INSERT + COMMIT
 
-    const updateCall = (mPool.query as any).mock.calls[4];
+    const updateCall = (mPool.query as any).mock.calls[6];
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCall[1][0]).toBe('PASS');
     expect(updateCall[1][1]).toBe('PREQUALIFIED');
     expect(JSON.parse(updateCall[1][4]).employment_type).toBe('PERMANENT');
     expect(updateCall[1][6]).toBe('1b58ad5d-5806-4245-8ee9-8a9f8705d499');
 
-    const insertCall = (mPool.query as any).mock.calls[5];
+    const insertCall = (mPool.query as any).mock.calls[7];
     expect(insertCall[0]).toContain('pipeline_run_id');
     expect(insertCall[1][3]).toMatch(/^[0-9a-f-]{36}$/i);
   });
@@ -136,6 +138,7 @@ describe('Pipeline Stage: Hard Gates', () => {
       role: 'OWNER',
     };
 
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // preference revision lookup
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // SELECT active preference mode
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
@@ -152,6 +155,7 @@ describe('Pipeline Stage: Hard Gates', () => {
     });
 
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // BEGIN
+    (mPool.query as any).mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE job_versions freshness
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // SELECT requirements empty
 
     (criteria.applyGlobalGates as any).mockReturnValueOnce(makeRejectResult('GATE_LOCATION_RESTRICTED'));
@@ -163,8 +167,8 @@ describe('Pipeline Stage: Hard Gates', () => {
     await runHardGates(undefined, { context });
 
     expect(criteria.applyGlobalGates).toHaveBeenCalledTimes(1);
-    expect(mPool.query).toHaveBeenCalledTimes(7);
-    const updateCall = (mPool.query as any).mock.calls[4];
+    expect(mPool.query).toHaveBeenCalledTimes(9);
+    const updateCall = (mPool.query as any).mock.calls[6];
     expect(updateCall[1][0]).toBe('HARD_REJECT');
     expect(updateCall[1][1]).toBe('HARD_REJECTED');
     expect(updateCall[1][2]).toBe('GATE_LOCATION_RESTRICTED');
@@ -200,7 +204,7 @@ describe('Pipeline Stage: Hard Gates', () => {
       if (sql === 'BEGIN' || sql === 'ROLLBACK') {
         return { rows: [] };
       }
-      if (sql.includes('FROM job_versions jv') && sql.includes('JOIN job_requirements')) {
+      if (sql.includes('SELECT jr.requirement_key') && sql.includes('FROM job_versions jv')) {
         throw new Error('requirements table unavailable');
       }
       return { rows: [] };

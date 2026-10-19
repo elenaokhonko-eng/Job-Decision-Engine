@@ -69,11 +69,23 @@ export async function requeueManualReviewEvaluations(
   workspaceId: string,
   options: { dryRun?: boolean; queueIds?: string[] } = {}
 ): Promise<RequeueResult> {
-  const dryRun = options.dryRun !== false; // Default to dry-run for safety unless explicitly false
-  const allCandidates = await findCultureQuoteManualReviewCandidates(client, workspaceId);
+  const dryRun = options.dryRun !== false;
+  const requestedQueueIds = [...new Set(options.queueIds ?? [])];
+  if (!dryRun && requestedQueueIds.length !== 2) {
+    throw new Error('Applying a manual-review requeue requires exactly two distinct explicit queue IDs.');
+  }
 
-  const selectedCandidates = options.queueIds && options.queueIds.length > 0
-    ? allCandidates.filter((c) => options.queueIds!.includes(c.queue_id))
+  const allCandidates = await findCultureQuoteManualReviewCandidates(client, workspaceId);
+  const candidatesById = new Map(allCandidates.map((candidate) => [candidate.queue_id, candidate]));
+  const missingQueueIds = requestedQueueIds.filter((queueId) => !candidatesById.has(queueId));
+  if (missingQueueIds.length > 0) {
+    throw new Error(`Requested queue IDs are not eligible culture-quote candidates: ${missingQueueIds.join(', ')}.`);
+  }
+  const selectedCandidates = requestedQueueIds.length > 0
+    ? requestedQueueIds.flatMap((queueId) => {
+        const candidate = candidatesById.get(queueId);
+        return candidate ? [candidate] : [];
+      })
     : allCandidates;
 
   const result: RequeueResult = {
@@ -97,7 +109,7 @@ export async function requeueManualReviewEvaluations(
   // Execute audited requeue in the transaction
   for (const candidate of selectedCandidates) {
     // 1. Reset evaluation_queue item to PENDING with reset attempt count
-    await client.query(
+    const queueUpdate = await client.query(
       `UPDATE evaluation_queue
        SET status = 'PENDING',
            attempt_count = 0,
@@ -111,6 +123,9 @@ export async function requeueManualReviewEvaluations(
          AND status = 'NEEDS_MANUAL_REVIEW'`,
       [workspaceId, candidate.queue_id]
     );
+    if (queueUpdate.rowCount !== 1) {
+      throw new Error(`Queue item ${candidate.queue_id} changed before the audited requeue could be applied.`);
+    }
 
     // 2. Insert audited attempt entry
     await client.query(
@@ -135,7 +150,7 @@ export async function requeueManualReviewEvaluations(
     );
 
     // 3. Update canonical_jobs processing state back to QUEUED_FOR_AI
-    await client.query(
+    const jobUpdate = await client.query(
       `UPDATE canonical_jobs
        SET processing_state = 'QUEUED_FOR_AI',
            processing_status = 'QUEUED_FOR_AI',
@@ -146,6 +161,9 @@ export async function requeueManualReviewEvaluations(
          AND COALESCE(processing_state, processing_status) = 'NEEDS_MANUAL_REVIEW'`,
       [workspaceId, candidate.canonical_job_id]
     );
+    if (jobUpdate.rowCount !== 1) {
+      throw new Error(`Canonical job ${candidate.canonical_job_id} is not in NEEDS_MANUAL_REVIEW.`);
+    }
 
     result.requeuedCount += 1;
   }

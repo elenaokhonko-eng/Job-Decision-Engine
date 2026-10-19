@@ -52,6 +52,19 @@ describe("P0-03: Additive Migration Chain & Canonical Schema Integrity", () => {
     expect(source).toContain("isPooledPostgresConnectionString(migrationDatabaseUrl)");
   });
 
+  it("defines stable scoped Stage 3 read models from canonical ranking snapshots", () => {
+    const source = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, "075_user_preference_lineage_freshness_company_policy.sql"),
+      "utf8"
+    );
+
+    expect(source).toContain("CREATE OR REPLACE VIEW v_apply_now_jobs_stage3_scoped AS");
+    expect(source).toContain("CREATE OR REPLACE VIEW v_top_ten_ready_jobs_stage3_scoped AS");
+    expect(source).toContain("ranking.final_application_priority_score");
+    expect(source).toContain("ranking.employment_verifiability_score");
+    expect(source).toContain("ranking.preference_context_id AS stage3_preference_context_id");
+  });
+
   it("should track and apply migrations idempotently", async () => {
     const executedQueries: string[] = [];
     const appliedVersions: string[] = [];
@@ -1193,6 +1206,72 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     const after = (await realPool.query(`SELECT COUNT(*)::int AS n FROM schema_migrations`)).rows[0].n;
     expect(after).toBe(before);
   });
+
+  it("migration 075 exposes versioned preferences and nullable authoritative freshness lineage idempotently", async () => {
+    const client = await realPool.connect();
+    try {
+      await applyMigrationFile(client, '075_user_preference_lineage_freshness_company_policy.sql');
+      await applyMigrationFile(client, '075_user_preference_lineage_freshness_company_policy.sql');
+
+      const preferenceTables = await client.query<{ table_name: string }>(
+        `SELECT table_name
+         FROM information_schema.tables
+         WHERE table_schema = current_schema()
+           AND table_name IN (
+             'workspace_user_preference_revisions',
+             'workspace_user_preference_active_versions',
+             'workspace_user_preference_contexts',
+             'workspace_company_policy_observations'
+           )
+         ORDER BY table_name`
+      );
+      expect(preferenceTables.rows.map((row) => row.table_name)).toEqual([
+        'workspace_company_policy_observations',
+        'workspace_user_preference_active_versions',
+        'workspace_user_preference_contexts',
+        'workspace_user_preference_revisions',
+      ]);
+
+      const freshnessColumns = await client.query<{ column_name: string; is_nullable: string; column_default: string | null }>(
+        `SELECT column_name, is_nullable, column_default
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'job_versions'
+           AND column_name IN (
+             'source_published_at', 'source_updated_at', 'reposted_at',
+             'first_seen_at', 'last_seen_at', 'freshness_basis',
+             'freshness_confidence', 'job_age_days', 'freshness_score',
+             'source_posting_identity_hash'
+           )`
+      );
+      expect(freshnessColumns.rows).toHaveLength(10);
+      expect(freshnessColumns.rows.find((row) => row.column_name === 'source_published_at')).toMatchObject({
+        is_nullable: 'YES',
+        column_default: null,
+      });
+      expect(freshnessColumns.rows.find((row) => row.column_name === 'source_updated_at')).toMatchObject({
+        is_nullable: 'YES',
+        column_default: null,
+      });
+
+      const rankingColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'job_ranking_snapshots'
+           AND column_name IN (
+             'base_rank_score', 'freshness_score', 'remote_freedom_score',
+             'final_application_priority_score', 'remote_from_home_base_score',
+             'temporary_abroad_score', 'country_flexibility_score',
+             'office_requirement_score', 'timezone_compatibility_score',
+             'employment_verifiability_score', 'preference_context_id'
+           )`
+      );
+      expect(rankingColumns.rows).toHaveLength(11);
+    } finally {
+      client.release();
+    }
+  }, 30_000);
 
   it("migration 008 succeeds on legacy upgrade path without uq_canonical_job_content_hash", async () => {
     const client = await realPool.connect();

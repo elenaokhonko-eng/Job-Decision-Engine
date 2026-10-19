@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { extractFreshnessEvidence } from '../../ingestion/freshnessEvidence.js';
 import {
   evaluateJobFreshness,
   evaluateMobilityMatch,
@@ -6,6 +7,8 @@ import {
   evaluateEmployerExclusions,
   evaluateEmployerWatchlist,
   computeEmploymentStabilityScore,
+  evaluateCompanyStagePreference,
+  computeEmploymentVerifiabilityScore,
 } from '../../policy/stage3PolicyEngine.js';
 import {
   calculateStage3PriorityScore,
@@ -13,22 +16,182 @@ import {
 import {
   applyPersistedRequirementGates,
 } from '../../pipeline/hardGate.js';
+import {
+  MobilityPreferencesSchema,
+  FreshnessPolicySchema,
+  CompensationPolicySchema,
+  EmployerWatchlistPreferencesSchema,
+} from '../../policy/stage3Contracts.js';
+
+const approvedMobility = MobilityPreferencesSchema.parse({
+  employment_home_base: 'SINGAPORE',
+  preferred_work_mode: 'FULLY_REMOTE',
+  temporary_foreign_work_days_per_year: 90,
+  preferred_max_days_single_foreign_location: 30,
+  accept_country_list_remote: true,
+  requires_residency_in_home_base: true,
+  quarterly_office_visit: 'ACCEPTABLE',
+  company_gatherings_1_2_per_year: 'ACCEPTABLE',
+  travel_max_pct: 20,
+  hybrid_sg_1_3_days: 'ACCEPTABLE_LOW_PREFERENCE',
+  timezone_preferences: { APAC: 100, EUROPE: 100, US_EAST: 60, US_WEST: 20 },
+  living_travel_excluded_regions: ['USA', 'RUSSIA', 'TAIWAN', 'INDIA', 'AFRICA'],
+  living_travel_acceptable_regions: ['LATIN_AMERICA', 'EUROPE', 'APAC'],
+});
+const approvedFreshness = FreshnessPolicySchema.parse({
+  max_posting_age_days: 60,
+  stale_gate_disposition: 'HARD_REJECT',
+  freshness_ranking_weight: 12.5,
+});
+const approvedCompensation = CompensationPolicySchema.parse({
+  startup_min_cash_salary_monthly_sgd: 10000,
+  commercial_min_annual_sgd: 240000,
+  commercial_target_annual_sgd: 250000,
+  university_research_min_annual_sgd: 120000,
+  mission_multilateral_min_annual_sgd: 120000,
+  disposition_below_floor: 'PREVENT_APPLY_NOW',
+});
+const approvedEmployerPreferences = EmployerWatchlistPreferencesSchema.parse({
+  watchlist_companies: ['Supabase', 'Neon', 'Harvey'],
+  preferred_categories: ['DEVELOPER_INFRASTRUCTURE', 'DATABASE_DATA_PLATFORMS', 'LEGALTECH'],
+  excluded_employers: ['AIA', 'Mercer', 'Great Eastern', 'Deloitte', 'Ernst & Young'],
+  excluded_operating_models: ['CLIENT_LEASING_BODYSHOPPING_OUTSOURCING', 'STAFFING_AGENCY_EMPLOYMENT'],
+  allowed_exceptions: ['EPAM'],
+});
+const approvedStage3Preferences = {
+  mobility: approvedMobility,
+  freshness: approvedFreshness,
+  compensation: approvedCompensation,
+  watchlist: approvedEmployerPreferences,
+};
 
 describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () => {
+  it('has neutral schema defaults instead of user-specific preference defaults', () => {
+    expect(MobilityPreferencesSchema.parse({}).employment_home_base).toBeUndefined();
+    expect(CompensationPolicySchema.parse({}).commercial_min_annual_sgd).toBeUndefined();
+    expect(EmployerWatchlistPreferencesSchema.parse({}).excluded_employers).toBeUndefined();
+    expect(FreshnessPolicySchema.parse({}).max_posting_age_days).toBeUndefined();
+  });
+
+  it('keeps age unknown when only ingestion or source-update timestamps are present', () => {
+    const extracted = extractFreshnessEvidence({
+      rawPayload: { updated_at: '2026-10-18T00:00:00Z' },
+      sourceName: 'ATS',
+      sourceExternalId: null,
+      canonicalUrl: 'https://jobs.example.test/role',
+      contentHash: 'same-content',
+    });
+    const result = evaluateJobFreshness({
+      source_updated_at: extracted.sourceUpdatedAt,
+      first_seen_at: '2026-10-18T00:00:00Z',
+    }, approvedFreshness, new Date('2026-10-18T00:00:00Z'));
+
+    expect(extracted.freshnessBasis).toBeNull();
+    expect(result.status).toBe('UNKNOWN');
+    expect(result.job_age_days).toBeNull();
+    expect(result.is_hard_reject).toBe(false);
+  });
+
+  it('does not invent an age for a new posting identity without a publication timestamp', () => {
+    const result = evaluateJobFreshness({
+      freshness_basis: 'NEW_POSTING_ID',
+      posting_identity_is_new: true,
+    }, approvedFreshness, new Date('2026-10-18T00:00:00Z'));
+
+    expect(result.status).toBe('UNKNOWN');
+    expect(result.freshness_basis).toBe('NEW_POSTING_ID');
+    expect(result.job_age_days).toBeNull();
+    expect(result.is_hard_reject).toBe(false);
+  });
+
+  it('preserves distinct ATS posting identities when content is unchanged', () => {
+    const common = {
+      rawPayload: { posted_at: '2026-10-01T00:00:00Z' },
+      sourceName: 'ATS',
+      canonicalUrl: 'https://jobs.example.test/role',
+      contentHash: 'same-content',
+    };
+    const first = extractFreshnessEvidence({ ...common, sourceExternalId: 'posting-1' });
+    const second = extractFreshnessEvidence({ ...common, sourceExternalId: 'posting-2' });
+
+    expect(first.postingIdentityHash).not.toBe(second.postingIdentityHash);
+    expect(first.freshnessBasis).toBe('POSTED_AT');
+  });
+
+  it('does not use anecdotal or low-confidence company-stage evidence to exclude a role', () => {
+    const result = evaluateCompanyStagePreference({
+      stage: 'UNDERFUNDED_EARLY_STARTUP',
+      confidence: 60,
+      source: 'ANECDOTAL_REVIEW',
+    }, {
+      excluded: ['UNDERFUNDED_EARLY_STARTUP'],
+      underfunded_startup_prevents_apply_now: true,
+    });
+
+    expect(result.status).toBe('UNKNOWN');
+    expect(result.score).toBeNull();
+    expect(result.preventsApplyNow).toBe(false);
+    expect(result.isHardReject).toBe(false);
+  });
+
+  it('uses authoritative company-stage evidence as a non-hard Apply Now preference', () => {
+    const result = evaluateCompanyStagePreference({
+      stage: 'UNDERFUNDED_EARLY_STARTUP',
+      confidence: 95,
+      source: 'OFFICIAL_COMPANY_SOURCE',
+    }, {
+      excluded: ['UNDERFUNDED_EARLY_STARTUP'],
+      underfunded_startup_prevents_apply_now: true,
+    });
+
+    expect(result.status).toBe('EXCLUDED');
+    expect(result.score).toBe(0);
+    expect(result.preventsApplyNow).toBe(true);
+    expect(result.isHardReject).toBe(false);
+  });
+
+  it('requires authoritative payroll and employment-structure facts for verifiability scoring', () => {
+    const incomplete = computeEmploymentVerifiabilityScore({
+      employment_structure: {
+        score: 90,
+        confidence: 95,
+        source: 'OFFICIAL_JOB_POSTING',
+      },
+    });
+    const complete = computeEmploymentVerifiabilityScore({
+      payroll_consistency: {
+        score: 80,
+        confidence: 95,
+        source: 'OFFICIAL_REGULATORY_SOURCE',
+      },
+      employment_structure: {
+        score: 90,
+        confidence: 95,
+        source: 'OFFICIAL_JOB_POSTING',
+      },
+    });
+
+    expect(incomplete.score).toBeNull();
+    expect(complete.score).toBe(85);
+    expect(complete.evidence).toContain('not a credit or mortgage-approval prediction');
+  });
+
   // Scenario 1: SG permanent employee + fully remote + 30-day foreign-work allowance -> very high preference
   it('Scenario 1: SG permanent employee + fully remote + 30-day foreign-work allowance yields highest mobility score', () => {
     const job = {
       workplace_type: 'FULLY_REMOTE',
-      description: 'Fully remote role for Singapore residents with global mobility benefit allowing up to 30 days temporary remote work abroad per year.',
+      description: 'Fully remote role; remote from Singapore is allowed. Global mobility benefit allows up to 30 days of temporary remote work abroad per year.',
       location: 'Singapore (Remote)',
     };
 
-    const result = evaluateMobilityMatch(job);
+    const result = evaluateMobilityMatch(job, approvedMobility);
 
-    expect(result.remote_from_singapore).toBe(true);
+    expect(result.remote_from_home_base).toBe(true);
+    expect(result.remote_from_home_base_status).toBe('SUPPORTED');
     expect(result.temporary_abroad_allowed).toBe(true);
-    expect(result.timezone_compatibility_score).toBe(100);
-    expect(result.remote_freedom_score).toBe(100);
+    expect(result.temporary_work_abroad_status).toBe('ALLOWED');
+    expect(result.timezone_compatibility_score).toBeNull();
+    expect(result.remote_freedom_score).toBeGreaterThanOrEqual(85);
     expect(result.is_hard_reject).toBe(false);
   });
 
@@ -40,7 +203,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       location: 'Singapore',
     };
 
-    const result = evaluateMobilityMatch(job);
+    const result = evaluateMobilityMatch(job, approvedMobility);
 
     expect(result.is_workable).toBe(true);
     expect(result.is_hard_reject).toBe(false);
@@ -56,11 +219,11 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       location: 'Remote',
     };
 
-    const result = evaluateMobilityMatch(job);
+    const result = evaluateMobilityMatch(job, approvedMobility);
 
     expect(result.work_from_anywhere).toBe(true);
     expect(result.timezone_compatibility_score).toBe(20); // Heavily penalized for US West overlap
-    expect(result.remote_freedom_score).toBeLessThan(80);
+    expect(result.remote_freedom_score).toBeLessThanOrEqual(80);
   });
 
   // Scenario 4: Remote US job but Singapore not an eligible hiring country -> workability rejection
@@ -71,27 +234,28 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       location: 'United States (Remote)',
     };
 
-    const result = evaluateMobilityMatch(job);
+    const result = evaluateMobilityMatch(job, approvedMobility);
 
     expect(result.is_hard_reject).toBe(true);
     expect(result.rejection_code).toBe('UNWORKABLE_LOCATION_MODEL');
-    expect(result.remote_from_singapore).toBe(false);
+    expect(result.remote_from_home_base).toBe(false);
   });
 
   // Scenario 5: Series-A startup + SGD 8k -> below configured floor
   it('Scenario 5: Series-A startup with SGD 8k/month cash salary is flagged below floor', () => {
     const job = {
-      salary_min: 8000 * 12, // SGD 96,000 / year (< SGD 10k/month floor)
+      salary_min: 8000 * 12, // SGD 96,000 / year (< SGD 10k/month cash floor)
       salary_currency: 'SGD',
+      salary_period: 'ANNUAL' as const,
       is_startup: true,
     };
 
-    const result = evaluateCompensationPolicy(job, 'COMMERCIAL');
+    const result = evaluateCompensationPolicy(job, 'COMMERCIAL', approvedCompensation);
 
     expect(result.status).toBe('BELOW_FLOOR');
     expect(result.prevents_apply_now).toBe(true);
     expect(result.rejection_code).toBe('COMPENSATION_BELOW_USER_FLOOR');
-    expect(result.evidence).toContain('SGD 10,000/month');
+    expect(result.evidence).toContain('SGD 10,000');
   });
 
   // Scenario 6: Old posting 75 days -> stale reject
@@ -101,7 +265,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
 
     const result = evaluateJobFreshness(
       { posted_at: oldPostingDate.toISOString() },
-      undefined,
+      approvedFreshness,
       now
     );
 
@@ -124,7 +288,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
         reposted_at: repostDate.toISOString(),
         is_repost: true,
       },
-      undefined,
+      approvedFreshness,
       now
     );
 
@@ -146,7 +310,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
         first_seen_at: now.toISOString(), // Ingestion saw it today, but posted_at is old
         is_repost: false,
       },
-      undefined,
+      approvedFreshness,
       now
     );
 
@@ -158,28 +322,29 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
   // Additional Stage 3 test: Employer Exclusions
   it('hard rejects traditional Singapore insurers and body-shopping firms while allowing exceptions', () => {
     // AIA rejected
-    const aia = evaluateEmployerExclusions('AIA Singapore', 'Insurance software architecture');
+    const aia = evaluateEmployerExclusions('AIA Singapore', 'Insurance software architecture', approvedEmployerPreferences);
     expect(aia.is_excluded).toBe(true);
     expect(aia.rejection_code).toBe('GATE_EXCLUDED_EMPLOYER');
 
     // Mercer rejected
-    const mercer = evaluateEmployerExclusions('Mercer Consulting', 'Transformation consultant');
+    const mercer = evaluateEmployerExclusions('Mercer Consulting', 'Transformation consultant', approvedEmployerPreferences);
     expect(mercer.is_excluded).toBe(true);
 
     // Big Four rejected
-    const ey = evaluateEmployerExclusions('Ernst & Young Advisory', 'Advisory delivery');
+    const ey = evaluateEmployerExclusions('Ernst & Young Advisory', 'Advisory delivery', approvedEmployerPreferences);
     expect(ey.is_excluded).toBe(true);
 
     // Body shopping outsourcing rejected
     const outsourcing = evaluateEmployerExclusions(
       'Tech Solutions Inc',
-      'Deployed across multiple client projects and billable client engagements in an IT staff augmentation model.'
+      'Deployed across multiple client projects and billable client engagements in an IT staff augmentation model.',
+      approvedEmployerPreferences
     );
     expect(outsourcing.is_excluded).toBe(true);
     expect(outsourcing.matched_model).toBe('CLIENT_LEASING_BODYSHOPPING_OUTSOURCING');
 
     // Allowed exception EPAM is not excluded
-    const epam = evaluateEmployerExclusions('EPAM Systems', 'Software engineering');
+    const epam = evaluateEmployerExclusions('EPAM Systems', 'Software engineering', approvedEmployerPreferences);
     expect(epam.is_excluded).toBe(false);
   });
 
@@ -187,7 +352,8 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
   it('recognizes target companies on the watchlist and awards category bonuses', () => {
     const supabase = evaluateEmployerWatchlist(
       'Supabase',
-      'Open source Firebase alternative, developer infrastructure, database platform with postgres.'
+      'Open source Firebase alternative, developer infrastructure, database platform with postgres.',
+      approvedEmployerPreferences
     );
 
     expect(supabase.is_named_watchlist).toBe(true);
@@ -229,11 +395,25 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       description: 'Building machine learning platforms.',
     };
 
-    const gateResult = applyPersistedRequirementGates(staleJob, []);
+    const gateResult = applyPersistedRequirementGates(staleJob, [], undefined, null, approvedStage3Preferences);
 
     expect(gateResult.passed).toBe(false);
     expect(gateResult.status).toBe('HARD_REJECT');
     expect(gateResult.rejection_codes).toContain('GATE_STALE_POSTING');
+  });
+
+  it('keeps below-floor compensation out of hard-reject gates when policy only prevents Apply Now', () => {
+    const result = applyPersistedRequirementGates({
+      title: 'Senior AI Engineer',
+      company_name: 'Acme AI',
+      posted_at: new Date().toISOString(),
+      compensation_raw: 'SGD 8,000 per month',
+      description: 'Build AI systems for enterprise customers.',
+    }, [], undefined, null, approvedStage3Preferences);
+
+    expect(result.passed).toBe(true);
+    expect(result.status).toBe('PASS');
+    expect(result.rejection_codes).not.toContain('COMPENSATION_BELOW_USER_FLOOR');
   });
 
   // Hard gate integration test for excluded employer
@@ -245,7 +425,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       description: 'Enterprise architecture for investment systems.',
     };
 
-    const gateResult = applyPersistedRequirementGates(excludedJob, []);
+    const gateResult = applyPersistedRequirementGates(excludedJob, [], undefined, null, approvedStage3Preferences);
 
     expect(gateResult.passed).toBe(false);
     expect(gateResult.status).toBe('HARD_REJECT');

@@ -304,7 +304,7 @@ function renderProfileDiffMarkdown(report: ProfileDiffReport): string {
   lines.push(`| Facts Updated (Metadata Enriched) | **${report.facts_updated.length}** |`);
   lines.push(`| Facts Unchanged | **${report.facts_unchanged_count}** |`);
   lines.push(`| Duplicates Consolidated | **${report.duplicates_consolidated.length}** |`);
-  lines.push(`| Credentials Added (In-Progress) | **+${report.credentials_added.length}** |`);
+  lines.push(`| Credentials Added / Status Changed | **+${report.credentials_added.length}** |`);
   lines.push(`| Credentials Removed / Moved to Roadmap | **-${report.credentials_removed.length}** |`);
   lines.push(`| Engagement Summaries Enriched | **${report.engagement_summaries_changed.length}** |`);
   lines.push(`| Unclassified / Ambiguous Items | **${report.unclassified_or_ambiguous.length}** |`);
@@ -341,9 +341,9 @@ function renderProfileDiffMarkdown(report: ProfileDiffReport): string {
   lines.push(`## 4. Credentials Delta`);
   lines.push(``);
   if (report.credentials_added.length > 0) {
-    lines.push(`### Added Credentials (IN_PROGRESS, Under Active Study)`);
+    lines.push(`### Added Credentials (Status from Canonical Ledger)`);
     for (const c of report.credentials_added) {
-      lines.push(`- ➕ **${c.credential_name}** (${c.issuer}) — \`${c.status}\``);
+      lines.push(`- ➕ **${c.credential_name}** (${c.issuer}) — \`${c.status}\` / \`${c.change_type}\``);
     }
     lines.push(``);
   }
