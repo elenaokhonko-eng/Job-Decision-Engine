@@ -26,6 +26,15 @@ describe("evaluation queue workflow", () => {
     expect(exitPolicy).toContain('stats.failed > 0 && exitOnRetryWait ? 1 : 0');
   });
 
+  it("supports explicit bounded profile-v6 queue filtering for staging smoke", () => {
+    const script = readFileSync(resolve("scripts/evaluate_queue.ts"), "utf8");
+
+    expect(script).toContain("options.profileVersionId");
+    expect(script).toContain("eq.job_version_id = ANY");
+    expect(script).toContain("options.limit");
+    expect(script).toContain("Profile-scoped evaluation requires explicit job-version IDs.");
+  });
+
   it("requires queue context to match the current deterministic artifacts", () => {
     const script = readFileSync(resolve("scripts/evaluate_queue.ts"), "utf8");
 

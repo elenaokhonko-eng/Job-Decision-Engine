@@ -5,7 +5,7 @@ import { pgPoolConfig } from '../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 
 dotenv.config();
-dotenv.config({ path: '.env.local', override: true });
+dotenv.config({ path: '.env.local' });
 
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 

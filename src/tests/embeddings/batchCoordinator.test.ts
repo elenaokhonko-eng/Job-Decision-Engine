@@ -148,7 +148,7 @@ describe('runEmbeddingBatch', () => {
       }
       if (sql.includes('FROM job_requirements jr')) {
         if (sql.includes('SELECT DISTINCT ei.id')) {
-          return { rows: [] };
+          return { rows: [{ id: 'input-req-1' }, { id: 'input-req-2' }] };
         }
         return {
           rows: [
@@ -251,5 +251,24 @@ describe('runEmbeddingBatch', () => {
     expect(anyCall).toBeTruthy();
     const params = (anyCall as unknown[])[1] as any[] | undefined;
     expect(params?.[1]).toEqual(['input-req-1']);
+
+    spy.mockReset();
+    spy.mockRejectedValue(new Error('primary embedding provider unavailable'));
+    const primaryOnly = await runEmbeddingBatchWithFallback(10, fakePool, {
+      context,
+      jobVersionIds: ['job-version-1'],
+      profileVersionId: '77777777-7777-4777-8777-777777777777',
+      includeProfileFacts: true,
+      includeLanePrototypes: false,
+      includeJobVersions: false,
+      allowFallback: false,
+      expectedPrimarySpaceId: 'space-primary',
+    });
+
+    expect(primaryOnly.primary.embeddingSpaceId).toBe('space-primary');
+    expect(primaryOnly.inputBuild.fromJobVersions).toBe(0);
+    expect(primaryOnly.fallback).toBeUndefined();
+    expect(primaryOnly.primary.failedInputIds.length).toBeGreaterThan(0);
+    expect(spy.mock.calls.every((call) => call[1] === 'gemini')).toBe(true);
   });
 });

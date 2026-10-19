@@ -14,13 +14,20 @@ dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
 
+export interface EvaluateQueueOptions {
+  readonly context?: WorkspaceContext;
+  readonly profileVersionId?: string;
+  readonly jobVersionIds?: readonly string[];
+  readonly limit?: number;
+}
+
 /** Exponential backoff: 30s, 60s, 120s, … capped at 30 minutes */
 function nextAvailableAt(attemptCount: number): string {
   const backoffSeconds = Math.min(30 * Math.pow(2, attemptCount), 1800);
   return `NOW() + INTERVAL '${backoffSeconds} seconds'`;
 }
 
-export async function evaluateQueue(): Promise<EvaluationQueueStats> {
+export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise<EvaluationQueueStats> {
   console.log("====================================================");
   console.log("         STAGE 0: AI EVALUATION PROCESSOR           ");
   console.log("====================================================");
@@ -40,7 +47,24 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
       throw new Error(`Model registry preflight failed: ${preflight.warnings.join(" | ")}`);
     }
 
-    const ctx: WorkspaceContext = await resolveWorkspaceContext(client as any);
+    const ctx: WorkspaceContext = options.context ?? await resolveWorkspaceContext(client as any);
+    const jobVersionIds = [...new Set(options.jobVersionIds ?? [])];
+    if (options.profileVersionId && jobVersionIds.length === 0) {
+      throw new Error('Profile-scoped evaluation requires explicit job-version IDs.');
+    }
+    if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 1000)) {
+      throw new Error('Evaluation queue limit must be an integer from 1 to 1000.');
+    }
+    const queryParams: unknown[] = [ctx.workspaceId];
+    const profileVersionFilter = options.profileVersionId
+      ? `AND eq.profile_version_id = $${queryParams.push(options.profileVersionId)}::uuid`
+      : '';
+    const jobVersionFilter = jobVersionIds.length > 0
+      ? `AND eq.job_version_id = ANY($${queryParams.push(jobVersionIds)}::uuid[])`
+      : '';
+    const limitClause = options.limit !== undefined
+      ? `LIMIT $${queryParams.push(options.limit)}`
+      : '';
 
     // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
     // Join strictly to evaluation_queue.job_version_id and gate_decisions for the same job_version_id (invariant: never substitute latest version during retry)
@@ -68,6 +92,8 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
         AND gd.canonical_job_id = eq.canonical_job_id
         AND gd.job_version_id = eq.job_version_id
        WHERE eq.workspace_id = $1
+         ${profileVersionFilter}
+         ${jobVersionFilter}
          AND (
            (eq.status = 'PENDING')
            OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
@@ -98,8 +124,9 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
              AND mr.context_fingerprint IS NOT NULL
              AND mr.status = 'COMPLETED'
          )
-       ORDER BY eq.priority_score DESC`,
-      [ctx.workspaceId]
+       ORDER BY eq.priority_score DESC
+       ${limitClause}`,
+      queryParams
     );
     eligibleCount = queueItems.length;
 
@@ -456,6 +483,10 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
     manualReview: manualReviewCount,
     eligible: eligibleCount,
   };
+}
+
+export async function closeEvaluationQueuePool(): Promise<void> {
+  await pool.end();
 }
 
 if (process.argv[1] && process.argv[1].includes("evaluate_queue")) {

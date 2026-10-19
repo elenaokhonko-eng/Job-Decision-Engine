@@ -13,7 +13,7 @@ import { recordModelRouteInvocation } from '../modelRoutes/registry.js';
 import { sha256Hex, stableStringify } from '../config/structuredLoader.js';
 
 dotenv.config();
-dotenv.config({ path: '.env.local', override: true });
+dotenv.config({ path: '.env.local' });
 
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
@@ -50,8 +50,12 @@ export interface EmbeddingFallbackSummary {
 export interface EmbeddingBatchCoordinatorOptions {
   context?: WorkspaceContext;
   jobVersionIds?: string[];
+  profileVersionId?: string;
   includeProfileFacts?: boolean;
   includeLanePrototypes?: boolean;
+  includeJobVersions?: boolean;
+  allowFallback?: boolean;
+  expectedPrimarySpaceId?: string;
 }
 
 interface InputRow {
@@ -705,6 +709,11 @@ export async function runEmbeddingBatchWithFallback(
     const scopedToJobVersions = jobVersionIds.length > 0;
     console.log(`[embeddings] seeding embedding spaces`);
     const seeded = await seedEmbeddingSpaces(client as pg.PoolClient, { context: ctx });
+    if (options?.expectedPrimarySpaceId && seeded.primarySpaceId !== options.expectedPrimarySpaceId) {
+      throw new Error(
+        `Primary embedding space mismatch: expected ${options.expectedPrimarySpaceId}, received ${seeded.primarySpaceId}.`
+      );
+    }
     console.log(
       `[embeddings] spaces primary=${seeded.primarySpaceId} fallback=${seeded.fallbackSpaceId}`
     );
@@ -712,8 +721,10 @@ export async function runEmbeddingBatchWithFallback(
     const inputBuild = await buildEmbeddingInputs(client as pg.PoolClient, maxItems, {
       context: ctx,
       jobVersionIds,
+      profileVersionId: options?.profileVersionId,
       includeProfileFacts: options?.includeProfileFacts,
       includeLanePrototypes: options?.includeLanePrototypes,
+      includeJobVersions: options?.includeJobVersions,
     });
     console.log(
       `[embeddings] input_build inserted=${inputBuild.inserted} requirements=${inputBuild.fromRequirements} profile_facts=${inputBuild.fromProfileFacts} job_versions=${inputBuild.fromJobVersions ?? 0} lane_prototypes=${inputBuild.fromLanePrototypes ?? 0}`
@@ -727,7 +738,7 @@ export async function runEmbeddingBatchWithFallback(
          WHERE ei.workspace_id = $1
            AND ei.is_current = TRUE
            AND (
-             (ei.source_type = 'JOB_VERSION' AND ei.source_id = ANY($2::uuid[]))
+             ($5::boolean = TRUE AND ei.source_type = 'JOB_VERSION' AND ei.source_id = ANY($2::uuid[]))
              OR (ei.source_type = 'JOB_REQUIREMENT' AND EXISTS (
                SELECT 1
                FROM job_requirements jr
@@ -751,6 +762,7 @@ export async function runEmbeddingBatchWithFallback(
                   AND pv.id = pf.profile_version_id
                   AND pv.status = 'ACTIVE'
                  WHERE pf.workspace_id = ei.workspace_id
+                   AND ($6::uuid IS NULL OR pf.profile_version_id = $6::uuid)
                    AND COALESCE(pf.fact_revision_id, pf.id) = ei.source_id
                )
              )
@@ -761,6 +773,8 @@ export async function runEmbeddingBatchWithFallback(
           jobVersionIds,
           options?.includeLanePrototypes ?? true,
           options?.includeProfileFacts ?? false,
+          options?.includeJobVersions ?? true,
+          options?.profileVersionId ?? null,
         ]
       );
       scopedInputIds = rows.map((row) => row.id);
@@ -786,7 +800,7 @@ export async function runEmbeddingBatchWithFallback(
     );
 
     let fallback: EmbeddingBatchSummary | undefined;
-    if (primary.failedInputIds.length > 0) {
+    if (primary.failedInputIds.length > 0 && options?.allowFallback !== false) {
       const fallbackBatches: EmbeddingBatchSummary[] = [];
       const failedByPrimaryBatch = new Map<string, string[]>();
       for (const batch of primaryDrain.batches) {

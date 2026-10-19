@@ -144,7 +144,9 @@ export async function buildEmbeddingInputs(
     context?: WorkspaceContext;
     jobVersionIds?: string[];
     includeProfileFacts?: boolean;
+    profileVersionId?: string;
     includeLanePrototypes?: boolean;
+    includeJobVersions?: boolean;
   }
 ): Promise<EmbeddingInputBuildSummary> {
   const pool = clientOrPool || defaultPool;
@@ -165,6 +167,7 @@ export async function buildEmbeddingInputs(
     const scopedToJobVersions = jobVersionIds.length > 0;
     const includeProfileFacts = options?.includeProfileFacts ?? !scopedToJobVersions;
     const includeLanePrototypes = options?.includeLanePrototypes ?? true;
+    const includeJobVersions = options?.includeJobVersions ?? true;
 
     await client.query('BEGIN');
 
@@ -217,6 +220,11 @@ export async function buildEmbeddingInputs(
     }
 
     if (includeProfileFacts) {
+      const profileFactParams: unknown[] = [ctx.workspaceId];
+      const profileVersionScope = options?.profileVersionId
+        ? `AND pf.profile_version_id = $${profileFactParams.push(options.profileVersionId)}::uuid`
+        : '';
+      const profileFactLimit = `$${profileFactParams.push(maxPerSource)}`;
       const factRows = await client.query<{
         id: string;
         embedding_node_id?: string;
@@ -233,9 +241,10 @@ export async function buildEmbeddingInputs(
           AND pv.id = pf.profile_version_id
           AND pv.status = 'ACTIVE'
          WHERE pf.workspace_id = $1
+           ${profileVersionScope}
          ORDER BY pf.created_at ASC
-         LIMIT $2`,
-        [ctx.workspaceId, maxPerSource]
+         LIMIT ${profileFactLimit}`,
+        profileFactParams
       );
 
       for (const row of factRows.rows) {
@@ -260,62 +269,64 @@ export async function buildEmbeddingInputs(
       }
     }
 
-    const jobParams: unknown[] = [ctx.workspaceId, maxPerSource];
-    const jobScope = scopedToJobVersions
-      ? `AND jv.id = ANY($${jobParams.push(jobVersionIds)}::uuid[])`
-      : '';
-    const jobRows = await client.query<{
-      id: string;
-      normalized_title: string;
-      description_text: string;
-    }>(
-      `SELECT
-              jv.id,
-              c.normalized_title,
-              jv.description_text
-       FROM canonical_jobs c
-       JOIN job_versions jv
-         ON jv.workspace_id = c.workspace_id
-        AND jv.canonical_job_id = c.id
-        AND jv.id = COALESCE(
-          c.latest_job_version_id,
-          (
-            SELECT jv2.id
-            FROM job_versions jv2
-            WHERE jv2.workspace_id = c.workspace_id
-              AND jv2.canonical_job_id = c.id
-            ORDER BY jv2.observed_at DESC
-            LIMIT 1
-          )
-       )
-       WHERE c.workspace_id = $1
-          AND (
-            $${jobParams.length + 1}::boolean = TRUE
-            OR COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'ROUTING_DEFERRED', 'MATCHED')
-          )
-         ${jobScope}
-         AND jv.description_text IS NOT NULL
-       ORDER BY jv.observed_at DESC
-       LIMIT $2`,
-      [...jobParams, scopedToJobVersions]
-    );
+    if (includeJobVersions) {
+      const jobParams: unknown[] = [ctx.workspaceId, maxPerSource];
+      const jobScope = scopedToJobVersions
+        ? `AND jv.id = ANY($${jobParams.push(jobVersionIds)}::uuid[])`
+        : '';
+      const jobRows = await client.query<{
+        id: string;
+        normalized_title: string;
+        description_text: string;
+      }>(
+        `SELECT
+                jv.id,
+                c.normalized_title,
+                jv.description_text
+         FROM canonical_jobs c
+         JOIN job_versions jv
+           ON jv.workspace_id = c.workspace_id
+          AND jv.canonical_job_id = c.id
+          AND jv.id = COALESCE(
+            c.latest_job_version_id,
+            (
+              SELECT jv2.id
+              FROM job_versions jv2
+              WHERE jv2.workspace_id = c.workspace_id
+                AND jv2.canonical_job_id = c.id
+              ORDER BY jv2.observed_at DESC
+              LIMIT 1
+            )
+         )
+         WHERE c.workspace_id = $1
+            AND (
+              $${jobParams.length + 1}::boolean = TRUE
+              OR COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED', 'LANE_ROUTED', 'ROUTING_DEFERRED', 'MATCHED')
+            )
+           ${jobScope}
+           AND jv.description_text IS NOT NULL
+         ORDER BY jv.observed_at DESC
+         LIMIT $2`,
+        [...jobParams, scopedToJobVersions]
+      );
 
-    for (const row of jobRows.rows) {
-      const contentText = buildJobVersionInputText(row);
-      const contentHash = hashText(contentText);
-      const inputKey = `job:${row.id}:${contentHash.slice(0, 16)}`;
-      const didWrite = await upsertEmbeddingInput(client, {
-        workspaceId: ctx.workspaceId,
-        inputKey,
-        sourceType: 'JOB_VERSION',
-        sourceId: row.id,
-        contentText,
-        contentHash,
-      });
+      for (const row of jobRows.rows) {
+        const contentText = buildJobVersionInputText(row);
+        const contentHash = hashText(contentText);
+        const inputKey = `job:${row.id}:${contentHash.slice(0, 16)}`;
+        const didWrite = await upsertEmbeddingInput(client, {
+          workspaceId: ctx.workspaceId,
+          inputKey,
+          sourceType: 'JOB_VERSION',
+          sourceId: row.id,
+          contentText,
+          contentHash,
+        });
 
-      if (didWrite) {
-        inserted += 1;
-        fromJobVersions += 1;
+        if (didWrite) {
+          inserted += 1;
+          fromJobVersions += 1;
+        }
       }
     }
 

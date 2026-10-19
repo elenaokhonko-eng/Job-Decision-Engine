@@ -166,6 +166,19 @@ describe("application ranking materializer", () => {
     }]);
   });
 
+  it("can materialize rankings only for an explicit bounded job-version set", async () => {
+    const { pool, calls } = createPool([currentApplyNowRow()]);
+
+    await materializeApplicationRankings(pool, "workspace-1", {
+      preferenceContext: null,
+      jobVersionIds: ["job-version-1"],
+    });
+
+    const select = calls.find((call) => call.sql.includes("FROM v_apply_now_jobs_scoped"));
+    expect(select?.sql).toContain("shortlist.job_version_id::uuid = ANY($2::uuid[])");
+    expect(select?.params).toEqual(["workspace-1", ["job-version-1"]]);
+  });
+
   it("persists an incomplete rank but never marks it Top 10 when a required deterministic signal is missing", async () => {
     const { pool, calls } = createPool([
       currentApplyNowRow({ deterministic_match_score: null }),

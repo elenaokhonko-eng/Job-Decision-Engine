@@ -171,6 +171,8 @@ const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
     LIMIT 1
   ) AS current_policy ON TRUE
   WHERE shortlist.workspace_id = $1
+    AND (COALESCE(array_length($2::uuid[], 1), 0) = 0
+         OR shortlist.job_version_id::uuid = ANY($2::uuid[]))
     AND shortlist.gate_status = 'PASS'
     AND shortlist.recommendation_eligibility = 'ELIGIBLE'
     AND shortlist.recommendation_outcome IN ('PRIORITY', 'REVIEW')
@@ -362,6 +364,7 @@ export async function materializeApplicationRankings(
     readonly dryRun?: boolean;
     readonly context?: WorkspaceContext;
     readonly preferenceContext?: ResolvedWorkspacePreferenceContext | null;
+    readonly jobVersionIds?: readonly string[];
   } = {}
 ): Promise<RankingMaterializationResult> {
   const client = await pool.connect();
@@ -376,7 +379,10 @@ export async function materializeApplicationRankings(
       : options.context
         ? await resolveWorkspacePreferenceContext(client, options.context, ['stage3'])
         : null;
-    const { rows } = await client.query<ApplyNowContextRow>(CURRENT_APPLY_NOW_CONTEXT_QUERY, [workspaceId]);
+    const { rows } = await client.query<ApplyNowContextRow>(CURRENT_APPLY_NOW_CONTEXT_QUERY, [
+      workspaceId,
+      options.jobVersionIds ?? [],
+    ]);
     const result = {
       dryRun: options.dryRun === true,
       eligibleApplyNowJobs: rows.length,
