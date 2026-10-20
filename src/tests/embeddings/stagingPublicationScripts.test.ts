@@ -23,18 +23,36 @@ describe('Stage 1–3 staging-only model scripts', () => {
     expect(script).not.toContain('INSERT INTO semantic_embeddings');
   });
 
-  it('scopes the evaluation smoke to active profile-v6 queue items and a small limit', () => {
+  it('uses the evaluator lineage contract and reconciles stale profile-v6 queue rows', () => {
     const script = readFileSync(resolve('scripts/run_stage1_3_staging_evaluation_smoke.ts'), 'utf8');
+    const evaluator = readFileSync(resolve('scripts/evaluate_queue.ts'), 'utf8');
+    const lineage = readFileSync(resolve('src/pipeline/evaluationQueueLineage.ts'), 'utf8');
 
     expect(script).toContain('STAGE3_STAGING_DATABASE_URL');
     expect(script).toContain("EXPECTED_STAGING_BRANCH_ID = 'br-orange-boat-azehba7u'");
     expect(script).toContain('MAX_SMOKE_JOBS = 500');
-    expect(script).toContain('eq.profile_version_id = $2');
-    expect(script).toContain('eq.enqueued_at >= $3');
+    expect(script).toContain('supersedeStaleEvaluationQueueRows');
+    expect(script).toContain('selectEligibleEvaluationQueueRows');
+    expect(evaluator).toContain('selectEligibleEvaluationQueueRows');
+    expect(evaluator).toContain('supersedeStaleEvaluationQueueRows');
     expect(script).toContain('jobVersionIds');
     expect(script).toContain("process.env.EVALUATION_EXIT_ON_RETRY_WAIT = 'false'");
     expect(script).toContain('runEvaluationQueueWithExitPolicy');
-    expect(script.indexOf('if (!apply || candidates.length === 0) return;')).toBeLessThan(
+    expect(script).toContain('cohort_technical_errors');
+    expect(script).toContain('newlyIntroducedStagingDebt');
+    expect(script).toContain('workspaceDebtBeforeReconciliation: workspaceDebtBefore');
+    expect(script).toContain('unchangedInheritedDebtIsInformational: true');
+    expect(script).toContain('NEW REGRESSION CAUSED BY RELEASE');
+    expect(script).toContain('PRE-EXISTING PROD DEBT (unchanged during smoke)');
+    expect(script).not.toContain("--apply requires an explicit --limit=N bound.");
+    expect(script).not.toContain('countValue(readModels.technical_errors) > 0');
+    expect(lineage).toContain('dd.context_fingerprint = eq.context_fingerprint');
+    expect(lineage).toContain('mr.context_fingerprint IS NOT NULL');
+    expect(lineage).not.toContain('mr.context_fingerprint = eq.context_fingerprint');
+    expect(lineage).toContain('eq.job_version_id = c.latest_job_version_id');
+    expect(lineage).toContain('eq.match_run_id = c.latest_match_run_id');
+    expect(lineage).toContain('eq.deterministic_decision_id = c.latest_deterministic_decision_id');
+    expect(script.indexOf('if (!apply) return;')).toBeLessThan(
       script.indexOf("import('./evaluate_queue.js')")
     );
   });

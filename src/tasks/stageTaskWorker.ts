@@ -13,6 +13,7 @@ import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pi
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
+import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
 import {
   blockPipelineTask,
   claimPipelineTasks,
@@ -2113,6 +2114,15 @@ async function processClaimedTask(
       // work for release-only canaries in an operational worker.
       await completePipelineTaskAndRun(task, clientOrPool, { context: ctx });
       return;
+    }
+    if (taskType === "PUBLISH_EMBEDDING") {
+      const canonicalJobId = requireStringPayload(task, "canonical_job_id");
+      const jobVersionId = requireStringPayload(task, "job_version_id");
+      if (!(await isCurrentCanonicalJobVersion(clientOrPool, ctx.workspaceId, canonicalJobId, jobVersionId))) {
+        console.info(`Superseding stale embedding task ${task.taskKey} without provider work.`);
+        await completePipelineTaskAndRun(task, clientOrPool, { context: ctx });
+        return;
+      }
     }
     await executeStageTask(taskType, task, clientOrPool, ctx, dependencies, options.budgetRunId);
     await completePipelineTaskAndRun(task, clientOrPool, {

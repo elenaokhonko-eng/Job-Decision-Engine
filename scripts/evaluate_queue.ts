@@ -8,6 +8,11 @@ import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
 import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
+import {
+  selectEligibleEvaluationQueueRows,
+  supersedeStaleEvaluationQueueRows,
+  type EvaluationQueueCandidate,
+} from "../src/pipeline/evaluationQueueLineage.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -55,79 +60,28 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
     if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 1000)) {
       throw new Error('Evaluation queue limit must be an integer from 1 to 1000.');
     }
-    const queryParams: unknown[] = [ctx.workspaceId];
-    const profileVersionFilter = options.profileVersionId
-      ? `AND eq.profile_version_id = $${queryParams.push(options.profileVersionId)}::uuid`
-      : '';
-    const jobVersionFilter = jobVersionIds.length > 0
-      ? `AND eq.job_version_id = ANY($${queryParams.push(jobVersionIds)}::uuid[])`
-      : '';
-    const limitClause = options.limit !== undefined
-      ? `LIMIT $${queryParams.push(options.limit)}`
-      : '';
-
-    // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
-    // Join strictly to evaluation_queue.job_version_id and gate_decisions for the same job_version_id (invariant: never substitute latest version during retry)
-    const { rows: queueItems } = await client.query(
-      `SELECT eq.*, c.normalized_title, c.company_name, c.canonical_url,
-              c.gate_decision, c.workability_facts,
-              jv.description_text, eq.job_version_id AS resolved_job_version_id,
-              gd.id AS resolved_gate_decision_id
-       FROM evaluation_queue eq
-       JOIN canonical_jobs c
-         ON c.id = eq.canonical_job_id
-        AND c.workspace_id = eq.workspace_id
-       JOIN job_versions jv
-         ON jv.id = eq.job_version_id
-        AND jv.workspace_id = eq.workspace_id
-       JOIN deterministic_decisions dd
-         ON dd.workspace_id = eq.workspace_id
-        AND dd.id = eq.deterministic_decision_id
-        AND dd.canonical_job_id = eq.canonical_job_id
-        AND dd.job_version_id = eq.job_version_id
-        AND dd.match_run_id = eq.match_run_id
-        AND dd.context_fingerprint = eq.context_fingerprint
-       LEFT JOIN gate_decisions gd
-         ON gd.workspace_id = eq.workspace_id
-        AND gd.canonical_job_id = eq.canonical_job_id
-        AND gd.job_version_id = eq.job_version_id
-       WHERE eq.workspace_id = $1
-         ${profileVersionFilter}
-         ${jobVersionFilter}
-         AND (
-           (eq.status = 'PENDING')
-           OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
-           OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
-         )
-         AND eq.profile_version_id IS NOT NULL
-         AND eq.match_run_id = c.latest_match_run_id
-         AND eq.deterministic_decision_id = c.latest_deterministic_decision_id
-         AND eq.job_content_hash = jv.content_hash
-         AND eq.context_fingerprint IS NOT NULL
-         AND EXISTS (
-           SELECT 1
-           FROM profile_versions pv
-           WHERE pv.workspace_id = eq.workspace_id
-             AND pv.id = eq.profile_version_id
-             AND pv.status = 'ACTIVE'
-         )
-         AND EXISTS (
-           SELECT 1
-           FROM match_runs mr
-           WHERE mr.workspace_id = eq.workspace_id
-             AND mr.id = eq.match_run_id
-             AND mr.canonical_job_id = eq.canonical_job_id
-             AND mr.job_version_id = eq.job_version_id
-             AND mr.profile_version_id = eq.profile_version_id
-             AND mr.requirement_set_id = jv.active_requirement_set_id
-             AND mr.job_content_hash = jv.content_hash
-             AND mr.context_fingerprint IS NOT NULL
-             AND mr.status = 'COMPLETED'
-         )
-       ORDER BY eq.priority_score DESC
-       ${limitClause}`,
-      queryParams
-    );
+    let queueItems: EvaluationQueueCandidate[];
+    let supersededQueueCount = 0;
+    await client.query("BEGIN");
+    try {
+      supersededQueueCount = await supersedeStaleEvaluationQueueRows(client, {
+        workspaceId: ctx.workspaceId,
+        ...(options.profileVersionId ? { profileVersionId: options.profileVersionId } : {}),
+      });
+      queueItems = await selectEligibleEvaluationQueueRows(client, {
+        workspaceId: ctx.workspaceId,
+        ...(options.profileVersionId ? { profileVersionId: options.profileVersionId } : {}),
+        ...(jobVersionIds.length > 0 ? { jobVersionIds } : {}),
+        ...(options.limit !== undefined ? { limit: options.limit } : {}),
+      });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
+    if (supersededQueueCount > 0) {
+      console.log(`Superseded ${supersededQueueCount} stale evaluation queue item(s).`);
+    }
     eligibleCount = queueItems.length;
 
     console.log(`Found ${queueItems.length} items eligible for AI evaluation. Pipeline run: ${pipelineRunId}`);
@@ -281,7 +235,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
       }, 60_000);
 
       // Strictly bound to the queue item's job_version_id
-      const jobVersionId: string = item.job_version_id;
+      const jobVersionId = item.job_version_id;
       if (!jobVersionId) {
         console.warn(`⚠️ No job_version_id found for canonical job ${item.canonical_job_id}. Moving to RETRY_WAIT.`);
         failedCount++;

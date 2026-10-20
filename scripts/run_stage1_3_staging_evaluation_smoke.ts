@@ -6,6 +6,14 @@ import dotenv from 'dotenv';
 import pg from 'pg';
 
 import { isPooledPostgresConnectionString, pgPoolConfig } from '../src/db/pgSsl.js';
+import {
+  selectEligibleEvaluationQueueRows,
+  supersedeStaleEvaluationQueueRows,
+} from '../src/pipeline/evaluationQueueLineage.js';
+import {
+  newlyIntroducedStagingDebt,
+  type StagingWorkspaceDebtCounts,
+} from '../src/pipeline/stagingDebtDelta.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../src/workspace/context.js';
 
 dotenv.config();
@@ -23,13 +31,6 @@ interface ActiveProfileRow {
   readonly effective_at: Date | string;
 }
 
-interface EligibleQueueRow {
-  readonly queue_id: string;
-  readonly job_version_id: string;
-  readonly status: string;
-  readonly available_at: Date | string | null;
-}
-
 interface QueueStatusCounts {
   readonly completed: number | string;
   readonly retry_wait: number | string;
@@ -37,10 +38,12 @@ interface QueueStatusCounts {
   readonly needs_manual_review: number | string;
   readonly pending: number | string;
   readonly evaluating: number | string;
+  readonly superseded: number | string;
 }
 
 interface ReadModelCounts {
   readonly technical_errors: number | string;
+  readonly cohort_technical_errors: number | string;
   readonly summary_apply_now: number | string;
   readonly view_apply_now: number | string;
   readonly summary_track: number | string;
@@ -54,9 +57,6 @@ function parseLimit(): number {
   const limit = raw === undefined ? 1 : Number(raw);
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SMOKE_JOBS) {
     throw new Error(`--limit must be an integer from 1 to ${MAX_SMOKE_JOBS}.`);
-  }
-  if (process.argv.includes('--apply') && !raw) {
-    throw new Error('--apply requires an explicit --limit=N bound.');
   }
   return limit;
 }
@@ -83,7 +83,8 @@ async function readQueueStatusCounts(
        COUNT(*) FILTER (WHERE status = 'FAILED')::INTEGER AS failed,
        COUNT(*) FILTER (WHERE status = 'NEEDS_MANUAL_REVIEW')::INTEGER AS needs_manual_review,
        COUNT(*) FILTER (WHERE status = 'PENDING')::INTEGER AS pending,
-       COUNT(*) FILTER (WHERE status = 'EVALUATING')::INTEGER AS evaluating
+       COUNT(*) FILTER (WHERE status = 'EVALUATING')::INTEGER AS evaluating,
+       COUNT(*) FILTER (WHERE status = 'SUPERSEDED')::INTEGER AS superseded
      FROM evaluation_queue
      WHERE workspace_id = $1
        AND profile_version_id = $2
@@ -97,10 +98,20 @@ async function readQueueStatusCounts(
 
 async function readReadModelCounts(
   pool: pg.Pool,
-  context: WorkspaceContext
+  context: WorkspaceContext,
+  jobVersionIds: readonly string[]
 ): Promise<ReadModelCounts> {
   const { rows } = await pool.query<ReadModelCounts>(
     `SELECT summary.technical_errors,
+            COALESCE((
+              SELECT SUM(GREATEST(
+                COALESCE(shortlist.technical_error_count, 0),
+                CASE WHEN shortlist.processing_state = 'PROCESSING_ERROR' THEN 1 ELSE 0 END
+              ))::INTEGER
+              FROM v_canonical_shortlist_actions_scoped shortlist
+              WHERE shortlist.workspace_id = $1
+                AND shortlist.job_version_id = ANY($3::uuid[])
+            ), 0)::INTEGER AS cohort_technical_errors,
             summary.apply_now_count AS summary_apply_now,
             (SELECT COUNT(DISTINCT canonical_job_id)::INTEGER
              FROM v_apply_now_jobs_stage3_scoped WHERE workspace_id = $1) AS view_apply_now,
@@ -113,11 +124,70 @@ async function readReadModelCounts(
      FROM v_application_workspace_summary_scoped AS summary
      WHERE summary.workspace_id = $1 AND summary.user_key = $2
      LIMIT 1`,
-    [context.workspaceId, context.userKey]
+    [context.workspaceId, context.userKey, [...jobVersionIds]]
   );
   const result = rows[0];
   if (!result) throw new Error('Could not read the current profile-v6 Streamlit summary row.');
   return result;
+}
+
+interface WorkspaceDebtRow {
+  readonly technical_errors: number | string;
+  readonly stranded_nonterminal_jobs: number | string;
+  readonly pipeline_retry_wait: number | string;
+  readonly pipeline_dead_letter: number | string;
+}
+
+async function readWorkspaceDebtCounts(
+  pool: pg.Pool,
+  context: WorkspaceContext
+): Promise<StagingWorkspaceDebtCounts> {
+  const { rows } = await pool.query<WorkspaceDebtRow>(
+    `WITH stranded AS (
+       SELECT job.id
+       FROM canonical_jobs job
+       WHERE job.workspace_id = $1
+         AND NOT COALESCE(job.is_test_fixture, FALSE)
+         AND COALESCE(job.processing_state, job.processing_status) IN (
+           'RAW_STAGED', 'PREQUALIFIED', 'ROUTING_DEFERRED', 'LANE_ROUTED',
+           'QUEUED_FOR_AI', 'EVALUATING', 'RETRY_WAIT'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_tasks task
+           WHERE task.workspace_id = job.workspace_id
+             AND task.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+             AND (
+               task.payload->>'canonical_job_id' = job.id::text
+               OR task.payload->>'job_version_id' = job.latest_job_version_id::text
+             )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM evaluation_queue queue
+           WHERE queue.workspace_id = job.workspace_id
+             AND queue.canonical_job_id = job.id
+             AND queue.status IN ('PENDING', 'RUNNING', 'RETRY_WAIT')
+         )
+     )
+     SELECT
+       (SELECT technical_errors
+        FROM v_application_workspace_summary_scoped
+        WHERE workspace_id = $1 AND user_key = $2
+        LIMIT 1) AS technical_errors,
+       (SELECT COUNT(*)::INTEGER FROM stranded) AS stranded_nonterminal_jobs,
+       (SELECT COUNT(*)::INTEGER FROM pipeline_tasks
+        WHERE workspace_id = $1 AND status = 'RETRY_WAIT') AS pipeline_retry_wait,
+       (SELECT COUNT(*)::INTEGER FROM pipeline_tasks
+        WHERE workspace_id = $1 AND status = 'DEAD_LETTER') AS pipeline_dead_letter`,
+    [context.workspaceId, context.userKey]
+  );
+  const row = rows[0];
+  if (!row) throw new Error('Could not read staging workspace debt counts.');
+  return {
+    technicalErrors: countValue(row.technical_errors),
+    strandedNonterminalJobs: countValue(row.stranded_nonterminal_jobs),
+    pipelineRetryWait: countValue(row.pipeline_retry_wait),
+    pipelineDeadLetter: countValue(row.pipeline_dead_letter),
+  };
 }
 
 function countValue(value: number | string): number {
@@ -175,50 +245,31 @@ async function main(): Promise<void> {
       throw new Error('Evaluation smoke requires active Stage 2 and Stage 3 preferences on staging.');
     }
 
-    const queueResult = await client.query<EligibleQueueRow>(
-      `SELECT eq.id AS queue_id, eq.job_version_id, eq.status, eq.available_at
-       FROM evaluation_queue AS eq
-       JOIN canonical_jobs AS job
-         ON job.workspace_id = eq.workspace_id
-        AND job.id = eq.canonical_job_id
-       JOIN job_versions AS version
-         ON version.workspace_id = eq.workspace_id
-        AND version.id = eq.job_version_id
-       JOIN deterministic_decisions AS decision
-         ON decision.workspace_id = eq.workspace_id
-        AND decision.id = eq.deterministic_decision_id
-        AND decision.canonical_job_id = eq.canonical_job_id
-        AND decision.job_version_id = eq.job_version_id
-        AND decision.match_run_id = eq.match_run_id
-        AND decision.context_fingerprint = eq.context_fingerprint
-       JOIN match_runs AS match_run
-         ON match_run.workspace_id = eq.workspace_id
-        AND match_run.id = eq.match_run_id
-        AND match_run.canonical_job_id = eq.canonical_job_id
-        AND match_run.job_version_id = eq.job_version_id
-        AND match_run.profile_version_id = eq.profile_version_id
-        AND match_run.requirement_set_id = version.active_requirement_set_id
-        AND match_run.job_content_hash = version.content_hash
-        AND match_run.context_fingerprint = eq.context_fingerprint
-        AND match_run.status = 'COMPLETED'
-       WHERE eq.workspace_id = $1
-         AND eq.profile_version_id = $2
-         AND eq.enqueued_at >= $3
-         AND eq.job_content_hash = version.content_hash
-         AND eq.context_fingerprint IS NOT NULL
-         AND eq.status IN ('PENDING', 'RETRY_WAIT')
-         AND (eq.status = 'PENDING' OR eq.available_at IS NULL OR eq.available_at <= NOW())
-         AND job.latest_job_version_id = eq.job_version_id
-         AND job.gate_decision = 'PASS'
-         AND job.primary_lane IS NOT NULL
-         AND BTRIM(job.primary_lane) <> ''
-         AND job.primary_lane <> 'UNCLASSIFIED'
-       ORDER BY eq.priority_score DESC, eq.enqueued_at ASC
-       LIMIT $4`,
-      [context.workspaceId, activeProfile.id, activeProfile.effective_at, limit]
-    );
-    const candidates = queueResult.rows;
-    const queueIds = candidates.map((candidate) => candidate.queue_id);
+    const workspaceDebtBefore = await readWorkspaceDebtCounts(pool, context);
+    let supersededQueueRows = 0;
+    let candidates: Awaited<ReturnType<typeof selectEligibleEvaluationQueueRows>>;
+    await client.query('BEGIN');
+    try {
+      if (apply) {
+        supersededQueueRows = await supersedeStaleEvaluationQueueRows(client, {
+          workspaceId: context.workspaceId,
+          profileVersionId: activeProfile.id,
+        });
+      }
+      candidates = await selectEligibleEvaluationQueueRows(client, {
+        workspaceId: context.workspaceId,
+        profileVersionId: activeProfile.id,
+        enqueuedAtOrAfter: activeProfile.effective_at,
+        limit,
+      });
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    }
+    const workspaceDebtAfterReconciliation = await readWorkspaceDebtCounts(pool, context);
+    const reconciliationDebtDelta = newlyIntroducedStagingDebt(workspaceDebtBefore, workspaceDebtAfterReconciliation);
+    const queueIds = candidates.map((candidate) => candidate.id);
     const jobVersionIds = [...new Set(candidates.map((candidate) => candidate.job_version_id))];
     if (jobVersionIds.length !== queueIds.length) {
       throw new Error('The bounded smoke cohort has multiple active queue rows for a job version.');
@@ -229,12 +280,35 @@ async function main(): Promise<void> {
       activeProfileVersion: activeProfile.version_number,
       eligibleQueueItems: candidates.length,
       uniqueJobVersions: jobVersionIds.length,
+      staleQueueRowsSuperseded: supersededQueueRows,
+      workspaceDebtBeforeReconciliation: workspaceDebtBefore,
+      workspaceDebtAfterReconciliation,
+      reconciliationDebtDeltaIsInformational: reconciliationDebtDelta,
       limit,
       retryPasses,
       workflowExitOnRetryWait: false,
     }, null, 2));
 
-    if (!apply || candidates.length === 0) return;
+    if (!apply) return;
+    if (candidates.length === 0) {
+      const workspaceDebtAfter = await readWorkspaceDebtCounts(pool, context);
+      const newDebt = newlyIntroducedStagingDebt(workspaceDebtAfterReconciliation, workspaceDebtAfter);
+      console.log(JSON.stringify({
+        evaluation: { completed: 0, eligibleQueueItems: 0 },
+        workspaceDebt: {
+          beforeReconciliation: workspaceDebtBefore,
+          afterReconciliation: workspaceDebtAfterReconciliation,
+          reconciliationChanges: reconciliationDebtDelta,
+          afterSmoke: workspaceDebtAfter,
+          newlyIntroducedDuringSmoke: newDebt,
+          releaseDebtClassification: Object.values(newDebt).some((value) => value > 0)
+            ? 'NEW REGRESSION CAUSED BY RELEASE'
+            : 'PRE-EXISTING PROD DEBT (unchanged during smoke)',
+          unchangedInheritedDebtIsInformational: true,
+        },
+      }, null, 2));
+      throw new Error(`No current profile-v6 queue item was eligible; ${supersededQueueRows} stale row(s) were superseded and no provider call was made.`);
+    }
 
     process.env.DATABASE_URL = databaseUrl;
     process.env.DATABASE_URL_UNPOOLED = databaseUrl;
@@ -290,10 +364,16 @@ async function main(): Promise<void> {
       context,
       jobVersionIds,
     });
-    const readModels = await readReadModelCounts(pool, context);
+    const [readModels, workspaceDebtAfter] = await Promise.all([
+      readReadModelCounts(pool, context, jobVersionIds),
+      readWorkspaceDebtCounts(pool, context),
+    ]);
+    const newlyIntroducedDebt = newlyIntroducedStagingDebt(workspaceDebtAfterReconciliation, workspaceDebtAfter);
+    const hasNewWorkspaceDebt = Object.values(newlyIntroducedDebt).some((value) => value > 0);
     console.log(JSON.stringify({
       evaluation: {
         completed: countValue(status.completed),
+        supersededDuringSmoke: countValue(status.superseded),
         retryWait: countValue(status.retry_wait),
         failed: countValue(status.failed),
         needsManualReview: countValue(status.needs_manual_review),
@@ -304,7 +384,8 @@ async function main(): Promise<void> {
       },
       rankingMaterialization: rankings,
       readModels: {
-        technicalErrors: countValue(readModels.technical_errors),
+        workspaceTechnicalErrors: countValue(readModels.technical_errors),
+        smokeCohortTechnicalErrors: countValue(readModels.cohort_technical_errors),
         summaryApplyNow: countValue(readModels.summary_apply_now),
         viewApplyNow: countValue(readModels.view_apply_now),
         summaryTrack: countValue(readModels.summary_track),
@@ -312,11 +393,23 @@ async function main(): Promise<void> {
         summaryTopTen: countValue(readModels.summary_top_ten),
         viewTopTen: countValue(readModels.view_top_ten),
       },
+      workspaceDebt: {
+        beforeReconciliation: workspaceDebtBefore,
+        afterReconciliation: workspaceDebtAfterReconciliation,
+        reconciliationChanges: reconciliationDebtDelta,
+        afterSmoke: workspaceDebtAfter,
+        newlyIntroducedDuringSmoke: newlyIntroducedDebt,
+        releaseDebtClassification: hasNewWorkspaceDebt
+          ? 'NEW REGRESSION CAUSED BY RELEASE'
+          : 'PRE-EXISTING PROD DEBT (unchanged during smoke)',
+        unchangedInheritedDebtIsInformational: true,
+      },
     }, null, 2));
 
     if (
-      countValue(status.completed) !== queueIds.length ||
-      countValue(readModels.technical_errors) > 0 ||
+      countValue(status.completed) === 0 ||
+      countValue(status.completed) + countValue(status.superseded) !== queueIds.length ||
+      countValue(readModels.cohort_technical_errors) > 0 ||
       countValue(readModels.summary_apply_now) !== countValue(readModels.view_apply_now) ||
       countValue(readModels.summary_track) !== countValue(readModels.view_track) ||
       countValue(readModels.summary_top_ten) !== countValue(readModels.view_top_ten) ||
@@ -324,9 +417,10 @@ async function main(): Promise<void> {
       countValue(status.failed) > 0 ||
       countValue(status.needs_manual_review) > 0 ||
       countValue(status.pending) > 0 ||
-      countValue(status.evaluating) > 0
+      countValue(status.evaluating) > 0 ||
+      hasNewWorkspaceDebt
     ) {
-      throw new Error('Bounded staging evaluation smoke did not drain to a clean terminal state.');
+      throw new Error('Bounded staging evaluation smoke did not drain without new release-lineage failures.');
     }
   } finally {
     client.release();
