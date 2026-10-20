@@ -215,7 +215,7 @@ async function main(): Promise<void> {
     await page.getByRole("heading", { name: "Application command centre", exact: true }).waitFor({ timeout: 120_000 });
     await page.getByText("Top 10 — apply first", { exact: true }).waitFor({ timeout: 120_000 });
     await page.getByLabel("Opportunity category").waitFor({ timeout: 120_000 });
-    await page.getByText(/Apply Now \(\d+\)/).waitFor({ timeout: 120_000 });
+    await page.getByText("Apply Now", { exact: true }).first().waitFor({ timeout: 120_000 });
 
     const ariaSnapshot = await page.locator("body").ariaSnapshot({ mode: "default", depth: 12 });
     if (/Top 10 Ranked is unavailable|read model is unavailable|workspace summary is unavailable/i.test(ariaSnapshot)) {
