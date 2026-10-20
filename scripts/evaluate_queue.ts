@@ -18,6 +18,7 @@ dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
+let poolClosePromise: Promise<void> | undefined;
 
 export interface EvaluateQueueOptions {
   readonly context?: WorkspaceContext;
@@ -426,7 +427,6 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
     }
   } finally {
     client.release();
-    await pool.end();
   }
 
   const summary = `\n✅ Queue evaluation complete. Processed: ${processedCount}, Retrying: ${failedCount}, Manual Review: ${manualReviewCount}`;
@@ -439,32 +439,49 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
   };
 }
 
-export async function closeEvaluationQueuePool(): Promise<void> {
-  await pool.end();
+export function closeEvaluationQueuePool(): Promise<void> {
+  if (!poolClosePromise) {
+    poolClosePromise = Promise.resolve().then(() => pool.end());
+  }
+  return poolClosePromise;
+}
+
+async function runEvaluationQueueCli(): Promise<void> {
+  const exitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
+  try {
+    const outcome = await runEvaluationQueueWithExitPolicy(evaluateQueue, exitOnRetryWait);
+    if (!outcome.ok) {
+      console.error("Fatal queue evaluation error:", outcome.error);
+      process.exitCode = outcome.exitCode;
+      return;
+    }
+    if (outcome.stats.failed > 0 && outcome.exitCode === 1) {
+      console.error(
+        `❌ ${outcome.stats.failed} evaluation(s) failed and were moved to RETRY_WAIT. Exiting non-zero.`
+      );
+    }
+    if (outcome.stats.failed > 0 && outcome.exitCode === 0) {
+      console.warn(
+        `⚠️ ${outcome.stats.failed} evaluation(s) moved to RETRY_WAIT; exiting zero for scheduled retry-drain mode.`
+      );
+    }
+    process.exitCode = outcome.exitCode;
+  } catch (error: unknown) {
+    console.error("Fatal queue evaluation error:", error);
+    process.exitCode = 1;
+  } finally {
+    try {
+      await closeEvaluationQueuePool();
+    } catch (error: unknown) {
+      console.error("Failed to close evaluation queue pool:", error);
+      process.exitCode = 1;
+    }
+  }
 }
 
 if (process.argv[1] && process.argv[1].includes("evaluate_queue")) {
-  const exitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
-  runEvaluationQueueWithExitPolicy(evaluateQueue, exitOnRetryWait)
-    .then((outcome) => {
-      if (!outcome.ok) {
-        console.error("Fatal queue evaluation error:", outcome.error);
-        process.exit(outcome.exitCode);
-      }
-      if (outcome.stats.failed > 0 && outcome.exitCode === 1) {
-        console.error(
-          `❌ ${outcome.stats.failed} evaluation(s) failed and were moved to RETRY_WAIT. Exiting non-zero.`
-        );
-      }
-      if (outcome.stats.failed > 0 && outcome.exitCode === 0) {
-        console.warn(
-          `⚠️ ${outcome.stats.failed} evaluation(s) moved to RETRY_WAIT; exiting zero for scheduled retry-drain mode.`
-        );
-      }
-      process.exit(outcome.exitCode);
-    })
-    .catch((error: unknown) => {
-      console.error("Fatal queue evaluation error:", error);
-      process.exit(1);
-    });
+  void runEvaluationQueueCli().catch((error: unknown) => {
+    console.error("Fatal queue evaluation CLI error:", error);
+    process.exitCode = 1;
+  });
 }

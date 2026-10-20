@@ -22,7 +22,26 @@ describe("evaluation queue workflow", () => {
 
     expect(script).toContain('process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false"');
     expect(script).toContain('runEvaluationQueueWithExitPolicy(evaluateQueue, exitOnRetryWait)');
-    expect(script).toContain('process.exit(1)');
+    expect(script).toContain('process.exitCode = 1');
+    expect(script).toContain('await closeEvaluationQueuePool();');
+    expect(script).toContain('poolClosePromise = Promise.resolve().then(() => pool.end());');
+    expect(script).toMatch(/finally\s*\{\s*client\.release\(\);\s*\}/);
+    expect(script).not.toMatch(/finally\s*\{\s*client\.release\(\);\s*await pool\.end\(\);/);
+    const reusableWorker = script.slice(
+      script.indexOf('export async function evaluateQueue'),
+      script.indexOf('export function closeEvaluationQueuePool')
+    );
+    expect(reusableWorker).toContain('client.release();');
+    expect(reusableWorker).not.toContain('pool.end()');
+    expect(script).toContain('void runEvaluationQueueCli().catch');
+    const cliLifecycle = script.slice(
+      script.indexOf('async function runEvaluationQueueCli'),
+      script.indexOf('if (process.argv[1]')
+    );
+    expect(cliLifecycle).toContain('finally {');
+    expect(cliLifecycle).toContain('await closeEvaluationQueuePool();');
+    expect(cliLifecycle).toContain('process.exitCode = outcome.exitCode');
+    expect(script).not.toContain('process.exit(');
     expect(exitPolicy).toContain('stats.failed > 0 && exitOnRetryWait ? 1 : 0');
   });
 
