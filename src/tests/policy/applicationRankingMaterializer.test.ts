@@ -226,9 +226,17 @@ describe("application ranking materializer", () => {
   });
 
   it("ranks an otherwise-equivalent one-day posting above a 45-day posting", async () => {
+    const dayMilliseconds = 24 * 60 * 60 * 1000;
+    const asOf = Date.now();
     const { pool, calls } = createPool([
-      currentApplyNowRow({ canonical_job_id: "fresh-job", posted_at: "2026-10-18T00:00:00.000Z" }),
-      currentApplyNowRow({ canonical_job_id: "older-job", posted_at: "2026-09-04T00:00:00.000Z" }),
+      currentApplyNowRow({
+        canonical_job_id: "fresh-job",
+        posted_at: new Date(asOf - dayMilliseconds).toISOString(),
+      }),
+      currentApplyNowRow({
+        canonical_job_id: "older-job",
+        posted_at: new Date(asOf - 45 * dayMilliseconds).toISOString(),
+      }),
     ], [1, 1]);
 
     const result = await materializeApplicationRankings(pool, "workspace-1");

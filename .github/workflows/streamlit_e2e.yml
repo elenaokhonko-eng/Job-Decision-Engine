@@ -63,6 +63,7 @@ jobs:
           JDEC_API_TOKEN: streamlit-e2e-token
           WORKSPACE_KEY: default
           WORKSPACE_USER_KEY: local_user
+          STREAMLIT_E2E_ALLOW_LOCAL_POSTGRES: "true"
         run: npm run test:streamlit
 
       - name: Upload Streamlit accessibility artifact

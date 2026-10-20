@@ -218,8 +218,12 @@ async function main(): Promise<void> {
     await page.getByText("Apply Now", { exact: true }).first().waitFor({ timeout: 120_000 });
 
     const ariaSnapshot = await page.locator("body").ariaSnapshot({ mode: "default", depth: 12 });
-    if (/Top 10 Ranked is unavailable|read model is unavailable|workspace summary is unavailable/i.test(ariaSnapshot)) {
-      throw new Error("A V5 read model reported an error in the browser accessibility snapshot.");
+    fs.writeFileSync(reportPath, ariaSnapshot);
+    const unavailableReadModelLines = ariaSnapshot
+      .split("\n")
+      .filter((line) => /Top 10 Ranked is unavailable|read model is unavailable|workspace summary is unavailable/i.test(line));
+    if (unavailableReadModelLines.length) {
+      throw new Error(`A V5 read model reported an error: ${unavailableReadModelLines.join(" | ")}`);
     }
     const sqlMetrics = await readDashboardMetrics(databaseUrl, workspaceKey, userKey);
     const expectedMetrics: Array<[string, number]> = [
@@ -237,7 +241,6 @@ async function main(): Promise<void> {
         throw new Error(`Dashboard metric ${label} mismatch: UI=${actual}, SQL=${expected}.`);
       }
     }
-    fs.writeFileSync(reportPath, ariaSnapshot);
     await page.screenshot({
       path: path.join(exportDir, "application_command_centre_smoke.png"),
       fullPage: true,

@@ -19,8 +19,13 @@ describe('streamlit read-model integrity', () => {
     expect(content).toContain('FROM v_canonical_shortlist_actions_scoped');
     expect(content).toContain('FROM v_rejected_jobs_audit_scoped');
     expect(content).toContain('set_session(readonly=True, autocommit=True)');
-    expect(content).toContain('sslmode="verify-full"');
-    expect(content).toContain('sslrootcert=certifi.where()');
+    expect(content).toContain('read_only_database_ssl_options(');
+    expect(content).toContain('allow_local_postgres=allow_local_postgres');
+    const databasePath = path.resolve(process.cwd(), 'streamlit_database.py');
+    const databaseContent = fs.readFileSync(databasePath, 'utf8');
+    expect(databaseContent).toContain('"sslmode": "verify-full"');
+    expect(databaseContent).toContain('"sslmode": "disable"');
+    expect(databaseContent).toContain('hostname in _LOCAL_DATABASE_HOSTS');
     expect(content).toContain('DATABASE_URL');
     expect(content).not.toContain('INSERT INTO canonical_jobs');
     expect(content).not.toContain('UPDATE canonical_jobs');

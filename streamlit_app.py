@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 from fpdf import FPDF
 from streamlit_application_workflow import is_document_generation_eligible
+from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
 from streamlit_workspace_contracts import (
     validate_application_row,
@@ -79,16 +80,25 @@ def _open_read_only_connection():
         raise RuntimeError("DATABASE_URL is not configured for the read-only Streamlit fallback.")
 
     try:
-        import certifi
         import psycopg2
     except ImportError as exc:
-        raise RuntimeError("psycopg2-binary and certifi are required for the verified Streamlit read-only fallback.") from exc
+        raise RuntimeError("psycopg2-binary is required for the verified Streamlit read-only fallback.") from exc
+
+    allow_local_postgres = os.environ.get("STREAMLIT_E2E_ALLOW_LOCAL_POSTGRES", "").strip().lower() == "true"
+    ssl_options = read_only_database_ssl_options(
+        database_url, allow_local_postgres=allow_local_postgres
+    )
+    if ssl_options["sslmode"] == "verify-full":
+        try:
+            import certifi
+        except ImportError as exc:
+            raise RuntimeError("certifi is required for verified Streamlit read-only connections.") from exc
+        ssl_options["sslrootcert"] = certifi.where()
 
     connection = psycopg2.connect(
         database_url,
         connect_timeout=10,
-        sslmode="verify-full",
-        sslrootcert=certifi.where(),
+        **ssl_options,
     )
     connection.set_session(readonly=True, autocommit=True)
     return connection
