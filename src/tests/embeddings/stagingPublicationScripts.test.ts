@@ -27,9 +27,16 @@ describe('Stage 1–3 staging-only model scripts', () => {
     const script = readFileSync(resolve('scripts/run_stage1_3_staging_evaluation_smoke.ts'), 'utf8');
     const evaluator = readFileSync(resolve('scripts/evaluate_queue.ts'), 'utf8');
     const lineage = readFileSync(resolve('src/pipeline/evaluationQueueLineage.ts'), 'utf8');
+    const identityGuard = readFileSync(resolve('src/db/stagingDatabaseIdentity.ts'), 'utf8');
 
     expect(script).toContain('STAGE3_STAGING_DATABASE_URL');
-    expect(script).toContain("EXPECTED_STAGING_BRANCH_ID = 'br-orange-boat-azehba7u'");
+    expect(script).toContain('STAGE1_3_STAGING_IDENTITY_EXPECTATIONS.expectedBranchId');
+    expect(script).toContain('createStagingDatabaseIdentityDiagnostic');
+    expect(script).toContain('console.log(identityDiagnostic)');
+    expect(identityGuard).toContain('expectedBranchId: "br-orange-boat-azehba7u"');
+    expect(identityGuard).toContain('knownProductionBranchId: "br-sweet-lab-azucfmoz"');
+    expect(identityGuard).toContain('ep-lingering-frog-azbw8weo.c-3.ap-southeast-1.aws.neon.tech');
+    expect(identityGuard).toContain('ep-damp-glade-az7npbae.c-3.ap-southeast-1.aws.neon.tech');
     expect(script).toContain('MAX_SMOKE_JOBS = 500');
     expect(script).toContain('supersedeStaleEvaluationQueueRows');
     expect(script).toContain('selectEligibleEvaluationQueueRows');

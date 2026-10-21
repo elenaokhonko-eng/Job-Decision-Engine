@@ -7,6 +7,11 @@ import pg from 'pg';
 
 import { isPooledPostgresConnectionString, pgPoolConfig } from '../src/db/pgSsl.js';
 import {
+  createStagingDatabaseIdentityDiagnostic,
+  isApprovedStagingDatabaseIdentity,
+  STAGE1_3_STAGING_IDENTITY_EXPECTATIONS,
+} from '../src/db/stagingDatabaseIdentity.js';
+import {
   selectEligibleEvaluationQueueRows,
   supersedeStaleEvaluationQueueRows,
 } from '../src/pipeline/evaluationQueueLineage.js';
@@ -19,8 +24,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from '../src/workspace
 dotenv.config();
 dotenv.config({ path: '.env.local' });
 
-const EXPECTED_STAGING_BRANCH_ID = 'br-orange-boat-azehba7u';
-const EXPECTED_DATABASE_NAME = 'neondb';
+const EXPECTED_STAGING_BRANCH_ID = STAGE1_3_STAGING_IDENTITY_EXPECTATIONS.expectedBranchId;
 const EXPECTED_PROFILE_VERSION = 6;
 const MAX_SMOKE_JOBS = 500;
 const MAX_RETRY_WAIT_SECONDS = 1800;
@@ -207,15 +211,24 @@ async function main(): Promise<void> {
   const pool = new pg.Pool(pgPoolConfig(databaseUrl));
   const client = await pool.connect();
   try {
-    const identity = await client.query<{ database_name: string; branch_id: string | null }>(
+    const identity = await client.query<{ database_name: string | null; branch_id: string | null }>(
       `SELECT current_database() AS database_name,
               current_setting('neon.branch_id', TRUE) AS branch_id`
     );
     const databaseIdentity = identity.rows[0];
-    if (
-      databaseIdentity?.database_name !== EXPECTED_DATABASE_NAME ||
-      databaseIdentity.branch_id !== EXPECTED_STAGING_BRANCH_ID
-    ) {
+    const identityDiagnostic = createStagingDatabaseIdentityDiagnostic(
+      databaseUrl,
+      databaseIdentity
+        ? { databaseName: databaseIdentity.database_name, branchId: databaseIdentity.branch_id }
+        : null,
+      STAGE1_3_STAGING_IDENTITY_EXPECTATIONS,
+    );
+    console.log(identityDiagnostic);
+    if (!isApprovedStagingDatabaseIdentity({
+      databaseName: databaseIdentity?.database_name,
+      branchId: databaseIdentity?.branch_id,
+      hostname: identityDiagnostic.connectionHost,
+    }, STAGE1_3_STAGING_IDENTITY_EXPECTATIONS)) {
       throw new Error('Refusing evaluation smoke: connected database is not the approved staging branch.');
     }
 
