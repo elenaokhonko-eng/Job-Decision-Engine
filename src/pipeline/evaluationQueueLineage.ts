@@ -79,10 +79,15 @@ export async function selectEligibleEvaluationQueueRows(
       AND dd.job_version_id = eq.job_version_id
       AND dd.match_run_id = eq.match_run_id
       AND dd.context_fingerprint = eq.context_fingerprint
-     LEFT JOIN gate_decisions gd
-       ON gd.workspace_id = eq.workspace_id
-      AND gd.canonical_job_id = eq.canonical_job_id
-      AND gd.job_version_id = eq.job_version_id
+     LEFT JOIN LATERAL (
+       SELECT gd.id
+       FROM gate_decisions gd
+       WHERE gd.workspace_id = eq.workspace_id
+         AND gd.canonical_job_id = eq.canonical_job_id
+         AND gd.job_version_id = eq.job_version_id
+       ORDER BY gd.created_at DESC, gd.id DESC
+       LIMIT 1
+     ) gd ON TRUE
      WHERE eq.workspace_id = $1
        ${profileFilter}
        ${jobVersionFilter}

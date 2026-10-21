@@ -194,11 +194,37 @@ async function createFixture(
   };
 }
 
+async function insertGateDecisionHistory(
+  fixture: LineageFixture,
+  decisionCount: number,
+): Promise<string | null> {
+  let latestId: string | null = null;
+  for (let offset = 0; offset < decisionCount; offset += 1) {
+    const id = crypto.randomUUID();
+    await getClient().query(
+      `INSERT INTO gate_decisions (
+         id, workspace_id, canonical_job_id, job_version_id, decision, created_at
+       ) VALUES ($1, $2, $3, $4, 'PASS', $5)`,
+      [
+        id,
+        getContext().workspaceId,
+        fixture.canonicalJobId,
+        fixture.jobVersionId,
+        new Date(Date.now() - offset * 60_000),
+      ],
+    );
+    if (offset === 0) latestId = id;
+  }
+  return latestId;
+}
+
 describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)", () => {
   let profileVersionId = "";
   let policySnapshotId = "";
   let validFixture: LineageFixture;
   let staleFixture: LineageFixture;
+  let bulkFixtures: LineageFixture[] = [];
+  let latestGateDecisionId = "";
 
   beforeAll(async () => {
     pool = new pg.Pool(pgConnectionConfig(databaseUrl));
@@ -234,6 +260,15 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
 
     validFixture = await createFixture(profileVersionId, policySnapshotId, "valid-different-match-fingerprint");
     staleFixture = await createFixture(profileVersionId, policySnapshotId, "stale-match");
+    latestGateDecisionId = (await insertGateDecisionHistory(validFixture, 9)) ?? "";
+    if (!latestGateDecisionId) throw new Error("The gate-decision fan-out fixture was not seeded.");
+
+    const gateDecisionCounts = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 2, 5];
+    for (const gateDecisionCount of gateDecisionCounts) {
+      const fixture = await createFixture(profileVersionId, policySnapshotId, "valid-different-match-fingerprint");
+      await insertGateDecisionHistory(fixture, gateDecisionCount);
+      bulkFixtures.push(fixture);
+    }
   });
 
   afterAll(async () => {
@@ -260,8 +295,12 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
       limit: 1,
     });
 
-    expect(eligible.map((row) => row.id)).toContain(validFixture.queueId);
+    expect(eligible).toHaveLength(1);
+    expect(new Set(eligible.map((row) => row.id)).size).toBe(1);
+    expect(new Set(eligible.map((row) => row.job_version_id)).size).toBe(1);
+    expect(eligible[0]?.id).toBe(validFixture.queueId);
     expect(eligible[0]?.context_fingerprint).toBe(validFixture.queueFingerprint);
+    expect(eligible[0]?.resolved_gate_decision_id).toBe(latestGateDecisionId);
   });
 
   it("supersedes stale queue rows without deleting them or creating manual-review debt", async () => {
@@ -334,5 +373,68 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
         [getContext().workspaceId, staleFixture.canonicalJobId],
       ).then((result) => result.rows[0]?.count),
     ).toBe(1);
+  });
+
+  it("returns 12 selector rows across heterogeneous gate-decision history", async () => {
+    const jobVersionIds = bulkFixtures.map((fixture) => fixture.jobVersionId);
+    const eligible = await selectEligibleEvaluationQueueRows(getClient(), {
+      workspaceId: getContext().workspaceId,
+      profileVersionId,
+      jobVersionIds,
+      limit: 20,
+    });
+    const uniqueQueueIds = new Set(eligible.map((row) => row.id));
+    const uniqueJobVersions = new Set(eligible.map((row) => row.job_version_id));
+
+    expect(eligible).toHaveLength(12);
+    expect(uniqueQueueIds.size).toBe(12);
+    expect(uniqueJobVersions.size).toBe(12);
+    expect(eligible.length - uniqueJobVersions.size).toBe(0);
+  });
+
+  it("evaluates one queue row once with nine historical gate decisions", async () => {
+    const priorDatabaseUrl = process.env.DATABASE_URL;
+    const priorUnpooledDatabaseUrl = process.env.DATABASE_URL_UNPOOLED;
+    const priorGeminiKey = process.env.GEMINI_API_KEY;
+    let closeQueuePool: (() => Promise<void>) | undefined;
+    const evaluatorUrl = new URL(databaseUrl);
+    evaluatorUrl.searchParams.set("options", `-c search_path=${schemaName},public`);
+    process.env.DATABASE_URL = evaluatorUrl.toString();
+    process.env.DATABASE_URL_UNPOOLED = evaluatorUrl.toString();
+    process.env.GEMINI_API_KEY = priorGeminiKey || "gate-fanout-test-unused-key";
+
+    try {
+      const { evaluateQueue, closeEvaluationQueuePool } = await import("../../../scripts/evaluate_queue.js");
+      closeQueuePool = closeEvaluationQueuePool;
+      await getClient().query(
+        `UPDATE evaluation_queue
+         SET attempt_count = max_attempts
+         WHERE workspace_id = $1 AND id = $2`,
+        [getContext().workspaceId, validFixture.queueId],
+      );
+
+      const result = await evaluateQueue({
+        context: getContext(),
+        profileVersionId,
+        jobVersionIds: [validFixture.jobVersionId],
+      });
+
+      expect(result).toMatchObject({ eligible: 1, processed: 0, failed: 0, manualReview: 1 });
+      const queue = await getClient().query<{ status: string }>(
+        `SELECT status FROM evaluation_queue WHERE workspace_id = $1 AND id = $2`,
+        [getContext().workspaceId, validFixture.queueId],
+      );
+      expect(queue.rows[0]?.status).toBe("NEEDS_MANUAL_REVIEW");
+      await closeEvaluationQueuePool();
+      closeQueuePool = undefined;
+    } finally {
+      if (closeQueuePool) await closeQueuePool();
+      if (priorDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = priorDatabaseUrl;
+      if (priorUnpooledDatabaseUrl === undefined) delete process.env.DATABASE_URL_UNPOOLED;
+      else process.env.DATABASE_URL_UNPOOLED = priorUnpooledDatabaseUrl;
+      if (priorGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = priorGeminiKey;
+    }
   });
 });

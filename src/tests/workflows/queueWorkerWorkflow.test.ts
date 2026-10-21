@@ -56,6 +56,12 @@ describe("evaluation queue workflow", () => {
     expect(script).toContain("Profile-scoped evaluation requires explicit job-version IDs.");
   });
 
+  it("uses the canonical selector to avoid gate-decision join fan-out", () => {
+    const evaluator = readFileSync(resolve("scripts/evaluate_queue.ts"), "utf8");
+    expect(evaluator).toContain("selectEligibleEvaluationQueueRows");
+    expect(evaluator).not.toContain("LEFT JOIN gate_decisions");
+  });
+
   it("requires queue context to match the current deterministic artifacts", () => {
     const lineage = readFileSync(resolve("src/pipeline/evaluationQueueLineage.ts"), "utf8");
 
@@ -68,5 +74,8 @@ describe("evaluation queue workflow", () => {
     expect(lineage).toContain("eq.match_run_id = c.latest_match_run_id");
     expect(lineage).toContain("eq.deterministic_decision_id = c.latest_deterministic_decision_id");
     expect(lineage).toContain("eq.context_fingerprint IS NOT NULL");
+    expect(lineage).toContain("LEFT JOIN LATERAL (");
+    expect(lineage).toContain("ORDER BY gd.created_at DESC, gd.id DESC");
+    expect(lineage).toContain("LIMIT 1");
   });
 });
