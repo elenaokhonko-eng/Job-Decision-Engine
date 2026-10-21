@@ -52,6 +52,20 @@ describe("P0-03: Additive Migration Chain & Canonical Schema Integrity", () => {
     expect(source).toContain("isPooledPostgresConnectionString(migrationDatabaseUrl)");
   });
 
+  it("lowers the default Top 10 ranking confidence threshold without rewriting historical policies", () => {
+    const migration = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, "076_lower_top_ten_confidence_threshold.sql"),
+      "utf8"
+    );
+
+    expect(migration).toContain("CREATE OR REPLACE FUNCTION seed_default_ranking_policy_for_workspace()");
+    expect(migration).toContain("WHERE latest_policy.minimum_ranking_confidence = 95.00");
+    expect(migration).toContain("90.00");
+    expect(migration).toContain("ALTER COLUMN minimum_ranking_confidence SET DEFAULT 90.00");
+    expect(migration).toContain("ON CONFLICT (workspace_id, policy_version) DO NOTHING");
+    expect(migration).not.toMatch(/UPDATE\s+ranking_policies/i);
+  });
+
   it("defines stable scoped Stage 3 read models from canonical ranking snapshots", () => {
     const source = fs.readFileSync(
       path.join(MIGRATIONS_DIR, "075_user_preference_lineage_freshness_company_policy.sql"),
@@ -172,6 +186,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("072_expose_top_ten_component_scores.sql");
     expect(versions).toContain("073_preserve_culture_observation_immutability.sql");
     expect(versions).toContain("074_rebalance_optional_ranking_confidence.sql");
+    expect(versions).toContain("076_lower_top_ten_confidence_threshold.sql");
   });
 
   it("V5 creates the ranking, culture, and workspace-scoped application read models", async () => {
@@ -413,15 +428,18 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       weights: Record<string, number>;
       minimum_ranking_confidence: number;
     }>(`
-      SELECT weights, minimum_ranking_confidence::FLOAT8 AS minimum_ranking_confidence
+      SELECT weights,
+             minimum_ranking_confidence::FLOAT8 AS minimum_ranking_confidence
       FROM ranking_policies
-      WHERE schema_version = '5.2.0'
+      WHERE workspace_id = (SELECT id FROM workspaces WHERE workspace_key = 'default')
+        AND schema_version = '5.2.0'
       ORDER BY policy_version DESC
+      LIMIT 1
     `);
     expect(rows.length).toBeGreaterThan(0);
     for (const policy of rows) {
       expect(policy.weights.strategicValue).toBeLessThanOrEqual(5);
-      expect(policy.minimum_ranking_confidence).toBe(95);
+      expect(policy.minimum_ranking_confidence).toBe(90);
     }
   });
 
@@ -562,12 +580,43 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     ];
     for (const policy of rows) {
       expect(policy.policy_version).toBeTruthy();
-      expect(policy.minimum_ranking_confidence).toBe(95);
       expect(Object.keys(policy.weights)).toEqual(expect.arrayContaining(requiredWeights));
       const weights = Object.values(policy.weights);
       expect(weights.every((weight) => Number.isFinite(weight) && weight >= 0)).toBe(true);
       expect(weights.reduce((total, weight) => total + weight, 0)).toBeCloseTo(100, 8);
     }
+
+    const { rows: activePolicies } = await realPool.query<{ minimum_ranking_confidence: number }>(`
+      SELECT minimum_ranking_confidence::float8 AS minimum_ranking_confidence
+      FROM ranking_policies
+      WHERE workspace_id = (SELECT id FROM workspaces WHERE workspace_key = 'default')
+      ORDER BY policy_version DESC
+      LIMIT 1
+    `);
+    expect(activePolicies).toHaveLength(1);
+    expect(activePolicies[0].minimum_ranking_confidence).toBe(90);
+    const { rows: confidenceDefault } = await realPool.query<{ column_default: string | null }>(`
+      SELECT column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'ranking_policies'
+        AND column_name = 'minimum_ranking_confidence'
+    `);
+    expect(confidenceDefault[0]?.column_default).toContain('90.00');
+
+    const { rows: defaultPolicyHistory } = await realPool.query<{
+      historical_95_count: number;
+      latest_policy_version: number;
+      latest_90_policy_version: number | null;
+    }>(`
+      SELECT COUNT(*) FILTER (WHERE minimum_ranking_confidence = 95.00)::INTEGER AS historical_95_count,
+             MAX(policy_version)::INTEGER AS latest_policy_version,
+             MAX(policy_version) FILTER (WHERE minimum_ranking_confidence = 90.00)::INTEGER AS latest_90_policy_version
+      FROM ranking_policies
+      WHERE workspace_id = (SELECT id FROM workspaces WHERE workspace_key = 'default')
+    `);
+    expect(defaultPolicyHistory[0].historical_95_count).toBeGreaterThan(0);
+    expect(defaultPolicyHistory[0].latest_90_policy_version).toBe(defaultPolicyHistory[0].latest_policy_version);
   });
 
   it("V5 application status accepts the new workflow states and retains legacy states", async () => {

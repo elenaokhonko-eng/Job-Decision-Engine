@@ -64,7 +64,7 @@ function currentApplyNowRow(overrides: Record<string, unknown> = {}) {
     },
     ranking_policy_version: 1,
     ranking_weights: POLICY_WEIGHTS,
-    minimum_ranking_confidence: 95,
+    minimum_ranking_confidence: 90,
     policy_recheck_required: false,
     ...overrides,
   };
