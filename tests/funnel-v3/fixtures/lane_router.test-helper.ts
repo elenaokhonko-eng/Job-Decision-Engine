@@ -119,6 +119,10 @@ export function createLaneRouterTestHarness(
       return { rows: jobRows, rowCount: jobRows.length };
     }
 
+    if (normalized.includes("workspace_user_preference_active_versions")) {
+      return { rows: [], rowCount: 0 };
+    }
+
     if (normalized.includes("workspace_lane_preferences")) {
       return { rows: [], rowCount: 0 };
     }

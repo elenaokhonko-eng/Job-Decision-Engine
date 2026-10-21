@@ -17,6 +17,7 @@ const CONTEXT_PAYLOAD_KEYS = [
   "requirement_extraction_run_id",
   "match_run_id",
   "profile_version_id",
+  "preference_context_id",
   "workability_policy_hash",
   "lane_policy_version",
   "embedding_space_id",

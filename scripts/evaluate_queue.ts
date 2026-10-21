@@ -7,11 +7,25 @@ import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.j
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
+import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
+import {
+  selectEligibleEvaluationQueueRows,
+  supersedeStaleEvaluationQueueRows,
+  type EvaluationQueueCandidate,
+} from "../src/pipeline/evaluationQueueLineage.js";
 
 dotenv.config();
-dotenv.config({ path: ".env.local", override: true });
+dotenv.config({ path: ".env.local" });
 
 const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
+let poolClosePromise: Promise<void> | undefined;
+
+export interface EvaluateQueueOptions {
+  readonly context?: WorkspaceContext;
+  readonly profileVersionId?: string;
+  readonly jobVersionIds?: readonly string[];
+  readonly limit?: number;
+}
 
 /** Exponential backoff: 30s, 60s, 120s, … capped at 30 minutes */
 function nextAvailableAt(attemptCount: number): string {
@@ -19,7 +33,7 @@ function nextAvailableAt(attemptCount: number): string {
   return `NOW() + INTERVAL '${backoffSeconds} seconds'`;
 }
 
-export async function evaluateQueue(): Promise<EvaluationQueueStats> {
+export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise<EvaluationQueueStats> {
   console.log("====================================================");
   console.log("         STAGE 0: AI EVALUATION PROCESSOR           ");
   console.log("====================================================");
@@ -39,67 +53,36 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
       throw new Error(`Model registry preflight failed: ${preflight.warnings.join(" | ")}`);
     }
 
-    const ctx: WorkspaceContext = await resolveWorkspaceContext(client as any);
-
-    // 1. Fetch eligible items: PENDING, RETRY_WAIT where available_at has elapsed, or expired leases
-    // Join strictly to evaluation_queue.job_version_id and gate_decisions for the same job_version_id (invariant: never substitute latest version during retry)
-    const { rows: queueItems } = await client.query(
-      `SELECT eq.*, c.normalized_title, c.company_name, c.canonical_url,
-              c.gate_decision, c.workability_facts,
-              jv.description_text, eq.job_version_id AS resolved_job_version_id,
-              gd.id AS resolved_gate_decision_id
-       FROM evaluation_queue eq
-       JOIN canonical_jobs c
-         ON c.id = eq.canonical_job_id
-        AND c.workspace_id = eq.workspace_id
-       JOIN job_versions jv
-         ON jv.id = eq.job_version_id
-        AND jv.workspace_id = eq.workspace_id
-       JOIN deterministic_decisions dd
-         ON dd.workspace_id = eq.workspace_id
-        AND dd.id = eq.deterministic_decision_id
-        AND dd.canonical_job_id = eq.canonical_job_id
-        AND dd.job_version_id = eq.job_version_id
-        AND dd.match_run_id = eq.match_run_id
-        AND dd.context_fingerprint = eq.context_fingerprint
-       LEFT JOIN gate_decisions gd
-         ON gd.workspace_id = eq.workspace_id
-        AND gd.canonical_job_id = eq.canonical_job_id
-        AND gd.job_version_id = eq.job_version_id
-       WHERE eq.workspace_id = $1
-         AND (
-           (eq.status = 'PENDING')
-           OR (eq.status = 'RETRY_WAIT' AND (eq.available_at IS NULL OR eq.available_at <= NOW()))
-           OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
-         )
-         AND eq.profile_version_id IS NOT NULL
-         AND eq.match_run_id = c.latest_match_run_id
-         AND eq.deterministic_decision_id = c.latest_deterministic_decision_id
-         AND eq.job_content_hash = jv.content_hash
-         AND eq.context_fingerprint IS NOT NULL
-         AND EXISTS (
-           SELECT 1
-           FROM profile_versions pv
-           WHERE pv.workspace_id = eq.workspace_id
-             AND pv.id = eq.profile_version_id
-             AND pv.status = 'ACTIVE'
-         )
-         AND EXISTS (
-           SELECT 1
-           FROM match_runs mr
-           WHERE mr.workspace_id = eq.workspace_id
-             AND mr.id = eq.match_run_id
-             AND mr.canonical_job_id = eq.canonical_job_id
-             AND mr.job_version_id = eq.job_version_id
-             AND mr.profile_version_id = eq.profile_version_id
-             AND mr.requirement_set_id = jv.active_requirement_set_id
-             AND mr.job_content_hash = jv.content_hash
-             AND mr.context_fingerprint IS NOT NULL
-             AND mr.status = 'COMPLETED'
-         )
-       ORDER BY eq.priority_score DESC`,
-      [ctx.workspaceId]
-    );
+    const ctx: WorkspaceContext = options.context ?? await resolveWorkspaceContext(client as any);
+    const jobVersionIds = [...new Set(options.jobVersionIds ?? [])];
+    if (options.profileVersionId && jobVersionIds.length === 0) {
+      throw new Error('Profile-scoped evaluation requires explicit job-version IDs.');
+    }
+    if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 1000)) {
+      throw new Error('Evaluation queue limit must be an integer from 1 to 1000.');
+    }
+    let queueItems: EvaluationQueueCandidate[];
+    let supersededQueueCount = 0;
+    await client.query("BEGIN");
+    try {
+      supersededQueueCount = await supersedeStaleEvaluationQueueRows(client, {
+        workspaceId: ctx.workspaceId,
+        ...(options.profileVersionId ? { profileVersionId: options.profileVersionId } : {}),
+      });
+      queueItems = await selectEligibleEvaluationQueueRows(client, {
+        workspaceId: ctx.workspaceId,
+        ...(options.profileVersionId ? { profileVersionId: options.profileVersionId } : {}),
+        ...(jobVersionIds.length > 0 ? { jobVersionIds } : {}),
+        ...(options.limit !== undefined ? { limit: options.limit } : {}),
+      });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
+    if (supersededQueueCount > 0) {
+      console.log(`Superseded ${supersededQueueCount} stale evaluation queue item(s).`);
+    }
     eligibleCount = queueItems.length;
 
     console.log(`Found ${queueItems.length} items eligible for AI evaluation. Pipeline run: ${pipelineRunId}`);
@@ -253,7 +236,7 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
       }, 60_000);
 
       // Strictly bound to the queue item's job_version_id
-      const jobVersionId: string = item.job_version_id;
+      const jobVersionId = item.job_version_id;
       if (!jobVersionId) {
         console.warn(`⚠️ No job_version_id found for canonical job ${item.canonical_job_id}. Moving to RETRY_WAIT.`);
         failedCount++;
@@ -444,7 +427,6 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
     }
   } finally {
     client.release();
-    await pool.end();
   }
 
   const summary = `\n✅ Queue evaluation complete. Processed: ${processedCount}, Retrying: ${failedCount}, Manual Review: ${manualReviewCount}`;
@@ -457,22 +439,49 @@ export async function evaluateQueue(): Promise<EvaluationQueueStats> {
   };
 }
 
+export function closeEvaluationQueuePool(): Promise<void> {
+  if (!poolClosePromise) {
+    poolClosePromise = Promise.resolve().then(() => pool.end());
+  }
+  return poolClosePromise;
+}
+
+async function runEvaluationQueueCli(): Promise<void> {
+  const exitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
+  try {
+    const outcome = await runEvaluationQueueWithExitPolicy(evaluateQueue, exitOnRetryWait);
+    if (!outcome.ok) {
+      console.error("Fatal queue evaluation error:", outcome.error);
+      process.exitCode = outcome.exitCode;
+      return;
+    }
+    if (outcome.stats.failed > 0 && outcome.exitCode === 1) {
+      console.error(
+        `❌ ${outcome.stats.failed} evaluation(s) failed and were moved to RETRY_WAIT. Exiting non-zero.`
+      );
+    }
+    if (outcome.stats.failed > 0 && outcome.exitCode === 0) {
+      console.warn(
+        `⚠️ ${outcome.stats.failed} evaluation(s) moved to RETRY_WAIT; exiting zero for scheduled retry-drain mode.`
+      );
+    }
+    process.exitCode = outcome.exitCode;
+  } catch (error: unknown) {
+    console.error("Fatal queue evaluation error:", error);
+    process.exitCode = 1;
+  } finally {
+    try {
+      await closeEvaluationQueuePool();
+    } catch (error: unknown) {
+      console.error("Failed to close evaluation queue pool:", error);
+      process.exitCode = 1;
+    }
+  }
+}
+
 if (process.argv[1] && process.argv[1].includes("evaluate_queue")) {
-  evaluateQueue()
-    .then((stats) => {
-      const strictExitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
-      if (stats.failed > 0 && strictExitOnRetryWait) {
-        // Invariant 7: exit non-zero when any required stage fails
-        console.error(`❌ ${stats.failed} evaluation(s) failed and were moved to RETRY_WAIT. Exiting non-zero.`);
-        process.exit(1);
-      }
-      if (stats.failed > 0 && !strictExitOnRetryWait) {
-        console.warn(`⚠️ ${stats.failed} evaluation(s) moved to RETRY_WAIT; exiting zero for retry-drain worker mode.`);
-      }
-      process.exit(0);
-    })
-    .catch((err) => {
-      console.error("Fatal queue evaluation error:", err);
-      process.exit(1);
-    });
+  void runEvaluationQueueCli().catch((error: unknown) => {
+    console.error("Fatal queue evaluation CLI error:", error);
+    process.exitCode = 1;
+  });
 }

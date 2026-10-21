@@ -9,9 +9,6 @@ import {
   EvidenceSourceInput,
   validateEvidenceSourceReferences,
 } from './evidenceValidator.js';
-import { seedRecoverablePipelineTasks } from '../tasks/stageTaskWorker.js';
-import { enqueuePipelineTask } from '../tasks/pipelineTasks.js';
-import { buildPipelineTaskContextFingerprint } from '../pipeline/artifactContext.js';
 
 type QueryClient = {
   query: pg.PoolClient['query'];
@@ -33,16 +30,6 @@ export interface ProfileImportSummary {
     factConceptLinks: number;
     factEvidenceLinks: number;
     credentials: number;
-  };
-  refreshSeed?: {
-    inserted: number;
-    existing: number;
-  };
-  preferenceRefreshSeed?: {
-    inserted: number;
-    existing: number;
-    modeKey: string;
-    active: boolean;
   };
 }
 
@@ -556,9 +543,8 @@ export async function importLoadedProfile(
     }
 
     const workPreferencesContent = profileWorkPreferencesContent(loaded);
-    let preferenceMode: { modeKey: string; active: boolean } | null = null;
     if (profile.status === 'ACTIVE' && workPreferencesContent) {
-      const modeResult = await client.query<{ mode_key: string; is_active: boolean }>(
+      await client.query(
         `INSERT INTO workspace_user_preference_modes (
            workspace_id, user_id, mode_key, display_name, description, content, is_active
          )
@@ -589,82 +575,13 @@ export async function importLoadedProfile(
              ) THEN TRUE
              ELSE FALSE
            END,
-           updated_at = NOW()
-         RETURNING mode_key, is_active`,
+           updated_at = NOW()`,
         [context.workspaceId, context.userId, JSON.stringify(workPreferencesContent)]
       );
-      preferenceMode = modeResult.rows[0]
-        ? { modeKey: modeResult.rows[0].mode_key, active: modeResult.rows[0].is_active }
-        : null;
     }
 
     await client.query('COMMIT');
     transactionCommitted = true;
-
-    // Activation changes the identity of every profile-dependent match. Seed
-    // current-profile work immediately after the profile transaction commits;
-    // the durable task worker remains responsible for execution and retry.
-    const refreshSeed = profile.status === 'ACTIVE'
-      ? await seedRecoverablePipelineTasks(client as any, { context })
-      : undefined;
-
-    let preferenceRefreshSeed: ProfileImportSummary['preferenceRefreshSeed'];
-    if (profile.status === 'ACTIVE' && preferenceMode?.active) {
-      const candidates = await client.query<{ canonical_job_id: string; job_version_id: string }>(
-        `SELECT c.id AS canonical_job_id,
-                COALESCE(c.latest_job_version_id, lv.id) AS job_version_id
-         FROM canonical_jobs c
-         LEFT JOIN LATERAL (
-           SELECT id
-           FROM job_versions
-           WHERE workspace_id = c.workspace_id
-             AND canonical_job_id = c.id
-           ORDER BY observed_at DESC
-           LIMIT 1
-         ) lv ON TRUE
-         WHERE c.workspace_id = $1
-           AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
-           AND COALESCE(c.latest_job_version_id, lv.id) IS NOT NULL
-         ORDER BY c.created_at ASC, c.id ASC`,
-        [context.workspaceId]
-      );
-      let inserted = 0;
-      let existing = 0;
-      const modeRevision = Date.now().toString();
-      for (const candidate of candidates.rows) {
-        const payload = {
-          canonical_job_id: candidate.canonical_job_id,
-          job_version_id: candidate.job_version_id,
-          force_policy_recalculation: true,
-          preference_mode_key: preferenceMode.modeKey,
-          preference_mode_revision: modeRevision,
-        };
-        const result = await enqueuePipelineTask(
-          {
-            taskType: 'APPLY_HARD_GATES',
-            taskKey: `APPLY_HARD_GATES:${candidate.job_version_id}:preference:${preferenceMode.modeKey}:${modeRevision}`,
-            payload,
-            maxAttempts: 8,
-            contextFingerprint: buildPipelineTaskContextFingerprint({
-              workspaceId: context.workspaceId,
-              taskType: 'APPLY_HARD_GATES',
-              taskVersion: 'hard_gate_v1',
-              payload,
-            }),
-          },
-          client as any,
-          { context }
-        );
-        if (result.inserted || result.reactivated) inserted += 1;
-        else existing += 1;
-      }
-      preferenceRefreshSeed = {
-        inserted,
-        existing,
-        modeKey: preferenceMode.modeKey,
-        active: true,
-      };
-    }
 
     return {
       candidateProfileId,
@@ -678,15 +595,8 @@ export async function importLoadedProfile(
         factEvidenceLinks: insertedFactEvidenceLinks,
         credentials: loaded.credentials.credentials.length,
       },
-      refreshSeed: refreshSeed
-        ? { inserted: refreshSeed.inserted, existing: refreshSeed.existing }
-        : undefined,
-      preferenceRefreshSeed,
     };
   } catch (error) {
-    // Profile activation commits before downstream task seeding. Never issue
-    // a misleading rollback after that commit; the worker can retry seeding
-    // without undoing the durable profile version.
     if (!transactionCommitted) {
       await client.query('ROLLBACK');
     }

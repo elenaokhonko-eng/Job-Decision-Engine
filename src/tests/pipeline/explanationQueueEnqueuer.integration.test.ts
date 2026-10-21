@@ -274,4 +274,101 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
     );
     expect(totalQueue.rows[0].count).toBe(4);
   }, 60_000);
+
+  it("supersedes a mismatched active duplicate and preserves the authoritative queue row", async () => {
+    const database = getClient();
+    const workspace = getContext();
+    const currentQueue = await database.query<{
+      id: string;
+      canonical_job_id: string;
+      job_version_id: string;
+      profile_version_id: string;
+      match_run_id: string;
+      deterministic_decision_id: string;
+      job_content_hash: string;
+      context_fingerprint: string;
+      lane: string;
+      priority_score: number;
+      budget_run_id: string | null;
+    }>(
+      `SELECT id, canonical_job_id, job_version_id, profile_version_id,
+              match_run_id, deterministic_decision_id, job_content_hash,
+              context_fingerprint, lane, priority_score, budget_run_id
+       FROM evaluation_queue
+       WHERE workspace_id = $1 AND status = 'PENDING'
+       ORDER BY enqueued_at ASC, id ASC
+       LIMIT 1`,
+      [workspace.workspaceId],
+    );
+    const authoritative = currentQueue.rows[0];
+    if (!authoritative) throw new Error("The budget fixture did not leave an authoritative active queue row.");
+
+    const staleQueueId = crypto.randomUUID();
+    await database.query(
+      `INSERT INTO evaluation_queue (
+         id, workspace_id, canonical_job_id, job_version_id, profile_version_id,
+         match_run_id, deterministic_decision_id, job_content_hash,
+         context_fingerprint, lane, priority_score, budget_run_id, status
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'PENDING')`,
+      [
+        staleQueueId,
+        workspace.workspaceId,
+        authoritative.canonical_job_id,
+        authoritative.job_version_id,
+        authoritative.profile_version_id,
+        authoritative.match_run_id,
+        authoritative.deterministic_decision_id,
+        authoritative.job_content_hash,
+        `stale-context-${crypto.randomUUID()}`,
+        authoritative.lane,
+        authoritative.priority_score,
+        authoritative.budget_run_id,
+      ],
+    );
+
+    const enqueued = await runExplanationQueueEnqueuer(database, {
+      context: workspace,
+      jobVersionIds: [authoritative.job_version_id],
+      canonicalJobIds: [authoritative.canonical_job_id],
+      limit: 1,
+      budgetRunId: crypto.randomUUID(),
+    });
+    expect(enqueued.enqueued).toBe(0);
+
+    const rows = await database.query<{ id: string; status: string }>(
+      `SELECT id, status
+       FROM evaluation_queue
+       WHERE workspace_id = $1
+         AND job_version_id = $2
+         AND status IN ('PENDING', 'EVALUATING', 'RETRY_WAIT', 'SUPERSEDED')
+       ORDER BY id`,
+      [workspace.workspaceId, authoritative.job_version_id],
+    );
+    expect(rows.rows).toEqual(expect.arrayContaining([
+      { id: authoritative.id, status: "PENDING" },
+      { id: staleQueueId, status: "SUPERSEDED" },
+    ]));
+    expect(rows.rows).toHaveLength(2);
+
+    const duplicateGroups = await database.query<{ job_version_id: string }>(
+      `SELECT job_version_id
+       FROM evaluation_queue
+       WHERE workspace_id = $1
+         AND job_version_id = $2
+         AND profile_version_id = $3
+         AND match_run_id = $4
+         AND deterministic_decision_id = $5
+         AND status IN ('PENDING', 'EVALUATING', 'RETRY_WAIT')
+       GROUP BY job_version_id, profile_version_id, match_run_id, deterministic_decision_id
+       HAVING COUNT(*) > 1`,
+      [
+        workspace.workspaceId,
+        authoritative.job_version_id,
+        authoritative.profile_version_id,
+        authoritative.match_run_id,
+        authoritative.deterministic_decision_id,
+      ],
+    );
+    expect(duplicateGroups.rows).toHaveLength(0);
+  }, 60_000);
 });

@@ -123,6 +123,111 @@ describe('buildEmbeddingInputs', () => {
     expect(summary.fromJobVersions).toBe(1);
   });
 
+  it('can scope a publication batch to profile facts and requirements only', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('FROM job_requirements jr')) {
+        return { rows: [{
+          id: '11111111-1111-4111-8111-111111111111',
+          requirement_type: 'DOMAIN',
+          requirement_text: 'Current validated requirement',
+          quote_text: null,
+          structured_value: null,
+        }] };
+      }
+      if (sql.includes('FROM profile_facts pf')) {
+        return { rows: [{
+          id: '22222222-2222-4222-8222-222222222222',
+          embedding_node_id: '22222222-2222-4222-8222-222222222222',
+          fact_type: 'SKILL',
+          statement: 'Active v6 profile fact',
+          structured_value: null,
+          evidence_tier: 'PROFESSIONAL_PRODUCTION',
+        }] };
+      }
+      if (sql.includes('FROM canonical_jobs c')) {
+        throw new Error('job-version descriptions are out of scope for this publication');
+      }
+      if (sql.includes('INSERT INTO embedding_inputs')) return { rows: [{ id: 'embedding-input' }], rowCount: 1 };
+      return { rows: [] };
+    });
+
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+    const result = await buildEmbeddingInputs({ query } as any, 2000, {
+      context,
+      jobVersionIds: ['33333333-3333-4333-8333-333333333333'],
+      includeProfileFacts: true,
+      includeLanePrototypes: false,
+      includeJobVersions: false,
+    });
+
+    expect(result.fromRequirements).toBe(1);
+    expect(result.fromProfileFacts).toBe(1);
+    expect(result.fromJobVersions).toBe(0);
+    expect(query.mock.calls.some(([sql]) => sql.includes('FROM canonical_jobs c'))).toBe(false);
+  });
+
+  it('can publish only profile-v6 facts and validated requirements for a scoped cohort', async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('FROM job_requirements jr')) {
+        return { rows: [{
+          id: '11111111-1111-4111-8111-111111111111',
+          requirement_type: 'DOMAIN',
+          requirement_text: 'Current validated requirement',
+          quote_text: null,
+          structured_value: null,
+        }] };
+      }
+      if (sql.includes('FROM profile_facts pf')) {
+        expect(sql).toContain('pf.profile_version_id = $2::uuid');
+        expect(params?.[1]).toBe('77777777-7777-4777-8777-777777777777');
+        return { rows: [{
+          id: '22222222-2222-4222-8222-222222222222',
+          embedding_node_id: '22222222-2222-4222-8222-222222222222',
+          fact_type: 'SKILL',
+          statement: 'Active profile fact',
+          structured_value: null,
+          evidence_tier: 'PROFESSIONAL_PRODUCTION',
+        }] };
+      }
+      if (sql.includes('FROM canonical_jobs c')) {
+        throw new Error('job-version embedding inputs are outside the selected publication scope');
+      }
+      if (sql.includes('INSERT INTO embedding_inputs')) {
+        return { rows: [{ id: 'embedding-input' }], rowCount: 1 };
+      }
+      return { rows: [] };
+    });
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const summary = await buildEmbeddingInputs({ query } as any, 2500, {
+      context,
+      jobVersionIds: ['33333333-3333-4333-8333-333333333333'],
+      profileVersionId: '77777777-7777-4777-8777-777777777777',
+      includeProfileFacts: true,
+      includeLanePrototypes: false,
+      includeJobVersions: false,
+    });
+
+    expect(summary.fromRequirements).toBe(1);
+    expect(summary.fromProfileFacts).toBe(1);
+    expect(summary.fromJobVersions).toBe(0);
+    expect(query.mock.calls.some(([sql]) => sql.includes('FROM canonical_jobs c'))).toBe(false);
+  });
+
   it('supersedes changed source content without deleting the prior embedding input', async () => {
     const requirementId = '44444444-4444-4444-8444-444444444444';
     const previousHash = 'previous-content-hash';

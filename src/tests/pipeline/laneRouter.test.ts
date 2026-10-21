@@ -96,7 +96,7 @@ describe('Pipeline Stage: Lane Routing', () => {
       role: 'OWNER',
     };
 
-    // 1. Mock DB query for jobs
+    // Mock DB query for jobs
     (mPool.query as any).mockResolvedValueOnce({
       rows: [
         {
@@ -106,6 +106,9 @@ describe('Pipeline Stage: Lane Routing', () => {
         }
       ]
     });
+
+    // Preference lookup has no active revision in this test fixture.
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
 
     // 2. Mock embeddings for the 4 prototypes + 1 job
     let embedCallCount = 0;
@@ -122,10 +125,10 @@ describe('Pipeline Stage: Lane Routing', () => {
     // 4 prototypes + 1 job = 5 calls
     expect(agent.generateEmbeddingWithProvider).toHaveBeenCalledTimes(5);
 
-    // DB update: SELECT + BEGIN + UPDATE canonical_jobs + COMMIT
-    expect(mPool.query).toHaveBeenCalledTimes(4);
+    // DB update: preference lookup + SELECT + BEGIN + UPDATE canonical_jobs + COMMIT
+    expect(mPool.query).toHaveBeenCalledTimes(5);
 
-    const updateCall = (mPool.query as any).mock.calls[2];
+    const updateCall = (mPool.query as any).mock.calls[3];
     expect(updateCall[0]).toContain('UPDATE canonical_jobs');
     expect(updateCall[1][0]).toEqual('CORE_AI_DATA'); // bestLane (arg 1)
     expect(updateCall[1][1]).toBe(1);                  // bestScore (arg 2)
@@ -210,6 +213,7 @@ describe('Pipeline Stage: Lane Routing', () => {
         },
       ],
     });
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
 
     (agent.generateEmbeddingWithProvider as any).mockImplementation((text: string) => {
       const t = text.toLowerCase();
@@ -307,6 +311,7 @@ describe('Pipeline Stage: Lane Routing', () => {
         },
       ],
     });
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
 
     (agent.generateEmbeddingWithProvider as any).mockImplementation((text: string) => {
       const t = text.toLowerCase();

@@ -5,6 +5,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { loadLanesConfig } from "./laneConfigLoader.js";
 import { PersistedEvaluationQueueItemSchema } from "../contracts/index.js";
+import { supersedeStaleEvaluationQueueRows } from "./evaluationQueueLineage.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -62,6 +63,7 @@ export async function runExplanationQueueEnqueuer(
 
     await client.query("BEGIN");
     try {
+      await supersedeStaleEvaluationQueueRows(client, { workspaceId: ctx.workspaceId });
       await client.query(
         `INSERT INTO ai_evaluation_budget_runs (id, workspace_id)
          VALUES ($1::uuid, $2::uuid)

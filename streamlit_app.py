@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 from fpdf import FPDF
 from streamlit_application_workflow import is_document_generation_eligible
+from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
 from streamlit_workspace_contracts import (
     validate_application_row,
@@ -79,16 +80,25 @@ def _open_read_only_connection():
         raise RuntimeError("DATABASE_URL is not configured for the read-only Streamlit fallback.")
 
     try:
-        import certifi
         import psycopg2
     except ImportError as exc:
-        raise RuntimeError("psycopg2-binary and certifi are required for the verified Streamlit read-only fallback.") from exc
+        raise RuntimeError("psycopg2-binary is required for the verified Streamlit read-only fallback.") from exc
+
+    allow_local_postgres = os.environ.get("STREAMLIT_E2E_ALLOW_LOCAL_POSTGRES", "").strip().lower() == "true"
+    ssl_options = read_only_database_ssl_options(
+        database_url, allow_local_postgres=allow_local_postgres
+    )
+    if ssl_options["sslmode"] == "verify-full":
+        try:
+            import certifi
+        except ImportError as exc:
+            raise RuntimeError("certifi is required for verified Streamlit read-only connections.") from exc
+        ssl_options["sslrootcert"] = certifi.where()
 
     connection = psycopg2.connect(
         database_url,
         connect_timeout=10,
-        sslmode="verify-full",
-        sslrootcert=certifi.where(),
+        **ssl_options,
     )
     connection.set_session(readonly=True, autocommit=True)
     return connection
@@ -242,8 +252,14 @@ TOP_TEN_READY_QUERY = """
            evidence_completeness_score, lane_confidence_score, autonomy_score,
            politics_risk_score, sensory_workload_risk_score, strategic_value_score,
            focus_protection_score, building_ratio_score, interaction_burden_score,
+           base_rank_score, freshness_score, remote_freedom_score,
+           final_application_priority_score, remote_from_home_base_score,
+           temporary_abroad_score, country_flexibility_score,
+           office_requirement_score, timezone_compatibility_score,
+           employment_verifiability_score, stage3_preference_context_id,
+           ranking_component_availability, ranking_component_provenance,
            current_artifact_status, version_mismatch
-    FROM v_top_ten_ready_jobs_scoped
+    FROM v_top_ten_ready_jobs_stage3_scoped
     WHERE workspace_id = %s
     ORDER BY ranking_position ASC
     LIMIT 10
@@ -263,8 +279,14 @@ APPLY_NOW_JOBS_QUERY = """
            eval_provider, eval_is_fallback, version_mismatch, observed_at, evaluated_at,
            latest_match_run_id, current_artifact_status, current_artifact_reason,
            blocked_task_count, overall_rank_score, ranking_confidence,
-           ranking_snapshot_id, policy_recheck_required
-    FROM v_apply_now_jobs_scoped
+           ranking_snapshot_id, policy_recheck_required, base_rank_score,
+           freshness_score, remote_freedom_score, final_application_priority_score,
+           remote_from_home_base_score, temporary_abroad_score,
+           country_flexibility_score, office_requirement_score,
+           timezone_compatibility_score, employment_verifiability_score,
+           stage3_preference_context_id, ranking_component_availability,
+           ranking_component_provenance
+    FROM v_apply_now_jobs_stage3_scoped
     WHERE workspace_id = %s
     ORDER BY overall_rank_score DESC NULLS LAST,
              CASE recommendation_outcome WHEN 'PRIORITY' THEN 0 ELSE 1 END,
@@ -1698,6 +1720,12 @@ with tab_dashboard:
                 detail_columns[1].metric("Autonomy", format_signal(ranked_job.get("autonomy_score")))
                 detail_columns[2].metric("Politics risk", format_signal(ranked_job.get("politics_risk_score")))
                 detail_columns[3].metric("Sensory/workload risk", format_signal(ranked_job.get("sensory_workload_risk_score")))
+                st.caption(
+                    f"Stage 3 — base: {format_score(ranked_job.get('base_rank_score'))} · "
+                    f"freshness: {format_score(ranked_job.get('freshness_score'))} · "
+                    f"remote freedom: {format_score(ranked_job.get('remote_freedom_score'))} · "
+                    f"employment verifiability: {format_score(ranked_job.get('employment_verifiability_score'))}"
+                )
                 st.caption(
                     f"Focus protection: {format_signal(ranked_job.get('focus_protection_score'))} · "
                     f"Building/research: {format_percent(ranked_job.get('building_ratio_score'))} · "

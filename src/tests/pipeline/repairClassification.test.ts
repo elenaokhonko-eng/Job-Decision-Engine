@@ -14,6 +14,19 @@ describe("classifyRepairCategory", () => {
     ).toBe("ROUTING_TASK_IDEMPOTENCY_RACE");
   });
 
+  it("recognizes culture quote verbatim failures for audited requeuing", () => {
+    expect(
+      classifyRepairCategory({
+        processing_state: "NEEDS_MANUAL_REVIEW",
+        gate_decision: "PASS",
+        primary_lane: "CORE_AI_DATA",
+        rejection_reason: null,
+        last_error:
+          "All model API calls failed. Evaluation culture evidence quote for SENSORY_WORKLOAD_RISK is not a verbatim substring of the job description.",
+      }),
+    ).toBe("CULTURE_QUOTE_VERBATIM_FAILURE");
+  });
+
   it("recognizes false-negative lifestyle rejection when evidence has negated on-call or travel", () => {
     expect(
       classifyRepairCategory({

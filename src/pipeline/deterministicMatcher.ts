@@ -162,6 +162,43 @@ export function isCapabilityRequirementType(requirementType: string): boolean {
   return !NON_CAPABILITY_REQUIREMENT_TYPES.has(requirementType);
 }
 
+export function computeProficiencyFactor(fact: FactRow | null, req: RequirementRow): number {
+  if (!fact) return 0;
+  const structured = fact.structured_value || {};
+  const proficiency = (structured.proficiency as string) || '';
+  const devStatus = (structured.development_status as string) || '';
+  const handsOn = (structured.hands_on_level as string) || '';
+  const reqText = `${req.requirement_text} ${req.quote_text || ''}`.toLowerCase();
+
+  const demandsProduction =
+    reqText.includes('production') ||
+    reqText.includes('5 years') ||
+    reqText.includes('multi-year') ||
+    reqText.includes('hands-on production') ||
+    reqText.includes('proven production');
+
+  if (devStatus === 'PLANNED' || proficiency === 'LEARNING') {
+    // Learning or planned capability cannot satisfy a production or senior requirement
+    return demandsProduction ? 0.05 : 0.2;
+  }
+
+  if (proficiency === 'KNOWLEDGE_ONLY' || handsOn === 'NONE') {
+    // Knowledge only cannot satisfy a hands-on production requirement
+    return demandsProduction ? 0.1 : 0.3;
+  }
+
+  if (proficiency === 'FOUNDATIONAL' || handsOn === 'CONCEPTUAL') {
+    return demandsProduction ? 0.25 : 0.6;
+  }
+
+  if (handsOn === 'APPLIED_PROJECT') {
+    // Applied project evidence (e.g. startup / applied RAG / agents) is legitimate
+    return demandsProduction ? 0.75 : 0.95;
+  }
+
+  return 1.0;
+}
+
 function scoreMatch(requirement: RequirementRow, fact: FactRow): number {
   const requirementTokens = tokenize(buildRequirementText(requirement));
   const factTokens = tokenize(buildFactText(fact));
@@ -334,6 +371,7 @@ export async function runDeterministicMatcher(
     jobVersionIds?: string[];
     canonicalJobIds?: string[];
     limit?: number;
+    actionableOnly?: boolean;
   }
 ): Promise<DeterministicMatchSummary> {
   console.log("Starting Deterministic Matcher...");
@@ -490,6 +528,8 @@ export async function runDeterministicMatcher(
     const canonicalJobFilter = canonicalJobIds.length > 0
       ? `AND c.id = ANY($${jobParams.push(canonicalJobIds)}::uuid[])`
       : "";
+    const actionableOnly = options?.actionableOnly === true;
+    const actionableOnlyParam = jobParams.push(actionableOnly);
     const limitClause = limit ? `LIMIT $${jobParams.push(limit)}` : "";
 
     const { rows: jobs } = await client.query<RoutingCandidate>(
@@ -507,11 +547,20 @@ export async function runDeterministicMatcher(
        ) jv ON TRUE
         WHERE c.workspace_id = $1
          AND (
-           COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+           (
+             $${actionableOnlyParam}::boolean
+             AND c.recommendation_outcome IN ('APPLY_NOW', 'TRACK')
+           )
            OR (
-             $${explicitTargetsParam}::boolean
-             AND COALESCE(c.processing_state, c.processing_status) IN (
-               'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
+             NOT $${actionableOnlyParam}::boolean
+             AND (
+               COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
+               OR (
+                 $${explicitTargetsParam}::boolean
+                 AND COALESCE(c.processing_state, c.processing_status) IN (
+                   'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
+                 )
+               )
              )
            )
          )
@@ -961,13 +1010,15 @@ export async function runDeterministicMatcher(
             }
           }
 
-          const evidenceStrength = bestFact
+          const proficiencyFactor = computeProficiencyFactor(bestFact, req);
+          const rawEvidenceStrength = bestFact
             ? computeEvidenceStrength(
                 bestFact.evidence_tier as any,
                 bestFact.verification_status as any,
                 evidenceStrengthPolicy.policy
               )
             : 0;
+          const evidenceStrength = Number((rawEvidenceStrength * proficiencyFactor).toFixed(6));
 
           let matchType: 'EXACT' | 'SEMANTIC' | 'NO_MATCH' | 'UNKNOWN' = 'NO_MATCH';
           if (structuredComparison.status === "MATCH") {
@@ -1038,6 +1089,7 @@ export async function runDeterministicMatcher(
                      ? null
                      : "PENDING_EMBEDDINGS",
                  embedding_space_id: usedEmbeddings ? semanticEmbeddingSpaceId : null,
+                 proficiency_factor: bestFact ? Number(proficiencyFactor.toFixed(4)) : null,
                  weighted_score: bestFact ? Number(weightedScore.toFixed(6)) : null,
                  semantic_ready: usedEmbeddings,
                }),
@@ -1159,3 +1211,45 @@ export async function runDeterministicMatcher(
   );
   return { matchedJobs, skippedJobs, errors };
 }
+
+/**
+ * Bounded rematch for currently actionable jobs only (Apply Now and Track).
+ * Avoids re-running hard gates or lane routing, and updates workspace rankings.
+ */
+export async function rematchActionableJobs(
+  clientOrPool?: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext; limit?: number }
+): Promise<DeterministicMatchSummary & { rankingsMaterialized: boolean }> {
+  const pool = clientOrPool || defaultPool;
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const ownsClient = isPool(pool);
+  const client = ownsClient ? await pool.connect() : pool;
+
+  try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const summary = await runDeterministicMatcher(client as any, {
+      context: ctx,
+      limit: options?.limit,
+      actionableOnly: true,
+    });
+
+    let rankingsMaterialized = false;
+    try {
+      const { materializeApplicationRankings } = await import("../services/applicationRankingMaterializer.js");
+      if (typeof (pool as any).connect === "function") {
+        await materializeApplicationRankings(pool as pg.Pool, ctx.workspaceId);
+        rankingsMaterialized = true;
+      }
+    } catch (err) {
+      console.warn("Ranking materialization after rematch encountered non-fatal error:", err);
+    }
+
+    return { ...summary, rankingsMaterialized };
+  } finally {
+    if (ownsClient && typeof (client as any).release === "function") {
+      (client as any).release();
+    }
+  }
+}
+

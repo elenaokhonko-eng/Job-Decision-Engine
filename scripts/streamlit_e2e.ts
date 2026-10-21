@@ -59,7 +59,7 @@ async function readDashboardMetrics(
     const row = summary.rows[0];
     if (!row) throw new Error("No SQL dashboard summary exists for the configured workspace member.");
     const topTen = await client.query<{ count: number }>(
-      "SELECT COUNT(*)::INTEGER AS count FROM v_top_ten_ready_jobs_scoped WHERE workspace_id = $1",
+      "SELECT COUNT(*)::INTEGER AS count FROM v_top_ten_ready_jobs_stage3_scoped WHERE workspace_id = $1",
       [row.workspace_id]
     );
     await client.query("COMMIT");
@@ -215,11 +215,15 @@ async function main(): Promise<void> {
     await page.getByRole("heading", { name: "Application command centre", exact: true }).waitFor({ timeout: 120_000 });
     await page.getByText("Top 10 — apply first", { exact: true }).waitFor({ timeout: 120_000 });
     await page.getByLabel("Opportunity category").waitFor({ timeout: 120_000 });
-    await page.getByText(/Apply Now \(\d+\)/).waitFor({ timeout: 120_000 });
+    await page.getByText("Apply Now", { exact: true }).first().waitFor({ timeout: 120_000 });
 
     const ariaSnapshot = await page.locator("body").ariaSnapshot({ mode: "default", depth: 12 });
-    if (/Top 10 Ranked is unavailable|read model is unavailable|workspace summary is unavailable/i.test(ariaSnapshot)) {
-      throw new Error("A V5 read model reported an error in the browser accessibility snapshot.");
+    fs.writeFileSync(reportPath, ariaSnapshot);
+    const unavailableReadModelLines = ariaSnapshot
+      .split("\n")
+      .filter((line) => /Top 10 Ranked is unavailable|read model is unavailable|workspace summary is unavailable/i.test(line));
+    if (unavailableReadModelLines.length) {
+      throw new Error(`A V5 read model reported an error: ${unavailableReadModelLines.join(" | ")}`);
     }
     const sqlMetrics = await readDashboardMetrics(databaseUrl, workspaceKey, userKey);
     const expectedMetrics: Array<[string, number]> = [
@@ -237,7 +241,6 @@ async function main(): Promise<void> {
         throw new Error(`Dashboard metric ${label} mismatch: UI=${actual}, SQL=${expected}.`);
       }
     }
-    fs.writeFileSync(reportPath, ariaSnapshot);
     await page.screenshot({
       path: path.join(exportDir, "application_command_centre_smoke.png"),
       fullPage: true,

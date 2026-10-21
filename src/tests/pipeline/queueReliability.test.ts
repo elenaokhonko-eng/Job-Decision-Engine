@@ -203,6 +203,32 @@ describe.skipIf(skipReal)("P0-04: Real Queue State Machine (PostgreSQL)", () => 
     expect(pickupCount).toBe(0);
   });
 
+  it("allows a RETRY_WAIT item to be leased on a later run after backoff expires", async () => {
+    await q(
+      `UPDATE evaluation_queue
+       SET status = 'RETRY_WAIT', available_at = NOW() - INTERVAL '1 second',
+           lease_id = NULL, lease_expires_at = NULL, updated_at = NOW()
+       WHERE id = $1`,
+      [Q_ID_1]
+    );
+
+    const retried = await q(
+      `UPDATE evaluation_queue
+       SET status = 'EVALUATING', attempt_count = attempt_count + 1,
+           lease_id = gen_random_uuid(), lease_expires_at = NOW() + INTERVAL '5 minutes',
+           updated_at = NOW()
+       WHERE id = $1
+         AND status = 'RETRY_WAIT'
+         AND (available_at IS NULL OR available_at <= NOW())
+       RETURNING status, attempt_count`,
+      [Q_ID_1]
+    );
+
+    expect(retried.rowCount).toBe(1);
+    expect(retried.rows[0].status).toBe('EVALUATING');
+    expect(retried.rows[0].attempt_count).toBeGreaterThan(0);
+  });
+
   it("dependency blocking preserves the pipeline_tasks available_at NOT NULL contract", async () => {
     await q(`DELETE FROM pipeline_tasks WHERE id = $1`, [TASK_ID]);
     const contextRows = await q(

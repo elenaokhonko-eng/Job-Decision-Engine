@@ -32,6 +32,17 @@ import {
   type WorkabilityPolicy,
 } from "./workabilityPolicy.js";
 
+import {
+  evaluateJobFreshness,
+  evaluateMobilityMatch,
+  evaluateEmployerExclusions,
+  evaluateCompensationPolicy,
+  inferOpportunityCategory,
+  parseCompensationEvidence,
+} from "../policy/stage3PolicyEngine.js";
+import type { Stage3PolicyPreferences } from "../policy/stage3Contracts.js";
+import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
+
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
@@ -166,11 +177,26 @@ export function applyPersistedRequirementGates(
     company_name: string;
     employment_type?: string;
     workplace_type?: string;
+    location?: string;
     description?: string;
+    posted_at?: string | Date | null;
+    reposted_at?: string | Date | null;
+    source_updated_at?: string | Date | null;
+    freshness_basis?: string | null;
+    compensation_raw?: string | null;
+    salary_min?: number | null;
+    salary_max?: number | null;
+    salary_currency?: string | null;
+    salary_period?: 'ANNUAL' | 'MONTHLY' | null;
+    travel_pct?: number | null;
+    currency_to_sgd_rate?: number | null;
+    is_startup?: boolean;
+    opportunity_category?: 'COMMERCIAL' | 'UNIVERSITY_RESEARCH' | 'MISSION_MULTILATERAL';
   },
   deterministicRequirements: PersistedRequirement[],
   policy: WorkabilityPolicy = loadWorkabilityPolicy(),
   answerContext?: VerificationAnswerContext | null,
+  stage3Preferences?: Stage3PolicyPreferences,
 ): GateResult {
   const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
   const officeDaysAnswerUnknown = isVerificationAnswerProvided(
@@ -184,6 +210,77 @@ export function applyPersistedRequirementGates(
   const title = job.title || "";
   let pendingVerification: { codes: string[]; evidence: string[]; facts?: Partial<GateResult["workability_facts"]> } | null = null;
   let inferredWorkabilityFacts: Partial<GateResult["workability_facts"]> = {};
+
+  // Stage 3: Freshness only uses authoritative publication or genuine-repost timestamps.
+  const freshness = evaluateJobFreshness({
+    posted_at: job.posted_at,
+    reposted_at: job.reposted_at,
+    source_updated_at: job.source_updated_at,
+    freshness_basis: job.freshness_basis,
+    is_repost: job.freshness_basis === 'REPOSTED_AT',
+    posting_identity_is_new: job.freshness_basis === 'NEW_POSTING_ID',
+  }, stage3Preferences?.freshness);
+  if (freshness.is_hard_reject) {
+    return makeReject(
+      [freshness.rejection_code || 'GATE_STALE_POSTING'],
+      [freshness.evidence]
+    );
+  }
+
+  // Stage 3: enforce user-scoped hiring eligibility and mobility, never global defaults.
+  const mobility = evaluateMobilityMatch({
+    workplace_type: job.workplace_type,
+    location: job.location,
+    description: job.description,
+    travel_pct: job.travel_pct,
+  }, stage3Preferences?.mobility);
+  if (mobility.is_hard_reject) {
+    return makeReject(
+      [mobility.rejection_code || 'UNWORKABLE_LOCATION_MODEL'],
+      [job.description || mobility.evidence]
+    );
+  }
+
+  // Stage 3: employer exclusions apply only when explicitly present in the active user preference.
+  if (job.company_name) {
+    const exclusion = evaluateEmployerExclusions(
+      job.company_name,
+      job.description || '',
+      stage3Preferences?.watchlist
+    );
+    if (exclusion.is_excluded) {
+      return makeReject(
+        [exclusion.rejection_code || 'GATE_EXCLUDED_EMPLOYER'],
+        [job.description || exclusion.reason || `Employer name: ${job.company_name}`]
+      );
+    }
+  }
+
+  // Compensation floors are handled as non-Apply-Now policy downstream unless explicitly configured as a hard reject.
+  const compensationInput = job.salary_min !== null && job.salary_min !== undefined
+    ? {
+        salary_min: job.salary_min,
+        salary_max: job.salary_max,
+        salary_currency: job.salary_currency,
+        salary_period: job.salary_period,
+        currency_to_sgd_rate: job.currency_to_sgd_rate,
+        is_startup: job.is_startup,
+      }
+    : parseCompensationEvidence(job.compensation_raw);
+  if (compensationInput) {
+    const compensation = evaluateCompensationPolicy(
+      compensationInput,
+      job.opportunity_category || inferOpportunityCategory(job.company_name, job.title, job.description || ''),
+      stage3Preferences?.compensation
+    );
+    if (compensation.is_hard_reject) {
+      return makeReject(
+        [compensation.rejection_code || 'COMPENSATION_BELOW_USER_FLOOR'],
+        [job.description || compensation.evidence]
+      );
+    }
+  }
+
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
     if (pattern.test(title)) {
       return makeReject(
@@ -627,6 +724,8 @@ export async function runHardGates(
   const client = ownsClient ? await pool.connect() : pool;
 
   const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+  const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['stage3']);
+  const stage3Preferences: Stage3PolicyPreferences = preferenceContext.stage3 ?? {};
   const pipelineRunId = crypto.randomUUID();
   const policyResolution = await resolveWorkspaceWorkabilityPolicy(client as any, { context: ctx });
   console.log(
@@ -669,7 +768,14 @@ export async function runHardGates(
 
   const { rows: stagedJobs } = await client.query(
     `
-      SELECT c.*, jv.description_text, jv.id AS job_version_id
+      SELECT c.*, jv.description_text, jv.id AS job_version_id,
+             jv.source_published_at AS posted_at,
+             jv.reposted_at,
+             jv.source_updated_at,
+             jv.freshness_basis,
+             jv.first_seen_at,
+             jv.last_seen_at,
+             source_observation.compensation_raw
       FROM canonical_jobs c
       JOIN job_versions jv ON jv.id = COALESCE(
         c.latest_job_version_id,
@@ -682,6 +788,14 @@ export async function runHardGates(
           LIMIT 1
         )
       )
+      LEFT JOIN LATERAL (
+        SELECT observation.compensation_raw
+        FROM raw_job_observations AS observation
+        WHERE observation.workspace_id = jv.workspace_id
+          AND observation.job_version_id = jv.id
+        ORDER BY observation.retrieved_at DESC, observation.id DESC
+        LIMIT 1
+      ) AS source_observation ON TRUE
       WHERE c.workspace_id = $1
         AND jv.workspace_id = $1
         AND (
@@ -713,13 +827,39 @@ export async function runHardGates(
           careers_portal_url: job.canonical_url,
           location: job.location,
           workplace_type: job.workplace_type,
-          employment_type: job.employment_type
+          employment_type: job.employment_type,
+          compensation_raw: job.compensation_raw
         };
         const jobAnswerContext = answerContext && isVerificationAnswerContextApplicable(answerContext, {
           jobVersionId: job.job_version_id,
         })
           ? answerContext
           : null;
+        const freshnessEvaluation = evaluateJobFreshness({
+          posted_at: job.posted_at,
+          reposted_at: job.reposted_at,
+          source_updated_at: job.source_updated_at,
+          first_seen_at: job.first_seen_at,
+          freshness_basis: job.freshness_basis,
+          is_repost: job.freshness_basis === 'REPOSTED_AT',
+          posting_identity_is_new: job.freshness_basis === 'NEW_POSTING_ID',
+        }, stage3Preferences.freshness);
+        await client.query(
+          `UPDATE job_versions
+           SET job_age_days = COALESCE(job_age_days, $1),
+               freshness_score = COALESCE(freshness_score, $2),
+               freshness_basis = COALESCE(freshness_basis, $3),
+               freshness_confidence = COALESCE(freshness_confidence, $4)
+           WHERE workspace_id = $5 AND id = $6`,
+          [
+            freshnessEvaluation.job_age_days,
+            freshnessEvaluation.job_age_days === null ? null : freshnessEvaluation.freshness_score,
+            freshnessEvaluation.job_age_days === null ? 'UNKNOWN' : freshnessEvaluation.freshness_basis,
+            freshnessEvaluation.job_age_days === null ? null : freshnessEvaluation.freshness_confidence === 'HIGH' ? 100 : 50,
+            ctx.workspaceId,
+            job.job_version_id,
+          ]
+        );
 
         const { rows: requirementRows } = await client.query(
           `SELECT jr.requirement_key, jr.requirement_type, jr.importance, jr.requirement_text, jr.quote_text, jr.structured_value
@@ -799,11 +939,18 @@ export async function runHardGates(
             company_name: rawJobAdapter.company_name,
             employment_type: rawJobAdapter.employment_type,
             workplace_type: rawJobAdapter.workplace_type,
+            location: rawJobAdapter.location,
             description: rawJobAdapter.raw_description,
+            posted_at: job.posted_at,
+            reposted_at: job.reposted_at,
+            source_updated_at: job.source_updated_at,
+            freshness_basis: job.freshness_basis,
+            compensation_raw: rawJobAdapter.compensation_raw,
           },
           deterministicRequirements,
           policyResolution.policy,
-          jobAnswerContext
+          jobAnswerContext,
+          stage3Preferences
         );
         const exactProfileGateResult = applyExactProfileGates(
           deterministicRequirements,
@@ -887,8 +1034,9 @@ export async function runHardGates(
           `INSERT INTO gate_decisions (
              workspace_id,
              canonical_job_id, job_version_id, pipeline_run_id, gate_version,
-             decision, rejection_codes, evidence_quotes, workability_facts
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+             decision, rejection_codes, evidence_quotes, workability_facts,
+             preference_user_id, preference_context_id
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [
             ctx.workspaceId,
             persistedGateDecision.canonical_job_id,
@@ -898,7 +1046,9 @@ export async function runHardGates(
             persistedGateDecision.status,
             JSON.stringify(persistedGateDecision.rejection_codes),
             JSON.stringify(persistedGateDecision.evidence_quotes),
-            JSON.stringify(persistedGateDecision.workability_facts)
+            JSON.stringify(persistedGateDecision.workability_facts),
+            preferenceContext.contextId ? ctx.userId : null,
+            preferenceContext.contextId,
           ]
         );
 

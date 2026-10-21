@@ -101,6 +101,24 @@ describe('application ranking service', () => {
     expect(result.topTenReady).toBe(true);
   });
 
+  it('allows Top 10 readiness at the new 90% minimum confidence threshold', () => {
+    const components = { ...COMPLETE_COMPONENTS, autonomy: null };
+    const result = calculateRanking(
+      components,
+      readyContext(),
+      { ...POLICY, minimumRankingConfidence: 90 },
+    );
+    const aboveNewThreshold = calculateRanking(
+      components,
+      readyContext(),
+      { ...POLICY, minimumRankingConfidence: 95 },
+    );
+
+    expect(result.rankingConfidence).toBe(90);
+    expect(result.topTenReady).toBe(true);
+    expect(aboveNewThreshold.topTenReady).toBe(false);
+  });
+
   it('allows Top 10 readiness when only the optional strategic-value signal is unknown', () => {
     const result = calculateRanking(
       { ...COMPLETE_COMPONENTS, strategicValue: null },

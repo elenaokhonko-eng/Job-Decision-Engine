@@ -60,8 +60,8 @@ jobs:
     - name: Run Python tests and Ruff
       run: |
         python -m pytest tests/python
-        ruff check --isolated --ignore I001 tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_workspace_contracts.py
-        ruff format --check --isolated tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_workspace_contracts.py
+        ruff check --isolated --ignore I001 tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_database.py streamlit_workspace_contracts.py
+        ruff format --check --isolated tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_database.py streamlit_workspace_contracts.py
 
     - name: Reject UTF-8 BOM in executable and migration sources
       shell: bash

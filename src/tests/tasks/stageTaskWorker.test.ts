@@ -1514,6 +1514,9 @@ describe("stageTaskWorker", () => {
       if (sql.includes("is_test_fixture")) {
         return { rows: [{ exists: false }], rowCount: 1 };
       }
+      if (sql.includes("job.latest_job_version_id = version.id")) {
+        return { rows: [{ is_current: true }], rowCount: 1 };
+      }
       if (sql.includes("SELECT EXISTS")) {
         return { rows: [{ exists: true }], rowCount: 1 };
       }
@@ -1528,6 +1531,7 @@ describe("stageTaskWorker", () => {
               gate_decision: null,
               recommendation_eligibility: null,
               recommendation_outcome: null,
+              latest_job_version_id: "version-1",
             },
           ],
           rowCount: 1,
@@ -1574,6 +1578,75 @@ describe("stageTaskWorker", () => {
         String(sql).includes("repair_action = $2") && String(sql).includes("BLOCKED_DEPENDENCY"),
       ),
     ).toBe(true);
+  });
+
+  it("completes stale embedding tasks without provider calls or successor work", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [{
+            id: "task-stale-embed",
+            workspace_id: ctx.workspaceId,
+            task_type: "PUBLISH_EMBEDDING",
+            task_key: "PUBLISH_EMBEDDING:version-old:embedding_publication_v1",
+            payload: { canonical_job_id: "job-1", job_version_id: "version-old" },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 3,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("is_test_fixture")) {
+        return { rows: [{ exists: false }], rowCount: 1 };
+      }
+      if (sql.includes("job.latest_job_version_id = version.id")) {
+        return { rows: [{ is_current: false }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: "task-stale-embed" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["PUBLISH_EMBEDDING"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps,
+    );
+
+    expect(summary).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
+    expect(deps.runEmbeddingBatchWithFallback).not.toHaveBeenCalled();
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO pipeline_tasks"))).toBe(false);
   });
 
   it("blocks a technical routing deferral and enqueues automatic embedding repair", async () => {

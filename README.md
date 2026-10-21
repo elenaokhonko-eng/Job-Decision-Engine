@@ -39,7 +39,7 @@ Job searching often presents overwhelming cognitive fatigue, rejection trauma fr
 The Streamlit workspace separates current application opportunities from pipeline and negative-decision records.
 
 * `Apply Now` contains only current `PRIORITY` and `REVIEW` decisions with deterministic eligibility and a passing hard gate.
-* `Top 10 Ready` is the persisted, versioned ranking of current Apply Now jobs. Missing optional signals remain `UNKNOWN` and reduce ranking confidence. Strategic value remains unknown without independent evidence and has a 5% policy weight, so the 95% confidence threshold remains reachable when it is the only missing signal. A rank cannot change a deterministic gate or recommendation.
+* `Top 10 Ready` is the persisted, versioned ranking of current Apply Now jobs. Missing optional signals remain `UNKNOWN` and reduce ranking confidence. Strategic value remains unknown without independent evidence and has a 5% policy weight. The default minimum ranking confidence is 90%, while required match and evidence signals must still be present. A rank cannot change a deterministic gate or recommendation.
 * Culture signal scores are derived from bounded phrase rules over exact job-description evidence. Unsupported or conflicting evidence remains `UNKNOWN`; model-proposed numeric culture scores are not accepted as persisted scores.
 * `Track` contains current `TRACK` decisions. The decision trace explains why a job is not currently in Apply Now.
 * Application handoffs require a current `PRIORITY` or `REVIEW` decision. Application status, generated CV and cover-letter links, and status history are stored in the tracker. Submitting an application remains a human action.

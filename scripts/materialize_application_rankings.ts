@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   try {
     const context = await resolveWorkspaceContext(pool);
     const dryRun = process.argv.includes("--dry-run");
-    const result = await materializeApplicationRankings(pool, context.workspaceId, { dryRun });
+    const result = await materializeApplicationRankings(pool, context.workspaceId, { dryRun, context });
     console.log(JSON.stringify(result, null, 2));
     if (result.missingCurrentEvaluations > 0 || result.incompleteRequiredInputs > 0) {
       console.warn(

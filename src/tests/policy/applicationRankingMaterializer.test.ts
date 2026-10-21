@@ -25,6 +25,15 @@ function currentApplyNowRow(overrides: Record<string, unknown> = {}) {
     match_job_content_hash: "job-hash-1",
     current_job_content_hash: "job-hash-1",
     current_job_description: "Work independently with minimal supervision.",
+    company_name: "Example Co",
+    location: "Singapore",
+    workplace_type: "REMOTE",
+    posted_at: "2026-10-18T00:00:00.000Z",
+    reposted_at: null,
+    source_updated_at: null,
+    freshness_basis: "POSTED_AT",
+    first_seen_at: "2026-10-18T00:00:00.000Z",
+    last_seen_at: "2026-10-18T00:00:00.000Z",
     current_artifact_status: "CURRENT_OR_NOT_APPLICABLE",
     version_mismatch: false,
     gate_status: "PASS",
@@ -55,7 +64,7 @@ function currentApplyNowRow(overrides: Record<string, unknown> = {}) {
     },
     ranking_policy_version: 1,
     ranking_weights: POLICY_WEIGHTS,
-    minimum_ranking_confidence: 95,
+    minimum_ranking_confidence: 90,
     policy_recheck_required: false,
     ...overrides,
   };
@@ -129,6 +138,47 @@ describe("application ranking materializer", () => {
     });
   });
 
+  it("neutralizes unsupported optional culture quotes without failing ranking materialization", async () => {
+    const { pool, calls } = createPool([
+      currentApplyNowRow({
+        evaluation_payload: {
+          culture_evidence: [{
+            signal: "AUTONOMY",
+            score: 100,
+            quote: "This quote is not in the current job description.",
+          }],
+        },
+      }),
+    ]);
+
+    const result = await materializeApplicationRankings(pool, "workspace-1");
+    const insert = calls.find((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
+    const availability = JSON.parse(String(insert?.params?.[24]));
+    const provenance = JSON.parse(String(insert?.params?.[25]));
+
+    expect(result.snapshotsInserted).toBe(1);
+    expect(availability.autonomy).toBe(false);
+    expect(provenance.culture_evidence).toEqual([{
+      signal: "AUTONOMY",
+      score: null,
+      quote: null,
+      score_derivation_version: "quote_phrase_rules_v1",
+    }]);
+  });
+
+  it("can materialize rankings only for an explicit bounded job-version set", async () => {
+    const { pool, calls } = createPool([currentApplyNowRow()]);
+
+    await materializeApplicationRankings(pool, "workspace-1", {
+      preferenceContext: null,
+      jobVersionIds: ["job-version-1"],
+    });
+
+    const select = calls.find((call) => call.sql.includes("FROM v_apply_now_jobs_scoped"));
+    expect(select?.sql).toContain("shortlist.job_version_id::uuid = ANY($2::uuid[])");
+    expect(select?.params).toEqual(["workspace-1", ["job-version-1"]]);
+  });
+
   it("persists an incomplete rank but never marks it Top 10 when a required deterministic signal is missing", async () => {
     const { pool, calls } = createPool([
       currentApplyNowRow({ deterministic_match_score: null }),
@@ -173,6 +223,34 @@ describe("application ranking materializer", () => {
     expect(result.snapshotsWouldInsert).toBe(1);
     expect(calls.some((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"))).toBe(false);
     expect(calls.some((call) => call.sql === "ROLLBACK")).toBe(true);
+  });
+
+  it("ranks an otherwise-equivalent one-day posting above a 45-day posting", async () => {
+    const dayMilliseconds = 24 * 60 * 60 * 1000;
+    const asOf = Date.now();
+    const { pool, calls } = createPool([
+      currentApplyNowRow({
+        canonical_job_id: "fresh-job",
+        posted_at: new Date(asOf - dayMilliseconds).toISOString(),
+      }),
+      currentApplyNowRow({
+        canonical_job_id: "older-job",
+        posted_at: new Date(asOf - 45 * dayMilliseconds).toISOString(),
+      }),
+    ], [1, 1]);
+
+    const result = await materializeApplicationRankings(pool, "workspace-1");
+    const inserts = calls.filter((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
+    const freshParams = inserts[0]?.params;
+    const olderParams = inserts[1]?.params;
+
+    expect(result.snapshotsInserted).toBe(2);
+    expect(freshParams?.[27]).toBe(100);
+    expect(olderParams?.[27]).toBe(40);
+    expect(Number(freshParams?.[20])).toBeGreaterThan(Number(olderParams?.[20]));
+    expect(Number(freshParams?.[20]) - Number(olderParams?.[20])).toBeCloseTo(7.5, 1);
+    expect(freshParams?.[28]).toBe(50);
+    expect(freshParams?.[29]).toBe(freshParams?.[20]);
   });
 
   it("uses ON CONFLICT DO NOTHING and counts an already-current immutable artifact", async () => {

@@ -52,6 +52,33 @@ describe("P0-03: Additive Migration Chain & Canonical Schema Integrity", () => {
     expect(source).toContain("isPooledPostgresConnectionString(migrationDatabaseUrl)");
   });
 
+  it("lowers the default Top 10 ranking confidence threshold without rewriting historical policies", () => {
+    const migration = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, "076_lower_top_ten_confidence_threshold.sql"),
+      "utf8"
+    );
+
+    expect(migration).toContain("CREATE OR REPLACE FUNCTION seed_default_ranking_policy_for_workspace()");
+    expect(migration).toContain("WHERE latest_policy.minimum_ranking_confidence = 95.00");
+    expect(migration).toContain("90.00");
+    expect(migration).toContain("ALTER COLUMN minimum_ranking_confidence SET DEFAULT 90.00");
+    expect(migration).toContain("ON CONFLICT (workspace_id, policy_version) DO NOTHING");
+    expect(migration).not.toMatch(/UPDATE\s+ranking_policies/i);
+  });
+
+  it("defines stable scoped Stage 3 read models from canonical ranking snapshots", () => {
+    const source = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, "075_user_preference_lineage_freshness_company_policy.sql"),
+      "utf8"
+    );
+
+    expect(source).toContain("CREATE OR REPLACE VIEW v_apply_now_jobs_stage3_scoped AS");
+    expect(source).toContain("CREATE OR REPLACE VIEW v_top_ten_ready_jobs_stage3_scoped AS");
+    expect(source).toContain("ranking.final_application_priority_score");
+    expect(source).toContain("ranking.employment_verifiability_score");
+    expect(source).toContain("ranking.preference_context_id AS stage3_preference_context_id");
+  });
+
   it("should track and apply migrations idempotently", async () => {
     const executedQueries: string[] = [];
     const appliedVersions: string[] = [];
@@ -159,6 +186,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("072_expose_top_ten_component_scores.sql");
     expect(versions).toContain("073_preserve_culture_observation_immutability.sql");
     expect(versions).toContain("074_rebalance_optional_ranking_confidence.sql");
+    expect(versions).toContain("076_lower_top_ten_confidence_threshold.sql");
   });
 
   it("V5 creates the ranking, culture, and workspace-scoped application read models", async () => {
@@ -400,15 +428,18 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       weights: Record<string, number>;
       minimum_ranking_confidence: number;
     }>(`
-      SELECT weights, minimum_ranking_confidence::FLOAT8 AS minimum_ranking_confidence
+      SELECT weights,
+             minimum_ranking_confidence::FLOAT8 AS minimum_ranking_confidence
       FROM ranking_policies
-      WHERE schema_version = '5.2.0'
+      WHERE workspace_id = (SELECT id FROM workspaces WHERE workspace_key = 'default')
+        AND schema_version = '5.2.0'
       ORDER BY policy_version DESC
+      LIMIT 1
     `);
     expect(rows.length).toBeGreaterThan(0);
     for (const policy of rows) {
       expect(policy.weights.strategicValue).toBeLessThanOrEqual(5);
-      expect(policy.minimum_ranking_confidence).toBe(95);
+      expect(policy.minimum_ranking_confidence).toBe(90);
     }
   });
 
@@ -549,12 +580,43 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     ];
     for (const policy of rows) {
       expect(policy.policy_version).toBeTruthy();
-      expect(policy.minimum_ranking_confidence).toBe(95);
       expect(Object.keys(policy.weights)).toEqual(expect.arrayContaining(requiredWeights));
       const weights = Object.values(policy.weights);
       expect(weights.every((weight) => Number.isFinite(weight) && weight >= 0)).toBe(true);
       expect(weights.reduce((total, weight) => total + weight, 0)).toBeCloseTo(100, 8);
     }
+
+    const { rows: activePolicies } = await realPool.query<{ minimum_ranking_confidence: number }>(`
+      SELECT minimum_ranking_confidence::float8 AS minimum_ranking_confidence
+      FROM ranking_policies
+      WHERE workspace_id = (SELECT id FROM workspaces WHERE workspace_key = 'default')
+      ORDER BY policy_version DESC
+      LIMIT 1
+    `);
+    expect(activePolicies).toHaveLength(1);
+    expect(activePolicies[0].minimum_ranking_confidence).toBe(90);
+    const { rows: confidenceDefault } = await realPool.query<{ column_default: string | null }>(`
+      SELECT column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'ranking_policies'
+        AND column_name = 'minimum_ranking_confidence'
+    `);
+    expect(confidenceDefault[0]?.column_default).toContain('90.00');
+
+    const { rows: defaultPolicyHistory } = await realPool.query<{
+      historical_95_count: number;
+      latest_policy_version: number;
+      latest_90_policy_version: number | null;
+    }>(`
+      SELECT COUNT(*) FILTER (WHERE minimum_ranking_confidence = 95.00)::INTEGER AS historical_95_count,
+             MAX(policy_version)::INTEGER AS latest_policy_version,
+             MAX(policy_version) FILTER (WHERE minimum_ranking_confidence = 90.00)::INTEGER AS latest_90_policy_version
+      FROM ranking_policies
+      WHERE workspace_id = (SELECT id FROM workspaces WHERE workspace_key = 'default')
+    `);
+    expect(defaultPolicyHistory[0].historical_95_count).toBeGreaterThan(0);
+    expect(defaultPolicyHistory[0].latest_90_policy_version).toBe(defaultPolicyHistory[0].latest_policy_version);
   });
 
   it("V5 application status accepts the new workflow states and retains legacy states", async () => {
@@ -1193,6 +1255,72 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     const after = (await realPool.query(`SELECT COUNT(*)::int AS n FROM schema_migrations`)).rows[0].n;
     expect(after).toBe(before);
   });
+
+  it("migration 075 exposes versioned preferences and nullable authoritative freshness lineage idempotently", async () => {
+    const client = await realPool.connect();
+    try {
+      await applyMigrationFile(client, '075_user_preference_lineage_freshness_company_policy.sql');
+      await applyMigrationFile(client, '075_user_preference_lineage_freshness_company_policy.sql');
+
+      const preferenceTables = await client.query<{ table_name: string }>(
+        `SELECT table_name
+         FROM information_schema.tables
+         WHERE table_schema = current_schema()
+           AND table_name IN (
+             'workspace_user_preference_revisions',
+             'workspace_user_preference_active_versions',
+             'workspace_user_preference_contexts',
+             'workspace_company_policy_observations'
+           )
+         ORDER BY table_name`
+      );
+      expect(preferenceTables.rows.map((row) => row.table_name)).toEqual([
+        'workspace_company_policy_observations',
+        'workspace_user_preference_active_versions',
+        'workspace_user_preference_contexts',
+        'workspace_user_preference_revisions',
+      ]);
+
+      const freshnessColumns = await client.query<{ column_name: string; is_nullable: string; column_default: string | null }>(
+        `SELECT column_name, is_nullable, column_default
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'job_versions'
+           AND column_name IN (
+             'source_published_at', 'source_updated_at', 'reposted_at',
+             'first_seen_at', 'last_seen_at', 'freshness_basis',
+             'freshness_confidence', 'job_age_days', 'freshness_score',
+             'source_posting_identity_hash'
+           )`
+      );
+      expect(freshnessColumns.rows).toHaveLength(10);
+      expect(freshnessColumns.rows.find((row) => row.column_name === 'source_published_at')).toMatchObject({
+        is_nullable: 'YES',
+        column_default: null,
+      });
+      expect(freshnessColumns.rows.find((row) => row.column_name === 'source_updated_at')).toMatchObject({
+        is_nullable: 'YES',
+        column_default: null,
+      });
+
+      const rankingColumns = await client.query<{ column_name: string }>(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'job_ranking_snapshots'
+           AND column_name IN (
+             'base_rank_score', 'freshness_score', 'remote_freedom_score',
+             'final_application_priority_score', 'remote_from_home_base_score',
+             'temporary_abroad_score', 'country_flexibility_score',
+             'office_requirement_score', 'timezone_compatibility_score',
+             'employment_verifiability_score', 'preference_context_id'
+           )`
+      );
+      expect(rankingColumns.rows).toHaveLength(11);
+    } finally {
+      client.release();
+    }
+  }, 30_000);
 
   it("migration 008 succeeds on legacy upgrade path without uq_canonical_job_content_hash", async () => {
     const client = await realPool.connect();

@@ -26,7 +26,7 @@ import {
 } from "./criteria.ts";
 
 dotenv.config();
-dotenv.config({ path: ".env.local", override: true });
+dotenv.config({ path: ".env.local" });
 
 export const MODEL_REGISTRY = {
   EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-3.6-flash",
@@ -2117,6 +2117,61 @@ function buildEvaluationResultFromValidatedPayload(
       ? root.evaluation_summary
       : jobPayload.evaluation_summary;
 
+  // Safely normalize optional culture_evidence before validation:
+  // If an optional culture evidence quote is unsupported (not a verbatim substring of descriptionText,
+  // or cannot be derived via scoreCultureEvidenceFromQuote), safely treat it as unmeasured (null score and null quote)
+  // so an unsupported optional culture quote never fails the entire job evaluation.
+  const rawCultureEvidence = Array.isArray(jobPayload.culture_evidence)
+    ? jobPayload.culture_evidence
+    : [];
+
+  const sanitizedCultureEvidence = rawCultureEvidence.map((evidence: any) => {
+    if (!evidence || typeof evidence !== "object") return evidence;
+    const signal = evidence.signal;
+    const rawQuote = typeof evidence.quote === "string" ? evidence.quote : null;
+
+    if (!rawQuote || rawQuote.trim().length === 0) {
+      return {
+        ...evidence,
+        score: null,
+        quote: null,
+        score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
+      };
+    }
+
+    if (!job.descriptionText.includes(rawQuote)) {
+      console.warn(
+        `[culture_evidence] Optional quote for ${signal} is not a verbatim substring of the job description; safely treating as unmeasured.`
+      );
+      return {
+        ...evidence,
+        score: null,
+        quote: null,
+        score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
+      };
+    }
+
+    const supportedScore = scoreCultureEvidenceFromQuote(signal, rawQuote);
+    if (supportedScore === null) {
+      console.warn(
+        `[culture_evidence] Quote for ${signal} in job description does not match deterministic phrase rules; safely treating as unmeasured.`
+      );
+      return {
+        ...evidence,
+        score: null,
+        quote: null,
+        score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
+      };
+    }
+
+    return {
+      ...evidence,
+      score: supportedScore,
+      quote: rawQuote,
+      score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
+    };
+  });
+
   const result = EvaluationResultSchema.parse({
     schema_version: SCHEMA_VERSION,
     canonical_job_id: jobPayload.canonical_job_id,
@@ -2152,7 +2207,7 @@ function buildEvaluationResultFromValidatedPayload(
     risk_flags: jobPayload.risk_flags,
     policy_conflicts: jobPayload.policy_conflicts,
     culture_score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
-    culture_evidence: jobPayload.culture_evidence,
+    culture_evidence: sanitizedCultureEvidence,
     rejection_codes: jobPayload.rejection_codes,
     strategic_value: jobPayload.strategic_value,
     recommended_cv_version: jobPayload.recommended_cv_version,
@@ -2160,34 +2215,6 @@ function buildEvaluationResultFromValidatedPayload(
     evaluated_at: new Date().toISOString()
   });
 
-  result.culture_evidence = result.culture_evidence.map((evidence) => {
-    if (evidence.quote === null) {
-      return {
-        ...evidence,
-        score: null,
-        score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
-      };
-    }
-    if (!job.descriptionText.includes(evidence.quote)) {
-      throw new Error(
-        `Evaluation culture evidence quote for ${evidence.signal} is not a verbatim substring of the job description.`
-      );
-    }
-
-    const supportedScore = scoreCultureEvidenceFromQuote(evidence.signal, evidence.quote);
-    return supportedScore === null
-      ? {
-          ...evidence,
-          score: null,
-          quote: null,
-          score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
-        }
-      : {
-          ...evidence,
-          score: supportedScore,
-          score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
-        };
-  });
   const scoreForSignal = (signal: EvaluationResult["culture_evidence"][number]["signal"]): number | null => {
     const score = result.culture_evidence.find((evidence) => evidence.signal === signal)?.score;
     return typeof score === "number" ? score : null;

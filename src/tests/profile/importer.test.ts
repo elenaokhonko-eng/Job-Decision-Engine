@@ -255,7 +255,7 @@ describe('importLoadedProfile', () => {
     expect(calls).toContain('ROLLBACK');
   });
 
-  it('does not attempt to roll back an already committed profile when refresh seeding fails', async () => {
+  it('does not schedule refresh seeding after committing a candidate profile', async () => {
     let committed = false;
     const query = vi.fn(async (sql: string, _params?: unknown[]) => {
       if (sql === 'BEGIN') return { rows: [] };
@@ -294,10 +294,13 @@ describe('importLoadedProfile', () => {
           role: 'OWNER',
         },
       })
-    ).rejects.toThrow('refresh seed failure');
+    ).resolves.toMatchObject({ profileVersionId: 'profile-version-id-1' });
 
     const calls = query.mock.calls.map((call: unknown[]) => String(call[0]));
-    expect(calls).toContain('COMMIT');
+    const commitIndex = calls.indexOf('COMMIT');
+    expect(commitIndex).toBeGreaterThanOrEqual(0);
     expect(calls).not.toContain('ROLLBACK');
+    expect(calls.slice(commitIndex + 1).filter((sql) => sql.trimStart().startsWith('SELECT'))).toHaveLength(0);
+    expect(calls.some((sql) => sql.includes('pipeline_tasks'))).toBe(false);
   });
 });

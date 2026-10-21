@@ -1,8 +1,18 @@
 import pg from "pg";
 
 import {
+  evaluateJobFreshness,
+  evaluateMobilityMatch,
+  type FreshnessEvaluationResult,
+  type MobilityEvaluationResult,
+} from "../policy/stage3PolicyEngine.js";
+import { resolveWorkspacePreferenceContext, type ResolvedWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
+import type { WorkspaceContext } from "../workspace/context.js";
+import type { Stage3ApplicationPriorityWeights } from "../policy/stage3Contracts.js";
+import {
   calculateRanking,
   INITIAL_RANKING_WEIGHTS,
+  calculateStage3PriorityScore,
   type RankingComponents,
   type RankingWeights,
 } from "./applicationRanking.js";
@@ -23,6 +33,15 @@ interface ApplyNowContextRow extends pg.QueryResultRow {
   match_job_content_hash: string;
   current_job_content_hash: string;
   current_job_description: string;
+  company_name: string;
+  location: string | null;
+  workplace_type: string | null;
+  posted_at: Date | string | null;
+  reposted_at: Date | string | null;
+  source_updated_at: Date | string | null;
+  freshness_basis: string | null;
+  first_seen_at: Date | string | null;
+  last_seen_at: Date | string | null;
   current_artifact_status: string;
   version_mismatch: boolean;
   gate_status: string;
@@ -66,6 +85,15 @@ const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
     current_match.job_content_hash AS match_job_content_hash,
     job_version.content_hash AS current_job_content_hash,
     job_version.description_text AS current_job_description,
+    job.company_name,
+    job.location,
+    job.workplace_type,
+    job_version.source_published_at AS posted_at,
+    job_version.reposted_at,
+    job_version.source_updated_at,
+    job_version.freshness_basis,
+    job_version.first_seen_at,
+    job_version.last_seen_at,
     shortlist.current_artifact_status,
     shortlist.version_mismatch,
     shortlist.gate_status,
@@ -143,6 +171,8 @@ const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
     LIMIT 1
   ) AS current_policy ON TRUE
   WHERE shortlist.workspace_id = $1
+    AND (COALESCE(array_length($2::uuid[], 1), 0) = 0
+         OR shortlist.job_version_id::uuid = ANY($2::uuid[]))
     AND shortlist.gate_status = 'PASS'
     AND shortlist.recommendation_eligibility = 'ELIGIBLE'
     AND shortlist.recommendation_outcome IN ('PRIORITY', 'REVIEW')
@@ -263,15 +293,55 @@ function buildComponents(row: ApplyNowContextRow): RankingComponents {
   };
 }
 
-function componentAvailability(components: RankingComponents): Record<string, boolean> {
-  return Object.fromEntries(
-    Object.entries(components).map(([name, score]) => [name, score !== null])
-  );
+function componentAvailability(
+  components: RankingComponents,
+  freshness: FreshnessEvaluationResult,
+  mobility: MobilityEvaluationResult,
+): Record<string, boolean> {
+  return {
+    ...Object.fromEntries(Object.entries(components).map(([name, score]) => [name, score !== null])),
+    freshness: freshness.status !== 'UNKNOWN',
+    remote_from_home_base: mobility.remote_from_home_base_score !== null,
+    temporary_abroad: mobility.temporary_abroad_score !== null,
+    country_flexibility: mobility.country_flexibility_score !== null,
+    office_requirement: mobility.office_requirement_score !== null,
+    timezone_compatibility: mobility.timezone_compatibility_score !== null,
+  };
 }
 
-function componentProvenance(row: ApplyNowContextRow): Record<string, unknown> {
+function componentProvenance(
+  row: ApplyNowContextRow,
+  preferenceContext: ResolvedWorkspacePreferenceContext | null,
+  freshness: FreshnessEvaluationResult,
+  mobility: MobilityEvaluationResult,
+  priorityWeights: Stage3ApplicationPriorityWeights,
+): Record<string, unknown> {
   return {
-    schema_version: "5.0.0",
+    schema_version: "5.3.0",
+    stage3_priority_derivation_version: "base_freshness_remote_v1",
+    stage3_preference_context_id: preferenceContext?.contextId ?? null,
+    stage3_preference_revisions: preferenceContext?.revisionsByDomain ?? {},
+    application_priority_weights: priorityWeights,
+    freshness: {
+      score: freshness.status === 'UNKNOWN' ? null : freshness.freshness_score,
+      job_age_days: freshness.job_age_days,
+      basis: freshness.freshness_basis,
+      confidence: freshness.freshness_confidence,
+      status: freshness.status,
+      evidence: freshness.evidence,
+    },
+    mobility: {
+      remote_from_home_base_status: mobility.remote_from_home_base_status,
+      temporary_work_abroad_status: mobility.temporary_work_abroad_status,
+      work_from_anywhere_status: mobility.work_from_anywhere_status,
+      remote_from_home_base_score: mobility.remote_from_home_base_score,
+      temporary_abroad_score: mobility.temporary_abroad_score,
+      country_flexibility_score: mobility.country_flexibility_score,
+      office_requirement_score: mobility.office_requirement_score,
+      timezone_compatibility_score: mobility.timezone_compatibility_score,
+      remote_freedom_score: mobility.remote_freedom_score,
+      evidence: mobility.evidence,
+    },
     culture_score_derivation_version: CULTURE_SCORE_DERIVATION_VERSION,
     requirement_fit: "canonical_jobs.deterministic_match_score",
     requirement_coverage: "canonical_jobs.deterministic_match_coverage",
@@ -290,13 +360,29 @@ function componentProvenance(row: ApplyNowContextRow): Record<string, unknown> {
 export async function materializeApplicationRankings(
   pool: pg.Pool,
   workspaceId: string,
-  options: { readonly dryRun?: boolean } = {}
+  options: {
+    readonly dryRun?: boolean;
+    readonly context?: WorkspaceContext;
+    readonly preferenceContext?: ResolvedWorkspacePreferenceContext | null;
+    readonly jobVersionIds?: readonly string[];
+  } = {}
 ): Promise<RankingMaterializationResult> {
   const client = await pool.connect();
   let committed = false;
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
-    const { rows } = await client.query<ApplyNowContextRow>(CURRENT_APPLY_NOW_CONTEXT_QUERY, [workspaceId]);
+    if (options.context && options.context.workspaceId !== workspaceId) {
+      throw new Error(`Ranking workspace mismatch: expected ${workspaceId}, received ${options.context.workspaceId}.`);
+    }
+    const preferenceContext = options.preferenceContext !== undefined
+      ? options.preferenceContext
+      : options.context
+        ? await resolveWorkspacePreferenceContext(client, options.context, ['stage3'])
+        : null;
+    const { rows } = await client.query<ApplyNowContextRow>(CURRENT_APPLY_NOW_CONTEXT_QUERY, [
+      workspaceId,
+      options.jobVersionIds ?? [],
+    ]);
     const result = {
       dryRun: options.dryRun === true,
       eligibleApplyNowJobs: rows.length,
@@ -329,6 +415,27 @@ export async function materializeApplicationRankings(
       ) {
         result.incompleteRequiredInputs += 1;
       }
+      const stage3Preferences = preferenceContext?.stage3;
+      const freshness = evaluateJobFreshness({
+        posted_at: row.posted_at,
+        reposted_at: row.reposted_at,
+        source_updated_at: row.source_updated_at,
+        first_seen_at: row.first_seen_at,
+        freshness_basis: row.freshness_basis,
+        is_repost: row.freshness_basis === 'REPOSTED_AT',
+        posting_identity_is_new: row.freshness_basis === 'NEW_POSTING_ID',
+      }, stage3Preferences?.freshness);
+      const mobility = evaluateMobilityMatch({
+        workplace_type: row.workplace_type ?? undefined,
+        location: row.location ?? undefined,
+        description: row.current_job_description,
+      }, stage3Preferences?.mobility);
+      const configuredPriorityWeights = stage3Preferences?.application_priority_weights;
+      const priorityWeights: Stage3ApplicationPriorityWeights = configuredPriorityWeights ?? {
+        base_rank_pct: 75,
+        freshness_pct: 12.5,
+        remote_freedom_pct: 12.5,
+      };
       const weights = parseRankingWeights(row.ranking_weights);
       const minConfidence = toFiniteNumber(row.minimum_ranking_confidence);
       if (minConfidence === null) throw new Error("The active ranking policy has an invalid confidence threshold.");
@@ -349,7 +456,19 @@ export async function materializeApplicationRankings(
         },
         { weights, minimumRankingConfidence: minConfidence }
       );
-      if (ranking.overallRankScore === null) {
+      const finalPriorityScore = calculateStage3PriorityScore(
+        ranking.overallRankScore,
+        {
+          freshnessScore: freshness.status === 'UNKNOWN' ? null : freshness.freshness_score,
+          remoteFreedomScore: mobility.remote_freedom_score,
+        },
+        {
+          baseRankWeight: priorityWeights.base_rank_pct / 100,
+          freshnessWeight: priorityWeights.freshness_pct / 100,
+          remoteFreedomWeight: priorityWeights.remote_freedom_pct / 100,
+        }
+      );
+      if (ranking.overallRankScore === null || finalPriorityScore === null) {
         result.incompleteRequiredInputs += 1;
         continue;
       }
@@ -368,15 +487,21 @@ export async function materializeApplicationRankings(
            politics_risk_score, sensory_workload_risk_score, strategic_value_score,
            focus_protection_score, building_ratio_score, interaction_burden_score,
            overall_rank_score, ranking_confidence, is_top_ten_ready,
-           policy_recheck_required, component_availability, component_provenance
+           policy_recheck_required, component_availability, component_provenance,
+           base_rank_score, freshness_score, remote_freedom_score,
+           final_application_priority_score, remote_from_home_base_score,
+           temporary_abroad_score, country_flexibility_score, office_requirement_score,
+           timezone_compatibility_score, employment_verifiability_score,
+           preference_user_id, preference_context_id
          ) VALUES (
            $1, $2, $3, $4, $5, $6, $7, $8, $9,
            $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-           $21, $22, $23, $24, $25::jsonb, $26::jsonb
+           $21, $22, $23, $24, $25::jsonb, $26::jsonb,
+           $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38
          ) ON CONFLICT (
            workspace_id, canonical_job_id, job_version_id, profile_version_id,
            match_run_id, deterministic_decision_id, ai_evaluation_id,
-           ranking_policy_version, context_fingerprint
+           ranking_policy_version, preference_context_id, context_fingerprint
          ) DO NOTHING`,
         [
           row.workspace_id,
@@ -399,12 +524,24 @@ export async function materializeApplicationRankings(
           normalizedCultureEvidence(row).find((evidence) => evidence.signal === "FOCUS_PROTECTION")?.score ?? null,
           toFiniteNumber(row.evaluation_payload.building_research_ratio),
           toFiniteNumber(row.evaluation_payload.interaction_load),
-          ranking.overallRankScore,
+          finalPriorityScore,
           ranking.rankingConfidence,
           ranking.topTenReady && currentContext,
           row.policy_recheck_required,
-          JSON.stringify(componentAvailability(components)),
-          JSON.stringify(componentProvenance(row)),
+          JSON.stringify(componentAvailability(components, freshness, mobility)),
+          JSON.stringify(componentProvenance(row, preferenceContext, freshness, mobility, priorityWeights)),
+          ranking.overallRankScore,
+          freshness.status === 'UNKNOWN' ? null : freshness.freshness_score,
+          mobility.remote_freedom_score,
+          finalPriorityScore,
+          mobility.remote_from_home_base_score,
+          mobility.temporary_abroad_score,
+          mobility.country_flexibility_score,
+          mobility.office_requirement_score,
+          mobility.timezone_compatibility_score,
+          null,
+          preferenceContext?.contextId ? preferenceContext.userId : null,
+          preferenceContext?.contextId ?? null,
         ]
       );
       if ((insert.rowCount ?? 0) > 0) result.snapshotsInserted += 1;

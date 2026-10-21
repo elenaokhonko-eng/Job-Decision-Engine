@@ -40,6 +40,7 @@ describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
 
     (mPool.query as any).mockResolvedValue({ rows: [] });
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // BEGIN
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // stale queue reconciliation
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // budget run
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // lane usage
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // row locks
