@@ -691,3 +691,132 @@ export async function releasePipelineTaskForRetry(
     }
   }
 }
+
+export interface PipelineDeadLetterCounts {
+  readonly actionableDeadLetters: number;
+  readonly staleHistoricalDeadLetters: number;
+}
+
+export async function reconcileStaleEmbeddingDeadLetters(
+  client: pg.PoolClient,
+  workspaceId: string,
+): Promise<number> {
+  const { rows, rowCount } = await client.query<{ id: string }>(
+    `WITH stale_tasks AS (
+       SELECT task.id,
+              task.workspace_id,
+              jsonb_build_object(
+                'reconciliation', 'STALE_SUPERSEDED_PUBLISH_EMBEDDING',
+                'task_type', task.task_type,
+                'canonical_job_id', canonical.id,
+                'superseded_job_version_id', superseded_version.id,
+                'latest_job_version_id', latest_version.id,
+                'prior_completed_at', task.completed_at,
+                'reconciled_at', clock_timestamp()
+              )::TEXT AS reconciliation_reason
+       FROM pipeline_tasks task
+       JOIN canonical_jobs canonical
+         ON canonical.workspace_id = task.workspace_id
+        AND canonical.id::TEXT = NULLIF(BTRIM(task.payload->>'canonical_job_id'), '')
+       JOIN job_versions superseded_version
+         ON superseded_version.workspace_id = task.workspace_id
+        AND superseded_version.canonical_job_id = canonical.id
+        AND superseded_version.id::TEXT = NULLIF(BTRIM(task.payload->>'job_version_id'), '')
+       JOIN job_versions latest_version
+         ON latest_version.workspace_id = canonical.workspace_id
+        AND latest_version.canonical_job_id = canonical.id
+        AND latest_version.id = canonical.latest_job_version_id
+       WHERE task.workspace_id = $1
+         AND task.task_type = 'PUBLISH_EMBEDDING'
+         AND task.status = 'DEAD_LETTER'
+         AND COALESCE(canonical.is_test_fixture, FALSE) = FALSE
+         AND superseded_version.id <> latest_version.id
+       FOR UPDATE OF task, canonical SKIP LOCKED
+     )
+     UPDATE pipeline_tasks task
+     SET status = 'COMPLETED',
+         lease_id = NULL,
+         lease_expires_at = NULL,
+         heartbeat_at = NULL,
+         claimed_by = NULL,
+         last_error = CASE
+           WHEN task.last_error IS NULL OR task.last_error = '' THEN stale_tasks.reconciliation_reason
+           ELSE task.last_error || E'\\n' || stale_tasks.reconciliation_reason
+         END,
+         dead_letter_reason = CASE
+           WHEN task.dead_letter_reason IS NULL OR task.dead_letter_reason = '' THEN stale_tasks.reconciliation_reason
+           ELSE task.dead_letter_reason || E'\\n' || stale_tasks.reconciliation_reason
+         END,
+         repair_action = CASE
+           WHEN task.repair_action IS NULL OR task.repair_action = '' THEN stale_tasks.reconciliation_reason
+           ELSE task.repair_action || E'\\n' || stale_tasks.reconciliation_reason
+         END,
+         completed_at = NOW(),
+         updated_at = NOW()
+     FROM stale_tasks
+     WHERE task.workspace_id = stale_tasks.workspace_id
+       AND task.id = stale_tasks.id
+       AND task.status = 'DEAD_LETTER'
+     RETURNING task.id`,
+    [workspaceId],
+  );
+  return rowCount ?? rows.length;
+}
+
+export async function readPipelineDeadLetterCounts(
+  client: pg.PoolClient,
+  workspaceId: string,
+): Promise<PipelineDeadLetterCounts> {
+  const { rows } = await client.query<{
+    actionable_dead_letters: number | string;
+    stale_historical_dead_letters: number | string;
+  }>(
+    `WITH operational_dead_letters AS (
+       SELECT task.id, task.workspace_id, task.task_type, task.payload
+       FROM pipeline_tasks task
+       WHERE task.workspace_id = $1
+         AND task.status = 'DEAD_LETTER'
+         AND NOT EXISTS (
+           SELECT 1
+           FROM canonical_jobs fixture_job
+           LEFT JOIN job_versions fixture_version
+             ON fixture_version.workspace_id = fixture_job.workspace_id
+            AND fixture_version.canonical_job_id = fixture_job.id
+           WHERE fixture_job.workspace_id = task.workspace_id
+             AND fixture_job.is_test_fixture = TRUE
+             AND (
+               task.payload->>'canonical_job_id' = fixture_job.id::TEXT
+               OR task.payload->>'job_version_id' = fixture_version.id::TEXT
+             )
+         )
+     ), stale_historical AS (
+       SELECT task.id
+       FROM operational_dead_letters task
+       JOIN canonical_jobs canonical
+         ON canonical.workspace_id = task.workspace_id
+        AND canonical.id::TEXT = NULLIF(BTRIM(task.payload->>'canonical_job_id'), '')
+       JOIN job_versions superseded_version
+         ON superseded_version.workspace_id = task.workspace_id
+        AND superseded_version.canonical_job_id = canonical.id
+        AND superseded_version.id::TEXT = NULLIF(BTRIM(task.payload->>'job_version_id'), '')
+       JOIN job_versions latest_version
+         ON latest_version.workspace_id = canonical.workspace_id
+        AND latest_version.canonical_job_id = canonical.id
+        AND latest_version.id = canonical.latest_job_version_id
+       WHERE task.task_type = 'PUBLISH_EMBEDDING'
+         AND COALESCE(canonical.is_test_fixture, FALSE) = FALSE
+         AND superseded_version.id <> latest_version.id
+     )
+     SELECT COUNT(*) FILTER (WHERE stale.id IS NULL)::INTEGER AS actionable_dead_letters,
+            COUNT(*) FILTER (WHERE stale.id IS NOT NULL)::INTEGER AS stale_historical_dead_letters
+     FROM operational_dead_letters task
+     LEFT JOIN stale_historical stale ON stale.id = task.id`,
+    [workspaceId],
+  );
+  const counts = rows[0];
+  if (!counts) throw new Error('Could not classify production pipeline dead letters.');
+  return {
+    actionableDeadLetters: Number(counts.actionable_dead_letters),
+    staleHistoricalDeadLetters: Number(counts.stale_historical_dead_letters),
+  };
+}

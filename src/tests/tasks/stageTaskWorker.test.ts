@@ -1581,7 +1581,9 @@ describe("stageTaskWorker", () => {
   });
 
   it("completes stale embedding tasks without provider calls or successor work", async () => {
+    const calls: string[] = [];
     const query = vi.fn(async (sql: string) => {
+      calls.push(sql);
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
         return { rows: [], rowCount: 0 };
       }
@@ -1646,6 +1648,12 @@ describe("stageTaskWorker", () => {
 
     expect(summary).toMatchObject({ claimed: 1, completed: 1, failed: 0, deadLettered: 0 });
     expect(deps.runEmbeddingBatchWithFallback).not.toHaveBeenCalled();
+    expect(calls.some((sql) => sql.includes("UPDATE pipeline_tasks") &&
+      sql.includes("SET status = 'COMPLETED'") &&
+      sql.includes("lease_id = NULL") &&
+      sql.includes("completed_at = NOW()"))).toBe(true);
+    expect(calls.some((sql) => sql.includes("UPDATE pipeline_task_attempts") &&
+      sql.includes("SET status = 'COMPLETED'"))).toBe(true);
     expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO pipeline_tasks"))).toBe(false);
   });
 

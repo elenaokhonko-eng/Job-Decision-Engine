@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import pg from "pg";
 import dotenv from "dotenv";
 import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
@@ -8,7 +9,8 @@ import {
   runPipelineStageTaskWorker,
 } from "../src/tasks/stageTaskWorker.js";
 import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
-import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { readPipelineDeadLetterCounts, reconcileStaleEmbeddingDeadLetters } from "../src/tasks/pipelineTasks.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -56,38 +58,54 @@ interface QueueHealth {
   pending: number;
   retryWait: number;
   blockedDependency: number;
-  deadLetter: number;
+  actionableDeadLetters: number;
+  staleHistoricalDeadLetters: number;
   oldestPendingAgeSeconds: number;
   oldestRetryWaitAgeSeconds: number;
   byType: QueueHealthRow[];
 }
 
-async function readQueueHealth(pool: pg.Pool): Promise<QueueHealth> {
-  // The pool exposes the query surface required by the workspace resolver.
-  const ctx = await resolveWorkspaceContext(pool as unknown as pg.PoolClient);
-  const result = await pool.query<QueueHealthRow>(
-    `SELECT task_type, status, task_count, oldest_age_seconds
-     FROM v_pipeline_task_queue_health
-     WHERE workspace_id = $1
-     ORDER BY task_type, status`,
-    [ctx.workspaceId],
-  );
-  const byStatus = (status: string) => result.rows
-    .filter((row) => row.status === status)
-    .reduce((total, row) => total + Number(row.task_count), 0);
-  const oldestAge = (status: string) => result.rows
-    .filter((row) => row.status === status)
-    .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+interface PipelineDeadLetterHealthReport {
+  actionableDeadLetters: number | null;
+  staleHistoricalDeadLetters: number | null;
+  newlyDeadLetteredThisRun: number | null;
+  staleHistoricalDeadLettersReconciled: number;
+  staleHistoricalDeadLettersRemaining: number | null;
+  reportGeneratedAt: string;
+  error: string | null;
+}
 
-  return {
-    pending: byStatus("PENDING"),
-    retryWait: byStatus("RETRY_WAIT"),
-    blockedDependency: byStatus("BLOCKED_DEPENDENCY"),
-    deadLetter: byStatus("DEAD_LETTER"),
-    oldestPendingAgeSeconds: oldestAge("PENDING"),
-    oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
-    byType: result.rows,
-  };
+async function readQueueHealth(pool: pg.Pool, workspaceId: string): Promise<QueueHealth> {
+  const client = await pool.connect();
+  try {
+    const queueResult = await client.query<QueueHealthRow>(
+      `SELECT task_type, status, task_count, oldest_age_seconds
+       FROM v_pipeline_task_queue_health
+       WHERE workspace_id = $1
+       ORDER BY task_type, status`,
+      [workspaceId],
+    );
+    const deadLetters = await readPipelineDeadLetterCounts(client, workspaceId);
+    const byStatus = (status: string) => queueResult.rows
+      .filter((row) => row.status === status)
+      .reduce((total, row) => total + Number(row.task_count), 0);
+    const oldestAge = (status: string) => queueResult.rows
+      .filter((row) => row.status === status)
+      .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+
+    return {
+      pending: byStatus("PENDING"),
+      retryWait: byStatus("RETRY_WAIT"),
+      blockedDependency: byStatus("BLOCKED_DEPENDENCY"),
+      actionableDeadLetters: deadLetters.actionableDeadLetters,
+      staleHistoricalDeadLetters: deadLetters.staleHistoricalDeadLetters,
+      oldestPendingAgeSeconds: oldestAge("PENDING"),
+      oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
+      byType: queueResult.rows,
+    };
+  } finally {
+    client.release();
+  }
 }
 
 function requestShutdown(signal: NodeJS.Signals): void {
@@ -157,15 +175,49 @@ export async function processPipelineTasks(): Promise<void> {
   const lockClient = await lockPool.connect();
   let lockAcquired = false;
   let workerError: Error | null = null;
+  let workspaceId: string | null = null;
+  let staleHistoricalDeadLettersReconciled = 0;
+  const deadLetterReport: PipelineDeadLetterHealthReport = {
+    actionableDeadLetters: null,
+    staleHistoricalDeadLetters: null,
+    newlyDeadLetteredThisRun: null,
+    staleHistoricalDeadLettersReconciled: 0,
+    staleHistoricalDeadLettersRemaining: null,
+    reportGeneratedAt: "",
+    error: null,
+  };
+  const deadLetterReportPath = process.env.PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE?.trim()
+    || "pipeline-dead-letter-health.json";
 
   try {
     const { rows } = await lockClient.query(`SELECT pg_try_advisory_lock($1) AS locked`, [lockId]);
     lockAcquired = Boolean(rows[0]?.locked);
 
     if (!lockAcquired) {
+      deadLetterReport.error = "Another pipeline worker already holds the advisory lock; no work was claimed.";
       console.warn("Another pipeline worker is already running. Exiting cleanly.");
       return;
     }
+
+    const contextClient = await pool.connect();
+    let context: WorkspaceContext;
+    try {
+      context = await resolveWorkspaceContext(contextClient);
+      workspaceId = context.workspaceId;
+    } finally {
+      contextClient.release();
+    }
+
+    const reconciliationClient = await pool.connect();
+    try {
+      staleHistoricalDeadLettersReconciled = await reconcileStaleEmbeddingDeadLetters(
+        reconciliationClient,
+        context.workspaceId,
+      );
+    } finally {
+      reconciliationClient.release();
+    }
+    console.log("Stale historical embedding dead letters reconciled:", staleHistoricalDeadLettersReconciled);
 
     const summary = await runPipelineStageTaskWorker(pool, {
       taskTypes: activeTaskTypes,
@@ -187,14 +239,24 @@ export async function processPipelineTasks(): Promise<void> {
 
     console.log("Pipeline task worker summary:", JSON.stringify(summary, null, 2));
 
-    const queueHealth = await readQueueHealth(pool);
+    const queueHealth = await readQueueHealth(pool, context.workspaceId);
+    deadLetterReport.actionableDeadLetters = queueHealth.actionableDeadLetters;
+    deadLetterReport.staleHistoricalDeadLetters =
+      staleHistoricalDeadLettersReconciled + queueHealth.staleHistoricalDeadLetters;
+    deadLetterReport.newlyDeadLetteredThisRun = summary.deadLettered;
+    deadLetterReport.staleHistoricalDeadLettersReconciled = staleHistoricalDeadLettersReconciled;
+    deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetters;
     console.log("Pipeline task queue health:", JSON.stringify(queueHealth, null, 2));
+    console.log("Pipeline task dead-letter health report:", JSON.stringify(deadLetterReport, null, 2));
     console.log("Pipeline bounded-run result:", JSON.stringify({
       exit_reason: summary.exitReason,
       claimed: summary.claimed,
       completed: summary.completed,
       failed: summary.failed,
       dead_lettered: summary.deadLettered,
+      actionableDeadLetters: queueHealth.actionableDeadLetters,
+      staleHistoricalDeadLetters: deadLetterReport.staleHistoricalDeadLetters,
+      newlyDeadLetteredThisRun: summary.deadLettered,
       remaining_pending: queueHealth.pending,
       duration_ms: summary.durationMs,
     }, null, 2));
@@ -226,7 +288,8 @@ export async function processPipelineTasks(): Promise<void> {
       failedThisRun: summary.failed,
       exitReason: summary.exitReason,
       deadLetteredThisRun: summary.deadLettered,
-      deadLetterCount: queueHealth.deadLetter,
+      actionableDeadLetters: queueHealth.actionableDeadLetters,
+      staleHistoricalDeadLetters: deadLetterReport.staleHistoricalDeadLetters ?? 0,
       retryWaitCount: queueHealth.retryWait,
       oldestRetryWaitAgeSeconds: queueHealth.oldestRetryWaitAgeSeconds,
       activePendingCount: activePending,
@@ -248,6 +311,28 @@ export async function processPipelineTasks(): Promise<void> {
     workerError = err instanceof Error ? err : new Error(String(err));
     console.error("Pipeline task worker failed:", workerError.message);
   } finally {
+    if (deadLetterReport.actionableDeadLetters === null && workspaceId !== null) {
+      try {
+        const queueHealth = await readQueueHealth(pool, workspaceId);
+        deadLetterReport.actionableDeadLetters = queueHealth.actionableDeadLetters;
+        deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetters;
+        deadLetterReport.staleHistoricalDeadLetters =
+          staleHistoricalDeadLettersReconciled + queueHealth.staleHistoricalDeadLetters;
+      } catch (error: unknown) {
+        deadLetterReport.error = error instanceof Error ? error.message : String(error);
+      }
+    }
+    deadLetterReport.staleHistoricalDeadLettersReconciled = staleHistoricalDeadLettersReconciled;
+    deadLetterReport.staleHistoricalDeadLetters ??= staleHistoricalDeadLettersReconciled;
+    deadLetterReport.reportGeneratedAt = new Date().toISOString();
+    deadLetterReport.error ??= workerError?.message ?? null;
+    try {
+      await writeFile(deadLetterReportPath, `${JSON.stringify(deadLetterReport, null, 2)}\n`, "utf8");
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Failed to write pipeline dead-letter health report:", message);
+      workerError ??= new Error(`Could not write pipeline dead-letter health report: ${message}`);
+    }
     if (forcedShutdownTimer) {
       clearTimeout(forcedShutdownTimer);
       forcedShutdownTimer = null;

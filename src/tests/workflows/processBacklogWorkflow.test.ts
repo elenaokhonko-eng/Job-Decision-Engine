@@ -13,6 +13,9 @@ describe('process backlog workflow', () => {
     expect(workflow).not.toContain('cancel-in-progress: true');
     expect(workflow).toContain("github.event.workflow_run.conclusion != 'cancelled'");
     expect(workflow).toContain('npx tsx scripts/process_pipeline_tasks.ts');
+    expect(workflow).toContain('id: process_pipeline_worker');
+    expect(workflow).toContain('PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: pipeline-dead-letter-health.json');
+    expect(workflow).toContain('pipeline-dead-letter-health-${{ github.run_id }}');
     expect(workflow).toContain('DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}');
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json');
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json');
