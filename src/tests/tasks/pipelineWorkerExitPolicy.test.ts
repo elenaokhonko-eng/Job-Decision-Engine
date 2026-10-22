@@ -6,8 +6,8 @@ const healthyInput = {
   claimedThisRun: 1,
   failedThisRun: 0,
   deadLetteredThisRun: 0,
-  actionableDeadLetters: 0,
-  staleHistoricalDeadLetters: 0,
+  actionableCurrentDeadLetterCount: 0,
+  staleHistoricalDeadLetterCount: 0,
   retryWaitCount: 0,
   oldestRetryWaitAgeSeconds: 0,
   activePendingCount: 0,
@@ -49,30 +49,27 @@ describe("pipeline worker exit policy", () => {
     })).not.toThrow();
   });
 
-  it("permits bounded progress when only stale historical dead letters remain", () => {
+  it("permits inherited stale historical dead letters after they are reconciled", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
-      claimedThisRun: 73,
-      exitReason: "WALL_CLOCK_BUDGET_REACHED",
-      staleHistoricalDeadLetters: 8,
+      deadLetteredThisRun: 0,
+      actionableCurrentDeadLetterCount: 0,
+      staleHistoricalDeadLetterCount: 8,
     })).not.toThrow();
   });
 
-  it("fails while actionable current-version dead letters remain", () => {
+  it("fails for actionable current and newly created dead letters", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
-      actionableDeadLetters: 1,
+      actionableCurrentDeadLetterCount: 1,
     })).toThrow("1 actionable current DEAD_LETTER");
-  });
-
-  it("fails when this run creates a new dead letter", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
       deadLetteredThisRun: 1,
-    })).toThrow("newly dead-lettered 1 task(s) this run");
+    })).toThrow("created 1 DEAD_LETTER");
   });
 
-  it("preserves retry SLO and no-forward-progress protections", () => {
+  it("fails for retry SLO breaches and no forward progress", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
       retryWaitCount: 6,

@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { appendFile, writeFile } from "node:fs/promises";
 import pg from "pg";
 import dotenv from "dotenv";
 import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
@@ -9,7 +9,10 @@ import {
   runPipelineStageTaskWorker,
 } from "../src/tasks/stageTaskWorker.js";
 import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
-import { readPipelineDeadLetterCounts, reconcileStaleEmbeddingDeadLetters } from "../src/tasks/pipelineTasks.js";
+import {
+  readDeadLetterTaskHealth,
+  reconcileStaleSupersededEmbeddingDeadLetters,
+} from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -58,8 +61,9 @@ interface QueueHealth {
   pending: number;
   retryWait: number;
   blockedDependency: number;
-  actionableDeadLetters: number;
-  staleHistoricalDeadLetters: number;
+  deadLetter: number;
+  actionableCurrentDeadLetter: number;
+  staleHistoricalDeadLetter: number;
   oldestPendingAgeSeconds: number;
   oldestRetryWaitAgeSeconds: number;
   byType: QueueHealthRow[];
@@ -85,7 +89,15 @@ async function readQueueHealth(pool: pg.Pool, workspaceId: string): Promise<Queu
        ORDER BY task_type, status`,
       [workspaceId],
     );
-    const deadLetters = await readPipelineDeadLetterCounts(client, workspaceId);
+    const deadLetterHealth = await readDeadLetterTaskHealth(client, workspaceId);
+    const actionableCurrentDeadLetter = deadLetterHealth.reduce(
+      (total, row) => total + Number(row.actionable_dead_letter_count),
+      0,
+    );
+    const staleHistoricalDeadLetter = deadLetterHealth.reduce(
+      (total, row) => total + Number(row.stale_historical_dead_letter_count),
+      0,
+    );
     const byStatus = (status: string) => queueResult.rows
       .filter((row) => row.status === status)
       .reduce((total, row) => total + Number(row.task_count), 0);
@@ -97,8 +109,9 @@ async function readQueueHealth(pool: pg.Pool, workspaceId: string): Promise<Queu
       pending: byStatus("PENDING"),
       retryWait: byStatus("RETRY_WAIT"),
       blockedDependency: byStatus("BLOCKED_DEPENDENCY"),
-      actionableDeadLetters: deadLetters.actionableDeadLetters,
-      staleHistoricalDeadLetters: deadLetters.staleHistoricalDeadLetters,
+      deadLetter: actionableCurrentDeadLetter + staleHistoricalDeadLetter,
+      actionableCurrentDeadLetter,
+      staleHistoricalDeadLetter,
       oldestPendingAgeSeconds: oldestAge("PENDING"),
       oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
       byType: queueResult.rows,
@@ -208,17 +221,18 @@ export async function processPipelineTasks(): Promise<void> {
       contextClient.release();
     }
 
-    const reconciliationClient = await pool.connect();
-    try {
-      staleHistoricalDeadLettersReconciled = await reconcileStaleEmbeddingDeadLetters(
-        reconciliationClient,
-        context.workspaceId,
-      );
-    } finally {
-      reconciliationClient.release();
+    if (lockId === LOCK_ID) {
+      const reconciliationClient = await pool.connect();
+      try {
+        staleHistoricalDeadLettersReconciled = await reconcileStaleSupersededEmbeddingDeadLetters(
+          reconciliationClient,
+          context.workspaceId,
+        );
+      } finally {
+        reconciliationClient.release();
+      }
+      console.log("Stale historical embedding dead letters reconciled:", staleHistoricalDeadLettersReconciled);
     }
-    console.log("Stale historical embedding dead letters reconciled:", staleHistoricalDeadLettersReconciled);
-
     const summary = await runPipelineStageTaskWorker(pool, {
       taskTypes: activeTaskTypes,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
@@ -238,14 +252,17 @@ export async function processPipelineTasks(): Promise<void> {
     });
 
     console.log("Pipeline task worker summary:", JSON.stringify(summary, null, 2));
+    const workflowOutputPath = process.env.GITHUB_OUTPUT?.trim();
+    if (workflowOutputPath) {
+      await appendFile(workflowOutputPath, `dead_lettered_this_run=${summary.deadLettered}\n`, "utf8");
+    }
 
     const queueHealth = await readQueueHealth(pool, context.workspaceId);
-    deadLetterReport.actionableDeadLetters = queueHealth.actionableDeadLetters;
-    deadLetterReport.staleHistoricalDeadLetters =
-      staleHistoricalDeadLettersReconciled + queueHealth.staleHistoricalDeadLetters;
+    deadLetterReport.actionableDeadLetters = queueHealth.actionableCurrentDeadLetter;
+    deadLetterReport.staleHistoricalDeadLetters = queueHealth.staleHistoricalDeadLetter;
     deadLetterReport.newlyDeadLetteredThisRun = summary.deadLettered;
     deadLetterReport.staleHistoricalDeadLettersReconciled = staleHistoricalDeadLettersReconciled;
-    deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetters;
+    deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetter;
     console.log("Pipeline task queue health:", JSON.stringify(queueHealth, null, 2));
     console.log("Pipeline task dead-letter health report:", JSON.stringify(deadLetterReport, null, 2));
     console.log("Pipeline bounded-run result:", JSON.stringify({
@@ -253,10 +270,10 @@ export async function processPipelineTasks(): Promise<void> {
       claimed: summary.claimed,
       completed: summary.completed,
       failed: summary.failed,
-      dead_lettered: summary.deadLettered,
-      actionableDeadLetters: queueHealth.actionableDeadLetters,
-      staleHistoricalDeadLetters: deadLetterReport.staleHistoricalDeadLetters,
-      newlyDeadLetteredThisRun: summary.deadLettered,
+      dead_lettered_this_run: summary.deadLettered,
+      actionable_current_dead_letters: queueHealth.actionableCurrentDeadLetter,
+      stale_historical_dead_letters: queueHealth.staleHistoricalDeadLetter,
+      total_dead_letters: queueHealth.deadLetter,
       remaining_pending: queueHealth.pending,
       duration_ms: summary.durationMs,
     }, null, 2));
@@ -265,6 +282,16 @@ export async function processPipelineTasks(): Promise<void> {
     }
     if (queueHealth.blockedDependency > 0) {
       console.warn(`Pipeline has ${queueHealth.blockedDependency} BLOCKED_DEPENDENCY task(s) awaiting repair artifacts.`);
+    }
+    if (queueHealth.staleHistoricalDeadLetter > 0) {
+      console.warn(
+        `Pipeline retains ${queueHealth.staleHistoricalDeadLetter} auditable superseded-version dead-letter task(s); these do not block the worker.`,
+      );
+    }
+    if (queueHealth.actionableCurrentDeadLetter > 0) {
+      console.error(
+        `Pipeline has ${queueHealth.actionableCurrentDeadLetter} actionable current dead-letter task(s).`,
+      );
     }
 
     const activeQueueRows = queueHealth.byType.filter((row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]));
@@ -288,8 +315,8 @@ export async function processPipelineTasks(): Promise<void> {
       failedThisRun: summary.failed,
       exitReason: summary.exitReason,
       deadLetteredThisRun: summary.deadLettered,
-      actionableDeadLetters: queueHealth.actionableDeadLetters,
-      staleHistoricalDeadLetters: deadLetterReport.staleHistoricalDeadLetters ?? 0,
+      actionableCurrentDeadLetterCount: queueHealth.actionableCurrentDeadLetter,
+      staleHistoricalDeadLetterCount: queueHealth.staleHistoricalDeadLetter,
       retryWaitCount: queueHealth.retryWait,
       oldestRetryWaitAgeSeconds: queueHealth.oldestRetryWaitAgeSeconds,
       activePendingCount: activePending,
@@ -314,10 +341,9 @@ export async function processPipelineTasks(): Promise<void> {
     if (deadLetterReport.actionableDeadLetters === null && workspaceId !== null) {
       try {
         const queueHealth = await readQueueHealth(pool, workspaceId);
-        deadLetterReport.actionableDeadLetters = queueHealth.actionableDeadLetters;
-        deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetters;
-        deadLetterReport.staleHistoricalDeadLetters =
-          staleHistoricalDeadLettersReconciled + queueHealth.staleHistoricalDeadLetters;
+        deadLetterReport.actionableDeadLetters = queueHealth.actionableCurrentDeadLetter;
+        deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetter;
+        deadLetterReport.staleHistoricalDeadLetters = queueHealth.staleHistoricalDeadLetter;
       } catch (error: unknown) {
         deadLetterReport.error = error instanceof Error ? error.message : String(error);
       }

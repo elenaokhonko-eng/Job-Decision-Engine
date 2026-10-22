@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   evaluateRetestGate,
@@ -19,6 +21,8 @@ const cleanFunnel: RetestGateFunnel = {
   blockedTasks: 0,
   retryingTasks: 0,
   deadLetterTasks: 0,
+  actionableDeadLetterTasks: 0,
+  staleHistoricalDeadLetterTasks: 0,
 };
 
 describe("managed API/desktop E2E retest gate", () => {
@@ -53,6 +57,37 @@ describe("managed API/desktop E2E retest gate", () => {
       "PREQUALIFIED_JOBS_AWAITING_LANE_ROUTING",
       "MANDATORY_PIPELINE_TASKS_PENDING",
     ]));
+  });
+
+  it("does not block on audited stale history but blocks actionable dead letters", () => {
+    expect(evaluateRetestGate({
+      managedApiConfigured: false,
+      managedApiReachable: false,
+      funnel: {
+        ...cleanFunnel,
+        deadLetterTasks: 8,
+        staleHistoricalDeadLetterTasks: 8,
+      },
+    })).toEqual([]);
+
+    expect(evaluateRetestGate({
+      managedApiConfigured: false,
+      managedApiReachable: false,
+      funnel: {
+        ...cleanFunnel,
+        deadLetterTasks: 1,
+        actionableDeadLetterTasks: 1,
+      },
+    })).toContain("PIPELINE_TASKS_DEAD_LETTERED");
+  });
+
+  it("queries actionable dependencies using the persisted BLOCKED_DEPENDENCY status", () => {
+    const source = readFileSync(resolve("scripts/check_e2e_retest_gate.ts"), "utf8");
+
+    expect(source).toContain("task.status = 'BLOCKED_DEPENDENCY'");
+    expect(source).not.toContain("task.status = 'BLOCKED'");
+    expect(source).toContain("task.status <> 'DEAD_LETTER'");
+    expect(source).toContain("dead_letter.classification = 'ACTIONABLE_CURRENT'");
   });
 
   it("passes after managed API and currentness checks are clear", () => {

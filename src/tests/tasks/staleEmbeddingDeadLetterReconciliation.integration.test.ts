@@ -6,9 +6,10 @@ import dotenv from 'dotenv';
 import { runMigrations } from '../../db/migrate.js';
 import { isLocalPostgresConnectionString, pgConnectionConfig } from '../../db/pgSsl.js';
 import {
-  readPipelineDeadLetterCounts,
-  reconcileStaleEmbeddingDeadLetters,
-} from '../../tasks/pipelineTasks.js';
+  readDeadLetterTaskHealth,
+  reconcileStaleSupersededEmbeddingDeadLetters,
+  STALE_SUPERSEDED_EMBEDDING_REPAIR_ACTION,
+} from '../../tasks/deadLetterPolicy.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../../workspace/context.js';
 
 dotenv.config();
@@ -176,19 +177,27 @@ describe.skipIf(skipReal)('stale embedding dead-letter reconciliation (PostgreSQ
     await pool?.end();
   });
 
-  it('reconciles only resolved superseded embedding dead letters and preserves audit rows', async () => {
+  it('classifies and reconciles only provably superseded embedding dead letters while preserving audit fields', async () => {
     const database = getClient();
     const workspaceId = getWorkspaceId();
+    const initialHealth = await readDeadLetterTaskHealth(database, workspaceId);
+    expect(initialHealth).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        task_type: 'PUBLISH_EMBEDDING',
+        actionable_dead_letter_count: 2,
+        stale_historical_dead_letter_count: 8,
+      }),
+      expect.objectContaining({
+        task_type: 'MATCH_PROFILE_EVIDENCE',
+        actionable_dead_letter_count: 1,
+        stale_historical_dead_letter_count: 0,
+      }),
+    ]));
 
-    await expect(readPipelineDeadLetterCounts(database, workspaceId)).resolves.toEqual({
-      actionableDeadLetters: 3,
-      staleHistoricalDeadLetters: 8,
-    });
-    await expect(reconcileStaleEmbeddingDeadLetters(database, workspaceId)).resolves.toBe(8);
-    await expect(readPipelineDeadLetterCounts(database, workspaceId)).resolves.toEqual({
-      actionableDeadLetters: 3,
-      staleHistoricalDeadLetters: 0,
-    });
+    await expect(reconcileStaleSupersededEmbeddingDeadLetters(database, workspaceId)).resolves.toBe(8);
+    await expect(reconcileStaleSupersededEmbeddingDeadLetters(database, workspaceId)).resolves.toBe(0);
+    const reconciledHealth = await readDeadLetterTaskHealth(database, workspaceId);
+    expect(reconciledHealth).toEqual(initialHealth);
 
     const reconciled = await database.query<{
       id: string;
@@ -210,21 +219,17 @@ describe.skipIf(skipReal)('stale embedding dead-letter reconciliation (PostgreSQ
     );
     expect(reconciled.rows).toHaveLength(8);
     for (const row of reconciled.rows) {
-      expect(row.status).toBe('COMPLETED');
-      expect(row.last_error).toContain('original provider error');
-      expect(row.dead_letter_reason).toContain('original dead-letter reason');
+      expect(row.status).toBe('DEAD_LETTER');
+      expect(row.last_error).toBe('original provider error');
+      expect(row.dead_letter_reason).toBe('original dead-letter reason');
       expect(row.repair_action).toContain('original repair action');
-      expect(row.last_error).toContain('STALE_SUPERSEDED_PUBLISH_EMBEDDING');
-      expect(row.dead_letter_reason).toContain('STALE_SUPERSEDED_PUBLISH_EMBEDDING');
-      expect(row.repair_action).toContain('STALE_SUPERSEDED_PUBLISH_EMBEDDING');
-      expect(row.completed_at).not.toBeNull();
-      if (row.completed_at === null) throw new Error('The reconciled task has no completion timestamp.');
-      const completedAt = row.completed_at instanceof Date ? row.completed_at : new Date(row.completed_at);
-      expect(completedAt.getTime()).toBeGreaterThan(priorCompletedAt.getTime());
-      expect(row.lease_id).toBeNull();
-      expect(row.lease_expires_at).toBeNull();
-      expect(row.heartbeat_at).toBeNull();
-      expect(row.claimed_by).toBeNull();
+      expect(row.repair_action).toContain(STALE_SUPERSEDED_EMBEDDING_REPAIR_ACTION);
+      expect(row.repair_action?.split(STALE_SUPERSEDED_EMBEDDING_REPAIR_ACTION)).toHaveLength(2);
+      expect(row.completed_at).toEqual(priorCompletedAt);
+      expect(row.lease_id).not.toBeNull();
+      expect(row.lease_expires_at).not.toBeNull();
+      expect(row.heartbeat_at).not.toBeNull();
+      expect(row.claimed_by).toBe('test-worker');
       expect(row.attempt_count).toBe(3);
     }
 

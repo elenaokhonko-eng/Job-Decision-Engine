@@ -1,6 +1,10 @@
 import dotenv from "dotenv";
 import pg from "pg";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
+import {
+  DEAD_LETTER_CLASSIFICATION_SQL,
+  DEAD_LETTER_LINEAGE_JOINS_SQL,
+} from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -27,6 +31,8 @@ export interface RetestGateFunnel {
   blockedTasks: number;
   retryingTasks: number;
   deadLetterTasks: number;
+  actionableDeadLetterTasks: number;
+  staleHistoricalDeadLetterTasks: number;
 }
 
 export interface RetestGateInput {
@@ -68,7 +74,7 @@ export function evaluateRetestGate(input: RetestGateInput): string[] {
   if (funnel.mandatoryPendingTasks > 0) blockers.push("MANDATORY_PIPELINE_TASKS_PENDING");
   if (funnel.blockedTasks > 0) blockers.push("PIPELINE_TASKS_BLOCKED");
   if (funnel.retryingTasks > 0) blockers.push("PIPELINE_TASKS_RETRYING");
-  if (funnel.deadLetterTasks > 0) blockers.push("PIPELINE_TASKS_DEAD_LETTERED");
+  if (funnel.actionableDeadLetterTasks > 0) blockers.push("PIPELINE_TASKS_DEAD_LETTERED");
   return blockers;
 }
 
@@ -160,17 +166,37 @@ async function readProductionGate(pool: pg.Pool): Promise<{ funnel: RetestGateFu
                 AND dd.match_run_id = c.latest_match_run_id
                 AND dd.context_fingerprint IS NOT NULL
               WHERE c.workspace_id = $1
+           ), classified_dead_letters AS (
+             SELECT task.id,
+                    (${DEAD_LETTER_CLASSIFICATION_SQL}) AS classification
+             FROM pipeline_tasks AS task
+             ${DEAD_LETTER_LINEAGE_JOINS_SQL}
+             WHERE task.workspace_id = $1
+               AND task.status = 'DEAD_LETTER'
            ), task_counts AS (
              SELECT
-               COUNT(*) FILTER (WHERE status = 'BLOCKED_DEPENDENCY')::int AS blocked_tasks,
-               COUNT(*) FILTER (WHERE status = 'RETRY_WAIT')::int AS retrying_tasks,
-               COUNT(*) FILTER (WHERE status = 'DEAD_LETTER')::int AS dead_letter_tasks,
+               COUNT(*) FILTER (WHERE task.status = 'BLOCKED_DEPENDENCY')::int AS blocked_tasks,
+               COUNT(*) FILTER (WHERE task.status = 'RETRY_WAIT')::int AS retrying_tasks,
+               COUNT(*) FILTER (WHERE task.status = 'DEAD_LETTER')::int AS dead_letter_tasks,
                COUNT(*) FILTER (
-                 WHERE status NOT IN ('COMPLETED')
-                   AND task_type <> 'EXTRACT_QUOTED_REQUIREMENTS'
+                 WHERE task.status = 'DEAD_LETTER'
+                   AND dead_letter.classification = 'ACTIONABLE_CURRENT'
+               )::int AS actionable_dead_letter_tasks,
+               COUNT(*) FILTER (
+                 WHERE task.status = 'DEAD_LETTER'
+                   AND dead_letter.classification = 'STALE_HISTORICAL'
+               )::int AS stale_historical_dead_letter_tasks,
+               COUNT(*) FILTER (
+                 WHERE task.status NOT IN ('COMPLETED')
+                   AND task.task_type <> 'EXTRACT_QUOTED_REQUIREMENTS'
+                   AND (
+                     task.status <> 'DEAD_LETTER'
+                     OR dead_letter.classification = 'ACTIONABLE_CURRENT'
+                   )
                )::int AS mandatory_pending_tasks
-               FROM pipeline_tasks
-              WHERE workspace_id = $1
+             FROM pipeline_tasks AS task
+             LEFT JOIN classified_dead_letters AS dead_letter ON dead_letter.id = task.id
+             WHERE task.workspace_id = $1
            )
            SELECT
              COUNT(*) FILTER (WHERE c.gate_decision = 'PASS')::int AS "gatePassed",
@@ -190,12 +216,15 @@ async function readProductionGate(pool: pg.Pool): Promise<{ funnel: RetestGateFu
              task_counts.mandatory_pending_tasks AS "mandatoryPendingTasks",
              task_counts.blocked_tasks AS "blockedTasks",
              task_counts.retrying_tasks AS "retryingTasks",
-             task_counts.dead_letter_tasks AS "deadLetterTasks"
+             task_counts.dead_letter_tasks AS "deadLetterTasks",
+             task_counts.actionable_dead_letter_tasks AS "actionableDeadLetterTasks",
+             task_counts.stale_historical_dead_letter_tasks AS "staleHistoricalDeadLetterTasks"
              FROM canonical_jobs c
              CROSS JOIN task_counts
             WHERE c.workspace_id = $1
             GROUP BY task_counts.mandatory_pending_tasks, task_counts.blocked_tasks,
-                     task_counts.retrying_tasks, task_counts.dead_letter_tasks`,
+                     task_counts.retrying_tasks, task_counts.dead_letter_tasks,
+                     task_counts.actionable_dead_letter_tasks, task_counts.stale_historical_dead_letter_tasks`,
       [context.workspaceId, (await client.query<{ id: string }>(
         `SELECT id FROM profile_versions WHERE workspace_id = $1 AND status = 'ACTIVE' ORDER BY created_at DESC LIMIT 1`,
         [context.workspaceId]
