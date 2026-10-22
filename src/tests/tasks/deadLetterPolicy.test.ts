@@ -79,7 +79,7 @@ async function seedFixture(): Promise<void> {
          attempt_count, max_attempts, last_error, dead_letter_reason
        ) VALUES ($1, $2, $3, $4, $5::JSONB, 'DEAD_LETTER', 3, 3,
                  'original error retained', 'original terminal reason retained')
-       ON CONFLICT (workspace_id, task_key) DO NOTHING`,
+       ON CONFLICT DO NOTHING`,
       [task.id, workspaceId, task.task_type, task.task_key, JSON.stringify(task.payload)],
     );
   }
