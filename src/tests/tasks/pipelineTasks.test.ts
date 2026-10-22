@@ -180,6 +180,7 @@ describe("pipelineTasks", () => {
     expect(claimed[0].attemptNumber).toBe(1);
     expect(calls.some((c) => c.includes("status = 'RUNNING'"))).toBe(true);
     expect(calls.some((c) => c.includes("lease_expires_at <= NOW()"))).toBe(true);
+    expect(calls.some((c) => c.includes("ORDER BY available_at ASC, created_at ASC"))).toBe(true);
     expect(calls.some((c) => c.includes("INSERT INTO pipeline_task_attempts"))).toBe(true);
   });
 

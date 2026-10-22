@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { planPipelineStageRound } from "../../tasks/pipelineStageScheduler.js";
 import {
   PipelineWorkerCancelledError,
   buildPipelineTaskKey,
   parsePipelineStageTaskLimits,
   parsePipelineTaskTypes,
-  runPipelineStageTaskWorker,
+  runPipelineStageTaskWorker as runPipelineStageTaskWorkerImpl,
   seedRecoverablePipelineTasks,
   type PipelineStageWorkerDependencies,
   type PipelineStageWorkerOptions,
@@ -27,6 +28,18 @@ describe("stageTaskWorker", () => {
     userKey: "local_user",
     role: "OWNER" as const,
   };
+
+  function runPipelineStageTaskWorker(
+    clientOrPool: Parameters<typeof runPipelineStageTaskWorkerImpl>[0],
+    options: PipelineStageWorkerOptions = {},
+    dependenciesOverride?: PipelineStageWorkerDependencies,
+  ) {
+    return runPipelineStageTaskWorkerImpl(
+      clientOrPool,
+      { reconcileStalePending: false, ...options },
+      dependenciesOverride,
+    );
+  }
 
   function dependencies(overrides: Partial<PipelineStageWorkerDependencies> = {}): PipelineStageWorkerDependencies {
     return {
@@ -107,6 +120,24 @@ describe("stageTaskWorker", () => {
     });
     expect(() => parsePipelineStageTaskLimits("NORMALIZE_OBSERVATION=0")).toThrow("positive integer");
     expect(() => parsePipelineStageTaskLimits("UNKNOWN_STAGE=10")).toThrow("Unsupported pipeline stage");
+  });
+
+  it("allocates bounded round-robin quanta so an earlier backlog cannot drain ahead of later stages", () => {
+    const types = ["NORMALIZE_OBSERVATION", "PUBLISH_EMBEDDING", "MATCH_PROFILE_EVIDENCE"] as const;
+    const firstRound = planPipelineStageRound(types, 1, {}, {}, 100, 100);
+    expect(firstRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
+    const scarceBudgetRound = planPipelineStageRound(types, 1, {}, {}, 100, 1);
+    expect(scarceBudgetRound.map((entry) => entry.taskType)).toEqual([...types]);
+
+    const secondRound = planPipelineStageRound(
+      types,
+      1,
+      { NORMALIZE_OBSERVATION: 1, PUBLISH_EMBEDDING: 1, MATCH_PROFILE_EVIDENCE: 1 },
+      {},
+      100,
+      97,
+    );
+    expect(secondRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
   });
 
   it("versions profile matching task keys by active profile version", () => {

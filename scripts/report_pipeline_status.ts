@@ -46,7 +46,7 @@ interface SourceConnectorRow {
 
 interface StageSummary {
   stage: PipelineStage;
-  status: "SUCCESS" | "BACKLOG_HEALTHY" | "RETRYING" | "BLOCKED" | "ERROR" | "IDLE";
+  status: "SUCCESS" | "BACKLOG_HEALTHY" | "BACKLOG_AGED" | "RETRYING" | "BLOCKED" | "ERROR" | "IDLE";
   pending: number;
   retry_wait: number;
   blocked_dependency: number;
@@ -82,7 +82,7 @@ function initialStageSummary(stage: PipelineStage): StageSummary {
   };
 }
 
-export function summarizeTaskStages(rows: readonly TaskHealthRow[]): StageSummary[] {
+export function summarizeTaskStages(rows: readonly TaskHealthRow[], maxPendingAgeSeconds = 7200): StageSummary[] {
   const stages = new Map<PipelineStage, StageSummary>(
     STAGES.map((stage) => [stage, initialStageSummary(stage)]),
   );
@@ -109,6 +109,9 @@ export function summarizeTaskStages(rows: readonly TaskHealthRow[]): StageSummar
     if (summary.actionable_dead_letter > 0) return { ...summary, status: "ERROR" };
     if (summary.retry_wait > 0) return { ...summary, status: "RETRYING" };
     if (summary.blocked_dependency > 0) return { ...summary, status: "BLOCKED" };
+    if (summary.pending > 0 && summary.oldest_age_seconds > maxPendingAgeSeconds) {
+      return { ...summary, status: "BACKLOG_AGED" };
+    }
     if (summary.pending > 0 || summary.stale_historical_dead_letter > 0) {
       return { ...summary, status: "BACKLOG_HEALTHY" };
     }
@@ -312,7 +315,11 @@ async function run(): Promise<void> {
         stale_historical_dead_letter_count: Number(classified?.stale_historical_dead_letter_count ?? 0),
       };
     });
-    const stages = summarizeTaskStages(taskHealthRows);
+    const maxPendingAgeRaw = Number.parseInt(process.env.PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS ?? "7200", 10);
+    const maxPendingAgeSeconds = Number.isFinite(maxPendingAgeRaw) && maxPendingAgeRaw > 0
+      ? Math.min(maxPendingAgeRaw, 604800)
+      : 7200;
+    const stages = summarizeTaskStages(taskHealthRows, maxPendingAgeSeconds);
     const sourceStage = stages.find((stage) => stage.stage === "SOURCE_INGESTION");
     if (sourceStage) {
       sourceStage.status = Number(sourceErrors.rows[0]?.count ?? 0) > 0
@@ -336,6 +343,7 @@ async function run(): Promise<void> {
     const report = {
       generated_at: new Date().toISOString(),
       workspace_id: context.workspaceId,
+      max_pending_age_seconds: maxPendingAgeSeconds,
       stages,
       source_runs_by_connector: sources.rows,
       new_observations_last_24h: Number(observations.rows[0]?.count ?? 0),
