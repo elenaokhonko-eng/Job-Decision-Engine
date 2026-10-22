@@ -1,6 +1,10 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../src/db/pgSsl.js';
+import {
+  DEAD_LETTER_CLASSIFICATION_SQL,
+  DEAD_LETTER_LINEAGE_JOINS_SQL,
+} from '../src/tasks/deadLetterPolicy.js';
 import { resolveWorkspaceContext } from '../src/workspace/context.js';
 
 dotenv.config();
@@ -76,6 +80,8 @@ async function runBackfillCutoverAudit(): Promise<void> {
       undecided_jobs: number;
       cross_workspace_versions: number;
       dead_letter_tasks: number;
+      actionable_dead_letter_tasks: number;
+      stale_historical_dead_letter_tasks: number;
     }>(
       `
         SELECT
@@ -100,10 +106,26 @@ async function runBackfillCutoverAudit(): Promise<void> {
           ) AS cross_workspace_versions,
           (
             SELECT COUNT(*)::int
-            FROM pipeline_tasks t
-            WHERE t.workspace_id = $1
-              AND t.status = 'DEAD_LETTER'
+            FROM pipeline_tasks AS task
+            WHERE task.workspace_id = $1
+              AND task.status = 'DEAD_LETTER'
           ) AS dead_letter_tasks,
+          (
+            SELECT COUNT(*)::int
+            FROM pipeline_tasks AS task
+            ${DEAD_LETTER_LINEAGE_JOINS_SQL}
+            WHERE task.workspace_id = $1
+              AND task.status = 'DEAD_LETTER'
+              AND (${DEAD_LETTER_CLASSIFICATION_SQL}) = 'ACTIONABLE_CURRENT'
+          ) AS actionable_dead_letter_tasks,
+          (
+            SELECT COUNT(*)::int
+            FROM pipeline_tasks AS task
+            ${DEAD_LETTER_LINEAGE_JOINS_SQL}
+            WHERE task.workspace_id = $1
+              AND task.status = 'DEAD_LETTER'
+              AND (${DEAD_LETTER_CLASSIFICATION_SQL}) = 'STALE_HISTORICAL'
+          ) AS stale_historical_dead_letter_tasks,
           (
             SELECT COUNT(*)::int
             FROM document_runs dr
@@ -137,7 +159,9 @@ async function runBackfillCutoverAudit(): Promise<void> {
     console.log(`- DEFERRED_BUDGET rows: ${row.deferred_budget}`);
     console.log(`- Jobs missing deterministic recommendation_outcome: ${row.undecided_jobs}`);
     console.log(`- Cross-workspace job_versions: ${row.cross_workspace_versions}`);
-    console.log(`- Dead-letter pipeline tasks: ${row.dead_letter_tasks}`);
+    console.log(`- Dead-letter pipeline tasks (total): ${row.dead_letter_tasks}`);
+    console.log(`- Actionable current dead-letter tasks: ${row.actionable_dead_letter_tasks}`);
+    console.log(`- Stale historical superseded-version dead letters: ${row.stale_historical_dead_letter_tasks}`);
     console.log(`- Completed document runs missing DOCUMENT_READY state: ${row.docs_without_state}`);
 
     const failures =
@@ -148,7 +172,7 @@ async function runBackfillCutoverAudit(): Promise<void> {
       row.deferred_budget +
       row.undecided_jobs +
       row.cross_workspace_versions +
-      row.dead_letter_tasks +
+      row.actionable_dead_letter_tasks +
       row.docs_without_state;
 
     const findings = {
@@ -160,6 +184,8 @@ async function runBackfillCutoverAudit(): Promise<void> {
       undecided_jobs: row.undecided_jobs,
       cross_workspace_versions: row.cross_workspace_versions,
       dead_letter_tasks: row.dead_letter_tasks,
+      actionable_dead_letter_tasks: row.actionable_dead_letter_tasks,
+      stale_historical_dead_letter_tasks: row.stale_historical_dead_letter_tasks,
       docs_without_state: row.docs_without_state,
       failures,
     };

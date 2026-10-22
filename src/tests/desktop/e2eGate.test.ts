@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { evaluateDesktopE2EGate, type DesktopE2EGateInput } from "../../../scripts/check_desktop_e2e_gate.js";
 
@@ -11,6 +13,8 @@ describe("evaluateDesktopE2EGate", () => {
     migrationsPending: 0,
     aiProviderConfigured: true,
     deadLetterTasks: 0,
+    actionableDeadLetterTasks: 0,
+    staleHistoricalDeadLetterTasks: 0,
     blockedTasks: 0,
   };
 
@@ -67,13 +71,26 @@ describe("evaluateDesktopE2EGate", () => {
     expect(blockers).toContain("AI_PROVIDER_NOT_CONFIGURED");
   });
 
-  it("flags dead-lettered and blocked tasks", () => {
+  it("does not block on stale historical dead letters but blocks actionable dead letters", () => {
+    expect(evaluateDesktopE2EGate({
+      ...basePassingInput,
+      deadLetterTasks: 8,
+      staleHistoricalDeadLetterTasks: 8,
+    })).toEqual([]);
+
     const blockers = evaluateDesktopE2EGate({
       ...basePassingInput,
-      deadLetterTasks: 2,
+      deadLetterTasks: 1,
+      actionableDeadLetterTasks: 1,
       blockedTasks: 1,
     });
     expect(blockers).toContain("PIPELINE_TASKS_DEAD_LETTERED");
     expect(blockers).toContain("PIPELINE_TASKS_BLOCKED");
+  });
+
+  it("uses the actual blocked dependency state in its database query", () => {
+    const source = readFileSync(resolve("scripts/check_desktop_e2e_gate.ts"), "utf8");
+    expect(source).toContain("task.status = 'BLOCKED_DEPENDENCY'");
+    expect(source).not.toContain("task.status = 'BLOCKED'");
   });
 });

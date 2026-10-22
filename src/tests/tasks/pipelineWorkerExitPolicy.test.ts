@@ -4,10 +4,11 @@ import { enforcePipelineWorkerExitPolicy } from "../../tasks/pipelineWorkerExitP
 
 const healthyInput = {
   claimedThisRun: 1,
+  completedThisRun: 1,
   failedThisRun: 0,
   deadLetteredThisRun: 0,
-  actionableDeadLetters: 0,
-  staleHistoricalDeadLetters: 0,
+  actionableCurrentDeadLetterCount: 0,
+  staleHistoricalDeadLetterCount: 0,
   retryWaitCount: 0,
   oldestRetryWaitAgeSeconds: 0,
   activePendingCount: 0,
@@ -16,6 +17,8 @@ const healthyInput = {
   maxRetryWaitCount: 5,
   maxRetryWaitAgeSeconds: 3600,
   maxPendingAgeSeconds: 3600,
+  activePendingCountBefore: 0,
+  oldestActivePendingAgeSecondsBefore: 0,
   noProgressPendingThreshold: 1,
 };
 
@@ -39,40 +42,77 @@ describe("pipeline worker exit policy", () => {
     })).toThrow("moved 1 task(s) to RETRY_WAIT");
   });
 
-  it("permits healthy bounded progress with an older remaining pending queue", () => {
+  it.each([
+    {
+      progressMetric: "pending count",
+      activePendingCountBefore: 120,
+      activePendingCount: 100,
+      oldestActivePendingAgeSecondsBefore: 100000,
+      oldestActivePendingAgeSeconds: 100000,
+    },
+    {
+      progressMetric: "oldest pending age",
+      activePendingCountBefore: 100,
+      activePendingCount: 100,
+      oldestActivePendingAgeSecondsBefore: 100000,
+      oldestActivePendingAgeSeconds: 99900,
+    },
+  ])("permits a clean bounded run when $progressMetric measurably improves", ({
+    activePendingCountBefore,
+    activePendingCount,
+    oldestActivePendingAgeSecondsBefore,
+    oldestActivePendingAgeSeconds,
+  }) => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
       claimedThisRun: 12,
+      completedThisRun: 12,
+      activePendingCountBefore,
+      activePendingCount,
+      oldestActivePendingAgeSecondsBefore,
+      oldestActivePendingAgeSeconds,
+      exitReason: "WALL_CLOCK_BUDGET_REACHED",
+    })).not.toThrow();
+  });
+
+  it.each([
+    { completedThisRun: 0, failedThisRun: 0 },
+    { completedThisRun: 1, failedThisRun: 1 },
+  ])("keeps the pending-age SLO when bounded work did not complete cleanly", ({ completedThisRun, failedThisRun }) => {
+    expect(() => enforcePipelineWorkerExitPolicy({
+      ...healthyInput,
+      claimedThisRun: 12,
+      completedThisRun,
+      failedThisRun,
+      activePendingCountBefore: 100,
       activePendingCount: 100,
+      oldestActivePendingAgeSecondsBefore: 100000,
       oldestActivePendingAgeSeconds: 100000,
       exitReason: "WALL_CLOCK_BUDGET_REACHED",
+    })).toThrow("Pending queue age exceeded SLO");
+  });
+
+  it("permits inherited stale historical dead letters after they are reconciled", () => {
+    expect(() => enforcePipelineWorkerExitPolicy({
+      ...healthyInput,
+      deadLetteredThisRun: 0,
+      actionableCurrentDeadLetterCount: 0,
+      staleHistoricalDeadLetterCount: 8,
     })).not.toThrow();
   });
 
-  it("permits bounded progress when only stale historical dead letters remain", () => {
+  it("fails for actionable current and newly created dead letters", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
-      claimedThisRun: 73,
-      exitReason: "WALL_CLOCK_BUDGET_REACHED",
-      staleHistoricalDeadLetters: 8,
-    })).not.toThrow();
-  });
-
-  it("fails while actionable current-version dead letters remain", () => {
-    expect(() => enforcePipelineWorkerExitPolicy({
-      ...healthyInput,
-      actionableDeadLetters: 1,
+      actionableCurrentDeadLetterCount: 1,
     })).toThrow("1 actionable current DEAD_LETTER");
-  });
-
-  it("fails when this run creates a new dead letter", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
       deadLetteredThisRun: 1,
-    })).toThrow("newly dead-lettered 1 task(s) this run");
+    })).toThrow("created 1 DEAD_LETTER");
   });
 
-  it("preserves retry SLO and no-forward-progress protections", () => {
+  it("fails for retry SLO breaches and no forward progress", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
       retryWaitCount: 6,

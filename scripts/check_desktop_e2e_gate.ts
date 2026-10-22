@@ -2,6 +2,10 @@ import dotenv from "dotenv";
 import pg from "pg";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { getMigrationStatus } from "../src/db/migrate.js";
+import {
+  DEAD_LETTER_CLASSIFICATION_SQL,
+  DEAD_LETTER_LINEAGE_JOINS_SQL,
+} from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext, DEFAULT_WORKSPACE_KEY, DEFAULT_USER_KEY } from "../src/workspace/context.js";
 import { verifyDesktopPackaging } from "./verify_desktop_packaging.js";
 import { startLocalServer } from "../src/desktop/localServer.js";
@@ -18,6 +22,8 @@ export interface DesktopE2EGateInput {
   migrationsPending: number;
   aiProviderConfigured: boolean;
   deadLetterTasks: number;
+  actionableDeadLetterTasks: number;
+  staleHistoricalDeadLetterTasks: number;
   blockedTasks: number;
 }
 
@@ -38,7 +44,7 @@ export function evaluateDesktopE2EGate(input: DesktopE2EGateInput): string[] {
     blockers.push("AI_PROVIDER_NOT_CONFIGURED");
   }
 
-  if (input.deadLetterTasks > 0) blockers.push("PIPELINE_TASKS_DEAD_LETTERED");
+  if (input.actionableDeadLetterTasks > 0) blockers.push("PIPELINE_TASKS_DEAD_LETTERED");
   if (input.blockedTasks > 0) blockers.push("PIPELINE_TASKS_BLOCKED");
 
   return blockers;
@@ -85,6 +91,8 @@ export async function checkDesktopE2EGate(): Promise<{
   let schemaInitialized = false;
   let pendingMigrations = 0;
   let deadLetters = 0;
+  let actionableDeadLetters = 0;
+  let staleHistoricalDeadLetters = 0;
   let blockedTasks = 0;
 
   if (dbConfigured) {
@@ -108,13 +116,33 @@ export async function checkDesktopE2EGate(): Promise<{
 
           // Check tasks
           const taskRes = await client.query(
-            `SELECT 
-               COUNT(*) FILTER (WHERE status = 'DEAD_LETTER') as dead_letters,
-               COUNT(*) FILTER (WHERE status = 'BLOCKED') as blocked
-             FROM pipeline_tasks WHERE workspace_id = $1`,
+            `WITH classified_dead_letters AS (
+               SELECT task.id,
+                      (${DEAD_LETTER_CLASSIFICATION_SQL}) AS classification
+               FROM pipeline_tasks AS task
+               ${DEAD_LETTER_LINEAGE_JOINS_SQL}
+               WHERE task.workspace_id = $1
+                 AND task.status = 'DEAD_LETTER'
+             )
+             SELECT
+               COUNT(*) FILTER (WHERE task.status = 'DEAD_LETTER') AS dead_letters,
+               COUNT(*) FILTER (
+                 WHERE task.status = 'DEAD_LETTER'
+                   AND dead_letter.classification = 'ACTIONABLE_CURRENT'
+               ) AS actionable_dead_letters,
+               COUNT(*) FILTER (
+                 WHERE task.status = 'DEAD_LETTER'
+                   AND dead_letter.classification = 'STALE_HISTORICAL'
+               ) AS stale_historical_dead_letters,
+               COUNT(*) FILTER (WHERE task.status = 'BLOCKED_DEPENDENCY') AS blocked
+             FROM pipeline_tasks AS task
+             LEFT JOIN classified_dead_letters AS dead_letter ON dead_letter.id = task.id
+             WHERE task.workspace_id = $1`,
             [ctx.workspaceId]
           );
           deadLetters = Number.parseInt(taskRes.rows[0]?.dead_letters || "0", 10);
+          actionableDeadLetters = Number.parseInt(taskRes.rows[0]?.actionable_dead_letters || "0", 10);
+          staleHistoricalDeadLetters = Number.parseInt(taskRes.rows[0]?.stale_historical_dead_letters || "0", 10);
           blockedTasks = Number.parseInt(taskRes.rows[0]?.blocked || "0", 10);
         }
       } finally {
@@ -140,6 +168,8 @@ export async function checkDesktopE2EGate(): Promise<{
     migrationsPending: pendingMigrations,
     aiProviderConfigured: aiConfigured,
     deadLetterTasks: deadLetters,
+    actionableDeadLetterTasks: actionableDeadLetters,
+    staleHistoricalDeadLetterTasks: staleHistoricalDeadLetters,
     blockedTasks,
   };
 

@@ -1,6 +1,10 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
+import {
+  DEAD_LETTER_CLASSIFICATION_SQL,
+  DEAD_LETTER_LINEAGE_JOINS_SQL,
+} from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -30,6 +34,8 @@ interface ReconciliationReport {
     blocked_tasks: number;
     retrying_tasks: number;
     dead_letter_tasks: number;
+    actionable_dead_letter_tasks: number;
+    stale_historical_dead_letter_tasks: number;
   };
   samples: {
     pass_missing_current_requirements: string[];
@@ -211,6 +217,8 @@ async function run(): Promise<void> {
       blocked_tasks: number;
       retrying_tasks: number;
       dead_letter_tasks: number;
+      actionable_dead_letter_tasks: number;
+      stale_historical_dead_letter_tasks: number;
     }>(
       `WITH latest_versions AS (
          SELECT c.id AS canonical_job_id,
@@ -308,13 +316,30 @@ async function run(): Promise<void> {
            AND COALESCE(mr.matched_count, 0) > 0
            AND NOT EXISTS (SELECT 1 FROM current_matches cm WHERE cm.canonical_job_id = c.id)
        ),
+       classified_dead_letters AS (
+         SELECT task.id,
+                (${DEAD_LETTER_CLASSIFICATION_SQL}) AS classification
+         FROM pipeline_tasks AS task
+         ${DEAD_LETTER_LINEAGE_JOINS_SQL}
+         WHERE task.workspace_id = $1
+           AND task.status = 'DEAD_LETTER'
+       ),
        task_counts AS (
          SELECT
-           COALESCE(SUM(task_count) FILTER (WHERE status = 'BLOCKED_DEPENDENCY'), 0)::int AS blocked_tasks,
-           COALESCE(SUM(task_count) FILTER (WHERE status = 'RETRY_WAIT'), 0)::int AS retrying_tasks,
-           COALESCE(SUM(task_count) FILTER (WHERE status = 'DEAD_LETTER'), 0)::int AS dead_letter_tasks
-         FROM v_pipeline_task_queue_health
-         WHERE workspace_id = $1
+           COUNT(*) FILTER (WHERE task.status = 'BLOCKED_DEPENDENCY')::int AS blocked_tasks,
+           COUNT(*) FILTER (WHERE task.status = 'RETRY_WAIT')::int AS retrying_tasks,
+           COUNT(*) FILTER (WHERE task.status = 'DEAD_LETTER')::int AS dead_letter_tasks,
+           COUNT(*) FILTER (
+             WHERE task.status = 'DEAD_LETTER'
+               AND dead_letter.classification = 'ACTIONABLE_CURRENT'
+           )::int AS actionable_dead_letter_tasks,
+           COUNT(*) FILTER (
+             WHERE task.status = 'DEAD_LETTER'
+               AND dead_letter.classification = 'STALE_HISTORICAL'
+           )::int AS stale_historical_dead_letter_tasks
+         FROM pipeline_tasks AS task
+         LEFT JOIN classified_dead_letters AS dead_letter ON dead_letter.id = task.id
+         WHERE task.workspace_id = $1
        )
        SELECT
          (SELECT COUNT(*)::int FROM canonical_jobs WHERE workspace_id = $1 AND is_test_fixture = FALSE) AS canonical_jobs,
@@ -329,7 +354,9 @@ async function run(): Promise<void> {
          (SELECT COUNT(*)::int FROM stale_matches) AS stale_or_unprovable_matches,
          task_counts.blocked_tasks,
          task_counts.retrying_tasks,
-         task_counts.dead_letter_tasks
+         task_counts.dead_letter_tasks,
+         task_counts.actionable_dead_letter_tasks,
+         task_counts.stale_historical_dead_letter_tasks
        FROM task_counts`,
       [
         ctx.workspaceId,

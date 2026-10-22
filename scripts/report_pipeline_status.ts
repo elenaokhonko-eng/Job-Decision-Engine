@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import pg from "pg";
 
 import { pgPoolConfig } from "../src/db/pgSsl.js";
+import { readDeadLetterTaskHealth } from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -33,6 +34,8 @@ interface TaskHealthRow {
   status: string;
   task_count: number;
   oldest_age_seconds: number | null;
+  actionable_dead_letter_count?: number;
+  stale_historical_dead_letter_count?: number;
 }
 
 interface SourceConnectorRow {
@@ -48,6 +51,8 @@ interface StageSummary {
   retry_wait: number;
   blocked_dependency: number;
   dead_letter: number;
+  actionable_dead_letter: number;
+  stale_historical_dead_letter: number;
   oldest_age_seconds: number;
 }
 
@@ -71,6 +76,8 @@ function initialStageSummary(stage: PipelineStage): StageSummary {
     retry_wait: 0,
     blocked_dependency: 0,
     dead_letter: 0,
+    actionable_dead_letter: 0,
+    stale_historical_dead_letter: 0,
     oldest_age_seconds: 0,
   };
 }
@@ -89,16 +96,22 @@ export function summarizeTaskStages(rows: readonly TaskHealthRow[]): StageSummar
     if (row.status === "PENDING") summary.pending += count;
     if (row.status === "RETRY_WAIT") summary.retry_wait += count;
     if (row.status === "BLOCKED_DEPENDENCY") summary.blocked_dependency += count;
-    if (row.status === "DEAD_LETTER") summary.dead_letter += count;
+    if (row.status === "DEAD_LETTER") {
+      summary.dead_letter += count;
+      summary.actionable_dead_letter += Number(row.actionable_dead_letter_count ?? count);
+      summary.stale_historical_dead_letter += Number(row.stale_historical_dead_letter_count ?? 0);
+    }
     summary.oldest_age_seconds = Math.max(summary.oldest_age_seconds, Number(row.oldest_age_seconds ?? 0));
   }
 
   return STAGES.map((stage) => {
     const summary = stages.get(stage) ?? initialStageSummary(stage);
-    if (summary.dead_letter > 0) return { ...summary, status: "ERROR" };
+    if (summary.actionable_dead_letter > 0) return { ...summary, status: "ERROR" };
     if (summary.retry_wait > 0) return { ...summary, status: "RETRYING" };
     if (summary.blocked_dependency > 0) return { ...summary, status: "BLOCKED" };
-    if (summary.pending > 0) return { ...summary, status: "BACKLOG_HEALTHY" };
+    if (summary.pending > 0 || summary.stale_historical_dead_letter > 0) {
+      return { ...summary, status: "BACKLOG_HEALTHY" };
+    }
     return summary;
   });
 }
@@ -123,10 +136,10 @@ function toMarkdown(report: Record<string, unknown>): string {
   const lines = [
     "## Pipeline status",
     "",
-    "| Stage | Status | Pending | Retry | Blocked | Dead letter | Oldest age (s) |",
-    "|---|---:|---:|---:|---:|---:|---:|",
+    "| Stage | Status | Pending | Retry | Blocked | Dead letter total | Actionable dead letter | Stale historical dead letter | Oldest age (s) |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ...stages.map((stage) =>
-      `| ${stage.stage} | ${stage.status} | ${stage.pending} | ${stage.retry_wait} | ${stage.blocked_dependency} | ${stage.dead_letter} | ${stage.oldest_age_seconds} |`,
+      `| ${stage.stage} | ${stage.status} | ${stage.pending} | ${stage.retry_wait} | ${stage.blocked_dependency} | ${stage.dead_letter} | ${stage.actionable_dead_letter} | ${stage.stale_historical_dead_letter} | ${stage.oldest_age_seconds} |`,
     ),
     "",
     "### Source runs by connector",
@@ -135,11 +148,15 @@ function toMarkdown(report: Record<string, unknown>): string {
     "|---|---:|---:|",
     ...sourceRows.map((row) => `| ${markdownText(row.connector)} | ${row.observations} | ${row.source_runs} |`),
     "",
+    `Dead letters created in this run: ${report.dead_letters_created_this_run ?? "not available"}`,
+    `Actionable current dead letters: ${report.actionable_dead_letters}`,
+    `Stale historical dead letters: ${report.stale_historical_dead_letters}`,
+    "",
     "### Pending queue by task type",
     "",
-    "| Task type | State | Count | Oldest age (s) |",
-    "|---|---|---:|---:|",
-    ...taskRows.map((row) => `| ${markdownText(row.task_type)} | ${markdownText(row.status)} | ${row.task_count} | ${row.oldest_age_seconds ?? 0} |`),
+    "| Task type | State | Count | Actionable dead letters | Stale historical dead letters | Oldest age (s) |",
+    "|---|---|---:|---:|---:|---:|",
+    ...taskRows.map((row) => `| ${markdownText(row.task_type)} | ${markdownText(row.status)} | ${row.task_count} | ${row.actionable_dead_letter_count ?? 0} | ${row.stale_historical_dead_letter_count ?? 0} | ${row.oldest_age_seconds ?? 0} |`),
     "",
     `Retry reasons: ${formatCounts(retryReasons)}`,
     "",
@@ -175,6 +192,7 @@ async function run(): Promise<void> {
       sourceErrors,
       retryReasons,
       blockedReasons,
+      deadLetterHealth,
     ] = await Promise.all([
       pool.query<TaskHealthRow>(
         `SELECT task_type, status, task_count, oldest_age_seconds
@@ -279,9 +297,22 @@ async function run(): Promise<void> {
          ORDER BY count DESC, key`,
         [context.workspaceId],
       ),
+      readDeadLetterTaskHealth(pool, context.workspaceId),
     ]);
 
-    const stages = summarizeTaskStages(taskHealth.rows);
+    const deadLetterHealthByType = new Map(
+      deadLetterHealth.map((row) => [row.task_type, row]),
+    );
+    const taskHealthRows = taskHealth.rows.map((row) => {
+      if (row.status !== "DEAD_LETTER") return row;
+      const classified = deadLetterHealthByType.get(row.task_type);
+      return {
+        ...row,
+        actionable_dead_letter_count: Number(classified?.actionable_dead_letter_count ?? row.task_count),
+        stale_historical_dead_letter_count: Number(classified?.stale_historical_dead_letter_count ?? 0),
+      };
+    });
+    const stages = summarizeTaskStages(taskHealthRows);
     const sourceStage = stages.find((stage) => stage.stage === "SOURCE_INGESTION");
     if (sourceStage) {
       sourceStage.status = Number(sourceErrors.rows[0]?.count ?? 0) > 0
@@ -291,13 +322,33 @@ async function run(): Promise<void> {
           : "IDLE";
     }
 
+    const deadLettersCreatedThisRunRaw = process.env.PIPELINE_DEAD_LETTERED_THIS_RUN?.trim();
+    const deadLettersCreatedThisRun = deadLettersCreatedThisRunRaw === undefined || deadLettersCreatedThisRunRaw === ""
+      ? null
+      : Number(deadLettersCreatedThisRunRaw);
+    if (
+      deadLettersCreatedThisRun !== null &&
+      (!Number.isInteger(deadLettersCreatedThisRun) || deadLettersCreatedThisRun < 0)
+    ) {
+      throw new Error("PIPELINE_DEAD_LETTERED_THIS_RUN must be a non-negative integer when provided.");
+    }
+
     const report = {
       generated_at: new Date().toISOString(),
       workspace_id: context.workspaceId,
       stages,
       source_runs_by_connector: sources.rows,
       new_observations_last_24h: Number(observations.rows[0]?.count ?? 0),
-      pending_queue_by_task_type: taskHealth.rows,
+      pending_queue_by_task_type: taskHealthRows,
+      actionable_dead_letters: deadLetterHealth.reduce(
+        (total, row) => total + Number(row.actionable_dead_letter_count),
+        0,
+      ),
+      stale_historical_dead_letters: deadLetterHealth.reduce(
+        (total, row) => total + Number(row.stale_historical_dead_letter_count),
+        0,
+      ),
+      dead_letters_created_this_run: deadLettersCreatedThisRun,
       processing_state_counts: states.rows,
       routing_disposition_counts: routing.rows,
       retry_wait_reasons: retryReasons.rows,

@@ -16,6 +16,7 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('id: process_pipeline_worker');
     expect(workflow).toContain('PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: pipeline-dead-letter-health.json');
     expect(workflow).toContain('pipeline-dead-letter-health-${{ github.run_id }}');
+    expect(workflow).toContain('PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}');
     expect(workflow).toContain('DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}');
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json');
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json');
@@ -99,6 +100,10 @@ describe('process backlog workflow', () => {
     expect(script).toContain('abortSignal: shutdownController.signal');
     expect(script).toContain('PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS');
     expect(script).toContain('enforcePipelineWorkerExitPolicy');
+    expect(script).toContain('reconcileStaleSupersededEmbeddingDeadLetters');
+    expect(script).toContain('actionableCurrentDeadLetter');
+    expect(script).toContain('staleHistoricalDeadLetter');
+    expect(script).toContain('dead_lettered_this_run=${summary.deadLettered}');
     expect(script).toContain('PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT');
     expect(script).toContain('PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS');
     expect(script).toContain('process.exitCode = workerError instanceof PipelineWorkerCancelledError ? 130 : 1');

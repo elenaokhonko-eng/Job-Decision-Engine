@@ -168,6 +168,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PIPELINE_WORKFLOW_NAME: Process Discovery Backlog
+          PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}
           PIPELINE_STATUS_REPORT_FILE: pipeline-status-backlog.json
         run: npx tsx scripts/report_pipeline_status.ts
 

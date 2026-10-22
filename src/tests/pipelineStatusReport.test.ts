@@ -46,19 +46,43 @@ describe("pipeline status report", () => {
     });
   });
 
-  it("marks only dead-lettered work as an error stage", () => {
+  it("keeps stale superseded dead letters visible without marking the stage as an error", () => {
+    const stages = summarizeTaskStages([
+      {
+        task_type: "PUBLISH_EMBEDDING",
+        status: "DEAD_LETTER",
+        task_count: 8,
+        oldest_age_seconds: 120,
+        actionable_dead_letter_count: 0,
+        stale_historical_dead_letter_count: 8,
+      },
+    ]);
+
+    expect(stages.find((stage) => stage.stage === "EMBEDDINGS")).toMatchObject({
+      status: "BACKLOG_HEALTHY",
+      dead_letter: 8,
+      actionable_dead_letter: 0,
+      stale_historical_dead_letter: 8,
+    });
+  });
+
+  it("marks actionable dead-lettered work as an error stage", () => {
     const stages = summarizeTaskStages([
       {
         task_type: "ROUTE_LANE",
         status: "DEAD_LETTER",
         task_count: 1,
         oldest_age_seconds: 120,
+        actionable_dead_letter_count: 1,
+        stale_historical_dead_letter_count: 0,
       },
     ]);
 
     expect(stages.find((stage) => stage.stage === "LANE_ROUTING")).toMatchObject({
       status: "ERROR",
       dead_letter: 1,
+      actionable_dead_letter: 1,
+      stale_historical_dead_letter: 0,
     });
   });
 });

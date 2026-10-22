@@ -1,13 +1,16 @@
 export interface PipelineWorkerExitPolicyInput {
   claimedThisRun: number;
+  completedThisRun: number;
   failedThisRun: number;
   exitReason?: "QUEUE_DRAINED" | "MAX_TASKS_REACHED" | "WALL_CLOCK_BUDGET_REACHED" | "STAGE_LIMIT_REACHED";
   deadLetteredThisRun: number;
-  actionableDeadLetters: number;
-  staleHistoricalDeadLetters: number;
+  actionableCurrentDeadLetterCount: number;
+  staleHistoricalDeadLetterCount: number;
   retryWaitCount: number;
   oldestRetryWaitAgeSeconds: number;
+  activePendingCountBefore: number;
   activePendingCount: number;
+  oldestActivePendingAgeSecondsBefore: number;
   oldestActivePendingAgeSeconds: number;
   failOnRetryWait: boolean;
   maxRetryWaitCount: number;
@@ -18,10 +21,14 @@ export interface PipelineWorkerExitPolicyInput {
 
 export function enforcePipelineWorkerExitPolicy(input: PipelineWorkerExitPolicyInput): void {
   if (input.deadLetteredThisRun > 0) {
-    throw new Error(`Pipeline task worker newly dead-lettered ${input.deadLetteredThisRun} task(s) this run.`);
+    throw new Error(
+      `Pipeline task worker created ${input.deadLetteredThisRun} DEAD_LETTER task(s) in this run.`,
+    );
   }
-  if (input.actionableDeadLetters > 0) {
-    throw new Error(`Pipeline task worker has ${input.actionableDeadLetters} actionable current DEAD_LETTER task(s).`);
+  if (input.actionableCurrentDeadLetterCount > 0) {
+    throw new Error(
+      `Pipeline task worker has ${input.actionableCurrentDeadLetterCount} actionable current DEAD_LETTER task(s).`,
+    );
   }
   if (input.failOnRetryWait && input.failedThisRun > 0) {
     throw new Error(
@@ -36,8 +43,15 @@ export function enforcePipelineWorkerExitPolicy(input: PipelineWorkerExitPolicyI
       `Retry backlog age exceeded SLO: ${input.oldestRetryWaitAgeSeconds}s > ${input.maxRetryWaitAgeSeconds}s.`,
     );
   }
+  // Old pending work is tolerated on bounded runs only when the measured backlog or age improves.
+  const pendingBacklogProgress =
+    input.activePendingCount < input.activePendingCountBefore
+    || input.oldestActivePendingAgeSeconds < input.oldestActivePendingAgeSecondsBefore;
   const boundedProgressExit =
     input.claimedThisRun > 0
+    && input.completedThisRun > 0
+    && input.failedThisRun === 0
+    && pendingBacklogProgress
     && ["MAX_TASKS_REACHED", "WALL_CLOCK_BUDGET_REACHED", "STAGE_LIMIT_REACHED"].includes(input.exitReason || "");
   if (!boundedProgressExit && input.oldestActivePendingAgeSeconds > input.maxPendingAgeSeconds) {
     throw new Error(

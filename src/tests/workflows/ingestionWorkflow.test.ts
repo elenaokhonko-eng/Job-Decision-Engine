@@ -21,5 +21,6 @@ describe("discovery ingestion workflow", () => {
     expect(workflow).toContain('PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: pipeline-dead-letter-health.json');
     expect(workflow).toContain('pipeline-dead-letter-health-ingestion-${{ github.run_id }}');
     expect(workflow).toContain('scripts/report_pipeline_status.ts');
+    expect(workflow).toContain('PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}');
   });
 });
