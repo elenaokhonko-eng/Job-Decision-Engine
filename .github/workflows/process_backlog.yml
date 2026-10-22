@@ -86,6 +86,7 @@ jobs:
         run: npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json
 
       - name: Process saved discovery backlog
+        id: process_pipeline_worker
         timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -119,6 +120,7 @@ jobs:
           PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE: ${{ vars.PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE || '1' }}
           PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '200' }}
           PIPELINE_TASK_WORKER_TASK_TYPES: ${{ vars.PIPELINE_TASK_WORKER_TASK_TYPES || '' }}
+          PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: pipeline-dead-letter-health.json
           PIPELINE_TASK_WORKER_SEED: ${{ vars.PIPELINE_TASK_WORKER_SEED || 'true' }}
           PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'
           # Deferred routing replay is opt-in; keep normal scheduled drains conservative.
@@ -176,6 +178,14 @@ jobs:
           name: pipeline-status-backlog-${{ github.run_id }}
           path: pipeline-status-backlog.json
           if-no-files-found: error
+
+      - name: Upload pipeline task dead-letter health
+        if: ${{ always() && steps.process_pipeline_worker.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-dead-letter-health-${{ github.run_id }}
+          path: pipeline-dead-letter-health.json
+          if-no-files-found: warn
 
       - name: Upload pipeline reconciliation evidence
         if: ${{ always() }}

@@ -152,6 +152,7 @@ jobs:
           REQUIREMENTS_ENABLE_QUOTED: 'true'
         run: npx tsx scripts/preflight_models.ts
       - name: Process discovery pipeline
+        id: process_pipeline_worker
         timeout-minutes: 15
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -185,6 +186,7 @@ jobs:
           PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE: ${{ vars.PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE || '1' }}
           PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '200' }}
           PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'
+          PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: pipeline-dead-letter-health.json
           PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'
           PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT: ${{ vars.PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT || '500' }}
           PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_AGE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_AGE_SECONDS || '21600' }}
@@ -232,6 +234,13 @@ jobs:
           name: pipeline-status-ingestion-${{ github.run_id }}
           path: pipeline-status-ingestion.json
           if-no-files-found: error
+      - name: Upload pipeline task dead-letter health
+        if: ${{ always() && steps.process_pipeline_worker.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-dead-letter-health-ingestion-${{ github.run_id }}
+          path: pipeline-dead-letter-health.json
+          if-no-files-found: warn
       - name: Check ingestion completeness
         if: ${{ always() && (needs.gmail_ingestion.result != 'success' || needs.public_source_ingestion.result != 'success') }}
         run: |

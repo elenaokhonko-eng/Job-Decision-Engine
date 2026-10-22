@@ -3,7 +3,8 @@ export interface PipelineWorkerExitPolicyInput {
   failedThisRun: number;
   exitReason?: "QUEUE_DRAINED" | "MAX_TASKS_REACHED" | "WALL_CLOCK_BUDGET_REACHED" | "STAGE_LIMIT_REACHED";
   deadLetteredThisRun: number;
-  deadLetterCount: number;
+  actionableDeadLetters: number;
+  staleHistoricalDeadLetters: number;
   retryWaitCount: number;
   oldestRetryWaitAgeSeconds: number;
   activePendingCount: number;
@@ -16,8 +17,11 @@ export interface PipelineWorkerExitPolicyInput {
 }
 
 export function enforcePipelineWorkerExitPolicy(input: PipelineWorkerExitPolicyInput): void {
-  if (input.deadLetterCount > 0 || input.deadLetteredThisRun > 0) {
-    throw new Error(`Pipeline task worker has ${input.deadLetterCount} DEAD_LETTER task(s).`);
+  if (input.deadLetteredThisRun > 0) {
+    throw new Error(`Pipeline task worker newly dead-lettered ${input.deadLetteredThisRun} task(s) this run.`);
+  }
+  if (input.actionableDeadLetters > 0) {
+    throw new Error(`Pipeline task worker has ${input.actionableDeadLetters} actionable current DEAD_LETTER task(s).`);
   }
   if (input.failOnRetryWait && input.failedThisRun > 0) {
     throw new Error(
