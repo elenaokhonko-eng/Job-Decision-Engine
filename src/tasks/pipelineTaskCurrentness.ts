@@ -812,8 +812,8 @@ export async function reconcileStalePendingPipelineTasks(
            claimed_by = NULL,
            completed_at = NOW(),
            updated_at = NOW(),
-           last_error = concat_ws(E'\\n', NULLIF(last_error, ''), $3),
-           repair_action = concat_ws(E'\\n', NULLIF(repair_action, ''), $4)
+           last_error = concat_ws(E'\\n', NULLIF(last_error, ''), $3::text),
+           repair_action = concat_ws(E'\\n', NULLIF(repair_action, ''), $4::text)
        WHERE workspace_id = $1
          AND id = $2
          AND status = 'PENDING'`,
