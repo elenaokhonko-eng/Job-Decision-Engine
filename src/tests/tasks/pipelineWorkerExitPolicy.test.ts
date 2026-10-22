@@ -42,15 +42,35 @@ describe("pipeline worker exit policy", () => {
     })).toThrow("moved 1 task(s) to RETRY_WAIT");
   });
 
-  it("permits healthy bounded progress with an older remaining pending queue", () => {
+  it.each([
+    {
+      progressMetric: "pending count",
+      activePendingCountBefore: 120,
+      activePendingCount: 100,
+      oldestActivePendingAgeSecondsBefore: 100000,
+      oldestActivePendingAgeSeconds: 100000,
+    },
+    {
+      progressMetric: "oldest pending age",
+      activePendingCountBefore: 100,
+      activePendingCount: 100,
+      oldestActivePendingAgeSecondsBefore: 100000,
+      oldestActivePendingAgeSeconds: 99900,
+    },
+  ])("permits a clean bounded run when $progressMetric measurably improves", ({
+    activePendingCountBefore,
+    activePendingCount,
+    oldestActivePendingAgeSecondsBefore,
+    oldestActivePendingAgeSeconds,
+  }) => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
       claimedThisRun: 12,
       completedThisRun: 12,
-      activePendingCountBefore: 120,
-      activePendingCount: 100,
-      oldestActivePendingAgeSecondsBefore: 100000,
-      oldestActivePendingAgeSeconds: 99900,
+      activePendingCountBefore,
+      activePendingCount,
+      oldestActivePendingAgeSecondsBefore,
+      oldestActivePendingAgeSeconds,
       exitReason: "WALL_CLOCK_BUDGET_REACHED",
     })).not.toThrow();
   });
