@@ -193,7 +193,6 @@ jobs:
           PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS || '7200' }}
           PIPELINE_TASK_WORKER_NO_FORWARD_PROGRESS_PENDING_THRESHOLD: ${{ vars.PIPELINE_TASK_WORKER_NO_FORWARD_PROGRESS_PENDING_THRESHOLD || '1' }}
           PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '10000' }}
-        id: process_pipeline
         run: npx tsx scripts/process_pipeline_tasks.ts
       - name: Run AI evaluation queue processor
         timeout-minutes: 15
@@ -226,7 +225,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PIPELINE_WORKFLOW_NAME: Job Discovery Ingestion
-          PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline.outputs.dead_lettered_this_run }}
+          PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}
           PIPELINE_STATUS_REPORT_FILE: pipeline-status-ingestion.json
         run: npx tsx scripts/report_pipeline_status.ts
       - name: Upload pipeline status report
