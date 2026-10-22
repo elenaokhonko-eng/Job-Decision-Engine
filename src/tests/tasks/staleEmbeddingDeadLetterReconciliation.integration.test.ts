@@ -24,9 +24,12 @@ let schemaName = '';
 let context: WorkspaceContext | undefined;
 let staleTaskIds: string[] = [];
 let originalAttemptTaskId = '';
+let staleCanonicalJobId = '';
 let currentTaskId = '';
 let nonEmbeddingTaskId = '';
 let unresolvedTaskId = '';
+let wrongOwnerTaskId = '';
+let nullLatestPointerTaskId = '';
 let priorCompletedAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
 function getClient(): pg.PoolClient {
@@ -139,6 +142,7 @@ describe.skipIf(skipReal)('stale embedding dead-letter reconciliation (PostgreSQ
     }
 
     const firstVersion = versions[0];
+    staleCanonicalJobId = versions[1].canonicalJobId;
     originalAttemptTaskId = staleTaskIds[0];
     await client.query(
       `INSERT INTO pipeline_task_attempts (
@@ -166,6 +170,23 @@ describe.skipIf(skipReal)('stale embedding dead-letter reconciliation (PostgreSQ
       jobVersionId: crypto.randomUUID(),
       suffix: 'unresolved',
     });
+    wrongOwnerTaskId = await insertDeadLetterTask({
+      taskType: 'PUBLISH_EMBEDDING',
+      canonicalJobId: firstVersion.canonicalJobId,
+      jobVersionId: versions[1].oldVersionId,
+      suffix: 'wrong-version-owner',
+    });
+    const nullLatestVersion = await insertCanonicalVersions(4);
+    await client.query(
+      `UPDATE canonical_jobs SET latest_job_version_id = NULL WHERE workspace_id = $1 AND id = $2`,
+      [getWorkspaceId(), nullLatestVersion.canonicalJobId],
+    );
+    nullLatestPointerTaskId = await insertDeadLetterTask({
+      taskType: 'PUBLISH_EMBEDDING',
+      canonicalJobId: nullLatestVersion.canonicalJobId,
+      jobVersionId: nullLatestVersion.oldVersionId,
+      suffix: 'null-latest-pointer',
+    });
   });
 
   afterAll(async () => {
@@ -184,7 +205,7 @@ describe.skipIf(skipReal)('stale embedding dead-letter reconciliation (PostgreSQ
     expect(initialHealth).toEqual(expect.arrayContaining([
       expect.objectContaining({
         task_type: 'PUBLISH_EMBEDDING',
-        actionable_dead_letter_count: 2,
+        actionable_dead_letter_count: 4,
         stale_historical_dead_letter_count: 8,
       }),
       expect.objectContaining({
@@ -195,9 +216,13 @@ describe.skipIf(skipReal)('stale embedding dead-letter reconciliation (PostgreSQ
     ]));
 
     await expect(reconcileStaleSupersededEmbeddingDeadLetters(database, workspaceId)).resolves.toBe(8);
-    await expect(reconcileStaleSupersededEmbeddingDeadLetters(database, workspaceId)).resolves.toBe(0);
+    await database.query(
+      `UPDATE canonical_jobs SET latest_job_version_id = NULL WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, staleCanonicalJobId],
+    );
     const reconciledHealth = await readDeadLetterTaskHealth(database, workspaceId);
     expect(reconciledHealth).toEqual(initialHealth);
+    await expect(reconcileStaleSupersededEmbeddingDeadLetters(database, workspaceId)).resolves.toBe(0);
 
     const reconciled = await database.query<{
       id: string;
@@ -250,9 +275,9 @@ describe.skipIf(skipReal)('stale embedding dead-letter reconciliation (PostgreSQ
 
     const untouched = await database.query<{ id: string; status: string }>(
       `SELECT id, status FROM pipeline_tasks WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
-      [workspaceId, [currentTaskId, nonEmbeddingTaskId, unresolvedTaskId]],
+      [workspaceId, [currentTaskId, nonEmbeddingTaskId, unresolvedTaskId, wrongOwnerTaskId, nullLatestPointerTaskId]],
     );
-    expect(untouched.rows).toHaveLength(3);
+    expect(untouched.rows).toHaveLength(5);
     expect(untouched.rows.every((row) => row.status === 'DEAD_LETTER')).toBe(true);
   });
 });

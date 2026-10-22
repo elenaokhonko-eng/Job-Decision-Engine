@@ -22,13 +22,16 @@ export const DEAD_LETTER_LINEAGE_JOINS_SQL = `
 `;
 
 export const DEAD_LETTER_CLASSIFICATION_SQL = `CASE
-  WHEN POSITION('${STALE_SUPERSEDED_EMBEDDING_REPAIR_ACTION}' IN COALESCE(task.repair_action, '')) > 0
-    THEN 'STALE_HISTORICAL'
   WHEN task.task_type = 'PUBLISH_EMBEDDING'
-   AND dead_letter_job.id IS NOT NULL
-   AND dead_letter_job_version.id IS NOT NULL
-   AND dead_letter_job.latest_job_version_id IS NOT NULL
-   AND dead_letter_job_version.id <> dead_letter_job.latest_job_version_id
+   AND (
+     POSITION('${STALE_SUPERSEDED_EMBEDDING_REPAIR_ACTION}' IN COALESCE(task.repair_action, '')) > 0
+     OR (
+       dead_letter_job.id IS NOT NULL
+       AND dead_letter_job_version.id IS NOT NULL
+       AND dead_letter_job.latest_job_version_id IS NOT NULL
+       AND dead_letter_job_version.id <> dead_letter_job.latest_job_version_id
+     )
+   )
     THEN 'STALE_HISTORICAL'
   ELSE 'ACTIONABLE_CURRENT'
 END`;
@@ -59,6 +62,7 @@ export async function reconcileStaleSupersededEmbeddingDeadLetters(
        AND POSITION($2 IN COALESCE(task.repair_action, '')) = 0
        AND task.payload->>'canonical_job_id' = dead_letter_job.id::TEXT
        AND task.payload->>'job_version_id' = dead_letter_job_version.id::TEXT
+       AND COALESCE(dead_letter_job.is_test_fixture, FALSE) = FALSE
        AND dead_letter_job.latest_job_version_id IS NOT NULL
        AND dead_letter_job_version.id <> dead_letter_job.latest_job_version_id
      RETURNING task.id`,
@@ -83,6 +87,19 @@ export async function readDeadLetterTaskHealth(
      ${DEAD_LETTER_LINEAGE_JOINS_SQL}
      WHERE task.workspace_id = $1
        AND task.status = 'DEAD_LETTER'
+       AND NOT EXISTS (
+         SELECT 1
+         FROM canonical_jobs AS fixture_job
+         LEFT JOIN job_versions AS fixture_version
+           ON fixture_version.workspace_id = fixture_job.workspace_id
+          AND fixture_version.canonical_job_id = fixture_job.id
+         WHERE fixture_job.workspace_id = task.workspace_id
+           AND fixture_job.is_test_fixture = TRUE
+           AND (
+             task.payload->>'canonical_job_id' = fixture_job.id::TEXT
+             OR task.payload->>'job_version_id' = fixture_version.id::TEXT
+           )
+       )
      GROUP BY task.task_type
      ORDER BY task.task_type`,
     [workspaceId],
