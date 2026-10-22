@@ -8,6 +8,7 @@ import {
   parsePipelineTaskTypes,
   runPipelineStageTaskWorker,
 } from "../src/tasks/stageTaskWorker.js";
+import type { PipelineTaskReconciliationSummary } from "../src/tasks/pipelineTaskCurrentness.js";
 import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
 import {
   readDeadLetterTaskHealth,
@@ -75,6 +76,22 @@ interface PipelineDeadLetterHealthReport {
   newlyDeadLetteredThisRun: number | null;
   staleHistoricalDeadLettersReconciled: number;
   staleHistoricalDeadLettersRemaining: number | null;
+  reportGeneratedAt: string;
+  error: string | null;
+}
+
+interface PipelineTaskReconciliationReport {
+  stalePendingReconciliation: PipelineTaskReconciliationSummary | null;
+  stalePendingReconciledThisRun: number;
+  byReason: Record<string, number> | null;
+  byTaskType: Record<string, number> | null;
+  tasksCompletedThisRun: number;
+  successorTasksCreatedThisRun: number;
+  activePendingBefore: number | null;
+  activePendingAfter: number | null;
+  netActivePendingDelta: number | null;
+  oldestActivePendingAgeSecondsBefore: number | null;
+  oldestActivePendingAgeSecondsAfter: number | null;
   reportGeneratedAt: string;
   error: string | null;
 }
@@ -201,13 +218,32 @@ export async function processPipelineTasks(): Promise<void> {
   };
   const deadLetterReportPath = process.env.PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE?.trim()
     || "pipeline-dead-letter-health.json";
+  const reconciliationReportPath = process.env.PIPELINE_TASK_WORKER_RECONCILIATION_REPORT_FILE?.trim()
+    || "pipeline-task-reconciliation.json";
+  const reconciliationReport: PipelineTaskReconciliationReport = {
+    stalePendingReconciliation: null,
+    stalePendingReconciledThisRun: 0,
+    byReason: null,
+    byTaskType: null,
+    tasksCompletedThisRun: 0,
+    successorTasksCreatedThisRun: 0,
+    activePendingBefore: null,
+    activePendingAfter: null,
+    netActivePendingDelta: null,
+    oldestActivePendingAgeSecondsBefore: null,
+    oldestActivePendingAgeSecondsAfter: null,
+    reportGeneratedAt: "",
+    error: null,
+  };
 
   try {
     const { rows } = await lockClient.query(`SELECT pg_try_advisory_lock($1) AS locked`, [lockId]);
     lockAcquired = Boolean(rows[0]?.locked);
 
     if (!lockAcquired) {
-      deadLetterReport.error = "Another pipeline worker already holds the advisory lock; no work was claimed.";
+      const lockMessage = "Another pipeline worker already holds the advisory lock; no work was claimed.";
+      deadLetterReport.error = lockMessage;
+      reconciliationReport.error = lockMessage;
       console.warn("Another pipeline worker is already running. Exiting cleanly.");
       return;
     }
@@ -244,6 +280,8 @@ export async function processPipelineTasks(): Promise<void> {
     const oldestActivePendingAgeBefore = activeQueueRowsBefore
       .filter((row) => row.status === "PENDING")
       .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+    reconciliationReport.activePendingBefore = activePendingBefore;
+    reconciliationReport.oldestActivePendingAgeSecondsBefore = oldestActivePendingAgeBefore;
     const summary = await runPipelineStageTaskWorker(pool, {
       taskTypes: activeTaskTypes,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
@@ -252,6 +290,8 @@ export async function processPipelineTasks(): Promise<void> {
       routingDeferredReplayVersion: process.env.PIPELINE_TASK_WORKER_ROUTING_DEFERRED_REPLAY_VERSION || "routing_deferred_replay_v1",
       maxTasks: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_TASKS", 100, 10000),
       maxTasksByType: parsePipelineStageTaskLimits(process.env.PIPELINE_TASK_WORKER_STAGE_MAX_TASKS),
+      stageQuantum: parsePositiveIntEnv("PIPELINE_TASK_WORKER_STAGE_QUANTUM", 1, 100),
+      maxStalePendingReconciliation: parsePositiveIntEnv("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT", 1000, 10000),
       claimBatchSize: parsePositiveIntEnv("PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE", 1, 25),
       leaseSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_LEASE_SECONDS", 300, 3600),
       heartbeatSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS", 60, 600),
@@ -262,10 +302,23 @@ export async function processPipelineTasks(): Promise<void> {
       abortSignal: shutdownController.signal,
     });
 
+    reconciliationReport.stalePendingReconciliation = summary.stalePendingReconciliation;
+    reconciliationReport.stalePendingReconciledThisRun = summary.stalePendingReconciliation.stalePendingReconciledThisRun;
+    reconciliationReport.byReason = summary.stalePendingReconciliation.byReason;
+    reconciliationReport.byTaskType = summary.stalePendingReconciliation.byTaskType;
+    reconciliationReport.tasksCompletedThisRun = summary.completed;
+    reconciliationReport.successorTasksCreatedThisRun = summary.successorTasksCreated;
     console.log("Pipeline task worker summary:", JSON.stringify(summary, null, 2));
     const workflowOutputPath = process.env.GITHUB_OUTPUT?.trim();
     if (workflowOutputPath) {
-      await appendFile(workflowOutputPath, `dead_lettered_this_run=${summary.deadLettered}\n`, "utf8");
+      await appendFile(workflowOutputPath, [
+        `dead_lettered_this_run=${summary.deadLettered}`,
+        `tasks_completed_this_run=${summary.completed}`,
+        `successor_tasks_created_this_run=${summary.successorTasksCreated}`,
+        `stale_pending_reconciled=${summary.stalePendingReconciliation.reconciled}`,
+        `stale_pending_reconciled_this_run=${summary.stalePendingReconciliation.stalePendingReconciledThisRun}`,
+        `stale_pending_unresolved=${summary.stalePendingReconciliation.unresolved}`,
+      ].join("\n") + "\n", "utf8");
     }
 
     const queueHealth = await readQueueHealth(pool, context.workspaceId);
@@ -274,6 +327,25 @@ export async function processPipelineTasks(): Promise<void> {
     deadLetterReport.newlyDeadLetteredThisRun = summary.deadLettered;
     deadLetterReport.staleHistoricalDeadLettersReconciled = staleHistoricalDeadLettersReconciled;
     deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetter;
+    const activeQueueRows = queueHealth.byType.filter((row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]));
+    const activePending = activeQueueRows
+      .filter((row) => row.status === "PENDING")
+      .reduce((total, row) => total + Number(row.task_count), 0);
+    const oldestActivePendingAgeSeconds = activeQueueRows
+      .filter((row) => row.status === "PENDING")
+      .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+    reconciliationReport.activePendingAfter = activePending;
+    reconciliationReport.netActivePendingDelta = activePending - activePendingBefore;
+    reconciliationReport.oldestActivePendingAgeSecondsAfter = oldestActivePendingAgeSeconds;
+    if (workflowOutputPath) {
+      await appendFile(workflowOutputPath, [
+        `active_pending_before=${activePendingBefore}`,
+        `active_pending_after=${activePending}`,
+        `net_active_pending_delta=${activePending - activePendingBefore}`,
+        `oldest_active_pending_age_seconds_before=${oldestActivePendingAgeBefore}`,
+        `oldest_active_pending_age_seconds_after=${oldestActivePendingAgeSeconds}`,
+      ].join("\n") + "\n", "utf8");
+    }
     console.log("Pipeline task queue health:", JSON.stringify(queueHealth, null, 2));
     console.log("Pipeline task dead-letter health report:", JSON.stringify(deadLetterReport, null, 2));
     console.log("Pipeline bounded-run result:", JSON.stringify({
@@ -286,7 +358,17 @@ export async function processPipelineTasks(): Promise<void> {
       stale_historical_dead_letters: queueHealth.staleHistoricalDeadLetter,
       total_dead_letters: queueHealth.deadLetter,
       active_pending_before: activePendingBefore,
+      active_pending_after: activePending,
+      net_active_pending_delta: activePending - activePendingBefore,
       oldest_active_pending_age_seconds_before: oldestActivePendingAgeBefore,
+      oldest_active_pending_age_seconds_after: oldestActivePendingAgeSeconds,
+      tasks_completed_this_run: summary.completed,
+      successor_tasks_created_this_run: summary.successorTasksCreated,
+      stale_pending_reconciled: summary.stalePendingReconciliation.reconciled,
+      stale_pending_reconciled_this_run: summary.stalePendingReconciliation.stalePendingReconciledThisRun,
+      stale_pending_by_reason: summary.stalePendingReconciliation.byReason,
+      stale_pending_by_task_type: summary.stalePendingReconciliation.byTaskType,
+      stale_pending_unresolved: summary.stalePendingReconciliation.unresolved,
       remaining_pending: queueHealth.pending,
       duration_ms: summary.durationMs,
     }, null, 2));
@@ -307,13 +389,6 @@ export async function processPipelineTasks(): Promise<void> {
       );
     }
 
-    const activeQueueRows = queueHealth.byType.filter((row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]));
-    const activePending = activeQueueRows
-      .filter((row) => row.status === "PENDING")
-      .reduce((total, row) => total + Number(row.task_count), 0);
-    const oldestActivePendingAgeSeconds = activeQueueRows
-      .filter((row) => row.status === "PENDING")
-      .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
     console.log("Pipeline active pending progress:", JSON.stringify({
       active_pending_before: activePendingBefore,
       active_pending_after: activePending,
@@ -380,6 +455,30 @@ export async function processPipelineTasks(): Promise<void> {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Failed to write pipeline dead-letter health report:", message);
       workerError ??= new Error(`Could not write pipeline dead-letter health report: ${message}`);
+    }
+    reconciliationReport.reportGeneratedAt = new Date().toISOString();
+    reconciliationReport.error ??= workerError?.message ?? null;
+    const reconciliationArtifact = {
+      stale_pending_reconciliation: reconciliationReport.stalePendingReconciliation,
+      stale_pending_reconciled_this_run: reconciliationReport.stalePendingReconciledThisRun,
+      by_reason: reconciliationReport.byReason,
+      by_task_type: reconciliationReport.byTaskType,
+      tasks_completed_this_run: reconciliationReport.tasksCompletedThisRun,
+      successor_tasks_created_this_run: reconciliationReport.successorTasksCreatedThisRun,
+      active_pending_before: reconciliationReport.activePendingBefore,
+      active_pending_after: reconciliationReport.activePendingAfter,
+      net_active_pending_delta: reconciliationReport.netActivePendingDelta,
+      oldest_active_pending_age_seconds_before: reconciliationReport.oldestActivePendingAgeSecondsBefore,
+      oldest_active_pending_age_seconds_after: reconciliationReport.oldestActivePendingAgeSecondsAfter,
+      report_generated_at: reconciliationReport.reportGeneratedAt,
+      error: reconciliationReport.error,
+    };
+    try {
+      await writeFile(reconciliationReportPath, `${JSON.stringify(reconciliationArtifact, null, 2)}\n`, "utf8");
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Failed to write pipeline task reconciliation report:", message);
+      workerError ??= new Error(`Could not write pipeline task reconciliation report: ${message}`);
     }
     if (forcedShutdownTimer) {
       clearTimeout(forcedShutdownTimer);

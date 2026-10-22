@@ -183,6 +183,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         {
           context,
           seed: false,
+          reconcileStalePending: false,
           taskTypes: ['EXTRACT_DETERMINISTIC_REQUIREMENTS'],
           maxTasks: 1,
           claimBatchSize: 1,

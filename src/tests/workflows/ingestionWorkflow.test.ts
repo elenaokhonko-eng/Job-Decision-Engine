@@ -17,6 +17,8 @@ describe("discovery ingestion workflow", () => {
     expect(gmailCleanupStep).toContain("GMAIL_RECONCILIATION_LIMIT: ${{ vars.GMAIL_RECONCILIATION_LIMIT || '2000' }}");
     expect(workflow).toContain("timeout-minutes: 60");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_STAGE_MAX_TASKS');
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_STAGE_QUANTUM: ${{ vars.PIPELINE_TASK_WORKER_STAGE_QUANTUM || '1' }}");
+    expect(workflow).toContain('pipeline-task-reconciliation-ingestion-${{ github.run_id }}');
     expect(workflow).toContain('id: process_pipeline_worker');
     expect(workflow).toContain('PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: pipeline-dead-letter-health.json');
     expect(workflow).toContain('pipeline-dead-letter-health-ingestion-${{ github.run_id }}');

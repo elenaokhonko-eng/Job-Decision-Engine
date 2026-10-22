@@ -66,6 +66,34 @@ describe("pipeline status report", () => {
     });
   });
 
+  it("distinguishes aged pending backlog from healthy pending work", () => {
+    const stages = summarizeTaskStages([
+      {
+        task_type: "NORMALIZE_OBSERVATION",
+        status: "PENDING",
+        task_count: 7,
+        oldest_age_seconds: 7201,
+      },
+      {
+        task_type: "PUBLISH_EMBEDDING",
+        status: "PENDING",
+        task_count: 2,
+        oldest_age_seconds: 7200,
+      },
+    ]);
+
+    expect(stages.find((stage) => stage.stage === "NORMALIZATION")).toMatchObject({
+      status: "BACKLOG_AGED",
+      pending: 7,
+      oldest_age_seconds: 7201,
+    });
+    expect(stages.find((stage) => stage.stage === "EMBEDDINGS")).toMatchObject({
+      status: "BACKLOG_HEALTHY",
+      pending: 2,
+      oldest_age_seconds: 7200,
+    });
+  });
+
   it("marks actionable dead-lettered work as an error stage", () => {
     const stages = summarizeTaskStages([
       {

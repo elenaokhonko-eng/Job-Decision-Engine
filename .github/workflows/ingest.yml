@@ -179,6 +179,9 @@ jobs:
           REQUIREMENTS_ENABLE_QUOTED: 'true'
           PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '2500' }}
           PIPELINE_TASK_WORKER_STAGE_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_STAGE_MAX_TASKS || 'NORMALIZE_OBSERVATION=800,EXTRACT_DETERMINISTIC_REQUIREMENTS=800,APPLY_HARD_GATES=800,PUBLISH_EMBEDDING=400,ROUTE_LANE=400,MATCH_PROFILE_EVIDENCE=400,DECIDE_RECOMMENDATION=800,ENQUEUE_EXPLANATION=400' }}
+          PIPELINE_TASK_WORKER_STAGE_QUANTUM: ${{ vars.PIPELINE_TASK_WORKER_STAGE_QUANTUM || '1' }}
+          PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT: ${{ vars.PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT || '1000' }}
+          PIPELINE_TASK_WORKER_RECONCILIATION_REPORT_FILE: pipeline-task-reconciliation.json
           PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '600000' }}
           PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS: ${{ vars.PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS || '120000' }}
           PIPELINE_TASK_WORKER_LEASE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_LEASE_SECONDS || '300' }}
@@ -226,6 +229,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PIPELINE_WORKFLOW_NAME: Job Discovery Ingestion
           PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}
+          PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS || '7200' }}
           PIPELINE_STATUS_REPORT_FILE: pipeline-status-ingestion.json
         run: npx tsx scripts/report_pipeline_status.ts
       - name: Upload pipeline status report
@@ -241,6 +245,13 @@ jobs:
         with:
           name: pipeline-dead-letter-health-ingestion-${{ github.run_id }}
           path: pipeline-dead-letter-health.json
+          if-no-files-found: warn
+      - name: Upload pipeline task reconciliation report
+        if: ${{ always() && steps.process_pipeline_worker.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-task-reconciliation-ingestion-${{ github.run_id }}
+          path: pipeline-task-reconciliation.json
           if-no-files-found: warn
       - name: Check ingestion completeness
         if: ${{ always() && (needs.gmail_ingestion.result != 'success' || needs.public_source_ingestion.result != 'success') }}
