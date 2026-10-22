@@ -233,6 +233,17 @@ export async function processPipelineTasks(): Promise<void> {
       }
       console.log("Stale historical embedding dead letters reconciled:", staleHistoricalDeadLettersReconciled);
     }
+
+    const queueHealthBefore = await readQueueHealth(pool, context.workspaceId);
+    const activeQueueRowsBefore = queueHealthBefore.byType.filter(
+      (row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]),
+    );
+    const activePendingBefore = activeQueueRowsBefore
+      .filter((row) => row.status === "PENDING")
+      .reduce((total, row) => total + Number(row.task_count), 0);
+    const oldestActivePendingAgeBefore = activeQueueRowsBefore
+      .filter((row) => row.status === "PENDING")
+      .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
     const summary = await runPipelineStageTaskWorker(pool, {
       taskTypes: activeTaskTypes,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
@@ -274,6 +285,8 @@ export async function processPipelineTasks(): Promise<void> {
       actionable_current_dead_letters: queueHealth.actionableCurrentDeadLetter,
       stale_historical_dead_letters: queueHealth.staleHistoricalDeadLetter,
       total_dead_letters: queueHealth.deadLetter,
+      active_pending_before: activePendingBefore,
+      oldest_active_pending_age_seconds_before: oldestActivePendingAgeBefore,
       remaining_pending: queueHealth.pending,
       duration_ms: summary.durationMs,
     }, null, 2));
@@ -301,6 +314,12 @@ export async function processPipelineTasks(): Promise<void> {
     const oldestActivePendingAgeSeconds = activeQueueRows
       .filter((row) => row.status === "PENDING")
       .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+    console.log("Pipeline active pending progress:", JSON.stringify({
+      active_pending_before: activePendingBefore,
+      active_pending_after: activePending,
+      oldest_active_pending_age_seconds_before: oldestActivePendingAgeBefore,
+      oldest_active_pending_age_seconds_after: oldestActivePendingAgeSeconds,
+    }));
     const maxRetryWaitCount = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT", 500, 100000);
     const maxRetryWaitAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_AGE_SECONDS", 21600, 604800);
     const maxPendingAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS", 7200, 604800);
@@ -312,6 +331,7 @@ export async function processPipelineTasks(): Promise<void> {
     const failOnRetryWait = parseBooleanEnv("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT", true);
     enforcePipelineWorkerExitPolicy({
       claimedThisRun: summary.claimed,
+      completedThisRun: summary.completed,
       failedThisRun: summary.failed,
       exitReason: summary.exitReason,
       deadLetteredThisRun: summary.deadLettered,
@@ -319,7 +339,9 @@ export async function processPipelineTasks(): Promise<void> {
       staleHistoricalDeadLetterCount: queueHealth.staleHistoricalDeadLetter,
       retryWaitCount: queueHealth.retryWait,
       oldestRetryWaitAgeSeconds: queueHealth.oldestRetryWaitAgeSeconds,
+      activePendingCountBefore: activePendingBefore,
       activePendingCount: activePending,
+      oldestActivePendingAgeSecondsBefore: oldestActivePendingAgeBefore,
       oldestActivePendingAgeSeconds,
       failOnRetryWait,
       maxRetryWaitCount,

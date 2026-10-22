@@ -4,6 +4,7 @@ import { enforcePipelineWorkerExitPolicy } from "../../tasks/pipelineWorkerExitP
 
 const healthyInput = {
   claimedThisRun: 1,
+  completedThisRun: 1,
   failedThisRun: 0,
   deadLetteredThisRun: 0,
   actionableCurrentDeadLetterCount: 0,
@@ -16,6 +17,8 @@ const healthyInput = {
   maxRetryWaitCount: 5,
   maxRetryWaitAgeSeconds: 3600,
   maxPendingAgeSeconds: 3600,
+  activePendingCountBefore: 0,
+  oldestActivePendingAgeSecondsBefore: 0,
   noProgressPendingThreshold: 1,
 };
 
@@ -43,10 +46,30 @@ describe("pipeline worker exit policy", () => {
     expect(() => enforcePipelineWorkerExitPolicy({
       ...healthyInput,
       claimedThisRun: 12,
+      completedThisRun: 12,
+      activePendingCountBefore: 120,
       activePendingCount: 100,
-      oldestActivePendingAgeSeconds: 100000,
+      oldestActivePendingAgeSecondsBefore: 100000,
+      oldestActivePendingAgeSeconds: 99900,
       exitReason: "WALL_CLOCK_BUDGET_REACHED",
     })).not.toThrow();
+  });
+
+  it.each([
+    { completedThisRun: 0, failedThisRun: 0 },
+    { completedThisRun: 1, failedThisRun: 1 },
+  ])("keeps the pending-age SLO when bounded work did not complete cleanly", ({ completedThisRun, failedThisRun }) => {
+    expect(() => enforcePipelineWorkerExitPolicy({
+      ...healthyInput,
+      claimedThisRun: 12,
+      completedThisRun,
+      failedThisRun,
+      activePendingCountBefore: 100,
+      activePendingCount: 100,
+      oldestActivePendingAgeSecondsBefore: 100000,
+      oldestActivePendingAgeSeconds: 100000,
+      exitReason: "WALL_CLOCK_BUDGET_REACHED",
+    })).toThrow("Pending queue age exceeded SLO");
   });
 
   it("permits inherited stale historical dead letters after they are reconciled", () => {
