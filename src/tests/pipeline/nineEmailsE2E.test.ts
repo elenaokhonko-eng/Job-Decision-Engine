@@ -766,8 +766,21 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         GROUP BY c.id, c.latest_job_version_id`,
       [getContext().workspaceId, observationIds],
     );
+    const debugVersions = await q(
+      `SELECT jv.id, jv.canonical_job_id, jv.content_hash, jv.source_posting_identity_hash, jv.observed_at
+         FROM raw_job_observations rjo
+         JOIN job_versions jv ON jv.workspace_id = rjo.workspace_id AND jv.id = rjo.job_version_id
+        WHERE rjo.workspace_id = $1 AND rjo.id = ANY($2::uuid[])
+        ORDER BY jv.observed_at, jv.id`,
+      [getContext().workspaceId, observationIds],
+    );
+    const debugIndex = await q(
+      `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = 'uq_job_versions_posting_content'`,
+      [schemaName],
+    );
+    console.log("posting identity dedup diagnostic", rows[0], debugVersions.rows, debugIndex.rows);
     expect(rows).toHaveLength(1);
-    console.log("posting identity dedup diagnostic", rows[0]);
+    console.log("posting identity dedup aggregate", rows[0]);
     expect(Number(rows[0].version_count)).toBe(2);
     expect(Number(rows[0].identity_count)).toBe(1);
     expect(rows[0].content_hashes).toHaveLength(2);
