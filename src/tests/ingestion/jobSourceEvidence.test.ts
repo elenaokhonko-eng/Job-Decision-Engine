@@ -88,6 +88,18 @@ describe("job source evidence builder", () => {
     expect(evidence.compensation.components[2]).toMatchObject({ amount_min: 100000, amount_max: 100000 });
   });
 
+  it("removes script and style content with malformed closing-tag attributes", () => {
+    const evidence = buildJobSourceEvidence({
+      ...baseInput,
+      descriptionText: "<p>Visible role details.</p><script>untrusted()</script\t\n trailing><style>hidden</style extra>Still visible.",
+    });
+
+    expect(evidence.description.normalized_text).toContain("Visible role details.");
+    expect(evidence.description.normalized_text).toContain("Still visible.");
+    expect(evidence.description.normalized_text).not.toContain("untrusted");
+    expect(evidence.description.normalized_text).not.toContain("hidden");
+  });
+
   it("preserves structured hourly assumptions and can parse k-valued source fields", () => {
     const evidence = buildJobSourceEvidence({
       ...baseInput,

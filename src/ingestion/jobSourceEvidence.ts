@@ -104,8 +104,8 @@ function normalizeDescription(input: BuildJobSourceEvidenceInput): {
   segments: DescriptionEvidenceSegment[];
 } {
   const marked = input.descriptionText
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, " ")
     .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>/gi, "\n\u001fH$1\u001f$2\n")
     .replace(/<li\b[^>]*>/gi, "\n\u001fL\u001f")
     .replace(/<\/(?:li|p|div|section|article|br)\s*>/gi, "\n")

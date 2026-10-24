@@ -131,14 +131,24 @@ export async function runNormalization(
                  ON canonical.workspace_id = version.workspace_id
                 AND canonical.id = version.canonical_job_id
                WHERE version.workspace_id = $1
-                 AND version.source_posting_identity_hash = $2
+                 AND (
+                   version.source_posting_identity_hash = $2
+                   OR EXISTS (
+                     SELECT 1
+                     FROM raw_job_observations observation
+                     WHERE observation.workspace_id = version.workspace_id
+                       AND observation.job_version_id = version.id
+                       AND observation.source_name = $3
+                       AND observation.source_external_id = $4
+                   )
+                 )
                  AND BTRIM(regexp_replace(lower(canonical.company_name), '[^a-z0-9]+', ' ', 'g'))
-                   = BTRIM(regexp_replace(lower($3), '[^a-z0-9]+', ' ', 'g'))
+                   = BTRIM(regexp_replace(lower($5), '[^a-z0-9]+', ' ', 'g'))
                  AND BTRIM(regexp_replace(lower(COALESCE(canonical.location, canonical.location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
-                   = BTRIM(regexp_replace(lower(COALESCE($4, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+                   = BTRIM(regexp_replace(lower(COALESCE($6, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
                ORDER BY version.observed_at DESC, version.id DESC
                LIMIT 1`,
-              [ctx.workspaceId, freshnessEvidence.postingIdentityHash, obs.company_name, obs.location_raw || "Unknown"]
+              [ctx.workspaceId, freshnessEvidence.postingIdentityHash, obs.source_name, obs.source_external_id, obs.company_name, obs.location_raw || "Unknown"]
             )
           : { rows: [] };
 

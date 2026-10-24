@@ -5,7 +5,8 @@ export function normalizePostingUrl(value: string, sourceName?: string): string 
     const url = new URL(value.trim());
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
     const source = (sourceName ?? "").toLowerCase();
-    if (source === "linkedin" || url.hostname.toLowerCase().endsWith("linkedin.com")) {
+    const hostname = url.hostname.toLowerCase();
+    if (source === "linkedin" || hostname === "linkedin.com" || hostname.endsWith(".linkedin.com")) {
       const linkedInId = url.pathname.match(/\/(?:comm\/)?jobs\/view\/(\d+)(?:\/|$)/i)?.[1];
       if (linkedInId) return `linkedin-job:${linkedInId}`;
     }

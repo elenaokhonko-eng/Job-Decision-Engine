@@ -12,6 +12,11 @@ describe("stable posting identity normalization", () => {
     expect(stableSourcePostingIdentity("LINKEDIN", "123456789", null)).toBe("linkedin:linkedin-job:123456789");
   });
 
+  it("does not treat a host with a LinkedIn-like suffix as a LinkedIn host", () => {
+    expect(normalizePostingUrl("https://notlinkedin.com/jobs/view/123456789/", "GREENHOUSE"))
+      .toBe("notlinkedin.com/jobs/view/123456789");
+  });
+
   it("strips tracking parameters and trailing slashes without merging different ATS postings", () => {
     expect(normalizePostingUrl("https://boards.example/jobs/42/?utm_campaign=email&gh_src=abc", "GREENHOUSE"))
       .toBe("boards.example/jobs/42");
