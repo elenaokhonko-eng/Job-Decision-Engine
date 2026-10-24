@@ -767,6 +767,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       [getContext().workspaceId, observationIds],
     );
     expect(rows).toHaveLength(1);
+    console.log("posting identity dedup diagnostic", rows[0]);
     expect(Number(rows[0].version_count)).toBe(2);
     expect(Number(rows[0].identity_count)).toBe(1);
     expect(rows[0].content_hashes).toHaveLength(2);
