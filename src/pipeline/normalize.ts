@@ -122,27 +122,28 @@ export async function runNormalization(
         let existingVersionId: string | null = null;
         let sourcePostingIdentitySeen = false;
         
-        // Identity precedence: source/requisition ID, canonical URL, company+title+location,
+        // Stable source identity is accepted only when normalized employer and location also agree.
+        const checkExt = freshnessEvidence.postingIdentityHash
+          ? await client.query(
+              `SELECT version.canonical_job_id, version.id AS job_version_id, version.content_hash
+               FROM job_versions version
+               JOIN canonical_jobs canonical
+                 ON canonical.workspace_id = version.workspace_id
+                AND canonical.id = version.canonical_job_id
+               WHERE version.workspace_id = $1
+                 AND version.source_posting_identity_hash = $2
+                 AND BTRIM(regexp_replace(lower(canonical.company_name), '[^a-z0-9]+', ' ', 'g'))
+                   = BTRIM(regexp_replace(lower($3), '[^a-z0-9]+', ' ', 'g'))
+                 AND BTRIM(regexp_replace(lower(COALESCE(canonical.location, canonical.location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+                   = BTRIM(regexp_replace(lower(COALESCE($4, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+               ORDER BY version.observed_at DESC, version.id DESC
+               LIMIT 1`,
+              [ctx.workspaceId, freshnessEvidence.postingIdentityHash, obs.company_name, obs.location_raw || "Unknown"]
+            )
+          : { rows: [] };
+
+        // Identity precedence: source/requisition identity, canonical URL, company+title+location,
         // then company+title only as a deliberately low-confidence fallback.
-        const checkExt = await client.query(
-          `          SELECT jv.canonical_job_id, jv.id AS job_version_id, jv.content_hash
-           FROM raw_job_observations rjo
-           JOIN job_versions jv ON jv.id = rjo.job_version_id
-           JOIN canonical_jobs canonical
-             ON canonical.workspace_id = jv.workspace_id
-            AND canonical.id = jv.canonical_job_id
-           WHERE rjo.workspace_id = $1
-             AND jv.workspace_id = $1
-             AND rjo.source_name = $2
-             AND rjo.source_external_id = $3
-             AND BTRIM(regexp_replace(lower(canonical.company_name), '[^a-z0-9]+', ' ', 'g'))
-               = BTRIM(regexp_replace(lower($4), '[^a-z0-9]+', ' ', 'g'))
-             AND BTRIM(regexp_replace(lower(COALESCE(canonical.location, canonical.location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
-               = BTRIM(regexp_replace(lower(COALESCE($5, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
-           ORDER BY rjo.retrieved_at DESC
-           LIMIT 1`,
-          [ctx.workspaceId, obs.source_name, obs.source_external_id, obs.company_name, obs.location_raw || "Unknown"]
-        );
 
         if (checkExt.rows.length > 0) {
           canonicalJobId = checkExt.rows[0].canonical_job_id;
