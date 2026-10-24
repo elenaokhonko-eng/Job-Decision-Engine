@@ -452,6 +452,118 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     producerStage: "v_canonical_shortlist_actions_scoped",
     transformation: "Separates user action, automatic processing, technical support errors, terminal non-matches, and completed jobs",
     nullable: false
+  },
+  {
+    field: "schema_version",
+    sourceTable: "runtime_contract",
+    sourceColumn: "SCHEMA_VERSION",
+    producerStage: "contracts/index.ts",
+    transformation: "Versioned ShortlistRow runtime contract version when present",
+    nullable: true
+  },
+  {
+    field: "read_model_version",
+    sourceTable: "v_application_readiness_current",
+    sourceColumn: "read_model_version",
+    producerStage: "migration 078",
+    transformation: "Version of the current readiness read model",
+    nullable: true
+  },
+  {
+    field: "application_readiness",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_json",
+    producerStage: "recommendationDecider.ts -> v_application_readiness_current",
+    transformation: "Versioned material checks and lineage for application readiness",
+    nullable: true
+  },
+  {
+    field: "job_source_evidence",
+    sourceTable: "raw_job_observations",
+    sourceColumn: "normalized_evidence",
+    producerStage: "sourceBroker.ts -> v_application_readiness_current",
+    transformation: "Latest source evidence normalized for the displayed job version",
+    nullable: true
+  },
+  {
+    field: "source_published_at",
+    sourceTable: "job_versions",
+    sourceColumn: "source_published_at",
+    producerStage: "normalize.ts -> v_application_readiness_current",
+    transformation: "Authoritative source publication date, not retrieval time",
+    nullable: true
+  },
+  {
+    field: "source_expires_at",
+    sourceTable: "job_versions",
+    sourceColumn: "source_expires_at",
+    producerStage: "normalize.ts -> v_application_readiness_current",
+    transformation: "Explicit source expiry date when supported",
+    nullable: true
+  },
+  {
+    field: "readiness_status",
+    sourceTable: "v_application_readiness_current",
+    sourceColumn: "readiness_status",
+    producerStage: "recommendationDecider.ts -> migration 078 read model",
+    transformation: "Current lineage- and expiry-checked READY/BLOCKED/NEEDS_VERIFICATION/PROCESSING status",
+    nullable: true
+  },
+  {
+    field: "readiness_reason_codes",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_json.reason_codes",
+    producerStage: "recommendationDecider.ts -> v_application_readiness_current",
+    transformation: "Persisted material verification, block, processing, or evidence-expiry reasons",
+    nullable: true
+  },
+  {
+    field: "readiness_fingerprint",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_fingerprint",
+    producerStage: "recommendationDecider.ts",
+    transformation: "Fingerprint of current job, profile, requirements, preferences, policies, evidence, and match context",
+    nullable: true
+  },
+  {
+    field: "readiness_expires_at",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_json.expires_at",
+    producerStage: "recommendationDecider.ts -> v_application_readiness_current",
+    transformation: "Earliest availability/freshness evidence expiry used by the current read model",
+    nullable: true
+  },
+  {
+    field: "evidence_revision_hash",
+    sourceTable: "job_versions",
+    sourceColumn: "evidence_revision_hash",
+    producerStage: "sourceBroker.ts -> normalize.ts",
+    transformation: "Stable semantic digest of normalized evidence for the current version",
+    nullable: true
+  },
+  {
+    field: "availability_status",
+    sourceTable: "job_versions",
+    sourceColumn: "availability_status",
+    producerStage: "sourceBroker.ts -> recommendationDecider.ts",
+    transformation: "Evidence-backed OPEN/CLOSED/UNKNOWN status",
+    nullable: true
+  },
+  {
+    field: "availability_verified_at",
+    sourceTable: "job_versions",
+    sourceColumn: "availability_verified_at",
+    producerStage: "sourceBroker.ts -> recommendationDecider.ts",
+    transformation: "Timestamp when the current availability evidence was verified",
+    nullable: true
+  },
+  {
+    field: "availability_recheck_at",
+    sourceTable: "job_versions",
+    sourceColumn: "availability_recheck_at",
+    producerStage: "sourceBroker.ts -> recommendationDecider.ts",
+    transformation: "TTL expiry for rechecking current vacancy availability",
+    nullable: true
   }
 ];
 

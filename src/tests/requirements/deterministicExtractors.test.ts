@@ -140,7 +140,7 @@ describe('extractDeterministicRequirements', () => {
       description_text: 'Minimum of 2 additional years of experience related to the functional area.',
     });
     const additionalExperience = additional.requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
-    expect(additionalExperience?.structured_value).toEqual({ minimum_years: 2 });
+    expect(additionalExperience?.structured_value).toMatchObject({ minimum_years: 2 });
 
     const writtenNumber = extractDeterministicRequirements({
       canonical_job_id: 'abababab-abab-4aba-8aba-abababababac',
@@ -154,11 +154,53 @@ describe('extractDeterministicRequirements', () => {
       job_version_id: 'cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcf',
       description_text: 'At least four years of AI engineering experience required.',
     }).requirements.find((r) => r.requirement_type === 'EXPERIENCE_YEARS');
-    expect(writtenScope?.structured_value).toEqual({
+    expect(writtenScope?.structured_value).toMatchObject({
       minimum_years: 4,
       experience_scope: 'AI engineering',
+      scope_schema_version: 'experience_scope_v2',
+      role_families: ['AI_ENGINEERING', 'HANDS_ON_SOFTWARE_ENGINEERING'],
+      domain_families: ['AI'],
     });
     expect(writtenScope?.importance).toBe('MUST');
+
+    const scopedDescription = [
+      'Required qualifications:',
+      '- 8+ years of software engineering experience.',
+      '- 8 years of experience in architecture or engineering.',
+      '- 2 additional years at staff level.',
+      '',
+      'Nice to have:',
+      '- 5 years of experience in finance.',
+    ].join('\n');
+    const scopedYears = extractDeterministicRequirements({
+      canonical_job_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      job_version_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      description_text: scopedDescription,
+    });
+    const experienceRequirements = scopedYears.requirements.filter((r) => r.requirement_type === 'EXPERIENCE_YEARS');
+    expect(experienceRequirements).toHaveLength(4);
+    expect(experienceRequirements.map((r) => r.importance)).toEqual([
+      'MUST', 'MUST', 'MUST', 'NICE_TO_HAVE',
+    ]);
+    expect(experienceRequirements[0].structured_value).toMatchObject({
+      minimum_years: 8,
+      role_families: ['HANDS_ON_SOFTWARE_ENGINEERING'],
+      domain_families: ['SOFTWARE'],
+    });
+    expect(experienceRequirements[1].structured_value).toMatchObject({
+      minimum_years: 8,
+      role_families: ['ARCHITECTURE', 'HANDS_ON_SOFTWARE_ENGINEERING'],
+      operator: 'ANY',
+    });
+    expect(experienceRequirements[2].structured_value).toMatchObject({
+      minimum_years: 2,
+      seniority_scope: 'staff level',
+    });
+    for (const req of experienceRequirements) {
+      expect(req.quote_start_offset).toBeGreaterThanOrEqual(0);
+      expect(req.quote_end_offset).toBeGreaterThan(req.quote_start_offset ?? -1);
+      expect(scopedDescription.slice(req.quote_start_offset ?? 0, req.quote_end_offset ?? 0)).toBe(req.quote_text);
+    }
 
     const degree = extractDeterministicRequirements({
       canonical_job_id: '34343434-3434-4343-8343-343434343434',
@@ -245,7 +287,7 @@ describe('extractDeterministicRequirements', () => {
     });
     const credReq = optionalCert.requirements.find((r) => r.requirement_type === 'CREDENTIAL');
     expect(credReq).toBeTruthy();
-    expect(credReq?.importance).toBe('PREFERRED');
+    expect(credReq?.importance).toBe('NICE_TO_HAVE');
 
     // 5. Adjacent sentence isolation: Python preferred. CISSP certification required.
     const mixedSentences = extractDeterministicRequirements({

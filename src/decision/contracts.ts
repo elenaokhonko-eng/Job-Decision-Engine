@@ -76,6 +76,11 @@ export const RecommendationDecisionTraceSchema = z.object({
   policy_snapshot_id: z.string().uuid(),
   eligibility_rule_id: z.string().nullable(),
   outcome_rule_id: z.string().nullable(),
+  evidence_revision_hash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  readiness_fingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  availability_evidence_hash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  fx_rate_observation_id: z.string().uuid().nullable().optional(),
+  qualification_comparator_version: z.string().min(1).nullable().optional(),
   notes: z.array(z.string()).default([]),
 });
 

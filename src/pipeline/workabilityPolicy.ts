@@ -7,6 +7,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/con
 
 export interface WorkabilityPolicy {
   unknownWorkModeDisposition: "PASS" | "HARD_REJECT" | "NEEDS_VERIFICATION";
+  allowedWorkModes: Array<"REMOTE" | "HYBRID" | "ONSITE">;
   onsiteOnlyAllowed: boolean;
   maxOfficeDaysPerWeek: number;
   hardFailOfficeDaysPerWeek: number;
@@ -70,6 +71,7 @@ const defaults: WorkabilityPolicy = {
   // conflict. It must not be held for manual verification or inferred as
   // onsite from a non-empty location label.
   unknownWorkModeDisposition: "HARD_REJECT",
+  allowedWorkModes: ["REMOTE", "HYBRID"],
   onsiteOnlyAllowed: false,
   maxOfficeDaysPerWeek: 3,
   hardFailOfficeDaysPerWeek: 4,
@@ -476,6 +478,27 @@ export async function loadVerificationAnswerContext(
  * sentence also contains an employment/location qualifier. This prevents
  * references such as "US clients" from becoming false location rejections.
  */
+export interface ExplicitWorkerTerritoryRequirement {
+  readonly territories: readonly string[];
+  readonly operator: "ANY" | "ALL";
+  readonly evidenceText: string;
+}
+
+export function extractExplicitWorkerTerritoryRequirements(value: unknown): ExplicitWorkerTerritoryRequirement[] {
+  const text = normalizeTerritorySearchText(value);
+  const requirements: ExplicitWorkerTerritoryRequirement[] = [];
+  for (const sentence of text.split(/[.!?;\n]+/).map((part) => part.trim()).filter(Boolean)) {
+    const territories = extractTerritories(sentence).filter((territory) => hasExplicitTerritoryRestriction(sentence, territory));
+    if (territories.length === 0) continue;
+    requirements.push({
+      territories: [...new Set(territories)],
+      operator: /\bor\b/i.test(sentence) ? "ANY" : /\band\b/i.test(sentence) ? "ALL" : "ANY",
+      evidenceText: sentence,
+    });
+  }
+  return requirements;
+}
+
 export function hasExplicitTerritoryRestriction(value: unknown, territory: string): boolean {
   const canonical = normalizeTerritory(territory);
   if (!canonical) return false;
@@ -572,11 +595,19 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
   const composition = document?.global_workability_gates?.work_composition ?? {};
   const configuredHardFail = finiteNumber(workMode.max_office_days_hard_fail, defaults.hardFailOfficeDaysPerWeek);
   const configuredMaxOffice = finiteNumber(workMode.max_office_days_per_week, defaults.maxOfficeDaysPerWeek);
+  const configuredModes = stringArray(firstDefined(workMode.allowed_work_modes, workMode.work_modes))
+    .map((mode) => mode.toUpperCase().replace(/[-\s]+/g, "_"))
+    .filter((mode): mode is "REMOTE" | "HYBRID" | "ONSITE" => ["REMOTE", "HYBRID", "ONSITE"].includes(mode));
 
   return {
     unknownWorkModeDisposition: normalizeUnknownWorkModeDisposition(
       firstDefined(workMode.unknown_work_mode_policy, workMode.unknownWorkModePolicy)
     ),
+    allowedWorkModes: configuredModes.length > 0
+      ? configuredModes
+      : workMode.onsite_only_allowed === true
+        ? ["REMOTE", "HYBRID", "ONSITE"]
+        : defaults.allowedWorkModes,
     onsiteOnlyAllowed: workMode.onsite_only_allowed === true,
     maxOfficeDaysPerWeek: configuredMaxOffice,
     hardFailOfficeDaysPerWeek: normalizeHardFailDays(configuredMaxOffice, configuredHardFail),
@@ -639,7 +670,10 @@ export function mergeWorkabilityPreferenceContent(
 
   const allowedWorkModes = stringArray(
     firstDefined(workability.work_modes, workability.allowed_work_modes, root.work_modes)
-  ).map((mode) => mode.toUpperCase().replace(/[-\s]+/g, "_"));
+  ).map((mode) => mode.toUpperCase().replace(/[-\s]+/g, "_").replace("ON_SITE", "ONSITE"));
+  const normalizedAllowedWorkModes = allowedWorkModes.filter(
+    (mode): mode is "REMOTE" | "HYBRID" | "ONSITE" => ["REMOTE", "HYBRID", "ONSITE"].includes(mode),
+  );
 
   const maxOfficeDays = finitePolicyNumber(
     firstDefined(
@@ -676,6 +710,14 @@ export function mergeWorkabilityPreferenceContent(
         root.unknownWorkModePolicy
       ) ?? basePolicy.unknownWorkModeDisposition
     ),
+    allowedWorkModes: normalizedAllowedWorkModes.length > 0
+      ? normalizedAllowedWorkModes
+      : booleanValue(
+          firstDefined(workability.onsite_only_allowed, workability.onsiteOnlyAllowed, root.onsite_only_allowed),
+          basePolicy.onsiteOnlyAllowed,
+        )
+        ? [...new Set([...basePolicy.allowedWorkModes, "ONSITE" as const])]
+        : basePolicy.allowedWorkModes,
     onsiteOnlyAllowed: allowedWorkModes.length > 0
       ? allowedWorkModes.some((mode) => mode === "ONSITE" || mode === "ON_SITE")
       : booleanValue(

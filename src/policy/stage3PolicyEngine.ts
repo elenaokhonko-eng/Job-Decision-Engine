@@ -338,140 +338,220 @@ export function evaluateMobilityMatch(
 // 3. Compensation Thresholds by Opportunity Category
 // ============================================================================
 
-export function inferOpportunityCategory(companyName: string, title: string, description: string): OpportunityCategory {
-  const text = `${companyName} ${title} ${description}`.toLowerCase();
-  if (/\b(university|research institute|academic institution|university research)\b/i.test(text)) {
-    return 'UNIVERSITY_RESEARCH';
+export function inferOpportunityCategory(
+  companyName: string,
+  _title: string,
+  _description: string,
+  organizationType?: string | null,
+): OpportunityCategory | null {
+  const identity = `${companyName} ${organizationType ?? ""}`.toLowerCase();
+  if (/\b(university|college|polytechnic|academic institution|research institute)\b/i.test(identity)) {
+    return "UNIVERSITY_RESEARCH";
   }
-  if (/\b(multilateral|intergovernmental|united nations|world bank|ngo|non[- ]profit|international development)\b/i.test(text)) {
-    return 'MISSION_MULTILATERAL';
+  if (/\b(world bank|united nations|unicef|undp|unhcr|international finance corporation|intergovernmental organization)\b/i.test(identity)) {
+    return "MISSION_MULTILATERAL";
   }
-  return 'COMMERCIAL';
+  return null;
 }
+
+export type SalaryPeriod = "ANNUAL" | "MONTHLY" | "HOURLY" | "UNKNOWN";
+export type SalaryComponentType = "BASE_CASH" | "VARIABLE_CASH" | "EQUITY" | "OTHER";
+export type SalaryBasis = "GROSS" | "NET" | "UNKNOWN";
 
 export interface JobCompensationInput {
   salary_min?: number | null;
   salary_max?: number | null;
   salary_currency?: string | null;
-  salary_period?: 'ANNUAL' | 'MONTHLY' | null;
+  salary_period?: SalaryPeriod | null;
+  salary_basis?: SalaryBasis;
+  component_type?: SalaryComponentType;
+  guaranteed_hours_per_week?: number | null;
+  paid_weeks_per_year?: number | null;
   currency_to_sgd_rate?: number | null;
+  fx_rate_date?: string | null;
+  fx_rate_source?: string | null;
+  fx_rate_observation_id?: string | null;
   is_startup?: boolean;
 }
 
 export interface CompensationEvaluationResult {
-  status: 'TARGET_MET' | 'ACCEPTABLE' | 'BELOW_FLOOR' | 'UNKNOWN';
+  status: "TARGET_MET" | "ACCEPTABLE" | "BELOW_FLOOR" | "UNKNOWN";
   salary_annual_sgd: number | null;
+  salary_annual_sgd_max: number | null;
+  applied_floor_sgd: number | null;
+  opportunity_category: OpportunityCategory | "UNKNOWN";
+  fx_rate_observation_id: string | null;
   is_hard_reject: boolean;
   prevents_apply_now: boolean;
   rejection_code?: string;
   evidence: string;
 }
 
-export function parseCompensationEvidence(raw: string | null | undefined): JobCompensationInput | null {
-  if (!raw || !raw.trim()) return null;
-  const text = raw.replace(/\u00a0/g, ' ').trim();
-  const currencyMatch = text.match(/\b(SGD|USD|EUR|GBP|AUD|CAD|HKD|MYR|JPY)\b|S\$|US\$/i);
-  if (!currencyMatch) return null;
-  const rawCurrency = currencyMatch[0].toUpperCase();
-  const salaryCurrency = rawCurrency === 'S$' ? 'SGD' : rawCurrency === 'US$' ? 'USD' : rawCurrency;
-  const periodMatch = text.match(/\b(monthly|per\s+month|a\s+month|\/\s*month|annual(?:ly)?|yearly|per\s+annum|per\s+year|\/\s*year)\b/i);
-  if (!periodMatch) return null;
-  const salaryPeriod = /month/i.test(periodMatch[0]) ? 'MONTHLY' : 'ANNUAL';
-  const amountPattern = '(\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?';
-  const amountRegex = new RegExp(`${amountPattern}\\s*([kK])?`, 'g');
-  const amounts: number[] = [];
-  for (const match of text.matchAll(amountRegex)) {
-    const number = Number(match[0].replace(/,/g, '').replace(/k$/i, ''));
-    if (!Number.isFinite(number) || number <= 0) continue;
-    amounts.push(number * (match[2] ? 1000 : 1));
-    if (amounts.length === 2) break;
-  }
-  if (amounts.length === 0) return null;
-  const rate = salaryCurrency === 'SGD' ? 1 : null;
+function parseSalaryAmount(value: string): number | null {
+  const normalized = value.replace(/,/g, "").trim();
+  const match = normalized.match(/^(\d+(?:\.\d+)?)\s*([kK])?$/);
+  if (!match) return null;
+  const amount = Number(match[1]) * (match[2] ? 1000 : 1);
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+export function parseCompensationEvidence(
+  raw: string | null | undefined,
+  structured: Partial<JobCompensationInput> = {},
+): JobCompensationInput | null {
+  const text = (raw ?? "").replace(/\u00a0/g, " ").trim();
+  if (/^(unknown|undisclosed|competitive|not disclosed|n\/?a)$/i.test(text)) return null;
+  const explicitCurrency = text.match(/\b(SGD|USD|EUR|GBP|AUD|CAD|HKD|MYR|JPY)\b|S\$|US\$/i)?.[0].toUpperCase();
+  const salaryCurrency = structured.salary_currency?.toUpperCase()
+    ?? (explicitCurrency === "S$" ? "SGD" : explicitCurrency === "US$" ? "USD" : explicitCurrency ?? null);
+  const periodText = `${text} ${structured.salary_period ?? ""}`.toLowerCase();
+  const salaryPeriod: SalaryPeriod = structured.salary_period
+    ?? (/\b(hourly|per\s+hour|\/\s*hour|per\s+hr)\b/i.test(periodText)
+      ? "HOURLY"
+      : /\b(monthly|per\s+month|a\s+month|\/\s*month)\b/i.test(periodText)
+        ? "MONTHLY"
+        : /\b(annual|annually|yearly|per\s+year|per\s+annum|\/\s*year)\b/i.test(periodText)
+          ? "ANNUAL"
+          : "UNKNOWN");
+  const currencyToken = String.raw`(?:SGD|USD|EUR|GBP|AUD|CAD|HKD|MYR|JPY|S\$|US\$|\$)`;
+  const amountToken = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*[kK]?`;
+  const rangeMatch = text.match(new RegExp(String.raw`(?:^|[^A-Z0-9])(?:${currencyToken}\s*)?(${amountToken})\s*(?:-|–|to)\s*(?:${currencyToken}\s*)?(${amountToken})`, "i"));
+  const singleMatch = rangeMatch ? null : text.match(new RegExp(String.raw`(?:^|[^A-Z0-9])(?:${currencyToken}\s*)?(${amountToken})`, "i"));
+  const rangeMin = rangeMatch ? parseSalaryAmount(rangeMatch[1]) : null;
+  const rangeMax = rangeMatch ? parseSalaryAmount(rangeMatch[2]) : null;
+  const singleAmount = singleMatch ? parseSalaryAmount(singleMatch[1]) : null;
+  const salaryMin = structured.salary_min ?? rangeMin ?? singleAmount ?? null;
+  const salaryMax = structured.salary_max ?? rangeMax ?? singleAmount ?? salaryMin;
+  const componentType = structured.component_type
+    ?? (/\b(equity|stock|rsu|options?)\b/i.test(text)
+      ? "EQUITY"
+      : /\b(ote|on[- ]target|commission|bonus|variable)\b/i.test(text)
+        ? "VARIABLE_CASH"
+        : "BASE_CASH");
+  const hoursMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:guaranteed\s+)?hours?\s*(?:per|a|\/)\s*week/i);
+  const basis: SalaryBasis = structured.salary_basis
+    ?? (/\bnet\b/i.test(text) ? "NET" : /\bgross\b/i.test(text) ? "GROSS" : "UNKNOWN");
+  if (salaryMin === null && salaryMax === null) return null;
   return {
-    salary_min: Math.min(...amounts),
-    salary_max: amounts.length > 1 ? Math.max(...amounts) : null,
+    ...structured,
+    salary_min: salaryMin,
+    salary_max: salaryMax,
     salary_currency: salaryCurrency,
     salary_period: salaryPeriod,
-    currency_to_sgd_rate: rate,
+    salary_basis: basis,
+    component_type: componentType,
+    guaranteed_hours_per_week: structured.guaranteed_hours_per_week ?? (hoursMatch ? Number(hoursMatch[1]) : null),
   };
 }
 
 export function evaluateCompensationPolicy(
   input: JobCompensationInput,
-  category: OpportunityCategory = 'COMMERCIAL',
-  policy: CompensationPolicy = CompensationPolicySchema.parse({})
+  category: OpportunityCategory | null = null,
+  policy: CompensationPolicy = CompensationPolicySchema.parse({}),
+  asOf: Date = new Date(),
 ): CompensationEvaluationResult {
-  if (input.salary_min === null || input.salary_min === undefined || !input.salary_period) {
-    return {
-      status: 'UNKNOWN',
-      salary_annual_sgd: null,
-      is_hard_reject: false,
-      prevents_apply_now: false,
-      evidence: 'Compensation amount or period is unknown; no floor decision was inferred.',
-    };
+  const categoryName = category ?? "UNKNOWN";
+  const unknown = (evidence: string, annualMin: number | null = null, annualMax: number | null = null, floor: number | null = null): CompensationEvaluationResult => ({
+    status: "UNKNOWN",
+    salary_annual_sgd: annualMin,
+    salary_annual_sgd_max: annualMax,
+    applied_floor_sgd: floor,
+    opportunity_category: categoryName,
+    fx_rate_observation_id: input.fx_rate_observation_id ?? null,
+    is_hard_reject: false,
+    prevents_apply_now: true,
+    evidence,
+  });
+
+  if (input.component_type && input.component_type !== "BASE_CASH") {
+    return unknown("Variable pay, OTE, equity, or non-base compensation is not counted as guaranteed base cash.");
+  }
+  const salaryMinimum = input.salary_min ?? null;
+  const salaryMaximum = input.salary_max ?? salaryMinimum;
+  if ((salaryMinimum === null && salaryMaximum === null) || !input.salary_period || input.salary_period === "UNKNOWN") {
+    return unknown("A guaranteed salary amount or pay period is unknown; no floor decision was inferred.");
+  }
+  if (!policy.target_salary_basis || !input.salary_basis || input.salary_basis === "UNKNOWN" || input.salary_basis !== policy.target_salary_basis) {
+    return unknown("Gross/net salary basis is missing or does not match the active compensation preference; no conversion was assumed.");
   }
 
-  const currency = (input.salary_currency || '').toUpperCase();
-  const conversionRate = currency === 'SGD'
-    ? 1
-    : input.currency_to_sgd_rate ?? null;
+  const currency = (input.salary_currency ?? "").toUpperCase();
+  let conversionRate: number | null = currency === "SGD" ? 1 : input.currency_to_sgd_rate ?? null;
+  if (currency !== "SGD") {
+    const rateDate = input.fx_rate_date ? new Date(input.fx_rate_date) : null;
+    const rateAgeDays = rateDate && Number.isFinite(rateDate.getTime())
+      ? Math.abs(asOf.getTime() - rateDate.getTime()) / (24 * 60 * 60 * 1000)
+      : Number.POSITIVE_INFINITY;
+    if (input.fx_rate_source !== "FRANKFURTER" || rateAgeDays > (policy.fx_rate_max_age_days ?? 7)) {
+      conversionRate = null;
+    }
+  }
   if (conversionRate === null || !Number.isFinite(conversionRate) || conversionRate <= 0) {
-    return {
-      status: 'UNKNOWN',
-      salary_annual_sgd: null,
-      is_hard_reject: false,
-      prevents_apply_now: false,
-      evidence: `Compensation currency ${currency || 'UNKNOWN'} has no validated SGD conversion rate.`,
-    };
+    return unknown(`Compensation currency ${currency || "UNKNOWN"} has no current, source-attributed SGD rate.`);
   }
 
-  const annualSgd = input.salary_min * (input.salary_period === 'MONTHLY' ? 12 : 1) * conversionRate;
+  let annualizationFactor = input.salary_period === "MONTHLY" ? 12 : 1;
+  if (input.salary_period === "HOURLY") {
+    if (!input.guaranteed_hours_per_week || !input.paid_weeks_per_year) {
+      return unknown("Hourly compensation cannot be annualized without guaranteed weekly hours and paid weeks per year.");
+    }
+    annualizationFactor = input.guaranteed_hours_per_week * input.paid_weeks_per_year;
+  }
+  const annualMin = salaryMinimum === null ? null : salaryMinimum * annualizationFactor * conversionRate;
+  const annualMax = salaryMaximum === null ? null : salaryMaximum * annualizationFactor * conversionRate;
+
   let minThreshold: number | undefined;
   let targetThreshold: number | undefined;
-
-  if (category === 'UNIVERSITY_RESEARCH') {
+  if (category === "UNIVERSITY_RESEARCH") {
     minThreshold = policy.university_research_min_annual_sgd;
-  } else if (category === 'MISSION_MULTILATERAL') {
+  } else if (category === "MISSION_MULTILATERAL") {
     minThreshold = policy.mission_multilateral_min_annual_sgd;
   } else {
     minThreshold = policy.commercial_min_annual_sgd;
-    targetThreshold = policy.commercial_target_annual_sgd;
+    if (category === "COMMERCIAL") targetThreshold = policy.commercial_target_annual_sgd;
   }
-
   const configuredFloor = input.is_startup
     ? Math.max(minThreshold ?? 0, (policy.startup_min_cash_salary_monthly_sgd ?? 0) * 12)
     : minThreshold ?? 0;
-  const hasConfiguredFloor = configuredFloor > 0;
-
-  if (!hasConfiguredFloor) {
-    return {
-      status: 'UNKNOWN',
-      salary_annual_sgd: annualSgd,
-      is_hard_reject: false,
-      prevents_apply_now: false,
-      evidence: 'Salary was normalized to SGD, but this user has no configured floor for the opportunity category.',
-    };
+  if (configuredFloor <= 0) {
+    return unknown("No active compensation floor is configured for this opportunity category.", annualMin, annualMax);
   }
 
-  if (annualSgd < configuredFloor) {
-    const disposition = policy.disposition_below_floor ?? 'WARN';
+  if (annualMax !== null && category === null && annualMax < configuredFloor) {
+    return unknown("Opportunity category is not verified; no discounted floor was applied and a below-floor conflict cannot be confirmed.", annualMin, annualMax, configuredFloor);
+  }
+  if (annualMax !== null && annualMax < configuredFloor) {
+    const disposition = policy.disposition_below_floor ?? "WARN";
     return {
-      status: 'BELOW_FLOOR',
-      salary_annual_sgd: annualSgd,
-      is_hard_reject: disposition === 'HARD_REJECT',
-      prevents_apply_now: disposition === 'HARD_REJECT' || disposition === 'PREVENT_APPLY_NOW',
-      rejection_code: 'COMPENSATION_BELOW_USER_FLOOR',
-      evidence: `Annual cash compensation SGD ${Math.round(annualSgd).toLocaleString()} is below the configured SGD ${configuredFloor.toLocaleString()} floor for ${category}${input.is_startup && policy.startup_min_cash_salary_monthly_sgd !== undefined ? `; startup monthly cash floor is SGD ${policy.startup_min_cash_salary_monthly_sgd.toLocaleString()}` : ''}.`,
+      status: "BELOW_FLOOR",
+      salary_annual_sgd: annualMin,
+      salary_annual_sgd_max: annualMax,
+      applied_floor_sgd: configuredFloor,
+      opportunity_category: categoryName,
+      fx_rate_observation_id: input.fx_rate_observation_id ?? null,
+      is_hard_reject: disposition === "HARD_REJECT",
+      prevents_apply_now: disposition === "HARD_REJECT" || disposition === "PREVENT_APPLY_NOW",
+      rejection_code: "COMPENSATION_BELOW_USER_FLOOR",
+      evidence: `Maximum guaranteed base cash SGD ${Math.round(annualMax).toLocaleString()} is below the configured SGD ${configuredFloor.toLocaleString()} floor for ${categoryName}${input.is_startup && policy.startup_min_cash_salary_monthly_sgd !== undefined ? `; startup monthly cash floor is SGD ${policy.startup_min_cash_salary_monthly_sgd.toLocaleString()}` : ""}.`,
     };
+  }
+  if (annualMin === null || annualMax === null) {
+    return unknown("A minimum guaranteed base-cash bound is missing; compensation cannot be confirmed as meeting the configured floor.", annualMin, annualMax, configuredFloor);
+  }
+  if (annualMin < configuredFloor) {
+    return unknown(`Guaranteed base-cash range SGD ${Math.round(annualMin).toLocaleString()}–${Math.round(annualMax).toLocaleString()} straddles the configured SGD ${configuredFloor.toLocaleString()} floor and needs verification.`, annualMin, annualMax, configuredFloor);
   }
 
   return {
-    status: targetThreshold !== undefined && annualSgd >= targetThreshold ? 'TARGET_MET' : 'ACCEPTABLE',
-    salary_annual_sgd: annualSgd,
+    status: targetThreshold !== undefined && annualMin >= targetThreshold ? "TARGET_MET" : "ACCEPTABLE",
+    salary_annual_sgd: annualMin,
+    salary_annual_sgd_max: annualMax,
+    applied_floor_sgd: configuredFloor,
+    opportunity_category: categoryName,
+    fx_rate_observation_id: input.fx_rate_observation_id ?? null,
     is_hard_reject: false,
     prevents_apply_now: false,
-    evidence: `Annual cash compensation SGD ${Math.round(annualSgd).toLocaleString()} meets the configured SGD ${configuredFloor.toLocaleString()} floor${targetThreshold === undefined ? '' : `; target is SGD ${targetThreshold.toLocaleString()}`}.`,
+    evidence: `Guaranteed base cash SGD ${Math.round(annualMin).toLocaleString()}–${Math.round(annualMax).toLocaleString()} meets the configured SGD ${configuredFloor.toLocaleString()} floor${targetThreshold === undefined ? "" : `; target is SGD ${targetThreshold.toLocaleString()}`}.`,
   };
 }
 

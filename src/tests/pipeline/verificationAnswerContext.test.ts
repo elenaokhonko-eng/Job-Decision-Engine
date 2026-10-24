@@ -138,7 +138,7 @@ describe("verification answer context", () => {
 
     expect(compareStructuredRequirement(experienceRequirement[0], softwareExperience).status).toBe("UNKNOWN");
     expect(compareStructuredRequirement(experienceRequirement[0], softwareExperience, softwareAnswer).status).toBe("MATCH");
-    expect(compareStructuredRequirement(experienceRequirement[0], shortExperience, softwareAnswer).status).toBe("MISMATCH");
+    expect(compareStructuredRequirement(experienceRequirement[0], shortExperience, softwareAnswer).status).toBe("UNKNOWN");
   });
 
   it("applies a travel cap without clearing an unrelated office blocker", () => {

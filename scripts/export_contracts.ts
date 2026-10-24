@@ -15,6 +15,10 @@ import {
   ApplicationEventSchema,
   ShortlistRowSchema,
   SourcePluginSchema,
+  ApplicationReadinessSchema,
+  JobSourceEvidenceSchema,
+  ExperienceRequirementScopeSchema,
+  ProfileExperienceEvidenceSchema,
 } from "../src/contracts/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -38,6 +42,10 @@ const schemas = {
   ApplicationEvent: ApplicationEventSchema,
   ShortlistRow: ShortlistRowSchema,
   SourcePlugin: SourcePluginSchema,
+  ApplicationReadiness: ApplicationReadinessSchema,
+  JobSourceEvidence: JobSourceEvidenceSchema,
+  ExperienceRequirementScope: ExperienceRequirementScopeSchema,
+  ProfileExperienceEvidence: ProfileExperienceEvidenceSchema,
 };
 
 console.log("Exporting runtime Zod contracts to JSON Schemas for Python and Streamlit...");

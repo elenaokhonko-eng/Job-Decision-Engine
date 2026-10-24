@@ -14,6 +14,7 @@ import { fileURLToPath } from "url";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
+import { SourceBroker } from "../../ingestion/sourceBroker.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -710,5 +711,119 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     expect(unmapped).toBe(0);
     expect(Number(orphaned.rows[0].count)).toBe(0);
+  });
+
+  it("preserves posting identity while creating a new immutable version only when content changes", async () => {
+    const { runNormalization } = await import("../../pipeline/normalize.js");
+    const broker = new SourceBroker(getClient(), getContext());
+    const sourceRunId = await broker.startRun("EVIDENCE_VERSION_TEST");
+    const identity = "jdec-evidence-version-test-42";
+    const common = {
+      sourceName: "GREENHOUSE" as const,
+      sourcePluginKey: "greenhouse",
+      sourceExternalId: identity,
+      sourceUrl: "https://boards.greenhouse.io/evidence-test/jobs/42",
+      canonicalApplyUrl: "https://boards.greenhouse.io/evidence-test/jobs/42",
+      retrievedAt: "2026-10-24T00:00:00.000Z",
+      companyName: "Evidence Version Test",
+      title: "Platform Engineer",
+      locationRaw: "Singapore",
+      workplaceTypeRaw: "HYBRID",
+      employmentTypeRaw: "PERMANENT",
+      compensationRaw: "UNKNOWN",
+      sourceLane: "CORE_AI_DATA",
+      searchPlanVersion: "evidence-identity-v1",
+    };
+    const descriptions = [
+      "Build the original production platform. Responsibilities include API design, data processing, and engineering operations.",
+      "Build the revised production platform. Responsibilities include API design, data processing, and engineering operations.",
+      "Build the revised production platform. Responsibilities include API design, data processing, and engineering operations.",
+    ];
+    const observationIds: string[] = [];
+
+    for (const [index, description] of descriptions.entries()) {
+      const result = await broker.processObservation(
+        { ...common, descriptionRaw: description, retrievedAt: new Date(Date.UTC(2026, 9, 24, 0, index)).toISOString(), rawPayload: { id: identity, description } },
+        { id: identity, publishedAt: "2026-10-20T00:00:00Z", updatedAt: `2026-10-${20 + index}T00:00:00Z`, version: index + 1, description },
+      );
+      if (!result.observationId) throw new Error("Test observation insert returned no ID.");
+      observationIds.push(result.observationId);
+      const summary = await runNormalization(getClient(), { context: getContext(), observationIds: [result.observationId] });
+      expect(summary.totalProcessed).toBe(1);
+    }
+    await broker.endRun("COMPLETED");
+
+    const { rows } = await q(
+      `SELECT c.id AS canonical_job_id, c.latest_job_version_id,
+              COUNT(jv.id)::int AS version_count,
+              COUNT(DISTINCT jv.source_posting_identity_hash)::int AS identity_count,
+              ARRAY_AGG(DISTINCT jv.content_hash) AS content_hashes,
+              ARRAY_AGG(DISTINCT jv.source_posting_identity_hash) AS posting_identity_hashes
+         FROM canonical_jobs c
+         JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.canonical_job_id = c.id
+         JOIN raw_job_observations rjo ON rjo.workspace_id = c.workspace_id AND rjo.job_version_id = jv.id
+        WHERE c.workspace_id = $1 AND rjo.id = ANY($2::uuid[])
+        GROUP BY c.id, c.latest_job_version_id`,
+      [getContext().workspaceId, observationIds],
+    );
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].version_count)).toBe(2);
+    expect(Number(rows[0].identity_count)).toBe(1);
+    expect(rows[0].content_hashes).toHaveLength(2);
+    expect(rows[0].posting_identity_hashes).toHaveLength(1);
+  });
+
+  it("does not merge the same external ID across different normalized locations", async () => {
+    const { runNormalization } = await import("../../pipeline/normalize.js");
+    const broker = new SourceBroker(getClient(), getContext());
+    await broker.startRun("LOCATION_IDENTITY_COLLISION_TEST");
+    const identity = "jdec-location-identity-collision-42";
+    const base = {
+      sourceName: "GREENHOUSE" as const,
+      sourcePluginKey: "greenhouse",
+      sourceExternalId: identity,
+      sourceUrl: "https://boards.greenhouse.io/location-test/jobs/42",
+      canonicalApplyUrl: "https://boards.greenhouse.io/location-test/jobs/42",
+      companyName: "Location Identity Test",
+      title: "Platform Engineer",
+      workplaceTypeRaw: "REMOTE",
+      employmentTypeRaw: "PERMANENT",
+      compensationRaw: "UNKNOWN",
+      sourceLane: "CORE_AI_DATA",
+      searchPlanVersion: "location-identity-v1",
+    };
+    const observationIds: string[] = [];
+    for (const [index, location] of ["Singapore", "New York, United States"].entries()) {
+      const rawPayload = { id: identity, location, occurrence: index };
+      const staged = await broker.processObservation({
+        ...base,
+        locationRaw: location,
+        descriptionRaw: "Build and maintain the production data platform for this role.",
+        retrievedAt: new Date(Date.UTC(2026, 9, 24, 0, index)).toISOString(),
+        rawPayload,
+      }, rawPayload);
+      if (!staged.observationId) throw new Error("Location-collision fixture observation returned no ID.");
+      observationIds.push(staged.observationId);
+      const summary = await runNormalization(getClient(), {
+        context: getContext(),
+        observationIds: [staged.observationId],
+      });
+      expect(summary.totalProcessed).toBe(1);
+    }
+    await broker.endRun("COMPLETED");
+
+    const { rows } = await q(
+      `SELECT COUNT(DISTINCT jv.canonical_job_id)::int AS canonical_count,
+              COUNT(DISTINCT jv.source_posting_identity_hash)::int AS identity_count,
+              ARRAY_AGG(DISTINCT COALESCE(c.location, c.location_summary, 'Unknown')) AS locations
+         FROM raw_job_observations rjo
+         JOIN job_versions jv ON jv.workspace_id = rjo.workspace_id AND jv.id = rjo.job_version_id
+         JOIN canonical_jobs c ON c.workspace_id = jv.workspace_id AND c.id = jv.canonical_job_id
+        WHERE rjo.workspace_id = $1 AND rjo.id = ANY($2::uuid[])`,
+      [getContext().workspaceId, observationIds],
+    );
+    expect(Number(rows[0].canonical_count)).toBe(2);
+    expect(Number(rows[0].identity_count)).toBe(1);
+    expect(rows[0].locations).toEqual(expect.arrayContaining(["Singapore", "New York, United States"]));
   });
 });

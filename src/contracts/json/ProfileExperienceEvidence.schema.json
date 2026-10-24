@@ -1,0 +1,196 @@
+{
+  "$ref": "#/definitions/ProfileExperienceEvidence",
+  "definitions": {
+    "ProfileExperienceEvidence": {
+      "type": "object",
+      "properties": {
+        "scope_schema_version": {
+          "type": "string",
+          "const": "experience_scope_v2"
+        },
+        "role_families": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "HANDS_ON_SOFTWARE_ENGINEERING",
+              "AI_ENGINEERING",
+              "DATA_ENGINEERING",
+              "ARCHITECTURE",
+              "RESEARCH_SOFTWARE",
+              "SCIENTIFIC_ENGINEERING",
+              "TECHNICAL_DELIVERY",
+              "TECHNICAL_PRODUCT",
+              "SALES_OWNERSHIP",
+              "CUSTOMER_SUPPORT",
+              "PEOPLE_MANAGEMENT"
+            ]
+          },
+          "default": []
+        },
+        "domain_families": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "SOFTWARE",
+              "AI",
+              "DATA",
+              "LEGAL_REGTECH",
+              "HEALTH_BIO_PHARMA",
+              "INVESTMENT_MARKETS_FINTECH",
+              "SOCIAL_IMPACT_MULTILATERAL",
+              "UNIVERSITY_AI_RESEARCH"
+            ]
+          },
+          "default": []
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "ANY",
+            "ALL"
+          ],
+          "default": "ANY"
+        },
+        "duration_basis": {
+          "type": "string",
+          "enum": [
+            "PROFESSIONAL_PRODUCTION",
+            "DEPLOYED_OPEN_SOURCE",
+            "APPLIED_PROJECT",
+            "COURSEWORK",
+            "KNOWLEDGE_ONLY",
+            "UNSPECIFIED"
+          ]
+        },
+        "interval_start": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "interval_end": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "is_current": {
+          "type": "boolean",
+          "default": false
+        },
+        "years_lower_bound": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "years_upper_bound": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "aggregation_kind": {
+          "type": "string",
+          "enum": [
+            "AGGREGATE_TOTAL",
+            "COMPONENT",
+            "UNKNOWN"
+          ],
+          "default": "UNKNOWN"
+        },
+        "aggregation_group_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "overlap_group_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scope_complete_for_profile": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "evidence_basis": {
+          "type": "string",
+          "enum": [
+            "DATED_ENGAGEMENT_INTERVAL",
+            "ATTESTED_TOTAL_DURATION",
+            "ATTESTED_COMPONENT_DURATION",
+            "DERIVED_FROM_VERSIONED_ENGAGEMENT",
+            "UNKNOWN"
+          ]
+        },
+        "evidence_source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": []
+        },
+        "attestation_status": {
+          "type": "string",
+          "enum": [
+            "VERIFIED",
+            "SELF_ATTESTED",
+            "UNVERIFIED"
+          ],
+          "default": "UNVERIFIED"
+        }
+      },
+      "required": [
+        "scope_schema_version",
+        "duration_basis",
+        "evidence_basis"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

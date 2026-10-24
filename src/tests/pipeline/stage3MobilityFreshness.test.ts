@@ -4,6 +4,8 @@ import {
   evaluateJobFreshness,
   evaluateMobilityMatch,
   evaluateCompensationPolicy,
+  parseCompensationEvidence,
+  inferOpportunityCategory,
   evaluateEmployerExclusions,
   evaluateEmployerWatchlist,
   computeEmploymentStabilityScore,
@@ -44,6 +46,7 @@ const approvedFreshness = FreshnessPolicySchema.parse({
   freshness_ranking_weight: 12.5,
 });
 const approvedCompensation = CompensationPolicySchema.parse({
+  target_salary_basis: "GROSS",
   startup_min_cash_salary_monthly_sgd: 10000,
   commercial_min_annual_sgd: 240000,
   commercial_target_annual_sgd: 250000,
@@ -116,6 +119,56 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
 
     expect(first.postingIdentityHash).not.toBe(second.postingIdentityHash);
     expect(first.freshnessBasis).toBe('POSTED_AT');
+  });
+
+  it('keeps posting identity stable across content revisions and tracking URL changes', () => {
+    const first = extractFreshnessEvidence({
+      rawPayload: { pubDate: '2026-10-01T00:00:00Z' },
+      sourceName: 'ATS',
+      sourceExternalId: null,
+      canonicalUrl: 'https://jobs.example.test/role/?utm_source=mail&gh_src=tracking',
+      contentHash: 'content-v1',
+    });
+    const revised = extractFreshnessEvidence({
+      rawPayload: { pubDate: '2026-10-01T00:00:00Z', updatedAt: '2026-10-20T00:00:00Z' },
+      sourceName: 'ATS',
+      sourceExternalId: null,
+      canonicalUrl: 'https://jobs.example.test/role',
+      contentHash: 'content-v2',
+    });
+
+    expect(revised.postingIdentityHash).toBe(first.postingIdentityHash);
+    expect(revised.sourceUpdatedAt).toBe('2026-10-20T00:00:00.000Z');
+    expect(revised.freshnessBasis).toBe('POSTED_AT');
+  });
+
+  it('parses explicit seconds/milliseconds and expiry dates without treating arbitrary numbers as dates', () => {
+    const seconds = extractFreshnessEvidence({
+      rawPayload: { publishedAt: 1790812800, validThrough: '2026-12-31T23:59:59Z' },
+      sourceName: 'ATS',
+      sourceExternalId: 'job-1',
+      canonicalUrl: null,
+      contentHash: 'content',
+    });
+    const milliseconds = extractFreshnessEvidence({
+      rawPayload: { datePosted: 1790812800000 },
+      sourceName: 'ATS',
+      sourceExternalId: 'job-2',
+      canonicalUrl: null,
+      contentHash: 'content',
+    });
+    const ambiguous = extractFreshnessEvidence({
+      rawPayload: { datePosted: 17908128000 },
+      sourceName: 'ATS',
+      sourceExternalId: 'job-3',
+      canonicalUrl: null,
+      contentHash: 'content',
+    });
+
+    expect(seconds.sourcePublishedAt).toBe(new Date(1790812800 * 1000).toISOString());
+    expect(seconds.sourceExpiresAt).toBe('2026-12-31T23:59:59.000Z');
+    expect(milliseconds.sourcePublishedAt).toBe(new Date(1790812800000).toISOString());
+    expect(ambiguous.sourcePublishedAt).toBeNull();
   });
 
   it('does not use anecdotal or low-confidence company-stage evidence to exclude a role', () => {
@@ -247,6 +300,8 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       salary_min: 8000 * 12, // SGD 96,000 / year (< SGD 10k/month cash floor)
       salary_currency: 'SGD',
       salary_period: 'ANNUAL' as const,
+      salary_basis: 'GROSS' as const,
+      component_type: 'BASE_CASH' as const,
       is_startup: true,
     };
 
@@ -256,6 +311,116 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     expect(result.prevents_apply_now).toBe(true);
     expect(result.rejection_code).toBe('COMPENSATION_BELOW_USER_FLOOR');
     expect(result.evidence).toContain('SGD 10,000');
+  });
+
+  it("parses salary ranges and preserves unknown currency, basis, and component semantics", () => {
+    const range = parseCompensationEvidence("SGD 220,000–260,000 gross per year base salary");
+    const unknownCurrency = parseCompensationEvidence("$220k–$260k gross per year base salary");
+    const variable = parseCompensationEvidence("SGD 300,000 OTE annual compensation, including commission");
+
+    expect(range).toMatchObject({
+      salary_min: 220000,
+      salary_max: 260000,
+      salary_currency: "SGD",
+      salary_period: "ANNUAL",
+      salary_basis: "GROSS",
+      component_type: "BASE_CASH",
+    });
+    expect(unknownCurrency?.salary_currency).toBeNull();
+    expect(variable?.component_type).toBe("VARIABLE_CASH");
+  });
+
+  it("treats straddling ranges, unknown currency, hourly assumptions, and non-base cash as verification", () => {
+    const straddling = evaluateCompensationPolicy({
+      salary_min: 220000,
+      salary_max: 260000,
+      salary_currency: "SGD",
+      salary_period: "ANNUAL",
+      salary_basis: "GROSS",
+      component_type: "BASE_CASH",
+    }, "COMMERCIAL", approvedCompensation);
+    const unknownCurrency = evaluateCompensationPolicy({
+      salary_min: 250000,
+      salary_currency: null,
+      salary_period: "ANNUAL",
+      salary_basis: "GROSS",
+      component_type: "BASE_CASH",
+    }, "COMMERCIAL", approvedCompensation);
+    const hourly = evaluateCompensationPolicy({
+      salary_min: 100,
+      salary_currency: "SGD",
+      salary_period: "HOURLY",
+      salary_basis: "GROSS",
+      component_type: "BASE_CASH",
+      guaranteed_hours_per_week: 40,
+    }, "COMMERCIAL", approvedCompensation);
+    const ote = evaluateCompensationPolicy({
+      salary_min: 300000,
+      salary_currency: "SGD",
+      salary_period: "ANNUAL",
+      salary_basis: "GROSS",
+      component_type: "VARIABLE_CASH",
+    }, "COMMERCIAL", approvedCompensation);
+
+    expect(straddling.status).toBe("UNKNOWN");
+    expect(straddling.prevents_apply_now).toBe(true);
+    expect(unknownCurrency.status).toBe("UNKNOWN");
+    expect(hourly.status).toBe("UNKNOWN");
+    expect(ote.status).toBe("UNKNOWN");
+  });
+
+  it("does not infer discounted compensation categories from posting keywords", () => {
+    expect(inferOpportunityCategory("Acme AI", "Research Engineer", "University research is a customer domain.")).toBeNull();
+    expect(inferOpportunityCategory("National University of Singapore", "Research Engineer", "")).toBe("UNIVERSITY_RESEARCH");
+  });
+
+  it("uses only supported opportunity categories and evaluates a structured maximum without inventing a minimum", () => {
+    const hardRejectPreferences = {
+      ...approvedStage3Preferences,
+      compensation: CompensationPolicySchema.parse({
+        ...approvedCompensation,
+        disposition_below_floor: "HARD_REJECT",
+      }),
+    };
+    const sharedSalary = {
+      title: "Research Engineer",
+      company_name: "Example Labs",
+      workplace_type: "REMOTE",
+      location: "Singapore",
+      posted_at: new Date().toISOString(),
+      salary_min: null,
+      salary_currency: "SGD",
+      salary_period: "ANNUAL" as const,
+      salary_basis: "GROSS" as const,
+      component_type: "BASE_CASH" as const,
+      description: "Build software for university research customers.",
+    };
+    const supportedUniversity = applyPersistedRequirementGates({
+      ...sharedSalary,
+      salary_min: 180000,
+      salary_max: 200000,
+      opportunity_category: "UNIVERSITY_RESEARCH",
+    }, [], undefined, null, hardRejectPreferences);
+    const structuredMaximumBelowFloor = applyPersistedRequirementGates({
+      ...sharedSalary,
+      salary_max: 200000,
+      opportunity_category: "COMMERCIAL",
+    }, [], undefined, null, hardRejectPreferences);
+    const structuredMaximumAboveFloor = evaluateCompensationPolicy({
+      salary_min: null,
+      salary_max: 260000,
+      salary_currency: "SGD",
+      salary_period: "ANNUAL",
+      salary_basis: "GROSS",
+      component_type: "BASE_CASH",
+    }, "COMMERCIAL", hardRejectPreferences.compensation);
+
+    expect(supportedUniversity.status).toBe("PASS");
+    expect(structuredMaximumBelowFloor.status).toBe("HARD_REJECT");
+    expect(structuredMaximumBelowFloor.rejection_codes).toContain("COMPENSATION_BELOW_USER_FLOOR");
+    expect(structuredMaximumAboveFloor.status).toBe("UNKNOWN");
+    expect(structuredMaximumAboveFloor.salary_annual_sgd).toBeNull();
+    expect(structuredMaximumAboveFloor.salary_annual_sgd_max).toBe(260000);
   });
 
   // Scenario 6: Old posting 75 days -> stale reject

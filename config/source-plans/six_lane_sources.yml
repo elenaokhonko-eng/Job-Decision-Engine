@@ -1,0 +1,48 @@
+schema_version: "2.2.0"
+plan_version: "six_lane_sources_v1"
+target_functions:
+  - technical project manager
+  - technical programme manager
+  - technical program manager
+  - technical delivery lead
+  - technical delivery manager
+  - solutions architect
+  - enterprise architect
+  - data architect
+  - AI architect
+  - platform architect
+  - research software engineer
+  - scientific computing engineer
+  - technical product manager
+  - applied scientist
+lanes:
+  CORE_AI_DATA:
+    domain_terms: [AI systems, machine learning, LLM, data engineering, distributed systems, MLOps, platform]
+    role_terms: [AI engineer, machine learning engineer, data engineer, software architect, platform architect, research engineer]
+    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely]
+    coverage_note: "Public employer ATS boards and configured remote-job feeds; source failures and empty pages are reported separately."
+  LEGAL_REGTECH:
+    domain_terms: [legal technology, legal AI, RegTech, compliance automation, contract analytics, fraud technology]
+    role_terms: [legal technology, regulatory technology, software engineer, solutions architect, technical delivery]
+    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely]
+    coverage_note: "Public employer ATS boards and configured remote-job feeds; legal practice-only roles remain subject to function gates."
+  HEALTH_BIO_PHARMA:
+    domain_terms: [bioinformatics, genomics, computational biology, drug discovery, healthcare data, clinical AI]
+    role_terms: [research software engineer, scientific computing, data engineer, AI engineer, platform architect]
+    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely]
+    coverage_note: "Public employer ATS boards and configured remote-job feeds; laboratory-only roles remain subject to workability gates."
+  INVESTMENT_MARKETS_FINTECH:
+    domain_terms: [investment technology, market data, trading systems, asset management technology, fintech platform, risk analytics]
+    role_terms: [software architect, data architect, platform engineer, technical delivery, technical product]
+    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely]
+    coverage_note: "Investment technology is searched separately from generic banking, payments, and deal advisory."
+  SOCIAL_IMPACT_MULTILATERAL:
+    domain_terms: [digital public infrastructure, humanitarian technology, climate data, multilateral AI, development data, civic technology]
+    role_terms: [technical programme manager, technical project manager, technical delivery lead, data architect, software engineer]
+    source_keys: [himalayas, jobicy, remotive, we_work_remotely]
+    coverage_note: "No institution-specific social-impact ATS board is enabled without verified public API/feed evidence; configured public feeds and manual/user-supplied intake remain available."
+  UNIVERSITY_AI_RESEARCH:
+    domain_terms: [university AI research, research software, scientific computing, responsible AI, academic data platform, research infrastructure]
+    role_terms: [research software engineer, scientific computing engineer, research engineer, AI architect, technical product manager]
+    source_keys: [himalayas, jobicy, remotive, we_work_remotely]
+    coverage_note: "No institution-specific university ATS board is enabled without verified public API/feed evidence; configured public feeds and manual/user-supplied intake remain available."

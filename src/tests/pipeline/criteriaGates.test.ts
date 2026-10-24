@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { applyGlobalGates, isTechnicalRole, evaluateWorkability } from "../../services/criteria.js";
-import { loadWorkabilityPolicy } from "../../pipeline/workabilityPolicy.js";
+import { loadWorkabilityPolicy, mergeWorkabilityPreferenceContent } from "../../pipeline/workabilityPolicy.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -176,6 +176,59 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       const result = applyGlobalGates(job as any);
       expect(result.status).toBe("HARD_REJECT");
       expect(result.rejection_codes).toContain("GATE_UNKNOWN_WORK_MODE");
+    });
+
+    it("evaluates explicit worker-country alternatives as a set and ignores employer headquarters", () => {
+      const authorizedAlternative = evaluateWorkability(
+        "Remote",
+        "REMOTE",
+        "Must be authorized to work in Singapore or Australia.",
+        "PERMANENT",
+        loadWorkabilityPolicy(),
+      );
+      const usaOnly = evaluateWorkability(
+        "Remote",
+        "REMOTE",
+        "Must be authorized to work in the United States.",
+        "PERMANENT",
+        loadWorkabilityPolicy(),
+      );
+      const employerHeadquartersOnly = evaluateWorkability(
+        "Remote",
+        "REMOTE",
+        "Fully remote role. The company is headquartered in California.",
+        "PERMANENT",
+        loadWorkabilityPolicy(),
+      );
+
+      expect(authorizedAlternative.workable).toBe(true);
+      expect(usaOnly.reasonCode).toBe("WORK_AUTHORIZATION_INCOMPATIBLE");
+      expect(employerHeadquartersOnly.workable).toBe(true);
+    });
+
+    it("does not let an assumed or explicit hybrid mode override a remote-only preference", () => {
+      const remoteOnlyPolicy = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+        hard_constraints: { work_modes: ["REMOTE"], max_office_days_per_week: 0 },
+      });
+      const assumed = evaluateWorkability(
+        "Singapore",
+        "ASSUMED_HYBRID",
+        "Flexible workplace arrangement.",
+        "PERMANENT",
+        remoteOnlyPolicy,
+      );
+      const explicitHybrid = evaluateWorkability(
+        "Singapore",
+        "HYBRID",
+        "Two days per week in the office.",
+        "PERMANENT",
+        remoteOnlyPolicy,
+      );
+
+      expect(assumed.workable).toBe(false);
+      expect(assumed.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
+      expect(explicitHybrid.workable).toBe(false);
+      expect(explicitHybrid.reasonCode).toBe("GATE_HIGH_OFFICE_DAYS");
     });
 
     it.each([

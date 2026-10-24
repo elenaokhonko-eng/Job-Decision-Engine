@@ -82,7 +82,7 @@ describe('Pipeline Stage: Normalization', () => {
       'RAW_STAGED',
       'RAW_STAGED',
       'INCOMPLETE',
-      'DESCRIPTION_BELOW_1000_CHAR_COMPLETENESS_FLOOR'
+      'DESCRIPTION_HAS_INSUFFICIENT_SUBSTANTIVE_CONTENT'
     ]);
     
     // Check job_versions insertion
@@ -94,13 +94,18 @@ describe('Pipeline Stage: Normalization', () => {
       generateContentHash('Test Corp', 'AI Engineer', 'Test description'),
       'Test description'
     ]);
-    expect(insertVersionCall[1].slice(4, 7)).toEqual([null, null, null]);
-    expect(insertVersionCall[1][7]).toMatch(/^[0-9a-f]{64}$/);
-    expect(insertVersionCall[1].slice(8)).toEqual([
+    expect(insertVersionCall[1].slice(4, 8)).toEqual([null, null, null, null]);
+    expect(insertVersionCall[1][8]).toMatch(/^[0-9a-f]{64}$/);
+    expect(insertVersionCall[1].slice(9, 16)).toEqual([
       '2026-10-18T00:00:00.000Z',
       null,
       null,
+      null,
+      null,
+      null,
+      null,
     ]);
+    expect(insertVersionCall[1][16]).toBeNull();
 
     // Check latest_job_version_id update on canonical job
     const updateCanonCall = calls.find((call: any[]) => call[0].includes('UPDATE canonical_jobs'));

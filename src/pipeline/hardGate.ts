@@ -187,11 +187,18 @@ export function applyPersistedRequirementGates(
     salary_min?: number | null;
     salary_max?: number | null;
     salary_currency?: string | null;
-    salary_period?: 'ANNUAL' | 'MONTHLY' | null;
+    salary_period?: 'ANNUAL' | 'MONTHLY' | 'HOURLY' | 'UNKNOWN' | null;
+    salary_basis?: 'GROSS' | 'NET' | 'UNKNOWN';
+    component_type?: 'BASE_CASH' | 'VARIABLE_CASH' | 'EQUITY' | 'OTHER';
+    guaranteed_hours_per_week?: number | null;
+    paid_weeks_per_year?: number | null;
     travel_pct?: number | null;
     currency_to_sgd_rate?: number | null;
+    fx_rate_date?: string | null;
+    fx_rate_source?: string | null;
+    fx_rate_observation_id?: string | null;
     is_startup?: boolean;
-    opportunity_category?: 'COMMERCIAL' | 'UNIVERSITY_RESEARCH' | 'MISSION_MULTILATERAL';
+    opportunity_category?: 'COMMERCIAL' | 'UNIVERSITY_RESEARCH' | 'MISSION_MULTILATERAL' | null;
   },
   deterministicRequirements: PersistedRequirement[],
   policy: WorkabilityPolicy = loadWorkabilityPolicy(),
@@ -257,20 +264,32 @@ export function applyPersistedRequirementGates(
   }
 
   // Compensation floors are handled as non-Apply-Now policy downstream unless explicitly configured as a hard reject.
-  const compensationInput = job.salary_min !== null && job.salary_min !== undefined
+  const hasStructuredSalary =
+    (job.salary_min !== null && job.salary_min !== undefined)
+    || (job.salary_max !== null && job.salary_max !== undefined);
+  const compensationInput = hasStructuredSalary
     ? {
         salary_min: job.salary_min,
         salary_max: job.salary_max,
         salary_currency: job.salary_currency,
         salary_period: job.salary_period,
+        salary_basis: job.salary_basis,
+        component_type: job.component_type,
+        guaranteed_hours_per_week: job.guaranteed_hours_per_week,
+        paid_weeks_per_year: job.paid_weeks_per_year,
         currency_to_sgd_rate: job.currency_to_sgd_rate,
+        fx_rate_date: job.fx_rate_date,
+        fx_rate_source: job.fx_rate_source,
+        fx_rate_observation_id: job.fx_rate_observation_id,
         is_startup: job.is_startup,
       }
     : parseCompensationEvidence(job.compensation_raw);
   if (compensationInput) {
+    const opportunityCategory = job.opportunity_category
+      ?? inferOpportunityCategory(job.company_name, job.title, job.description || '');
     const compensation = evaluateCompensationPolicy(
       compensationInput,
-      job.opportunity_category || inferOpportunityCategory(job.company_name, job.title, job.description || ''),
+      opportunityCategory,
       stage3Preferences?.compensation
     );
     if (compensation.is_hard_reject) {
@@ -663,7 +682,7 @@ export function applyExactProfileGates(
       continue;
     }
 
-    let comparison = compareStructuredRequirement(requirement, profileFacts, answerContext);
+    let comparison = compareStructuredRequirement(requirement, profileFacts, answerContext ?? undefined);
     if (comparison.status === "UNKNOWN" && answerContext) {
       if (requirement.requirement_type === "WORK_AUTH"
         && answerContext.overrides.workAuthorizationRegions.length > 0) {
@@ -673,7 +692,7 @@ export function applyExactProfileGates(
           structured_value: { authorized_regions: answerContext.overrides.workAuthorizationRegions },
           source_type: "PROFILE_FACT",
         };
-        comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact], answerContext);
+        comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact], answerContext ?? undefined);
       }
     }
 

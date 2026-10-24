@@ -5,8 +5,8 @@ import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
 export { normalizeWorkMode };
 import {
   applyVerificationAnswerOverrides,
+  extractExplicitWorkerTerritoryRequirements,
   extractTerritories,
-  hasExplicitTerritoryRestriction,
   isVerificationAnswerProvided,
   loadWorkabilityPolicy,
   VERIFICATION_ANSWER_KEYS,
@@ -236,6 +236,23 @@ export function evaluateWorkability(
   const baseFacts: Partial<GateResult["workability_facts"]> = {
     employment_type: normalizedEmp,
   };
+  const unknownWorkModeOutcome = (assumedHybrid = false) => {
+    const facts: Partial<GateResult["workability_facts"]> = {
+      ...baseFacts,
+      office_days_min: assumedHybrid ? 3 : null,
+      office_days_max: assumedHybrid ? 3 : null,
+      attendance_basis: assumedHybrid ? "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE" : "UNKNOWN",
+    };
+    switch (effectivePolicy.unknownWorkModeDisposition) {
+      case "PASS":
+        return { workable: true, needsVerify: false, reason: "Workplace model unspecified; accepted by configured policy", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
+      case "NEEDS_VERIFICATION":
+        return { workable: true, needsVerify: true, reason: "Workplace model unspecified; needs manual verification", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
+      case "HARD_REJECT":
+      default:
+        return { workable: false, needsVerify: false, reason: "Workplace model unspecified and remains unknown after evidence review", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
+    }
+  };
 
   // Structured or strongly indicated contract employment is deterministic.
   if (normalizedEmp === "CONTRACT" && !effectivePolicy.contractAllowed) {
@@ -248,20 +265,19 @@ export function evaluateWorkability(
     };
   }
 
-  // 1a. Assumed hybrid from owner policy (e.g. Singapore unknown work-mode default)
+  // An inferred hybrid signal is never affirmative employer evidence.
   const isAssumedHybrid = String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID";
   if (isAssumedHybrid) {
-    return {
-      workable: true,
-      needsVerify: false,
-      facts: {
-        ...baseFacts,
-        workplace_type: "ASSUMED_HYBRID",
-        office_days_min: 3,
-        office_days_max: 3,
-        attendance_basis: "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE",
-      },
-    };
+    if (!effectivePolicy.allowedWorkModes.includes("HYBRID")) {
+      return {
+        workable: false,
+        needsVerify: false,
+        reason: "Hybrid is not permitted by the active work-mode preference, and the inferred mode cannot override it",
+        reasonCode: "GATE_UNKNOWN_WORK_MODE",
+        facts: { ...baseFacts, office_days_min: 3, office_days_max: 3, attendance_basis: "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE" },
+      };
+    }
+    return unknownWorkModeOutcome(true);
   }
 
   // 1. Explicit ONSITE structured field or work-mode heading/text -> HARD REJECT.
@@ -276,7 +292,17 @@ export function evaluateWorkability(
     || /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i.test(d)
     || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek);
 
-  if ((!effectivePolicy.onsiteOnlyAllowed && wp === "ONSITE") || (!effectivePolicy.onsiteOnlyAllowed && isExplicitOnsiteText)) {
+  if (wp !== "UNKNOWN" && !effectivePolicy.allowedWorkModes.includes(wp)) {
+    return {
+      workable: false,
+      needsVerify: false,
+      reason: `${wp.toLowerCase()} work mode is not included in the active work-mode preference`,
+      reasonCode: wp === "REMOTE" ? "GATE_LOCATION_RESTRICTED" : "GATE_HIGH_OFFICE_DAYS",
+      facts: { ...baseFacts, workplace_type: wp },
+    };
+  }
+
+  if ((!effectivePolicy.allowedWorkModes.includes("ONSITE") && wp === "ONSITE") || (!effectivePolicy.allowedWorkModes.includes("ONSITE") && isExplicitOnsiteText)) {
     const minDays = officeDaysMatch ? Number(officeDaysMatch[1]) : 4;
     const maxDays = officeDaysMatch ? Number(officeDaysMatch[1]) : 5;
     return {
@@ -295,36 +321,57 @@ export function evaluateWorkability(
     || /\b(?:location|workplace|work\s+location)\s*:\s*remote\b/i.test(d);
   const isRemote = wp === "REMOTE" || (wp === "UNKNOWN" && (/\bremote\b/i.test(loc) || isExplicitRemoteText));
 
-  // 3. Geographic restrictions. Structured foreign locations are relevant to
-  // onsite/hybrid roles; remote roles require an explicit worker authorization
-  // or physical-residency restriction before they can fail this gate.
+  // 3. Geographic restrictions use worker-location evidence, never employer HQ mentions.
   const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
   const locationTerritories = extractTerritories(loc);
-  const descriptionTerritories = extractTerritories(d);
-  const explicitlyDisallowed = effectivePolicy.rejectExplicitForeignTerritory
-    ? [
-        ...(isRemote ? [] : locationTerritories),
-        ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory)),
-      ].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory))
+  const remoteLocationTerritories = isRemote && /\\b(remote|worldwide|global|anywhere)\\b/i.test(loc)
+    ? locationTerritories
     : [];
-  if (explicitlyDisallowed.length > 0) {
-    const territory = explicitlyDisallowed[0];
+  const relevantLocationTerritories = isRemote ? remoteLocationTerritories : locationTerritories;
+  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d);
+  const isUnauthorized = (territory: string): boolean =>
+    effectivePolicy.rejectExplicitForeignTerritory
+    && authorizedRegions.size > 0
+    && !authorizedRegions.has(territory);
+  const explicitlyDisallowedTerritories = relevantLocationTerritories.filter(isUnauthorized);
+  for (const requirement of workerTerritoryRequirements) {
+    const permittedCount = requirement.territories.filter((territory) => authorizedRegions.size === 0 || authorizedRegions.has(territory)).length;
+    const conflicts = requirement.operator === "ANY"
+      ? permittedCount === 0
+      : permittedCount < requirement.territories.length;
+    if (effectivePolicy.rejectExplicitForeignTerritory && authorizedRegions.size > 0 && conflicts) {
+      explicitlyDisallowedTerritories.push(...requirement.territories.filter(isUnauthorized));
+    }
+  }
+  if (explicitlyDisallowedTerritories.length > 0) {
+    const territory = explicitlyDisallowedTerritories[0];
     return {
       workable: false,
       needsVerify: false,
-      reason: `Explicit work-authorization restriction detected: ${territory}`,
+      reason: `Explicit work-authorization or job-location restriction conflicts with the active preference: ${territory}`,
       reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
       facts: { ...baseFacts, location_restriction: territory }
     };
   }
 
+  const territoryEvidenceMissing = relevantLocationTerritories.length === 0 && workerTerritoryRequirements.length === 0;
+  if (effectivePolicy.unknownWorkAuthorizationNeedsVerification && territoryEvidenceMissing) {
+    return {
+      workable: true,
+      needsVerify: true,
+      reason: "Worker hiring territory is not established by employer or source evidence",
+      reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
+      facts: { ...baseFacts, location_restriction: null },
+    };
+  }
+
   // 4. REMOTE structured field or explicit remote work-mode text -> PASS.
   if (isRemote) {
-    if (locationTerritories.length === 0 && descriptionTerritories.length === 0 && !effectivePolicy.remoteWithoutTerritoryAllowed) {
+    if (relevantLocationTerritories.length === 0 && workerTerritoryRequirements.length === 0 && !effectivePolicy.remoteWithoutTerritoryAllowed) {
       return {
         workable: true,
         needsVerify: true,
-        reason: "Remote territory is not stated and this preference mode requires it",
+        reason: "Remote worker territory is not stated and this preference mode requires it",
         facts: { ...baseFacts, office_days_min: 0, office_days_max: 0, attendance_basis: "REMOTE" }
       };
     }
@@ -398,37 +445,6 @@ export function evaluateWorkability(
       facts: { ...baseFacts, office_days_min: null, office_days_max: null, attendance_basis: "UNKNOWN" }
     };
   }
-
-  const unknownWorkModeOutcome = () => {
-    const facts = { ...baseFacts, office_days_min: null, office_days_max: null, attendance_basis: "UNKNOWN" as const };
-    switch (effectivePolicy.unknownWorkModeDisposition) {
-      case "PASS":
-        return {
-          workable: true,
-          needsVerify: false,
-          reason: "Workplace model unspecified; accepted by configured policy",
-          reasonCode: "GATE_UNKNOWN_WORK_MODE",
-          facts,
-        };
-      case "NEEDS_VERIFICATION":
-        return {
-          workable: true,
-          needsVerify: true,
-          reason: "Workplace model unspecified; needs manual verification",
-          reasonCode: "GATE_UNKNOWN_WORK_MODE",
-          facts,
-        };
-      case "HARD_REJECT":
-      default:
-        return {
-          workable: false,
-          needsVerify: false,
-          reason: "Workplace model unspecified; rejected by owner policy",
-          reasonCode: "GATE_UNKNOWN_WORK_MODE",
-          facts,
-        };
-    }
-  };
 
   // 6. Ambiguous location / office expectations are unresolved workplace-model
   // evidence. Apply the configured disposition rather than bypassing policy.
@@ -881,20 +897,39 @@ export function applyGlobalGates(
   // ── 4. Geographic restrictions ──
   const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
   const locationTerritories = extractTerritories(String(job.location || ""));
-  const descriptionTerritories = extractTerritories(d);
   const explicitlyRemote = wp === "REMOTE" || /\b(fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|work\s+from\s+home|work\s+remotely)\b/i.test(d);
-  const disallowedTerritories = effectivePolicy.rejectExplicitForeignTerritory
-    ? [
-        // A remote listing's display location is not an employment-eligibility requirement.
-        ...(explicitlyRemote ? [] : locationTerritories),
-        ...descriptionTerritories.filter((territory) => hasExplicitTerritoryRestriction(d, territory)),
-      ].filter((territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory))
+  const remoteLocationTerritories = explicitlyRemote && /\b(remote|worldwide|global|anywhere)\b/i.test(loc)
+    ? locationTerritories
     : [];
+  const relevantLocationTerritories = explicitlyRemote ? remoteLocationTerritories : locationTerritories;
+  const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d);
+  const isUnauthorizedTerritory = (territory: string): boolean =>
+    effectivePolicy.rejectExplicitForeignTerritory
+    && authorizedRegions.size > 0
+    && !authorizedRegions.has(territory);
+  const disallowedTerritories = relevantLocationTerritories.filter(isUnauthorizedTerritory);
+  for (const requirement of workerTerritoryRequirements) {
+    const permittedCount = requirement.territories.filter((territory) => authorizedRegions.size === 0 || authorizedRegions.has(territory)).length;
+    const conflicts = requirement.operator === "ANY"
+      ? permittedCount === 0
+      : permittedCount < requirement.territories.length;
+    if (effectivePolicy.rejectExplicitForeignTerritory && authorizedRegions.size > 0 && conflicts) {
+      disallowedTerritories.push(...requirement.territories.filter(isUnauthorizedTerritory));
+    }
+  }
   if (disallowedTerritories.length > 0) {
     const territory = disallowedTerritories[0];
-    return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit work territory restriction: ${territory}`], {
+    return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit worker-territory or job-location restriction: ${territory}`], {
       location_restriction: territory,
     });
+  }
+  if (effectivePolicy.unknownWorkAuthorizationNeedsVerification
+    && relevantLocationTerritories.length === 0
+    && workerTerritoryRequirements.length === 0) {
+    pendingVerification = {
+      reason: "Worker hiring territory is not established by employer or source evidence",
+      facts: { location_restriction: null },
+    };
   }
 
   // ── 5. Lifestyle incompatibilities ──

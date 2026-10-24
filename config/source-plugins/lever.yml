@@ -5,7 +5,7 @@ kind: ats
 status: active
 capabilities:
   discovery: true
-  pagination: false
+  pagination: true
   incremental: false
   location_filter: false
   work_mode_evidence: true
@@ -33,11 +33,11 @@ request:
     requests_per_minute: 10
     items_per_run: null
   pagination:
-    strategy: none
-    page_parameter: null
+    strategy: page
+    page_parameter: skip
     cursor_json_path: null
     next_link_json_path: null
-    checkpoint_field: null
+    checkpoint_field: skip
   query:
     keywords: []
     locations: []

@@ -5,7 +5,9 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { generateContentHash } from "../services/criteria.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { classifyDescriptionQuality, MIN_COMPLETE_DESCRIPTION_CHARS } from "./descriptionQuality.js";
+import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { extractFreshnessEvidence } from "../ingestion/freshnessEvidence.js";
+import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -88,6 +90,33 @@ export async function runNormalization(
             : null,
           contentHash: normalizedContentHash,
         });
+        let normalizedEvidence: JobSourceEvidence | null = null;
+        if (obs.normalized_evidence !== null && obs.normalized_evidence !== undefined) {
+          let evidencePayload: unknown = obs.normalized_evidence;
+          if (typeof evidencePayload === "string") {
+            try {
+              evidencePayload = JSON.parse(evidencePayload) as unknown;
+            } catch {
+              evidencePayload = null;
+            }
+          }
+          const evidenceResult = JobSourceEvidenceSchema.safeParse(evidencePayload);
+          if (evidenceResult.success && evidenceResult.data.raw_payload_hash === obs.raw_payload_hash) {
+            normalizedEvidence = evidenceResult.data;
+          } else {
+            const evidenceError = evidenceResult.success
+              ? "Normalized source evidence raw payload hash does not match its observation."
+              : evidenceResult.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
+            await client.query(
+              `UPDATE raw_job_observations
+               SET error_history = COALESCE(error_history, '[]'::jsonb) || jsonb_build_array($1::jsonb)
+               WHERE workspace_id = $2 AND id = $3`,
+              [JSON.stringify({ stage: "NORMALIZED_SOURCE_EVIDENCE", error: evidenceError, occurred_at: obs.retrieved_at }), ctx.workspaceId, obs.id],
+            );
+            console.warn(`Normalized source evidence is invalid for observation ${obs.id}; continuing with unknown evidence.`);
+          }
+        }
+        const evidenceRevisionHash = normalizedEvidence ? buildEvidenceRevisionHash(normalizedEvidence) : null;
         let canonicalJobId: string | null = null;
         let isExistingJob = false;
         let existingVersionId: string | null = null;
@@ -99,13 +128,20 @@ export async function runNormalization(
           `          SELECT jv.canonical_job_id, jv.id AS job_version_id, jv.content_hash
            FROM raw_job_observations rjo
            JOIN job_versions jv ON jv.id = rjo.job_version_id
+           JOIN canonical_jobs canonical
+             ON canonical.workspace_id = jv.workspace_id
+            AND canonical.id = jv.canonical_job_id
            WHERE rjo.workspace_id = $1
              AND jv.workspace_id = $1
              AND rjo.source_name = $2
              AND rjo.source_external_id = $3
+             AND BTRIM(regexp_replace(lower(canonical.company_name), '[^a-z0-9]+', ' ', 'g'))
+               = BTRIM(regexp_replace(lower($4), '[^a-z0-9]+', ' ', 'g'))
+             AND BTRIM(regexp_replace(lower(COALESCE(canonical.location, canonical.location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+               = BTRIM(regexp_replace(lower(COALESCE($5, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
            ORDER BY rjo.retrieved_at DESC
            LIMIT 1`,
-          [ctx.workspaceId, obs.source_name, obs.source_external_id]
+          [ctx.workspaceId, obs.source_name, obs.source_external_id, obs.company_name, obs.location_raw || "Unknown"]
         );
 
         if (checkExt.rows.length > 0) {
@@ -120,8 +156,12 @@ export async function runNormalization(
             `SELECT id FROM canonical_jobs
              WHERE workspace_id = $1
                AND canonical_url = $2
+               AND BTRIM(regexp_replace(lower(company_name), '[^a-z0-9]+', ' ', 'g'))
+                 = BTRIM(regexp_replace(lower($3), '[^a-z0-9]+', ' ', 'g'))
+               AND BTRIM(regexp_replace(lower(COALESCE(location, location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+                 = BTRIM(regexp_replace(lower(COALESCE($4, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
              LIMIT 1`,
-            [ctx.workspaceId, obs.canonical_apply_url || obs.source_url]
+            [ctx.workspaceId, obs.canonical_apply_url || obs.source_url, obs.company_name, obs.location_raw || "Unknown"]
           );
           if (checkUrl.rows.length > 0) {
             canonicalJobId = checkUrl.rows[0].id;
@@ -180,8 +220,10 @@ export async function runNormalization(
                  WHERE workspace_id = $1
                    AND canonical_job_id = $2
                    AND source_posting_identity_hash = $3
+                   AND content_hash = $4
+                 ORDER BY observed_at DESC, id DESC
                  LIMIT 1`,
-                [ctx.workspaceId, canonicalJobId, freshnessEvidence.postingIdentityHash]
+                [ctx.workspaceId, canonicalJobId, freshnessEvidence.postingIdentityHash, normalizedContentHash]
               )
             : await client.query(
                 `SELECT id
@@ -217,10 +259,12 @@ export async function runNormalization(
           const verInsert = await client.query<{ id: string }>(
             `INSERT INTO job_versions (
                workspace_id, canonical_job_id, content_hash, description_text, observed_at,
-               source_published_at, source_updated_at, reposted_at,
+               source_published_at, source_updated_at, source_expires_at, reposted_at,
                source_posting_identity_hash, first_seen_at, last_seen_at,
-               freshness_basis, freshness_confidence
-             ) VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7, $8, $9, $9, $10, $11)
+               freshness_basis, freshness_confidence,
+               availability_status, availability_evidence, availability_verified_at,
+               availability_recheck_at, evidence_revision_hash
+             ) VALUES ($1, $2, $3, $4, NOW(), $5, $6, $7, $8, $9, $10, $10, $11, $12, $13, $14, $15, $16, $17)
              RETURNING id`,
             [
               ctx.workspaceId,
@@ -229,11 +273,17 @@ export async function runNormalization(
               obs.description_raw,
               freshnessEvidence.sourcePublishedAt,
               freshnessEvidence.sourceUpdatedAt,
+              freshnessEvidence.sourceExpiresAt,
               freshnessEvidence.repostedAt,
               freshnessEvidence.postingIdentityHash,
               obs.retrieved_at,
               effectiveFreshnessBasis,
               effectiveFreshnessConfidence,
+              normalizedEvidence?.availability.status ?? null,
+              normalizedEvidence ? JSON.stringify(normalizedEvidence.availability) : null,
+              normalizedEvidence?.availability.verified_at ?? null,
+              normalizedEvidence?.availability.expires_at ?? null,
+              evidenceRevisionHash,
             ]
           );
           resolvedVersionId = verInsert.rows[0].id;
@@ -249,21 +299,52 @@ export async function runNormalization(
                    WHEN source_updated_at IS NULL OR source_updated_at < $3::timestamptz THEN $3::timestamptz
                    ELSE source_updated_at
                  END,
-                 reposted_at = COALESCE(reposted_at, $4),
-                 freshness_basis = COALESCE(freshness_basis, $5),
-                 freshness_confidence = COALESCE(freshness_confidence, $6),
-                 source_posting_identity_hash = COALESCE(source_posting_identity_hash, $7)
-             WHERE workspace_id = $8 AND id = $9`,
+                 source_expires_at = COALESCE(source_expires_at, $4),
+                 reposted_at = COALESCE(reposted_at, $5),
+                 freshness_basis = COALESCE(freshness_basis, $6),
+                 freshness_confidence = COALESCE(freshness_confidence, $7),
+                 source_posting_identity_hash = COALESCE(source_posting_identity_hash, $8),
+                 availability_status = CASE
+                   WHEN $11::text IN ('OPEN', 'CLOSED')
+                     AND (availability_verified_at IS NULL OR $13::timestamptz >= availability_verified_at) THEN $11
+                   WHEN availability_status IS NULL THEN $11
+                   ELSE availability_status
+                 END,
+                 availability_evidence = CASE
+                   WHEN $12::jsonb IS NULL THEN availability_evidence
+                   WHEN $11::text IN ('OPEN', 'CLOSED')
+                     AND (availability_verified_at IS NULL OR $13::timestamptz >= availability_verified_at) THEN $12::jsonb
+                   WHEN availability_evidence IS NULL THEN $12::jsonb
+                   ELSE availability_evidence
+                 END,
+                 availability_verified_at = CASE
+                   WHEN $11::text IN ('OPEN', 'CLOSED')
+                     AND (availability_verified_at IS NULL OR $13::timestamptz >= availability_verified_at) THEN $13
+                   ELSE availability_verified_at
+                 END,
+                 availability_recheck_at = CASE
+                   WHEN $11::text IN ('OPEN', 'CLOSED')
+                     AND (availability_verified_at IS NULL OR $13::timestamptz >= availability_verified_at) THEN $14
+                   ELSE availability_recheck_at
+                 END,
+                 evidence_revision_hash = COALESCE($15, evidence_revision_hash)
+             WHERE workspace_id = $9 AND id = $10`,
             [
               obs.retrieved_at,
               freshnessEvidence.sourcePublishedAt,
               freshnessEvidence.sourceUpdatedAt,
+              freshnessEvidence.sourceExpiresAt,
               freshnessEvidence.repostedAt,
               effectiveFreshnessBasis,
               effectiveFreshnessConfidence,
               freshnessEvidence.postingIdentityHash,
               ctx.workspaceId,
               resolvedVersionId,
+              normalizedEvidence?.availability.status ?? null,
+              normalizedEvidence ? JSON.stringify(normalizedEvidence.availability) : null,
+              normalizedEvidence?.availability.verified_at ?? null,
+              normalizedEvidence?.availability.expires_at ?? null,
+              evidenceRevisionHash,
             ]
           );
         }
