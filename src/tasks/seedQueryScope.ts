@@ -29,11 +29,11 @@ export function scopeSeedQuery(
 
   if (hasJobScope) {
     scopedParams.push([...(scope.jobVersionIds ?? [])]);
-    filters.push(`scoped_seed.job_version_id = ANY($${scopedParams.length}::text[])`);
+    filters.push(`scoped_seed.job_version_id::text = ANY($${scopedParams.length}::text[])`);
   }
   if (hasObservationScope) {
     scopedParams.push([...(scope.observationIds ?? [])]);
-    filters.push(`scoped_seed.observation_id = ANY($${scopedParams.length}::text[])`);
+    filters.push(`scoped_seed.observation_id::text = ANY($${scopedParams.length}::text[])`);
   }
   scopedParams.push(limit);
 

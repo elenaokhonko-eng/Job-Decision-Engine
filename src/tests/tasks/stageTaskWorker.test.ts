@@ -176,13 +176,14 @@ describe("stageTaskWorker", () => {
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
       [ctx.workspaceId, 200],
-      { jobVersionIds: ["target-version"] },
+      { jobVersionIds: ["target-version"], observationIds: ["target-observation"] },
       1,
     );
 
-    expect(scoped.sql).toContain("WHERE scoped_seed.job_version_id = ANY($2::text[])");
-    expect(scoped.sql).toContain("LIMIT $3");
-    expect(scoped.params).toEqual([ctx.workspaceId, ["target-version"], 1]);
+    expect(scoped.sql).toContain("scoped_seed.job_version_id::text = ANY($2::text[])");
+    expect(scoped.sql).toContain("scoped_seed.observation_id::text = ANY($3::text[])");
+    expect(scoped.sql).toContain("LIMIT $4");
+    expect(scoped.params).toEqual([ctx.workspaceId, ["target-version"], ["target-observation"], 1]);
     expect(scoped.sql).not.toContain("LIMIT $2\n       ) AS scoped_seed");
   });
 
