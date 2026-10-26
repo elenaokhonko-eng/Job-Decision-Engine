@@ -226,23 +226,6 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         cursorClause = "AND (s.observed_at, s.canonical_job_id) < ($2::timestamptz, $3::uuid)";
       }
       params.push(limit);
-      const readinessViewAvailable = (await pool.query<{ available: boolean }>(
-        "SELECT to_regclass('v_application_readiness_current') IS NOT NULL AS available",
-      )).rows[0]?.available === true;
-      const readinessProjection = readinessViewAvailable
-        ? `readiness.readiness_status, readiness.readiness_fingerprint,
-           readiness.readiness_expires_at, readiness.readiness_reason_codes,
-           readiness.availability_status, readiness.availability_recheck_at`
-        : `NULL::text AS readiness_status, NULL::text AS readiness_fingerprint,
-           NULL::timestamptz AS readiness_expires_at, ARRAY[]::text[] AS readiness_reason_codes,
-           NULL::text AS availability_status, NULL::timestamptz AS availability_recheck_at`;
-      const readinessJoin = readinessViewAvailable
-        ? `LEFT JOIN v_application_readiness_current readiness
-             ON readiness.workspace_id = s.workspace_id
-            AND readiness.canonical_job_id = s.canonical_job_id
-            AND readiness.job_version_id::text = s.job_version_id::text`
-        : "";
-
       const { rows } = await pool.query(
         `
           SELECT
@@ -294,7 +277,12 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             s.document_ready,
             s.current_artifact_status,
             s.current_artifact_reason,
-            ${readinessProjection},
+            readiness.readiness_status,
+            readiness.readiness_fingerprint,
+            readiness.readiness_expires_at,
+            readiness.readiness_reason_codes,
+            readiness.availability_status,
+            readiness.availability_recheck_at,
             s.blocked_task_count,
             s.requires_user_action,
             s.user_action_type,
@@ -303,7 +291,10 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             s.technical_error_count,
             s.pipeline_display_category
           FROM v_canonical_shortlist_actions_scoped s
-          ${readinessJoin}
+          LEFT JOIN v_application_readiness_current readiness
+            ON readiness.workspace_id = s.workspace_id
+           AND readiness.canonical_job_id = s.canonical_job_id
+           AND readiness.job_version_id::text = s.job_version_id::text
           WHERE s.workspace_id = $1
           ${cursorClause}
           ORDER BY s.observed_at DESC, s.canonical_job_id DESC
