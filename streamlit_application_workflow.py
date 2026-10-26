@@ -34,14 +34,19 @@ def parse_application_document_pair_status(
             status = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(status, dict) or status.get("event") != "APPLICATION_DOCUMENT_PAIR_VALIDATED":
+        if (
+            not isinstance(status, dict)
+            or status.get("event") != "APPLICATION_DOCUMENT_PAIR_VALIDATED"
+        ):
             continue
         if (
             status.get("applicationRecordId") != application_record_id
             or status.get("cvDocumentRunId") != cv_document_run_id
             or status.get("coverLetterDocumentRunId") != cover_letter_document_run_id
         ):
-            raise ValueError("Document-pair status does not match the selected application and run IDs.")
+            raise ValueError(
+                "Document-pair status does not match the selected application and run IDs."
+            )
         return status
     raise ValueError("The document-pair validator returned no structured status.")
 
