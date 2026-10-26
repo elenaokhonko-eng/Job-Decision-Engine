@@ -550,6 +550,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const summary = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
       apply: true,
       taskTypes: ["EXTRACT_DETERMINISTIC_REQUIREMENTS"],
+      jobVersionIds: [versions.latestVersionId],
     });
     expect(summary).toMatchObject({ current: 1, wouldReconcile: 1, reconciled: 1 });
     const statuses = await getClient().query<{ id: string; status: string }>(

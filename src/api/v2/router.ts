@@ -149,6 +149,41 @@ async function withTransaction<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => 
   }
 }
 
+function createApplicationDocumentRateLimiter(): express.RequestHandler {
+  const windowMs = 60_000;
+  const maxRequests = 30;
+  const buckets = new Map<string, { windowStartedAt: number; requestCount: number }>();
+
+  return (req, res, next) => {
+    const context = (req as express.Request & { workspaceContext?: WorkspaceContext }).workspaceContext;
+    if (!context) {
+      res.status(503).json({ ok: false, error: "WORKSPACE_CONTEXT_UNAVAILABLE" });
+      return;
+    }
+    const now = Date.now();
+    if (buckets.size >= 10_000) {
+      for (const [key, bucket] of buckets) {
+        if (now - bucket.windowStartedAt >= windowMs) buckets.delete(key);
+      }
+      if (buckets.size >= 10_000) buckets.delete(buckets.keys().next().value ?? "");
+    }
+    const key = `${context.workspaceId}:${context.userId}:${req.ip || req.socket.remoteAddress || "unknown"}`;
+    const bucket = buckets.get(key);
+    if (!bucket || now - bucket.windowStartedAt >= windowMs) {
+      buckets.set(key, { windowStartedAt: now, requestCount: 1 });
+      next();
+      return;
+    }
+    if (bucket.requestCount >= maxRequests) {
+      res.setHeader("Retry-After", String(Math.max(1, Math.ceil((bucket.windowStartedAt + windowMs - now) / 1000))));
+      res.status(429).json({ ok: false, error: "DOCUMENT_STATUS_RATE_LIMITED" });
+      return;
+    }
+    bucket.requestCount += 1;
+    next();
+  };
+}
+
 export interface ApiV2RouterDeps {
   pool?: pg.Pool;
   resolveContext?: ResolveContextFn;
@@ -156,6 +191,7 @@ export interface ApiV2RouterDeps {
 
 export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
   const router = express.Router();
+  const applicationDocumentRateLimiter = createApplicationDocumentRateLimiter();
   router.use(express.json({ limit: "1mb" }));
 
   // Keep the pool strongly typed while the setup wizard is running before a
@@ -1077,6 +1113,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
 
   router.get(
     "/applications/:id/documents",
+    applicationDocumentRateLimiter,
     asyncHandler(async (req, res) => {
       const ctx = (req as any).workspaceContext as WorkspaceContext;
       const applicationRecordId = String(req.params.id || "").trim();

@@ -1092,11 +1092,32 @@ export async function reconcileStalePendingPipelineTasks(
   }
   if (options.jobVersionIds !== undefined && options.observationIds !== undefined) {
     params.push(jobVersionIds, observationIds);
-    targetClause = `AND (task.payload->>'job_version_id' = ANY($${params.length - 1}::text[])
-      OR task.payload->>'observation_id' = ANY($${params.length}::text[]))`;
+    const jobVersionParam = params.length - 1;
+    const observationParam = params.length;
+    targetClause = `AND (
+      task.payload->>'job_version_id' = ANY($${jobVersionParam}::text[])
+      OR task.payload->>'observation_id' = ANY($${observationParam}::text[])
+      OR EXISTS (
+        SELECT 1
+        FROM raw_job_observations AS scoped_observation
+        WHERE scoped_observation.workspace_id = task.workspace_id
+          AND scoped_observation.id::text = task.payload->>'observation_id'
+          AND scoped_observation.job_version_id::text = ANY($${jobVersionParam}::text[])
+      )
+    )`;
   } else if (options.jobVersionIds !== undefined) {
     params.push(jobVersionIds);
-    targetClause = `AND task.payload->>'job_version_id' = ANY($${params.length}::text[])`;
+    const jobVersionParam = params.length;
+    targetClause = `AND (
+      task.payload->>'job_version_id' = ANY($${jobVersionParam}::text[])
+      OR EXISTS (
+        SELECT 1
+        FROM raw_job_observations AS scoped_observation
+        WHERE scoped_observation.workspace_id = task.workspace_id
+          AND scoped_observation.id::text = task.payload->>'observation_id'
+          AND scoped_observation.job_version_id::text = ANY($${jobVersionParam}::text[])
+      )
+    )`;
   } else if (options.observationIds !== undefined) {
     params.push(observationIds);
     targetClause = `AND task.payload->>'observation_id' = ANY($${params.length}::text[])`;

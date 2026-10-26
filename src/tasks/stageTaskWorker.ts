@@ -13,7 +13,7 @@ import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pi
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
 import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
-import { createTaskIntentV2 } from "./taskIntent.js";
+import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
 import { planPipelineStageRound } from "./pipelineStageScheduler.js";
 import {
@@ -2198,6 +2198,34 @@ async function processClaimedTask(
       const canonicalJobId = requireStringPayload(task, "canonical_job_id");
       const jobVersionId = requireStringPayload(task, "job_version_id");
       if (!(await isCurrentCanonicalJobVersion(clientOrPool, ctx.workspaceId, canonicalJobId, jobVersionId))) {
+        const payload = (task.payload || {}) as Record<string, unknown>;
+        const intent = TaskIntentV2Schema.safeParse(payload.task_intent);
+        const forced = payload.reprocess === true ||
+          payload.force_policy_recalculation === true ||
+          payload.reprocess_existing_state === true ||
+          optionalStringPayload(task, "verification_answer_revision_id") !== undefined ||
+          (intent.success && intent.data.mode === "FORCE_RECOMPUTE");
+        if (forced) {
+          const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
+          const latestJobVersionId = currentState.latestJobVersionId;
+          const currentCanonicalJobId = currentState.canonicalJobId ?? canonicalJobId;
+          if (!latestJobVersionId) {
+            throw new Error(`Forced embedding task ${task.taskKey} has no authoritative latest job version.`);
+          }
+          const reroutedPayload = forcedTaskReroutePayload(task, currentCanonicalJobId, latestJobVersionId);
+          const reroute = forcedTaskRerouteIntent(task);
+          if (await enqueueStageTask(
+            "PUBLISH_EMBEDDING",
+            latestJobVersionId,
+            reroutedPayload,
+            clientOrPool,
+            ctx,
+            reroute,
+          )) metrics.successorTasksCreated += 1;
+          metrics.rerouted = true;
+          await completePipelineTaskAndRun(task, clientOrPool, { context: ctx });
+          return;
+        }
         console.info(`Superseding stale embedding task ${task.taskKey} without provider work.`);
         await completePipelineTaskAndRun(task, clientOrPool, { context: ctx });
         return;

@@ -349,6 +349,24 @@ describe("api/v2 application tracker", () => {
     }
   });
 
+  it("rate-limits repeated application document readiness reads", async () => {
+    const applicationId = "11111111-1111-4111-8111-111111111111";
+    const pool = {
+      query: vi.fn(async () => ({ rows: [] })),
+    };
+    const { baseUrl, server } = await startApp(pool);
+    try {
+      const responses = await Promise.all(Array.from({ length: 31 }, () =>
+        fetch(`${baseUrl}/applications/${applicationId}/documents`)
+      ));
+      const statuses = responses.map((response) => response.status);
+      expect(statuses.filter((status) => status === 404)).toHaveLength(30);
+      expect(statuses.filter((status) => status === 429)).toHaveLength(1);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
   it("does not report document_ready for a CV-only application", async () => {
     const applicationId = "11111111-1111-4111-8111-111111111111";
     const pool = {

@@ -361,26 +361,33 @@ export async function claimPipelineTasks(
       const { rows } = await (client as QueryClient).query<PipelineTaskRow>(
         `
           WITH claimable AS (
-            SELECT id
-            FROM pipeline_tasks
-            WHERE workspace_id = $1
-              AND task_type = $2
+            SELECT candidate.id
+            FROM pipeline_tasks AS candidate
+            WHERE candidate.workspace_id = $1
+              AND candidate.task_type = $2
               AND (
                 ($6::text[] IS NULL AND $7::text[] IS NULL)
-                OR payload->>'job_version_id' = ANY($6::text[])
-                OR payload->>'observation_id' = ANY($7::text[])
+                OR candidate.payload->>'job_version_id' = ANY($6::text[])
+                OR candidate.payload->>'observation_id' = ANY($7::text[])
+                OR ($6::text[] IS NOT NULL AND EXISTS (
+                  SELECT 1
+                  FROM raw_job_observations AS scoped_observation
+                  WHERE scoped_observation.workspace_id = candidate.workspace_id
+                    AND scoped_observation.id::text = candidate.payload->>'observation_id'
+                    AND scoped_observation.job_version_id::text = ANY($6::text[])
+                ))
               )
               AND (
                 (
-                  status IN ('PENDING', 'RETRY_WAIT')
-                  AND available_at <= NOW()
+                  candidate.status IN ('PENDING', 'RETRY_WAIT')
+                  AND candidate.available_at <= NOW()
                 )
                 OR (
-                  status = 'RUNNING'
-                  AND lease_expires_at <= NOW()
+                  candidate.status = 'RUNNING'
+                  AND candidate.lease_expires_at <= NOW()
                 )
               )
-            ORDER BY available_at ASC, created_at ASC
+            ORDER BY candidate.available_at ASC, candidate.created_at ASC
             LIMIT $3
             FOR UPDATE SKIP LOCKED
           )

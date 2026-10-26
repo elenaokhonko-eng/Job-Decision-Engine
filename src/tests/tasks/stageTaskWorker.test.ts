@@ -1486,6 +1486,88 @@ describe("stageTaskWorker", () => {
     });
   });
 
+  it("reroutes a forced stale embedding publication instead of discharging it", async () => {
+    const insertedTasks: Array<{ params: unknown[] | undefined }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) {
+        return { rows: [{
+          id: "task-forced-embedding-old-version",
+          workspace_id: ctx.workspaceId,
+          task_type: "PUBLISH_EMBEDDING",
+          task_key: "PUBLISH_EMBEDDING:version-old:embedding_publication_v1:repair",
+          payload: {
+            canonical_job_id: "job-forced-embedding",
+            job_version_id: "version-old",
+            reprocess_existing_state: true,
+          },
+          status: "RUNNING",
+          available_at: new Date().toISOString(),
+          lease_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+          heartbeat_at: new Date().toISOString(),
+          claimed_by: "worker:test",
+          attempt_count: 1,
+          max_attempts: 8,
+          last_error: null,
+          dead_letter_reason: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          completed_at: null,
+        }] };
+      }
+      if (sql.includes("job.latest_job_version_id = version.id")) return { rows: [{ is_current: false }] };
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return { rows: [{
+          canonical_job_id: "job-forced-embedding",
+          processing_state: "PREQUALIFIED",
+          primary_lane: null,
+          lane_evidence: null,
+          routing_disposition: null,
+          profile_match_status: "UNKNOWN",
+          gate_decision: "PASS",
+          recommendation_eligibility: "ELIGIBLE",
+          recommendation_outcome: "REVIEW",
+          latest_job_version_id: "version-current",
+        }] };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        insertedTasks.push({ params });
+        return { rows: [{ id: "task-forced-embedding-current" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-forced-embedding-old-version" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(client, {
+      context: ctx,
+      seed: false,
+      taskTypes: ["PUBLISH_EMBEDDING"],
+      maxTasks: 1,
+      heartbeatSeconds: 0,
+    }, deps);
+
+    expect(summary.completed).toBe(1);
+    expect(summary.successorTasksCreated).toBe(1);
+    expect(deps.runEmbeddingBatchWithFallback).not.toHaveBeenCalled();
+    expect(insertedTasks[0]?.params?.[2]).toBe(
+      "PUBLISH_EMBEDDING:version-current:embedding_publication_v1:repair"
+    );
+    expect(insertedTasks[0]?.params?.[3]).toMatchObject({
+      canonical_job_id: "job-forced-embedding",
+      job_version_id: "version-current",
+      reprocess_existing_state: true,
+      task_intent: {
+        mode: "FORCE_RECOMPUTE",
+        target: { jobVersionId: "version-current" },
+      },
+    });
+  });
+
   it("reroutes a forced extraction replay to the latest job version", async () => {
     const insertedTasks: Array<{ params: unknown[] | undefined }> = [];
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
