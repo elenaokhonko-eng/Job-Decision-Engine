@@ -610,7 +610,9 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
       : /\b(multilateral|intergovernmental|ngo|nonprofit|non-profit|united nations)\b/i.test(categoryText)
         || /\b(world bank|united nations|unicef|undp|international finance corporation)\b/i.test(employerIdentity)
         ? "MISSION_MULTILATERAL"
-        : null;
+        : /\b(commercial|for[- ]profit|private company|private sector)\b/i.test(categoryText)
+          ? "COMMERCIAL"
+          : null;
   const categoryQuote = category ? `${input.companyName} (${categoryText || "recognized employer identity"})` : "";
   const sourceIdentity = freshness.postingIdentityHash;
 

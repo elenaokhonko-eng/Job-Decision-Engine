@@ -739,6 +739,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         location: "Singapore",
         workplaceType: "REMOTE",
         employmentType: "PERMANENT",
+        organizationType: "commercial",
         description,
       };
       const staged = await broker.processObservation({
@@ -766,6 +767,10 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         status: "SUPPORTED",
         operator: "ANY",
         countries: ["SINGAPORE", "AUSTRALIA"],
+      });
+      expect(staged.normalizedEvidence?.opportunity_category).toMatchObject({
+        status: "SUPPORTED",
+        value: "COMMERCIAL",
       });
       expect(staged.normalizedEvidence?.compensation.components[0]).toMatchObject({
         component_type: "BASE_CASH",

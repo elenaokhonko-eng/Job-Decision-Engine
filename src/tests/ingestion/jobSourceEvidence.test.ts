@@ -231,16 +231,25 @@ describe("job source evidence builder", () => {
     });
   });
 
-  it("uses explicit employer organization evidence for discounted opportunity categories", () => {
+  it("uses explicit employer organization evidence for opportunity categories", () => {
     const evidence = buildJobSourceEvidence({
       ...baseInput,
       companyName: "National University of Singapore",
       rawPayload: { organizationType: "university" },
     });
+    const commercialEvidence = buildJobSourceEvidence({
+      ...baseInput,
+      companyName: "Readiness Commercial Fixture Labs",
+      rawPayload: { organizationType: "commercial" },
+    });
 
     expect(evidence.opportunity_category).toMatchObject({
       status: "SUPPORTED",
       value: "UNIVERSITY_RESEARCH",
+    });
+    expect(commercialEvidence.opportunity_category).toMatchObject({
+      status: "SUPPORTED",
+      value: "COMMERCIAL",
     });
   });
 });
