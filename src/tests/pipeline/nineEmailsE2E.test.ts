@@ -14,7 +14,9 @@ import { fileURLToPath } from "url";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
+import { buildEvidenceRevisionHash } from "../../ingestion/jobSourceEvidence.js";
 import { SourceBroker } from "../../ingestion/sourceBroker.js";
+import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../../contracts/jobSourceEvidence.js";
 import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -874,6 +876,164 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
           .toBe("COMPENSATION_BELOW_USER_FLOOR");
       }
     }
+
+    const positivePosting = postings[0];
+    if (!positivePosting) throw new Error("Positive readiness fixture is missing.");
+    const positiveVersion = versionsByExternalId.get(positivePosting.externalId);
+    if (!positiveVersion?.job_version_id || !positiveVersion.canonical_job_id) {
+      throw new Error("Positive readiness fixture has no canonical version identity.");
+    }
+    const { rows: observationRows } = await q(
+      `SELECT id::text AS id, normalized_evidence
+       FROM raw_job_observations
+       WHERE workspace_id = $1 AND source_external_id = $2 AND job_version_id = $3::uuid
+       ORDER BY retrieved_at DESC, id DESC
+       LIMIT 1`,
+      [getContext().workspaceId, positivePosting.externalId, positiveVersion.job_version_id],
+    );
+    const originalObservation = observationRows[0];
+    if (!originalObservation?.id) throw new Error("Positive readiness fixture has no source observation.");
+    const originalEvidence = JobSourceEvidenceSchema.parse(originalObservation.normalized_evidence);
+    const decisionForPositive = async () => {
+      const { rows } = await q(
+        `SELECT id::text AS id, context_fingerprint, evidence_revision_hash,
+                readiness_fingerprint, readiness_json
+         FROM deterministic_decisions
+         WHERE workspace_id = $1 AND canonical_job_id = $2::uuid AND job_version_id = $3::uuid
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [getContext().workspaceId, positiveVersion.canonical_job_id, positiveVersion.job_version_id],
+      );
+      return rows[0];
+    };
+    const originalDecision = await decisionForPositive();
+    if (!originalDecision?.id) throw new Error("Positive readiness fixture has no persisted decision.");
+    expect(originalDecision.readiness_json.status).toBe("READY");
+
+    const refreshAvailability = async (input: {
+      readonly status: "OPEN" | "CLOSED";
+      readonly verifiedAt: string;
+      readonly expiresAt: string | null;
+      readonly reasonCode: string;
+      readonly quote: string;
+    }): Promise<JobSourceEvidence> => {
+      const rawPayload = {
+        id: positivePosting.externalId,
+        status: input.status === "OPEN" ? "active" : "closed",
+        title: "Principal AI Systems Architect",
+        location: "Singapore",
+        workplaceType: "REMOTE",
+        employmentType: "PERMANENT",
+        organizationType: "commercial",
+      };
+      const rawPayloadHash = crypto.createHash("sha256").update(JSON.stringify(rawPayload)).digest("hex");
+      const refreshedEvidence = JobSourceEvidenceSchema.parse({
+        ...originalEvidence,
+        raw_payload_hash: rawPayloadHash,
+        retrieved_at: input.verifiedAt,
+        availability: {
+          ...originalEvidence.availability,
+          status: input.status,
+          verified_at: input.verifiedAt,
+          expires_at: input.expiresAt,
+          reason_code: input.reasonCode,
+          evidence: originalEvidence.availability.evidence.map((span) => ({
+            ...span,
+            quote_text: input.quote,
+          })),
+        },
+      });
+      const refreshBroker = new SourceBroker(getClient(), getContext());
+      await refreshBroker.startRun("READINESS_AVAILABILITY_REFRESH_E2E");
+      await refreshBroker.recordCandidateDisposition({
+        sourcePluginKey: "greenhouse",
+        planKey: "company:readiness-fixture:CORE_AI_DATA",
+        laneKey: "CORE_AI_DATA",
+        sourceExternalId: positivePosting.externalId,
+        sourceUrl: `https://boards.greenhouse.io/readiness-fixture/jobs/${positivePosting.externalId}`,
+        rawPayloadHash,
+        rawPayload,
+        disposition: "DUPLICATE",
+        canonicalJobId: positiveVersion.canonical_job_id,
+        observationId: originalObservation.id,
+        normalizedEvidence: refreshedEvidence,
+      }, null);
+      await refreshBroker.endRun("COMPLETED");
+      await q(
+        `UPDATE job_versions
+         SET evidence_revision_hash = $3
+         WHERE workspace_id = $1 AND id = $2::uuid`,
+        [getContext().workspaceId, positiveVersion.job_version_id, buildEvidenceRevisionHash(refreshedEvidence)],
+      );
+      return refreshedEvidence;
+    };
+
+    const closedEvidence = await refreshAvailability({
+      status: "CLOSED",
+      verifiedAt: new Date().toISOString(),
+      expiresAt: null,
+      reasonCode: "SOURCE_EXPLICITLY_CLOSED",
+      quote: "Source status: closed",
+    });
+    const closedRun = await runRecommendationDecider(getClient(), {
+      context: getContext(),
+      jobVersionIds: [positiveVersion.job_version_id],
+    });
+    expect(closedRun.errors).toBe(0);
+    expect(closedRun.decisionsInserted).toBe(1);
+    const closedDecision = await decisionForPositive();
+    expect(closedDecision?.readiness_json.status).toBe("BLOCKED");
+    expect(closedDecision?.id).not.toBe(originalDecision.id);
+    expect(closedDecision?.context_fingerprint).not.toBe(originalDecision.context_fingerprint);
+    expect(closedDecision?.readiness_fingerprint).not.toBe(originalDecision.readiness_fingerprint);
+    expect(closedDecision?.evidence_revision_hash).toBe(buildEvidenceRevisionHash(closedEvidence));
+
+    const expiredAt = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const expiredEvidence = await refreshAvailability({
+      status: "OPEN",
+      verifiedAt: expiredAt,
+      expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      reasonCode: "CURRENT_LISTING_EVIDENCE",
+      quote: "Active public listing observed from GREENHOUSE",
+    });
+    const expiredRun = await runRecommendationDecider(getClient(), {
+      context: getContext(),
+      jobVersionIds: [positiveVersion.job_version_id],
+    });
+    expect(expiredRun.errors).toBe(0);
+    expect(expiredRun.decisionsInserted).toBe(1);
+    const expiredDecision = await decisionForPositive();
+    expect(expiredDecision?.readiness_json.status).toBe("NEEDS_VERIFICATION");
+    expect(expiredDecision?.readiness_json.checks.find((check: { key: string }) => check.key === "AVAILABILITY").status)
+      .toBe("NEEDS_VERIFICATION");
+    expect(expiredDecision?.id).not.toBe(closedDecision?.id);
+    expect(expiredDecision?.context_fingerprint).not.toBe(closedDecision?.context_fingerprint);
+    expect(expiredDecision?.readiness_fingerprint).not.toBe(closedDecision?.readiness_fingerprint);
+    expect(expiredDecision?.evidence_revision_hash).toBe(buildEvidenceRevisionHash(expiredEvidence));
+
+    const freshAt = new Date().toISOString();
+    const freshEvidence = await refreshAvailability({
+      status: "OPEN",
+      verifiedAt: freshAt,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      reasonCode: "CURRENT_LISTING_EVIDENCE",
+      quote: "Active public listing observed from GREENHOUSE",
+    });
+    const reassessedRun = await runRecommendationDecider(getClient(), {
+      context: getContext(),
+      jobVersionIds: [positiveVersion.job_version_id],
+    });
+    expect(reassessedRun.errors).toBe(0);
+    expect(reassessedRun.decisionsInserted).toBe(1);
+    const reassessedDecision = await decisionForPositive();
+    expect(reassessedDecision?.readiness_json.status).toBe("READY");
+    expect(reassessedDecision?.readiness_json.checks.find((check: { key: string }) => check.key === "AVAILABILITY").status)
+      .toBe("MET");
+    expect(reassessedDecision?.id).not.toBe(expiredDecision?.id);
+    expect(reassessedDecision?.id).not.toBe(originalDecision.id);
+    expect(reassessedDecision?.context_fingerprint).not.toBe(expiredDecision?.context_fingerprint);
+    expect(reassessedDecision?.readiness_fingerprint).not.toBe(expiredDecision?.readiness_fingerprint);
+    expect(reassessedDecision?.evidence_revision_hash).toBe(buildEvidenceRevisionHash(freshEvidence));
   });
   it("Conservation — no observation, canonical job, or version disappears", async () => {
     const conservation = await q(
