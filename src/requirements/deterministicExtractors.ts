@@ -239,6 +239,142 @@ function buildRequirement(
   });
 }
 
+const EXPERIENCE_NUMBER_WORDS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
+  nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20,
+};
+const EXPERIENCE_NUMBER = `(?:\\d{1,2}(?:\\.\\d+)?|${Object.keys(EXPERIENCE_NUMBER_WORDS).join('|')})`;
+const EXPERIENCE_PATTERNS = [
+  new RegExp(String.raw`\b${EXPERIENCE_NUMBER}(?:\s*[-–]\s*${EXPERIENCE_NUMBER})?\+?\s*(?:additional\s+)?(?:years?|yrs?)\s+(?:of\s+)?(?:[^.;\n]{0,100}?\s+)?experience\b`, 'gi'),
+  new RegExp(String.raw`\b${EXPERIENCE_NUMBER}(?:\s*[-–]\s*${EXPERIENCE_NUMBER})?\+?\s*(?:additional\s+)?(?:years?|yrs?)\s+of\s+experience\s+(?:in|with|as|at)\s+[^.;\n]{1,100}`, 'gi'),
+  new RegExp(String.raw`\b${EXPERIENCE_NUMBER}(?:\s*[-–]\s*${EXPERIENCE_NUMBER})?\+?\s*(?:additional\s+)?(?:years?|yrs?)\s+(?:in|at)\s+(?:the\s+)?(?:architecture|engineering|software|coding|programming|data|ai|machine learning|research|staff|principal|technical delivery)[^.;\n]{0,100}`, 'gi'),
+];
+
+function parseExperienceNumber(value: string): number | null {
+  const normalized = value.toLowerCase().trim();
+  return /^\d+(?:\.\d+)?$/.test(normalized)
+    ? Number(normalized)
+    : EXPERIENCE_NUMBER_WORDS[normalized] ?? null;
+}
+
+function experienceScopeFromQuote(quote: string): string | null {
+  const afterExperience = quote.match(/\bexperience\s+(?:in|with|as|at)\s+(.+)$/i)?.[1];
+  const withoutDuration = quote.replace(
+    new RegExp(String.raw`^\s*${EXPERIENCE_NUMBER}(?:\s*[-–]\s*${EXPERIENCE_NUMBER})?\+?\s*(?:additional\s+)?(?:years?|yrs?)\s*`, 'i'),
+    '',
+  );
+  const scope = (afterExperience ?? withoutDuration)
+    .replace(/^\s*(?:of\s+)?/, '')
+    .replace(/\b(?:professional|production)\s+experience\b.*$/i, '')
+    .replace(/\b(?:experience|expertise)\b.*$/i, '')
+    .replace(/^\s*(?:in|at|as|with)\s+/, '')
+    .replace(/[,:;.]\s*$/, '')
+    .trim();
+  return scope || null;
+}
+
+function experienceScopeFamilies(scope: string | null): {
+  roleFamilies: string[];
+  domainFamilies: string[];
+  seniorityScope: string | null;
+  durationBasis: string;
+  operator: 'ANY' | 'ALL';
+} {
+  const value = (scope ?? '').toLowerCase();
+  const roleFamilies = new Set<string>();
+  const domainFamilies = new Set<string>();
+  if (/\barchitect(?:ure)?\b/i.test(value)) roleFamilies.add('ARCHITECTURE');
+  if (/\b(ai|machine learning|ml|llm|artificial intelligence)\b/i.test(value)) {
+    roleFamilies.add('AI_ENGINEERING');
+    domainFamilies.add('AI');
+  }
+  if (/\b(data engineering|data engineer|data platform)\b/i.test(value)) {
+    roleFamilies.add('DATA_ENGINEERING');
+    domainFamilies.add('DATA');
+  }
+  if (/\b(software\s+(?:engineering|development)|coding|programming|developer|development|engineering|engineer|implementation|hands[- ]on|full[- ]stack|backend|frontend|web development)\b/i.test(value)) {
+    roleFamilies.add('HANDS_ON_SOFTWARE_ENGINEERING');
+  }
+  if (/\b(software|coding|programming|developer|development|full[- ]stack|backend|frontend|web development)\b/i.test(value)) domainFamilies.add('SOFTWARE');
+  if (/\b(research software|research engineer|scientific computing|scientific software)\b/i.test(value)) {
+    roleFamilies.add('RESEARCH_SOFTWARE');
+    domainFamilies.add('UNIVERSITY_AI_RESEARCH');
+  }
+  if (/\b(technical project|technical programme|technical program|technical delivery)\b/i.test(value)) roleFamilies.add('TECHNICAL_DELIVERY');
+  if (/\b(technical product|product management)\b/i.test(value)) roleFamilies.add('TECHNICAL_PRODUCT');
+  if (/\b(legal|regtech|regulatory)\b/i.test(value)) domainFamilies.add('LEGAL_REGTECH');
+  if (/\b(health|biomedical|biotech|pharma|clinical)\b/i.test(value)) domainFamilies.add('HEALTH_BIO_PHARMA');
+  if (/\b(investment|financial|fintech|trading|markets)\b/i.test(value)) domainFamilies.add('INVESTMENT_MARKETS_FINTECH');
+  if (/\b(multilateral|humanitarian|social impact|development sector)\b/i.test(value)) domainFamilies.add('SOCIAL_IMPACT_MULTILATERAL');
+  if (/\b(university|academic|research)\b/i.test(value)) domainFamilies.add('UNIVERSITY_AI_RESEARCH');
+
+  const seniorityScope = value.match(/\b(staff|senior|principal|lead|director|executive)\s+(?:level|scope|role)\b/i)?.[0] ?? null;
+  const durationBasis = /\b(coursework|academic coursework|classroom)\b/i.test(value)
+    ? 'COURSEWORK'
+    : /\b(deployed open[- ]source|open[- ]source production)\b/i.test(value)
+      ? 'DEPLOYED_OPEN_SOURCE'
+      : /\b(applied project|project work)\b/i.test(value)
+        ? 'APPLIED_PROJECT'
+        : 'PROFESSIONAL_PRODUCTION';
+  return {
+    roleFamilies: [...roleFamilies],
+    domainFamilies: [...domainFamilies],
+    seniorityScope,
+    durationBasis,
+    operator: /\bor\b/i.test(value) ? 'ANY' : /\band\b/i.test(value) ? 'ALL' : 'ANY',
+  };
+}
+
+function extractExperienceRequirements(
+  input: DeterministicExtractorInput,
+  firstSequence: number,
+): { requirements: DeterministicRequirement[]; nextSequence: number } {
+  const matches = findAllMatches(input.description_text, EXPERIENCE_PATTERNS)
+    .filter((match) => !isOccurrenceNegated(input.description_text, match.quote_start_offset, match.quote_end_offset));
+  const matchesByStart = new Map<number, typeof matches[number]>();
+  for (const match of matches) {
+    const existing = matchesByStart.get(match.quote_start_offset);
+    if (!existing || match.quote_end_offset > existing.quote_end_offset) {
+      matchesByStart.set(match.quote_start_offset, match);
+    }
+  }
+  const orderedMatches = [...matchesByStart.values()].sort((left, right) => left.quote_start_offset - right.quote_start_offset);
+  const requirements: DeterministicRequirement[] = [];
+  let sequence = firstSequence;
+
+  for (const match of orderedMatches) {
+    const durationMatch = match.quote_text.match(new RegExp(String.raw`^\s*(${EXPERIENCE_NUMBER})(?:\s*[-–]\s*(${EXPERIENCE_NUMBER}))?`, 'i'));
+    const minimumYears = durationMatch?.[1] ? parseExperienceNumber(durationMatch[1]) : null;
+    if (minimumYears === null) continue;
+    const maximumYears = durationMatch?.[2] ? parseExperienceNumber(durationMatch[2]) : null;
+    const scope = experienceScopeFromQuote(match.quote_text);
+    const families = experienceScopeFamilies(scope);
+    const structuredValue: Record<string, unknown> = {
+      minimum_years: minimumYears,
+      maximum_years: maximumYears,
+      scope_schema_version: 'experience_scope_v2',
+      role_families: families.roleFamilies,
+      domain_families: families.domainFamilies,
+      operator: families.operator,
+      seniority_scope: families.seniorityScope,
+      duration_basis: families.durationBasis,
+      alternative_group_id: families.operator === 'ANY' && /\bor\b/i.test(scope ?? '')
+        ? `experience-alt-${match.quote_start_offset}`
+        : null,
+      ...(scope ? { experience_scope: scope } : {}),
+    };
+    requirements.push(buildRequirement(
+      input,
+      sequence++,
+      'EXPERIENCE_YEARS',
+      'Role requires scoped minimum years of experience.',
+      match,
+      structuredValue,
+    ));
+  }
+  return { requirements, nextSequence: sequence };
+}
+
 export function extractDeterministicRequirements(
   input: DeterministicExtractorInput
 ): DeterministicExtractorResult {
@@ -282,53 +418,9 @@ export function extractDeterministicRequirements(
     );
   }
 
-  const numericExperienceYears = findFirstMatch(description, [
-    /\b(?:(?:at\s+least|minimum(?:\s+of)?|a\s+minimum\s+of)\s+)?\d{1,2}(?:\s*[-–]\s*\d{1,2})?\+?(?:\s+additional)?\s*(?:years|yrs)\s+(?:of\s+)?(?:[a-z][\w/&.+-]*\s+){0,8}experience\b/i,
-  ]);
-  const writtenExperienceYears = findFirstMatch(description, [
-    /\b(?:(?:at\s+least|minimum(?:\s+of)?|a\s+minimum\s+of)\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:years|yrs)\s+(?:of\s+)?(?:[a-z][\w/&.+-]*\s+){0,8}experience\b/i,
-  ]);
-  const experienceYears = numericExperienceYears ?? writtenExperienceYears;
-  if (experienceYears) {
-    const yearsMatch = experienceYears.quote_text.match(/\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b/i);
-    const numberWords: Record<string, number> = {
-      one: 1,
-      two: 2,
-      three: 3,
-      four: 4,
-      five: 5,
-      six: 6,
-      seven: 7,
-      eight: 8,
-      nine: 9,
-      ten: 10,
-    };
-    const years = yearsMatch
-      ? /^\d+$/.test(yearsMatch[1])
-        ? Number(yearsMatch[1])
-        : numberWords[yearsMatch[1].toLowerCase()] ?? null
-      : null;
-    const scopedExperience = experienceYears.quote_text.match(
-      /\b(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*[-–]\s*(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten))?\+?(?:\s+additional)?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i
-    );
-    const experienceScope = scopedExperience?.[1]
-      ?.trim()
-      .replace(/[,:;]+$/, "")
-      .replace(/^of\s*$/i, "") || null;
-    requirements.push(
-      buildRequirement(
-        input,
-        sequence++,
-        'EXPERIENCE_YEARS',
-        'Role requires minimum years of experience.',
-        experienceYears,
-        {
-          minimum_years: years,
-          ...(experienceScope ? { experience_scope: experienceScope } : {}),
-        }
-      )
-    );
-  }
+  const extractedExperience = extractExperienceRequirements(input, sequence);
+  requirements.push(...extractedExperience.requirements);
+  sequence = extractedExperience.nextSequence;
 
   const degree = findFirstMatch(description, [
     /\b(?:bachelor(?:'s)?|master(?:'s)?|phd|doctorate|doctoral)(?:\s+degree)?(?:\s+in\s+[^.;\n]{1,100})?/i,

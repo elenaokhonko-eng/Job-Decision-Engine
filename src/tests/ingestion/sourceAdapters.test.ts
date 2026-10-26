@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobicyAdapter } from "../../ingestion/adapters/jobicyAdapter.js";
+import { GreenhouseAdapter } from "../../ingestion/adapters/greenhouseAdapter.js";
+import { LeverAdapter } from "../../ingestion/adapters/leverAdapter.js";
+import { AshbyAdapter } from "../../ingestion/adapters/ashbyAdapter.js";
 import { HimalayasAdapter } from "../../ingestion/adapters/himalayasAdapter.js";
 import { RemotiveAdapter } from "../../ingestion/adapters/remotiveAdapter.js";
 import { createWeWorkRemotelyAdapter } from "../../ingestion/adapters/attributedRssAdapter.js";
@@ -29,6 +32,7 @@ describe("public source adapters", () => {
       jobGeo: "Worldwide",
       jobType: ["full-time", "permanent"],
       url: "https://jobicy.example/jobs/42",
+      applicationUrl: "https://apply.example.test/jobs/42",
       jobDescription: "<p>Build <strong>ML</strong> systems.</p><script>alert(1)</script >",
       pubDate: "2026-09-01T00:00:00Z"
     }] })));
@@ -40,7 +44,74 @@ describe("public source adapters", () => {
     expect(result.jobs[0].employment_type_raw).toBe("full-time, permanent");
     expect(result.jobs[0].description_raw).toBe("Build ML systems.");
     expect(result.jobs[0].raw_payload).toMatchObject({ id: 42 });
+    expect(result.jobs[0].employer_posting_url).toBe("https://jobicy.example/jobs/42");
+    expect(result.jobs[0].application_url).toBe("https://apply.example.test/jobs/42");
+    expect(result.jobs[0].canonical_apply_url).toBe("https://apply.example.test/jobs/42");
     expect(result.jobs[0].source_attribution).toBe("Jobicy");
+  });
+
+  it("resumes a full Greenhouse board snapshot beyond the first page without duplicating postings", async () => {
+    const records = Array.from({ length: 61 }, (_, index) => {
+      const id = String(index + 1).padStart(4, "0");
+      return {
+        id,
+        title: `Technical Platform Role ${id}`,
+        location: { name: "Singapore" },
+        absolute_url: `https://boards.greenhouse.io/example/jobs/${id}`,
+        content: "Build and maintain a technical data platform with engineering and architecture responsibilities.",
+      };
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: records })));
+    const adapter = new GreenhouseAdapter("example");
+    const allIds: string[] = [];
+    let cursor: string | null = null;
+    let calls = 0;
+
+    do {
+      const result = await adapter.fetchJobs({ limit: 30, cursor });
+      expect(result.success).toBe(true);
+      allIds.push(...result.jobs.map((job) => job.source_external_id ?? ""));
+      cursor = result.nextCursor ?? null;
+      calls++;
+      expect(calls).toBeLessThanOrEqual(3);
+    } while (cursor !== null);
+
+    expect(allIds).toHaveLength(61);
+    expect(new Set(allIds).size).toBe(61);
+    expect(allIds).toContain("0061");
+  });
+
+  it("keeps Lever posting and application URLs distinct", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse([{
+      id: "lever-42",
+      text: "Solutions Architect",
+      hostedUrl: "https://jobs.lever.co/example/lever-42",
+      applyUrl: "https://apply.lever.co/example/lever-42",
+      categories: { location: "Singapore", commitment: "Full-time" },
+      descriptionPlain: "Architect technical platforms.",
+    }])));
+
+    const result = await new LeverAdapter("example").fetchJobs();
+
+    expect(result.jobs[0].employer_posting_url).toBe("https://jobs.lever.co/example/lever-42");
+    expect(result.jobs[0].application_url).toBe("https://apply.lever.co/example/lever-42");
+    expect(result.jobs[0].canonical_apply_url).toBe("https://apply.lever.co/example/lever-42");
+  });
+
+  it("keeps Ashby posting and application URLs distinct", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [{
+      id: "ashby-42",
+      title: "Platform Architect",
+      jobUrl: "https://jobs.ashbyhq.com/example/ashby-42",
+      applyUrl: "https://apply.ashbyhq.com/example/ashby-42",
+      description: "Architect data platforms.",
+    }] })));
+
+    const result = await new AshbyAdapter("example").fetchJobs();
+
+    expect(result.jobs[0].employer_posting_url).toBe("https://jobs.ashbyhq.com/example/ashby-42");
+    expect(result.jobs[0].application_url).toBe("https://apply.ashbyhq.com/example/ashby-42");
+    expect(result.jobs[0].canonical_apply_url).toBe("https://apply.ashbyhq.com/example/ashby-42");
   });
 
   it("quarantines malformed Jobicy records", async () => {
@@ -89,12 +160,16 @@ describe("public source adapters", () => {
       companyName: "Himalayas AI",
       title: "Data Platform Lead",
       jobUrl: "https://himalayas.example/jobs/data-platform-lead",
+      applicationUrl: "https://apply.example.test/jobs/data-platform-lead",
       description: "Build production data platforms remotely."
     }] })));
     const result = await new HimalayasAdapter("https://himalayas.example/api").fetchJobs();
     expect(result.success).toBe(true);
     expect(result.jobs).toHaveLength(1);
     expect(result.jobs[0].source_external_id).toBe("https://himalayas.example/jobs/data-platform-lead");
+    expect(result.jobs[0].employer_posting_url).toBe("https://himalayas.example/jobs/data-platform-lead");
+    expect(result.jobs[0].application_url).toBe("https://apply.example.test/jobs/data-platform-lead");
+    expect(result.jobs[0].canonical_apply_url).toBe("https://apply.example.test/jobs/data-platform-lead");
     expect(result.totalFetched).toBe(1);
   });
 

@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { runLaneRouting } from '../../pipeline/laneRouter.js';
+import { assessLaneIntentPreference, runLaneRouting } from '../../pipeline/laneRouter.js';
 import pg from 'pg';
 import * as agent from '../../services/agent.js';
 import type { WorkspaceContext } from '../../workspace/context.js';
 import { loadWorkspaceLanesConfig } from '../../pipeline/laneConfigLoader.js';
+import { APPROVED_STAGE2_LANE_WEIGHTS, LaneIntentPreferencesSchema } from '../../policy/laneIntentContracts.js';
 
 vi.mock('pg', () => {
   const mPool: any = {
@@ -85,6 +86,50 @@ const mPool = new pg.Pool();
 describe('Pipeline Stage: Lane Routing', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('uses active role preferences as soft lane tie-breakers without converting exclusions into hard gates', () => {
+    const preferences = LaneIntentPreferencesSchema.parse({
+      lane_weights: APPROVED_STAGE2_LANE_WEIGHTS,
+      lane_preferences: {
+        CORE_AI_DATA: {
+          preferred_role_families: ['AI_AGENTIC_ARCHITECT'],
+          excluded_role_families: ['COORDINATION_HEAVY_PROGRAMME_MANAGER'],
+        },
+        UNIVERSITY_AI_RESEARCH: {
+          acceptable_direct_research_share_pct: { minimum_pct: 20, maximum_pct: 30 },
+        },
+      },
+    });
+
+    const preferred = assessLaneIntentPreference(
+      'CORE_AI_DATA',
+      'AI agentic architect',
+      'Build agentic AI systems and own technical architecture.',
+      'Example AI',
+      preferences,
+    );
+    const excluded = assessLaneIntentPreference(
+      'CORE_AI_DATA',
+      'Coordination-heavy programme manager',
+      'Coordinates stakeholder plans.',
+      'Example AI',
+      preferences,
+    );
+    const researchShare = assessLaneIntentPreference(
+      'UNIVERSITY_AI_RESEARCH',
+      'Research engineer',
+      'About 25% of time is direct research work.',
+      'University Research Lab',
+      preferences,
+    );
+
+    expect(preferred.tieBreakAdjustment).toBeGreaterThan(0);
+    expect(preferred.evidence).toContain('USER_PREFERENCE_PREFERRED_ROLE_FAMILY:AI_AGENTIC_ARCHITECT');
+    expect(excluded.tieBreakAdjustment).toBeLessThan(0);
+    expect(excluded.evidence).toContain('USER_PREFERENCE_EXCLUDED_ROLE_FAMILY:COORDINATION_HEAVY_PROGRAMME_MANAGER');
+    expect(researchShare.evidence).toContain('USER_PREFERENCE_DIRECT_RESEARCH_SHARE_WITHIN:25%');
+    expect(researchShare.tieBreakAdjustment).toBeGreaterThan(0);
   });
 
   it('should calculate cosine similarity and update job lane', async () => {

@@ -41,6 +41,14 @@
           "type": "string",
           "default": "UNKNOWN"
         },
+        "employer_posting_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "application_url": {
+          "type": "string",
+          "format": "uri"
+        },
         "canonical_apply_url": {
           "anyOf": [
             {

@@ -47,6 +47,7 @@ describe('application ranking service', () => {
       politicsRisk: 7.5,
       sensoryWorkloadRisk: 5,
       strategicValue: 5,
+      culturePriorityFit: 0,
     });
   });
 
@@ -71,6 +72,7 @@ describe('application ranking service', () => {
         politicsRisk: 0,
         sensoryWorkloadRisk: 0,
         strategicValue: 1,
+        culturePriorityFit: 0,
       },
       minimumRankingConfidence: 100,
     };

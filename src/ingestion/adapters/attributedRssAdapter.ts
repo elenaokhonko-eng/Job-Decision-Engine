@@ -1,6 +1,19 @@
 import { XMLParser } from "fast-xml-parser";
-import { AdapterResult, BaseSourceAdapter } from "./baseAdapter.js";
+import { BaseSourceAdapter, type AdapterFetchOptions, type AdapterResult, snapshotPage, stableAdapterIdentity } from "./baseAdapter.js";
 import { ExtractedJob, SCHEMA_VERSION, SourceName } from "../../contracts/index.js";
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  // RSS parser output is narrowed at the public-feed boundary.
+  return value as Record<string, unknown>;
+}
+
+function textValue(value: unknown, fallback = ""): string {
+  if (typeof value === "string") return value;
+  const record = asRecord(value);
+  const text = record?.["#text"];
+  return typeof text === "string" ? text : fallback;
+}
 
 export interface AttributedRssConfig {
   sourceName: SourceName;
@@ -19,8 +32,9 @@ export class AttributedRssAdapter extends BaseSourceAdapter {
     this.sourceName = config.sourceName;
   }
 
-  async fetchJobs(options: { limit?: number; page?: number } = {}): Promise<AdapterResult> {
-    const limit = options.limit ?? 50;
+  async fetchJobs(options: AdapterFetchOptions = {}): Promise<AdapterResult> {
+    this.beginFetch();
+    const limit = Math.min(200, Math.max(1, options.limit ?? 50));
     try {
       const response = await this.fetchWithTimeout(this.config.feedUrl, {
         headers: { Accept: "application/rss+xml, application/xml, text/xml", "User-Agent": "JobDecisionEngine/1.0" }
@@ -29,36 +43,77 @@ export class AttributedRssAdapter extends BaseSourceAdapter {
       if (!response.ok) return this.errorResult(`HTTP ${response.status}: ${response.statusText}`);
 
       const xml = await response.text();
-      const parsed = new XMLParser({ ignoreAttributes: false, trimValues: true }).parse(xml) as any;
-      const itemsRaw = parsed?.rss?.channel?.item ?? parsed?.feed?.entry ?? [];
-      const items = Array.isArray(itemsRaw) ? itemsRaw : (itemsRaw ? [itemsRaw] : []);
+      const parsed: unknown = new XMLParser({ ignoreAttributes: false, trimValues: true }).parse(xml);
+      const root = asRecord(parsed);
+      const rss = asRecord(root?.rss);
+      const channel = asRecord(rss?.channel);
+      const feed = asRecord(root?.feed);
+      const rawItems = channel?.item ?? feed?.entry;
+      const items: unknown[] = Array.isArray(rawItems) ? rawItems : rawItems === null || rawItems === undefined ? [] : [rawItems];
+      const identity = (rawItem: unknown): string => {
+        const item = asRecord(rawItem);
+        if (!item) return stableAdapterIdentity(rawItem);
+        const linkValue = item.link;
+        const linkRecord = asRecord(linkValue);
+        return textValue(item.guid) || textValue(item.id) || textValue(linkValue) || textValue(linkRecord?.["@_href"]) || stableAdapterIdentity(item);
+      };
+      const page = snapshotPage(items, limit, options.cursor, options.page, identity);
       const jobs: ExtractedJob[] = [];
       let quarantined = 0;
 
-      for (const item of items.slice(0, limit)) {
-        const link = typeof item.link === "string" ? item.link : item.link?.["@_href"];
-        const titleText = String(item.title?.["#text"] ?? item.title ?? "").trim();
+      for (const rawItem of page.records) {
+        const item = asRecord(rawItem);
+        if (!item) {
+          quarantined++;
+          continue;
+        }
+        const linkValue = item.link;
+        const linkRecord = asRecord(linkValue);
+        const link = textValue(linkValue) || textValue(linkRecord?.["@_href"]);
+        const titleText = textValue(item.title).trim();
         const titleParts = titleText.split(":");
+        const author = asRecord(item.author);
+        const sourceExternalId = identity(rawItem);
+        const companyName = textValue(item.company)
+          || textValue(author?.name)
+          || (titleParts.length > 1 ? titleParts[0].trim() : this.config.defaultCompany || "Unknown Company");
+        const title = titleParts.length > 1 ? titleParts.slice(1).join(":").trim() || titleText : titleText;
+        const published = item.pubDate ?? item.published;
+        const publishedAt = typeof published === "string" && Number.isFinite(new Date(published).getTime())
+          ? new Date(published).toISOString()
+          : undefined;
         const candidate = {
           schema_version: SCHEMA_VERSION,
-          source_external_id: String(item.guid?.["#text"] ?? item.guid ?? item.id ?? link ?? ""),
-          company_name: item.company ?? item.author?.name ?? (titleParts.length > 1 ? titleParts.shift()?.trim() : this.config.defaultCompany) ?? "Unknown Company",
-          title: titleParts.join(":").trim() || titleText,
-          location_raw: item.region ?? item.location ?? "Remote",
+          ...(sourceExternalId ? { source_external_id: sourceExternalId } : {}),
+          company_name: companyName,
+          title: title || "Unknown Title",
+          location_raw: textValue(item.region ?? item.location, "Unknown"),
           workplace_type_raw: "REMOTE",
-          employment_type_raw: item.type ?? "UNKNOWN",
+          employment_type_raw: textValue(item.type, "UNKNOWN"),
           compensation_raw: "UNKNOWN",
+          employer_posting_url: link,
+          application_url: link,
           canonical_apply_url: link,
-          description_raw: this.sanitizeHtml(item.description ?? item.summary ?? item.content),
-          published_at: item.pubDate || item.published ? new Date(item.pubDate ?? item.published).toISOString() : undefined,
+          description_raw: this.sanitizeHtml(textValue(item.description ?? item.summary ?? item.content)),
+          ...(publishedAt ? { published_at: publishedAt } : {}),
           source_attribution: this.config.attribution,
-          raw_payload: item
+          raw_payload: rawItem,
         };
-        const validated = this.validateJob(candidate, String(candidate.source_external_id || titleText || "unknown"));
+        const validated = this.validateJob(candidate, sourceExternalId || title || "unknown");
         if (validated) jobs.push(validated); else quarantined++;
       }
 
-      return { sourceName: this.sourceName, success: true, jobs, totalFetched: items.length, quarantined };
+      return {
+        sourceName: this.sourceName,
+        success: page.records.length === 0 || jobs.length > 0,
+        jobs,
+        totalFetched: page.records.length,
+        snapshotTotal: items.length,
+        quarantined,
+        quarantinedCandidates: this.getQuarantinedCandidates(),
+        nextCursor: page.nextCursor,
+        hasMore: page.hasMore,
+      };
     } catch (err: any) {
       const timeout = err?.name === "AbortError";
       return this.errorResult(timeout ? `Timeout after ${this.timeoutMs}ms` : (err.message || String(err)));
