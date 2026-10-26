@@ -201,9 +201,61 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
         loadWorkabilityPolicy(),
       );
 
+      const gate = (description: string) => applyGlobalGates({
+        id: "country-condition-test",
+        title: "Senior AI Engineer",
+        company_name: "Test Systems",
+        raw_description: description,
+        location: "Remote",
+        workplace_type: "REMOTE",
+        employment_type: "PERMANENT",
+      } as any);
+      const alternativeGate = gate("Build deep learning models. Candidates must be authorized to work in Singapore or Australia.");
+      const separateMandatoryGate = gate("Build deep learning models. Must reside in the United States. Must be authorized to work in Singapore.");
+      const abbreviatedGate = gate("Build deep learning models. Must reside in the U.S.");
+      const citizenshipGate = gate("Build deep learning models. U.S. citizenship is required.");
+      const ambiguousGate = gate("Build deep learning models. Candidates must be authorized to work in Singapore, Australia.");
+
       expect(authorizedAlternative.workable).toBe(true);
       expect(usaOnly.reasonCode).toBe("WORK_AUTHORIZATION_INCOMPATIBLE");
       expect(employerHeadquartersOnly.workable).toBe(true);
+      expect(alternativeGate.status).toBe("PASS");
+      expect(separateMandatoryGate.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+      expect(abbreviatedGate.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+      expect(citizenshipGate.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+      expect(ambiguousGate.status).toBe("NEEDS_VERIFICATION");
+    });
+
+    it("retains a positive travel requirement after a negated clause and applies the numeric cap", () => {
+      const result = applyGlobalGates({
+        id: "mixed-travel-test",
+        title: "Senior AI Engineer",
+        company_name: "Test Systems",
+        raw_description: "Build deep learning models. No regular travel is required, but 30% travel is required for client deployments.",
+        location: "Singapore",
+        workplace_type: "REMOTE",
+        employment_type: "PERMANENT",
+      } as any);
+      const minimalTravelJob = {
+        id: "minimal-travel-test",
+        title: "Senior AI Engineer",
+        company_name: "Test Systems",
+        raw_description: "Build deep learning models. Minimal travel is required.",
+        location: "Singapore",
+        workplace_type: "REMOTE",
+        employment_type: "PERMANENT",
+      };
+      const minimalTravel = applyGlobalGates(minimalTravelJob as any);
+      const unacceptedMinimalTravel = applyGlobalGates(
+        minimalTravelJob as any,
+        { ...loadWorkabilityPolicy(), minimalTravelAllowed: false },
+      );
+
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+      expect(result.evidence_quotes.join(" ")).toContain("30% travel");
+      expect(minimalTravel.status).toBe("PASS");
+      expect(unacceptedMinimalTravel.status).toBe("NEEDS_VERIFICATION");
     });
 
     it("does not let an assumed or explicit hybrid mode override a remote-only preference", () => {

@@ -18,8 +18,8 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/con
 import { calculateProfessionalExperienceYears, compareStructuredRequirement, type ComparableFact } from "./requirementComparators.js";
 import {
   applyVerificationAnswerOverrides,
-  extractTerritories,
-  hasExplicitTerritoryRestriction,
+  evaluateWorkerTerritoryRequirements,
+  extractExplicitWorkerTerritoryRequirements,
   isVerificationAnswerContextApplicable,
   isVerificationAnswerProvided,
   loadVerificationAnswerContext,
@@ -503,26 +503,36 @@ export function applyPersistedRequirementGates(
     return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(shiftReq)]);
   }
 
-  const workAuthReq = deterministicRequirements.find((r) => r.requirement_type === "WORK_AUTH");
-  if (workAuthReq) {
+  const workAuthRequirements = deterministicRequirements.filter((r) => r.requirement_type === "WORK_AUTH");
+  const unresolvedTerritoryRequirements: string[] = [];
+  const incompatibleTerritories: string[] = [];
+  for (const workAuthReq of workAuthRequirements) {
     const authText = quoteOrText(workAuthReq);
-    const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
-    const explicitlyRestrictedTerritories = extractTerritories(authText)
-      .filter((territory) => hasExplicitTerritoryRestriction(authText, territory));
-    const incompatibleTerritory = explicitlyRestrictedTerritories.find(
-      (territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory)
+    const conditions = extractExplicitWorkerTerritoryRequirements(authText);
+    const territoryEvaluation = evaluateWorkerTerritoryRequirements(
+      conditions,
+      effectivePolicy.authorizedRegions,
+      effectivePolicy.rejectExplicitForeignTerritory,
     );
+    unresolvedTerritoryRequirements.push(...territoryEvaluation.unresolvedRequirements.map((condition) => condition.evidenceText));
+    incompatibleTerritories.push(...territoryEvaluation.incompatibleTerritories);
+  }
 
-    // A city/country label, an employer location, or generic "remote" text is
-    // not a work-authorization restriction. Only explicit eligibility evidence
-    // can reject; every other remote role advances automatically.
-    if (effectivePolicy.rejectExplicitForeignTerritory && incompatibleTerritory) {
-      return makeReject(
-        ["WORK_AUTHORIZATION_INCOMPATIBLE"],
-        [authText],
-        { location_restriction: incompatibleTerritory }
-      );
-    }
+  // Each worker-territory condition is evaluated separately. An OR alternative
+  // inside one condition never masks another mandatory restriction.
+  if (incompatibleTerritories.length > 0) {
+    return makeReject(
+      ["WORK_AUTHORIZATION_INCOMPATIBLE"],
+      workAuthRequirements.map(quoteOrText),
+      { location_restriction: incompatibleTerritories[0] ?? "UNKNOWN" }
+    );
+  }
+  if (unresolvedTerritoryRequirements.length > 0) {
+    return makeVerification(
+      ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_WORK_AUTHORIZATION"],
+      unresolvedTerritoryRequirements,
+      { ...inferredWorkabilityFacts, location_restriction: null },
+    );
   }
 
   if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {

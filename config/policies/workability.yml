@@ -26,8 +26,10 @@ global_workability_gates:
     frequent_travel_allowed: false
   travel:
     # A fixed requirement at 20% passes; a range whose upper bound exceeds
-    # 20% rejects (for example, 20-30%).
+    # 20% rejects (for example, 20-30%). Qualitative minimal travel is accepted
+    # as a policy assumption without inventing a numeric percentage.
     max_travel_pct: 20
+    minimal_qualitative_travel_allowed: true
 
   work_composition:
     minimum_building_research_pct: 60

@@ -14,6 +14,7 @@ const policy: WorkabilityPolicy = {
   rejectExplicitForeignTerritory: true,
   unknownWorkAuthorizationNeedsVerification: false,
   maxTravelPct: 20,
+  minimalTravelAllowed: true,
   contractAllowed: false,
   minimumBuildingResearchPct: 60,
   maximumInteractionPct: 40,
@@ -27,30 +28,63 @@ const policy: WorkabilityPolicy = {
 
 describe("readiness workability evidence", () => {
   it("normalizes employer and preference country names before evaluating alternatives", () => {
-    const result = assessHiringTerritoryReadiness({
-      status: "SUPPORTED",
-      operator: "ANY",
-      countries: ["Singapore", "Australia"],
-      evidence: [{ evidence_key: "hiring-countries" }],
-    }, "REMOTE", {
-      ...policy,
-      authorizedRegions: ["SINGAPORE"],
-    });
+    const result = assessHiringTerritoryReadiness(
+      "Candidates must be authorized to work in Singapore or Australia.",
+      {
+        status: "SUPPORTED",
+        operator: "ANY",
+        countries: ["Singapore", "Australia"],
+        evidence: [{ evidence_key: "hiring-countries" }],
+      },
+      "REMOTE",
+      policy,
+    );
 
     expect(result).toMatchObject({ status: "MET", reasonCode: null });
   });
 
-  it("does not let an unrelated country or ambiguous operator establish work authorization", () => {
-    const ambiguous = assessHiringTerritoryReadiness({
-      status: "SUPPORTED",
-      operator: "UNKNOWN",
-      countries: ["SINGAPORE", "UNITED_STATES"],
-      evidence: [{ evidence_key: "scoped-hiring-clause" }],
-    }, "REMOTE", policy);
+  it("requires verification when a territory list does not establish alternatives", () => {
+    const ambiguous = assessHiringTerritoryReadiness(
+      "Candidates must be authorized to work in Singapore, Australia.",
+      {
+        status: "UNKNOWN",
+        operator: "UNKNOWN",
+        countries: ["SINGAPORE", "AUSTRALIA"],
+        evidence: [{ evidence_key: "scoped-hiring-clause" }],
+      },
+      "REMOTE",
+      policy,
+    );
 
     expect(ambiguous).toMatchObject({
       status: "NEEDS_VERIFICATION",
       reasonCode: "WORK_AUTHORIZATION_OPERATOR_UNKNOWN",
+    });
+  });
+
+  it.each([
+    "Must reside in the U.S.",
+    "U.S. citizenship is required.",
+  ])("does not lose abbreviated country restrictions: %s", (description) => {
+    const result = assessHiringTerritoryReadiness(description, null, "REMOTE", policy);
+
+    expect(result).toMatchObject({
+      status: "BLOCKED",
+      reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
+    });
+  });
+
+  it("evaluates each separate mandatory territory condition independently", () => {
+    const result = assessHiringTerritoryReadiness(
+      "Must reside in the United States. Must be authorized to work in Singapore.",
+      null,
+      "REMOTE",
+      policy,
+    );
+
+    expect(result).toMatchObject({
+      status: "BLOCKED",
+      reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
     });
   });
 
@@ -119,10 +153,27 @@ describe("readiness workability evidence", () => {
     const occasional = assessTravelReadiness("Occasional travel is required.", {
       status: "UNKNOWN", minimum: null, maximum: null, evidence: [{ evidence_key: "occasional-travel" }],
     }, policy);
+    const mixed = assessTravelReadiness("No regular travel is required, but 30% travel is required for client deployments.", {
+      status: "SUPPORTED", minimum: 30, maximum: 30, evidence: [{ evidence_key: "positive-travel" }],
+    }, policy);
+    const minimal = assessTravelReadiness("Minimal travel is required.", {
+      status: "UNKNOWN", minimum: null, maximum: null, evidence: [{ evidence_key: "minimal-travel" }],
+    }, policy);
+    const minimalUnaccepted = assessTravelReadiness("Minimal travel is required.", {
+      status: "UNKNOWN", minimum: null, maximum: null, evidence: [{ evidence_key: "minimal-travel" }],
+    }, { ...policy, minimalTravelAllowed: false });
 
     expect(frequent.status).toBe("BLOCKED");
     expect(negated).toMatchObject({ status: "NOT_APPLICABLE", policyReferenceRequired: true });
     expect(unrelated.status).toBe("NOT_APPLICABLE");
     expect(occasional.status).toBe("NEEDS_VERIFICATION");
+    expect(mixed).toMatchObject({ status: "BLOCKED", reasonCode: "TRAVEL_EXCEEDS_POLICY" });
+    expect(minimal).toMatchObject({ status: "MET", policyReferenceRequired: true });
+    expect(minimal.rationale).toContain("no numeric travel percentage is inferred");
+    expect(minimal.evidenceKeys).toContain("travel_policy_assumption:minimal_qualitative:Minimal travel is required");
+    expect(minimalUnaccepted).toMatchObject({
+      status: "NEEDS_VERIFICATION",
+      reasonCode: "MINIMAL_TRAVEL_POLICY_UNCONFIRMED",
+    });
   });
 });

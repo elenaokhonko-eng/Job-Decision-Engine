@@ -694,131 +694,171 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       preferenceValue: {
         schema_version: "3.0.0",
         freshness: { max_posting_age_days: 60, stale_gate_disposition: "HARD_REJECT" },
+        compensation: {
+          target_salary_basis: "GROSS",
+          commercial_min_annual_sgd: 240000,
+          disposition_below_floor: "PREVENT_APPLY_NOW",
+        },
       },
     });
 
-    const postingId = `readiness-positive-${crypto.randomUUID()}`;
-    const postingUrl = `https://boards.greenhouse.io/readiness-fixture/jobs/${postingId}`;
+    const postings = [
+      { externalId: `readiness-positive-${crypto.randomUUID()}`, salary: "SGD250,000", expectedStatus: "READY" },
+      { externalId: `readiness-below-floor-${crypto.randomUUID()}`, salary: "SGD200,000", expectedStatus: "BLOCKED" },
+    ] as const;
     const retrievedAt = new Date().toISOString();
     const publishedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const description = [
-      "<h1>Principal AI Systems Architect</h1>",
-      "<h2>About the role</h2><p>Readiness Evidence Fixture Labs builds production AI platforms for enterprise data teams.</p>",
-      "<h2>Responsibilities</h2><ul><li>Architect and build distributed AI and machine-learning systems used in production.</li><li>Implement reliable Python services and data infrastructure with engineering teams.</li></ul>",
-      "<h2>Qualifications</h2><ul><li>8+ years of professional production experience.</li></ul>",
-      "<p>This position is fully remote. Candidates must be authorized to work in Singapore. No travel is required.</p>",
-    ].join("");
-    const rawPayload = {
-      id: postingId,
-      title: "Principal AI Systems Architect",
-      status: "active",
-      publishedAt,
-      location: "Singapore",
-      workplaceType: "REMOTE",
-      employmentType: "PERMANENT",
-      description,
-    };
     const broker = new SourceBroker(getClient(), getContext());
-    await broker.startRun("READINESS_POSITIVE_POSTGRES_E2E");
-    const staged = await broker.processObservation({
-      sourceName: "GREENHOUSE",
-      sourcePluginKey: "greenhouse",
-      sourceExternalId: postingId,
-      sourceUrl: postingUrl,
-      canonicalApplyUrl: postingUrl,
-      retrievedAt,
-      companyName: "Readiness Evidence Fixture Labs",
-      title: "Principal AI Systems Architect",
-      descriptionRaw: description,
-      locationRaw: "Singapore",
-      workplaceTypeRaw: "REMOTE",
-      employmentTypeRaw: "PERMANENT",
-      compensationRaw: "UNKNOWN",
-      sourceLane: "CORE_AI_DATA",
-      searchPlanVersion: "readiness-positive-v1",
-      rawPayload,
-    }, rawPayload);
-    expect(staged.observationId).toBeTruthy();
-    expect(staged.normalizedEvidence?.description.completeness_status).toBe("COMPLETE");
-    expect(staged.normalizedEvidence?.availability.status).toBe("OPEN");
+    await broker.startRun("READINESS_COMPENSATION_POSTGRES_E2E");
+    const observationIds: string[] = [];
+    for (const posting of postings) {
+      const postingUrl = `https://boards.greenhouse.io/readiness-fixture/jobs/${posting.externalId}`;
+      const description = [
+        "<h1>Principal AI Systems Architect</h1>",
+        "<h2>About the role</h2><p>Readiness Evidence Fixture Labs builds production AI platforms for enterprise data teams.</p>",
+        "<h2>Responsibilities</h2><ul><li>Architect and build distributed AI and machine-learning systems used in production.</li><li>Implement reliable Python services and data infrastructure with engineering teams.</li></ul>",
+        "<h2>Qualifications</h2><ul><li>8+ years of professional production experience.</li></ul>",
+        `<h2>Compensation</h2><p>${posting.salary} gross base salary per year.</p>`,
+        "<p>This position is fully remote. Candidates must be authorized to work in Singapore or Australia. No travel is required.</p>",
+      ].join("");
+      const rawPayload = {
+        id: posting.externalId,
+        title: "Principal AI Systems Architect",
+        status: "active",
+        publishedAt,
+        location: "Singapore",
+        workplaceType: "REMOTE",
+        employmentType: "PERMANENT",
+        description,
+      };
+      const staged = await broker.processObservation({
+        sourceName: "GREENHOUSE",
+        sourcePluginKey: "greenhouse",
+        sourceExternalId: posting.externalId,
+        sourceUrl: postingUrl,
+        canonicalApplyUrl: postingUrl,
+        retrievedAt,
+        companyName: "Readiness Evidence Fixture Labs",
+        title: "Principal AI Systems Architect",
+        descriptionRaw: description,
+        locationRaw: "Singapore",
+        workplaceTypeRaw: "REMOTE",
+        employmentTypeRaw: "PERMANENT",
+        compensationRaw: "UNKNOWN",
+        sourceLane: "CORE_AI_DATA",
+        searchPlanVersion: "readiness-compensation-v1",
+        rawPayload,
+      }, rawPayload);
+      expect(staged.observationId).toBeTruthy();
+      expect(staged.normalizedEvidence?.description.completeness_status).toBe("COMPLETE");
+      expect(staged.normalizedEvidence?.availability.status).toBe("OPEN");
+      expect(staged.normalizedEvidence?.workability.hiring_territories).toMatchObject({
+        status: "SUPPORTED",
+        operator: "ANY",
+        countries: ["SINGAPORE", "AUSTRALIA"],
+      });
+      expect(staged.normalizedEvidence?.compensation.components[0]).toMatchObject({
+        component_type: "BASE_CASH",
+        amount_min: Number(posting.salary.replace(/[^0-9]/g, "")),
+        currency: "SGD",
+        period: "ANNUAL",
+        pay_basis: "GROSS",
+      });
+      if (staged.observationId) observationIds.push(staged.observationId);
+    }
     await broker.endRun("COMPLETED");
 
     const normalized = await runNormalization(getClient(), {
       context: getContext(),
-      observationIds: [staged.observationId!],
+      observationIds,
     });
     expect(normalized.totalErrors).toBe(0);
     const { rows: versionRows } = await q(
-      `SELECT observation.job_version_id::text AS job_version_id,
+      `SELECT observation.source_external_id,
+              observation.job_version_id::text AS job_version_id,
               version.canonical_job_id::text AS canonical_job_id
        FROM raw_job_observations observation
        JOIN job_versions version ON version.workspace_id = observation.workspace_id AND version.id = observation.job_version_id
-       WHERE observation.workspace_id = $1 AND observation.id = $2::uuid`,
-      [getContext().workspaceId, staged.observationId],
+       WHERE observation.workspace_id = $1 AND observation.id = ANY($2::uuid[])`,
+      [getContext().workspaceId, observationIds],
     );
-    const jobVersionId = versionRows[0]?.job_version_id;
-    const canonicalJobId = versionRows[0]?.canonical_job_id;
-    expect(jobVersionId).toBeTruthy();
-    expect(canonicalJobId).toBeTruthy();
+    expect(versionRows).toHaveLength(postings.length);
+    const versionsByExternalId = new Map(versionRows.map((row) => [row.source_external_id, row]));
+    const jobVersionIds = postings.map((posting) => versionsByExternalId.get(posting.externalId)?.job_version_id).filter((id): id is string => Boolean(id));
+    expect(jobVersionIds).toHaveLength(postings.length);
 
-    const gates = await runHardGates(getClient(), { context: getContext(), jobVersionIds: [jobVersionId!] });
+    const gates = await runHardGates(getClient(), { context: getContext(), jobVersionIds });
     expect(gates.errors).toBe(0);
-    expect(gates.passed).toBe(1);
+    expect(gates.passed).toBe(postings.length);
     const extraction = await runRequirementsExtraction(getClient(), {
       context: getContext(),
-      jobVersionIds: [jobVersionId!],
+      jobVersionIds,
       quotedMode: "deterministic_only",
     });
     expect(extraction.errors).toBe(0);
     const embeddings = await runEmbeddingBatchWithFallback(200, getClient(), {
       context: getContext(),
-      jobVersionIds: [jobVersionId!],
+      jobVersionIds,
     });
     expect(embeddings.primary.failed).toBe(0);
-    const routing = await runLaneRouter(getClient(), { context: getContext(), jobVersionIds: [jobVersionId!] });
+    const routing = await runLaneRouter(getClient(), { context: getContext(), jobVersionIds });
     expect(routing.deferred).toBe(0);
-    const matching = await runDeterministicMatcher(getClient(), { context: getContext(), jobVersionIds: [jobVersionId!] });
+    const matching = await runDeterministicMatcher(getClient(), { context: getContext(), jobVersionIds });
     expect(matching.errors).toBe(0);
-    expect(matching.matchedJobs).toBe(1);
-    const decisions = await runRecommendationDecider(getClient(), { context: getContext(), jobVersionIds: [jobVersionId!] });
+    expect(matching.matchedJobs).toBe(postings.length);
+    const decisions = await runRecommendationDecider(getClient(), { context: getContext(), jobVersionIds });
     expect(decisions.errors).toBe(0);
 
-    const { rows: qualificationRows } = await q(
-      `SELECT requirement.requirement_type, latest_match.match_type
-       FROM job_requirements requirement
-       JOIN canonical_jobs canonical
-         ON canonical.workspace_id = requirement.workspace_id
-        AND canonical.id = requirement.canonical_job_id
-       LEFT JOIN LATERAL (
-         SELECT match.match_type
-         FROM requirement_evidence_matches match
-         WHERE match.workspace_id = requirement.workspace_id
-           AND match.match_run_id = canonical.latest_match_run_id
-           AND match.requirement_id = requirement.id
-         ORDER BY match.created_at DESC, match.id DESC
-         LIMIT 1
-       ) latest_match ON TRUE
-       WHERE requirement.workspace_id = $1
-         AND requirement.job_version_id = $2::uuid
-         AND requirement.importance = 'MUST'
-         AND requirement.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')`,
-      [getContext().workspaceId, jobVersionId],
-    );
-    expect(qualificationRows.length).toBeGreaterThan(0);
-    expect(qualificationRows.every((row) => ["EXACT", "SEMANTIC"].includes(row.match_type))).toBe(true);
+    for (const posting of postings) {
+      const version = versionsByExternalId.get(posting.externalId);
+      const jobVersionId = version?.job_version_id;
+      const canonicalJobId = version?.canonical_job_id;
+      expect(jobVersionId).toBeTruthy();
+      expect(canonicalJobId).toBeTruthy();
 
-    const { rows: decisionRows } = await q(
-      `SELECT readiness_json
-       FROM deterministic_decisions
-       WHERE workspace_id = $1 AND canonical_job_id = $2::uuid AND job_version_id = $3::uuid
-       ORDER BY created_at DESC, id DESC
-       LIMIT 1`,
-      [getContext().workspaceId, canonicalJobId, jobVersionId],
-    );
-    const readiness = decisionRows[0]?.readiness_json;
-    expect(readiness).toBeDefined();
-    expect(readiness.status).toBe("READY");
-    expect(readiness.checks.find((check: { key: string }) => check.key === "MANDATORY_QUALIFICATIONS").status).toBe("MET");
+      const { rows: qualificationRows } = await q(
+        `SELECT requirement.requirement_type, latest_match.match_type
+         FROM job_requirements requirement
+         JOIN canonical_jobs canonical
+           ON canonical.workspace_id = requirement.workspace_id
+          AND canonical.id = requirement.canonical_job_id
+         LEFT JOIN LATERAL (
+           SELECT match.match_type
+           FROM requirement_evidence_matches match
+           WHERE match.workspace_id = requirement.workspace_id
+             AND match.match_run_id = canonical.latest_match_run_id
+             AND match.requirement_id = requirement.id
+           ORDER BY match.created_at DESC, match.id DESC
+           LIMIT 1
+         ) latest_match ON TRUE
+         WHERE requirement.workspace_id = $1
+           AND requirement.job_version_id = $2::uuid
+           AND requirement.importance = 'MUST'
+           AND requirement.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')`,
+        [getContext().workspaceId, jobVersionId],
+      );
+      expect(qualificationRows.length).toBeGreaterThan(0);
+      expect(qualificationRows.every((row) => ["EXACT", "SEMANTIC"].includes(row.match_type))).toBe(true);
+
+      const { rows: decisionRows } = await q(
+        `SELECT readiness_json
+         FROM deterministic_decisions
+         WHERE workspace_id = $1 AND canonical_job_id = $2::uuid AND job_version_id = $3::uuid
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [getContext().workspaceId, canonicalJobId, jobVersionId],
+      );
+      const readiness = decisionRows[0]?.readiness_json;
+      expect(readiness).toBeDefined();
+      expect(readiness.status).toBe(posting.expectedStatus);
+      expect(readiness.checks.find((check: { key: string }) => check.key === "MANDATORY_QUALIFICATIONS").status).toBe("MET");
+      expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").status)
+        .toBe(posting.expectedStatus === "READY" ? "MET" : "BLOCKED");
+      if (posting.expectedStatus === "BLOCKED") {
+        expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").reasonCode)
+          .toBe("COMPENSATION_BELOW_USER_FLOOR");
+      }
+    }
   });
   it("Conservation — no observation, canonical job, or version disappears", async () => {
     const conservation = await q(

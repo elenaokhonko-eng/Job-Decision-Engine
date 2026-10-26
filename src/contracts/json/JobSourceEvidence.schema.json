@@ -505,6 +505,43 @@
                   },
                   "default": []
                 },
+                "requirements": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "operator": {
+                        "type": "string",
+                        "enum": [
+                          "ANY",
+                          "ALL",
+                          "UNKNOWN"
+                        ]
+                      },
+                      "countries": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 2
+                        },
+                        "minItems": 1
+                      },
+                      "evidence": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/definitions/JobSourceEvidence/properties/dates/properties/published_at/properties/evidence/items"
+                        },
+                        "default": []
+                      }
+                    },
+                    "required": [
+                      "operator",
+                      "countries"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "default": []
+                },
                 "evidence": {
                   "type": "array",
                   "items": {

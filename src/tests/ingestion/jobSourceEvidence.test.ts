@@ -186,6 +186,21 @@ describe("job source evidence builder", () => {
       operator: "UNKNOWN",
       countries: [],
     });
+
+    const separateConditions = buildJobSourceEvidence({
+      ...baseInput,
+      descriptionText: "Must reside in the U.S. Must be authorized to work in Singapore. U.S. citizenship is required.",
+      rawPayload: {},
+    });
+    expect(separateConditions.workability.hiring_territories.requirements.map((requirement) => ({
+      operator: requirement.operator,
+      countries: requirement.countries,
+      quote: requirement.evidence[0]?.quote_text,
+    }))).toEqual([
+      { operator: "ANY", countries: ["UNITED_STATES"], quote: "Must reside in the U.S" },
+      { operator: "ANY", countries: ["SINGAPORE"], quote: "Must be authorized to work in Singapore" },
+      { operator: "ANY", countries: ["UNITED_STATES"], quote: "U.S. citizenship is required" },
+    ]);
   });
 
   it("parses ranges, minimum-only, frequent and explicitly negated travel separately", () => {
@@ -206,6 +221,13 @@ describe("job source evidence builder", () => {
     });
     expect(makeEvidence("No travel is required.")).toMatchObject({
       status: "SUPPORTED", minimum: 0, maximum: 0,
+    });
+    const mixedNegation = makeEvidence("No regular travel is required, but 30% travel is required for client deployments.");
+    expect(mixedNegation).toMatchObject({ status: "SUPPORTED", minimum: 30, maximum: 30 });
+    expect(mixedNegation.evidence[0]?.quote_text).toContain("No regular travel is required");
+    expect(mixedNegation.evidence[0]?.quote_text).toContain("30% travel is required for client deployments");
+    expect(makeEvidence("Minimal travel is required.")).toMatchObject({
+      status: "UNKNOWN", minimum: null, maximum: null,
     });
   });
 

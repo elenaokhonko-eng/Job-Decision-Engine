@@ -5,8 +5,11 @@ import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
 export { normalizeWorkMode };
 import {
   applyVerificationAnswerOverrides,
+  evaluateWorkerTerritoryRequirements,
   extractExplicitWorkerTerritoryRequirements,
   extractTerritories,
+  normalizeTerritories,
+  splitWorkabilityClauses,
   isVerificationAnswerProvided,
   loadWorkabilityPolicy,
   VERIFICATION_ANSWER_KEYS,
@@ -170,19 +173,24 @@ export interface TravelRequirement {
 
 /** Return the upper bound of a travel requirement, preserving range semantics. */
 export function extractTravelRequirement(description: string): TravelRequirement | null {
-  const text = String(description || "").toLowerCase();
   const patterns = [
-    /(?:travel|travelling|traveling)(?:[^.;\n%]{0,40}?)(\d+)\s*%\s*(?:-|–|to)\s*(\d+)\s*%/gi,
-    /(\d+)\s*%\s*(?:-|–|to)\s*(\d+)\s*%(?:[^.;\n%]{0,40}?)(?:travel|travelling|traveling)/gi,
-    /(?:travel|travelling|traveling)(?:[^.;\n%]{0,40}?)(\d+)\s*%/gi,
-    /(\d+)\s*%(?:[^.;\n%]{0,40}?)(?:travel|travelling|traveling)/gi,
+    /(?:travel|travelling|traveling)(?:[^.;\n%]{0,40}?)(\d+)\s*%\s*(?:-|–|to)\s*(\d+)\s*%/i,
+    /(\d+)\s*%\s*(?:-|–|to)\s*(\d+)\s*%(?:[^.;\n%]{0,40}?)(?:travel|travelling|traveling)/i,
+    /(?:travel|travelling|traveling)(?:[^.;\n%]{0,40}?)(\d+)\s*%/i,
+    /(\d+)\s*%(?:[^.;\n%]{0,40}?)(?:travel|travelling|traveling)/i,
   ];
-  for (const pattern of patterns) {
-    const match = pattern.exec(text);
-    if (!match) continue;
-    const first = Number(match[1]);
-    const second = match[2] === undefined ? first : Number(match[2]);
-    return { max_pct: Math.max(first, second), evidence: match[0] };
+  for (const clause of splitWorkabilityClauses(description)) {
+    if (/\b(?:no|without)\s+(?:required\s+|regular\s+|business\s+)?(?:travel|business trips?)\b|\b(?:travel|business trips?)\b[^.;\n]{0,40}\b(?:not required|not expected|not needed|isn't required|is not required|is not expected)\b/i.test(clause)) {
+      continue;
+    }
+    const text = clause.toLowerCase();
+    for (const pattern of patterns) {
+      const match = pattern.exec(text);
+      if (!match) continue;
+      const first = Number(match[1]);
+      const second = match[2] === undefined ? first : Number(match[2]);
+      return { max_pct: Math.max(first, second), evidence: clause };
+    }
   }
   return null;
 }
@@ -321,36 +329,44 @@ export function evaluateWorkability(
     || /\b(?:location|workplace|work\s+location)\s*:\s*remote\b/i.test(d);
   const isRemote = wp === "REMOTE" || (wp === "UNKNOWN" && (/\bremote\b/i.test(loc) || isExplicitRemoteText));
 
-  // 3. Geographic restrictions use worker-location evidence, never employer HQ mentions.
-  const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
-  const locationTerritories = extractTerritories(loc);
-  const remoteLocationTerritories = isRemote && /\\b(remote|worldwide|global|anywhere)\\b/i.test(loc)
+  // 3. Apply the same per-condition territory evaluation used by readiness. A
+  // country alternative is scoped to its worker-eligibility clause; separate
+  // clauses remain independent mandatory restrictions.
+  const authorizedRegions = new Set(normalizeTerritories(effectivePolicy.authorizedRegions));
+  const locationTerritories = normalizeTerritories(extractTerritories(loc));
+  const remoteLocationTerritories = isRemote && /\b(remote|worldwide|global|anywhere)\b/i.test(loc)
     ? locationTerritories
     : [];
   const relevantLocationTerritories = isRemote ? remoteLocationTerritories : locationTerritories;
   const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d);
-  const isUnauthorized = (territory: string): boolean =>
+  const workerTerritoryEvaluation = evaluateWorkerTerritoryRequirements(
+    workerTerritoryRequirements,
+    [...authorizedRegions],
+    effectivePolicy.rejectExplicitForeignTerritory,
+  );
+  const explicitlyDisallowedTerritories = relevantLocationTerritories.filter((territory) =>
     effectivePolicy.rejectExplicitForeignTerritory
     && authorizedRegions.size > 0
-    && !authorizedRegions.has(territory);
-  const explicitlyDisallowedTerritories = relevantLocationTerritories.filter(isUnauthorized);
-  for (const requirement of workerTerritoryRequirements) {
-    const permittedCount = requirement.territories.filter((territory) => authorizedRegions.size === 0 || authorizedRegions.has(territory)).length;
-    const conflicts = requirement.operator === "ANY"
-      ? permittedCount === 0
-      : permittedCount < requirement.territories.length;
-    if (effectivePolicy.rejectExplicitForeignTerritory && authorizedRegions.size > 0 && conflicts) {
-      explicitlyDisallowedTerritories.push(...requirement.territories.filter(isUnauthorized));
-    }
-  }
-  if (explicitlyDisallowedTerritories.length > 0) {
-    const territory = explicitlyDisallowedTerritories[0];
+    && !authorizedRegions.has(territory)
+  );
+  explicitlyDisallowedTerritories.push(...workerTerritoryEvaluation.incompatibleTerritories);
+  if (explicitlyDisallowedTerritories.length > 0 || workerTerritoryEvaluation.status === "INCOMPATIBLE") {
+    const territory = explicitlyDisallowedTerritories[0] ?? workerTerritoryEvaluation.incompatibleTerritories[0] ?? "UNKNOWN";
     return {
       workable: false,
       needsVerify: false,
       reason: `Explicit work-authorization or job-location restriction conflicts with the active preference: ${territory}`,
       reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
       facts: { ...baseFacts, location_restriction: territory }
+    };
+  }
+  if (workerTerritoryEvaluation.status === "NEEDS_VERIFICATION") {
+    return {
+      workable: true,
+      needsVerify: true,
+      reason: "Worker-territory conditions are recognized but their alternatives remain unresolved",
+      reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
+      facts: { ...baseFacts, location_restriction: null },
     };
   }
 
@@ -784,6 +800,11 @@ export function applyGlobalGates(
       frequentTravelEvidence,
       { travel_pct_max: null }
     );
+  } else if (!effectivePolicy.minimalTravelAllowed && /\bminimal\s+(?:business\s+)?travel\b/i.test(d)) {
+    pendingVerification = {
+      reason: "The policy does not accept qualitative minimal travel without an explicit percentage",
+      facts: { travel_pct_max: null },
+    };
   }
 
   // ── 1. Deterministic Non-Technical Title-Family Exclusions ──
@@ -895,33 +916,36 @@ export function applyGlobalGates(
   }
 
   // ── 4. Geographic restrictions ──
-  const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
-  const locationTerritories = extractTerritories(String(job.location || ""));
+  const authorizedRegions = new Set(normalizeTerritories(effectivePolicy.authorizedRegions));
+  const locationTerritories = normalizeTerritories(extractTerritories(String(job.location || "")));
   const explicitlyRemote = wp === "REMOTE" || /\b(fully\s+remote|remote[- ]first|remote\s+(?:position|role|job|work|opportunity)|work\s+from\s+home|work\s+remotely)\b/i.test(d);
   const remoteLocationTerritories = explicitlyRemote && /\b(remote|worldwide|global|anywhere)\b/i.test(loc)
     ? locationTerritories
     : [];
   const relevantLocationTerritories = explicitlyRemote ? remoteLocationTerritories : locationTerritories;
   const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d);
-  const isUnauthorizedTerritory = (territory: string): boolean =>
+  const disallowedTerritories = relevantLocationTerritories.filter((territory) =>
     effectivePolicy.rejectExplicitForeignTerritory
     && authorizedRegions.size > 0
-    && !authorizedRegions.has(territory);
-  const disallowedTerritories = relevantLocationTerritories.filter(isUnauthorizedTerritory);
-  for (const requirement of workerTerritoryRequirements) {
-    const permittedCount = requirement.territories.filter((territory) => authorizedRegions.size === 0 || authorizedRegions.has(territory)).length;
-    const conflicts = requirement.operator === "ANY"
-      ? permittedCount === 0
-      : permittedCount < requirement.territories.length;
-    if (effectivePolicy.rejectExplicitForeignTerritory && authorizedRegions.size > 0 && conflicts) {
-      disallowedTerritories.push(...requirement.territories.filter(isUnauthorizedTerritory));
-    }
-  }
-  if (disallowedTerritories.length > 0) {
-    const territory = disallowedTerritories[0];
+    && !authorizedRegions.has(territory)
+  );
+  const workerTerritoryEvaluation = evaluateWorkerTerritoryRequirements(
+    workerTerritoryRequirements,
+    [...authorizedRegions],
+    effectivePolicy.rejectExplicitForeignTerritory,
+  );
+  disallowedTerritories.push(...workerTerritoryEvaluation.incompatibleTerritories);
+  if (disallowedTerritories.length > 0 || workerTerritoryEvaluation.status === "INCOMPATIBLE") {
+    const territory = disallowedTerritories[0] ?? workerTerritoryEvaluation.incompatibleTerritories[0] ?? "UNKNOWN";
     return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit worker-territory or job-location restriction: ${territory}`], {
       location_restriction: territory,
     });
+  }
+  if (workerTerritoryEvaluation.status === "NEEDS_VERIFICATION") {
+    pendingVerification = {
+      reason: "The posting lists worker-territory conditions whose alternatives are ambiguous",
+      facts: { location_restriction: null },
+    };
   }
   if (effectivePolicy.unknownWorkAuthorizationNeedsVerification
     && relevantLocationTerritories.length === 0

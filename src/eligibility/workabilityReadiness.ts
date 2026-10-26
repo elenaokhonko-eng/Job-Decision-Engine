@@ -1,4 +1,8 @@
-import { normalizeTerritory } from "../pipeline/workabilityPolicy.js";
+import {
+  evaluateWorkerTerritoryRequirements,
+  extractExplicitWorkerTerritoryRequirements,
+  splitWorkabilityClauses,
+} from "../pipeline/workabilityPolicy.js";
 
 export type WorkabilityReadinessStatus = "MET" | "BLOCKED" | "NEEDS_VERIFICATION" | "NOT_APPLICABLE";
 
@@ -9,8 +13,10 @@ export interface WorkabilityReadinessPolicy {
   readonly hybridWithoutOfficeDaysAllowed: boolean;
   readonly authorizedRegions: readonly string[];
   readonly remoteWithoutTerritoryAllowed: boolean;
+  readonly rejectExplicitForeignTerritory: boolean;
   readonly unknownWorkAuthorizationNeedsVerification: boolean;
   readonly maxTravelPct: number;
+  readonly minimalTravelAllowed: boolean;
   readonly frequentTravelAllowed: boolean;
 }
 
@@ -43,35 +49,83 @@ export interface WorkModeReadinessEvidence {
   readonly evidence: readonly { readonly evidence_key: string }[];
 }
 
+const TRAVEL_NEGATION_RE = /\b(?:no|without)\s+(?:required\s+|regular\s+|business\s+)?(?:travel|business trips?)\b|\b(?:travel|business trips?)\b[^;\n]{0,40}\b(?:not required|not expected|not needed|isn't required|is not required|is not expected)\b/i;
+const TRAVEL_OBLIGATION_RE = /\d{1,3}\s*%|\b(?:required|expected|occasionally|occasional|minimal|frequent|frequently|extensive|regular|substantial|significant|willing(?:ness)?|must|may need|up to|no more than|at least|minimum)\b/i;
+
 function clauses(description: string): string[] {
-  return description.split(/(?:[.!?;]+\s*|\r?\n+)/).map((clause) => clause.trim()).filter(Boolean);
+  return splitWorkabilityClauses(description);
 }
 
 function explicitTravelNegation(description: string): string | null {
-  const negative = clauses(description).find((clause) =>
-    /\b(?:no|without)\s+(?:required\s+|regular\s+|business\s+)?(?:travel|business trips?)\b|\b(?:travel|business trips?)\b[^;\n]{0,40}\b(?:not required|not expected|not needed|isn't required|is not required|is not expected)\b/i.test(clause)
+  return clauses(description).find((clause) => TRAVEL_NEGATION_RE.test(clause)) ?? null;
+}
+
+function hasPositiveTravelObligation(description: string): boolean {
+  return clauses(description).some((clause) =>
+    /\b(?:travel|traveling|travelling|business trips?)\b/i.test(clause)
+      && !TRAVEL_NEGATION_RE.test(clause)
+      && TRAVEL_OBLIGATION_RE.test(clause)
   );
-  return negative ?? null;
 }
 
 function explicitFrequentTravel(description: string): string | null {
   return clauses(description).find((clause) =>
-    /\b(?:frequent|frequently|extensive|regular|substantial|significant)\b[^;\n]{0,40}\b(?:travel|traveling|travelling|business trips?)\b|\b(?:travel|traveling|travelling|business trips?)\b[^;\n]{0,40}\b(?:frequent|extensive|regular|substantial|significant)\b/i.test(clause)
+    !TRAVEL_NEGATION_RE.test(clause)
+      && /\b(?:frequent|frequently|extensive|regular|substantial|significant)\b[^;\n]{0,40}\b(?:travel|traveling|travelling|business trips?)\b|\b(?:travel|traveling|travelling|business trips?)\b[^;\n]{0,40}\b(?:frequent|extensive|regular|substantial|significant)\b/i.test(clause)
+  ) ?? null;
+}
+
+function explicitMinimalTravel(description: string): string | null {
+  return clauses(description).find((clause) =>
+    !TRAVEL_NEGATION_RE.test(clause)
+      && /\bminimal\s+(?:business\s+)?travel\b|\b(?:business\s+)?travel\b[^;\n]{0,30}\bminimal\b/i.test(clause)
+      && TRAVEL_OBLIGATION_RE.test(clause)
   ) ?? null;
 }
 
 export function assessHiringTerritoryReadiness(
+  description: string,
   evidence: HiringTerritoryReadinessEvidence | null,
   workMode: string | null,
-  policy: Pick<WorkabilityReadinessPolicy, "authorizedRegions" | "remoteWithoutTerritoryAllowed" | "unknownWorkAuthorizationNeedsVerification">,
+  policy: Pick<WorkabilityReadinessPolicy, "authorizedRegions" | "remoteWithoutTerritoryAllowed" | "rejectExplicitForeignTerritory" | "unknownWorkAuthorizationNeedsVerification">,
 ): WorkabilityReadinessResult {
-  const countries = (evidence?.countries ?? [])
-    .map((country) => normalizeTerritory(country))
-    .filter((country): country is string => country !== null);
-  const allowed = policy.authorizedRegions
-    .map((country) => normalizeTerritory(country))
-    .filter((country): country is string => country !== null);
+  const requirements = extractExplicitWorkerTerritoryRequirements(description);
   const evidenceKeys = evidence?.evidence.map((item) => item.evidence_key) ?? [];
+  const requirementKeys = requirements.map((requirement) => `worker_territory_requirement:${requirement.evidenceText}`);
+  if (requirements.length > 0) {
+    const evaluation = evaluateWorkerTerritoryRequirements(
+      requirements,
+      policy.authorizedRegions,
+      policy.rejectExplicitForeignTerritory,
+    );
+    if (evaluation.status === "INCOMPATIBLE") {
+      return {
+        status: "BLOCKED",
+        reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
+        rationale: `At least one separate worker-territory restriction is incompatible with the active authorized regions: ${evaluation.incompatibleTerritories.join(", ")}.`,
+        evidenceKeys: [...evidenceKeys, ...requirementKeys],
+        policyReferenceRequired: false,
+      };
+    }
+    if (evaluation.status === "NEEDS_VERIFICATION") {
+      return {
+        status: "NEEDS_VERIFICATION",
+        reasonCode: "WORK_AUTHORIZATION_OPERATOR_UNKNOWN",
+        rationale: "The posting lists worker territories but does not establish the alternatives within each separate eligibility condition.",
+        evidenceKeys: [...evidenceKeys, ...requirementKeys],
+        policyReferenceRequired: false,
+      };
+    }
+    return {
+      status: "MET",
+      reasonCode: null,
+      rationale: `Every worker-territory condition is compatible with ${policy.authorizedRegions.join(", ") || "the configured policy"}.`,
+      evidenceKeys: [...evidenceKeys, ...requirementKeys],
+      policyReferenceRequired: false,
+    };
+  }
+
+  const remotePolicyAllowsUnknownTerritory = workMode === "REMOTE" && policy.remoteWithoutTerritoryAllowed;
   if (evidence?.status === "CONFLICTING") {
     return {
       status: "NEEDS_VERIFICATION",
@@ -81,36 +135,6 @@ export function assessHiringTerritoryReadiness(
       policyReferenceRequired: false,
     };
   }
-  if (evidence?.status === "SUPPORTED" && countries.length > 0) {
-    if (evidence.operator === "UNKNOWN") {
-      return {
-        status: "NEEDS_VERIFICATION",
-        reasonCode: "WORK_AUTHORIZATION_OPERATOR_UNKNOWN",
-        rationale: "The posting lists worker territories but does not establish whether they are alternatives or cumulative requirements.",
-        evidenceKeys,
-        policyReferenceRequired: false,
-      };
-    }
-    const countrySetMatches = evidence.operator === "ALL"
-      ? countries.every((country) => allowed.length === 0 || allowed.includes(country))
-      : countries.some((country) => allowed.length === 0 || allowed.includes(country));
-    return countrySetMatches
-      ? {
-          status: "MET",
-          reasonCode: null,
-          rationale: `Explicit worker-territory alternatives are compatible with ${allowed.join(", ") || "the configured policy"}.`,
-          evidenceKeys,
-          policyReferenceRequired: false,
-        }
-      : {
-          status: "BLOCKED",
-          reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
-          rationale: "Explicit worker-territory restrictions conflict with the active authorized regions.",
-          evidenceKeys,
-          policyReferenceRequired: false,
-        };
-  }
-  const remotePolicyAllowsUnknownTerritory = workMode === "REMOTE" && policy.remoteWithoutTerritoryAllowed;
   if (remotePolicyAllowsUnknownTerritory || !policy.unknownWorkAuthorizationNeedsVerification) {
     return {
       status: "NOT_APPLICABLE",
@@ -132,9 +156,9 @@ export function assessHiringTerritoryReadiness(
 export function assessTravelReadiness(
   description: string,
   evidence: TravelReadinessEvidence | null,
-  policy: Pick<WorkabilityReadinessPolicy, "maxTravelPct" | "frequentTravelAllowed">,
+  policy: Pick<WorkabilityReadinessPolicy, "maxTravelPct" | "minimalTravelAllowed" | "frequentTravelAllowed">,
 ): WorkabilityReadinessResult {
-  const negation = explicitTravelNegation(description);
+  const negation = hasPositiveTravelObligation(description) ? null : explicitTravelNegation(description);
   const travelEvidence = evidence?.evidence.map((item) => item.evidence_key) ?? [];
   if (negation && evidence?.status !== "CONFLICTING") {
     return {
@@ -204,10 +228,29 @@ export function assessTravelReadiness(
     };
   }
 
+  const minimalTravel = explicitMinimalTravel(description);
+  if (minimalTravel) {
+    return policy.minimalTravelAllowed
+      ? {
+          status: "MET",
+          reasonCode: null,
+          rationale: "The active policy accepts qualitative minimal travel as an assumption; no numeric travel percentage is inferred.",
+          evidenceKeys: [...travelEvidence, `travel_policy_assumption:minimal_qualitative:${minimalTravel}`],
+          policyReferenceRequired: true,
+        }
+      : {
+          status: "NEEDS_VERIFICATION",
+          reasonCode: "MINIMAL_TRAVEL_POLICY_UNCONFIRMED",
+          rationale: "The active workability policy does not accept qualitative minimal travel without an explicit percentage.",
+          evidenceKeys: travelEvidence,
+          policyReferenceRequired: true,
+        };
+  }
+
   const obligationMentioned = clauses(description).some((clause) =>
     /\b(?:travel|traveling|travelling|business trips?)\b/i.test(clause)
       && (/\d{1,3}\s*%/.test(clause)
-        || /\b(?:required|expected|occasionally|occasional|frequent|frequently|extensive|regular|substantial|significant|willing(?:ness)?|must|may need|up to|no more than|at least|minimum)\b/i.test(clause))
+        || /\b(?:required|expected|occasionally|occasional|minimal|frequent|frequently|extensive|regular|substantial|significant|willing(?:ness)?|must|may need|up to|no more than|at least|minimum)\b/i.test(clause))
   );
   if (frequent || obligationMentioned) {
     return {

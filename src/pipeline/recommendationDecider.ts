@@ -670,6 +670,7 @@ export async function runRecommendationDecider(
         const workabilityEvidence = sourceEvidence?.workability;
         const territoryEvidence = workabilityEvidence?.hiring_territories ?? null;
         const workAuthorization = assessHiringTerritoryReadiness(
+          sourceEvidence?.description.normalized_text ?? job.description_text ?? "",
           territoryEvidence,
           workabilityEvidence?.work_mode.value ?? null,
           workabilityPolicyResolution.policy,

@@ -93,10 +93,18 @@ export const CompensationEvidenceSchema = z.object({
 });
 export type CompensationEvidence = z.infer<typeof CompensationEvidenceSchema>;
 
+export const JurisdictionRequirementEvidenceSchema = z.object({
+  operator: z.enum(["ANY", "ALL", "UNKNOWN"]),
+  countries: z.array(z.string().min(2)).min(1),
+  evidence: z.array(JobEvidenceSpanSchema).default([]),
+});
+export type JurisdictionRequirementEvidence = z.infer<typeof JurisdictionRequirementEvidenceSchema>;
+
 export const JurisdictionEvidenceSchema = z.object({
   status: JobEvidenceStatusSchema,
   operator: z.enum(["ANY", "ALL", "UNKNOWN"]),
   countries: z.array(z.string().min(2)).default([]),
+  requirements: z.array(JurisdictionRequirementEvidenceSchema).default([]),
   evidence: z.array(JobEvidenceSpanSchema).default([]),
 });
 export type JurisdictionEvidence = z.infer<typeof JurisdictionEvidenceSchema>;

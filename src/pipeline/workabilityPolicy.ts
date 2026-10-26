@@ -17,6 +17,7 @@ export interface WorkabilityPolicy {
   rejectExplicitForeignTerritory: boolean;
   unknownWorkAuthorizationNeedsVerification: boolean;
   maxTravelPct: number;
+  minimalTravelAllowed: boolean;
   contractAllowed: boolean;
   minimumBuildingResearchPct: number;
   maximumInteractionPct: number;
@@ -81,6 +82,7 @@ const defaults: WorkabilityPolicy = {
   rejectExplicitForeignTerritory: true,
   unknownWorkAuthorizationNeedsVerification: false,
   maxTravelPct: 20,
+  minimalTravelAllowed: true,
   contractAllowed: false,
   minimumBuildingResearchPct: 60,
   maximumInteractionPct: 40,
@@ -159,6 +161,28 @@ function normalizeTerritorySearchText(value: unknown): string {
     .replace(/\be\s*\.\s*u\.?/g, "eu");
 }
 
+const PROTECTED_ABBREVIATION_PERIOD = "\uE000";
+
+function protectTerritoryAbbreviationPeriods(value: string): string {
+  const protect = (match: string, offset: number, source: string): string => {
+    const nextText = source.slice(offset + match.length);
+    const hasSentenceBoundaryAfterAbbreviation = match.endsWith(".") && /^\s+[A-Z]/.test(nextText);
+    const abbreviation = hasSentenceBoundaryAfterAbbreviation ? match.slice(0, -1) : match;
+    return abbreviation.replace(/\./g, PROTECTED_ABBREVIATION_PERIOD) + match.slice(abbreviation.length);
+  };
+  return value
+    .replace(/\bu\s*\.\s*s\.?/gi, protect)
+    .replace(/\bu\s*\.\s*k\.?/gi, protect)
+    .replace(/\be\s*\.\s*u\.?/gi, protect);
+}
+
+export function splitWorkabilityClauses(value: unknown): string[] {
+  return String(value ?? "")
+    .split(/(?:[.!?;]+\s*|\r?\n+|,\s*(?=(?:but|however|although|yet)\b))/i)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+}
+
 export function normalizeTerritory(value: unknown): string | null {
   const normalized = String(value ?? "")
     .trim()
@@ -206,7 +230,7 @@ export function inferTerritoryOperator(value: unknown): "ANY" | "ALL" | "UNKNOWN
     const current = distinctMentions[index];
     if (!previous || !current || previous.territory === current.territory) continue;
     const between = text.slice(previous.end, current.index).trim();
-    if (/\b(?:or|either)\b|\//i.test(between) || /^[,;]$/.test(between)) joins.push("ANY");
+    if (/\b(?:or|either)\b|\//i.test(between)) joins.push("ANY");
     else if (/^and$/i.test(between)) joins.push("ALL");
     else joins.push("UNKNOWN");
   }
@@ -508,23 +532,63 @@ export async function loadVerificationAnswerContext(
  */
 export interface ExplicitWorkerTerritoryRequirement {
   readonly territories: readonly string[];
-  readonly operator: "ANY" | "ALL";
+  readonly operator: "ANY" | "ALL" | "UNKNOWN";
   readonly evidenceText: string;
 }
 
+export interface WorkerTerritoryEvaluation {
+  readonly status: "ALLOWED" | "INCOMPATIBLE" | "NEEDS_VERIFICATION";
+  readonly incompatibleTerritories: readonly string[];
+  readonly unresolvedRequirements: readonly ExplicitWorkerTerritoryRequirement[];
+}
+
 export function extractExplicitWorkerTerritoryRequirements(value: unknown): ExplicitWorkerTerritoryRequirement[] {
-  const text = normalizeTerritorySearchText(value);
+  const protectedText = protectTerritoryAbbreviationPeriods(String(value ?? ""));
   const requirements: ExplicitWorkerTerritoryRequirement[] = [];
-  for (const sentence of text.split(/[.!?;\n]+/).map((part) => part.trim()).filter(Boolean)) {
+  for (const part of protectedText.split(/[.!?;\n]+/)) {
+    const sentence = part.replaceAll(PROTECTED_ABBREVIATION_PERIOD, ".").trim();
+    if (!sentence) continue;
     const territories = extractTerritories(sentence).filter((territory) => hasExplicitTerritoryRestriction(sentence, territory));
     if (territories.length === 0) continue;
     requirements.push({
       territories: [...new Set(territories)],
-      operator: /\bor\b/i.test(sentence) ? "ANY" : /\band\b/i.test(sentence) ? "ALL" : "ANY",
+      operator: inferTerritoryOperator(sentence),
       evidenceText: sentence,
     });
   }
   return requirements;
+}
+
+export function evaluateWorkerTerritoryRequirements(
+  requirements: readonly ExplicitWorkerTerritoryRequirement[],
+  authorizedRegions: readonly string[],
+  rejectExplicitForeignTerritory = true,
+): WorkerTerritoryEvaluation {
+  const allowed = new Set(normalizeTerritories([...authorizedRegions]));
+  const incompatibleTerritories: string[] = [];
+  const unresolvedRequirements: ExplicitWorkerTerritoryRequirement[] = [];
+  for (const requirement of requirements) {
+    const territories = normalizeTerritories([...requirement.territories]);
+    if (territories.length === 0 || requirement.operator === "UNKNOWN") {
+      unresolvedRequirements.push(requirement);
+      continue;
+    }
+    const permittedCount = territories.filter((territory) => allowed.size === 0 || allowed.has(territory)).length;
+    const satisfied = requirement.operator === "ANY"
+      ? permittedCount > 0
+      : permittedCount === territories.length;
+    if (!satisfied && rejectExplicitForeignTerritory && allowed.size > 0) {
+      incompatibleTerritories.push(...territories.filter((territory) => !allowed.has(territory)));
+    }
+  }
+  const uniqueIncompatible = [...new Set(incompatibleTerritories)];
+  return {
+    status: uniqueIncompatible.length > 0
+      ? "INCOMPATIBLE"
+      : unresolvedRequirements.length > 0 ? "NEEDS_VERIFICATION" : "ALLOWED",
+    incompatibleTerritories: uniqueIncompatible,
+    unresolvedRequirements,
+  };
 }
 
 export function hasExplicitTerritoryRestriction(value: unknown, territory: string): boolean {
@@ -659,6 +723,10 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
       defaults.unknownWorkAuthorizationNeedsVerification
     ),
     maxTravelPct: finiteNumber(document?.global_workability_gates?.travel?.max_travel_pct, defaults.maxTravelPct),
+    minimalTravelAllowed: booleanValue(
+      document?.global_workability_gates?.travel?.minimal_qualitative_travel_allowed,
+      defaults.minimalTravelAllowed
+    ),
     contractAllowed: document?.global_workability_gates?.employment?.contract_allowed === true,
     minimumBuildingResearchPct: finiteNumber(composition.minimum_building_research_pct, defaults.minimumBuildingResearchPct),
     maximumInteractionPct: finiteNumber(composition.maximum_interaction_pct, defaults.maximumInteractionPct),
@@ -694,6 +762,7 @@ export function mergeWorkabilityPreferenceContent(
   const workability = objectValue(firstDefined(root.workability, root.hard_constraints));
   const territory = objectValue(firstDefined(workability.territory, root.territory));
   const operations = objectValue(firstDefined(workability.operations, root.operations));
+  const travel = objectValue(firstDefined(workability.travel, root.travel));
   const composition = objectValue(firstDefined(workability.work_composition, root.work_composition));
 
   const allowedWorkModes = stringArray(
@@ -806,6 +875,14 @@ export function mergeWorkabilityPreferenceContent(
       basePolicy.maxTravelPct,
       0,
       100
+    ),
+    minimalTravelAllowed: booleanValue(
+      firstDefined(
+        travel.minimal_qualitative_travel_allowed,
+        workability.minimal_qualitative_travel_allowed,
+        root.minimal_qualitative_travel_allowed
+      ),
+      basePolicy.minimalTravelAllowed
     ),
     contractAllowed: employmentTypes.length > 0
       ? employmentTypes.some((type) => type === "CONTRACT" || type === "CONTRACTOR")

@@ -51,12 +51,15 @@ describe("workspace workability policy", () => {
         shift_work_allowed: true,
         employment_types: ["PERMANENT", "CONTRACT"],
       },
+      travel: { minimal_qualitative_travel_allowed: false },
     });
 
     expect(merged.onsiteOnlyAllowed).toBe(false);
     expect(merged.maxOfficeDaysPerWeek).toBe(2);
     expect(merged.hardFailOfficeDaysPerWeek).toBeGreaterThanOrEqual(3);
     expect(merged.maxTravelPct).toBe(25);
+    expect(merged.minimalTravelAllowed).toBe(false);
+    expect(loadWorkabilityPolicy().minimalTravelAllowed).toBe(true);
     expect(merged.contractAllowed).toBe(true);
     expect(merged.regularOnCallAllowed).toBe(true);
     expect(merged.shiftWorkAllowed).toBe(true);
