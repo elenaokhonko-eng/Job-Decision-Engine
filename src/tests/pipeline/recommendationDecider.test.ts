@@ -204,6 +204,71 @@ describe("Recommendation Decider: Exact-only and Semantic Matching (R01)", () =>
     expect(decisionJson.trace.notes).toContain("priority_downgraded_semantic_pending");
   });
 
+  it("classifies actual matcher success states and excludes workability requirements from qualification counts", async () => {
+    let insertedDecision: any = null;
+    let qualificationQuery = "";
+    (mPool.query as any).mockImplementation(async (sql: string, params?: any[]) => {
+      if (sql.includes("FROM workspaces w")) {
+        return { rows: [{ workspace_id: "00000000-0000-0000-0000-000000000001", user_id: "00000000-0000-0000-0000-000000000002", role: "OWNER" }] };
+      }
+      if (sql.includes("FROM workspace_policy_snapshots") || sql.includes("INSERT INTO workspace_policy_snapshots")) {
+        return { rows: [{ id: "00000000-0000-0000-0000-000000000003" }] };
+      }
+      if (sql.includes("FROM workspace_user_preference_active_versions")) return { rows: [] };
+      if (sql.includes("FROM canonical_jobs c")) {
+        return { rows: [{
+          canonical_job_id: "11111111-1111-4111-8111-111111111114",
+          job_version_id: "22222222-2222-4222-8222-222222222225",
+          canonical_latest_job_version_id: "22222222-2222-4222-8222-222222222225",
+          job_content_hash: "current-content-hash",
+          gate_decision: "PASS",
+          processing_state: "LANE_ROUTED",
+          workplace_type: "REMOTE",
+          workability_facts: { employment_type: "PERMANENT" },
+          profile_match_status: "POSITIVE_MATCH",
+          match_matched_count: 1,
+          latest_match_run_id: "55555555-5555-4555-8555-555555555558",
+          match_canonical_job_id: "11111111-1111-4111-8111-111111111114",
+          match_job_version_id: "22222222-2222-4222-8222-222222222225",
+          match_status: "COMPLETED",
+          match_profile_version_id: "33333333-3333-4333-8333-333333333336",
+          match_requirement_set_id: "44444444-4444-4444-8444-444444444447",
+          match_job_content_hash: "current-content-hash",
+          match_context_fingerprint: "match-fingerprint",
+          active_profile_version_id: "33333333-3333-4333-8333-333333333336",
+          active_profile_source_hash: "profile-hash",
+          active_requirement_set_id: "44444444-4444-4444-8444-444444444447",
+          match_embedding_space_id: "embedding-space-v1",
+          deterministic_match_score: "100.00",
+          deterministic_match_coverage: "100.00",
+          routing_disposition: "MATCHED",
+          company_name: "Example Company",
+          normalized_title: "Senior Software Architect",
+          description_text: "Complete role description",
+        }] };
+      }
+      if (sql.includes("COUNT(jr.id)")) {
+        qualificationQuery = sql;
+        return { rows: [{ total_mandatory: "2", matched_mandatory: "2", blocked_mandatory: "0", unresolved_mandatory: "0" }] };
+      }
+      if (sql.includes("INSERT INTO deterministic_decisions")) {
+        insertedDecision = params;
+        return { rows: [{ id: "decision-success-states", inserted: true }] };
+      }
+      if (sql.includes("UPDATE canonical_jobs")) return { rows: [{ id: "11111111-1111-4111-8111-111111111114" }] };
+      return { rows: [] };
+    });
+
+    const summary = await runRecommendationDecider(mPool as any);
+
+    expect(summary.errors).toBe(0);
+    expect(qualificationQuery).toContain("current_match.match_type IN ('EXACT', 'SEMANTIC')");
+    expect(qualificationQuery).toContain("'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK'");
+    expect(qualificationQuery).not.toContain("match_type = 'MATCH'");
+    const readiness = JSON.parse(insertedDecision[13]);
+    expect(readiness.checks.find((check: { key: string }) => check.key === "MANDATORY_QUALIFICATIONS").status).toBe("MET");
+  });
+
   it("blocks Apply Now outcomes when a mandatory qualification is mismatched", async () => {
     const canonicalJobId = "11111111-1111-4111-8111-111111111113";
     const jobVersionId = "22222222-2222-4222-8222-222222222224";

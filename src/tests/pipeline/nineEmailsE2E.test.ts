@@ -15,6 +15,7 @@ import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { SourceBroker } from "../../ingestion/sourceBroker.js";
+import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -677,6 +678,188 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     }
   });
 
+  it("PostgreSQL positive path — normal scoped pipeline stages can produce READY from actual matcher rows", async () => {
+    const { runHardGates } = await import("../../pipeline/hardGate.js");
+    const { runRequirementsExtraction } = await import("../../pipeline/requirementsExtractor.js");
+    const { runEmbeddingBatchWithFallback } = await import("../../embeddings/batchCoordinator.js");
+    const { runLaneRouter } = await import("../../pipeline/laneRouter.js");
+    const { runDeterministicMatcher } = await import("../../pipeline/deterministicMatcher.js");
+    const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
+    const { runNormalization } = await import("../../pipeline/normalize.js");
+
+    await saveWorkspacePreferenceRevision(getClient(), getContext(), {
+      preferenceDomain: "stage3",
+      schemaVersion: "3.0.0",
+      activate: true,
+      preferenceValue: {
+        schema_version: "3.0.0",
+        freshness: { max_posting_age_days: 60, stale_gate_disposition: "HARD_REJECT" },
+      },
+    });
+
+    const postingId = `readiness-positive-${crypto.randomUUID()}`;
+    const postingUrl = `https://boards.greenhouse.io/readiness-fixture/jobs/${postingId}`;
+    const retrievedAt = new Date().toISOString();
+    const publishedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const description = [
+      "<h1>Principal AI Systems Architect</h1>",
+      "<h2>About the role</h2><p>Readiness Evidence Fixture Labs builds production AI platforms for enterprise data teams.</p>",
+      "<h2>Responsibilities</h2><ul><li>Architect and build distributed AI and machine-learning systems used in production.</li><li>Implement reliable Python services and data infrastructure with engineering teams.</li></ul>",
+      "<h2>Qualifications</h2><ul><li>8+ years of professional production experience in AI engineering or software architecture.</li></ul>",
+      "<p>This position is fully remote. Candidates must be authorized to work in Singapore. No travel is required.</p>",
+    ].join("");
+    const rawPayload = {
+      id: postingId,
+      title: "Principal AI Systems Architect",
+      status: "active",
+      publishedAt,
+      location: "Singapore",
+      workplaceType: "REMOTE",
+      employmentType: "PERMANENT",
+      description,
+    };
+    const broker = new SourceBroker(getClient(), getContext());
+    await broker.startRun("READINESS_POSITIVE_POSTGRES_E2E");
+    const staged = await broker.processObservation({
+      sourceName: "GREENHOUSE",
+      sourcePluginKey: "greenhouse",
+      sourceExternalId: postingId,
+      sourceUrl: postingUrl,
+      canonicalApplyUrl: postingUrl,
+      retrievedAt,
+      companyName: "Readiness Evidence Fixture Labs",
+      title: "Principal AI Systems Architect",
+      descriptionRaw: description,
+      locationRaw: "Singapore",
+      workplaceTypeRaw: "REMOTE",
+      employmentTypeRaw: "PERMANENT",
+      compensationRaw: "UNKNOWN",
+      sourceLane: "CORE_AI_DATA",
+      searchPlanVersion: "readiness-positive-v1",
+      rawPayload,
+    }, rawPayload);
+    expect(staged.observationId).toBeTruthy();
+    expect(staged.normalizedEvidence?.description.completeness_status).toBe("COMPLETE");
+    expect(staged.normalizedEvidence?.availability.status).toBe("OPEN");
+    await broker.endRun("COMPLETED");
+
+    const normalized = await runNormalization(getClient(), {
+      context: getContext(),
+      observationIds: [staged.observationId!],
+    });
+    expect(normalized.totalErrors).toBe(0);
+    const { rows: versionRows } = await q(
+      `SELECT observation.job_version_id::text AS job_version_id,
+              version.canonical_job_id::text AS canonical_job_id
+       FROM raw_job_observations observation
+       JOIN job_versions version ON version.workspace_id = observation.workspace_id AND version.id = observation.job_version_id
+       WHERE observation.workspace_id = $1 AND observation.id = $2::uuid`,
+      [getContext().workspaceId, staged.observationId],
+    );
+    const jobVersionId = versionRows[0]?.job_version_id;
+    const canonicalJobId = versionRows[0]?.canonical_job_id;
+    expect(jobVersionId).toBeTruthy();
+    expect(canonicalJobId).toBeTruthy();
+
+    const gates = await runHardGates(getClient(), { context: getContext(), jobVersionIds: [jobVersionId!] });
+    expect(gates.errors).toBe(0);
+    expect(gates.passed).toBe(1);
+    const extraction = await runRequirementsExtraction(getClient(), {
+      context: getContext(),
+      jobVersionIds: [jobVersionId!],
+      quotedMode: "deterministic_only",
+    });
+    expect(extraction.errors).toBe(0);
+    const { rows: activeProfileRows } = await q(
+      `SELECT id::text AS profile_version_id
+       FROM profile_versions
+       WHERE workspace_id = $1 AND status = 'ACTIVE'
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [getContext().workspaceId],
+    );
+    expect(activeProfileRows).toHaveLength(1);
+    await q(
+      `INSERT INTO profile_facts (
+         workspace_id, profile_version_id, fact_key, fact_type, statement,
+         structured_value, evidence_tier, verification_status, confidentiality
+       ) VALUES ($1, $2::uuid, $3, 'SKILL', $4, $5::jsonb,
+                 'PROFESSIONAL_PRODUCTION', 'VERIFIED', 'PRIVATE_REUSABLE')
+       ON CONFLICT (profile_version_id, fact_key)
+       DO UPDATE SET statement = EXCLUDED.statement,
+                     structured_value = EXCLUDED.structured_value,
+                     evidence_tier = EXCLUDED.evidence_tier,
+                     verification_status = EXCLUDED.verification_status`,
+      [
+        getContext().workspaceId,
+        activeProfileRows[0].profile_version_id,
+        `readiness-positive-experience-${jobVersionId}`,
+        "9 years of professional production experience in AI engineering and software architecture.",
+        JSON.stringify({
+          professional_years: 9,
+          experience_scope_v2: {
+            role_families: ["AI_ENGINEERING", "ARCHITECTURE", "HANDS_ON_SOFTWARE_ENGINEERING"],
+            domain_families: ["AI", "SOFTWARE"],
+            duration_basis: "PROFESSIONAL_PRODUCTION",
+            years_lower_bound: 9,
+            scope_complete_for_profile: true,
+            aggregation_kind: "AGGREGATE_TOTAL",
+            evidence_basis: "ATTESTED_TOTAL_DURATION",
+            attestation_status: "VERIFIED",
+          },
+        }),
+      ],
+    );
+    const embeddings = await runEmbeddingBatchWithFallback(200, getClient(), {
+      context: getContext(),
+      jobVersionIds: [jobVersionId!],
+    });
+    expect(embeddings.primary.failed).toBe(0);
+    const routing = await runLaneRouter(getClient(), { context: getContext(), jobVersionIds: [jobVersionId!] });
+    expect(routing.deferred).toBe(0);
+    const matching = await runDeterministicMatcher(getClient(), { context: getContext(), jobVersionIds: [jobVersionId!] });
+    expect(matching.errors).toBe(0);
+    expect(matching.matchedJobs).toBe(1);
+    const decisions = await runRecommendationDecider(getClient(), { context: getContext(), jobVersionIds: [jobVersionId!] });
+    expect(decisions.errors).toBe(0);
+
+    const { rows: qualificationRows } = await q(
+      `SELECT requirement.requirement_type, latest_match.match_type
+       FROM job_requirements requirement
+       JOIN canonical_jobs canonical
+         ON canonical.workspace_id = requirement.workspace_id
+        AND canonical.id = requirement.canonical_job_id
+       LEFT JOIN LATERAL (
+         SELECT match.match_type
+         FROM requirement_evidence_matches match
+         WHERE match.workspace_id = requirement.workspace_id
+           AND match.match_run_id = canonical.latest_match_run_id
+           AND match.requirement_id = requirement.id
+         ORDER BY match.created_at DESC, match.id DESC
+         LIMIT 1
+       ) latest_match ON TRUE
+       WHERE requirement.workspace_id = $1
+         AND requirement.job_version_id = $2::uuid
+         AND requirement.importance = 'MUST'
+         AND requirement.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')`,
+      [getContext().workspaceId, jobVersionId],
+    );
+    expect(qualificationRows.length).toBeGreaterThan(0);
+    expect(qualificationRows.every((row) => ["EXACT", "SEMANTIC"].includes(row.match_type))).toBe(true);
+
+    const { rows: decisionRows } = await q(
+      `SELECT readiness_json
+       FROM deterministic_decisions
+       WHERE workspace_id = $1 AND canonical_job_id = $2::uuid AND job_version_id = $3::uuid
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [getContext().workspaceId, canonicalJobId, jobVersionId],
+    );
+    const readiness = decisionRows[0]?.readiness_json;
+    expect(readiness).toBeDefined();
+    expect(readiness.status).toBe("READY");
+    expect(readiness.checks.find((check: { key: string }) => check.key === "MANDATORY_QUALIFICATIONS").status).toBe("MET");
+  });
   it("Conservation — no observation, canonical job, or version disappears", async () => {
     const conservation = await q(
       `SELECT COUNT(*)::int AS observation_count,

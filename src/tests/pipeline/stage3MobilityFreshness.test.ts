@@ -369,6 +369,25 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     expect(ote.status).toBe("UNKNOWN");
   });
 
+  it("does not infer a gross or net target basis when the active preference omits it", () => {
+    const basisUnconfigured = CompensationPolicySchema.parse({
+      commercial_min_annual_sgd: 240000,
+      disposition_below_floor: "PREVENT_APPLY_NOW",
+    });
+    const result = evaluateCompensationPolicy({
+      salary_min: 250000,
+      salary_max: 250000,
+      salary_currency: "SGD",
+      salary_period: "ANNUAL",
+      salary_basis: "GROSS",
+      component_type: "BASE_CASH",
+    }, "COMMERCIAL", basisUnconfigured);
+
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.prevents_apply_now).toBe(true);
+    expect(result.evidence).toContain("Gross/net salary basis is missing or does not match");
+  });
+
   it("does not infer discounted compensation categories from posting keywords", () => {
     expect(inferOpportunityCategory("Acme AI", "Research Engineer", "University research is a customer domain.")).toBeNull();
     expect(inferOpportunityCategory("National University of Singapore", "Research Engineer", "")).toBe("UNIVERSITY_RESEARCH");

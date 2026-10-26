@@ -3,6 +3,7 @@ import { JobSourceEvidenceSchema, type JobEvidenceSpan, type JobSourceEvidence }
 import { stripHtmlToText } from "../security/sanitize.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
 import { extractFreshnessEvidence } from "./freshnessEvidence.js";
+import { extractTerritories, inferTerritoryOperator, normalizeTerritory } from "../pipeline/workabilityPolicy.js";
 
 export interface BuildJobSourceEvidenceInput {
   readonly sourceName: string;
@@ -192,9 +193,139 @@ function normalizedWorkMode(value: string | null): "REMOTE" | "HYBRID" | "ONSITE
   return "UNKNOWN";
 }
 
+export interface ParsedTravelEvidence {
+  readonly status: "SUPPORTED" | "UNKNOWN" | "CONFLICTING";
+  readonly minimum: number | null;
+  readonly maximum: number | null;
+  readonly quote: string | null;
+}
+
+const TRAVEL_RE = /\b(travel|traveling|travelling|business trips?)\b/i;
+const TRAVEL_NEGATION_RE = /\b(?:no|without)\s+(?:required\s+|regular\s+|business\s+)?(?:travel|business trips?)\b|\b(?:travel|business trips?)\b[^.;\n]{0,40}\b(?:not required|not expected|not needed|isn't required|is not required|is not expected)\b/i;
+const FREQUENT_TRAVEL_RE = /\b(?:frequent|frequently|extensive|regular|substantial|significant)\b[^.;\n]{0,40}\b(?:travel|traveling|travelling|business trips?)\b|\b(?:travel|traveling|travelling|business trips?)\b[^.;\n]{0,40}\b(?:frequent|extensive|regular|substantial|significant)\b/i;
+
+function descriptionClauses(value: string): string[] {
+  return value.split(/(?:[.!?;]+\s*|\r?\n+)/).map((clause) => clause.trim()).filter(Boolean);
+}
+
+function isTravelObligationClause(clause: string): boolean {
+  if (!TRAVEL_RE.test(clause)) return false;
+  return TRAVEL_NEGATION_RE.test(clause)
+    || /\d{1,3}\s*%/.test(clause)
+    || /\b(?:required|expected|occasionally|occasional|frequent|frequently|extensive|regular|substantial|significant|willing(?:ness)?|must|may need|up to|no more than|at least|minimum)\b/i.test(clause);
+}
+
+export function parseTravelEvidenceText(description: string): ParsedTravelEvidence {
+  const cleanDescription = stripHtmlToText(description);
+  const clauses = descriptionClauses(cleanDescription).filter(isTravelObligationClause);
+  if (clauses.length === 0) return { status: "UNKNOWN", minimum: null, maximum: null, quote: null };
+
+  const negatives = clauses.filter((clause) => TRAVEL_NEGATION_RE.test(clause));
+  const requirements = clauses.filter((clause) => !TRAVEL_NEGATION_RE.test(clause));
+  if (negatives.length > 0 && requirements.length > 0) {
+    return { status: "CONFLICTING", minimum: null, maximum: null, quote: [...negatives, ...requirements].join("; ") };
+  }
+  if (negatives.length > 0) {
+    return { status: "SUPPORTED", minimum: 0, maximum: 0, quote: negatives.join("; ") };
+  }
+
+  const parsed = requirements.map((clause): ParsedTravelEvidence => {
+    const range = clause.match(/(\d{1,3})\s*%?\s*(?:-|–|to)\s*(\d{1,3})\s*%/i);
+    if (range) {
+      const first = Number(range[1]);
+      const second = Number(range[2]);
+      if (first > 100 || second > 100) return { status: "CONFLICTING", minimum: null, maximum: null, quote: clause };
+      return { status: "SUPPORTED", minimum: Math.min(first, second), maximum: Math.max(first, second), quote: clause };
+    }
+    const amount = clause.match(/(\d{1,3})\s*%/);
+    if (!amount) return { status: "UNKNOWN", minimum: null, maximum: null, quote: clause };
+    const percentage = Number(amount[1]);
+    if (percentage > 100) return { status: "CONFLICTING", minimum: null, maximum: null, quote: clause };
+    const before = clause.slice(0, amount.index);
+    const after = clause.slice((amount.index ?? 0) + amount[0].length);
+    if (/\b(at least|minimum(?: of)?|no less than)\b/i.test(before)) {
+      return { status: "SUPPORTED", minimum: percentage, maximum: null, quote: clause };
+    }
+    if (/\b(up to|at most|maximum(?: of)?|no more than)\b/i.test(before)) {
+      return { status: "SUPPORTED", minimum: 0, maximum: percentage, quote: clause };
+    }
+    if (/\b(?:minimum|at least|no less than)\b/i.test(after)) {
+      return { status: "SUPPORTED", minimum: percentage, maximum: null, quote: clause };
+    }
+    return { status: "SUPPORTED", minimum: percentage, maximum: percentage, quote: clause };
+  });
+  const supported = parsed.filter((item) => item.status === "SUPPORTED");
+  if (parsed.some((item) => item.status === "CONFLICTING")
+    || (supported.some((item) => item.minimum === 0 && item.maximum === 0) && supported.some((item) => (item.maximum ?? 0) > 0))) {
+    return { status: "CONFLICTING", minimum: null, maximum: null, quote: requirements.join("; ") };
+  }
+  if (supported.length === 1 && parsed.length === 1) return supported[0]!;
+  if (supported.length > 1) {
+    const maximums = supported.map((item) => item.maximum).filter((value): value is number => value !== null);
+    const minimums = supported.map((item) => item.minimum).filter((value): value is number => value !== null);
+    return {
+      status: "SUPPORTED",
+      minimum: minimums.length > 0 ? Math.max(...minimums) : null,
+      maximum: maximums.length === supported.length ? Math.max(...maximums) : null,
+      quote: supported.map((item) => item.quote).filter((value): value is string => value !== null).join("; "),
+    };
+  }
+  return { status: "UNKNOWN", minimum: null, maximum: null, quote: requirements.join("; ") };
+}
+
+const HIRING_TERRITORY_CUE = /\b(?:must reside|must be based|must live|must be located|must be authorized|must be authorised|only residents|remote only in|eligible to work|authorized to work|authorised to work|work authorization|work authorisation|must work from|hiring in|hire in|employed in|employment in|candidates? (?:must be|need to be|should be)?\s*(?:located|based|resident|residing)|applicants? (?:must be|need to be|should be)?\s*(?:located|based|resident|residing))\b/i;
+
+export interface ParsedHiringTerritories {
+  readonly status: "SUPPORTED" | "UNKNOWN" | "CONFLICTING";
+  readonly operator: "ANY" | "ALL" | "UNKNOWN";
+  readonly countries: readonly string[];
+  readonly quotes: readonly string[];
+}
+
+export function parseHiringTerritoryEvidence(description: string): ParsedHiringTerritories {
+  const restrictions = descriptionClauses(description).filter((clause) => HIRING_TERRITORY_CUE.test(clause));
+  if (restrictions.length === 0) return { status: "UNKNOWN", operator: "UNKNOWN", countries: [], quotes: [] };
+  const countryGroups = restrictions.map((clause) => ({
+    clause,
+    countries: [...new Set(extractTerritories(clause).map((country) => normalizeTerritory(country)).filter((country): country is string => country !== null))],
+  })).filter((group) => group.countries.length > 0);
+  if (countryGroups.length === 0) return { status: "UNKNOWN", operator: "UNKNOWN", countries: [], quotes: restrictions };
+
+  const countries = [...new Set(countryGroups.flatMap((group) => group.countries))];
+  const operators = countryGroups.map(({ clause }) => inferTerritoryOperator(clause));
+  return {
+    status: new Set(operators).size > 1 ? "CONFLICTING" : "SUPPORTED",
+    operator: new Set(operators).size > 1 ? "UNKNOWN" : operators[0] ?? "UNKNOWN",
+    countries,
+    quotes: countryGroups.map((group) => group.clause),
+  };
+}
+
+function extractDescriptionCompensationText(description: string): string | null {
+  const cleanDescription = stripHtmlToText(description);
+  const payAnchor = /\b(?:base salary|base pay|salary|compensation|remuneration|pay range|pay rate|OTE|on[- ]target earnings|bonus|equity|RSU|stock options?)\b/i;
+  const currencyAmount = /(?:\b(?:SGD|USD|EUR|GBP|AUD|CAD|HKD|MYR|JPY)(?=\s*\d)|US\$|S\$|\$)\s*\d[\d,]*(?:\.\d+)?\s*[kK]?/i;
+  const amountAfterPayAnchor = /\b(?:base salary|base pay|salary|compensation|remuneration|pay range|pay rate|OTE|on[- ]target earnings|bonus|equity|RSU|stock options?)\b[^.;\n]{0,45}\b\d[\d,]*(?:\.\d+)?\s*[kK]?/i;
+  const clauses = descriptionClauses(cleanDescription);
+  const selected = clauses.flatMap((clause) => {
+    const anchor = payAnchor.exec(clause);
+    const explicitMoney = currencyAmount.exec(clause);
+    if (!anchor || (!explicitMoney && !amountAfterPayAnchor.test(clause))) return [];
+    const hasNumericPreamble = /\d/.test(clause.slice(0, anchor.index));
+    const start = explicitMoney && hasNumericPreamble
+      ? explicitMoney.index
+      : anchor.index;
+    return [clause.slice(start).trim()];
+  });
+  if (selected.length === 0) return null;
+  return selected.slice(0, 8).join("; ").slice(0, 1200);
+}
+
 function parseCompensation(input: BuildJobSourceEvidenceInput, records: readonly Record<string, unknown>[]) {
-  const rawText = input.compensationRaw?.trim() ?? "";
-  const unknownText = /^(unknown|undisclosed|competitive|not disclosed|n\/?a)$/i.test(rawText);
+  const suppliedText = input.compensationRaw?.trim() ?? "";
+  const suppliedIsUnknown = !suppliedText || /^(unknown|undisclosed|competitive|not disclosed|n\/?a)$/i.test(suppliedText);
+  const rawText = suppliedIsUnknown ? extractDescriptionCompensationText(input.descriptionText) ?? suppliedText : suppliedText;
+  const unknownText = !rawText || /^(unknown|undisclosed|competitive|not disclosed|n\/?a)$/i.test(rawText);
   const parseAmount = (value: unknown): number | null => {
     if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : null;
     if (typeof value !== "string") return null;
@@ -213,7 +344,7 @@ function parseCompensation(input: BuildJobSourceEvidenceInput, records: readonly
     if (token === "US$") return "USD";
     return null;
   };
-  const textCurrencyPattern = /\b(?:SGD|USD|EUR|GBP|AUD|CAD|HKD|MYR|JPY)\b|US\$|S\$/gi;
+  const textCurrencyPattern = /\b(?:SGD|USD|EUR|GBP|AUD|CAD|HKD|MYR|JPY)(?=\s*\d)|US\$|S\$/gi;
   const textCurrencyCodes = [...rawText.matchAll(textCurrencyPattern)]
     .map((match) => currencyFromToken(match[0]))
     .filter((value): value is string => value !== null);
@@ -456,13 +587,9 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
   const modeValue = normalizedWorkMode(input.workplaceTypeRaw);
   const assumedMode = (input.workplaceTypeRaw ?? "").toUpperCase() === "ASSUMED_HYBRID";
   const officeDaysMatch = input.descriptionText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i);
-  const travelMatch = input.descriptionText.match(/\b(?:up\s+to\s+)?(\d{1,2})(?:\s*[-–]\s*(\d{1,2}))?%\s+travel\b/i);
-  const territories = /\b(must reside|must be based|must be authorized|only residents|remote only in|eligible to work in|must work from)\b/i.test(input.descriptionText)
-    ? input.descriptionText.match(/\b(?:Singapore|Australia|United States|United Kingdom|Canada|Germany|France|India|Japan|New Zealand)\b/gi) ?? []
-    : [];
-  const territorySpan = territories.length > 0
-    ? [evidenceSpan(input, "HIRING_TERRITORY", territories.join(" / "))]
-    : [];
+  const travel = parseTravelEvidenceText(normalizedDescription.normalizedText);
+  const hiringTerritories = parseHiringTerritoryEvidence(normalizedDescription.normalizedText);
+  const territorySpan = hiringTerritories.quotes.map((quote) => evidenceSpan(input, "HIRING_TERRITORY", quote));
   const employmentRouteValues = [
     ...( /\b(employer of record|\bEOR\b)\b/i.test(input.descriptionText) ? ["EOR_EMPLOYEE"] : []),
     ...( /\b(independent contractor|individual contractor|contractor engagement)\b/i.test(input.descriptionText) ? ["INDIVIDUAL_CONTRACTOR"] : []),
@@ -515,9 +642,9 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
     },
     workability: {
       hiring_territories: {
-        status: territories.length > 0 ? "SUPPORTED" : "UNKNOWN",
-        operator: territories.length === 0 ? "UNKNOWN" : /\bor\b/i.test(input.descriptionText) ? "ANY" : "ALL",
-        countries: [...new Set(territories)],
+        status: hiringTerritories.status,
+        operator: hiringTerritories.operator,
+        countries: [...hiringTerritories.countries],
         evidence: territorySpan,
       },
       work_mode: {
@@ -525,7 +652,7 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
         value: modeValue,
         office_days_min: officeDaysMatch ? Number(officeDaysMatch[1]) : null,
         office_days_max: officeDaysMatch ? Number(officeDaysMatch[1]) : null,
-        evidence: modeValue === "UNKNOWN" ? [] : [evidenceSpan(input, "WORK_MODE", assumedMode ? "Work mode inferred as hybrid; employer confirmation required" : input.workplaceTypeRaw ?? modeValue)],
+        evidence: modeValue === "UNKNOWN" ? [] : [evidenceSpan(input, "WORK_MODE", assumedMode ? "Work mode inferred as hybrid under the configured default; not employer-confirmed" : input.workplaceTypeRaw ?? modeValue)],
       },
       employment_routes: {
         status: employmentRouteValues.length > 0 ? "SUPPORTED" : "UNKNOWN",
@@ -534,10 +661,10 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
       },
       timezone_overlap: { status: "UNKNOWN", value: null, evidence: [] },
       travel_pct: {
-        status: travelMatch ? "SUPPORTED" : "UNKNOWN",
-        minimum: travelMatch ? Number(travelMatch[1]) : null,
-        maximum: travelMatch ? Number(travelMatch[2] ?? travelMatch[1]) : null,
-        evidence: travelMatch ? [evidenceSpan(input, "TRAVEL", travelMatch[0])] : [],
+        status: travel.status,
+        minimum: travel.minimum,
+        maximum: travel.maximum,
+        evidence: travel.quote ? [evidenceSpan(input, "TRAVEL", travel.quote)] : [],
       },
       on_call: {
         status: /\b(no on[- ]call|no on-call|not on-call)\b/i.test(input.descriptionText) ? "SUPPORTED" : /\b(on[- ]call|on call)\b/i.test(input.descriptionText) ? "SUPPORTED" : "UNKNOWN",

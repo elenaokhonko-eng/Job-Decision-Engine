@@ -140,6 +140,75 @@ describe("job source evidence builder", () => {
     expect(buildEvidenceRevisionHash(first)).toBe(buildEvidenceRevisionHash(retrievedAgain));
   });
 
+  it("extracts salary from the full description when the adapter compensation field is undisclosed", () => {
+    const evidence = buildJobSourceEvidence({
+      ...baseInput,
+      compensationRaw: "UNKNOWN",
+      descriptionText: "<h2>Compensation</h2><p>SGD250,000 gross base salary per year.</p>",
+      rawPayload: {},
+    });
+
+    expect(evidence.compensation).toMatchObject({
+      status: "SUPPORTED",
+      components: [{
+        component_type: "BASE_CASH",
+        amount_min: 250000,
+        amount_max: 250000,
+        currency: "SGD",
+        period: "ANNUAL",
+        pay_basis: "GROSS",
+      }],
+    });
+    expect(evidence.compensation.evidence[0]?.quote_text).toContain("SGD250,000 gross base salary per year");
+  });
+
+  it("extracts only worker-hiring territory clauses and normalizes explicit alternatives", () => {
+    const alternative = buildJobSourceEvidence({
+      ...baseInput,
+      descriptionText: "Candidates must be authorized to work in Singapore or Australia. The team serves customers in the United States.",
+      rawPayload: {},
+    });
+    const unrelatedMention = buildJobSourceEvidence({
+      ...baseInput,
+      descriptionText: "The team has a Singapore office or a US office. The role builds data products for customers.",
+      rawPayload: {},
+    });
+
+    expect(alternative.workability.hiring_territories).toMatchObject({
+      status: "SUPPORTED",
+      operator: "ANY",
+      countries: ["SINGAPORE", "AUSTRALIA"],
+    });
+    expect(alternative.workability.hiring_territories.evidence.map((span) => span.quote_text))
+      .toEqual(["Candidates must be authorized to work in Singapore or Australia"]);
+    expect(unrelatedMention.workability.hiring_territories).toMatchObject({
+      status: "UNKNOWN",
+      operator: "UNKNOWN",
+      countries: [],
+    });
+  });
+
+  it("parses ranges, minimum-only, frequent and explicitly negated travel separately", () => {
+    const makeEvidence = (descriptionText: string) => buildJobSourceEvidence({
+      ...baseInput,
+      descriptionText,
+      rawPayload: {},
+    }).workability.travel_pct;
+
+    expect(makeEvidence("Travel is required 20-30% of the time.")).toMatchObject({
+      status: "SUPPORTED", minimum: 20, maximum: 30,
+    });
+    expect(makeEvidence("A minimum of 25% travel is required.")).toMatchObject({
+      status: "SUPPORTED", minimum: 25, maximum: null,
+    });
+    expect(makeEvidence("Frequent travel is required.")).toMatchObject({
+      status: "UNKNOWN", minimum: null, maximum: null,
+    });
+    expect(makeEvidence("No travel is required.")).toMatchObject({
+      status: "SUPPORTED", minimum: 0, maximum: 0,
+    });
+  });
+
   it("uses explicit employer organization evidence for discounted opportunity categories", () => {
     const evidence = buildJobSourceEvidence({
       ...baseInput,

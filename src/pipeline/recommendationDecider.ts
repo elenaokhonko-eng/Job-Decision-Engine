@@ -19,6 +19,7 @@ import { resolveFrankfurterSgdRate } from "../policy/fxRateService.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
 import type { MaterialReadinessCheck } from "../contracts/applicationReadiness.js";
 import { assessApplicationReadiness, buildApplicationReadinessFingerprint, QUALIFICATION_COMPARATOR_VERSION } from "../eligibility/applicationReadiness.js";
+import { assessHiringTerritoryReadiness, assessTravelReadiness, assessWorkModeReadiness } from "../eligibility/workabilityReadiness.js";
 import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { resolveWorkspaceWorkabilityPolicy } from "./workabilityPolicy.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
@@ -667,83 +668,69 @@ export async function runRecommendationDecider(
         ));
 
         const workabilityEvidence = sourceEvidence?.workability;
-        const territoryEvidence = workabilityEvidence?.hiring_territories;
-        const workerTerritories = territoryEvidence?.countries ?? [];
-        const authorizedRegions = workabilityPolicyResolution.policy.authorizedRegions;
-        const territoryAllowed = territoryEvidence?.operator === "ALL"
-          ? workerTerritories.every((territory) => authorizedRegions.length === 0 || authorizedRegions.includes(territory))
-          : workerTerritories.some((territory) => authorizedRegions.length === 0 || authorizedRegions.includes(territory));
-        const remotePolicyAllowsUnknownTerritory = workabilityEvidence?.work_mode.value === "REMOTE"
-          && workabilityPolicyResolution.policy.remoteWithoutTerritoryAllowed;
-        const workAuthStatus = territoryEvidence?.status === "SUPPORTED" && workerTerritories.length > 0
-          ? territoryAllowed ? "MET" : "BLOCKED"
-          : remotePolicyAllowsUnknownTerritory || !workabilityPolicyResolution.policy.unknownWorkAuthorizationNeedsVerification
-            ? "NOT_APPLICABLE" : "NEEDS_VERIFICATION";
+        const territoryEvidence = workabilityEvidence?.hiring_territories ?? null;
+        const workAuthorization = assessHiringTerritoryReadiness(
+          territoryEvidence,
+          workabilityEvidence?.work_mode.value ?? null,
+          workabilityPolicyResolution.policy,
+        );
         readinessChecks.push(readinessCheck(
           "WORK_AUTHORIZATION",
-          workAuthStatus,
-          workAuthStatus === "MET"
-            ? `Explicit worker-territory alternatives are compatible with ${authorizedRegions.join(", ") || "the configured policy"}.`
-            : workAuthStatus === "BLOCKED"
-              ? "Explicit worker-territory restrictions conflict with the active authorized regions."
-              : workAuthStatus === "NOT_APPLICABLE"
-                ? "The active policy does not require separate work-authorization evidence for this posting context."
-                : "Hiring-country or work-authorization evidence is unresolved.",
+          workAuthorization.status,
+          workAuthorization.rationale,
           readinessAssessedAt,
           {
-            reasonCode: workAuthStatus === "BLOCKED" ? "WORK_AUTHORIZATION_INCOMPATIBLE" : workAuthStatus === "NEEDS_VERIFICATION" ? "WORK_AUTHORIZATION_UNKNOWN" : null,
-            evidenceKeys: territoryEvidence?.evidence.map((item) => item.evidence_key) ?? [],
-            policyReference: workAuthStatus === "NOT_APPLICABLE" ? `workability_policy:${workabilityPolicyResolution.policyHash}` : null,
-          },
-        ));
-
-        const modeEvidence = workabilityEvidence?.work_mode;
-        const modeValue = modeEvidence?.value ?? "UNKNOWN";
-        const officeDaysMax = modeEvidence?.office_days_max ?? normalizeWorkabilityFacts(job.workability_facts)["office_days_max"];
-        const modeAllowed = modeValue !== "UNKNOWN" && workabilityPolicyResolution.policy.allowedWorkModes.includes(modeValue);
-        const officeDaysAllowed = officeDaysMax === null || officeDaysMax === undefined
-          ? modeValue === "REMOTE"
-          : Number(officeDaysMax) <= workabilityPolicyResolution.policy.maxOfficeDaysPerWeek
-            && Number(officeDaysMax) < workabilityPolicyResolution.policy.hardFailOfficeDaysPerWeek;
-        const workModeStatus = normalizedGateDecision === "HARD_REJECT" && (modeValue === "UNKNOWN" || !modeAllowed)
-          ? "BLOCKED"
-          : modeEvidence?.status === "SUPPORTED" && modeAllowed && officeDaysAllowed
-            ? "MET"
-            : modeEvidence?.status === "SUPPORTED" && (!modeAllowed || !officeDaysAllowed)
-              ? "BLOCKED" : "NEEDS_VERIFICATION";
-        readinessChecks.push(readinessCheck(
-          "WORK_MODE",
-          workModeStatus,
-          workModeStatus === "MET"
-            ? `Employer-confirmed ${modeValue.toLowerCase()} work mode fits the active office-day policy.`
-            : workModeStatus === "BLOCKED"
-              ? "Employer-confirmed work mode or attendance exceeds the active preference."
-              : "Work mode or office-day requirements are not established by employer evidence.",
-          readinessAssessedAt,
-          { reasonCode: workModeStatus === "BLOCKED" ? "WORK_MODE_INCOMPATIBLE" : workModeStatus === "MET" ? null : "WORK_MODE_UNVERIFIED", evidenceKeys: modeEvidence?.evidence.map((item) => item.evidence_key) ?? [] },
-        ));
-
-        const travelEvidence = workabilityEvidence?.travel_pct;
-        const travelMentioned = /\\b(travel|traveling|travelling)\\b/i.test(job.description_text ?? "");
-        const travelMaximum = travelEvidence?.maximum;
-        const travelStatus = travelEvidence?.status === "SUPPORTED" && typeof travelMaximum === "number"
-          ? travelMaximum > workabilityPolicyResolution.policy.maxTravelPct && !workabilityPolicyResolution.policy.frequentTravelAllowed ? "BLOCKED" : "MET"
-          : travelMentioned ? "NEEDS_VERIFICATION" : "NOT_APPLICABLE";
-        readinessChecks.push(readinessCheck(
-          "TRAVEL",
-          travelStatus,
-          travelStatus === "BLOCKED"
-            ? `Employer travel maximum ${travelMaximum}% exceeds the active ${workabilityPolicyResolution.policy.maxTravelPct}% cap.`
-            : travelStatus === "MET" ? "Disclosed travel requirement fits the active cap." : travelStatus === "NEEDS_VERIFICATION" ? "Travel is mentioned without a supported numeric upper bound." : "No travel obligation is stated; the numeric travel cap is not applicable.",
-          readinessAssessedAt,
-          {
-            reasonCode: travelStatus === "BLOCKED" ? "TRAVEL_EXCEEDS_POLICY" : travelStatus === "NEEDS_VERIFICATION" ? "TRAVEL_PERCENTAGE_UNKNOWN" : null,
-            evidenceKeys: travelEvidence?.evidence.map((item) => item.evidence_key) ?? [],
-            policyReference: travelStatus === "NOT_APPLICABLE" ? `workability_policy:${workabilityPolicyResolution.policyHash}` : null,
+            reasonCode: workAuthorization.reasonCode,
+            evidenceKeys: [...workAuthorization.evidenceKeys],
+            policyReference: workAuthorization.policyReferenceRequired
+              ? `workability_policy:${workabilityPolicyResolution.policyHash}`
+              : null,
           },
         ));
 
         const workabilityFacts = normalizeWorkabilityFacts(job.workability_facts);
+        const modeEvidence = workabilityEvidence?.work_mode ?? null;
+        const workModeAssessment = assessWorkModeReadiness(
+          modeEvidence,
+          job.workplace_type,
+          workabilityFacts["office_days_max"],
+          workabilityFacts["attendance_basis"],
+          normalizedGateDecision,
+          workabilityPolicyResolution.policy,
+        );
+        readinessChecks.push(readinessCheck(
+          "WORK_MODE",
+          workModeAssessment.status,
+          workModeAssessment.rationale,
+          readinessAssessedAt,
+          {
+            reasonCode: workModeAssessment.reasonCode,
+            evidenceKeys: [...workModeAssessment.evidenceKeys],
+            policyReference: workModeAssessment.policyReferenceRequired
+              ? `workability_policy:${workabilityPolicyResolution.policyHash}`
+              : null,
+          },
+        ));
+
+        const travelAssessment = assessTravelReadiness(
+          job.description_text ?? "",
+          workabilityEvidence?.travel_pct ?? null,
+          workabilityPolicyResolution.policy,
+        );
+        readinessChecks.push(readinessCheck(
+          "TRAVEL",
+          travelAssessment.status,
+          travelAssessment.rationale,
+          readinessAssessedAt,
+          {
+            reasonCode: travelAssessment.reasonCode,
+            evidenceKeys: [...travelAssessment.evidenceKeys],
+            policyReference: travelAssessment.policyReferenceRequired
+              ? `workability_policy:${workabilityPolicyResolution.policyHash}`
+              : null,
+          },
+        ));
+
         const employmentType = String(workabilityFacts["employment_type"] ?? job.employment_type ?? "UNKNOWN").toUpperCase();
         const employmentStatus = employmentType === "CONTRACT" && !workabilityPolicyResolution.policy.contractAllowed
           ? "BLOCKED"
@@ -770,9 +757,9 @@ export async function runRecommendationDecider(
             unresolved_mandatory: number | string;
           }>(
             `SELECT COUNT(jr.id) AS total_mandatory,
-                    COUNT(jr.id) FILTER (WHERE current_match.match_type = 'MATCH') AS matched_mandatory,
+                   COUNT(jr.id) FILTER (WHERE current_match.match_type IN ('EXACT', 'SEMANTIC')) AS matched_mandatory,
                     COUNT(jr.id) FILTER (WHERE current_match.match_type = 'NO_MATCH') AS blocked_mandatory,
-                    COUNT(jr.id) FILTER (WHERE current_match.match_type IS DISTINCT FROM 'MATCH' AND current_match.match_type IS DISTINCT FROM 'NO_MATCH') AS unresolved_mandatory
+                   COUNT(jr.id) FILTER (WHERE current_match.match_type IS DISTINCT FROM 'EXACT' AND current_match.match_type IS DISTINCT FROM 'SEMANTIC' AND current_match.match_type IS DISTINCT FROM 'NO_MATCH') AS unresolved_mandatory
              FROM job_requirements jr
              LEFT JOIN LATERAL (
                SELECT rem.match_type
@@ -785,7 +772,8 @@ export async function runRecommendationDecider(
              ) current_match ON TRUE
              WHERE jr.workspace_id = $1 AND jr.canonical_job_id = $2
                AND jr.job_version_id = $4 AND jr.requirement_set_id = $5
-               AND jr.importance = 'MUST'`,
+               AND jr.importance = 'MUST'
+               AND jr.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')`,
             [ctx.workspaceId, job.canonical_job_id, job.latest_match_run_id, job.job_version_id, job.active_requirement_set_id],
           );
           const qualificationSummary = qualificationRows[0];
@@ -814,19 +802,28 @@ export async function runRecommendationDecider(
           : compensationAssessment === null || compensationAssessment.status === "UNKNOWN"
             ? "NEEDS_VERIFICATION"
             : compensationAssessment.status === "BELOW_FLOOR" ? "BLOCKED" : "MET";
+        const compensationBasisUnconfigured = hasCompensationFloor && !compensationPolicy?.target_salary_basis;
         readinessChecks.push(readinessCheck(
           "COMPENSATION",
           compensationStatus,
           compensationStatus === "NOT_APPLICABLE"
             ? "No active compensation floor is configured."
             : compensationStatus === "NEEDS_VERIFICATION"
-              ? fxRateFailure ? "Compensation conversion or source evidence is unavailable and requires retry/verification." : "Guaranteed base compensation, salary basis, period, currency, or category is unresolved."
+              ? fxRateFailure
+                ? "Compensation conversion or source evidence is unavailable and requires retry/verification."
+                : compensationBasisUnconfigured
+                  ? "The active compensation policy does not define whether the salary target is gross or net; no advertised basis is assumed."
+                  : "Guaranteed base compensation, salary basis, period, currency, or category is unresolved."
               : compensationStatus === "BLOCKED"
                 ? compensationAssessment?.evidence ?? "Guaranteed base compensation is below the active floor."
                 : compensationAssessment?.evidence ?? "Guaranteed base compensation meets the active floor.",
           readinessAssessedAt,
           {
-            reasonCode: compensationStatus === "BLOCKED" ? "COMPENSATION_BELOW_USER_FLOOR" : compensationStatus === "NEEDS_VERIFICATION" ? "COMPENSATION_UNKNOWN" : null,
+            reasonCode: compensationStatus === "BLOCKED"
+              ? "COMPENSATION_BELOW_USER_FLOOR"
+              : compensationStatus === "NEEDS_VERIFICATION"
+                ? compensationBasisUnconfigured ? "COMPENSATION_TARGET_BASIS_UNCONFIGURED" : "COMPENSATION_UNKNOWN"
+                : null,
             importance: compensationStatus === "NOT_APPLICABLE" ? "PREFERRED" : "MUST",
             evidenceKeys: fxRateObservationId ? [`fx_rate_observation:${fxRateObservationId}`] : [],
             policyReference: compensationStatus === "NOT_APPLICABLE" ? `stage3_compensation:${preferenceContext.revisionsByDomain.stage3 ?? "unconfigured"}` : null,

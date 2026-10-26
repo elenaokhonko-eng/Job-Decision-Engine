@@ -186,6 +186,34 @@ export function extractTerritories(value: unknown): string[] {
   return found;
 }
 
+export function inferTerritoryOperator(value: unknown): "ANY" | "ALL" | "UNKNOWN" {
+  const text = normalizeTerritorySearchText(value);
+  const mentions = TERRITORY_ALIASES.flatMap(([territory, aliases]) => aliases.flatMap((alias) => {
+    const matches = [...text.matchAll(new RegExp(`\\b${escapeRegExp(alias)}\\b`, "gi"))];
+    return matches.map((match) => ({ territory, index: match.index ?? -1, end: (match.index ?? -1) + match[0].length }));
+  })).filter((mention) => mention.index >= 0)
+    .sort((left, right) => left.index - right.index || right.end - left.end);
+  const distinctMentions = mentions.filter((mention, index) =>
+    index === 0 || mention.index >= (mentions[index - 1]?.end ?? -1)
+  );
+  const countries = [...new Set(distinctMentions.map((mention) => mention.territory))];
+  if (countries.length === 0) return "UNKNOWN";
+  if (countries.length === 1) return "ANY";
+
+  const joins: Array<"ANY" | "ALL" | "UNKNOWN"> = [];
+  for (let index = 1; index < distinctMentions.length; index++) {
+    const previous = distinctMentions[index - 1];
+    const current = distinctMentions[index];
+    if (!previous || !current || previous.territory === current.territory) continue;
+    const between = text.slice(previous.end, current.index).trim();
+    if (/\b(?:or|either)\b|\//i.test(between) || /^[,;]$/.test(between)) joins.push("ANY");
+    else if (/^and$/i.test(between)) joins.push("ALL");
+    else joins.push("UNKNOWN");
+  }
+  if (joins.length === 0 || joins.includes("UNKNOWN") || new Set(joins).size !== 1) return "UNKNOWN";
+  return joins[0] ?? "UNKNOWN";
+}
+
 const KNOWN_TERRITORIES = new Set(TERRITORY_ALIASES.map(([territory]) => territory));
 
 function answerObject(content: unknown): Record<string, unknown> {
