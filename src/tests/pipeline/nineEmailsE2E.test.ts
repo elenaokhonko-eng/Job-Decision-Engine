@@ -870,7 +870,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").status)
         .toBe(posting.expectedStatus === "READY" ? "MET" : "BLOCKED");
       if (posting.expectedStatus === "BLOCKED") {
-        expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").reasonCode)
+        expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").reason_code)
           .toBe("COMPENSATION_BELOW_USER_FLOOR");
       }
     }
