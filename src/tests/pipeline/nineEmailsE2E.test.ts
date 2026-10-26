@@ -703,8 +703,18 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     });
 
     const postings = [
-      { externalId: `readiness-positive-${crypto.randomUUID()}`, salary: "SGD250,000", expectedStatus: "READY" },
-      { externalId: `readiness-below-floor-${crypto.randomUUID()}`, salary: "SGD200,000", expectedStatus: "BLOCKED" },
+      {
+        externalId: `readiness-positive-${crypto.randomUUID()}`,
+        companyName: "Readiness Evidence Fixture Labs",
+        salary: "SGD250,000",
+        expectedStatus: "READY",
+      },
+      {
+        externalId: `readiness-below-floor-${crypto.randomUUID()}`,
+        companyName: "Readiness Below Floor Fixture Labs",
+        salary: "SGD200,000",
+        expectedStatus: "BLOCKED",
+      },
     ] as const;
     const retrievedAt = new Date().toISOString();
     const publishedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -715,7 +725,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       const postingUrl = `https://boards.greenhouse.io/readiness-fixture/jobs/${posting.externalId}`;
       const description = [
         "<h1>Principal AI Systems Architect</h1>",
-        "<h2>About the role</h2><p>Readiness Evidence Fixture Labs builds production AI platforms for enterprise data teams.</p>",
+        `<h2>About the role</h2><p>${posting.companyName} builds production AI platforms for enterprise data teams.</p>`,
         "<h2>Responsibilities</h2><ul><li>Architect and build distributed AI and machine-learning systems used in production.</li><li>Implement reliable Python services and data infrastructure with engineering teams.</li></ul>",
         "<h2>Qualifications</h2><ul><li>8+ years of professional production experience.</li></ul>",
         `<h2>Compensation</h2><p>${posting.salary} gross base salary per year.</p>`,
@@ -738,7 +748,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         sourceUrl: postingUrl,
         canonicalApplyUrl: postingUrl,
         retrievedAt,
-        companyName: "Readiness Evidence Fixture Labs",
+        companyName: posting.companyName,
         title: "Principal AI Systems Architect",
         descriptionRaw: description,
         locationRaw: "Singapore",
@@ -875,7 +885,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(Number(conservation.rows[0].observation_count)).toBe(9);
     expect(Number(conservation.rows[0].observed_version_count)).toBe(9);
     expect(Number(conservation.rows[0].canonical_count)).toBe(8);
-    expect(versionCount).toBe(10); // Nine email fixture versions plus the scoped positive-readiness job.
+    expect(versionCount).toBe(11); // Nine email fixture versions plus positive and below-floor readiness jobs.
   });
 
   it("Integrity — every fixture observation maps to a live canonical job version", async () => {
