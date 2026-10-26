@@ -9,7 +9,7 @@ export interface RawJobObservation {
   sourcePluginKey?: string;
   /** Active source plugin revision id (if registry is seeded). */
   sourcePluginRevisionId?: string | null;
-  sourceExternalId: string;
+  sourceExternalId: string | null;
   sourceUrl: string;
   canonicalApplyUrl?: string;
 

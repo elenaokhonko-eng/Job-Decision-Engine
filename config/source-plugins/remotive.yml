@@ -5,7 +5,7 @@ kind: json_api
 status: active
 capabilities:
   discovery: true
-  pagination: false
+  pagination: true
   incremental: false
   location_filter: false
   work_mode_evidence: false
@@ -33,16 +33,16 @@ request:
     requests_per_minute: 20
     items_per_run: 50
   pagination:
-    strategy: none
+    strategy: cursor
     page_parameter: null
     cursor_json_path: null
     next_link_json_path: null
-    checkpoint_field: null
+    checkpoint_field: source_external_id
   query:
     keywords: [ai, data, software, product]
     locations: []
     work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
-    lane_keys: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH]
+    lane_keys: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH, SOCIAL_IMPACT_MULTILATERAL, UNIVERSITY_AI_RESEARCH]
 mapping:
   external_id: $.id
   title: $.title

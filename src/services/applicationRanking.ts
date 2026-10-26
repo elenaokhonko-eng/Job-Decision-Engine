@@ -6,7 +6,8 @@ export type RankingComponentName =
   | 'autonomy'
   | 'politicsRisk'
   | 'sensoryWorkloadRisk'
-  | 'strategicValue';
+  | 'strategicValue'
+  | 'culturePriorityFit';
 
 export type RankingWeights = Readonly<Record<RankingComponentName, number>>;
 
@@ -19,6 +20,7 @@ export interface RankingComponents {
   readonly politicsRisk: number | null;
   readonly sensoryWorkloadRisk: number | null;
   readonly strategicValue: number | null;
+  readonly culturePriorityFit?: number | null;
 }
 
 export interface RankingReadinessContext {
@@ -51,6 +53,7 @@ const RANKING_COMPONENTS: readonly RankingComponentName[] = [
   'politicsRisk',
   'sensoryWorkloadRisk',
   'strategicValue',
+  'culturePriorityFit',
 ];
 
 const INVERSE_RISK_COMPONENTS: ReadonlySet<RankingComponentName> = new Set([
@@ -67,12 +70,13 @@ export const INITIAL_RANKING_WEIGHTS: RankingWeights = Object.freeze({
   politicsRisk: 7.5,
   sensoryWorkloadRisk: 5,
   strategicValue: 5,
+  culturePriorityFit: 0,
 });
 
 function validateScores(components: RankingComponents): void {
   for (const component of RANKING_COMPONENTS) {
     const score = components[component];
-    if (score !== null && (!Number.isFinite(score) || score < 0 || score > 100)) {
+    if (score !== null && score !== undefined && (!Number.isFinite(score) || score < 0 || score > 100)) {
       throw new RangeError(`${component} must be a finite score between 0 and 100`);
     }
   }
@@ -107,7 +111,9 @@ function getAvailableWeight(
   policy: RankingPolicyConfiguration,
 ): number {
   return RANKING_COMPONENTS.reduce(
-    (weight, component) => components[component] === null ? weight : weight + policy.weights[component],
+    (weight, component) => components[component] === null || components[component] === undefined
+      ? weight
+      : weight + policy.weights[component],
     0,
   );
 }
@@ -123,7 +129,7 @@ function calculateOverallRankScore(
 
   return RANKING_COMPONENTS.reduce((weightedScore, component) => {
     const score = components[component];
-    if (score === null) {
+    if (score === null || score === undefined) {
       return weightedScore;
     }
 
