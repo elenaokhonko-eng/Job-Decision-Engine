@@ -35,8 +35,13 @@ describe("P1-07: Real-Job Calibration, Counterfactual & Yield Suite", () => {
     for (const [lane, plan] of Object.entries(plans)) {
       expect(plan.lane).toBe(lane);
       expect(plan.searchQueries.length).toBeGreaterThan(0);
-      expect(plan.targetCompanies.length).toBeGreaterThan(0);
+      expect(plan.targetFeeds.length).toBeGreaterThan(0);
+      expect(plan.coverageNote.length).toBeGreaterThan(0);
+      expect(plan.targetCompanies).toEqual([]);
     }
+
+    const configuredPlans = planner.generateSearchPlans({ CORE_AI_DATA: ["Verified employer fixture"] });
+    expect(configuredPlans.CORE_AI_DATA.targetCompanies).toEqual(["Verified employer fixture"]);
   });
 
   it("should evaluate counterfactual workability cases: location vs remote", () => {

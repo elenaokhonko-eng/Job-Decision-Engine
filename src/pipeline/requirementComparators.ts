@@ -1,3 +1,5 @@
+import type { VerificationAnswerContext } from "./workabilityPolicy.js";
+
 export interface ComparableRequirement {
   requirement_type: string;
   requirement_text: string;
@@ -311,6 +313,151 @@ function scopesOverlap(requiredScope: string, factScope: string): boolean {
   return false;
 }
 
+interface ExperienceScopeInfo {
+  readonly roleFamilies: readonly string[];
+  readonly domainFamilies: readonly string[];
+  readonly operator: "ANY" | "ALL";
+  readonly seniorityScope: string | null;
+  readonly durationBasis: string;
+}
+
+interface ProfileExperienceInfo {
+  readonly fact: ComparableFact;
+  readonly years: number;
+  readonly roleFamilies: readonly string[];
+  readonly domainFamilies: readonly string[];
+  readonly seniorityScope: string | null;
+  readonly durationBasis: string;
+  readonly interval: ExperienceInterval | null;
+  readonly aggregationKind: string;
+  readonly aggregationGroupId: string | null;
+  readonly overlapGroupId: string | null;
+  readonly scopeComplete: boolean;
+  readonly attestedTotal: boolean;
+  readonly attestedComponent: boolean;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringValues(value: unknown): string[] {
+  return (Array.isArray(value) ? value : value === null || value === undefined ? [] : [value])
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function inferExperienceRoleFamilies(text: string): string[] {
+  const families = new Set<string>();
+  if (/\barchitect(?:ure)?\b/i.test(text)) families.add("ARCHITECTURE");
+  if (/\b(ai|machine learning|ml|llm|artificial intelligence)\b/i.test(text)) families.add("AI_ENGINEERING");
+  if (/\bdata (?:engineering|engineer|platform)\b/i.test(text)) families.add("DATA_ENGINEERING");
+  if (/\b(software\s+(?:engineering|development)|coding|programming|developer|development|engineering|engineer|implementation|hands[- ]on|full[- ]stack|backend|frontend|web development)\b/i.test(text)) {
+    families.add("HANDS_ON_SOFTWARE_ENGINEERING");
+  }
+  if (/\b(research software|research engineer|scientific computing|scientific software)\b/i.test(text)) {
+    families.add("RESEARCH_SOFTWARE");
+  }
+  if (/\b(technical project|technical programme|technical program|technical delivery)\b/i.test(text)) {
+    families.add("TECHNICAL_DELIVERY");
+  }
+  if (/\b(technical product|product management)\b/i.test(text)) families.add("TECHNICAL_PRODUCT");
+  if (/\b(sales ownership|quota|prospecting|closing)\b/i.test(text)) families.add("SALES_OWNERSHIP");
+  if (/\b(people manager|people management|managed a team)\b/i.test(text)) families.add("PEOPLE_MANAGEMENT");
+  return [...families];
+}
+
+function inferExperienceDomainFamilies(text: string): string[] {
+  const domains = new Set<string>();
+  if (/\b(ai|machine learning|ml|llm|artificial intelligence)\b/i.test(text)) domains.add("AI");
+  if (/\b(software|coding|programming|developer|development|full[- ]stack|backend|frontend|web development)\b/i.test(text)) domains.add("SOFTWARE");
+  if (/\b(data|analytics|etl|data pipeline)\b/i.test(text)) domains.add("DATA");
+  if (/\b(legal|regtech|regulatory|compliance technology)\b/i.test(text)) domains.add("LEGAL_REGTECH");
+  if (/\b(health|biomedical|biotech|pharma|clinical)\b/i.test(text)) domains.add("HEALTH_BIO_PHARMA");
+  if (/\b(investment|financial|fintech|trading|markets)\b/i.test(text)) domains.add("INVESTMENT_MARKETS_FINTECH");
+  if (/\b(multilateral|humanitarian|social impact|development sector)\b/i.test(text)) domains.add("SOCIAL_IMPACT_MULTILATERAL");
+  if (/\b(university|academic|research)\b/i.test(text)) domains.add("UNIVERSITY_AI_RESEARCH");
+  return [...domains];
+}
+
+function experienceScopeInfo(requirement: ComparableRequirement): ExperienceScopeInfo {
+  const structured = requirement.structured_value ?? {};
+  const nested = recordValue(structured.experience_scope_v2) ?? structured;
+  const legacyText = experienceScopes(structured).join(" ") || textForRequirement(requirement);
+  const roles = stringValues(nested.role_families);
+  const domains = stringValues(nested.domain_families);
+  return {
+    roleFamilies: roles.length > 0 ? roles : inferExperienceRoleFamilies(legacyText),
+    domainFamilies: domains.length > 0 ? domains : inferExperienceDomainFamilies(legacyText),
+    operator: nested.operator === "ALL" ? "ALL" : "ANY",
+    seniorityScope: typeof nested.seniority_scope === "string" ? nested.seniority_scope : null,
+    durationBasis: typeof nested.duration_basis === "string" ? nested.duration_basis : "PROFESSIONAL_PRODUCTION",
+  };
+}
+
+function profileExperienceInfo(fact: ComparableFact): ProfileExperienceInfo | null {
+  const structured = fact.structured_value;
+  const nested = structured ? recordValue(structured.experience_scope_v2) ?? structured : null;
+  const years = factYears(fact);
+  if (years === null) return null;
+  const text = [fact.statement, ...experienceScopes(structured)].join(" ");
+  const basis = typeof nested?.duration_basis === "string"
+    ? nested.duration_basis
+    : /\b(coursework|classroom|academic project)\b/i.test(text)
+      ? "COURSEWORK"
+      : structured && (structured.professional_years !== undefined || structured.professional_months !== undefined)
+        ? "PROFESSIONAL_PRODUCTION"
+        : "UNSPECIFIED";
+  const yearsLower = numberValue(nested?.years_lower_bound ?? structured?.years_lower_bound) ?? years;
+  const attestation = nested?.attestation_status ?? structured?.attestation_status;
+  const evidenceBasis = nested?.evidence_basis ?? structured?.evidence_basis;
+  return {
+    fact,
+    years: yearsLower,
+    roleFamilies: stringValues(nested?.role_families).length > 0
+      ? stringValues(nested?.role_families)
+      : inferExperienceRoleFamilies(text),
+    domainFamilies: stringValues(nested?.domain_families).length > 0
+      ? stringValues(nested?.domain_families)
+      : inferExperienceDomainFamilies(text),
+    seniorityScope: typeof nested?.seniority_scope === "string" ? nested.seniority_scope : null,
+    durationBasis: basis,
+    interval: experienceInterval(fact),
+    aggregationKind: typeof nested?.aggregation_kind === "string" ? nested.aggregation_kind : "UNKNOWN",
+    aggregationGroupId: typeof nested?.aggregation_group_id === "string" ? nested.aggregation_group_id : null,
+    overlapGroupId: typeof nested?.overlap_group_id === "string" ? nested.overlap_group_id : null,
+    scopeComplete: nested?.scope_complete_for_profile === true || structured?.scope_complete_for_profile === true,
+    attestedTotal: evidenceBasis === "ATTESTED_TOTAL_DURATION"
+      && (attestation === "VERIFIED" || attestation === "SELF_ATTESTED"),
+    attestedComponent: evidenceBasis === "ATTESTED_COMPONENT_DURATION"
+      && (attestation === "VERIFIED" || attestation === "SELF_ATTESTED"),
+  };
+}
+
+function matchesExperienceScope(
+  requirement: ExperienceScopeInfo,
+  profile: ProfileExperienceInfo,
+): boolean {
+  if (requirement.roleFamilies.length > 0) {
+    if (profile.roleFamilies.length === 0) return false;
+    const matchingRoles = requirement.roleFamilies.filter((role) => profile.roleFamilies.includes(role));
+    if (requirement.operator === "ALL" ? matchingRoles.length !== requirement.roleFamilies.length : matchingRoles.length === 0) {
+      return false;
+    }
+  }
+  if (requirement.domainFamilies.length > 0) {
+    if (!requirement.domainFamilies.some((domain) => profile.domainFamilies.includes(domain))) return false;
+  }
+  if (requirement.seniorityScope) {
+    const profileSeniority = profile.seniorityScope?.toLowerCase() ?? "";
+    if (!profileSeniority || !profileSeniority.includes(requirement.seniorityScope.toLowerCase())) return false;
+  }
+  return true;
+}
+
 function degreeLevel(text: string): number | null {
   if (/\b(phd|doctorate|doctoral)\b/i.test(text)) return 3;
   if (/\b(master'?s?|msc|ma|mba)\b/i.test(text)) return 2;
@@ -445,14 +592,24 @@ export function expandExperienceScope(
   const structured = { ...(requirement.structured_value || {}) };
   const existing = structured.experience_scope ?? structured.experience_scopes ?? structured.scope ?? structured.domain;
   const existingValues = Array.isArray(existing) ? existing : existing ? [existing] : [];
-  structured.experience_scope = [...existingValues, ...domains];
+  const expandedScope = [...existingValues, ...domains];
+  const expandedText = expandedScope.join(" ");
+  const roleFamilies = inferExperienceRoleFamilies(expandedText);
+  const acceptedSoftwareDomain = domains.some((domain) => inferExperienceDomainFamilies(domain).includes("SOFTWARE"));
+  if (acceptedSoftwareDomain && roleFamilies.includes("AI_ENGINEERING") && !roleFamilies.includes("HANDS_ON_SOFTWARE_ENGINEERING")) {
+    roleFamilies.push("HANDS_ON_SOFTWARE_ENGINEERING");
+  }
+  structured.experience_scope = expandedScope;
+  structured.role_families = roleFamilies;
+  structured.domain_families = inferExperienceDomainFamilies(expandedText);
+  structured.operator = "ANY";
   return { ...requirement, structured_value: structured };
 }
 
 export function compareStructuredRequirement(
   requirement: ComparableRequirement,
   facts: ComparableFact[],
-  answerContext?: any
+  answerContext?: VerificationAnswerContext
 ): StructuredComparison {
   if (answerContext) {
     if (requirement.requirement_type === "DEGREE" && answerContext.overrides?.degreeSubjects?.length > 0) {
@@ -478,80 +635,73 @@ export function compareStructuredRequirement(
   if (requirement.requirement_type === "EXPERIENCE_YEARS") {
     const required = requiredYears(requirement);
     if (required === null) return { status: "UNKNOWN", rationale: "Required experience duration is not structured.", fact: null };
-    const requiredScope = requiredExperienceScope(requirement);
+    const requiredScope = experienceScopeInfo(requirement);
+    const scopeLabel = requiredExperienceScope(requirement) ?? "professional experience";
     const candidates = facts
-      .map((fact) => {
-        const scopes = experienceScopes(fact.structured_value);
-        if (scopes.length === 0) {
-          const text = textForFact(fact);
-          const scoped = text.match(/\b(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\+?\s*(?:years|yrs)\s+(?:of\s+)?(.+?)\s+experience\b/i)
-            || text.match(/\b(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)\+?\s*years?\s+of\s+experience\s+in\s+(.+)$/i);
-          if (scoped?.[1]) {
-            scopes.push(normalizedScope(scoped[1]));
-          } else {
-            scopes.push(normalizedScope(text));
-          }
-        }
-        return { fact, years: factYears(fact), scopes, interval: experienceInterval(fact) };
-      })
-      .filter((candidate): candidate is { fact: ComparableFact; years: number; scopes: string[]; interval: ExperienceInterval | null } => candidate.years !== null);
-    if (candidates.length === 0) return { status: "UNKNOWN", rationale: "No structured profile experience duration is available.", fact: null };
-    const scopedCandidates = requiredScope
-      ? candidates.filter((candidate) => candidate.scopes.some((scope) => scopesOverlap(requiredScope, scope)))
-      : candidates;
-    if (requiredScope && scopedCandidates.length === 0) {
+      .map(profileExperienceInfo)
+      .filter((candidate): candidate is ProfileExperienceInfo => candidate !== null)
+      .filter((candidate) => candidate.durationBasis === requiredScope.durationBasis)
+      .filter((candidate) => matchesExperienceScope(requiredScope, candidate));
+
+    if (candidates.length === 0) {
       return {
         status: "UNKNOWN",
-        rationale: `No structured profile experience duration is available for the required scope: ${requiredScope}.`,
+        rationale: `No profile duration with positive evidence for the required role/domain scope: ${scopeLabel}.`,
         fact: null,
       };
     }
 
-    // Add genuinely relevant role/domain evidence rather than selecting the
-    // largest single fact. A generic overall-years fact is an aggregate and
-    // must not be counted again when scoped engagement facts are present.
-    const hasScopedEvidence = scopedCandidates.some((candidate) => candidate.scopes.some((scope) => {
-      const normalized = scope.replace(/\s+/g, " ").trim();
-      return normalized.length > 0 && !/\b(overall|professional|production)\b/i.test(normalized);
-    }) || candidate.interval !== null);
-    const usableCandidates = !requiredScope && hasScopedEvidence
-      ? scopedCandidates.filter((candidate) => !candidate.scopes.some((scope) => /\b(overall|professional|production)\b/i.test(scope)))
-      : scopedCandidates;
-    const intervals = usableCandidates.flatMap((candidate) => candidate.interval ? [candidate.interval] : []);
-    const intervalYears = unionExperienceYears(intervals);
-    const nonIntervalYears = usableCandidates
-      .filter((candidate) => candidate.interval === null)
-      .reduce((sum, candidate) => sum + candidate.years, 0);
-    const totalYears = intervalYears + nonIntervalYears;
-    const representative = [...usableCandidates].sort((a, b) => b.years - a.years)[0]
-      || [...scopedCandidates].sort((a, b) => b.years - a.years)[0];
-    if (!representative) {
+    const intervalCandidates = candidates.filter((candidate) => candidate.interval !== null);
+    const undatedCandidates = candidates.filter((candidate) => candidate.interval === null);
+    const intervalYears = unionExperienceYears(intervalCandidates.flatMap((candidate) => candidate.interval ? [candidate.interval] : []));
+    let totalYears = intervalYears;
+
+    if (intervalCandidates.length === 0 && undatedCandidates.length > 0) {
+      const aggregateTotals = undatedCandidates.filter((candidate) => candidate.aggregationKind === "AGGREGATE_TOTAL");
+      if (aggregateTotals.length > 0) {
+        totalYears = Math.max(...aggregateTotals.map((candidate) => candidate.years));
+      } else {
+        const components = undatedCandidates.filter((candidate) => candidate.aggregationKind === "COMPONENT");
+        const provenIndependentComponents = components.length > 0
+          && components.every((candidate) => candidate.attestedComponent && candidate.overlapGroupId !== null)
+          && new Set(components.map((candidate) => candidate.overlapGroupId)).size === components.length;
+        totalYears = provenIndependentComponents
+          ? components.reduce((sum, candidate) => sum + candidate.years, 0)
+          : Math.max(...undatedCandidates.map((candidate) => candidate.years));
+      }
+    }
+
+    const representative = [...candidates].sort((left, right) => right.years - left.years)[0];
+    const scopeIsComplete = candidates.some((candidate) => candidate.scopeComplete || candidate.attestedTotal);
+    const scopeSuffix = ` for ${scopeLabel}`;
+    const coverage = required > 0 ? Math.min(1, Math.max(0, totalYears / required)) : 1;
+    const evidenceDetails = {
+      fact: representative.fact,
+      coverage: Number(coverage.toFixed(3)),
+      requiredYears: required,
+      evidencedYears: Number(totalYears.toFixed(3)),
+    };
+
+    if (totalYears >= required) {
       return {
-        status: "UNKNOWN",
-        rationale: `No structured profile experience duration is available for the required scope: ${requiredScope || "professional experience"}.`,
-        fact: null,
+        status: "MATCH",
+        rationale: `Supported profile experience ${totalYears.toFixed(1)} years meets the ${required}-year requirement${scopeSuffix}.`,
+        ...evidenceDetails,
       };
     }
-    const scopeSuffix = requiredScope ? ` for ${requiredScope}` : "";
-    const coverage = required > 0 ? Number(Math.min(1, Math.max(0, totalYears / required)).toFixed(3)) : 1;
-    return totalYears >= required
-      ? {
-          status: "MATCH",
-          rationale: `Combined profile experience ${totalYears.toFixed(1)} years meets the ${required}-year requirement${scopeSuffix} (coverage: 1.000).`,
-          fact: representative.fact,
-          coverage: 1,
-          requiredYears: required,
-          evidencedYears: Number(totalYears.toFixed(1)),
-        }
-      : {
-          status: "MISMATCH",
-          rationale: `Combined profile experience ${totalYears.toFixed(1)} years is below the ${required}-year requirement${scopeSuffix} (coverage: ${coverage.toFixed(3)}).`,
-          fact: representative.fact,
-          coverage,
-          requiredYears: required,
-          evidencedYears: Number(totalYears.toFixed(1)),
-          qualificationCode: "MATCH_QUALIFICATION_EXPERIENCE_GAP",
-        };
+    if (!scopeIsComplete) {
+      return {
+        status: "UNKNOWN",
+        rationale: `At least ${totalYears.toFixed(1)} years are evidenced${scopeSuffix}, but the experience ledger is not attested complete enough to establish a shortfall against ${required} years.`,
+        ...evidenceDetails,
+      };
+    }
+    return {
+      status: "MISMATCH",
+      rationale: `Attested complete profile experience ${totalYears.toFixed(1)} years is below the ${required}-year requirement${scopeSuffix}.`,
+      ...evidenceDetails,
+      qualificationCode: "MATCH_QUALIFICATION_EXPERIENCE_GAP",
+    };
   }
 
   if (requirement.requirement_type === "DEGREE") {

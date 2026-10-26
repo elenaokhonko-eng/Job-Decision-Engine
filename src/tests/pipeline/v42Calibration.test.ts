@@ -177,8 +177,9 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
         policy
       );
 
-      expect(workability.workable).toBe(true);
-      expect(workability.facts?.workplace_type).toBe("ASSUMED_HYBRID");
+      expect(workability.workable).toBe(false);
+      expect(workability.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
+      expect(workability.facts?.workplace_type).toBeUndefined();
     });
 
     it("rejects foreign roles when work mode is unknown", () => {

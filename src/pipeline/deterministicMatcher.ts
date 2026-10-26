@@ -866,20 +866,26 @@ export async function runDeterministicMatcher(
           const structuredComparison = compareStructuredRequirement(req, comparisonFacts);
           const exactRequirementType = ["EXPERIENCE_YEARS", "CREDENTIAL", "DEGREE", "WORK_AUTH"].includes(req.requirement_type);
           if (exactRequirementType && structuredComparison.status === "UNKNOWN") {
+            const partialCoverage = structuredComparison.coverage ?? 0;
             await client.query(
               `INSERT INTO requirement_evidence_matches (
                  workspace_id, match_run_id, requirement_id, profile_fact_id,
                  match_type, match_score, rationale, evidence
-               ) VALUES ($1, $2, $3, NULL, 'UNKNOWN', 0, $4, $5)`,
+               ) VALUES ($1, $2, $3, $4, 'UNKNOWN', $5, $6, $7)`,
               [
                 ctx.workspaceId,
                 matchRunId,
                 req.id,
+                toProfileFactForeignKey(structuredComparison.fact),
+                partialCoverage,
                 structuredComparison.rationale,
                 JSON.stringify({
                   requirement_key: req.requirement_key,
                   requirement_type: req.requirement_type,
                   comparator: "STRUCTURED_EXACT",
+                  required_years: structuredComparison.requiredYears ?? null,
+                  evidenced_years: structuredComparison.evidencedYears ?? null,
+                  experience_coverage: structuredComparison.coverage ?? null,
                   semantic_ready: usedEmbeddings,
                 }),
               ]
@@ -891,8 +897,10 @@ export async function runDeterministicMatcher(
             const coverage = structuredComparison.coverage ?? 0;
             const weightedScore = coverage * weight;
             weightedScoreSum += weightedScore;
-            if (coverage >= 0.5) {
-              matchedCount += 1;
+            if (req.importance === "MUST") {
+              mandatoryQualificationFailures.push(
+                structuredComparison.qualificationCode ?? "MATCH_QUALIFICATION_EXPERIENCE_GAP",
+              );
             }
             await client.query(
               `INSERT INTO requirement_evidence_matches (

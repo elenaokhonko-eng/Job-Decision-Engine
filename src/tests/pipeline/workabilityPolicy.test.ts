@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   extractTerritories,
+  inferTerritoryOperator,
+  normalizeTerritories,
   hasExplicitTerritoryRestriction,
   loadWorkabilityPolicy,
   mergeWorkabilityPreferenceContent,
@@ -13,6 +15,14 @@ describe("workspace workability policy", () => {
     expect(extractTerritories("Location: 100% Remote (U.S.)")).toContain("UNITED_STATES");
     expect(hasExplicitTerritoryRestriction("Location: 100% Remote (U.S. only)", "UNITED_STATES")).toBe(true);
     expect(hasExplicitTerritoryRestriction("Serve U.S. clients from anywhere", "UNITED_STATES")).toBe(false);
+  });
+
+  it("normalizes the owner and posting territories to the same canonical country code", () => {
+    expect(normalizeTerritories(["Singapore", "Australia"])).toEqual(["SINGAPORE", "AUSTRALIA"]);
+    expect(normalizeTerritories(["SINGAPORE"])).toEqual(["SINGAPORE"]);
+    expect(inferTerritoryOperator("Candidates must be authorized to work in Singapore or Australia.")).toBe("ANY");
+    expect(inferTerritoryOperator("Must be authorized in Singapore and Australia.")).toBe("ALL");
+    expect(inferTerritoryOperator("Must be based in Singapore and collaborate with US customer teams.")).toBe("UNKNOWN");
   });
 
   it("distinguishes worker territory restrictions from employer/company locations", () => {
@@ -41,12 +51,15 @@ describe("workspace workability policy", () => {
         shift_work_allowed: true,
         employment_types: ["PERMANENT", "CONTRACT"],
       },
+      travel: { minimal_qualitative_travel_allowed: false },
     });
 
     expect(merged.onsiteOnlyAllowed).toBe(false);
     expect(merged.maxOfficeDaysPerWeek).toBe(2);
     expect(merged.hardFailOfficeDaysPerWeek).toBeGreaterThanOrEqual(3);
     expect(merged.maxTravelPct).toBe(25);
+    expect(merged.minimalTravelAllowed).toBe(false);
+    expect(loadWorkabilityPolicy().minimalTravelAllowed).toBe(true);
     expect(merged.contractAllowed).toBe(true);
     expect(merged.regularOnCallAllowed).toBe(true);
     expect(merged.shiftWorkAllowed).toBe(true);
