@@ -54,6 +54,8 @@ export interface ReconcileStalePendingPipelineTasksOptions {
   apply?: boolean;
   limit?: number;
   taskTypes?: readonly string[];
+  jobVersionIds?: readonly string[];
+  observationIds?: readonly string[];
   timeBudgetMs?: number;
 }
 
@@ -1079,11 +1081,25 @@ export async function reconcileStalePendingPipelineTasks(
   const timeBudgetMs = Math.max(1, Math.min(options.timeBudgetMs ?? 10_000, 60_000));
   const startedAt = Date.now();
   const taskTypes = options.taskTypes?.filter((value) => value.trim() !== "") ?? [];
+  const jobVersionIds = options.jobVersionIds?.filter((value) => value.trim() !== "") ?? [];
+  const observationIds = options.observationIds?.filter((value) => value.trim() !== "") ?? [];
   const params: unknown[] = [context.workspaceId];
   let taskTypeClause = "";
+  let targetClause = "";
   if (taskTypes.length > 0) {
     params.push(taskTypes);
     taskTypeClause = `AND task.task_type = ANY($${params.length}::text[])`;
+  }
+  if (options.jobVersionIds !== undefined && options.observationIds !== undefined) {
+    params.push(jobVersionIds, observationIds);
+    targetClause = `AND (task.payload->>'job_version_id' = ANY($${params.length - 1}::text[])
+      OR task.payload->>'observation_id' = ANY($${params.length}::text[]))`;
+  } else if (options.jobVersionIds !== undefined) {
+    params.push(jobVersionIds);
+    targetClause = `AND task.payload->>'job_version_id' = ANY($${params.length}::text[])`;
+  } else if (options.observationIds !== undefined) {
+    params.push(observationIds);
+    targetClause = `AND task.payload->>'observation_id' = ANY($${params.length}::text[])`;
   }
   params.push(limit);
 
@@ -1099,6 +1115,7 @@ export async function reconcileStalePendingPipelineTasks(
        WHERE task.workspace_id = $1
          AND task.status = 'PENDING'
          ${taskTypeClause}
+         ${targetClause}
        ORDER BY task.available_at ASC, task.created_at ASC, task.id ASC
        LIMIT $${params.length}
        ${apply ? "FOR UPDATE OF task SKIP LOCKED" : ""}`,

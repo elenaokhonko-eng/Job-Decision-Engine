@@ -2324,6 +2324,8 @@ export async function runPipelineStageTaskWorker(
           limit: options.maxStalePendingReconciliation ?? 100,
           timeBudgetMs: reconciliationBudgetRemainingMs,
           taskTypes,
+          jobVersionIds: options.jobVersionIds,
+          observationIds: options.observationIds,
         },
       );
     }

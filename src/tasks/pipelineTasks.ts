@@ -365,8 +365,11 @@ export async function claimPipelineTasks(
             FROM pipeline_tasks
             WHERE workspace_id = $1
               AND task_type = $2
-              AND ($6::text[] IS NULL OR payload->>'job_version_id' = ANY($6::text[]))
-              AND ($7::text[] IS NULL OR payload->>'observation_id' = ANY($7::text[]))
+              AND (
+                ($6::text[] IS NULL AND $7::text[] IS NULL)
+                OR payload->>'job_version_id' = ANY($6::text[])
+                OR payload->>'observation_id' = ANY($7::text[])
+              )
               AND (
                 (
                   status IN ('PENDING', 'RETRY_WAIT')

@@ -460,6 +460,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const summary = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
       apply: true,
       taskTypes: ["APPLY_HARD_GATES"],
+      jobVersionIds: [versions.latestVersionId],
     });
     expect(summary).toMatchObject({
       scannedPending: 5,
@@ -563,11 +564,15 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
 
   it("bounds reconciliation work and leaves unscanned obligations pending", async () => {
     const taskIds: string[] = [];
+    const jobVersionIds: string[] = [];
     for (let index = 0; index < 10; index += 1) {
+      const canonicalJobId = crypto.randomUUID();
+      const jobVersionId = crypto.randomUUID();
+      jobVersionIds.push(jobVersionId);
       taskIds.push(await insertPendingTask({
         taskType: "PUBLISH_EMBEDDING",
-        taskKey: `PUBLISH_EMBEDDING:${crypto.randomUUID()}:embedding_publication_v1:budget-${index}`,
-        payload: { canonical_job_id: crypto.randomUUID(), job_version_id: crypto.randomUUID() },
+        taskKey: `PUBLISH_EMBEDDING:${jobVersionId}:embedding_publication_v1:budget-${index}`,
+        payload: { canonical_job_id: canonicalJobId, job_version_id: jobVersionId },
         fingerprintTaskType: "PUBLISH_EMBEDDING",
         fingerprintTaskVersion: "embedding_publication_v1",
       }));
@@ -576,6 +581,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const summary = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
       apply: true,
       taskTypes: ["PUBLISH_EMBEDDING"],
+      jobVersionIds,
       limit: 10,
       timeBudgetMs: 1,
     });
@@ -648,6 +654,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const summary = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
       apply: true,
       taskTypes: ["PUBLISH_EMBEDDING"],
+      jobVersionIds: [versions.latestVersionId],
     });
     expect(summary).toMatchObject({ unresolved: 1, wouldReconcile: 0, reconciled: 0 });
     const status = await getClient().query<{ status: string }>(
@@ -700,6 +707,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       const reconciliation = reconcileStalePendingPipelineTasks(getClient(), getContext(), {
         apply: true,
         taskTypes: ["PUBLISH_EMBEDDING"],
+        jobVersionIds: [versions.oldVersionId, newerVersionId],
       });
       let observedLockWait = false;
       for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -904,6 +912,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       context: getContext(),
       seed: false,
       taskTypes: [...taskTypes],
+      jobVersionIds: [normalizationJob.latestVersionId, recommendationJob.latestVersionId],
       stageStartOffset: 0,
       stageQuantum: 1,
       maxTasks: 100,
@@ -930,6 +939,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       context: getContext(),
       seed: false,
       taskTypes: [...taskTypes],
+      jobVersionIds: [normalizationJob.latestVersionId, recommendationJob.latestVersionId],
       stageStartOffset: 1,
       stageQuantum: 1,
       maxTasks: 1,
@@ -952,6 +962,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       context: getContext(),
       seed: false,
       taskTypes: [...taskTypes],
+      jobVersionIds: [normalizationJob.latestVersionId, recommendationJob.latestVersionId],
       stageStartOffset: 2,
       stageQuantum: 1,
       maxTasks: 1,
