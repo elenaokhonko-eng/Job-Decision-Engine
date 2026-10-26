@@ -149,18 +149,22 @@ export async function reconcileStrandedStates(options?: {
     if (apply && r1.rows.length > 0) {
       for (const row of r1.rows) {
         if (row.latest_job_version_id) {
+          const taskKey = `ROUTE_LANE:${row.latest_job_version_id}:lane_router_v1:state-reconcile`;
           await enqueuePipelineTask(
             {
               taskType: "ROUTE_LANE",
-              taskKey: `ROUTE_LANE:${row.latest_job_version_id}`,
+              taskKey,
               payload: {
                 canonical_job_id: row.id,
                 job_version_id: row.latest_job_version_id,
               },
+              producer: "script.reconcile_states",
+              stageVersion: "lane_router_v1",
+              requestId: taskKey,
             },
             pool,
             { context: ctx }
-          ).catch(() => undefined);
+          );
         }
       }
     }

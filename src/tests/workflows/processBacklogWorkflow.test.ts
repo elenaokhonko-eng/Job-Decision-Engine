@@ -14,6 +14,8 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain("github.event.workflow_run.conclusion != 'cancelled'");
     expect(workflow).toContain('npx tsx scripts/process_pipeline_tasks.ts');
     expect(workflow).toContain('id: process_pipeline_worker');
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT: ${{ vars.PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT || '100' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS: ${{ vars.PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS || '10000' }}");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: pipeline-dead-letter-health.json');
     expect(workflow).toContain('pipeline-dead-letter-health-${{ github.run_id }}');
     expect(workflow).toContain('PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}');

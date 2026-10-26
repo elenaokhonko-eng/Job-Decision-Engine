@@ -12,8 +12,9 @@ import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
-import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
+import { createTaskIntentV2 } from "./taskIntent.js";
+import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
 import { planPipelineStageRound } from "./pipelineStageScheduler.js";
 import {
   pipelineTaskStageVersion,
@@ -105,6 +106,8 @@ export interface PipelineStageWorkerDependencies {
 export interface SeedPipelineTasksSummary {
   inserted: number;
   existing: number;
+  deferredByBudget: number;
+  timeBudgetExceeded: boolean;
   byType: Record<string, { inserted: number; existing: number }>;
 }
 
@@ -132,6 +135,8 @@ export interface PipelineStageWorkerSummary {
 export interface PipelineStageWorkerOptions {
   context?: WorkspaceContext;
   taskTypes?: PipelineStageTaskType[];
+  jobVersionIds?: readonly string[];
+  observationIds?: readonly string[];
   seed?: boolean;
   /** Explicitly opt into bounded replay of ROUTING_DEFERRED jobs. */
   includeRoutingDeferred?: boolean;
@@ -142,11 +147,15 @@ export interface PipelineStageWorkerOptions {
   maxTasks?: number;
   /** Per-stage caps applied across round-robin passes. */
   maxTasksByType?: Partial<Record<PipelineStageTaskType, number>>;
+  seedTimeBudgetMs?: number;
   /** Tasks claimed per stage on each round-robin pass. */
   stageQuantum?: number;
+  /** First stage index for this run; bounded by the stage count. */
+  stageStartOffset?: number;
   /** Defaults to true; set false only when reconciliation is exercised separately. */
   reconcileStalePending?: boolean;
   maxStalePendingReconciliation?: number;
+  stalePendingReconciliationTimeBudgetMs?: number;
   claimBatchSize?: number;
   leaseSeconds?: number;
   heartbeatSeconds?: number;
@@ -295,7 +304,13 @@ async function enqueueStageTask(
   id: string,
   payload: Record<string, unknown>,
   clientOrPool: pg.Pool | pg.PoolClient,
-  context: WorkspaceContext
+  context: WorkspaceContext,
+  intentOptions?: {
+    producer?: string;
+    requestId?: string;
+    triggerRevisionId?: string | null;
+    mode?: "ENSURE_CURRENT" | "FORCE_RECOMPUTE";
+  },
 ): Promise<boolean> {
   const maxAttempts = MODEL_BACKED_STAGE_TASK_TYPES.has(taskType) ? 3 : 8;
   let taskPayload = payload;
@@ -373,6 +388,9 @@ async function enqueueStageTask(
       ? taskPayload.routing_deferred_replay_version.trim()
       : null;
   const isRepairTask =
+    taskPayload.reprocess === true ||
+    taskPayload.force_policy_recalculation === true ||
+    (typeof taskPayload.verification_answer_revision_id === "string" && taskPayload.verification_answer_revision_id.trim() !== "") ||
     (taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS" &&
       taskPayload.repair_existing_state === true) ||
     ((taskType === "PUBLISH_EMBEDDING" || taskType === "ROUTE_LANE") &&
@@ -384,24 +402,25 @@ async function enqueueStageTask(
   const taskVariant = routingReplayVersion
     ? `repair-${routingReplayVersion}`
     : isRepairTask ? "repair" : undefined;
+  const taskVersion = stageVersion(taskType);
+  const taskKey = buildPipelineTaskKey(taskType, id, taskVersion, profileVersionId, taskVariant);
+  const intent = createTaskIntentV2({
+    workspaceId: context.workspaceId,
+    taskType,
+    stageVersion: taskVersion,
+    producer: intentOptions?.producer ?? `stageTaskWorker:${taskType}`,
+    requestId: intentOptions?.requestId ?? taskKey,
+    triggerRevisionId: intentOptions?.triggerRevisionId,
+    mode: intentOptions?.mode,
+    payload: taskPayload,
+  });
   const result = await enqueuePipelineTask(
     {
       taskType,
-      taskKey: buildPipelineTaskKey(
-        taskType,
-        id,
-        stageVersion(taskType),
-        profileVersionId,
-        taskVariant
-      ),
+      taskKey,
       payload: taskPayload,
       maxAttempts,
-      contextFingerprint: buildPipelineTaskContextFingerprint({
-        workspaceId: context.workspaceId,
-        taskType,
-        taskVersion: stageVersion(taskType),
-        payload: taskPayload,
-      }),
+      intent,
     },
     clientOrPool,
     { context }
@@ -433,8 +452,13 @@ async function selectAndEnqueue(
   build: (row: Record<string, unknown>) => { id: string; payload: Record<string, unknown> },
   enabledTypes?: Set<PipelineStageTaskType>,
   includeTestFixtures = false,
+  deadlineAt?: number,
 ): Promise<void> {
   if (enabledTypes && !enabledTypes.has(taskType)) return;
+  if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+    summary.timeBudgetExceeded = true;
+    return;
+  }
   const { rows } = await client.query<Record<string, unknown>>(sql, params);
   const candidates = rows.map(build);
   const canonicalJobIds = [...new Set(candidates
@@ -454,7 +478,14 @@ async function selectAndEnqueue(
     for (const fixture of fixtures.rows) fixtureIds.add(fixture.id);
   }
 
-  for (const task of candidates) {
+  for (let index = 0; index < candidates.length; index += 1) {
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+      summary.timeBudgetExceeded = true;
+      summary.deferredByBudget += candidates.length - index;
+      break;
+    }
+    const task = candidates[index];
+    if (!task) continue;
     const canonicalJobId = task.payload.canonical_job_id;
     if (!includeTestFixtures && typeof canonicalJobId === "string" && fixtureIds.has(canonicalJobId)) continue;
     const inserted = await enqueueStageTask(taskType, task.id, task.payload, client as any, ctx);
@@ -472,13 +503,22 @@ export async function seedRecoverablePipelineTasks(
     includeTestFixtures?: boolean;
     routingDeferredReplayVersion?: string;
     budgetRunId?: string;
+    timeBudgetMs?: number;
   } = {}
 ): Promise<SeedPipelineTasksSummary> {
   const pool = clientOrPool || defaultPool;
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;
-  const summary: SeedPipelineTasksSummary = { inserted: 0, existing: 0, byType: {} };
-  const maxPerType = options.maxSeedPerType ?? 500;
+  const summary: SeedPipelineTasksSummary = {
+    inserted: 0,
+    existing: 0,
+    deferredByBudget: 0,
+    timeBudgetExceeded: false,
+    byType: {},
+  };
+  const maxPerType = options.maxSeedPerType ?? 200;
+  const timeBudgetMs = Math.max(1, Math.min(options.timeBudgetMs ?? 15_000, 60_000));
+  const deadlineAt = Date.now() + timeBudgetMs;
   // Technical routing failures are machine-recoverable by default. Terminal
   // POLICY_NO_MATCH outcomes are excluded below unless a lane revision changed.
   const includeRoutingDeferred = options.includeRoutingDeferred !== false;
@@ -514,6 +554,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     await selectAndEnqueue(
@@ -568,6 +609,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     await selectAndEnqueue(
@@ -617,6 +659,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     await selectAndEnqueue(
@@ -653,6 +696,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     await selectAndEnqueue(
@@ -710,6 +754,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     await selectAndEnqueue(
@@ -778,6 +823,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     await selectAndEnqueue(
@@ -845,6 +891,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     await selectAndEnqueue(
@@ -931,6 +978,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     await selectAndEnqueue(
@@ -1003,6 +1051,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     await selectAndEnqueue(
@@ -1087,6 +1136,7 @@ export async function seedRecoverablePipelineTasks(
       }),
       enabledTypes,
       includeTestFixtures,
+      deadlineAt,
     );
 
     return summary;
@@ -1693,6 +1743,7 @@ async function executeStageTask(
   dependencies: PipelineStageWorkerDependencies,
   budgetRunId: string,
   onSuccessorTaskCreated: () => void,
+  onTaskRerouted: () => void,
 ): Promise<void> {
   if (taskType === "NORMALIZE_OBSERVATION") {
     const observationId = requireStringPayload(task, "observation_id");
@@ -1718,10 +1769,20 @@ async function executeStageTask(
     const reprocess = payload.reprocess === true;
     const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
     if (currentState.latestJobVersionId && currentState.latestJobVersionId !== jobVersionId) {
-      // Requirement tasks are version-specific. A canonical job may have
-      // advanced since this task was seeded; completing the stale task keeps
-      // old versions from creating retry/manual-review noise or overwriting
-      // the current version's funnel state.
+      if (!reprocess) return;
+      const canonicalJobId = currentState.canonicalJobId ?? optionalStringPayload(task, "canonical_job_id");
+      if (!canonicalJobId) throw new Error(`Forced extraction task ${task.taskKey} has no canonical job identity.`);
+      const payload = forcedTaskReroutePayload(task, canonicalJobId, currentState.latestJobVersionId);
+      const reroute = forcedTaskRerouteIntent(task);
+      if (await enqueueStageTask(
+        "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+        currentState.latestJobVersionId,
+        payload,
+        clientOrPool,
+        ctx,
+        reroute,
+      )) onSuccessorTaskCreated();
+      onTaskRerouted();
       return;
     }
     if (["HARD_REJECTED", "MANUALLY_REMOVED", "UNMATCHED"].includes(currentState.processingState || "")) {
@@ -1757,17 +1818,27 @@ async function executeStageTask(
 
   if (taskType === "APPLY_HARD_GATES") {
     const payload = (task.payload || {}) as Record<string, unknown>;
-    const reprocess = payload.force_policy_recalculation === true || payload.reprocess === true;
+    const verificationAnswerRevisionId = optionalStringPayload(task, "verification_answer_revision_id");
+    const reprocess = payload.force_policy_recalculation === true ||
+      payload.reprocess === true ||
+      verificationAnswerRevisionId !== undefined;
     const currentState = await lookupJobState(clientOrPool, ctx, jobVersionId);
 
-    // A preference refresh can leave a task for a superseded job version in
-    // the queue. Hard-gate execution is version-specific; the gate runner
-    // intentionally selects the canonical latest version, so a stale task
-    // must complete as a no-op even when it carries force_policy_recalculation.
-    if (
-      currentState.latestJobVersionId &&
-      currentState.latestJobVersionId !== jobVersionId
-    ) {
+    if (currentState.latestJobVersionId && currentState.latestJobVersionId !== jobVersionId) {
+      if (!reprocess) return;
+      const canonicalJobId = currentState.canonicalJobId ?? optionalStringPayload(task, "canonical_job_id");
+      if (!canonicalJobId) throw new Error(`Forced hard-gate task ${task.taskKey} has no canonical job identity.`);
+      const payload = forcedTaskReroutePayload(task, canonicalJobId, currentState.latestJobVersionId);
+      const reroute = forcedTaskRerouteIntent(task);
+      if (await enqueueStageTask(
+        "APPLY_HARD_GATES",
+        currentState.latestJobVersionId,
+        payload,
+        clientOrPool,
+        ctx,
+        reroute,
+      )) onSuccessorTaskCreated();
+      onTaskRerouted();
       return;
     }
 
@@ -1779,10 +1850,6 @@ async function executeStageTask(
       return;
     }
 
-    const verificationAnswerRevisionId = optionalStringPayload(
-      task,
-      "verification_answer_revision_id"
-    );
     const summary = await dependencies.runHardGates(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
@@ -2087,6 +2154,7 @@ async function executeStageTask(
 
 interface PipelineTaskRunMetrics {
   successorTasksCreated: number;
+  rerouted: boolean;
 }
 
 async function processClaimedTask(
@@ -2143,11 +2211,14 @@ async function processClaimedTask(
       dependencies,
       options.budgetRunId,
       () => { metrics.successorTasksCreated += 1; },
+      () => { metrics.rerouted = true; },
     );
     await completePipelineTaskAndRun(task, clientOrPool, {
       context: ctx,
       afterComplete: async (transactionClient) => {
-        metrics.successorTasksCreated += await maybeEnqueueAfterTask(taskType, task, transactionClient, ctx);
+        if (!metrics.rerouted) {
+          metrics.successorTasksCreated += await maybeEnqueueAfterTask(taskType, task, transactionClient, ctx);
+        }
       },
     });
   } finally {
@@ -2180,8 +2251,22 @@ export async function runPipelineStageTaskWorker(
   const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
   const budgetRunId = options.budgetRunId?.trim() || crypto.randomUUID();
   const claimedByType: Partial<Record<PipelineStageTaskType, number>> = {};
+  const stageStartOffset = Math.max(0, Math.floor(options.stageStartOffset ?? 0));
+  let stageRound = 0;
   const startedAt = Date.now();
   const deadlineAt = startedAt + wallClockMs;
+  const preparationReserveMs = Math.min(wallClockMs, Math.max(minTimeToStartTaskMs, 1_000));
+  const preparationBudgetMs = Math.max(1, wallClockMs - preparationReserveMs);
+  const seedTimeBudgetMs = Math.max(1, Math.min(
+    Math.floor(options.seedTimeBudgetMs ?? 15_000),
+    Math.floor(preparationBudgetMs / 2),
+    60_000,
+  ));
+  const staleReconciliationTimeBudgetMs = Math.max(1, Math.min(
+    Math.floor(options.stalePendingReconciliationTimeBudgetMs ?? 10_000),
+    preparationBudgetMs - seedTimeBudgetMs,
+    60_000,
+  ));
   const canStartAnotherTask = () => Date.now() + minTimeToStartTaskMs < deadlineAt;
   const summary: PipelineStageWorkerSummary = {
     seeded: null,
@@ -2192,6 +2277,8 @@ export async function runPipelineStageTaskWorker(
       wouldReconcile: 0,
       reconciled: 0,
       stalePendingReconciledThisRun: 0,
+      deferredByBudget: 0,
+      decisions: [],
       byClassification: {},
       byReason: {},
       byTaskType: {},
@@ -2211,18 +2298,6 @@ export async function runPipelineStageTaskWorker(
   try {
     throwIfWorkerCancelled(options.abortSignal);
 
-    if (options.reconcileStalePending !== false) {
-      summary.stalePendingReconciliation = await reconcileStalePendingPipelineTasks(
-        client as pg.PoolClient,
-        ctx,
-        {
-          apply: true,
-          limit: options.maxStalePendingReconciliation ?? 1000,
-          taskTypes,
-        },
-      );
-    }
-
     if (options.seed !== false) {
       summary.seeded = await seedRecoverablePipelineTasks(client as any, {
         context: ctx,
@@ -2232,7 +2307,25 @@ export async function runPipelineStageTaskWorker(
         routingDeferredReplayVersion: options.routingDeferredReplayVersion,
         budgetRunId,
         maxSeedPerType: options.maxSeedPerType,
+        timeBudgetMs: seedTimeBudgetMs,
       });
+    }
+
+    if (options.reconcileStalePending !== false) {
+      const reconciliationBudgetRemainingMs = Math.max(
+        1,
+        Math.min(staleReconciliationTimeBudgetMs, preparationBudgetMs - (Date.now() - startedAt)),
+      );
+      summary.stalePendingReconciliation = await reconcileStalePendingPipelineTasks(
+        client as pg.PoolClient,
+        ctx,
+        {
+          apply: true,
+          limit: options.maxStalePendingReconciliation ?? 100,
+          timeBudgetMs: reconciliationBudgetRemainingMs,
+          taskTypes,
+        },
+      );
     }
 
     while (summary.claimed < maxTasks && canStartAnotherTask()) {
@@ -2246,7 +2339,11 @@ export async function runPipelineStageTaskWorker(
         options.maxTasksByType ?? {},
         maxTasks,
         maxTasks - summary.claimed,
+        stageRound === 0 || taskTypes.length === 0
+          ? stageStartOffset
+          : (stageStartOffset + stageRound) % taskTypes.length,
       );
+      stageRound += 1;
       for (const { taskType, claimLimit: stagePassLimit } of roundPlan) {
         const stageLimit = Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks));
         let claimedThisPass = 0;
@@ -2269,6 +2366,8 @@ export async function runPipelineStageTaskWorker(
               limit: claimLimit,
               leaseSeconds,
               claimedBy,
+              jobVersionIds: options.jobVersionIds,
+              observationIds: options.observationIds,
             },
             client as any,
             { context: ctx }
@@ -2282,7 +2381,7 @@ export async function runPipelineStageTaskWorker(
             summary.claimed += 1;
             claimedByType[taskType] = (claimedByType[taskType] ?? 0) + 1;
             incrementWorker(summary, task.taskType, "claimed");
-            const taskMetrics: PipelineTaskRunMetrics = { successorTasksCreated: 0 };
+            const taskMetrics: PipelineTaskRunMetrics = { successorTasksCreated: 0, rerouted: false };
             try {
               // Keep the cancellation check inside the lease-release catch:
               // aborting immediately after claim must never strand a RUNNING

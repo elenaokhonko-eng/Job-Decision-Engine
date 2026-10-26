@@ -261,6 +261,127 @@ describe("api/v2 application tracker", () => {
     }
   });
 
+  it("requires both exact application document runs to be current and reviewed before document_ready", async () => {
+    const applicationId = "11111111-1111-4111-8111-111111111111";
+    const canonicalJobId = "22222222-2222-4222-8222-222222222222";
+    const jobVersionId = "33333333-3333-4333-8333-333333333333";
+    const cvRunId = "44444444-4444-4444-8444-444444444444";
+    const letterRunId = "55555555-5555-4555-8555-555555555555";
+    const profileVersionId = "66666666-6666-4666-8666-666666666666";
+    const matchRunId = "77777777-7777-4777-8777-777777777777";
+    const decisionId = "88888888-8888-4888-8888-888888888888";
+    const requirementSetId = "99999999-9999-4999-8999-999999999999";
+    const contextFingerprint = "current-document-context";
+    const pool = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (sql.includes("FROM application_records") && sql.includes("cv_document_run_id")) {
+          return { rows: [{
+            id: applicationId,
+            canonical_job_id: canonicalJobId,
+            job_version_id: jobVersionId,
+            cv_document_run_id: cvRunId,
+            cover_letter_document_run_id: letterRunId,
+          }] };
+        }
+        if (sql.includes("FROM document_runs")) {
+          const documentType = params?.[4];
+          const isCv = documentType === "CV";
+          return { rows: [{
+            id: isCv ? cvRunId : letterRunId,
+            canonical_job_id: canonicalJobId,
+            job_version_id: jobVersionId,
+            match_run_id: matchRunId,
+            profile_version_id: profileVersionId,
+            deterministic_decision_id: decisionId,
+            context_fingerprint: contextFingerprint,
+            document_type: documentType,
+            status: "COMPLETED",
+            document_template_plugin_revision_id: null,
+            output_manifest: { docx_sha256: isCv ? "cv-hash" : "letter-hash" },
+          }] };
+        }
+        if (sql.includes("FROM canonical_jobs AS job")) {
+          return { rows: [{
+            current_job_version_id: jobVersionId,
+            latest_match_run_id: matchRunId,
+            latest_deterministic_decision_id: decisionId,
+            active_profile_version_id: profileVersionId,
+            match_run_id: matchRunId,
+            match_run_job_version_id: jobVersionId,
+            match_run_profile_version_id: profileVersionId,
+            match_run_status: "COMPLETED",
+            match_run_requirement_set_id: requirementSetId,
+            active_requirement_set_id: requirementSetId,
+            match_run_job_content_hash: "job-hash",
+            current_job_content_hash: "job-hash",
+            match_run_context_fingerprint: contextFingerprint,
+            deterministic_decision_id: decisionId,
+            decision_job_version_id: jobVersionId,
+            decision_match_run_id: matchRunId,
+            decision_context_fingerprint: contextFingerprint,
+            decision_recommendation_eligibility: "ELIGIBLE",
+            decision_recommendation_outcome: "REVIEW",
+            gate_status: "PASS",
+            recommendation_eligibility: "ELIGIBLE",
+            recommendation_outcome: "REVIEW",
+          }] };
+        }
+        if (sql.includes("FROM document_template_plugins")) return { rows: [] };
+        if (sql.includes("FROM application_events")) return { rows: [{ created_at: "2026-10-24T01:00:00.000Z" }] };
+        return { rows: [] };
+      }),
+    };
+    const { baseUrl, server } = await startApp(pool);
+    try {
+      const response = await fetch(`${baseUrl}/applications/${applicationId}/documents`);
+      const body = await response.json() as any;
+      expect(response.status).toBe(200);
+      expect(body).toMatchObject({
+        ok: true,
+        cv_ready: true,
+        cover_letter_ready: true,
+        pair_current: true,
+        reviewed_at: "2026-10-24T01:00:00.000Z",
+        document_ready: true,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
+  it("does not report document_ready for a CV-only application", async () => {
+    const applicationId = "11111111-1111-4111-8111-111111111111";
+    const pool = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("FROM application_records") && sql.includes("cv_document_run_id")) {
+          return { rows: [{
+            id: applicationId,
+            canonical_job_id: "22222222-2222-4222-8222-222222222222",
+            job_version_id: "33333333-3333-4333-8333-333333333333",
+            cv_document_run_id: "44444444-4444-4444-8444-444444444444",
+            cover_letter_document_run_id: null,
+          }] };
+        }
+        return { rows: [] };
+      }),
+    };
+    const { baseUrl, server } = await startApp(pool);
+    try {
+      const response = await fetch(`${baseUrl}/applications/${applicationId}/documents`);
+      const body = await response.json() as any;
+      expect(response.status).toBe(200);
+      expect(body).toMatchObject({
+        cv_ready: false,
+        cover_letter_ready: false,
+        pair_current: false,
+        reviewed_at: null,
+        document_ready: false,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
   it.each(["SUBMITTED", "APPLIED"])("updates an application to %s and appends a status-change event", async (status) => {
     const txQueries: Array<{ sql: string; params?: any[] }> = [];
     const tx = {

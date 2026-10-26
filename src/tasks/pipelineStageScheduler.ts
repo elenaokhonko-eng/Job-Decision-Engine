@@ -10,13 +10,16 @@ export function planPipelineStageRound<T extends string>(
   stageLimits: Partial<Record<T, number>>,
   defaultStageLimit: number,
   remainingGlobalTasks: number,
+  startOffset = 0,
 ): PipelineStageRoundPlan<T>[] {
   const quantum = Math.max(1, Math.floor(stageQuantum));
   const globalBudget = Math.max(0, Math.floor(remainingGlobalTasks));
   const plans: PipelineStageRoundPlan<T>[] = [];
-  if (globalBudget === 0) return plans;
+  if (globalBudget === 0 || taskTypes.length === 0) return plans;
 
-  for (const taskType of taskTypes) {
+  const offset = ((Math.floor(startOffset) % taskTypes.length) + taskTypes.length) % taskTypes.length;
+  for (let index = 0; index < taskTypes.length; index += 1) {
+    const taskType = taskTypes[(index + offset) % taskTypes.length];
     const stageLimit = Math.max(1, Math.floor(stageLimits[taskType] ?? defaultStageLimit));
     const remainingForStage = Math.max(0, stageLimit - (claimedByType[taskType] ?? 0));
     const claimLimit = Math.min(quantum, remainingForStage);

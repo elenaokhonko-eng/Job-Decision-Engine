@@ -54,6 +54,8 @@ interface StageSummary {
   actionable_dead_letter: number;
   stale_historical_dead_letter: number;
   oldest_age_seconds: number;
+  oldest_retry_wait_age_seconds: number;
+  oldest_dead_letter_age_seconds: number;
 }
 
 const TASK_STAGE: Record<string, PipelineStage> = {
@@ -79,6 +81,8 @@ function initialStageSummary(stage: PipelineStage): StageSummary {
     actionable_dead_letter: 0,
     stale_historical_dead_letter: 0,
     oldest_age_seconds: 0,
+    oldest_retry_wait_age_seconds: 0,
+    oldest_dead_letter_age_seconds: 0,
   };
 }
 
@@ -101,7 +105,16 @@ export function summarizeTaskStages(rows: readonly TaskHealthRow[], maxPendingAg
       summary.actionable_dead_letter += Number(row.actionable_dead_letter_count ?? count);
       summary.stale_historical_dead_letter += Number(row.stale_historical_dead_letter_count ?? 0);
     }
-    summary.oldest_age_seconds = Math.max(summary.oldest_age_seconds, Number(row.oldest_age_seconds ?? 0));
+    const oldestAgeSeconds = Number(row.oldest_age_seconds ?? 0);
+    if (row.status === "PENDING") {
+      summary.oldest_age_seconds = Math.max(summary.oldest_age_seconds, oldestAgeSeconds);
+    }
+    if (row.status === "RETRY_WAIT") {
+      summary.oldest_retry_wait_age_seconds = Math.max(summary.oldest_retry_wait_age_seconds, oldestAgeSeconds);
+    }
+    if (row.status === "DEAD_LETTER") {
+      summary.oldest_dead_letter_age_seconds = Math.max(summary.oldest_dead_letter_age_seconds, oldestAgeSeconds);
+    }
   }
 
   return STAGES.map((stage) => {
@@ -139,10 +152,10 @@ function toMarkdown(report: Record<string, unknown>): string {
   const lines = [
     "## Pipeline status",
     "",
-    "| Stage | Status | Pending | Retry | Blocked | Dead letter total | Actionable dead letter | Stale historical dead letter | Oldest age (s) |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "| Stage | Status | Pending | Retry | Blocked | Dead letter total | Actionable dead letter | Stale historical dead letter | Oldest pending (s) | Oldest retry (s) | Oldest dead letter (s) |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ...stages.map((stage) =>
-      `| ${stage.stage} | ${stage.status} | ${stage.pending} | ${stage.retry_wait} | ${stage.blocked_dependency} | ${stage.dead_letter} | ${stage.actionable_dead_letter} | ${stage.stale_historical_dead_letter} | ${stage.oldest_age_seconds} |`,
+      `| ${stage.stage} | ${stage.status} | ${stage.pending} | ${stage.retry_wait} | ${stage.blocked_dependency} | ${stage.dead_letter} | ${stage.actionable_dead_letter} | ${stage.stale_historical_dead_letter} | ${stage.oldest_age_seconds} | ${stage.oldest_retry_wait_age_seconds} | ${stage.oldest_dead_letter_age_seconds} |`,
     ),
     "",
     "### Source runs by connector",
@@ -157,9 +170,9 @@ function toMarkdown(report: Record<string, unknown>): string {
     "",
     "### Pending queue by task type",
     "",
-    "| Task type | State | Count | Actionable dead letters | Stale historical dead letters | Oldest age (s) |",
-    "|---|---|---:|---:|---:|---:|",
-    ...taskRows.map((row) => `| ${markdownText(row.task_type)} | ${markdownText(row.status)} | ${row.task_count} | ${row.actionable_dead_letter_count ?? 0} | ${row.stale_historical_dead_letter_count ?? 0} | ${row.oldest_age_seconds ?? 0} |`),
+    "| Task type | State | Count | Actionable dead letters | Stale historical dead letters | Oldest pending (s) | Oldest retry (s) | Oldest dead letter (s) |",
+    "|---|---|---:|---:|---:|---:|---:|---:|",
+    ...taskRows.map((row) => `| ${markdownText(row.task_type)} | ${markdownText(row.status)} | ${row.task_count} | ${row.actionable_dead_letter_count ?? 0} | ${row.stale_historical_dead_letter_count ?? 0} | ${row.status === "PENDING" ? row.oldest_age_seconds ?? 0 : 0} | ${row.status === "RETRY_WAIT" ? row.oldest_age_seconds ?? 0 : 0} | ${row.status === "DEAD_LETTER" ? row.oldest_age_seconds ?? 0 : 0} |`),
     "",
     `Retry reasons: ${formatCounts(retryReasons)}`,
     "",

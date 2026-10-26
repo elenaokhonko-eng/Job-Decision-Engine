@@ -10,6 +10,15 @@ CURRENT_DETERMINISTIC_CONTEXTS = frozenset(
     }
 )
 APPLY_NOW_OUTCOMES = frozenset({"PRIORITY", "REVIEW"})
+API_V2_PREFIX = "/api/v2"
+
+
+def application_api_path(path: str) -> str:
+    """Return an application route under the mounted API v2 prefix."""
+    normalized = "/" + path.strip("/")
+    if normalized == API_V2_PREFIX or normalized.startswith(f"{API_V2_PREFIX}/"):
+        return normalized
+    return f"{API_V2_PREFIX}{normalized}"
 
 
 def is_document_generation_eligible(

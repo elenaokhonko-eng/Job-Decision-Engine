@@ -20,6 +20,8 @@ describe("discovery ingestion workflow", () => {
     expect(workflow).toContain("PIPELINE_TASK_WORKER_STAGE_QUANTUM: ${{ vars.PIPELINE_TASK_WORKER_STAGE_QUANTUM || '1' }}");
     expect(workflow).toContain('pipeline-task-reconciliation-ingestion-${{ github.run_id }}');
     expect(workflow).toContain('id: process_pipeline_worker');
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT: ${{ vars.PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT || '100' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS: ${{ vars.PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS || '10000' }}");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: pipeline-dead-letter-health.json');
     expect(workflow).toContain('pipeline-dead-letter-health-ingestion-${{ github.run_id }}');
     expect(workflow).toContain('scripts/report_pipeline_status.ts');

@@ -14,6 +14,7 @@
  */
 
 import pg from "pg";
+import crypto from "node:crypto";
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
@@ -326,6 +327,7 @@ type EngagementRow = {
 async function generateTailoredCV(): Promise<void> {
   const jobId = process.argv[2];
   const requestedJobVersionId = process.argv[3];
+  const applicationRecordId = process.env.JDEC_APPLICATION_RECORD_ID?.trim() || null;
   if (!jobId) {
     throw new Error("Usage: npx tsx scripts/generate_cv.ts <canonical_job_id> [job_version_id]");
   }
@@ -840,6 +842,7 @@ async function generateTailoredCV(): Promise<void> {
     const claims = collectCvClaims(finalCv);
     const provenance = await persistDocumentProvenance(
       {
+        applicationRecordId,
         canonicalJobId: jobId,
         jobVersionId: resolvedJobVersionId,
         matchRunId: matchRunId,
@@ -855,7 +858,9 @@ async function generateTailoredCV(): Promise<void> {
         outputManifest: {
           json_path: jsonPath,
           docx_path: docxPath,
+          docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
           pdf_path: pdfCreated ? pdfPath : null,
+          pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
         },
         claims,
       },
@@ -868,6 +873,31 @@ async function generateTailoredCV(): Promise<void> {
   DOCX : ${docxPath}
   PDF  : ${pdfCreated ? pdfPath : "NOT CREATED (no Word/LibreOffice in environment)"}
   document_run_id: ${provenance.documentRunId} (claims: ${provenance.claimCount})`);
+    console.log(JSON.stringify({
+      event: "DOCUMENT_GENERATION_COMPLETED",
+      documentType: "CV",
+      applicationRecordId,
+      documentRunId: provenance.documentRunId,
+      canonicalJobId: jobId,
+      jobVersionId: resolvedJobVersionId,
+      profileVersionId,
+      deterministicDecisionId: job.deterministic_decision_id,
+      contextFingerprint: job.decision_context_fingerprint,
+      templateRevisionId: pluginRevision?.revisionId ?? null,
+      outputs: {
+        json: { path: jsonPath },
+        docx: {
+          path: docxPath,
+          sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
+          mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        },
+        pdf: pdfCreated ? {
+          path: pdfPath,
+          sha256: crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex"),
+          mimeType: "application/pdf",
+        } : null,
+      },
+    }));
   } finally {
     await pool.end();
   }

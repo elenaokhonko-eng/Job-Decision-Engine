@@ -35,11 +35,11 @@ describe('streamlit read-model integrity', () => {
     expect(content).toContain('current_artifact_status');
     expect(content).toContain('requires_user_action');
     expect(content).toContain('pipeline_display_category');
-    expect(content).toContain('from streamlit_application_workflow import is_document_generation_eligible');
+    expect(content).toContain('application_api_path');
     expect(content).toMatch(/st\.checkbox\(\s*"Include TRACK jobs",\s*value=False,/);
     expect(content).toContain('if is_document_generation_eligible(job, include_track=include_track_jobs)');
     expect(content).toContain('from streamlit_formatters import as_number, format_percent, format_score, format_signal');
-    expect(content).toContain('from streamlit_application_workflow import is_document_generation_eligible');
+    expect(content).toContain('is_document_generation_eligible');
     expect(content).toContain('FROM v_application_workspace_summary_scoped');
     expect(content).toContain('FROM v_top_ten_ready_jobs_stage3_scoped');
     expect(content).toContain('FROM v_apply_now_jobs_stage3_scoped');

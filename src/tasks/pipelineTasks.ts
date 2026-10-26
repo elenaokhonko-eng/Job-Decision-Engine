@@ -1,10 +1,39 @@
 import crypto from "crypto";
 import pg from "pg";
+import { z } from "zod";
+import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import {
+  createTaskIntentV2,
+  TaskIntentV2Schema,
+  type TaskIntentMode,
+  type TaskIntentV2,
+} from "./taskIntent.js";
 
 type QueryClient = {
   query: pg.PoolClient["query"];
 };
+
+const taskPayloadRecordSchema = z.record(z.string(), z.unknown());
+
+function parseTaskPayloadRecord(value: unknown): Record<string, unknown> | null {
+  let candidate: unknown = value;
+  if (typeof value === "string") {
+    try {
+      const parsedJson: unknown = JSON.parse(value);
+      candidate = parsedJson;
+    } catch {
+      return null;
+    }
+  }
+  const parsed = taskPayloadRecordSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
+function taskPayloadString(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
 
 export type PipelineTaskStatus =
   | "PENDING"
@@ -46,6 +75,12 @@ export interface EnqueuePipelineTaskInput {
   maxAttempts?: number;
   availableAt?: Date;
   contextFingerprint?: string;
+  intent?: TaskIntentV2;
+  producer?: string;
+  stageVersion?: string;
+  requestId?: string;
+  mode?: TaskIntentMode;
+  triggerRevisionId?: string | null;
 }
 
 export interface EnqueuePipelineTaskResult {
@@ -79,7 +114,62 @@ export async function enqueuePipelineTask(
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
     const availableAt = input.availableAt ? input.availableAt.toISOString() : null;
-    const contextFingerprint = input.contextFingerprint ?? "legacy_pipeline_context_v1";
+    let taskPayload: unknown = input.payload;
+    let contextFingerprint = input.contextFingerprint ?? "legacy_pipeline_context_v1";
+    const intentRequested = input.intent !== undefined || input.producer !== undefined || input.stageVersion !== undefined;
+    if (intentRequested) {
+      const payload = parseTaskPayloadRecord(input.payload);
+      if (!payload) throw new Error("TaskIntentV2 requires an object payload.");
+      if (payload.task_intent !== undefined) throw new Error("Task payload already contains a task_intent.");
+
+      let intent = input.intent;
+      if (!intent) {
+        if (!input.producer || !input.stageVersion) {
+          throw new Error("TaskIntentV2 requires both producer and stageVersion.");
+        }
+        intent = createTaskIntentV2({
+          workspaceId: ctx.workspaceId,
+          taskType: input.taskType,
+          stageVersion: input.stageVersion,
+          producer: input.producer,
+          requestId: input.requestId ?? input.taskKey,
+          mode: input.mode,
+          triggerRevisionId: input.triggerRevisionId,
+          payload,
+        });
+      }
+
+      const parsedIntent = TaskIntentV2Schema.parse(intent);
+      const payloadForcesRecompute = payload.reprocess === true ||
+        payload.force_policy_recalculation === true ||
+        payload.reprocess_existing_state === true ||
+        taskPayloadString(payload, "verification_answer_revision_id") !== null;
+      if ((parsedIntent.mode === "FORCE_RECOMPUTE") !== payloadForcesRecompute) {
+        throw new Error("TaskIntentV2 mode must match explicit payload rerun flags.");
+      }
+      if (parsedIntent.taskType !== input.taskType || parsedIntent.target.workspaceId !== ctx.workspaceId) {
+        throw new Error("TaskIntentV2 type or workspace does not match the enqueue request.");
+      }
+      const targetMatchesPayload =
+        parsedIntent.target.canonicalJobId === taskPayloadString(payload, "canonical_job_id") &&
+        parsedIntent.target.jobVersionId === taskPayloadString(payload, "job_version_id") &&
+        parsedIntent.target.observationId === taskPayloadString(payload, "observation_id");
+      if (!targetMatchesPayload) throw new Error("TaskIntentV2 target does not match the enqueue payload.");
+
+      const payloadWithIntent = { ...payload, task_intent: parsedIntent };
+      const expectedFingerprint = buildPipelineTaskContextFingerprint({
+        workspaceId: ctx.workspaceId,
+        taskType: input.taskType,
+        taskVersion: parsedIntent.stageVersion,
+        payload: payloadWithIntent,
+      });
+      if (parsedIntent.contextFingerprint !== expectedFingerprint ||
+          (input.contextFingerprint !== undefined && input.contextFingerprint !== expectedFingerprint)) {
+        throw new Error("TaskIntentV2 context fingerprint does not match the enqueue payload.");
+      }
+      taskPayload = payloadWithIntent;
+      contextFingerprint = expectedFingerprint;
+    }
     const maxAttempts = input.maxAttempts ?? 8;
 
     const inserted = await (client as QueryClient).query<{ id: string }>(
@@ -105,7 +195,7 @@ export async function enqueuePipelineTask(
         ctx.workspaceId,
         input.taskType,
         input.taskKey,
-        input.payload as any,
+        taskPayload as any,
         contextFingerprint,
         availableAt,
         maxAttempts,
@@ -235,6 +325,8 @@ export interface ClaimPipelineTasksInput {
   limit?: number;
   leaseSeconds?: number;
   claimedBy?: string;
+  jobVersionIds?: readonly string[];
+  observationIds?: readonly string[];
 }
 
 export interface ClaimedPipelineTask {
@@ -273,6 +365,8 @@ export async function claimPipelineTasks(
             FROM pipeline_tasks
             WHERE workspace_id = $1
               AND task_type = $2
+              AND ($6::text[] IS NULL OR payload->>'job_version_id' = ANY($6::text[]))
+              AND ($7::text[] IS NULL OR payload->>'observation_id' = ANY($7::text[]))
               AND (
                 (
                   status IN ('PENDING', 'RETRY_WAIT')
@@ -303,7 +397,15 @@ export async function claimPipelineTasks(
           WHERE t.id = claimable.id
           RETURNING t.*
         `,
-        [ctx.workspaceId, input.taskType, limit, leaseSeconds, claimedBy]
+        [
+          ctx.workspaceId,
+          input.taskType,
+          limit,
+          leaseSeconds,
+          claimedBy,
+          input.jobVersionIds ? [...input.jobVersionIds] : null,
+          input.observationIds ? [...input.observationIds] : null,
+        ]
       );
 
       for (const row of rows) {

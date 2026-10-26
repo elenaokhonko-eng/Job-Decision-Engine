@@ -51,6 +51,21 @@ function parseBooleanEnv(name: string, fallback: boolean): boolean {
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
+function pipelineStageStartOffset(taskTypeCount: number): number {
+  if (taskTypeCount <= 0) return 0;
+  const configuredOffset = process.env.PIPELINE_TASK_WORKER_STAGE_START_OFFSET?.trim();
+  if (configuredOffset) {
+    const parsedOffset = Number.parseInt(configuredOffset, 10);
+    return Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset % taskTypeCount : 0;
+  }
+
+  const runId = Number.parseInt(process.env.GITHUB_RUN_ID ?? "0", 10);
+  const runAttempt = Number.parseInt(process.env.GITHUB_RUN_ATTEMPT ?? "1", 10);
+  const runOffset = Number.isFinite(runId) && runId >= 0 ? runId : 0;
+  const attemptOffset = Number.isFinite(runAttempt) && runAttempt > 1 ? runAttempt - 1 : 0;
+  return (runOffset + attemptOffset) % taskTypeCount;
+}
+
 interface QueueHealthRow {
   task_type: string;
   status: string;
@@ -83,6 +98,7 @@ interface PipelineDeadLetterHealthReport {
 interface PipelineTaskReconciliationReport {
   stalePendingReconciliation: PipelineTaskReconciliationSummary | null;
   stalePendingReconciledThisRun: number;
+  deferredByBudget: number;
   byReason: Record<string, number> | null;
   byTaskType: Record<string, number> | null;
   tasksCompletedThisRun: number;
@@ -223,6 +239,7 @@ export async function processPipelineTasks(): Promise<void> {
   const reconciliationReport: PipelineTaskReconciliationReport = {
     stalePendingReconciliation: null,
     stalePendingReconciledThisRun: 0,
+    deferredByBudget: 0,
     byReason: null,
     byTaskType: null,
     tasksCompletedThisRun: 0,
@@ -282,8 +299,11 @@ export async function processPipelineTasks(): Promise<void> {
       .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
     reconciliationReport.activePendingBefore = activePendingBefore;
     reconciliationReport.oldestActivePendingAgeSecondsBefore = oldestActivePendingAgeBefore;
+    const stageStartOffset = pipelineStageStartOffset(activeTaskTypes.length);
+    console.log("Pipeline stage start offset:", stageStartOffset);
     const summary = await runPipelineStageTaskWorker(pool, {
       taskTypes: activeTaskTypes,
+      stageStartOffset,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
       includeRoutingDeferred: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED", true),
       includeTestFixtures: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES", false),
@@ -291,19 +311,22 @@ export async function processPipelineTasks(): Promise<void> {
       maxTasks: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_TASKS", 100, 10000),
       maxTasksByType: parsePipelineStageTaskLimits(process.env.PIPELINE_TASK_WORKER_STAGE_MAX_TASKS),
       stageQuantum: parsePositiveIntEnv("PIPELINE_TASK_WORKER_STAGE_QUANTUM", 1, 100),
-      maxStalePendingReconciliation: parsePositiveIntEnv("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT", 1000, 10000),
+      maxStalePendingReconciliation: parsePositiveIntEnv("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT", 100, 1000),
+      stalePendingReconciliationTimeBudgetMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS", 10000, 60000),
       claimBatchSize: parsePositiveIntEnv("PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE", 1, 25),
       leaseSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_LEASE_SECONDS", 300, 3600),
       heartbeatSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS", 60, 600),
       wallClockMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_WALL_CLOCK_MS", 10 * 60 * 1000, 23 * 60 * 60 * 1000),
       minTimeToStartTaskMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS", 120000, 600000),
-      maxSeedPerType: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE", 500, 5000),
+      maxSeedPerType: parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE", 200, 1000),
+      seedTimeBudgetMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_SEED_BUDGET_MS", 15_000, 60_000),
       claimedBy: process.env.PIPELINE_TASK_WORKER_CLAIMED_BY || `gha-stage-worker:${process.pid}`,
       abortSignal: shutdownController.signal,
     });
 
     reconciliationReport.stalePendingReconciliation = summary.stalePendingReconciliation;
     reconciliationReport.stalePendingReconciledThisRun = summary.stalePendingReconciliation.stalePendingReconciledThisRun;
+    reconciliationReport.deferredByBudget = summary.stalePendingReconciliation.deferredByBudget;
     reconciliationReport.byReason = summary.stalePendingReconciliation.byReason;
     reconciliationReport.byTaskType = summary.stalePendingReconciliation.byTaskType;
     reconciliationReport.tasksCompletedThisRun = summary.completed;
@@ -318,6 +341,7 @@ export async function processPipelineTasks(): Promise<void> {
         `stale_pending_reconciled=${summary.stalePendingReconciliation.reconciled}`,
         `stale_pending_reconciled_this_run=${summary.stalePendingReconciliation.stalePendingReconciledThisRun}`,
         `stale_pending_unresolved=${summary.stalePendingReconciliation.unresolved}`,
+        `stale_pending_deferred_by_budget=${summary.stalePendingReconciliation.deferredByBudget}`,
       ].join("\n") + "\n", "utf8");
     }
 
@@ -366,9 +390,13 @@ export async function processPipelineTasks(): Promise<void> {
       successor_tasks_created_this_run: summary.successorTasksCreated,
       stale_pending_reconciled: summary.stalePendingReconciliation.reconciled,
       stale_pending_reconciled_this_run: summary.stalePendingReconciliation.stalePendingReconciledThisRun,
+      stale_pending_unresolved: summary.stalePendingReconciliation.unresolved,
+      stale_pending_deferred_by_budget: summary.stalePendingReconciliation.deferredByBudget,
+      task_reconciliation_decisions: summary.stalePendingReconciliation.decisions,
       stale_pending_by_reason: summary.stalePendingReconciliation.byReason,
       stale_pending_by_task_type: summary.stalePendingReconciliation.byTaskType,
-      stale_pending_unresolved: summary.stalePendingReconciliation.unresolved,
+      seed_deferred_by_budget: summary.seeded?.deferredByBudget ?? 0,
+      seed_time_budget_exceeded: summary.seeded?.timeBudgetExceeded ?? false,
       remaining_pending: queueHealth.pending,
       duration_ms: summary.durationMs,
     }, null, 2));
@@ -461,6 +489,7 @@ export async function processPipelineTasks(): Promise<void> {
     const reconciliationArtifact = {
       stale_pending_reconciliation: reconciliationReport.stalePendingReconciliation,
       stale_pending_reconciled_this_run: reconciliationReport.stalePendingReconciledThisRun,
+      stale_pending_deferred_by_budget: reconciliationReport.deferredByBudget,
       by_reason: reconciliationReport.byReason,
       by_task_type: reconciliationReport.byTaskType,
       tasks_completed_this_run: reconciliationReport.tasksCompletedThisRun,

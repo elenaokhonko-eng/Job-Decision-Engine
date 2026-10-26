@@ -1,4 +1,19 @@
-from streamlit_application_workflow import is_document_generation_eligible
+from streamlit_application_workflow import (
+    application_api_path,
+    is_document_generation_eligible,
+)
+
+
+def test_application_routes_are_namespaced_under_api_v2():
+    assert application_api_path("/applications") == "/api/v2/applications"
+    assert (
+        application_api_path("applications/record-id")
+        == "/api/v2/applications/record-id"
+    )
+    assert (
+        application_api_path("/api/v2/applications/record-id/events")
+        == "/api/v2/applications/record-id/events"
+    )
 
 
 def current_review_job(**overrides):

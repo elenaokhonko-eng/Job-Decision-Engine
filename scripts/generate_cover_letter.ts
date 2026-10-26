@@ -16,6 +16,7 @@
  */
 
 import pg from "pg";
+import crypto from "node:crypto";
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
@@ -109,6 +110,7 @@ function collectCoverLetterClaims(finalCl: any): DocumentClaimInput[] {
 async function generateTailoredCoverLetter(): Promise<void> {
   const jobId = process.argv[2];
   const requestedJobVersionId = process.argv[3];
+  const applicationRecordId = process.env.JDEC_APPLICATION_RECORD_ID?.trim() || null;
   if (!jobId) {
     console.error("❌ ERROR: Job ID must be provided as the first argument.");
     console.error("  Usage: npx tsx scripts/generate_cover_letter.ts <canonical_job_id> [job_version_id]");
@@ -533,6 +535,7 @@ ${JSON.stringify(coverLetterSchema)}`;
     const claims = collectCoverLetterClaims(finalCl);
     const provenance = await persistDocumentProvenance(
       {
+        applicationRecordId,
         canonicalJobId: jobId,
         jobVersionId: resolvedJobVersionId,
         matchRunId: latestMatchRunId,
@@ -548,7 +551,9 @@ ${JSON.stringify(coverLetterSchema)}`;
         outputManifest: {
           json_path: jsonPath,
           docx_path: docxPath,
+          docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
           pdf_path: pdfCreated ? pdfPath : null,
+          pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
         },
         claims,
       },
@@ -561,6 +566,31 @@ ${JSON.stringify(coverLetterSchema)}`;
   DOCX : ${docxPath}
   PDF  : ${pdfCreated ? pdfPath : "NOT CREATED (no Word/LibreOffice in environment)"}
   document_run_id: ${provenance.documentRunId} (claims: ${provenance.claimCount})`);
+    console.log(JSON.stringify({
+      event: "DOCUMENT_GENERATION_COMPLETED",
+      documentType: "COVER_LETTER",
+      applicationRecordId,
+      documentRunId: provenance.documentRunId,
+      canonicalJobId: jobId,
+      jobVersionId: resolvedJobVersionId,
+      profileVersionId: selectedProfileVersionId,
+      deterministicDecisionId: job.deterministic_decision_id,
+      contextFingerprint: job.decision_context_fingerprint,
+      templateRevisionId: pluginRevision?.revisionId ?? null,
+      outputs: {
+        json: { path: jsonPath },
+        docx: {
+          path: docxPath,
+          sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
+          mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        },
+        pdf: pdfCreated ? {
+          path: pdfPath,
+          sha256: crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex"),
+          mimeType: "application/pdf",
+        } : null,
+      },
+    }));
 
   } catch (error: any) {
     console.error("❌ ERROR during Cover Letter generation:", error.message || error);

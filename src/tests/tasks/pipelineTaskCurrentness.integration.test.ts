@@ -6,6 +6,8 @@ import dotenv from "dotenv";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { buildPipelineTaskContextFingerprint } from "../../pipeline/artifactContext.js";
+import { GATE_VERSION } from "../../contracts/version.js";
+import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
 import { reconcileStalePendingPipelineTasks } from "../../tasks/pipelineTaskCurrentness.js";
 import {
   runPipelineStageTaskWorker,
@@ -72,10 +74,11 @@ async function insertPendingTask(input: {
   payload: Record<string, unknown>;
   fingerprintTaskType: string;
   fingerprintTaskVersion: string;
+  contextFingerprint?: string;
 }): Promise<string> {
   const id = crypto.randomUUID();
   const payload = JSON.stringify(input.payload);
-  const contextFingerprint = buildPipelineTaskContextFingerprint({
+  const contextFingerprint = input.contextFingerprint ?? buildPipelineTaskContextFingerprint({
     workspaceId: getContext().workspaceId,
     taskType: input.fingerprintTaskType,
     taskVersion: input.fingerprintTaskVersion,
@@ -102,6 +105,58 @@ async function insertPendingTask(input: {
     ],
   );
   return id;
+}
+
+async function createEmbeddingSpace(): Promise<string> {
+  const { rows } = await getClient().query<{ id: string }>(
+    `INSERT INTO embedding_spaces (
+       workspace_id, space_key, provider, model, dimensions, is_fallback_space, active
+     ) VALUES ($1, $2, 'fixture', 'slow-embedding-fixture', 4, FALSE, TRUE)
+     RETURNING id`,
+    [getContext().workspaceId, `slow-embedding-${crypto.randomUUID()}`],
+  );
+  const spaceId = rows[0]?.id;
+  if (!spaceId) throw new Error("Slow embedding fixture space was not created.");
+  return spaceId;
+}
+
+async function publishJobEmbedding(embeddingSpaceId: string, jobVersionId: string): Promise<void> {
+  const database = getClient();
+  const workspaceId = getContext().workspaceId;
+  const { rows: inputs } = await database.query<{ id: string }>(
+    `INSERT INTO embedding_inputs (
+       workspace_id, input_key, source_type, source_id, content_text, content_hash
+     ) VALUES ($1, $2, 'JOB_VERSION', $3, 'Disposable slow-embedding fixture', $4)
+     RETURNING id`,
+    [workspaceId, `slow-embedding-input-${crypto.randomUUID()}`, jobVersionId, crypto.randomUUID()],
+  );
+  const embeddingInputId = inputs[0]?.id;
+  if (!embeddingInputId) throw new Error("Slow embedding fixture input was not created.");
+
+  const { rows: batches } = await database.query<{ id: string }>(
+    `INSERT INTO embedding_batches (
+       workspace_id, embedding_space_id, batch_key, run_type, status,
+       item_count, success_count, failure_count, completed_at
+     ) VALUES ($1, $2, $3, 'PRIMARY', 'COMPLETED', 1, 1, 0, NOW())
+     RETURNING id`,
+    [workspaceId, embeddingSpaceId, `slow-embedding-batch-${crypto.randomUUID()}`],
+  );
+  const embeddingBatchId = batches[0]?.id;
+  if (!embeddingBatchId) throw new Error("Slow embedding fixture batch was not created.");
+
+  await database.query(
+    `INSERT INTO embedding_batch_items (
+       workspace_id, embedding_batch_id, embedding_input_id, status
+     ) VALUES ($1, $2, $3, 'COMPLETED')`,
+    [workspaceId, embeddingBatchId, embeddingInputId],
+  );
+  await database.query(
+    `INSERT INTO semantic_embeddings (
+       workspace_id, embedding_space_id, embedding_input_id, embedding_batch_id,
+       vector_dimensions, embedding_values, vector_checksum
+     ) VALUES ($1, $2, $3, $4, 4, ARRAY[0.1, 0.2, 0.3, 0.4]::DOUBLE PRECISION[], $5)`,
+    [workspaceId, embeddingSpaceId, embeddingInputId, embeddingBatchId, crypto.randomUUID()],
+  );
 }
 
 describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () => {
@@ -144,6 +199,13 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       taskType: "ROUTE_LANE",
       taskKey: `ROUTE_LANE:${versions.oldVersionId}:lane_router_v1`,
       payload: { canonical_job_id: versions.canonicalJobId, job_version_id: versions.oldVersionId },
+      fingerprintTaskType: "ROUTE_LANE",
+      fingerprintTaskVersion: "lane_router_v1",
+    });
+    const currentRouteTaskId = await insertPendingTask({
+      taskType: "ROUTE_LANE",
+      taskKey: `ROUTE_LANE:${versions.latestVersionId}:lane_router_v1`,
+      payload: { canonical_job_id: versions.canonicalJobId, job_version_id: versions.latestVersionId },
       fingerprintTaskType: "ROUTE_LANE",
       fingerprintTaskVersion: "lane_router_v1",
     });
@@ -201,24 +263,25 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       taskTypes: ["PUBLISH_EMBEDDING", "ROUTE_LANE", "NORMALIZE_OBSERVATION"],
     });
     expect(dryRun).toMatchObject({
-      scannedPending: 5,
-      current: 1,
+      scannedPending: 6,
+      current: 2,
       unresolved: 1,
       wouldReconcile: 3,
       reconciled: 0,
     });
     expect(dryRun.byClassification).toMatchObject({
-      SUPERSEDED_JOB_VERSION: 2,
-      ALREADY_SATISFIED: 1,
-      CURRENT: 1,
+      PROVEN_SUPERSEDED: 2,
+      PROVEN_SATISFIED: 1,
+      CURRENT: 2,
       UNRESOLVED: 1,
     });
 
     const dryRunRows = await getClient().query<{ id: string; status: string }>(
       `SELECT id, status FROM pipeline_tasks WHERE id = ANY($1::uuid[]) ORDER BY id`,
-      [[staleTaskId, currentTaskId, satisfiedTaskId, staleRouteTaskId, unresolvedTaskId]],
+      [[staleTaskId, currentTaskId, satisfiedTaskId, staleRouteTaskId, currentRouteTaskId, unresolvedTaskId]],
     );
-    expect(dryRunRows.rows.map((row) => row.status)).toEqual(["PENDING", "PENDING", "PENDING", "PENDING", "PENDING"]);
+    expect(dryRunRows.rows).toHaveLength(6);
+    expect(dryRunRows.rows.every((row) => row.status === "PENDING")).toBe(true);
 
     const applied = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
       apply: true,
@@ -228,8 +291,8 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     expect(applied.stalePendingReconciledThisRun).toBe(3);
     expect(applied.unresolved).toBe(1);
     expect(applied.byReason).toMatchObject({
-      SUPERSEDED_JOB_VERSION: 2,
-      ALREADY_SATISFIED: 1,
+      TASK_JOB_VERSION_IS_NOT_LATEST: 2,
+      NORMALIZATION_ALREADY_PROCESSED: 1,
     });
     expect(applied.byTaskType).toMatchObject({
       PUBLISH_EMBEDDING: 1,
@@ -267,7 +330,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
               completed_at, last_error, repair_action
        FROM pipeline_tasks
        WHERE id = ANY($1::uuid[])`,
-      [[staleTaskId, currentTaskId, satisfiedTaskId, staleRouteTaskId, unresolvedTaskId]],
+      [[staleTaskId, currentTaskId, satisfiedTaskId, staleRouteTaskId, currentRouteTaskId, unresolvedTaskId]],
     );
     const rowsById = new Map(after.rows.map((row) => [row.id, row]));
     for (const taskId of [staleTaskId, staleRouteTaskId, satisfiedTaskId]) {
@@ -286,10 +349,11 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       expect(row?.repair_action).toContain("preserve prior repair action");
     }
     expect(rowsById.get(currentTaskId)?.status).toBe("PENDING");
+    expect(rowsById.get(currentRouteTaskId)?.status).toBe("PENDING");
     expect(rowsById.get(unresolvedTaskId)?.status).toBe("PENDING");
     await getClient().query(
       `UPDATE pipeline_tasks SET status = 'COMPLETED', completed_at = NOW() WHERE id = ANY($1::uuid[])`,
-      [[currentTaskId, unresolvedTaskId]],
+      [[currentTaskId, currentRouteTaskId, unresolvedTaskId]],
     );
 
     const workerStaleTaskId = await insertPendingTask({
@@ -306,8 +370,10 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       maxTasks: 1,
       heartbeatSeconds: 0,
     });
-    expect(workerSummary.stalePendingReconciliation.reconciled).toBe(1);
-    expect(workerSummary.claimed).toBe(0);
+    expect(workerSummary.stalePendingReconciliation.reconciled).toBe(0);
+    expect(workerSummary.stalePendingReconciliation.unresolved).toBe(1);
+    expect(workerSummary.claimed).toBe(1);
+    expect(workerSummary.completed).toBe(1);
     const workerStaleStatus = await getClient().query<{ status: string }>(
       `SELECT status FROM pipeline_tasks WHERE id = $1`,
       [workerStaleTaskId],
@@ -323,8 +389,349 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     expect(attempts.rows[0]?.count).toBe(1);
   });
 
-  it("services recommendation work while normalization continues to arrive", async () => {
+  it("preserves alternate preference task keys and forced recalculation requests", async () => {
+    const versions = await insertJobVersions();
+    await getClient().query(
+      `INSERT INTO gate_decisions (
+         workspace_id, canonical_job_id, job_version_id, gate_version, decision
+       ) VALUES ($1, $2, $3, $4, 'PASS')`,
+      [getContext().workspaceId, versions.canonicalJobId, versions.latestVersionId, GATE_VERSION],
+    );
+
+    const basePayload = {
+      canonical_job_id: versions.canonicalJobId,
+      job_version_id: versions.latestVersionId,
+    };
+    const satisfiedTaskId = await insertPendingTask({
+      taskType: "APPLY_HARD_GATES",
+      taskKey: `APPLY_HARD_GATES:${versions.latestVersionId}:hard_gate_v1`,
+      payload: basePayload,
+      fingerprintTaskType: "APPLY_HARD_GATES",
+      fingerprintTaskVersion: "hard_gate_v1",
+    });
+    const forcedPayload = {
+      ...basePayload,
+      force_policy_recalculation: true,
+      preference_mode_key: "focused",
+      preference_mode_updated_at: new Date().toISOString(),
+    };
+    const forcedTaskKey = `APPLY_HARD_GATES:${versions.latestVersionId}:hard_gate_v1:preference:focused:2`;
+    const forcedTask = await enqueuePipelineTask({
+      taskType: "APPLY_HARD_GATES",
+      taskKey: forcedTaskKey,
+      payload: forcedPayload,
+      producer: "test.preference_mode_change",
+      stageVersion: "hard_gate_v1",
+      requestId: forcedTaskKey,
+      triggerRevisionId: "2",
+    }, getClient(), { context: getContext() });
+    const legacyPreferenceUpdatedAt = "2026-10-24T00:00:00.000Z";
+    const legacyPreferenceRevision = String(Date.parse(legacyPreferenceUpdatedAt));
+    const legacyPreferenceTaskId = await insertPendingTask({
+      taskType: "APPLY_HARD_GATES",
+      taskKey: `APPLY_HARD_GATES:${versions.latestVersionId}:preference:focused:${legacyPreferenceRevision}`,
+      payload: {
+        ...basePayload,
+        force_policy_recalculation: true,
+        preference_mode_key: "focused",
+        preference_mode_updated_at: legacyPreferenceUpdatedAt,
+      },
+      fingerprintTaskType: "APPLY_HARD_GATES",
+      fingerprintTaskVersion: "hard_gate_v1",
+      contextFingerprint: "legacy_pipeline_context_v1",
+    });
+    const unknownLegacyTaskId = await insertPendingTask({
+      taskType: "APPLY_HARD_GATES",
+      taskKey: `APPLY_HARD_GATES:${versions.latestVersionId}:preference:legacy-unproven:1`,
+      payload: { ...basePayload, force_policy_recalculation: true },
+      fingerprintTaskType: "APPLY_HARD_GATES",
+      fingerprintTaskVersion: "hard_gate_v1",
+      contextFingerprint: "legacy_pipeline_context_v1",
+    });
+    const unknownKeyTaskId = await insertPendingTask({
+      taskType: "APPLY_HARD_GATES",
+      taskKey: `APPLY_HARD_GATES:${versions.latestVersionId}:unrecognized-producer-key:1`,
+      payload: basePayload,
+      fingerprintTaskType: "APPLY_HARD_GATES",
+      fingerprintTaskVersion: "hard_gate_v1",
+    });
+    const taskIds = [satisfiedTaskId, forcedTask.taskId, legacyPreferenceTaskId, unknownLegacyTaskId, unknownKeyTaskId];
+
+    const summary = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
+      apply: true,
+      taskTypes: ["APPLY_HARD_GATES"],
+    });
+    expect(summary).toMatchObject({
+      scannedPending: 5,
+      current: 2,
+      unresolved: 2,
+      wouldReconcile: 1,
+      reconciled: 1,
+    });
+    const statuses = await getClient().query<{ id: string; status: string }>(
+      `SELECT id, status FROM pipeline_tasks WHERE id = ANY($1::uuid[])`,
+      [taskIds],
+    );
+    expect(new Map(statuses.rows.map((row) => [row.id, row.status]))).toEqual(new Map([
+      [taskIds[0], "COMPLETED"],
+      [taskIds[1], "PENDING"],
+      [taskIds[2], "PENDING"],
+      [taskIds[3], "PENDING"],
+      [taskIds[4], "PENDING"],
+    ]));
+  });
+
+  it("does not treat completed extraction as satisfying an explicit reprocess request", async () => {
+    const versions = await insertJobVersions();
+    const { rows: versionRows } = await getClient().query<{ content_hash: string }>(
+      `SELECT content_hash FROM job_versions WHERE id = $1`,
+      [versions.latestVersionId],
+    );
+    const contentHash = versionRows[0]?.content_hash;
+    if (!contentHash) throw new Error("Requirement fixture job version has no content hash.");
+    const { rows: identityRows } = await getClient().query<{ id: string }>(
+      `INSERT INTO requirement_set_identities (
+         workspace_id, canonical_job_id, identity_hash, job_content_hash,
+         deterministic_extractor_version, quoted_extractor_version,
+         quoted_prompt_hash, normalizer_hash
+       ) VALUES ($1, $2, $3, $4, 'deterministic_v3', 'quoted_v1', 'quoted-hash', 'normalizer-hash')
+       RETURNING id`,
+      [getContext().workspaceId, versions.canonicalJobId, crypto.randomUUID(), contentHash],
+    );
+    const identityId = identityRows[0]?.id;
+    if (!identityId) throw new Error("Requirement identity fixture was not created.");
+    const { rows: requirementSetRows } = await getClient().query<{ id: string }>(
+      `INSERT INTO requirement_sets (
+         workspace_id, requirement_identity_id, canonical_job_id, job_version_id,
+         revision_number, source_type
+       ) VALUES ($1, $2, $3, $4, 1, 'EXTRACTED')
+       RETURNING id`,
+      [getContext().workspaceId, identityId, versions.canonicalJobId, versions.latestVersionId],
+    );
+    const requirementSetId = requirementSetRows[0]?.id;
+    if (!requirementSetId) throw new Error("Requirement set fixture was not created.");
+    await getClient().query(
+      `UPDATE job_versions SET active_requirement_set_id = $1 WHERE id = $2`,
+      [requirementSetId, versions.latestVersionId],
+    );
+    await getClient().query(
+      `INSERT INTO requirement_extraction_runs (
+         workspace_id, canonical_job_id, job_version_id, run_type, status, requirement_set_id
+       ) VALUES ($1, $2, $3, 'DETERMINISTIC', 'COMPLETED', $4)`,
+      [getContext().workspaceId, versions.canonicalJobId, versions.latestVersionId, requirementSetId],
+    );
+    await getClient().query(
+      `INSERT INTO job_version_pipeline_state (
+         workspace_id, canonical_job_id, job_version_id, current_stage, stage_status
+       ) VALUES ($1, $2, $3, 'REQUIREMENTS_EXTRACTED', 'COMPLETED')`,
+      [getContext().workspaceId, versions.canonicalJobId, versions.latestVersionId],
+    );
+
+    const basePayload = {
+      canonical_job_id: versions.canonicalJobId,
+      job_version_id: versions.latestVersionId,
+    };
+    const forcedTaskId = await insertPendingTask({
+      taskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      taskKey: `EXTRACT_DETERMINISTIC_REQUIREMENTS:${versions.latestVersionId}:deterministic_v3:repair`,
+      payload: { ...basePayload, reprocess: true },
+      fingerprintTaskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      fingerprintTaskVersion: "deterministic_v3",
+    });
+    const satisfiedTaskId = await insertPendingTask({
+      taskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      taskKey: `EXTRACT_DETERMINISTIC_REQUIREMENTS:${versions.latestVersionId}:deterministic_v3`,
+      payload: basePayload,
+      fingerprintTaskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      fingerprintTaskVersion: "deterministic_v3",
+    });
+
+    const summary = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
+      apply: true,
+      taskTypes: ["EXTRACT_DETERMINISTIC_REQUIREMENTS"],
+    });
+    expect(summary).toMatchObject({ current: 1, wouldReconcile: 1, reconciled: 1 });
+    const statuses = await getClient().query<{ id: string; status: string }>(
+      `SELECT id, status FROM pipeline_tasks WHERE id = ANY($1::uuid[])`,
+      [[forcedTaskId, satisfiedTaskId]],
+    );
+    expect(new Map(statuses.rows.map((row) => [row.id, row.status]))).toEqual(new Map([
+      [forcedTaskId, "PENDING"],
+      [satisfiedTaskId, "COMPLETED"],
+    ]));
+  });
+
+  it("bounds reconciliation work and leaves unscanned obligations pending", async () => {
+    const taskIds: string[] = [];
+    for (let index = 0; index < 10; index += 1) {
+      taskIds.push(await insertPendingTask({
+        taskType: "PUBLISH_EMBEDDING",
+        taskKey: `PUBLISH_EMBEDDING:${crypto.randomUUID()}:embedding_publication_v1:budget-${index}`,
+        payload: { canonical_job_id: crypto.randomUUID(), job_version_id: crypto.randomUUID() },
+        fingerprintTaskType: "PUBLISH_EMBEDDING",
+        fingerprintTaskVersion: "embedding_publication_v1",
+      }));
+    }
+
+    const summary = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
+      apply: true,
+      taskTypes: ["PUBLISH_EMBEDDING"],
+      limit: 10,
+      timeBudgetMs: 1,
+    });
+    expect(summary.scannedPending).toBe(10);
+    expect(summary.deferredByBudget).toBeGreaterThan(0);
+    expect(summary.reconciled).toBe(0);
+    const statuses = await getClient().query<{ status: string }>(
+      `SELECT status FROM pipeline_tasks WHERE id = ANY($1::uuid[])`,
+      [taskIds],
+    );
+    expect(statuses.rows).toHaveLength(10);
+    expect(statuses.rows.every((row) => row.status === "PENDING")).toBe(true);
+  });
+
+  it("does not reset a running lease when the same intent is enqueued again", async () => {
+    const versions = await insertJobVersions();
+    const taskKey = `PUBLISH_EMBEDDING:${versions.latestVersionId}:embedding_publication_v1:lease-test`;
+    const enqueueInput = {
+      taskType: "PUBLISH_EMBEDDING",
+      taskKey,
+      payload: { canonical_job_id: versions.canonicalJobId, job_version_id: versions.latestVersionId },
+      producer: "test.running_lease",
+      stageVersion: "embedding_publication_v1",
+      requestId: taskKey,
+    };
+    const first = await enqueuePipelineTask(enqueueInput, getClient(), { context: getContext() });
+    expect(first.inserted).toBe(true);
+    const leaseId = crypto.randomUUID();
+    await getClient().query(
+      `UPDATE pipeline_tasks
+       SET status = 'RUNNING', lease_id = $2, lease_expires_at = NOW() + INTERVAL '5 minutes',
+           heartbeat_at = NOW(), claimed_by = 'lease-owner'
+       WHERE workspace_id = $1 AND id = $3`,
+      [getContext().workspaceId, leaseId, first.taskId],
+    );
+
+    const second = await enqueuePipelineTask(enqueueInput, getClient(), { context: getContext() });
+    expect(second).toMatchObject({ taskId: first.taskId, inserted: false, reactivated: false });
+    const running = await getClient().query<{
+      status: string;
+      lease_id: string | null;
+      claimed_by: string | null;
+      attempt_count: number;
+    }>(
+      `SELECT status, lease_id, claimed_by, attempt_count FROM pipeline_tasks WHERE id = $1`,
+      [first.taskId],
+    );
+    expect(running.rows[0]).toMatchObject({
+      status: "RUNNING",
+      lease_id: leaseId,
+      claimed_by: "lease-owner",
+      attempt_count: 0,
+    });
+  });
+
+  it("keeps tasks unresolved when the canonical latest-version pointer is missing", async () => {
+    const versions = await insertJobVersions();
+    await getClient().query(
+      `UPDATE canonical_jobs SET latest_job_version_id = NULL WHERE workspace_id = $1 AND id = $2`,
+      [getContext().workspaceId, versions.canonicalJobId],
+    );
+    const taskId = await insertPendingTask({
+      taskType: "PUBLISH_EMBEDDING",
+      taskKey: `PUBLISH_EMBEDDING:${versions.latestVersionId}:embedding_publication_v1`,
+      payload: { canonical_job_id: versions.canonicalJobId, job_version_id: versions.latestVersionId },
+      fingerprintTaskType: "PUBLISH_EMBEDDING",
+      fingerprintTaskVersion: "embedding_publication_v1",
+    });
+
+    const summary = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
+      apply: true,
+      taskTypes: ["PUBLISH_EMBEDDING"],
+    });
+    expect(summary).toMatchObject({ unresolved: 1, wouldReconcile: 0, reconciled: 0 });
+    const status = await getClient().query<{ status: string }>(
+      `SELECT status FROM pipeline_tasks WHERE id = $1`,
+      [taskId],
+    );
+    expect(status.rows[0]?.status).toBe("PENDING");
+  });
+
+  it("re-reads a changed latest-version pointer before reconciling", async () => {
+    const versions = await insertJobVersions();
+    const newerVersionId = crypto.randomUUID();
+    await getClient().query(
+      `INSERT INTO job_versions (
+         id, workspace_id, canonical_job_id, content_hash, description_text, observed_at
+       ) VALUES ($1, $2, $3, $4, 'Concurrent pointer fixture', NOW())`,
+      [newerVersionId, getContext().workspaceId, versions.canonicalJobId, `new-${crypto.randomUUID()}`],
+    );
+    const staleTaskId = await insertPendingTask({
+      taskType: "PUBLISH_EMBEDDING",
+      taskKey: `PUBLISH_EMBEDDING:${versions.oldVersionId}:embedding_publication_v1`,
+      payload: { canonical_job_id: versions.canonicalJobId, job_version_id: versions.oldVersionId },
+      fingerprintTaskType: "PUBLISH_EMBEDDING",
+      fingerprintTaskVersion: "embedding_publication_v1",
+    });
+    await getClient().query(
+      `UPDATE pipeline_tasks SET created_at = NOW() - INTERVAL '5 hours' WHERE id = $1`,
+      [staleTaskId],
+    );
+    await insertPendingTask({
+      taskType: "PUBLISH_EMBEDDING",
+      taskKey: `PUBLISH_EMBEDDING:${newerVersionId}:embedding_publication_v1`,
+      payload: { canonical_job_id: versions.canonicalJobId, job_version_id: newerVersionId },
+      fingerprintTaskType: "PUBLISH_EMBEDDING",
+      fingerprintTaskVersion: "embedding_publication_v1",
+    });
+
+    const blocker = await pool?.connect();
+    if (!blocker) throw new Error("The currentness race test requires a second PostgreSQL client.");
+    let pointerUpdateOpen = false;
+    try {
+      await blocker.query(`SET search_path TO ${schemaName}, public`);
+      await blocker.query("BEGIN");
+      pointerUpdateOpen = true;
+      await blocker.query(
+        `UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE workspace_id = $2 AND id = $3`,
+        [newerVersionId, getContext().workspaceId, versions.canonicalJobId],
+      );
+      const { rows: pidRows } = await getClient().query<{ pid: number }>(`SELECT pg_backend_pid()::int AS pid`);
+      const reconciliation = reconcileStalePendingPipelineTasks(getClient(), getContext(), {
+        apply: true,
+        taskTypes: ["PUBLISH_EMBEDDING"],
+      });
+      let observedLockWait = false;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const activity = await blocker.query<{ wait_event_type: string | null }>(
+          `SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`,
+          [pidRows[0]?.pid],
+        );
+        if (activity.rows[0]?.wait_event_type === "Lock") {
+          observedLockWait = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(observedLockWait).toBe(true);
+      await blocker.query("COMMIT");
+      pointerUpdateOpen = false;
+      const summary = await reconciliation;
+      expect(summary).toMatchObject({ reconciled: 1, current: 1, unresolved: 0 });
+      const staleStatus = await getClient().query<{ status: string }>(
+        `SELECT status FROM pipeline_tasks WHERE id = $1`,
+        [staleTaskId],
+      );
+      expect(staleStatus.rows[0]?.status).toBe("COMPLETED");
+    } finally {
+      if (pointerUpdateOpen) await blocker.query("ROLLBACK");
+      blocker.release();
+    }
+  }, 15000);
+
+  it("rotates past slow embedding work across bounded database-backed runs", async () => {
     const normalizationJob = await insertJobVersions();
+    const embeddingSpaceId = await createEmbeddingSpace();
     const recommendationJob = await insertJobVersions();
     await getClient().query(
       `UPDATE canonical_jobs
@@ -375,12 +782,22 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     };
 
     const firstObservationId = await insertObservation(normalizationJob.latestVersionId);
-    await insertPendingTask({
+    const firstNormalizationTaskId = await insertPendingTask({
       taskType: "NORMALIZE_OBSERVATION",
       taskKey: `NORMALIZE_OBSERVATION:${firstObservationId}:normalizer_v1`,
       payload: { observation_id: firstObservationId },
       fingerprintTaskType: "NORMALIZE_OBSERVATION",
       fingerprintTaskVersion: "normalizer_v1",
+    });
+    const embeddingTaskId = await insertPendingTask({
+      taskType: "PUBLISH_EMBEDDING",
+      taskKey: `PUBLISH_EMBEDDING:${normalizationJob.latestVersionId}:embedding_publication_v1`,
+      payload: {
+        canonical_job_id: normalizationJob.canonicalJobId,
+        job_version_id: normalizationJob.latestVersionId,
+      },
+      fingerprintTaskType: "PUBLISH_EMBEDDING",
+      fingerprintTaskVersion: "embedding_publication_v1",
     });
     const decisionPayload = {
       canonical_job_id: recommendationJob.canonicalJobId,
@@ -448,21 +865,25 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
         details: [],
       })),
       runHardGates: vi.fn(async () => ({ passed: 0, hardRejected: 0, needsVerification: 0, errors: 0 })),
-      runEmbeddingBatchWithFallback: vi.fn(async () => ({
-        seededSpaces: { primarySpaceId: "primary", fallbackSpaceId: "fallback" },
-        inputBuild: { inserted: 0, fromRequirements: 0, fromProfileFacts: 0, fromJobVersions: 0, fromLanePrototypes: 0 },
-        primary: {
-          batchId: null,
-          embeddingSpaceId: "primary",
-          processed: 0,
-          processedInputIds: [],
-          succeeded: 0,
-          failed: 0,
-          failedInputIds: [],
-          runType: "PRIMARY",
-          errors: [],
-        },
-      })),
+      runEmbeddingBatchWithFallback: vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5100));
+        await publishJobEmbedding(embeddingSpaceId, normalizationJob.latestVersionId);
+        return {
+          seededSpaces: { primarySpaceId: embeddingSpaceId, fallbackSpaceId: crypto.randomUUID() },
+          inputBuild: { inserted: 0, fromRequirements: 0, fromProfileFacts: 0, fromJobVersions: 0, fromLanePrototypes: 0 },
+          primary: {
+            batchId: null,
+            embeddingSpaceId,
+            processed: 0,
+            processedInputIds: [],
+            succeeded: 0,
+            failed: 0,
+            failedInputIds: [],
+            runType: "PRIMARY",
+            errors: [],
+          },
+        };
+      }),
       runLaneRouting: vi.fn(async () => ({ routed: 0, deferred: 0 })),
       runDeterministicMatcher: vi.fn(async () => ({ matchedJobs: 0, skippedJobs: 0, errors: 0 })),
       runRecommendationDecider: vi.fn(async () => {
@@ -478,26 +899,71 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       runExplanationQueueEnqueuer: vi.fn(async () => ({ enqueued: 0, updated: 0, deferred: 0 })),
     } as PipelineStageWorkerDependencies;
 
-    const summary = await runPipelineStageTaskWorker(getClient(), {
+    const taskTypes = ["PUBLISH_EMBEDDING", "NORMALIZE_OBSERVATION", "DECIDE_RECOMMENDATION"] as const;
+    const slowEmbeddingRun = await runPipelineStageTaskWorker(getClient(), {
       context: getContext(),
       seed: false,
-      taskTypes: ["NORMALIZE_OBSERVATION", "DECIDE_RECOMMENDATION"],
+      taskTypes: [...taskTypes],
+      stageStartOffset: 0,
       stageQuantum: 1,
-      maxTasks: 3,
+      maxTasks: 100,
       claimBatchSize: 1,
       heartbeatSeconds: 0,
+      wallClockMs: 5000,
+      minTimeToStartTaskMs: 0,
     }, workerDependencies);
+    expect(slowEmbeddingRun.claimed).toBe(1);
+    expect(slowEmbeddingRun.exitReason).toBe("WALL_CLOCK_BUDGET_REACHED");
+    expect(slowEmbeddingRun.byType.PUBLISH_EMBEDDING?.claimed).toBe(1);
+    expect(slowEmbeddingRun.stalePendingReconciliation.stalePendingReconciledThisRun).toBe(1);
+    const afterSlowEmbedding = await getClient().query<{ id: string; status: string }>(
+      `SELECT id, status FROM pipeline_tasks WHERE id = ANY($1::uuid[])`,
+      [[embeddingTaskId, firstNormalizationTaskId, currentDecisionTaskId]],
+    );
+    expect(new Map(afterSlowEmbedding.rows.map((row) => [row.id, row.status]))).toEqual(new Map([
+      [embeddingTaskId, "COMPLETED"],
+      [firstNormalizationTaskId, "PENDING"],
+      [currentDecisionTaskId, "PENDING"],
+    ]));
 
-    expect(summary.claimed).toBe(3);
-    expect(summary.completed).toBe(3);
-    expect(summary.failed).toBe(0);
-    expect(summary.byType.NORMALIZE_OBSERVATION?.claimed).toBe(2);
-    expect(summary.byType.DECIDE_RECOMMENDATION?.claimed).toBe(1);
-    expect(summary.stalePendingReconciliation.stalePendingReconciledThisRun).toBe(1);
-    expect(summary.stalePendingReconciliation.byReason).toMatchObject({ SUPERSEDED_PROFILE_VERSION: 1 });
+    const normalizationRun = await runPipelineStageTaskWorker(getClient(), {
+      context: getContext(),
+      seed: false,
+      taskTypes: [...taskTypes],
+      stageStartOffset: 1,
+      stageQuantum: 1,
+      maxTasks: 1,
+      claimBatchSize: 1,
+      heartbeatSeconds: 0,
+      wallClockMs: 5000,
+      minTimeToStartTaskMs: 0,
+    }, workerDependencies);
+    expect(normalizationRun.byType.NORMALIZE_OBSERVATION?.claimed).toBe(1);
+    const afterNormalization = await getClient().query<{ id: string; status: string }>(
+      `SELECT id, status FROM pipeline_tasks WHERE id = ANY($1::uuid[])`,
+      [[firstNormalizationTaskId, currentDecisionTaskId]],
+    );
+    expect(new Map(afterNormalization.rows.map((row) => [row.id, row.status]))).toEqual(new Map([
+      [firstNormalizationTaskId, "COMPLETED"],
+      [currentDecisionTaskId, "PENDING"],
+    ]));
+
+    const recommendationRun = await runPipelineStageTaskWorker(getClient(), {
+      context: getContext(),
+      seed: false,
+      taskTypes: [...taskTypes],
+      stageStartOffset: 2,
+      stageQuantum: 1,
+      maxTasks: 1,
+      claimBatchSize: 1,
+      heartbeatSeconds: 0,
+      wallClockMs: 5000,
+      minTimeToStartTaskMs: 0,
+    }, workerDependencies);
+    expect(recommendationRun.byType.DECIDE_RECOMMENDATION?.claimed).toBe(1);
+    expect(workerDependencies.runEmbeddingBatchWithFallback).toHaveBeenCalledTimes(1);
     expect(workerDependencies.runRecommendationDecider).toHaveBeenCalledTimes(1);
-    expect(workerDependencies.runEmbeddingBatchWithFallback).not.toHaveBeenCalled();
-    expect(summary.successorTasksCreated).toBe(1);
+    expect(slowEmbeddingRun.successorTasksCreated).toBeGreaterThanOrEqual(1);
     const decisionTaskStatuses = await getClient().query<{ id: string; status: string }>(
       `SELECT id, status FROM pipeline_tasks WHERE id = ANY($1::uuid[])`,
       [[staleDecisionTaskId, currentDecisionTaskId]],
@@ -506,5 +972,5 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       [staleDecisionTaskId, "COMPLETED"],
       [currentDecisionTaskId, "COMPLETED"],
     ]));
-  });
+  }, 20000);
 });

@@ -3,7 +3,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
-import { buildPipelineTaskContextFingerprint } from "../src/pipeline/artifactContext.js";
 import {
   classifyRepairCategory,
   type RepairCategory,
@@ -264,19 +263,15 @@ async function enqueueRepairTask(
   variant: string
 ): Promise<boolean> {
   const taskKey = `${taskType}:${candidate.job_version_id}:${taskVersion}:repair:${variant}`;
-  const contextFingerprint = buildPipelineTaskContextFingerprint({
-    workspaceId: context.workspaceId,
-    taskType,
-    taskVersion,
-    payload,
-  });
   const result = await enqueuePipelineTask(
     {
       taskType,
       taskKey,
       payload,
       maxAttempts: taskType === "APPLY_HARD_GATES" || taskType === "MATCH_PROFILE_EVIDENCE" ? 8 : 3,
-      contextFingerprint,
+      producer: "script.repair_pipeline_funnel",
+      stageVersion: taskVersion,
+      requestId: taskKey,
     },
     client,
     { context }
