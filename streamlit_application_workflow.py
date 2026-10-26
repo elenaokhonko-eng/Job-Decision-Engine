@@ -1,6 +1,7 @@
 """Eligibility helpers for the Streamlit application workspace."""
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 import json
 
 CURRENT_DETERMINISTIC_CONTEXTS = frozenset(
@@ -51,6 +52,19 @@ def parse_application_document_pair_status(
     raise ValueError("The document-pair validator returned no structured status.")
 
 
+def _is_future_timestamp(value: object) -> bool:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return False
+    else:
+        return False
+    return parsed.tzinfo is not None and parsed > datetime.now(UTC)
+
+
 def is_document_generation_eligible(
     job: Mapping[str, object], *, include_track: bool = False
 ) -> bool:
@@ -61,8 +75,8 @@ def is_document_generation_eligible(
         include_track: Whether a current TRACK decision may be selected.
 
     Returns:
-        True only when the current job version, match, gate, and deterministic
-        recommendation are usable for document generation. AI evaluation is optional.
+        True only when the current job version, match, gate, recommendation, and
+        unexpired READY assessment are usable for document generation. AI evaluation is optional.
 
     Example:
         >>> is_document_generation_eligible({
@@ -73,6 +87,12 @@ def is_document_generation_eligible(
         ...     "decision_eligibility": "ELIGIBLE",
         ...     "decision_outcome": "REVIEW",
         ...     "current_artifact_status": "EVALUATION_MISSING",
+        ...     "readiness_status": "READY",
+        ...     "readiness_fingerprint": "a" * 64,
+        ...     "readiness_reason_codes": [],
+        ...     "readiness_expires_at": "2099-01-01T00:00:00Z",
+        ...     "availability_status": "OPEN",
+        ...     "availability_recheck_at": "2099-01-01T00:00:00Z",
         ... })
         True
     """
@@ -83,6 +103,22 @@ def is_document_generation_eligible(
     if job.get("decision_eligibility") != "ELIGIBLE":
         return False
     if job.get("current_artifact_status") not in CURRENT_DETERMINISTIC_CONTEXTS:
+        return False
+    readiness_fingerprint = job.get("readiness_fingerprint")
+    readiness_reason_codes = job.get("readiness_reason_codes")
+    if (
+        job.get("readiness_status") != "READY"
+        or not isinstance(readiness_fingerprint, str)
+        or len(readiness_fingerprint) != 64
+        or any(
+            character not in "0123456789abcdef" for character in readiness_fingerprint
+        )
+        or not isinstance(readiness_reason_codes, list)
+        or readiness_reason_codes
+        or job.get("availability_status") != "OPEN"
+        or not _is_future_timestamp(job.get("readiness_expires_at"))
+        or not _is_future_timestamp(job.get("availability_recheck_at"))
+    ):
         return False
 
     outcomes = APPLY_NOW_OUTCOMES | ({"TRACK"} if include_track else set())

@@ -179,6 +179,69 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     await pool?.end();
   });
 
+  it("reassesses an already-decided job when current readiness evidence is missing", async ({ skip }) => {
+    const database = getClient();
+    const readinessView = await database.query<{ available: boolean }>(
+      "SELECT to_regclass('v_application_readiness_current') IS NOT NULL AS available",
+    );
+    if (readinessView.rows[0]?.available !== true) skip();
+
+    const versions = await insertJobVersions();
+    await database.query(
+      `UPDATE canonical_jobs
+       SET processing_state = 'NEEDS_VERIFICATION',
+           processing_status = 'NEEDS_VERIFICATION',
+           gate_decision = 'PASS',
+           recommendation_eligibility = 'ELIGIBLE',
+           recommendation_outcome = 'REVIEW'
+       WHERE workspace_id = $1 AND id = $2`,
+      [getContext().workspaceId, versions.canonicalJobId],
+    );
+
+    const seeded = await seedRecoverablePipelineTasks(database, {
+      context: getContext(),
+      taskTypes: ["DECIDE_RECOMMENDATION"],
+      jobVersionIds: [versions.latestVersionId],
+      routingDeferredReplayVersion: "readiness-refresh-test",
+      maxSeedPerType: 10,
+    });
+    expect(seeded.inserted).toBe(1);
+
+    const task = await database.query<{
+      id: string;
+      status: string;
+      payload: Record<string, unknown>;
+    }>(
+      `SELECT id, status, payload
+       FROM pipeline_tasks
+       WHERE workspace_id = $1 AND task_type = 'DECIDE_RECOMMENDATION'
+         AND payload->>'canonical_job_id' = $2
+         AND payload->>'job_version_id' = $3
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [getContext().workspaceId, versions.canonicalJobId, versions.latestVersionId],
+    );
+    expect(task.rows[0]?.payload).toMatchObject({
+      reprocess_existing_state: true,
+      reassessment_reason: "APPLICATION_READINESS_REFRESH",
+    });
+
+    const reconciliation = await reconcileStalePendingPipelineTasks(database, getContext(), {
+      apply: true,
+      taskTypes: ["DECIDE_RECOMMENDATION"],
+      jobVersionIds: [versions.latestVersionId],
+      limit: 10,
+    });
+    expect(reconciliation.current).toBe(1);
+    expect(reconciliation.reconciled).toBe(0);
+    expect(task.rows[0]?.status).toBe("PENDING");
+    const after = await database.query<{ status: string }>(
+      `SELECT status FROM pipeline_tasks WHERE id = $1`,
+      [task.rows[0]?.id],
+    );
+    expect(after.rows[0]?.status).toBe("PENDING");
+  });
+
   it("dry-runs and reconciles stale or already-satisfied pending tasks without changing current work", async () => {
     const versions = await insertJobVersions();
     const staleTaskId = await insertPendingTask({

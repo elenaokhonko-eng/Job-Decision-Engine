@@ -1,5 +1,6 @@
 import pg from "pg";
 
+import { loadCurrentApplicationReadiness, isCurrentReadyApplicationReadiness } from "../services/currentApplicationReadiness.js";
 import { validateDocumentCurrentContext } from "./currentContext.js";
 
 export interface PersistedDocumentCurrentnessInput {
@@ -83,8 +84,18 @@ export async function validatePersistedDocumentCurrentness(
   const current = rows[0];
   if (!current) return { current: false, reason: "JOB_NOT_AVAILABLE" };
 
+  const readiness = await loadCurrentApplicationReadiness(
+    client,
+    workspaceId,
+    document.canonicalJobId,
+    document.jobVersionId,
+  );
+  if (!isCurrentReadyApplicationReadiness(readiness)) {
+    return { current: false, reason: "READINESS_NOT_READY" };
+  }
   const context = validateDocumentCurrentContext({
     ...current,
+    ...readiness,
     selected_job_version_id: document.jobVersionId,
     selected_profile_version_id: document.profileVersionId,
   });

@@ -15,6 +15,7 @@ from streamlit_application_workflow import (
     is_document_generation_eligible,
     parse_application_document_pair_status,
 )
+from streamlit_application_review import render_document_pair_review_checkbox
 from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
 from streamlit_workspace_contracts import (
@@ -1003,14 +1004,9 @@ def render_job_document_actions(job, key_prefix):
     show_document_run_downloads(cv, f"{key_prefix}_cv_download")
     show_document_run_downloads(letter, f"{key_prefix}_letter_download")
     review_key = f"{key_prefix}_pair_reviewed_{cv['documentRunId']}_{letter['documentRunId']}"
-    if review_key not in st.session_state:
-        st.session_state[review_key] = bool(application_status.get("reviewedAt"))
-    reviewed = st.checkbox(
-        "I reviewed both documents and their downloads. The application remains a draft.",
-        key=review_key,
-        disabled=bool(application_status.get("reviewedAt")),
-    )
-    if reviewed and not application_status.get("reviewedAt"):
+    already_reviewed = bool(application_status.get("reviewedAt"))
+
+    def persist_pair_review() -> None:
         review_response = api_request(
             "PATCH",
             f"/api/v2/applications/{cv['applicationRecordId']}",
@@ -1026,8 +1022,13 @@ def render_job_document_actions(job, key_prefix):
         )
         if not isinstance(review_response, dict) or not review_response.get("ok"):
             raise RuntimeError("The API did not persist the document review event.")
-        st.session_state[review_key] = True
         st.success("Document review recorded on the draft application.")
+
+    reviewed = render_document_pair_review_checkbox(
+        review_key=review_key,
+        already_reviewed=already_reviewed,
+        on_review=persist_pair_review,
+    )
     if application_status.get("documentReady") or reviewed:
         st.success("Document pair reviewed. The application remains a draft; no employer submission was recorded.")
 

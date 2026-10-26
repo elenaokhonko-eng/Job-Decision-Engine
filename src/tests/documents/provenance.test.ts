@@ -7,6 +7,38 @@ describe('persistDocumentProvenance', () => {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
         return { rows: [] };
       }
+      if (sql.includes("to_regclass('v_application_readiness_current')")) {
+        return { rows: [{ available: true }] };
+      }
+      if (sql.includes('FROM v_application_readiness_current')) {
+        const expiresAt = '2099-01-01T00:00:00.000Z';
+        const readinessFingerprint = 'a'.repeat(64);
+        return { rows: [{
+          application_readiness: {
+            schema_version: 'application_readiness_v1',
+            status: 'READY',
+            canonical_job_id: '33333333-3333-4333-8333-333333333333',
+            job_version_id: '44444444-4444-4444-8444-444444444444',
+            profile_version_id: '77777777-7777-4777-8777-777777777777',
+            requirement_set_id: '88888888-8888-4888-8888-888888888888',
+            match_run_id: '55555555-5555-4555-8555-555555555555',
+            evidence_revision_hash: 'b'.repeat(64),
+            readiness_fingerprint: readinessFingerprint,
+            evaluated_at: '2098-01-01T00:00:00.000Z',
+            expires_at: expiresAt,
+          },
+          readiness_status: 'READY',
+          readiness_fingerprint: readinessFingerprint,
+          readiness_expires_at: new Date(expiresAt),
+          readiness_reason_codes: [],
+          canonical_job_id: '33333333-3333-4333-8333-333333333333',
+          job_version_id: '44444444-4444-4444-8444-444444444444',
+          profile_version_id: '77777777-7777-4777-8777-777777777777',
+          requirement_set_id: '88888888-8888-4888-8888-888888888888',
+          match_run_id: '55555555-5555-4555-8555-555555555555',
+          evidence_revision_hash: 'b'.repeat(64),
+        }] };
+      }
       if (sql.includes('current_shortlist.gate_status')) {
         return {
           rows: [{

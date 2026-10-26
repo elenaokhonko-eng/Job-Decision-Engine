@@ -6,6 +6,12 @@ import { GATE_VERSION } from "../contracts/version.js";
 import { loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
+import {
+  applicationReadinessViewAvailable,
+  isCurrentReadinessAssessment,
+  loadCurrentApplicationReadiness,
+  type CurrentApplicationReadiness,
+} from "../services/currentApplicationReadiness.js";
 import type { WorkspaceContext } from "../workspace/context.js";
 import type { PipelineTaskRow } from "./pipelineTasks.js";
 import { TaskIntentV2Schema, type TaskIntentV2 } from "./taskIntent.js";
@@ -695,6 +701,20 @@ export async function classifyPipelineTaskCurrentness(
     });
   }
   const jobVersionSuperseded = facts.latest_job_version_id !== taskVersionId;
+  let readinessContractAvailable = false;
+  let currentReadiness: CurrentApplicationReadiness | null = null;
+  if (task.task_type === "DECIDE_RECOMMENDATION" || task.task_type === "ENQUEUE_EXPLANATION") {
+    readinessContractAvailable = await applicationReadinessViewAvailable(client);
+    if (readinessContractAvailable && facts.latest_job_version_id) {
+      currentReadiness = await loadCurrentApplicationReadiness(
+        client,
+        context.workspaceId,
+        facts.canonical_job_id,
+        facts.latest_job_version_id,
+        true,
+      );
+    }
+  }
 
   const expectedStageVersion = pipelineTaskStageVersion(task.task_type);
   if (!expectedStageVersion) {
@@ -905,12 +925,15 @@ export async function classifyPipelineTaskCurrentness(
     facts.match_evidence_strength_policy_hash === evidenceStrengthPolicyHash &&
     (Number(facts.match_requirement_count ?? 0) === 0 || facts.match_embedding_space_id),
   );
+  const decisionReadinessCurrent = !readinessContractAvailable ||
+    isCurrentReadinessAssessment(currentReadiness);
   const decisionIsCurrent = Boolean(
     facts.latest_deterministic_decision_id &&
     facts.decision_job_version_id === facts.latest_job_version_id &&
     facts.decision_match_run_id === (facts.latest_match_run_id ?? null) &&
     facts.decision_policy_snapshot_id === facts.latest_policy_snapshot_id &&
-    (facts.decision_match_run_id === null || matchIsCurrent),
+    (facts.decision_match_run_id === null || matchIsCurrent) &&
+    decisionReadinessCurrent,
   );
 
   if (task.task_type === "PUBLISH_EMBEDDING" && jobVersionSuperseded &&

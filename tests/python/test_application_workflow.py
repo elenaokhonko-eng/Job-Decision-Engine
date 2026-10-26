@@ -68,6 +68,12 @@ def current_review_job(**overrides):
         "decision_outcome": "REVIEW",
         "processing_state": "MATCHED",
         "current_artifact_status": "EVALUATION_MISSING",
+        "readiness_status": "READY",
+        "readiness_fingerprint": "a" * 64,
+        "readiness_expires_at": "2099-01-01T00:00:00Z",
+        "readiness_reason_codes": [],
+        "availability_status": "OPEN",
+        "availability_recheck_at": "2099-01-01T00:00:00Z",
         "version_mismatch": False,
         "eval_provider": None,
     }
@@ -87,6 +93,36 @@ def test_excludes_stale_or_incomplete_deterministic_context():
     )
     assert not is_document_generation_eligible(
         current_review_job(current_artifact_status="DECISION_STALE")
+    )
+
+
+def test_excludes_jobs_without_current_ready_assessment():
+    assert not is_document_generation_eligible(
+        current_review_job(readiness_status=None)
+    )
+    assert not is_document_generation_eligible(
+        current_review_job(
+            readiness_status="NEEDS_VERIFICATION",
+            readiness_reason_codes=["SALARY_BASIS_UNRESOLVED"],
+        )
+    )
+    assert not is_document_generation_eligible(
+        current_review_job(readiness_status="PROCESSING")
+    )
+    assert not is_document_generation_eligible(
+        current_review_job(readiness_reason_codes=["SALARY_BASIS_UNRESOLVED"])
+    )
+    assert not is_document_generation_eligible(
+        current_review_job(readiness_fingerprint=None)
+    )
+    assert not is_document_generation_eligible(
+        current_review_job(readiness_expires_at="2000-01-01T00:00:00Z")
+    )
+    assert not is_document_generation_eligible(
+        current_review_job(availability_status="CLOSED")
+    )
+    assert not is_document_generation_eligible(
+        current_review_job(availability_recheck_at="2000-01-01T00:00:00Z")
     )
 
 

@@ -25,6 +25,10 @@ import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
 import { validateDocumentCurrentContext, type DocumentCurrentContext } from "../src/documents/currentContext.js";
+import {
+  isCurrentReadyApplicationReadiness,
+  loadCurrentApplicationReadiness,
+} from "../src/services/currentApplicationReadiness.js";
 import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 
@@ -449,17 +453,30 @@ async function generateTailoredCV(): Promise<void> {
     }
 
     const profile = profileRes.rows[0];
+    if (!job.selected_job_version_id) {
+      throw new Error("Document generation rejected a missing selected job version.");
+    }
+    const resolvedJobVersionId = job.selected_job_version_id;
+    const readiness = await loadCurrentApplicationReadiness(
+      pool,
+      ctx.workspaceId,
+      job.canonical_job_id,
+      resolvedJobVersionId,
+    );
+    if (!isCurrentReadyApplicationReadiness(readiness)) {
+      throw new Error("Document generation rejected: a current READY assessment is required.");
+    }
     const currentness = validateDocumentCurrentContext({
       ...job,
+      readiness_status: readiness?.readiness_status ?? null,
+      readiness_fingerprint: readiness?.readiness_fingerprint ?? null,
+      readiness_expires_at: readiness?.readiness_expires_at ?? null,
+      readiness_reason_codes: readiness?.readiness_reason_codes ?? null,
       selected_profile_version_id: profile.profile_version_id,
     });
     if (!currentness.ok) {
       throw new Error(`Document generation rejected stale context: ${currentness.reason}.`);
     }
-    if (!job.selected_job_version_id) {
-      throw new Error("Document generation rejected a missing selected job version.");
-    }
-    const resolvedJobVersionId = job.selected_job_version_id;
 
     const matchRunId = job.latest_match_run_id;
     if (!matchRunId) {

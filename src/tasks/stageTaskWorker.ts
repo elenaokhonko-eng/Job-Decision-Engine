@@ -12,6 +12,7 @@ import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
+import { applicationReadinessViewAvailable } from "../services/currentApplicationReadiness.js";
 import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
 import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
@@ -544,6 +545,32 @@ export async function seedRecoverablePipelineTasks(
       const lanes = await loadWorkspaceLanesConfig(client as any, { context: ctx, seedIfEmpty: true });
       routingDeferredReplayVersion = lanes.config.version || "routing_deferred_replay_v1";
     }
+    const readinessViewAvailable = !enabledTypes || enabledTypes.has("DECIDE_RECOMMENDATION")
+      ? await applicationReadinessViewAvailable(client as pg.PoolClient)
+      : false;
+    const readinessRefreshPredicate = readinessViewAvailable
+      ? `EXISTS (
+          SELECT 1
+          FROM v_application_readiness_current readiness_refresh
+          WHERE readiness_refresh.workspace_id = c.workspace_id
+            AND readiness_refresh.canonical_job_id = c.id
+            AND readiness_refresh.job_version_id::text = COALESCE(c.latest_job_version_id, jv.id)::text
+            AND (
+              readiness_refresh.application_readiness IS NULL
+              OR readiness_refresh.readiness_reason_codes && ARRAY[
+                'READINESS_EVIDENCE_STALE',
+                'READINESS_FINGERPRINT_STALE',
+                'READINESS_CONTEXT_STALE'
+              ]::text[]
+              OR (
+                'READINESS_EVIDENCE_EXPIRED' = ANY(readiness_refresh.readiness_reason_codes)
+                AND readiness_refresh.readiness_expires_at IS NOT NULL
+                AND NULLIF(readiness_refresh.application_readiness->>'evaluated_at', '')::timestamptz
+                  < readiness_refresh.readiness_expires_at
+              )
+            )
+        )`
+      : "FALSE";
 
     await selectAndEnqueue(
       client as any,
@@ -1014,8 +1041,13 @@ export async function seedRecoverablePipelineTasks(
       "DECIDE_RECOMMENDATION",
       `SELECT c.id AS canonical_job_id,
               COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
+              jv.content_hash,
+              jv.active_requirement_set_id,
+              c.latest_match_run_id AS match_run_id,
+              c.latest_deterministic_decision_id AS deterministic_decision_id,
               active_profile.id AS profile_version_id,
-              TRUE AS repair_existing_state
+              TRUE AS repair_existing_state,
+              (${readinessRefreshPredicate} AND c.recommendation_outcome IS NOT NULL) AS readiness_reassessment_required
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
          SELECT pv.id
@@ -1026,19 +1058,25 @@ export async function seedRecoverablePipelineTasks(
          LIMIT 1
        ) active_profile ON TRUE
        LEFT JOIN LATERAL (
-         SELECT id
+         SELECT id, content_hash, active_requirement_set_id
          FROM job_versions
          WHERE workspace_id = c.workspace_id AND canonical_job_id = c.id
          ORDER BY observed_at DESC
          LIMIT 1
        ) jv ON TRUE
        WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) IN (
-           'HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED',
-           'MATCHED', 'QUEUED_FOR_AI', 'NEEDS_MANUAL_REVIEW'
+         AND (
+           COALESCE(c.processing_state, c.processing_status) IN (
+             'HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED',
+             'MATCHED', 'QUEUED_FOR_AI', 'NEEDS_MANUAL_REVIEW'
+           )
+           OR ${readinessRefreshPredicate}
          )
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
-         AND c.recommendation_outcome IS NULL
+         AND (
+           c.recommendation_outcome IS NULL
+           OR ${readinessRefreshPredicate}
+         )
          AND (
            COALESCE(c.processing_state, c.processing_status) IN (
              'HARD_REJECTED', 'NEEDS_VERIFICATION', 'ROUTING_DEFERRED'
@@ -1071,8 +1109,15 @@ export async function seedRecoverablePipelineTasks(
         payload: {
           canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
           job_version_id: requiredSeedValue(row, "job_version_id"),
+          content_hash: row.content_hash ?? null,
+          active_requirement_set_id: row.active_requirement_set_id ?? null,
+          match_run_id: row.match_run_id ?? null,
+          deterministic_decision_id: row.deterministic_decision_id ?? null,
           ...(row.profile_version_id ? { profile_version_id: row.profile_version_id } : {}),
           ...(row.repair_existing_state === true ? { repair_existing_state: true } : {}),
+          ...(row.readiness_reassessment_required === true
+            ? { reprocess_existing_state: true, reassessment_reason: "APPLICATION_READINESS_REFRESH" }
+            : {}),
         },
       }),
       enabledTypes,

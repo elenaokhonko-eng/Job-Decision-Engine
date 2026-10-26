@@ -398,6 +398,54 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     nullable: true
   },
   {
+    field: "readiness_status",
+    sourceTable: "v_application_readiness_current",
+    sourceColumn: "readiness_status",
+    producerStage: "recommendationDecider.ts -> migration 078 read model",
+    transformation: "Current lineage- and expiry-checked readiness state",
+    nullable: true
+  },
+  {
+    field: "readiness_fingerprint",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_fingerprint",
+    producerStage: "recommendationDecider.ts",
+    transformation: "Fingerprint of current application-readiness dependencies",
+    nullable: true
+  },
+  {
+    field: "readiness_expires_at",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_json.expires_at",
+    producerStage: "recommendationDecider.ts -> v_application_readiness_current",
+    transformation: "Earliest expiry among mandatory readiness evidence",
+    nullable: true
+  },
+  {
+    field: "readiness_reason_codes",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_json.reason_codes",
+    producerStage: "recommendationDecider.ts -> v_application_readiness_current",
+    transformation: "Current unresolved, blocked, stale, or expired readiness reasons",
+    nullable: true
+  },
+  {
+    field: "availability_status",
+    sourceTable: "job_versions",
+    sourceColumn: "availability_status",
+    producerStage: "sourceBroker.ts -> recommendationDecider.ts",
+    transformation: "Evidence-backed OPEN/CLOSED/UNKNOWN vacancy state",
+    nullable: true
+  },
+  {
+    field: "availability_recheck_at",
+    sourceTable: "job_versions",
+    sourceColumn: "availability_recheck_at",
+    producerStage: "sourceBroker.ts -> recommendationDecider.ts",
+    transformation: "Expiry of current vacancy availability evidence",
+    nullable: true
+  },
+  {
     field: "blocked_task_count",
     sourceTable: "pipeline_tasks",
     sourceColumn: "status/blocked_reason",

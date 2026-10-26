@@ -16,12 +16,16 @@ describe("documents/currentContext", () => {
     active_requirement_set_id: "requirements-current",
     match_run_job_content_hash: "job-hash-current",
     current_job_content_hash: "job-hash-current",
-    match_run_context_fingerprint: "current-context",
+    match_run_context_fingerprint: "match-context",
     latest_deterministic_decision_id: "decision-current",
     deterministic_decision_id: "decision-current",
     decision_job_version_id: "job-version-current",
     decision_match_run_id: "match-current",
-    decision_context_fingerprint: "current-context",
+    decision_context_fingerprint: "decision-context",
+    readiness_status: "READY",
+    readiness_fingerprint: "readiness-current",
+    readiness_expires_at: "2099-01-01T00:00:00.000Z",
+    readiness_reason_codes: [],
     decision_recommendation_eligibility: "ELIGIBLE",
     decision_recommendation_outcome: "REVIEW",
     gate_status: "PASS",
@@ -76,13 +80,26 @@ describe("documents/currentContext", () => {
     });
   });
 
-  it("rejects a deterministic decision from a different context fingerprint", () => {
-    const context = { ...currentContext(), decision_context_fingerprint: "decision-context-old" };
+  it("rejects a deterministic decision without its own context fingerprint", () => {
+    const context = { ...currentContext(), decision_context_fingerprint: null };
 
     expect(validateDocumentCurrentContext(context)).toEqual({ ok: false, reason: "DECISION_STALE" });
   });
 
-  it("accepts a fully current job, match, profile, and decision context", () => {
+  it.each([
+    { readiness_status: "NEEDS_VERIFICATION" },
+    { readiness_status: "PROCESSING" },
+    { readiness_status: "BLOCKED" },
+    { readiness_fingerprint: null },
+    { readiness_expires_at: "2000-01-01T00:00:00.000Z" },
+  ])("rejects a document when its application-readiness assessment is not current READY", (overrides) => {
+    expect(validateDocumentCurrentContext({ ...currentContext(), ...overrides })).toEqual({
+      ok: false,
+      reason: "READINESS_NOT_READY",
+    });
+  });
+
+  it("accepts distinct current match and decision fingerprints when readiness is READY", () => {
     expect(validateDocumentCurrentContext(currentContext())).toEqual({ ok: true });
   });
 });

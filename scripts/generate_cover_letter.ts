@@ -29,6 +29,10 @@ import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_rende
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
 import { validateDocumentCurrentContext } from "../src/documents/currentContext.js";
+import {
+  isCurrentReadyApplicationReadiness,
+  loadCurrentApplicationReadiness,
+} from "../src/services/currentApplicationReadiness.js";
 import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
 import {
   loadProfileFactsByIds,
@@ -276,7 +280,20 @@ async function generateTailoredCoverLetter(): Promise<void> {
       [ctx.workspaceId, job.active_profile_version_id]
     );
     const selectedProfileVersionId = profileNameRes.rows[0]?.profile_version_id ?? null;
+    const readiness = await loadCurrentApplicationReadiness(
+      pool,
+      ctx.workspaceId,
+      job.canonical_job_id,
+      resolvedJobVersionId,
+    );
+    if (!isCurrentReadyApplicationReadiness(readiness)) {
+      throw new Error("Document generation rejected: a current READY assessment is required.");
+    }
     const currentness = validateDocumentCurrentContext({
+      readiness_status: readiness?.readiness_status ?? null,
+      readiness_fingerprint: readiness?.readiness_fingerprint ?? null,
+      readiness_expires_at: readiness?.readiness_expires_at ?? null,
+      readiness_reason_codes: readiness?.readiness_reason_codes ?? null,
       current_job_version_id: job.current_job_version_id,
       selected_job_version_id: job.selected_job_version_id,
       active_profile_version_id: job.active_profile_version_id,
