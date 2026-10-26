@@ -705,7 +705,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       "<h1>Principal AI Systems Architect</h1>",
       "<h2>About the role</h2><p>Readiness Evidence Fixture Labs builds production AI platforms for enterprise data teams.</p>",
       "<h2>Responsibilities</h2><ul><li>Architect and build distributed AI and machine-learning systems used in production.</li><li>Implement reliable Python services and data infrastructure with engineering teams.</li></ul>",
-      "<h2>Qualifications</h2><ul><li>8+ years of professional production experience in AI engineering or software architecture.</li></ul>",
+      "<h2>Qualifications</h2><ul><li>8+ years of professional production experience.</li></ul>",
       "<p>This position is fully remote. Candidates must be authorized to work in Singapore. No travel is required.</p>",
     ].join("");
     const rawPayload = {
@@ -770,46 +770,6 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       quotedMode: "deterministic_only",
     });
     expect(extraction.errors).toBe(0);
-    const { rows: activeProfileRows } = await q(
-      `SELECT id::text AS profile_version_id
-       FROM profile_versions
-       WHERE workspace_id = $1 AND status = 'ACTIVE'
-       ORDER BY created_at DESC, id DESC
-       LIMIT 1`,
-      [getContext().workspaceId],
-    );
-    expect(activeProfileRows).toHaveLength(1);
-    await q(
-      `INSERT INTO profile_facts (
-         workspace_id, profile_version_id, fact_key, fact_type, statement,
-         structured_value, evidence_tier, verification_status, confidentiality
-       ) VALUES ($1, $2::uuid, $3, 'SKILL', $4, $5::jsonb,
-                 'PROFESSIONAL_PRODUCTION', 'VERIFIED', 'PRIVATE_REUSABLE')
-       ON CONFLICT (profile_version_id, fact_key)
-       DO UPDATE SET statement = EXCLUDED.statement,
-                     structured_value = EXCLUDED.structured_value,
-                     evidence_tier = EXCLUDED.evidence_tier,
-                     verification_status = EXCLUDED.verification_status`,
-      [
-        getContext().workspaceId,
-        activeProfileRows[0].profile_version_id,
-        `readiness-positive-experience-${jobVersionId}`,
-        "9 years of professional production experience in AI engineering and software architecture.",
-        JSON.stringify({
-          professional_years: 9,
-          experience_scope_v2: {
-            role_families: ["AI_ENGINEERING", "ARCHITECTURE", "HANDS_ON_SOFTWARE_ENGINEERING"],
-            domain_families: ["AI", "SOFTWARE"],
-            duration_basis: "PROFESSIONAL_PRODUCTION",
-            years_lower_bound: 9,
-            scope_complete_for_profile: true,
-            aggregation_kind: "AGGREGATE_TOTAL",
-            evidence_basis: "ATTESTED_TOTAL_DURATION",
-            attestation_status: "VERIFIED",
-          },
-        }),
-      ],
-    );
     const embeddings = await runEmbeddingBatchWithFallback(200, getClient(), {
       context: getContext(),
       jobVersionIds: [jobVersionId!],
@@ -875,7 +835,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(Number(conservation.rows[0].observation_count)).toBe(9);
     expect(Number(conservation.rows[0].observed_version_count)).toBe(9);
     expect(Number(conservation.rows[0].canonical_count)).toBe(8);
-    expect(versionCount).toBe(9);
+    expect(versionCount).toBe(10); // Nine email fixture versions plus the scoped positive-readiness job.
   });
 
   it("Integrity — every fixture observation maps to a live canonical job version", async () => {
