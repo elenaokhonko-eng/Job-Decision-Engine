@@ -1,6 +1,11 @@
+import json
+
+import pytest
+
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
+    parse_application_document_pair_status,
 )
 
 
@@ -14,6 +19,43 @@ def test_application_routes_are_namespaced_under_api_v2():
         application_api_path("/api/v2/applications/record-id/events")
         == "/api/v2/applications/record-id/events"
     )
+
+
+def test_parses_read_only_document_pair_status_for_exact_run_ids():
+    manifest = {
+        "event": "APPLICATION_DOCUMENT_PAIR_VALIDATED",
+        "applicationRecordId": "application-1",
+        "cvDocumentRunId": "cv-run-1",
+        "coverLetterDocumentRunId": "letter-run-1",
+        "pairCurrent": True,
+    }
+    output = f"logging output\n{json.dumps(manifest)}\n"
+
+    parsed = parse_application_document_pair_status(
+        output,
+        application_record_id="application-1",
+        cv_document_run_id="cv-run-1",
+        cover_letter_document_run_id="letter-run-1",
+    )
+    assert parsed["pairCurrent"] is True
+
+
+def test_rejects_document_pair_status_for_different_run_ids():
+    manifest = {
+        "event": "APPLICATION_DOCUMENT_PAIR_VALIDATED",
+        "applicationRecordId": "application-1",
+        "cvDocumentRunId": "other-cv",
+        "coverLetterDocumentRunId": "letter-run-1",
+    }
+    output = json.dumps(manifest)
+
+    with pytest.raises(ValueError, match="does not match"):
+        parse_application_document_pair_status(
+            output,
+            application_record_id="application-1",
+            cv_document_run_id="cv-run-1",
+            cover_letter_document_run_id="letter-run-1",
+        )
 
 
 def current_review_job(**overrides):

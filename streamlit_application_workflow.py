@@ -1,6 +1,7 @@
 """Eligibility helpers for the Streamlit application workspace."""
 
 from collections.abc import Mapping
+import json
 
 CURRENT_DETERMINISTIC_CONTEXTS = frozenset(
     {
@@ -19,6 +20,30 @@ def application_api_path(path: str) -> str:
     if normalized == API_V2_PREFIX or normalized.startswith(f"{API_V2_PREFIX}/"):
         return normalized
     return f"{API_V2_PREFIX}{normalized}"
+
+
+def parse_application_document_pair_status(
+    stdout: str,
+    *,
+    application_record_id: str,
+    cv_document_run_id: str,
+    cover_letter_document_run_id: str,
+) -> dict[str, object]:
+    for line in reversed(stdout.splitlines()):
+        try:
+            status = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(status, dict) or status.get("event") != "APPLICATION_DOCUMENT_PAIR_VALIDATED":
+            continue
+        if (
+            status.get("applicationRecordId") != application_record_id
+            or status.get("cvDocumentRunId") != cv_document_run_id
+            or status.get("coverLetterDocumentRunId") != cover_letter_document_run_id
+        ):
+            raise ValueError("Document-pair status does not match the selected application and run IDs.")
+        return status
+    raise ValueError("The document-pair validator returned no structured status.")
 
 
 def is_document_generation_eligible(

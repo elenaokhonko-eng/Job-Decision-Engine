@@ -22,26 +22,10 @@ import {
   dismissVerificationQuestion,
 } from "../../services/verificationQuestionService.js";
 import { RejectedJobRowSchema, ShortlistRowV2Schema } from "../../readModels/contracts.js";
-import { getActiveDocumentTemplatePluginRevision } from "../../documents/plugins.js";
-import { validatePersistedDocumentCurrentness } from "../../documents/provenanceCurrentness.js";
 
 type QueryClient = {
   query: pg.PoolClient["query"];
 };
-
-interface ApplicationDocumentRunRow {
-  id: string;
-  canonical_job_id: string;
-  job_version_id: string;
-  match_run_id: string | null;
-  profile_version_id: string | null;
-  deterministic_decision_id: string | null;
-  context_fingerprint: string | null;
-  document_type: "CV" | "COVER_LETTER";
-  status: string;
-  document_template_plugin_revision_id: string | null;
-  output_manifest: unknown;
-}
 
 type ResolveContextFn = typeof resolveWorkspaceContext;
 
@@ -149,41 +133,6 @@ async function withTransaction<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => 
   }
 }
 
-function createApplicationDocumentRateLimiter(): express.RequestHandler {
-  const windowMs = 60_000;
-  const maxRequests = 30;
-  const buckets = new Map<string, { windowStartedAt: number; requestCount: number }>();
-
-  return (req, res, next) => {
-    const context = (req as express.Request & { workspaceContext?: WorkspaceContext }).workspaceContext;
-    if (!context) {
-      res.status(503).json({ ok: false, error: "WORKSPACE_CONTEXT_UNAVAILABLE" });
-      return;
-    }
-    const now = Date.now();
-    if (buckets.size >= 10_000) {
-      for (const [key, bucket] of buckets) {
-        if (now - bucket.windowStartedAt >= windowMs) buckets.delete(key);
-      }
-      if (buckets.size >= 10_000) buckets.delete(buckets.keys().next().value ?? "");
-    }
-    const key = `${context.workspaceId}:${context.userId}:${req.ip || req.socket.remoteAddress || "unknown"}`;
-    const bucket = buckets.get(key);
-    if (!bucket || now - bucket.windowStartedAt >= windowMs) {
-      buckets.set(key, { windowStartedAt: now, requestCount: 1 });
-      next();
-      return;
-    }
-    if (bucket.requestCount >= maxRequests) {
-      res.setHeader("Retry-After", String(Math.max(1, Math.ceil((bucket.windowStartedAt + windowMs - now) / 1000))));
-      res.status(429).json({ ok: false, error: "DOCUMENT_STATUS_RATE_LIMITED" });
-      return;
-    }
-    bucket.requestCount += 1;
-    next();
-  };
-}
-
 export interface ApiV2RouterDeps {
   pool?: pg.Pool;
   resolveContext?: ResolveContextFn;
@@ -191,7 +140,6 @@ export interface ApiV2RouterDeps {
 
 export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
   const router = express.Router();
-  const applicationDocumentRateLimiter = createApplicationDocumentRateLimiter();
   router.use(express.json({ limit: "1mb" }));
 
   // Keep the pool strongly typed while the setup wizard is running before a
@@ -1108,121 +1056,6 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
       }
 
       res.status(201).json({ ok: true, application: record });
-    })
-  );
-
-  router.get(
-    "/applications/:id/documents",
-    applicationDocumentRateLimiter,
-    asyncHandler(async (req, res) => {
-      const ctx = (req as any).workspaceContext as WorkspaceContext;
-      const applicationRecordId = String(req.params.id || "").trim();
-      if (!isUuid(applicationRecordId)) {
-        res.status(400).json({ ok: false, error: "application id must be a UUID string." });
-        return;
-      }
-
-      const { rows: applicationRows } = await pool.query<{
-        id: string;
-        canonical_job_id: string;
-        job_version_id: string;
-        cv_document_run_id: string | null;
-        cover_letter_document_run_id: string | null;
-      }>(
-        `SELECT id, canonical_job_id, job_version_id, cv_document_run_id, cover_letter_document_run_id
-         FROM application_records
-         WHERE workspace_id = $1 AND user_id = $2 AND id = $3::uuid
-         LIMIT 1`,
-        [ctx.workspaceId, ctx.userId, applicationRecordId],
-      );
-      const application = applicationRows[0];
-      if (!application) {
-        res.status(404).json({ ok: false, error: "Application record not found." });
-        return;
-      }
-
-      const readRun = async (runId: string | null, documentType: "CV" | "COVER_LETTER") => {
-        if (!runId) return { run: null, current: false, reason: "DOCUMENT_RUN_MISSING" };
-        const { rows } = await pool.query<ApplicationDocumentRunRow>(
-          `SELECT id, canonical_job_id, job_version_id, match_run_id, profile_version_id,
-                  deterministic_decision_id, context_fingerprint, document_type, status,
-                  document_template_plugin_revision_id, output_manifest
-           FROM document_runs
-           WHERE workspace_id = $1 AND id = $2::uuid AND canonical_job_id = $3::uuid
-             AND job_version_id = $4::uuid AND document_type = $5 AND status = 'COMPLETED'
-           LIMIT 1`,
-          [ctx.workspaceId, runId, application.canonical_job_id, application.job_version_id, documentType],
-        );
-        const run = rows[0];
-        if (!run || run.id !== runId) return { run: null, current: false, reason: "DOCUMENT_RUN_NOT_FOUND" };
-
-        const [currentness, activeTemplate] = await Promise.all([
-          validatePersistedDocumentCurrentness(pool, ctx.workspaceId, {
-            canonicalJobId: run.canonical_job_id,
-            jobVersionId: run.job_version_id,
-            matchRunId: run.match_run_id,
-            profileVersionId: run.profile_version_id,
-            deterministicDecisionId: run.deterministic_decision_id,
-            contextFingerprint: run.context_fingerprint,
-          }),
-          getActiveDocumentTemplatePluginRevision(documentType, pool, { context: ctx }),
-        ]);
-        const templateCurrent = (activeTemplate?.revisionId ?? null) === run.document_template_plugin_revision_id;
-        return {
-          run,
-          current: currentness.current && templateCurrent,
-          reason: currentness.current ? (templateCurrent ? null : "DOCUMENT_TEMPLATE_STALE") : currentness.reason,
-        };
-      };
-
-      const [cv, coverLetter] = await Promise.all([
-        readRun(application.cv_document_run_id, "CV"),
-        readRun(application.cover_letter_document_run_id, "COVER_LETTER"),
-      ]);
-      const sameContext = Boolean(cv.run && coverLetter.run &&
-        cv.run.canonical_job_id === coverLetter.run.canonical_job_id &&
-        cv.run.job_version_id === coverLetter.run.job_version_id &&
-        cv.run.profile_version_id === coverLetter.run.profile_version_id &&
-        cv.run.deterministic_decision_id === coverLetter.run.deterministic_decision_id &&
-        cv.run.context_fingerprint === coverLetter.run.context_fingerprint);
-      const pairCurrent = Boolean(cv.current && coverLetter.current && sameContext);
-      let reviewedAt: string | null = null;
-      if (pairCurrent && cv.run && coverLetter.run) {
-        const cvManifest = jsonObjectOrEmpty(cv.run.output_manifest);
-        const letterManifest = jsonObjectOrEmpty(coverLetter.run.output_manifest);
-        const cvHash = typeof cvManifest.docx_sha256 === "string" ? cvManifest.docx_sha256 : null;
-        const letterHash = typeof letterManifest.docx_sha256 === "string" ? letterManifest.docx_sha256 : null;
-        if (cvHash && letterHash) {
-          const { rows: reviewEvents } = await pool.query<{ created_at: string }>(
-            `SELECT created_at
-             FROM application_events
-             WHERE workspace_id = $1 AND application_record_id = $2::uuid
-               AND event_payload->>'event' = 'DOCUMENT_PAIR_REVIEWED'
-               AND event_payload->>'cv_document_run_id' = $3
-               AND event_payload->>'cover_letter_document_run_id' = $4
-               AND event_payload->>'cv_sha256' = $5
-               AND event_payload->>'cover_letter_sha256' = $6
-             ORDER BY created_at DESC
-             LIMIT 1`,
-            [ctx.workspaceId, applicationRecordId, cv.run.id, coverLetter.run.id, cvHash, letterHash],
-          );
-          reviewedAt = reviewEvents[0]?.created_at ?? null;
-        }
-      }
-
-      res.json({
-        ok: true,
-        application_record_id: applicationRecordId,
-        cv_document_run_id: cv.run?.id ?? null,
-        cover_letter_document_run_id: coverLetter.run?.id ?? null,
-        cv_ready: cv.current,
-        cv_reason: cv.reason,
-        cover_letter_ready: coverLetter.current,
-        cover_letter_reason: coverLetter.reason,
-        pair_current: pairCurrent,
-        reviewed_at: reviewedAt,
-        document_ready: pairCurrent && reviewedAt !== null,
-      });
     })
   );
 

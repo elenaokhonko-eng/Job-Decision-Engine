@@ -47,6 +47,16 @@ describe('persistDocumentProvenance', () => {
       if (sql.includes('INSERT INTO document_runs')) {
         return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
       }
+      if (sql.includes('FROM application_records AS application')) {
+        return { rows: [{
+          application_record_id: '99999999-9999-4999-8999-999999999999',
+          cv_document_run_id: '11111111-1111-4111-8111-111111111111',
+          cover_letter_document_run_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          cv_template_revision_id: null,
+          cover_letter_template_revision_id: null,
+        }] };
+      }
+      if (sql.includes('FROM document_template_plugins')) return { rows: [] };
       if (sql.includes('UPDATE application_records')) {
         return { rows: [{ id: '99999999-9999-4999-8999-999999999999' }], rowCount: 1 };
       }
@@ -81,6 +91,7 @@ describe('persistDocumentProvenance', () => {
         outputManifest: {
           json_path: 'scripts/exports/example.cv.json',
           docx_path: 'scripts/exports/example.docx',
+          docx_sha256: 'test-docx-sha256',
         },
         claims: [
           {

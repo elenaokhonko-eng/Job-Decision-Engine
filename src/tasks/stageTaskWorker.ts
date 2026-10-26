@@ -16,6 +16,7 @@ import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
 import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
 import { planPipelineStageRound } from "./pipelineStageScheduler.js";
+import { scopeSeedQuery } from "./seedQueryScope.js";
 import {
   pipelineTaskStageVersion,
   reconcileStalePendingPipelineTasks,
@@ -453,13 +454,16 @@ async function selectAndEnqueue(
   enabledTypes?: Set<PipelineStageTaskType>,
   includeTestFixtures = false,
   deadlineAt?: number,
+  seedScope: { jobVersionIds?: readonly string[]; observationIds?: readonly string[] } = {},
+  maxSeedPerType = 200,
 ): Promise<void> {
   if (enabledTypes && !enabledTypes.has(taskType)) return;
   if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
     summary.timeBudgetExceeded = true;
     return;
   }
-  const { rows } = await client.query<Record<string, unknown>>(sql, params);
+  const scopedQuery = scopeSeedQuery(sql, params, seedScope, maxSeedPerType);
+  const { rows } = await client.query<Record<string, unknown>>(scopedQuery.sql, scopedQuery.params);
   const candidates = rows.map(build);
   const canonicalJobIds = [...new Set(candidates
     .map((candidate) => candidate.payload.canonical_job_id)
@@ -499,6 +503,8 @@ export async function seedRecoverablePipelineTasks(
     context?: WorkspaceContext;
     maxSeedPerType?: number;
     taskTypes?: PipelineStageTaskType[];
+    jobVersionIds?: readonly string[];
+    observationIds?: readonly string[];
     includeRoutingDeferred?: boolean;
     includeTestFixtures?: boolean;
     routingDeferredReplayVersion?: string;
@@ -527,6 +533,10 @@ export async function seedRecoverablePipelineTasks(
   const enabledTypes: Set<PipelineStageTaskType> | undefined = options.taskTypes
     ? new Set<PipelineStageTaskType>(options.taskTypes)
     : undefined;
+  const seedScope = {
+    jobVersionIds: options.jobVersionIds,
+    observationIds: options.observationIds,
+  };
 
   try {
     const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
@@ -555,6 +565,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     await selectAndEnqueue(
@@ -610,6 +622,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     await selectAndEnqueue(
@@ -660,6 +674,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     await selectAndEnqueue(
@@ -697,6 +713,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     await selectAndEnqueue(
@@ -755,6 +773,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     await selectAndEnqueue(
@@ -824,6 +844,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     await selectAndEnqueue(
@@ -892,6 +914,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     await selectAndEnqueue(
@@ -979,6 +1003,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     await selectAndEnqueue(
@@ -1052,6 +1078,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     await selectAndEnqueue(
@@ -1137,6 +1165,8 @@ export async function seedRecoverablePipelineTasks(
       enabledTypes,
       includeTestFixtures,
       deadlineAt,
+    seedScope,
+    maxPerType,
     );
 
     return summary;
@@ -2330,6 +2360,8 @@ export async function runPipelineStageTaskWorker(
       summary.seeded = await seedRecoverablePipelineTasks(client as any, {
         context: ctx,
         taskTypes,
+        jobVersionIds: options.jobVersionIds,
+        observationIds: options.observationIds,
         includeRoutingDeferred: options.includeRoutingDeferred,
         includeTestFixtures: options.includeTestFixtures,
         routingDeferredReplayVersion: options.routingDeferredReplayVersion,

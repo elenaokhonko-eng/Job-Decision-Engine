@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { planPipelineStageRound } from "../../tasks/pipelineStageScheduler.js";
+import { scopeSeedQuery } from "../../tasks/seedQueryScope.js";
 import {
   PipelineWorkerCancelledError,
   buildPipelineTaskKey,
@@ -164,6 +165,25 @@ describe("stageTaskWorker", () => {
       97,
     );
     expect(secondRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
+  });
+
+  it("pushes the exact target filter into bounded seed queries before their limit", () => {
+    const scoped = scopeSeedQuery(
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.canonical_job_id = c.id
+       WHERE c.workspace_id = $1
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, 200],
+      { jobVersionIds: ["target-version"] },
+      1,
+    );
+
+    expect(scoped.sql).toContain("WHERE scoped_seed.job_version_id = ANY($2::text[])");
+    expect(scoped.sql).toContain("LIMIT $3");
+    expect(scoped.params).toEqual([ctx.workspaceId, ["target-version"], 1]);
+    expect(scoped.sql).not.toContain("LIMIT $2\n       ) AS scoped_seed");
   });
 
   it("rotates the first stage across bounded worker runs and rounds", () => {

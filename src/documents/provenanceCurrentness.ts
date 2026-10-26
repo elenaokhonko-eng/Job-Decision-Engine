@@ -1,7 +1,6 @@
 import pg from "pg";
 
 import { validateDocumentCurrentContext } from "./currentContext.js";
-import type { DocumentTemplateType } from "./plugins.js";
 
 export interface PersistedDocumentCurrentnessInput {
   readonly canonicalJobId: string;
@@ -96,18 +95,4 @@ export async function validatePersistedDocumentCurrentness(
     return { current: false, reason: "DECISION_CONTEXT_CHANGED" };
   }
   return { current: true };
-}
-
-export interface PersistedDocumentRunRow {
-  readonly id: string;
-  readonly canonical_job_id: string;
-  readonly job_version_id: string;
-  readonly match_run_id: string | null;
-  readonly profile_version_id: string | null;
-  readonly deterministic_decision_id: string | null;
-  readonly context_fingerprint: string | null;
-  readonly document_type: DocumentTemplateType;
-  readonly status: string;
-  readonly document_template_plugin_revision_id: string | null;
-  readonly output_manifest: unknown;
 }

@@ -13,6 +13,7 @@ from fpdf import FPDF
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
+    parse_application_document_pair_status,
 )
 from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
@@ -976,18 +977,24 @@ def render_job_document_actions(job, key_prefix):
         show_document_run_downloads(letter, f"{key_prefix}_letter_historical")
         return
 
-    application_status = api_request(
-        "GET",
-        f"/api/v2/applications/{cv['applicationRecordId']}/documents",
-        timeout=30,
+    verification = run_checked_command(
+        [
+            "npx",
+            "tsx",
+            "scripts/validate_application_document_pair.ts",
+            cv["applicationRecordId"],
+            cv["documentRunId"],
+            letter["documentRunId"],
+        ],
+        "validate_document_pair",
     )
-    if (
-        not isinstance(application_status, dict)
-        or not application_status.get("ok")
-        or application_status.get("cv_document_run_id") != cv["documentRunId"]
-        or application_status.get("cover_letter_document_run_id") != letter["documentRunId"]
-        or not application_status.get("pair_current")
-    ):
+    application_status = parse_application_document_pair_status(
+        verification.stdout,
+        application_record_id=cv["applicationRecordId"],
+        cv_document_run_id=cv["documentRunId"],
+        cover_letter_document_run_id=letter["documentRunId"],
+    )
+    if not application_status.get("pairCurrent"):
         st.warning("This document pair is no longer current or attached to this draft application. Regenerate before marking it ready.")
         show_document_run_downloads(cv, f"{key_prefix}_cv_stale")
         show_document_run_downloads(letter, f"{key_prefix}_letter_stale")
@@ -997,13 +1004,13 @@ def render_job_document_actions(job, key_prefix):
     show_document_run_downloads(letter, f"{key_prefix}_letter_download")
     review_key = f"{key_prefix}_pair_reviewed_{cv['documentRunId']}_{letter['documentRunId']}"
     if review_key not in st.session_state:
-        st.session_state[review_key] = bool(application_status.get("reviewed_at"))
+        st.session_state[review_key] = bool(application_status.get("reviewedAt"))
     reviewed = st.checkbox(
         "I reviewed both documents and their downloads. The application remains a draft.",
         key=review_key,
-        disabled=bool(application_status.get("reviewed_at")),
+        disabled=bool(application_status.get("reviewedAt")),
     )
-    if reviewed and not application_status.get("reviewed_at"):
+    if reviewed and not application_status.get("reviewedAt"):
         review_response = api_request(
             "PATCH",
             f"/api/v2/applications/{cv['applicationRecordId']}",
@@ -1021,7 +1028,7 @@ def render_job_document_actions(job, key_prefix):
             raise RuntimeError("The API did not persist the document review event.")
         st.session_state[review_key] = True
         st.success("Document review recorded on the draft application.")
-    if application_status.get("document_ready") or reviewed:
+    if application_status.get("documentReady") or reviewed:
         st.success("Document pair reviewed. The application remains a draft; no employer submission was recorded.")
 
 def validate_shortlist_row_shape(row):

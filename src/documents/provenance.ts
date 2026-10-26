@@ -3,6 +3,7 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { getActiveDocumentTemplatePluginRevision } from './plugins.js';
 import { validatePersistedDocumentCurrentness } from './provenanceCurrentness.js';
 
 dotenv.config();
@@ -150,6 +151,81 @@ async function assertDocumentInputsInWorkspace(
       );
     }
   }
+}
+
+interface CurrentDocumentPairRow {
+  readonly application_record_id: string;
+  readonly cv_document_run_id: string;
+  readonly cover_letter_document_run_id: string;
+  readonly cv_template_revision_id: string | null;
+  readonly cover_letter_template_revision_id: string | null;
+}
+
+async function findCurrentApplicationDocumentPair(
+  client: pg.PoolClient,
+  context: WorkspaceContext,
+  input: DocumentProvenanceInput,
+): Promise<CurrentDocumentPairRow | null> {
+  if (!input.profileVersionId || !input.deterministicDecisionId || !input.contextFingerprint) return null;
+  const { rows } = await client.query<CurrentDocumentPairRow>(
+    `SELECT application.id AS application_record_id,
+            cv.id AS cv_document_run_id,
+            cover_letter.id AS cover_letter_document_run_id,
+            cv.document_template_plugin_revision_id AS cv_template_revision_id,
+            cover_letter.document_template_plugin_revision_id AS cover_letter_template_revision_id
+     FROM application_records AS application
+     JOIN document_runs AS cv
+       ON cv.workspace_id = application.workspace_id
+      AND cv.id = application.cv_document_run_id
+      AND cv.canonical_job_id = application.canonical_job_id
+      AND cv.job_version_id = application.job_version_id
+      AND cv.document_type = 'CV'
+      AND cv.status = 'COMPLETED'
+      AND cv.profile_version_id = $5::uuid
+      AND cv.deterministic_decision_id = $6::uuid
+      AND cv.context_fingerprint = $7
+      AND NULLIF(cv.output_manifest->>'docx_path', '') IS NOT NULL
+      AND NULLIF(cv.output_manifest->>'docx_sha256', '') IS NOT NULL
+     JOIN document_runs AS cover_letter
+       ON cover_letter.workspace_id = application.workspace_id
+      AND cover_letter.id = application.cover_letter_document_run_id
+      AND cover_letter.canonical_job_id = application.canonical_job_id
+      AND cover_letter.job_version_id = application.job_version_id
+      AND cover_letter.document_type = 'COVER_LETTER'
+      AND cover_letter.status = 'COMPLETED'
+      AND cover_letter.profile_version_id = $5::uuid
+      AND cover_letter.deterministic_decision_id = $6::uuid
+      AND cover_letter.context_fingerprint = $7
+      AND NULLIF(cover_letter.output_manifest->>'docx_path', '') IS NOT NULL
+      AND NULLIF(cover_letter.output_manifest->>'docx_sha256', '') IS NOT NULL
+     WHERE application.workspace_id = $1
+       AND application.user_id = $2
+       AND application.canonical_job_id = $3::uuid
+       AND application.job_version_id = $4::uuid
+       AND ($8::uuid IS NULL OR application.id = $8::uuid)
+     ORDER BY application.updated_at DESC, application.id DESC
+     LIMIT 1`,
+    [
+      context.workspaceId,
+      context.userId,
+      input.canonicalJobId,
+      input.jobVersionId,
+      input.profileVersionId,
+      input.deterministicDecisionId,
+      input.contextFingerprint,
+      input.applicationRecordId ?? null,
+    ],
+  );
+  const pair = rows[0];
+  if (!pair) return null;
+
+  const [cvTemplate, coverLetterTemplate] = await Promise.all([
+    getActiveDocumentTemplatePluginRevision('CV', client, { context }),
+    getActiveDocumentTemplatePluginRevision('COVER_LETTER', client, { context }),
+  ]);
+  if ((cvTemplate?.revisionId ?? null) !== pair.cv_template_revision_id ||
+      (coverLetterTemplate?.revisionId ?? null) !== pair.cover_letter_template_revision_id) return null;
+  return pair;
 }
 
 async function assertDocumentCurrentContext(
@@ -410,12 +486,17 @@ export async function persistDocumentProvenance(
       );
     }
 
-    await upsertDocumentReadyStage(client, ctx.workspaceId, input.canonicalJobId, input.jobVersionId, {
-      document_run_id: documentRunId,
-      document_type: input.documentType,
-      claim_count: claimRows.length,
-      policy_version: input.policyVersion,
-    });
+    const currentPair = await findCurrentApplicationDocumentPair(client, ctx, input);
+    if (currentPair) {
+      await upsertDocumentReadyStage(client, ctx.workspaceId, input.canonicalJobId, input.jobVersionId, {
+        application_record_id: currentPair.application_record_id,
+        cv_document_run_id: currentPair.cv_document_run_id,
+        cover_letter_document_run_id: currentPair.cover_letter_document_run_id,
+        document_type_generated: input.documentType,
+        claim_count: claimRows.length,
+        policy_version: input.policyVersion,
+      });
+    }
 
     await client.query('COMMIT');
 
