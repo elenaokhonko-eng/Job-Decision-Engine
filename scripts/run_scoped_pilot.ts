@@ -69,19 +69,15 @@ export interface ScopedPilotReport {
 }
 
 export interface ScopedPilotHistory {
-  readonly latestMatchRunId: string | null;
-  readonly latestDeterministicDecisionId: string | null;
+  readonly hasCurrentMatchRun: boolean;
+  readonly hasCurrentDeterministicDecision: boolean;
   readonly hasEvaluation: boolean;
   readonly hasPipelineHistory: boolean;
 }
 
 export function hasScopedPilotHistory(history: ScopedPilotHistory): boolean {
-  return Boolean(
-    history.latestMatchRunId ||
-    history.latestDeterministicDecisionId ||
-    history.hasEvaluation ||
-    history.hasPipelineHistory
-  );
+  return history.hasCurrentMatchRun || history.hasCurrentDeterministicDecision ||
+    history.hasEvaluation || history.hasPipelineHistory;
 }
 
 export function canResumeScopedPilotState(
@@ -102,6 +98,8 @@ interface PilotTarget extends pg.QueryResultRow {
   readonly processing_state: string | null;
   readonly latest_match_run_id: string | null;
   readonly latest_deterministic_decision_id: string | null;
+  readonly has_current_match_run: boolean;
+  readonly has_current_deterministic_decision: boolean;
   readonly source_expires_at: Date | string | null;
   readonly source_name: string;
   readonly source_plugin_key: string | null;
@@ -287,6 +285,18 @@ async function loadPilotTarget(
             COALESCE(canonical.processing_state, canonical.processing_status) AS processing_state,
             canonical.latest_match_run_id::TEXT AS latest_match_run_id,
             canonical.latest_deterministic_decision_id::TEXT AS latest_deterministic_decision_id,
+            EXISTS (
+              SELECT 1 FROM match_runs match_run
+              WHERE match_run.workspace_id = canonical.workspace_id
+                AND match_run.id = canonical.latest_match_run_id
+                AND match_run.job_version_id = version.id
+            ) AS has_current_match_run,
+            EXISTS (
+              SELECT 1 FROM deterministic_decisions decision
+              WHERE decision.workspace_id = canonical.workspace_id
+                AND decision.id = canonical.latest_deterministic_decision_id
+                AND decision.job_version_id = version.id
+            ) AS has_current_deterministic_decision,
             version.source_expires_at,
             observation.source_name,
             observation.source_plugin_key,
@@ -347,8 +357,8 @@ async function loadPilotTarget(
   if (target.is_test_fixture) throw new Error("The selected job is a test fixture.");
   if (target.latest_job_version_id !== args.jobVersionId) throw new Error("The selected version is no longer current.");
   const history: ScopedPilotHistory = {
-    latestMatchRunId: target.latest_match_run_id,
-    latestDeterministicDecisionId: target.latest_deterministic_decision_id,
+    hasCurrentMatchRun: target.has_current_match_run,
+    hasCurrentDeterministicDecision: target.has_current_deterministic_decision,
     hasEvaluation: target.has_evaluation,
     hasPipelineHistory: target.has_pipeline_history,
   };
@@ -505,8 +515,8 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
       const context = await resolveWorkspaceContext(client);
       const target = await loadPilotTarget(client, context, args);
       const resumedExistingWork = hasScopedPilotHistory({
-        latestMatchRunId: target.latest_match_run_id,
-        latestDeterministicDecisionId: target.latest_deterministic_decision_id,
+        hasCurrentMatchRun: target.has_current_match_run,
+        hasCurrentDeterministicDecision: target.has_current_deterministic_decision,
         hasEvaluation: target.has_evaluation,
         hasPipelineHistory: target.has_pipeline_history,
       });

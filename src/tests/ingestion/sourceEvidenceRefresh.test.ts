@@ -78,6 +78,23 @@ describe("single-version source evidence refresh assessment", () => {
     expect(result).toMatchObject({ kind: "MATCHED", job: { source_external_id: "ashby-role-42" } });
   });
 
+  it("recognizes quarantined Ashby records by posting URL when the stored ID is legacy URL-shaped", () => {
+    const ashbyUrl = "https://jobs.ashbyhq.com/cohere/role-42";
+    const result = assessSourceEvidenceCandidate({
+      adapterSourceName: "ASHBY",
+      observedSourceName: "ASHBY",
+      sourceExternalId: ashbyUrl,
+      sourceUrl: ashbyUrl,
+      expectedContentHash: generateContentHash(job.company_name, job.title, job.description_raw),
+    }, [], [{
+      identity: "ashby-role-42",
+      rawPayload: { id: "ashby-role-42", jobUrl: ashbyUrl },
+      error: "invalid extracted job",
+    }]);
+
+    expect(result).toMatchObject({ kind: "UNSUPPORTED" });
+  });
+
   it("returns conflict when the linked source identity now has different content", () => {
     const changedJob = { ...job, description_raw: "A different role description." };
 

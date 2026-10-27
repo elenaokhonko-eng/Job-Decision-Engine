@@ -148,16 +148,41 @@ function sourceIdentityMatches(
     normalizePostingUrl(candidateUrl, sourceName) === expectedUrl;
 }
 
+function rawPostingUrl(rawPayload: unknown, sourceName: string): string | null {
+  const urlKeys = [
+    "jobUrl",
+    "job_url",
+    "absolute_url",
+    "hostedUrl",
+    "hosted_url",
+    "employer_posting_url",
+    "canonical_apply_url",
+    "application_url",
+    "source_url",
+    "url",
+  ];
+  for (const record of payloadRecords(rawPayload)) {
+    for (const key of urlKeys) {
+      const value = record[key];
+      if (typeof value === "string" && normalizePostingUrl(value, sourceName) !== null) return value;
+    }
+  }
+  return null;
+}
+
 function rawIdentityMatches(
   identity: string,
   sourceExternalId: string | null,
   sourceUrl: string | null,
   sourceName: string,
+  rawPayload?: unknown,
 ): boolean {
   if (sourceExternalId !== null && !isHttpUrl(sourceExternalId) &&
       identity.trim() === sourceExternalId.trim()) return true;
   const expectedUrl = expectedPostingUrl(sourceExternalId, sourceUrl, sourceName);
-  return expectedUrl !== null && normalizePostingUrl(identity, sourceName) === expectedUrl;
+  const candidateUrl = isHttpUrl(identity) ? identity : rawPostingUrl(rawPayload, sourceName);
+  return expectedUrl !== null && candidateUrl !== null &&
+    normalizePostingUrl(candidateUrl, sourceName) === expectedUrl;
 }
 
 function payloadRecords(value: unknown): Record<string, unknown>[] {
@@ -220,7 +245,13 @@ export function assessSourceEvidenceCandidate(
   }
 
   const matchingQuarantine = quarantinedCandidates.find((candidate) =>
-    rawIdentityMatches(candidate.identity, target.sourceExternalId, target.sourceUrl, target.observedSourceName),
+    rawIdentityMatches(
+      candidate.identity,
+      target.sourceExternalId,
+      target.sourceUrl,
+      target.observedSourceName,
+      candidate.rawPayload,
+    ),
   );
   if (matchingQuarantine) {
     return {
@@ -240,7 +271,13 @@ export function assessSourceEvidenceCandidate(
         : null;
       const rawId = rawRecord?.source_external_id ?? rawRecord?.id;
       const candidateIdentity = typeof rawId === "string" || typeof rawId === "number" ? String(rawId) : "";
-      if (candidateIdentity && rawIdentityMatches(candidateIdentity, target.sourceExternalId, target.sourceUrl, target.observedSourceName)) {
+      if (candidateIdentity && rawIdentityMatches(
+        candidateIdentity,
+        target.sourceExternalId,
+        target.sourceUrl,
+        target.observedSourceName,
+        candidate,
+      )) {
         return {
           kind: "UNSUPPORTED",
           reason: "The matching source record failed ExtractedJob validation.",

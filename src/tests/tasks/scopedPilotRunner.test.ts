@@ -63,20 +63,29 @@ describe("scoped pilot runner", () => {
 
   it("recognizes prior match, decision, evaluation, or task history as resumable", () => {
     expect(hasScopedPilotHistory({
-      latestMatchRunId: "match-run-1",
-      latestDeterministicDecisionId: null,
+      hasCurrentMatchRun: true,
+      hasCurrentDeterministicDecision: false,
       hasEvaluation: false,
       hasPipelineHistory: false,
     })).toBe(true);
     expect(hasScopedPilotHistory({
-      latestMatchRunId: null,
-      latestDeterministicDecisionId: null,
+      hasCurrentMatchRun: false,
+      hasCurrentDeterministicDecision: false,
       hasEvaluation: false,
       hasPipelineHistory: true,
     })).toBe(true);
     expect(hasScopedPilotHistory({
-      latestMatchRunId: null,
-      latestDeterministicDecisionId: null,
+      hasCurrentMatchRun: false,
+      hasCurrentDeterministicDecision: false,
+      hasEvaluation: false,
+      hasPipelineHistory: false,
+    })).toBe(false);
+  });
+
+  it("ignores match and decision pointers from a different version", () => {
+    expect(hasScopedPilotHistory({
+      hasCurrentMatchRun: false,
+      hasCurrentDeterministicDecision: false,
       hasEvaluation: false,
       hasPipelineHistory: false,
     })).toBe(false);
@@ -84,8 +93,8 @@ describe("scoped pilot runner", () => {
 
   it("allows resuming operational errors with history but blocks terminal decisions", () => {
     const history = {
-      latestMatchRunId: null,
-      latestDeterministicDecisionId: null,
+      hasCurrentMatchRun: false,
+      hasCurrentDeterministicDecision: false,
       hasEvaluation: false,
       hasPipelineHistory: true,
     };
