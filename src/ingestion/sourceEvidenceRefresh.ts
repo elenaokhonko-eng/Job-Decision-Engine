@@ -801,10 +801,11 @@ export async function refreshCanonicalJobSourceEvidence(
                WHEN $4::text IN ('OPEN', 'CLOSED') THEN $7::timestamptz
                ELSE availability_recheck_at
              END,
-             evidence_revision_hash = $8
-         WHERE workspace_id = $9
-           AND canonical_job_id = $10::uuid
-           AND id = $11::uuid`,
+             evidence_revision_hash = $8,
+             source_posting_identity_hash = $9
+         WHERE workspace_id = $10
+           AND canonical_job_id = $11::uuid
+           AND id = $12::uuid`,
         [
           supported.publishedAt,
           supported.sourceUpdatedAt,
@@ -814,6 +815,7 @@ export async function refreshCanonicalJobSourceEvidence(
           supported.availability?.verified_at ?? null,
           supported.availability?.expires_at ?? null,
           revisionHash,
+          versionEvidenceIdentity,
           context.workspaceId,
           request.canonicalJobId,
           request.jobVersionId,
