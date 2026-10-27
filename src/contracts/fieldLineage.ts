@@ -515,7 +515,7 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     sourceTable: "v_application_readiness_current",
     sourceColumn: "readiness_reason_codes",
     producerStage: "recommendationDecider.ts -> migration 078 read model",
-    transformation: "Starts with readiness_json.reason_codes and adds READINESS_EVIDENCE_STALE, READINESS_FINGERPRINT_STALE, READINESS_CONTEXT_STALE, READINESS_EVIDENCE_EXPIRED, and READINESS_EXPIRY_MISSING when current lineage checks detect them",
+    transformation: "CASE emits the first applicable derived reason: READINESS_NOT_COMPUTED, READINESS_EVIDENCE_MISSING, READINESS_EVIDENCE_STALE, READINESS_FINGERPRINT_STALE, READINESS_EXPIRY_MISSING, READINESS_CONTEXT_STALE, or READINESS_EVIDENCE_EXPIRED; otherwise it returns readiness_json.reason_codes",
     nullable: true
   },
   {
