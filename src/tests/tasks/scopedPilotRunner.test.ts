@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createEmployerAtsAdapter,
   createScopedEvaluationOptions,
+  canResumeScopedPilotState,
   createScopedPilotWorkerOptions,
+  hasScopedPilotHistory,
+  isScopedEvaluationReadyForDocuments,
   parseScopedPilotArgs,
   runScopedPilot,
 } from "../../../scripts/run_scoped_pilot.js";
@@ -56,6 +59,62 @@ describe("scoped pilot runner", () => {
     expect(options.includeTestFixtures).toBe(false);
     expect(options.maxTasks).toBeGreaterThan(1);
     expect(options.claimBatchSize).toBe(1);
+  });
+
+  it("recognizes prior match, decision, evaluation, or task history as resumable", () => {
+    expect(hasScopedPilotHistory({
+      latestMatchRunId: "match-run-1",
+      latestDeterministicDecisionId: null,
+      hasEvaluation: false,
+      hasPipelineHistory: false,
+    })).toBe(true);
+    expect(hasScopedPilotHistory({
+      latestMatchRunId: null,
+      latestDeterministicDecisionId: null,
+      hasEvaluation: false,
+      hasPipelineHistory: true,
+    })).toBe(true);
+    expect(hasScopedPilotHistory({
+      latestMatchRunId: null,
+      latestDeterministicDecisionId: null,
+      hasEvaluation: false,
+      hasPipelineHistory: false,
+    })).toBe(false);
+  });
+
+  it("allows resuming operational errors with history but blocks terminal decisions", () => {
+    const history = {
+      latestMatchRunId: null,
+      latestDeterministicDecisionId: null,
+      hasEvaluation: false,
+      hasPipelineHistory: true,
+    };
+
+    expect(canResumeScopedPilotState("PROCESSING_ERROR", history)).toBe(true);
+    expect(canResumeScopedPilotState("PROCESSING_ERROR", { ...history, hasPipelineHistory: false })).toBe(false);
+    expect(canResumeScopedPilotState("HARD_REJECTED", history)).toBe(false);
+    expect(canResumeScopedPilotState("MANUALLY_REMOVED", history)).toBe(false);
+  });
+
+  it("accepts a persisted current evaluation when a resumed queue processes no new item", () => {
+    expect(isScopedEvaluationReadyForDocuments({
+      processed: 0,
+      failed: 0,
+      manualReview: 0,
+      eligible: 1,
+    }, true)).toBe(true);
+    expect(isScopedEvaluationReadyForDocuments({
+      processed: 0,
+      failed: 0,
+      manualReview: 0,
+      eligible: 1,
+    }, false)).toBe(false);
+    expect(isScopedEvaluationReadyForDocuments({
+      processed: 0,
+      failed: 1,
+      manualReview: 0,
+      eligible: 1,
+    }, true)).toBe(false);
   });
 
   it("passes the same version and active profile to evaluation selection and reconciliation", () => {

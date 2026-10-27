@@ -46,6 +46,7 @@ export interface ScopedPilotReport {
   readonly sourcePluginKey: string;
   readonly preferenceRevisionId: string | null;
   readonly sourceRefresh: SourceEvidenceRefreshResult;
+  readonly resumedExistingWork: boolean;
   readonly worker: PipelineStageWorkerSummary | null;
   readonly evaluation: EvaluationQueueStats | null;
   readonly readiness: {
@@ -67,6 +68,30 @@ export interface ScopedPilotReport {
   readonly operationalError: string | null;
 }
 
+export interface ScopedPilotHistory {
+  readonly latestMatchRunId: string | null;
+  readonly latestDeterministicDecisionId: string | null;
+  readonly hasEvaluation: boolean;
+  readonly hasPipelineHistory: boolean;
+}
+
+export function hasScopedPilotHistory(history: ScopedPilotHistory): boolean {
+  return Boolean(
+    history.latestMatchRunId ||
+    history.latestDeterministicDecisionId ||
+    history.hasEvaluation ||
+    history.hasPipelineHistory
+  );
+}
+
+export function canResumeScopedPilotState(
+  processingState: string | null,
+  history: ScopedPilotHistory,
+): boolean {
+  if (processingState === "HARD_REJECTED" || processingState === "MANUALLY_REMOVED") return false;
+  return processingState !== "PROCESSING_ERROR" || hasScopedPilotHistory(history);
+}
+
 interface PilotTarget extends pg.QueryResultRow {
   readonly canonical_job_id: string;
   readonly job_version_id: string;
@@ -85,6 +110,7 @@ interface PilotTarget extends pg.QueryResultRow {
   readonly canonical_apply_url: string | null;
   readonly observation_id: string;
   readonly has_evaluation: boolean;
+  readonly has_pipeline_history: boolean;
   readonly has_application: boolean;
   readonly has_documents: boolean;
 }
@@ -275,6 +301,19 @@ async function loadPilotTarget(
                 AND evaluation.job_version_id = version.id
             ) AS has_evaluation,
             EXISTS (
+              SELECT 1 FROM pipeline_tasks task
+              WHERE task.workspace_id = canonical.workspace_id
+                AND (
+                  task.payload->>'job_version_id' = version.id::TEXT
+                  OR EXISTS (
+                    SELECT 1 FROM raw_job_observations linked_observation
+                    WHERE linked_observation.workspace_id = task.workspace_id
+                      AND linked_observation.id::TEXT = task.payload->>'observation_id'
+                      AND linked_observation.job_version_id = version.id
+                  )
+                )
+            ) AS has_pipeline_history,
+            EXISTS (
               SELECT 1 FROM application_records application
               WHERE application.workspace_id = canonical.workspace_id
                 AND application.canonical_job_id = canonical.id
@@ -307,11 +346,14 @@ async function loadPilotTarget(
   if (!target) throw new Error("The selected job version or linked source observation was not found.");
   if (target.is_test_fixture) throw new Error("The selected job is a test fixture.");
   if (target.latest_job_version_id !== args.jobVersionId) throw new Error("The selected version is no longer current.");
-  if (["HARD_REJECTED", "MANUALLY_REMOVED", "PROCESSING_ERROR"].includes(target.processing_state ?? "")) {
-    throw new Error(`The selected job is in non-pilot state ${target.processing_state}.`);
-  }
-  if (target.latest_match_run_id || target.latest_deterministic_decision_id || target.has_evaluation) {
-    throw new Error("The selected job has already been matched or evaluated; choose an unprocessed job version.");
+  const history: ScopedPilotHistory = {
+    latestMatchRunId: target.latest_match_run_id,
+    latestDeterministicDecisionId: target.latest_deterministic_decision_id,
+    hasEvaluation: target.has_evaluation,
+    hasPipelineHistory: target.has_pipeline_history,
+  };
+  if (!canResumeScopedPilotState(target.processing_state, history)) {
+    throw new Error(`The selected job is in non-resumable state ${target.processing_state}.`);
   }
   if (target.has_application || target.has_documents) {
     throw new Error("The selected job already has application or document history.");
@@ -369,6 +411,45 @@ async function readCurrentDecisionAndReadiness(
   };
 }
 
+async function hasCurrentPersistedEvaluation(
+  client: pg.PoolClient,
+  context: WorkspaceContext,
+  canonicalJobId: string,
+  jobVersionId: string,
+  profileVersionId: string,
+): Promise<boolean> {
+  const { rows } = await client.query<{ current: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM ai_evaluations evaluation
+       JOIN canonical_jobs canonical
+         ON canonical.workspace_id = evaluation.workspace_id
+        AND canonical.id = evaluation.canonical_job_id
+       JOIN job_versions version
+         ON version.workspace_id = evaluation.workspace_id
+        AND version.canonical_job_id = evaluation.canonical_job_id
+        AND version.id = evaluation.job_version_id
+       WHERE evaluation.workspace_id = $1
+         AND evaluation.canonical_job_id = $2::UUID
+         AND evaluation.job_version_id = $3::UUID
+         AND evaluation.profile_version_id = $4::UUID
+         AND canonical.latest_job_version_id = evaluation.job_version_id
+         AND canonical.latest_match_run_id = evaluation.match_run_id
+         AND canonical.latest_deterministic_decision_id = evaluation.deterministic_decision_id
+         AND version.content_hash = evaluation.job_content_hash
+     ) AS current`,
+    [context.workspaceId, canonicalJobId, jobVersionId, profileVersionId],
+  );
+  return rows[0]?.current === true;
+}
+
+export function isScopedEvaluationReadyForDocuments(
+  evaluation: EvaluationQueueStats | null,
+  hasCurrentPersistedEvaluation: boolean,
+): boolean {
+  return evaluation !== null && evaluation.failed === 0 && evaluation.manualReview === 0 && hasCurrentPersistedEvaluation;
+}
+
 async function readScopedEvaluationProfileVersion(client: pg.PoolClient, context: WorkspaceContext): Promise<string> {
   const { rows } = await client.query<{ id: string }>(
     `SELECT id::TEXT AS id
@@ -423,6 +504,12 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
     try {
       const context = await resolveWorkspaceContext(client);
       const target = await loadPilotTarget(client, context, args);
+      const resumedExistingWork = hasScopedPilotHistory({
+        latestMatchRunId: target.latest_match_run_id,
+        latestDeterministicDecisionId: target.latest_deterministic_decision_id,
+        hasEvaluation: target.has_evaluation,
+        hasPipelineHistory: target.has_pipeline_history,
+      });
       const before = await readScopedTaskHealth(client, context.workspaceId, args.jobVersionId);
       if (before.activeRunning > 0) {
         throw new Error("The selected job version has an active task lease; refusing to overlap its worker.");
@@ -471,6 +558,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
           sourcePluginKey: target.source_plugin_key ?? "UNKNOWN",
           preferenceRevisionId,
           sourceRefresh,
+          resumedExistingWork,
           worker: null,
           evaluation: null,
           readiness: null,
@@ -485,7 +573,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
       });
       if (worker.failed > 0 || worker.deadLettered > 0 || worker.errors.length > 0) {
         const current = await readCurrentDecisionAndReadiness(client, context, args.canonicalJobId, args.jobVersionId);
-        return thisReport({ target, args, preferenceRevisionId, sourceRefresh, worker, evaluation: null, current, error: "Scoped pipeline worker reported a task failure." });
+        return thisReport({ target, args, preferenceRevisionId, sourceRefresh, resumedExistingWork, worker, evaluation: null, current, error: "Scoped pipeline worker reported a task failure." });
       }
 
       const evaluationProfileVersionId = await readScopedEvaluationProfileVersion(client, context);
@@ -534,6 +622,13 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
       }
 
       const current = await readCurrentDecisionAndReadiness(client, context, args.canonicalJobId, args.jobVersionId);
+      const currentEvaluation = await hasCurrentPersistedEvaluation(
+        client,
+        context,
+        args.canonicalJobId,
+        args.jobVersionId,
+        evaluationProfileVersionId,
+      );
       const readinessPayload = current.readiness?.application_readiness;
       const readinessRecord = readinessPayload !== null && typeof readinessPayload === "object"
         ? Object.fromEntries(Object.entries(readinessPayload))
@@ -554,8 +649,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
       const documentsEligible = isCurrentReadyApplicationReadiness(current.readiness) &&
         current.recommendationEligibility === "ELIGIBLE" &&
         (outcome === "PRIORITY" || outcome === "REVIEW") &&
-        evaluation !== null &&
-        evaluation.processed > 0 && evaluation.failed === 0 && evaluation.manualReview === 0;
+        isScopedEvaluationReadyForDocuments(evaluation, currentEvaluation);
       return {
         canonicalJobId: args.canonicalJobId,
         jobVersionId: args.jobVersionId,
@@ -564,6 +658,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
         sourcePluginKey: target.source_plugin_key ?? "UNKNOWN",
         preferenceRevisionId,
         sourceRefresh,
+        resumedExistingWork,
         worker,
         evaluation,
         readiness: {
@@ -612,6 +707,7 @@ function thisReport(input: {
   readonly args: ScopedPilotArgs;
   readonly preferenceRevisionId: string | null;
   readonly sourceRefresh: SourceEvidenceRefreshResult;
+  readonly resumedExistingWork: boolean;
   readonly worker: PipelineStageWorkerSummary;
   readonly evaluation: EvaluationQueueStats | null;
   readonly current: Awaited<ReturnType<typeof readCurrentDecisionAndReadiness>>;
@@ -625,6 +721,7 @@ function thisReport(input: {
     sourcePluginKey: input.target.source_plugin_key ?? "UNKNOWN",
     preferenceRevisionId: input.preferenceRevisionId,
     sourceRefresh: input.sourceRefresh,
+    resumedExistingWork: input.resumedExistingWork,
     worker: input.worker,
     evaluation: input.evaluation,
     readiness: {
