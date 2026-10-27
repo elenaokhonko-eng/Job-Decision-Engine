@@ -8,26 +8,91 @@
  *    invalid records are quarantined with an error log, never silently
  *    passed downstream (AGENTS.md invariant 2)
  */
+import { createHash } from "node:crypto";
 import { ExtractedJob, ExtractedJobSchema, SourceName } from "../../contracts/index.js";
 import { stripHtmlToText } from "../../security/sanitize.js";
+
+export interface QuarantinedSourceCandidate {
+  readonly identity: string;
+  readonly rawPayload: unknown;
+  readonly error: string;
+}
 
 export interface AdapterResult {
   sourceName: SourceName;
   success: boolean;
   jobs: ExtractedJob[];
   totalFetched: number;
+  snapshotTotal?: number;
   error?: string;
   isRateLimited?: boolean;
-  quarantined?: number; // count of items that failed schema validation
+  quarantined?: number;
+  quarantinedCandidates?: QuarantinedSourceCandidate[];
+  nextCursor?: string | null;
+  hasMore?: boolean;
+  snapshotId?: string | null;
+}
+
+export interface AdapterFetchOptions {
+  readonly limit?: number;
+  readonly page?: number;
+  readonly cursor?: string | null;
+}
+
+export function snapshotPage<T>(
+  records: readonly T[],
+  limit: number,
+  cursor: string | null | undefined,
+  page: number | undefined,
+  identity: (record: T) => string,
+): { records: T[]; nextCursor: string | null; hasMore: boolean } {
+  const ordered = [...records].sort((left, right) => identity(left).localeCompare(identity(right)));
+  const after = cursor?.startsWith("after:") ? decodeURIComponent(cursor.slice("after:".length)) : null;
+  const offset = cursor?.startsWith("offset:") ? Number(cursor.slice("offset:".length)) : Math.max(0, page ?? 0) * limit;
+  const eligible = after !== null
+    ? ordered.filter((record) => identity(record).localeCompare(after) > 0)
+    : ordered.slice(offset);
+  const selected = eligible.slice(0, limit);
+  const hasMore = eligible.length > selected.length;
+  const lastIdentity = selected.length > 0 ? identity(selected[selected.length - 1]) : null;
+  return {
+    records: selected,
+    nextCursor: hasMore && lastIdentity !== null ? `after:${encodeURIComponent(lastIdentity)}` : null,
+    hasMore,
+  };
+}
+
+export function stableAdapterIdentity(value: unknown): string {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    // Provider JSON is narrowed at this external-data boundary.
+    const record = value as Record<string, unknown>;
+    for (const field of ["source_external_id", "sourceExternalId", "id", "jobId", "slug", "employer_posting_url", "jobUrl", "hostedUrl", "canonical_apply_url", "application_url", "url"]) {
+      const identity = record[field];
+      if (typeof identity === "string" && identity.trim()) return identity.trim();
+      if (typeof identity === "number" && Number.isFinite(identity)) return String(identity);
+    }
+  }
+  // This digest only orders anonymous rows within one snapshot; it is not a canonical posting identity.
+  const serialized = JSON.stringify(value ?? null);
+  return `snapshot:${createHash("sha256").update(serialized).digest("hex")}`;
 }
 
 export abstract class BaseSourceAdapter {
   abstract sourceName: SourceName;
+  private quarantinedCandidates: QuarantinedSourceCandidate[] = [];
 
   /** Default per-request timeout: 15 seconds */
   protected timeoutMs: number = 15_000;
 
-  abstract fetchJobs(options?: { limit?: number; page?: number }): Promise<AdapterResult>;
+  abstract fetchJobs(options?: AdapterFetchOptions): Promise<AdapterResult>;
+
+  protected beginFetch(): void {
+    this.quarantinedCandidates = [];
+  }
+
+  protected getQuarantinedCandidates(): QuarantinedSourceCandidate[] {
+    return [...this.quarantinedCandidates];
+  }
 
   /**
    * Fetch with an AbortController timeout.
@@ -54,6 +119,7 @@ export abstract class BaseSourceAdapter {
       const issues = result.error.issues
         .map((i) => `${i.path.join(".")}: ${i.message}`)
         .join("; ");
+      this.quarantinedCandidates.push({ identity: sourceRef, rawPayload: raw, error: issues });
       console.warn(`⚠️ [${this.sourceName}] Item quarantined (${sourceRef}): ${issues}`);
       return null;
     }

@@ -39,6 +39,29 @@ describe("pipeline artifact context", () => {
     expect(first).not.toBe(second);
   });
 
+  it.each([
+    ["evidence_revision_hash", "evidence-a", "evidence-b"],
+    ["readiness_fingerprint", "readiness-a", "readiness-b"],
+    ["availability_evidence_hash", "availability-a", "availability-b"],
+    ["fx_rate_observation_id", "fx-observation-a", "fx-observation-b"],
+    ["qualification_comparator_version", "comparator-v1", "comparator-v2"],
+  ])("changes a decision identity when %s changes", (key, original, updated) => {
+    const decision = {
+      ...base,
+      taskType: "DECIDE_RECOMMENDATION",
+      taskVersion: "recommendation_decider_v1",
+      payload: { ...base.payload, [key]: original },
+    };
+    const changedDecision = {
+      ...decision,
+      payload: { ...decision.payload, [key]: updated },
+    };
+
+    expect(buildPipelineTaskContextFingerprint(decision)).not.toBe(
+      buildPipelineTaskContextFingerprint(changedDecision),
+    );
+  });
+
   it("changes when an explicit reassessment reason changes", () => {
     const first = buildPipelineTaskContextFingerprint({
       ...base,
@@ -78,6 +101,29 @@ describe("pipeline artifact context", () => {
     });
 
     expect(first).not.toBe(second);
+  });
+
+  it.each([
+    ["evidence_revision_hash", "evidence-v1", "evidence-v2"],
+    ["readiness_fingerprint", "readiness-v1", "readiness-v2"],
+    ["availability_evidence_hash", "availability-v1", "availability-v2"],
+    ["fx_rate_observation_id", "fx-observation-1", "fx-observation-2"],
+    ["qualification_comparator_version", "comparator-v1", "comparator-v2"],
+  ] as const)("changes recommendation identity when %s changes", (field, initialValue, changedValue) => {
+    const initialFingerprint = buildPipelineTaskContextFingerprint({
+      ...base,
+      taskType: "DECIDE_RECOMMENDATION",
+      taskVersion: "recommendation_decider_v1",
+      payload: { ...base.payload, [field]: initialValue },
+    });
+    const changedFingerprint = buildPipelineTaskContextFingerprint({
+      ...base,
+      taskType: "DECIDE_RECOMMENDATION",
+      taskVersion: "recommendation_decider_v1",
+      payload: { ...base.payload, [field]: changedValue },
+    });
+
+    expect(changedFingerprint).not.toBe(initialFingerprint);
   });
 
   it("changes when a semantic repair generation changes", () => {

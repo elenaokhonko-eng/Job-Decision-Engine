@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { planPipelineStageRound } from "../../tasks/pipelineStageScheduler.js";
+import { scopeSeedQuery } from "../../tasks/seedQueryScope.js";
 import {
   PipelineWorkerCancelledError,
   buildPipelineTaskKey,
   parsePipelineStageTaskLimits,
   parsePipelineTaskTypes,
-  runPipelineStageTaskWorker,
+  runPipelineStageTaskWorker as runPipelineStageTaskWorkerImpl,
   seedRecoverablePipelineTasks,
   type PipelineStageWorkerDependencies,
   type PipelineStageWorkerOptions,
@@ -27,6 +29,18 @@ describe("stageTaskWorker", () => {
     userKey: "local_user",
     role: "OWNER" as const,
   };
+
+  function runPipelineStageTaskWorker(
+    clientOrPool: Parameters<typeof runPipelineStageTaskWorkerImpl>[0],
+    options: PipelineStageWorkerOptions = {},
+    dependenciesOverride?: PipelineStageWorkerDependencies,
+  ) {
+    return runPipelineStageTaskWorkerImpl(
+      clientOrPool,
+      { reconcileStalePending: false, ...options },
+      dependenciesOverride,
+    );
+  }
 
   function dependencies(overrides: Partial<PipelineStageWorkerDependencies> = {}): PipelineStageWorkerDependencies {
     return {
@@ -98,6 +112,32 @@ describe("stageTaskWorker", () => {
     } as PipelineStageWorkerDependencies;
   }
 
+  it("applies job and observation allowlists to every task claim", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query } as any;
+
+    const summary = await runPipelineStageTaskWorker(client, {
+      context: ctx,
+      seed: false,
+      taskTypes: ["PUBLISH_EMBEDDING"],
+      jobVersionIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      observationIds: ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
+      maxTasks: 1,
+      heartbeatSeconds: 0,
+    });
+
+    const claim = calls.find((call) => call.sql.includes("WITH claimable AS"));
+    expect(claim?.sql).toContain("payload->>'job_version_id' = ANY($6::text[])");
+    expect(claim?.sql).toContain("payload->>'observation_id' = ANY($7::text[])");
+    expect(claim?.params?.[5]).toEqual(["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]);
+    expect(claim?.params?.[6]).toEqual(["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]);
+    expect(summary.claimed).toBe(0);
+  });
+
   it("parses per-stage task drain limits", () => {
     expect(
       parsePipelineStageTaskLimits("NORMALIZE_OBSERVATION=600,DECIDE_RECOMMENDATION=800"),
@@ -107,6 +147,56 @@ describe("stageTaskWorker", () => {
     });
     expect(() => parsePipelineStageTaskLimits("NORMALIZE_OBSERVATION=0")).toThrow("positive integer");
     expect(() => parsePipelineStageTaskLimits("UNKNOWN_STAGE=10")).toThrow("Unsupported pipeline stage");
+  });
+
+  it("allocates bounded round-robin quanta so an earlier backlog cannot drain ahead of later stages", () => {
+    const types = ["NORMALIZE_OBSERVATION", "PUBLISH_EMBEDDING", "MATCH_PROFILE_EVIDENCE"] as const;
+    const firstRound = planPipelineStageRound(types, 1, {}, {}, 100, 100);
+    expect(firstRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
+    const scarceBudgetRound = planPipelineStageRound(types, 1, {}, {}, 100, 1);
+    expect(scarceBudgetRound.map((entry) => entry.taskType)).toEqual([...types]);
+
+    const secondRound = planPipelineStageRound(
+      types,
+      1,
+      { NORMALIZE_OBSERVATION: 1, PUBLISH_EMBEDDING: 1, MATCH_PROFILE_EVIDENCE: 1 },
+      {},
+      100,
+      97,
+    );
+    expect(secondRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
+  });
+
+  it("pushes the exact target filter into bounded seed queries before their limit", () => {
+    const scoped = scopeSeedQuery(
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.canonical_job_id = c.id
+       WHERE c.workspace_id = $1
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, 200],
+      { jobVersionIds: ["target-version"], observationIds: ["target-observation"] },
+      1,
+    );
+
+    expect(scoped.sql).toContain("scoped_seed.job_version_id::text = ANY($2::text[])");
+    expect(scoped.sql).toContain("scoped_seed.observation_id::text = ANY($3::text[])");
+    expect(scoped.sql).toContain("LIMIT $4");
+    expect(scoped.params).toEqual([ctx.workspaceId, ["target-version"], ["target-observation"], 1]);
+    expect(scoped.sql).not.toContain("LIMIT $2\n       ) AS scoped_seed");
+  });
+
+  it("rotates the first stage across bounded worker runs and rounds", () => {
+    const types = ["NORMALIZE_OBSERVATION", "PUBLISH_EMBEDDING", "MATCH_PROFILE_EVIDENCE"] as const;
+    const firstTaskByRun = types.map((_, startOffset) => {
+      const round = planPipelineStageRound(types, 1, {}, {}, 100, 1, startOffset);
+      return round[0]?.taskType;
+    });
+    const nextRound = planPipelineStageRound(types, 1, {}, {}, 100, 1, 1);
+
+    expect(firstTaskByRun).toEqual([...types]);
+    expect(nextRound[0]?.taskType).toBe(types[1]);
   });
 
   it("versions profile matching task keys by active profile version", () => {
@@ -1322,6 +1412,269 @@ describe("stageTaskWorker", () => {
     expect(summary.completed).toBe(1);
     expect(summary.failed).toBe(0);
     expect(deps.runHardGates).not.toHaveBeenCalled();
+  });
+
+  it("reroutes a forced legacy preference task to the latest job version", async () => {
+    const insertedTasks: Array<{ params: unknown[] | undefined }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [{
+            id: "task-forced-preference-old-version",
+            workspace_id: ctx.workspaceId,
+            task_type: "APPLY_HARD_GATES",
+            task_key: "APPLY_HARD_GATES:version-old:preference:focused:1782216000000",
+            payload: {
+              canonical_job_id: "job-forced-preference",
+              job_version_id: "version-old",
+              force_policy_recalculation: true,
+              preference_mode_key: "focused",
+              preference_mode_updated_at: "2026-06-23T12:00:00.000Z",
+            },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 8,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return {
+          rows: [{
+            canonical_job_id: "job-forced-preference",
+            processing_state: "PREQUALIFIED",
+            primary_lane: null,
+            lane_evidence: null,
+            routing_disposition: null,
+            profile_match_status: "UNKNOWN",
+            gate_decision: "PASS",
+            recommendation_eligibility: "VERIFY",
+            recommendation_outcome: "TRACK",
+            latest_job_version_id: "version-current",
+          }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        insertedTasks.push({ params });
+        return { rows: [{ id: "task-forced-preference-current" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-forced-preference-old-version" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(client, {
+      context: ctx,
+      seed: false,
+      taskTypes: ["APPLY_HARD_GATES"],
+      maxTasks: 1,
+      heartbeatSeconds: 0,
+    }, deps);
+
+    expect(summary.completed).toBe(1);
+    expect(summary.successorTasksCreated).toBe(1);
+    expect(deps.runHardGates).not.toHaveBeenCalled();
+    expect(insertedTasks).toHaveLength(1);
+    expect(insertedTasks[0]?.params?.[2]).toBe(
+      "APPLY_HARD_GATES:version-current:hard_gate_v1:repair"
+    );
+    expect(insertedTasks[0]?.params?.[3]).toMatchObject({
+      canonical_job_id: "job-forced-preference",
+      job_version_id: "version-current",
+      force_policy_recalculation: true,
+      task_intent: {
+        schemaVersion: "task_intent_v2",
+        producer: "api.preference_mode_change",
+        requestId: "preference:focused:1782216000000",
+                triggerRevisionId: "1782216000000",
+        mode: "FORCE_RECOMPUTE",
+        target: { jobVersionId: "version-current" },
+      },
+    });
+  });
+
+  it("reroutes a forced stale embedding publication instead of discharging it", async () => {
+    const insertedTasks: Array<{ params: unknown[] | undefined }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) {
+        return { rows: [{
+          id: "task-forced-embedding-old-version",
+          workspace_id: ctx.workspaceId,
+          task_type: "PUBLISH_EMBEDDING",
+          task_key: "PUBLISH_EMBEDDING:version-old:embedding_publication_v1:repair",
+          payload: {
+            canonical_job_id: "job-forced-embedding",
+            job_version_id: "version-old",
+            reprocess_existing_state: true,
+          },
+          status: "RUNNING",
+          available_at: new Date().toISOString(),
+          lease_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+          heartbeat_at: new Date().toISOString(),
+          claimed_by: "worker:test",
+          attempt_count: 1,
+          max_attempts: 8,
+          last_error: null,
+          dead_letter_reason: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          completed_at: null,
+        }] };
+      }
+      if (sql.includes("job.latest_job_version_id = version.id")) return { rows: [{ is_current: false }] };
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return { rows: [{
+          canonical_job_id: "job-forced-embedding",
+          processing_state: "PREQUALIFIED",
+          primary_lane: null,
+          lane_evidence: null,
+          routing_disposition: null,
+          profile_match_status: "UNKNOWN",
+          gate_decision: "PASS",
+          recommendation_eligibility: "ELIGIBLE",
+          recommendation_outcome: "REVIEW",
+          latest_job_version_id: "version-current",
+        }] };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        insertedTasks.push({ params });
+        return { rows: [{ id: "task-forced-embedding-current" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-forced-embedding-old-version" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(client, {
+      context: ctx,
+      seed: false,
+      taskTypes: ["PUBLISH_EMBEDDING"],
+      maxTasks: 1,
+      heartbeatSeconds: 0,
+    }, deps);
+
+    expect(summary.completed).toBe(1);
+    expect(summary.successorTasksCreated).toBe(1);
+    expect(deps.runEmbeddingBatchWithFallback).not.toHaveBeenCalled();
+    expect(insertedTasks[0]?.params?.[2]).toBe(
+      "PUBLISH_EMBEDDING:version-current:embedding_publication_v1:repair"
+    );
+    expect(insertedTasks[0]?.params?.[3]).toMatchObject({
+      canonical_job_id: "job-forced-embedding",
+      job_version_id: "version-current",
+      reprocess_existing_state: true,
+      task_intent: {
+        mode: "FORCE_RECOMPUTE",
+        target: { jobVersionId: "version-current" },
+      },
+    });
+  });
+
+  it("reroutes a forced extraction replay to the latest job version", async () => {
+    const insertedTasks: Array<{ params: unknown[] | undefined }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) {
+        return {
+          rows: [{
+            id: "task-forced-extraction-old-version",
+            workspace_id: ctx.workspaceId,
+            task_type: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+            task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-old:deterministic_v3:repair",
+            payload: {
+              canonical_job_id: "job-forced-extraction",
+              job_version_id: "version-old",
+              reprocess: true,
+            },
+            status: "RUNNING",
+            available_at: new Date().toISOString(),
+            lease_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+            heartbeat_at: new Date().toISOString(),
+            claimed_by: "worker:test",
+            attempt_count: 1,
+            max_attempts: 8,
+            last_error: null,
+            dead_letter_reason: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            completed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return {
+          rows: [{
+            canonical_job_id: "job-forced-extraction",
+            processing_state: "PREQUALIFIED",
+            primary_lane: null,
+            lane_evidence: null,
+            routing_disposition: null,
+            profile_match_status: "UNKNOWN",
+            gate_decision: "PASS",
+            recommendation_eligibility: "VERIFY",
+            recommendation_outcome: "TRACK",
+            latest_job_version_id: "version-current",
+          }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        insertedTasks.push({ params });
+        return { rows: [{ id: "task-forced-extraction-current" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_task_attempts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("UPDATE pipeline_tasks")) return { rows: [{ id: "task-forced-extraction-old-version" }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(client, {
+      context: ctx,
+      seed: false,
+      taskTypes: ["EXTRACT_DETERMINISTIC_REQUIREMENTS"],
+      maxTasks: 1,
+      heartbeatSeconds: 0,
+    }, deps);
+
+    expect(summary.completed).toBe(1);
+    expect(summary.successorTasksCreated).toBe(1);
+    expect(deps.runRequirementsExtraction).not.toHaveBeenCalled();
+    expect(insertedTasks).toHaveLength(1);
+    expect(insertedTasks[0]?.params?.[2]).toBe(
+      "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-current:deterministic_v3:repair"
+    );
+    expect(insertedTasks[0]?.params?.[3]).toMatchObject({
+      canonical_job_id: "job-forced-extraction",
+      job_version_id: "version-current",
+      reprocess: true,
+      task_intent: {
+        schemaVersion: "task_intent_v2",
+        mode: "FORCE_RECOMPUTE",
+        target: { jobVersionId: "version-current" },
+      },
+    });
   });
 
   it("excludes marked release fixtures from operational task seeding", async () => {

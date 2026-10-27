@@ -3,9 +3,41 @@ import { persistDocumentProvenance } from '../../documents/provenance.js';
 
 describe('persistDocumentProvenance', () => {
   it('stores document run, claims, and DOCUMENT_READY stage event', async () => {
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, _params?: unknown[]) => {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
         return { rows: [] };
+      }
+      if (sql.includes("to_regclass('v_application_readiness_current')")) {
+        return { rows: [{ available: true }] };
+      }
+      if (sql.includes('FROM v_application_readiness_current')) {
+        const expiresAt = '2099-01-01T00:00:00.000Z';
+        const readinessFingerprint = 'a'.repeat(64);
+        return { rows: [{
+          application_readiness: {
+            schema_version: 'application_readiness_v1',
+            status: 'READY',
+            canonical_job_id: '33333333-3333-4333-8333-333333333333',
+            job_version_id: '44444444-4444-4444-8444-444444444444',
+            profile_version_id: '77777777-7777-4777-8777-777777777777',
+            requirement_set_id: '88888888-8888-4888-8888-888888888888',
+            match_run_id: '55555555-5555-4555-8555-555555555555',
+            evidence_revision_hash: 'b'.repeat(64),
+            readiness_fingerprint: readinessFingerprint,
+            evaluated_at: '2098-01-01T00:00:00.000Z',
+            expires_at: expiresAt,
+          },
+          readiness_status: 'READY',
+          readiness_fingerprint: readinessFingerprint,
+          readiness_expires_at: new Date(expiresAt),
+          readiness_reason_codes: [],
+          canonical_job_id: '33333333-3333-4333-8333-333333333333',
+          job_version_id: '44444444-4444-4444-8444-444444444444',
+          profile_version_id: '77777777-7777-4777-8777-777777777777',
+          requirement_set_id: '88888888-8888-4888-8888-888888888888',
+          match_run_id: '55555555-5555-4555-8555-555555555555',
+          evidence_revision_hash: 'b'.repeat(64),
+        }] };
       }
       if (sql.includes('current_shortlist.gate_status')) {
         return {
@@ -47,6 +79,19 @@ describe('persistDocumentProvenance', () => {
       if (sql.includes('INSERT INTO document_runs')) {
         return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
       }
+      if (sql.includes('FROM application_records AS application')) {
+        return { rows: [{
+          application_record_id: '99999999-9999-4999-8999-999999999999',
+          cv_document_run_id: '11111111-1111-4111-8111-111111111111',
+          cover_letter_document_run_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          cv_template_revision_id: null,
+          cover_letter_template_revision_id: null,
+        }] };
+      }
+      if (sql.includes('FROM document_template_plugins')) return { rows: [] };
+      if (sql.includes('UPDATE application_records')) {
+        return { rows: [{ id: '99999999-9999-4999-8999-999999999999' }], rowCount: 1 };
+      }
       if (sql.includes('SELECT id, requirement_key')) {
         return {
           rows: [
@@ -65,6 +110,7 @@ describe('persistDocumentProvenance', () => {
 
     const result = await persistDocumentProvenance(
       {
+        applicationRecordId: '99999999-9999-4999-8999-999999999999',
         canonicalJobId: '33333333-3333-4333-8333-333333333333',
         jobVersionId: '44444444-4444-4444-8444-444444444444',
         matchRunId: '55555555-5555-4555-8555-555555555555',
@@ -77,6 +123,7 @@ describe('persistDocumentProvenance', () => {
         outputManifest: {
           json_path: 'scripts/exports/example.cv.json',
           docx_path: 'scripts/exports/example.docx',
+          docx_sha256: 'test-docx-sha256',
         },
         claims: [
           {
@@ -109,6 +156,9 @@ describe('persistDocumentProvenance', () => {
       sql.includes('decision.recommendation_eligibility')
     )).toBe(true);
     expect(calls.some((sql) => sql.includes('INSERT INTO document_runs'))).toBe(true);
+    const exactApplicationLink = query.mock.calls.find((call: unknown[]) => String(call[0]).includes('UPDATE application_records'));
+    expect(exactApplicationLink?.[0]).toContain('AND id = $5::uuid');
+    expect(exactApplicationLink?.[1]).toContain('99999999-9999-4999-8999-999999999999');
     expect(calls.some((sql) => sql.includes('INSERT INTO document_claims'))).toBe(true);
     expect(calls.some((sql) => sql.includes('INSERT INTO job_version_pipeline_state'))).toBe(true);
     expect(calls.some((sql) => sql.includes('INSERT INTO pipeline_stage_events'))).toBe(true);

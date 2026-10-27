@@ -397,6 +397,7 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     transformation: "Stable reason code for stale or blocked currentness",
     nullable: true
   },
+
   {
     field: "blocked_task_count",
     sourceTable: "pipeline_tasks",
@@ -452,6 +453,118 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     producerStage: "v_canonical_shortlist_actions_scoped",
     transformation: "Separates user action, automatic processing, technical support errors, terminal non-matches, and completed jobs",
     nullable: false
+  },
+  {
+    field: "schema_version",
+    sourceTable: "runtime_contract",
+    sourceColumn: "SCHEMA_VERSION",
+    producerStage: "contracts/index.ts",
+    transformation: "Versioned ShortlistRow runtime contract version when present",
+    nullable: true
+  },
+  {
+    field: "read_model_version",
+    sourceTable: "v_application_readiness_current",
+    sourceColumn: "read_model_version",
+    producerStage: "migration 078",
+    transformation: "Version of the current readiness read model",
+    nullable: true
+  },
+  {
+    field: "application_readiness",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_json",
+    producerStage: "recommendationDecider.ts -> v_application_readiness_current",
+    transformation: "Versioned material checks and lineage for application readiness",
+    nullable: true
+  },
+  {
+    field: "job_source_evidence",
+    sourceTable: "raw_job_observations / source_candidate_dispositions",
+    sourceColumn: "normalized_evidence",
+    producerStage: "sourceBroker.ts -> v_application_readiness_current",
+    transformation: "Newest normalized source evidence for the displayed job version, including availability refreshes",
+    nullable: true
+  },
+  {
+    field: "source_published_at",
+    sourceTable: "job_versions",
+    sourceColumn: "source_published_at",
+    producerStage: "normalize.ts -> v_application_readiness_current",
+    transformation: "Authoritative source publication date, not retrieval time",
+    nullable: true
+  },
+  {
+    field: "source_expires_at",
+    sourceTable: "job_versions",
+    sourceColumn: "source_expires_at",
+    producerStage: "normalize.ts -> v_application_readiness_current",
+    transformation: "Explicit source expiry date when supported",
+    nullable: true
+  },
+  {
+    field: "readiness_status",
+    sourceTable: "v_application_readiness_current",
+    sourceColumn: "readiness_status",
+    producerStage: "recommendationDecider.ts -> migration 078 read model",
+    transformation: "Current lineage- and expiry-checked READY/BLOCKED/NEEDS_VERIFICATION/PROCESSING status",
+    nullable: true
+  },
+  {
+    field: "readiness_reason_codes",
+    sourceTable: "v_application_readiness_current",
+    sourceColumn: "readiness_reason_codes",
+    producerStage: "recommendationDecider.ts -> migration 078 read model",
+    transformation: "CASE emits the first applicable derived reason: READINESS_NOT_COMPUTED, READINESS_EVIDENCE_MISSING, READINESS_EVIDENCE_STALE, READINESS_FINGERPRINT_STALE, READINESS_EXPIRY_MISSING, READINESS_CONTEXT_STALE, or READINESS_EVIDENCE_EXPIRED; otherwise it returns readiness_json.reason_codes",
+    nullable: true
+  },
+  {
+    field: "readiness_fingerprint",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_fingerprint",
+    producerStage: "recommendationDecider.ts",
+    transformation: "Fingerprint of current job, profile, requirements, preferences, policies, evidence, and match context",
+    nullable: true
+  },
+  {
+    field: "readiness_expires_at",
+    sourceTable: "deterministic_decisions",
+    sourceColumn: "readiness_json.expires_at",
+    producerStage: "recommendationDecider.ts -> v_application_readiness_current",
+    transformation: "Earliest availability/freshness evidence expiry used by the current read model",
+    nullable: true
+  },
+  {
+    field: "evidence_revision_hash",
+    sourceTable: "job_versions",
+    sourceColumn: "evidence_revision_hash",
+    producerStage: "sourceBroker.ts -> normalize.ts",
+    transformation: "Stable semantic digest of normalized evidence for the current version",
+    nullable: true
+  },
+  {
+    field: "availability_status",
+    sourceTable: "raw_job_observations / source_candidate_dispositions / job_versions",
+    sourceColumn: "normalized_evidence.availability.status / availability_status",
+    producerStage: "sourceBroker.ts -> migration 078 v_application_readiness_current",
+    transformation: "Latest normalized source evidence takes precedence; falls back to job_versions.availability_status",
+    nullable: true
+  },
+  {
+    field: "availability_verified_at",
+    sourceTable: "raw_job_observations / source_candidate_dispositions / job_versions",
+    sourceColumn: "normalized_evidence.availability.verified_at / availability_verified_at",
+    producerStage: "sourceBroker.ts -> migration 078 v_application_readiness_current",
+    transformation: "Latest normalized source verification timestamp takes precedence; falls back to job_versions.availability_verified_at",
+    nullable: true
+  },
+  {
+    field: "availability_recheck_at",
+    sourceTable: "raw_job_observations / source_candidate_dispositions / job_versions",
+    sourceColumn: "normalized_evidence.availability.expires_at / availability_recheck_at",
+    producerStage: "sourceBroker.ts -> migration 078 v_application_readiness_current",
+    transformation: "Latest normalized source expiry takes precedence; falls back to job_versions.availability_recheck_at",
+    nullable: true
   }
 ];
 

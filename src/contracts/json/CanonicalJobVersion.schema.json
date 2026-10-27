@@ -55,6 +55,1153 @@
           "type": "string",
           "minLength": 1
         },
+        "source_identity_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_revision_hash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "job_source_evidence": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "schema_version": {
+                  "type": "string",
+                  "const": "job_source_evidence_v1"
+                },
+                "normalizer_version": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source_name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source_plugin_key": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source_plugin_revision_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source_external_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source_identity_hash": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "employer_posting_url": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "application_url": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "raw_payload_hash": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retrieved_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "description": {
+                  "type": "object",
+                  "properties": {
+                    "normalized_text": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "normalized_text_hash": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "completeness_status": {
+                      "type": "string",
+                      "enum": [
+                        "COMPLETE",
+                        "INCOMPLETE",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "completeness_reasons": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "default": []
+                    },
+                    "segments": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "HEADING",
+                              "PARAGRAPH",
+                              "LIST_ITEM",
+                              "OTHER"
+                            ]
+                          },
+                          "text": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "normalized_start_offset": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "normalized_end_offset": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "raw_start_offset": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "raw_end_offset": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 1
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "heading_level": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 6
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "text",
+                          "normalized_start_offset",
+                          "normalized_end_offset",
+                          "raw_start_offset",
+                          "raw_end_offset"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "default": []
+                    }
+                  },
+                  "required": [
+                    "normalized_text",
+                    "normalized_text_hash",
+                    "completeness_status"
+                  ],
+                  "additionalProperties": false
+                },
+                "dates": {
+                  "type": "object",
+                  "properties": {
+                    "published_at": {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "SUPPORTED",
+                            "UNKNOWN",
+                            "CONFLICTING",
+                            "INVALID"
+                          ]
+                        },
+                        "value": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "basis": {
+                          "type": "string",
+                          "enum": [
+                            "PUBLISHED_AT",
+                            "GENUINE_REPOST_AT",
+                            "SOURCE_UPDATED_AT",
+                            "EXPIRES_AT",
+                            "RETRIEVED_AT",
+                            "UNKNOWN"
+                          ]
+                        },
+                        "raw_value": {
+                          "anyOf": [
+                            {
+                              "type": [
+                                "string",
+                                "number"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "timestamp_unit": {
+                          "type": "string",
+                          "enum": [
+                            "ISO_STRING",
+                            "RFC2822_STRING",
+                            "UNIX_SECONDS",
+                            "UNIX_MILLISECONDS",
+                            "UNKNOWN"
+                          ]
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "evidence_key": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "source_name": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "source_plugin_key": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "source_external_id": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "source_url": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "format": "uri"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "raw_payload_hash": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "quote_text": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "normalized_start_offset": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "normalized_end_offset": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "raw_start_offset": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "raw_end_offset": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "observed_at": {
+                                "type": "string",
+                                "format": "date-time"
+                              },
+                              "confidence": {
+                                "type": "string",
+                                "enum": [
+                                  "HIGH",
+                                  "MEDIUM",
+                                  "LOW"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "evidence_key",
+                              "source_name",
+                              "source_plugin_key",
+                              "source_external_id",
+                              "source_url",
+                              "raw_payload_hash",
+                              "quote_text",
+                              "normalized_start_offset",
+                              "normalized_end_offset",
+                              "raw_start_offset",
+                              "raw_end_offset",
+                              "observed_at",
+                              "confidence"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "default": []
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value",
+                        "basis",
+                        "raw_value",
+                        "timestamp_unit"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "reposted_at": {
+                      "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at"
+                    },
+                    "source_updated_at": {
+                      "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at"
+                    },
+                    "expires_at": {
+                      "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at"
+                    }
+                  },
+                  "required": [
+                    "published_at",
+                    "reposted_at",
+                    "source_updated_at",
+                    "expires_at"
+                  ],
+                  "additionalProperties": false
+                },
+                "availability": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "OPEN",
+                        "CLOSED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "verified_at": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "expires_at": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "verification_method": {
+                      "type": "string",
+                      "enum": [
+                        "EMPLOYER_ATS_LISTING",
+                        "EXPLICIT_SOURCE_STATUS",
+                        "EMPLOYER_APPLICATION_PAGE",
+                        "USER_SUPPLIED",
+                        "NONE"
+                      ]
+                    },
+                    "reason_code": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                      },
+                      "default": []
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "verified_at",
+                    "expires_at",
+                    "verification_method",
+                    "reason_code"
+                  ],
+                  "additionalProperties": false
+                },
+                "workability": {
+                  "type": "object",
+                  "properties": {
+                    "hiring_territories": {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/status"
+                        },
+                        "operator": {
+                          "type": "string",
+                          "enum": [
+                            "ANY",
+                            "ALL",
+                            "UNKNOWN"
+                          ]
+                        },
+                        "countries": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 2
+                          },
+                          "default": []
+                        },
+                        "requirements": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "operator": {
+                                "type": "string",
+                                "enum": [
+                                  "ANY",
+                                  "ALL",
+                                  "UNKNOWN"
+                                ]
+                              },
+                              "countries": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 2
+                                },
+                                "minItems": 1
+                              },
+                              "evidence": {
+                                "type": "array",
+                                "items": {
+                                  "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                                },
+                                "default": []
+                              }
+                            },
+                            "required": [
+                              "operator",
+                              "countries"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "default": []
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                          },
+                          "default": []
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "operator"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "work_mode": {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/status"
+                        },
+                        "value": {
+                          "type": "string",
+                          "enum": [
+                            "REMOTE",
+                            "HYBRID",
+                            "ONSITE",
+                            "UNKNOWN"
+                          ]
+                        },
+                        "office_days_min": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 7
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "office_days_max": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 7
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                          },
+                          "default": []
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value",
+                        "office_days_min",
+                        "office_days_max"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "employment_routes": {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/status"
+                        },
+                        "values": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "SG_EMPLOYEE",
+                              "EOR_EMPLOYEE",
+                              "DIRECT_OVERSEAS_EMPLOYEE",
+                              "OWN_COMPANY_CONSULTANT",
+                              "INDIVIDUAL_CONTRACTOR",
+                              "UNKNOWN"
+                            ]
+                          },
+                          "default": []
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                          },
+                          "default": []
+                        }
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "timezone_overlap": {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/status"
+                        },
+                        "value": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                          },
+                          "default": []
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "travel_pct": {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/status"
+                        },
+                        "minimum": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "maximum": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 100
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                          },
+                          "default": []
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "minimum",
+                        "maximum"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "on_call": {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/status"
+                        },
+                        "required": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "evidence": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                          },
+                          "default": []
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "required"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "hiring_territories",
+                    "work_mode",
+                    "employment_routes",
+                    "timezone_overlap",
+                    "travel_pct",
+                    "on_call"
+                  ],
+                  "additionalProperties": false
+                },
+                "compensation": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/status"
+                    },
+                    "components": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "component_type": {
+                            "type": "string",
+                            "enum": [
+                              "BASE_CASH",
+                              "VARIABLE_CASH",
+                              "EQUITY",
+                              "OTHER"
+                            ]
+                          },
+                          "amount_min": {
+                            "anyOf": [
+                              {
+                                "type": "number",
+                                "exclusiveMinimum": 0
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "amount_max": {
+                            "anyOf": [
+                              {
+                                "type": "number",
+                                "exclusiveMinimum": 0
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "currency": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[A-Z]{3}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "period": {
+                            "type": "string",
+                            "enum": [
+                              "HOURLY",
+                              "MONTHLY",
+                              "ANNUAL",
+                              "ONE_TIME",
+                              "UNKNOWN"
+                            ]
+                          },
+                          "guaranteed_hours_per_week": {
+                            "anyOf": [
+                              {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 168
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "paid_weeks_per_year": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 53
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "default": null
+                          },
+                          "pay_basis": {
+                            "type": "string",
+                            "enum": [
+                              "GROSS",
+                              "NET",
+                              "UNKNOWN"
+                            ]
+                          },
+                          "evidence": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                            },
+                            "minItems": 1
+                          }
+                        },
+                        "required": [
+                          "component_type",
+                          "amount_min",
+                          "amount_max",
+                          "currency",
+                          "period",
+                          "guaranteed_hours_per_week",
+                          "pay_basis",
+                          "evidence"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "default": []
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                      },
+                      "default": []
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                },
+                "role_shape": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/status"
+                    },
+                    "role_families": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "default": []
+                    },
+                    "domain_families": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "default": []
+                    },
+                    "technical_ownership": {
+                      "type": "string",
+                      "enum": [
+                        "MEANINGFUL",
+                        "LIMITED",
+                        "NONE",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "hands_on_coding": {
+                      "type": "string",
+                      "enum": [
+                        "REQUIRED",
+                        "PREFERRED",
+                        "NOT_REQUIRED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "architecture_scope": {
+                      "type": "string",
+                      "enum": [
+                        "REQUIRED",
+                        "PREFERRED",
+                        "NOT_REQUIRED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "delivery_scope": {
+                      "type": "string",
+                      "enum": [
+                        "TECHNICAL_PROJECT",
+                        "TECHNICAL_PROGRAMME",
+                        "TECHNICAL_PRODUCT",
+                        "NON_TECHNICAL",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "sales_ownership": {
+                      "type": "string",
+                      "enum": [
+                        "QUOTA_OR_CLOSING",
+                        "PROSPECTING",
+                        "TECHNICAL_SUPPORT_ONLY",
+                        "NO_EVIDENCE",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "people_management": {
+                      "type": "string",
+                      "enum": [
+                        "REQUIRED",
+                        "PREFERRED",
+                        "NOT_REQUIRED",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "interaction_burden": {
+                      "type": "string",
+                      "enum": [
+                        "LOW",
+                        "MODERATE",
+                        "HIGH",
+                        "UNKNOWN"
+                      ]
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                      },
+                      "default": []
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "technical_ownership",
+                    "hands_on_coding",
+                    "architecture_scope",
+                    "delivery_scope",
+                    "sales_ownership",
+                    "people_management",
+                    "interaction_burden"
+                  ],
+                  "additionalProperties": false
+                },
+                "opportunity_category": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/status"
+                    },
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "COMMERCIAL",
+                            "UNIVERSITY_RESEARCH",
+                            "MISSION_MULTILATERAL"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/CanonicalJobVersion/properties/job_source_evidence/anyOf/0/properties/dates/properties/published_at/properties/evidence/items"
+                      },
+                      "default": []
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "schema_version",
+                "normalizer_version",
+                "source_name",
+                "source_plugin_key",
+                "source_plugin_revision_id",
+                "source_external_id",
+                "source_identity_hash",
+                "employer_posting_url",
+                "application_url",
+                "raw_payload_hash",
+                "retrieved_at",
+                "description",
+                "dates",
+                "availability",
+                "workability",
+                "compensation",
+                "role_shape",
+                "opportunity_category"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_published_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_updated_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_expires_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "availability_status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "OPEN",
+                "CLOSED",
+                "UNKNOWN"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "availability_verified_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "availability_recheck_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "version_number": {
           "type": "integer",
           "exclusiveMinimum": 0,

@@ -44,6 +44,36 @@ describe("api/v2 application tracker", () => {
     };
   }
 
+  function readinessRow(readinessStatus: string | null, reasonCodes: string[] = []) {
+    const expiresAt = "2099-01-01T00:00:00.000Z";
+    const fingerprint = "a".repeat(64);
+    const applicationReadiness = {
+      status: readinessStatus ?? "READY",
+      canonical_job_id: "22222222-2222-4222-8222-222222222222",
+      job_version_id: "33333333-3333-4333-8333-333333333333",
+      profile_version_id: null,
+      requirement_set_id: null,
+      match_run_id: null,
+      evidence_revision_hash: "b".repeat(64),
+      readiness_fingerprint: fingerprint,
+      evaluated_at: "2098-01-01T00:00:00.000Z",
+      expires_at: expiresAt,
+    };
+    return {
+      application_readiness: applicationReadiness,
+      readiness_status: readinessStatus,
+      readiness_fingerprint: fingerprint,
+      readiness_expires_at: new Date(expiresAt),
+      readiness_reason_codes: reasonCodes,
+      canonical_job_id: "22222222-2222-4222-8222-222222222222",
+      job_version_id: "33333333-3333-4333-8333-333333333333",
+      profile_version_id: null,
+      requirement_set_id: null,
+      match_run_id: null,
+      evidence_revision_hash: "b".repeat(64),
+    };
+  }
+
   async function startApp(pool: any): Promise<{ baseUrl: string; server: Server }> {
     const app = express();
     app.use("/api/v2", createApiV2Router({
@@ -64,6 +94,12 @@ describe("api/v2 application tracker", () => {
         if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
           return { rows: [] };
         }
+        if (sql.includes("to_regclass('v_application_readiness_current')")) {
+          return { rows: [{ available: true }] };
+        }
+        if (sql.includes("FROM v_application_readiness_current")) {
+          return { rows: [readinessRow("READY")] };
+        }
         if (sql.includes("FROM canonical_jobs c") && sql.includes("JOIN job_versions jv")) {
           return {
             rows: [
@@ -77,6 +113,10 @@ describe("api/v2 application tracker", () => {
                 gate_status: "PASS",
                 recommendation_eligibility: "ELIGIBLE",
                 recommendation_outcome: "PRIORITY",
+                readiness_status: "READY",
+                readiness_fingerprint: "a".repeat(64),
+                readiness_expires_at: new Date("2099-01-01T00:00:00.000Z"),
+                readiness_reason_codes: [],
               },
             ],
           };
@@ -130,6 +170,69 @@ describe("api/v2 application tracker", () => {
       await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
     }
   });
+
+  it.each(["NEEDS_VERIFICATION", "PROCESSING", "BLOCKED", null])(
+    "blocks application handoff when current readiness is %s",
+    async (readinessStatus) => {
+      const txQueries: string[] = [];
+      const tx = {
+        query: vi.fn(async (sql: string) => {
+          txQueries.push(sql);
+          if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+            return { rows: [] };
+          }
+          if (sql.includes("to_regclass('v_application_readiness_current')")) {
+            return { rows: [{ available: true }] };
+          }
+          if (sql.includes("FROM v_application_readiness_current")) {
+            const reasons = readinessStatus === "NEEDS_VERIFICATION" ? ["SALARY_BASIS_UNRESOLVED"] : [];
+            return { rows: [readinessRow(readinessStatus, reasons)] };
+          }
+          if (sql.includes("FROM canonical_jobs c") && sql.includes("JOIN job_versions jv")) {
+            return {
+              rows: [{
+                canonical_job_id: "22222222-2222-4222-8222-222222222222",
+                job_version_id: "33333333-3333-4333-8333-333333333333",
+                canonical_url: "https://example.test/apply",
+                current_artifact_status: "EVALUATION_MISSING",
+                current_artifact_reason: "NO_CURRENT_AI_EVALUATION",
+                gate_status: "PASS",
+                recommendation_eligibility: "ELIGIBLE",
+                recommendation_outcome: "PRIORITY",
+                readiness_status: readinessStatus,
+                readiness_fingerprint: "a".repeat(64),
+                readiness_expires_at: new Date("2099-01-01T00:00:00.000Z"),
+                readiness_reason_codes: readinessStatus === "READY" ? [] : ["SALARY_BASIS_UNRESOLVED"],
+              }],
+            };
+          }
+          return { rows: [] };
+        }),
+        release: vi.fn(),
+      };
+      const pool = { connect: vi.fn(async () => tx), query: vi.fn(async () => ({ rows: [] })) };
+      const { baseUrl, server } = await startApp(pool);
+      try {
+        const response = await fetch(`${baseUrl}/applications`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            canonical_job_id: "22222222-2222-4222-8222-222222222222",
+            status: "APPLIED",
+          }),
+        });
+        const body = await response.json() as any;
+
+        expect(response.status).toBe(409);
+        expect(body.reason).toBe(readinessStatus === "NEEDS_VERIFICATION"
+          ? "SALARY_BASIS_UNRESOLVED"
+          : readinessStatus ? `READINESS_${readinessStatus}` : "READINESS_NOT_COMPUTED");
+        expect(txQueries.some((sql) => sql.includes("INSERT INTO application_records"))).toBe(false);
+      } finally {
+        await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+      }
+    },
+  );
 
   it.each([
     { artifactStatus: "MATCH_STALE", reason: "MATCH_PROFILE_VERSION_STALE" },
@@ -193,6 +296,12 @@ describe("api/v2 application tracker", () => {
         if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
           return { rows: [] };
         }
+        if (sql.includes("to_regclass('v_application_readiness_current')")) {
+          return { rows: [{ available: true }] };
+        }
+        if (sql.includes("FROM v_application_readiness_current")) {
+          return { rows: [readinessRow("READY")] };
+        }
         if (sql.includes("FROM canonical_jobs c") && sql.includes("JOIN job_versions jv")) {
           return {
             rows: [{
@@ -204,6 +313,10 @@ describe("api/v2 application tracker", () => {
               gate_status,
               recommendation_eligibility: "ELIGIBLE",
               recommendation_outcome,
+              readiness_status: "READY",
+              readiness_fingerprint: "a".repeat(64),
+              readiness_expires_at: new Date("2099-01-01T00:00:00.000Z"),
+              readiness_reason_codes: [],
             }],
           };
         }

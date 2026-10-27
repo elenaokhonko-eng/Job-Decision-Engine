@@ -20,6 +20,7 @@ import {
 import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
 import { PersistedLaneDecisionSchema, SCHEMA_VERSION } from "../contracts/index.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
+import { SixLaneKeySchema, type LaneIntentPreferences, type LanePreferenceTaxonomy } from "../policy/laneIntentContracts.js";
 
 export { loadGlobalLanesConfig, loadLanesConfig };
 export type { GlobalLanesConfig, LaneDefinition };
@@ -512,6 +513,128 @@ function conceptVariants(concept: string): string[] {
 function conceptScopeScore(description: string, concepts: string[] | undefined): number {
   if (!concepts || concepts.length === 0) return 1;
   return concepts.some((concept) => containsConcept(description, concept)) ? 1 : 0;
+}
+
+export interface LaneIntentPreferenceAssessment {
+  readonly tieBreakAdjustment: number;
+  readonly evidence: readonly string[];
+}
+
+function normalizedPreferenceText(value: string): string {
+  return value.toLowerCase().replace(/[-_/]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function matchingPreferenceTerms(terms: readonly string[], text: string): string[] {
+  return terms.filter((term) => containsConcept(text, normalizedPreferenceText(term)));
+}
+
+export function assessLaneIntentPreference(
+  laneKey: string,
+  title: string,
+  description: string,
+  companyName: string,
+  preferences: LaneIntentPreferences | null,
+): LaneIntentPreferenceAssessment {
+  const parsedLane = SixLaneKeySchema.safeParse(laneKey);
+  const taxonomy: LanePreferenceTaxonomy | undefined = parsedLane.success
+    ? preferences?.lane_preferences[parsedLane.data]
+    : undefined;
+  if (!taxonomy) return { tieBreakAdjustment: 0, evidence: [] };
+
+  const roleText = normalizedPreferenceText(`${title} ${description}`);
+  const organizationText = normalizedPreferenceText(companyName);
+  let adjustment = 0;
+  const evidence: string[] = [];
+  const applyCategory = (
+    label: string,
+    preferred: readonly string[],
+    acceptable: readonly string[],
+    excluded: readonly string[],
+    text: string,
+    positiveWeight: number,
+    excludedWeight: number,
+  ): void => {
+    const excludedMatch = matchingPreferenceTerms(excluded, text)[0];
+    if (excludedMatch) {
+      adjustment -= excludedWeight;
+      evidence.push(`USER_PREFERENCE_EXCLUDED_${label}:${excludedMatch}`);
+      return;
+    }
+    const preferredMatch = matchingPreferenceTerms(preferred, text)[0];
+    if (preferredMatch) {
+      adjustment += positiveWeight;
+      evidence.push(`USER_PREFERENCE_PREFERRED_${label}:${preferredMatch}`);
+      return;
+    }
+    const acceptableMatch = matchingPreferenceTerms(acceptable, text)[0];
+    if (acceptableMatch) {
+      adjustment += positiveWeight / 2;
+      evidence.push(`USER_PREFERENCE_ACCEPTABLE_${label}:${acceptableMatch}`);
+    }
+  };
+
+  applyCategory(
+    "ROLE_FAMILY",
+    taxonomy.preferred_role_families,
+    taxonomy.acceptable_role_families,
+    taxonomy.excluded_role_families,
+    roleText,
+    0.02,
+    0.025,
+  );
+  applyCategory(
+    "SUBDOMAIN",
+    taxonomy.preferred_subdomains,
+    taxonomy.acceptable_subdomains,
+    taxonomy.excluded_subdomains,
+    roleText,
+    0.015,
+    0.02,
+  );
+  applyCategory(
+    "ORGANIZATION_TYPE",
+    taxonomy.preferred_organization_types,
+    taxonomy.acceptable_organization_types,
+    taxonomy.excluded_organization_types,
+    organizationText,
+    0.01,
+    0.015,
+  );
+
+  const range = taxonomy.acceptable_direct_research_share_pct;
+  if (range) {
+    const shares = [...roleText.matchAll(/\b(?:research|direct research)\b[^.;]{0,40}\b(\d{1,3})\s*(?:%|percent)(?![a-z])|\b(\d{1,3})\s*(?:%|percent)(?![a-z])[^.;]{0,40}\b(?:research|direct research)\b/g)];
+    if (shares.length === 1) {
+      const share = Number(shares[0][1] ?? shares[0][2]);
+      if (Number.isFinite(share) && share <= 100) {
+        const withinRange = share >= range.minimum_pct && share <= range.maximum_pct;
+        adjustment += withinRange ? 0.01 : -0.01;
+        evidence.push(`USER_PREFERENCE_DIRECT_RESEARCH_SHARE_${withinRange ? "WITHIN" : "OUTSIDE"}:${share}%`);
+      }
+    }
+  }
+
+  for (const signal of preferences?.cross_lane_work_style_signals.positive ?? []) {
+    const term = normalizedPreferenceText(signal);
+    if (term && containsConcept(roleText, term)) {
+      adjustment += 0.01;
+      evidence.push(`USER_WORK_STYLE_PREFERRED:${signal}`);
+      break;
+    }
+  }
+  for (const signal of preferences?.cross_lane_work_style_signals.negative ?? []) {
+    const term = normalizedPreferenceText(signal);
+    if (term && containsConcept(roleText, term)) {
+      adjustment -= 0.01;
+      evidence.push(`USER_WORK_STYLE_AVOID:${signal}`);
+      break;
+    }
+  }
+
+  return {
+    tieBreakAdjustment: Math.max(-0.05, Math.min(0.05, adjustment)),
+    evidence,
+  };
 }
 
 const NON_TECHNICAL_ROLE_FAMILY = /\b(?:sales|business\s+development|account\s+(?:executive|manager|cto)|customer\s+success|counselor|social\s+worker|people\s+(?:partner|business)|human\s+resources|hr\b|brand(?:s)?|marketing|finance|fp\s*&\s*a|accounting|tax|designer|design\s+director|art\s+director|leather|investigator|recruiter|talent|operations?)\b/i;
@@ -1367,6 +1490,8 @@ export async function runLaneRouter(
           const scoreMap: Record<string, number> = {};
           const domainScoreMap: Record<string, number> = {};
           const functionScoreMap: Record<string, number> = {};
+          const lanePreferenceAdjustments: Record<string, number> = {};
+          const lanePreferenceEvidence: Record<string, readonly string[]> = {};
           const laneEvidence: string[] = [];
           const descText = extractCoreJobText(
             job.normalized_title || "",
@@ -1385,6 +1510,15 @@ export async function runLaneRouter(
             }
             const score = cosineSimilarity(jobEmbedding, laneEmbeddings[laneKey]);
             scoreMap[laneKey] = score;
+            const lanePreference = assessLaneIntentPreference(
+              laneKey,
+              job.normalized_title || "",
+              job.description_text || "",
+              String(job.company_name ?? ""),
+              preferenceContext.laneIntent,
+            );
+            lanePreferenceAdjustments[laneKey] = lanePreference.tieBreakAdjustment;
+            lanePreferenceEvidence[laneKey] = lanePreference.evidence;
             domainScoreMap[laneKey] = laneDomainScopeScore(descText, laneKey, laneDef.included_domain_concepts);
             functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, job.normalized_title || "")
               ? 0
@@ -1410,6 +1544,8 @@ export async function runLaneRouter(
                 domainScore,
                 functionScore,
                 rank: preferenceRank(laneKey),
+                preferenceAdjustment: lanePreferenceAdjustments[laneKey] ?? 0,
+                preferenceEvidence: lanePreferenceEvidence[laneKey] ?? [],
                 enabled: preferenceEnabled(laneKey),
                 negativeExcluded: applyNegativeExclusion(descText, laneDef),
               };
@@ -1427,7 +1563,11 @@ export async function runLaneRouter(
             bestScore = Math.max(0, bestScore);
           } else {
             qualifyingPrimary.sort((a, b) => {
-              if (Math.abs(a.score - b.score) > 1e-9) return b.score - a.score;
+              const scoreDifference = Math.abs(a.score - b.score);
+              if (scoreDifference > 0.03) return b.score - a.score;
+              const preferenceDifference = b.preferenceAdjustment - a.preferenceAdjustment;
+              if (Math.abs(preferenceDifference) > 1e-9) return preferenceDifference;
+              if (scoreDifference > 1e-9) return b.score - a.score;
               return a.rank - b.rank;
             });
             bestLane = qualifyingPrimary[0].laneKey;
@@ -1435,6 +1575,9 @@ export async function runLaneRouter(
           }
 
           const selectedLaneDef = bestLane === "UNCLASSIFIED" ? null : config.lanes[bestLane];
+          if (bestLane !== "UNCLASSIFIED") {
+            laneEvidence.push(...(lanePreferenceEvidence[bestLane] ?? []));
+          }
           const selectedThreshold =
             selectedLaneDef?.semantic_threshold ?? selectedLaneDef?.threshold ?? minSimilarityFloor;
 
@@ -1449,7 +1592,7 @@ export async function runLaneRouter(
 
           // Secondary lanes: must meet per-lane threshold, have positive concept evidence, and not be excluded.
           // Preference rank is applied as a stable ordering (not a classifier).
-          const secondaryCandidates: Array<{ laneKey: string; score: number; rank: number }> = [];
+          const secondaryCandidates: Array<{ laneKey: string; score: number; rank: number; preferenceAdjustment: number }> = [];
           for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
             if (laneKey === bestLane) continue;
             if (!preferenceEnabled(laneKey)) continue;
@@ -1469,7 +1612,13 @@ export async function runLaneRouter(
               // Require at least one positive concept match for secondary lane qualification
               const hasPositiveEvidence = laneDef.positive_concepts?.some((pc) => containsConcept(descText, pc));
               if (hasPositiveEvidence) {
-                secondaryCandidates.push({ laneKey, score, rank: preferenceRank(laneKey) });
+                secondaryCandidates.push({
+                  laneKey,
+                  score,
+                  rank: preferenceRank(laneKey),
+                  preferenceAdjustment: lanePreferenceAdjustments[laneKey] ?? 0,
+                });
+                laneEvidence.push(...(lanePreferenceEvidence[laneKey] ?? []));
                 if (laneDef.positive_concepts) {
                   for (const pc of laneDef.positive_concepts) {
                     if (containsConcept(descText, pc)) {
@@ -1482,7 +1631,11 @@ export async function runLaneRouter(
             }
           }
           secondaryCandidates.sort((a, b) => {
-            if (Math.abs(a.score - b.score) > 1e-9) return b.score - a.score;
+            const scoreDifference = Math.abs(a.score - b.score);
+            if (scoreDifference > 0.03) return b.score - a.score;
+            const preferenceDifference = b.preferenceAdjustment - a.preferenceAdjustment;
+            if (Math.abs(preferenceDifference) > 1e-9) return preferenceDifference;
+            if (scoreDifference > 1e-9) return b.score - a.score;
             return a.rank - b.rank;
           });
           const secondaryLanes = secondaryCandidates.map((c) => c.laneKey);

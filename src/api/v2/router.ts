@@ -9,6 +9,8 @@ import {
   type WorkspaceContext,
 } from "../../workspace/context.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
+import { createTaskIntentV2 } from "../../tasks/taskIntent.js";
+import { pipelineTaskStageVersion } from "../../tasks/pipelineTaskCurrentness.js";
 import { loadWorkabilityPolicy, mergeWorkabilityPreferenceContent } from "../../pipeline/workabilityPolicy.js";
 import { stableStringify } from "../../config/structuredLoader.js";
 import { apiAuthMiddleware } from "./auth.js";
@@ -19,6 +21,10 @@ import {
   answerVerificationQuestion,
   dismissVerificationQuestion,
 } from "../../services/verificationQuestionService.js";
+import {
+  isCurrentReadyApplicationReadiness,
+  loadCurrentApplicationReadiness,
+} from "../../services/currentApplicationReadiness.js";
 import { RejectedJobRowSchema, ShortlistRowV2Schema } from "../../readModels/contracts.js";
 
 type QueryClient = {
@@ -220,7 +226,6 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         cursorClause = "AND (s.observed_at, s.canonical_job_id) < ($2::timestamptz, $3::uuid)";
       }
       params.push(limit);
-
       const { rows } = await pool.query(
         `
           SELECT
@@ -272,6 +277,12 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             s.document_ready,
             s.current_artifact_status,
             s.current_artifact_reason,
+            readiness.readiness_status,
+            readiness.readiness_fingerprint,
+            readiness.readiness_expires_at,
+            readiness.readiness_reason_codes,
+            readiness.availability_status,
+            readiness.availability_recheck_at,
             s.blocked_task_count,
             s.requires_user_action,
             s.user_action_type,
@@ -280,6 +291,10 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             s.technical_error_count,
             s.pipeline_display_category
           FROM v_canonical_shortlist_actions_scoped s
+          LEFT JOIN v_application_readiness_current readiness
+            ON readiness.workspace_id = s.workspace_id
+           AND readiness.canonical_job_id = s.canonical_job_id
+           AND readiness.job_version_id::text = s.job_version_id::text
           WHERE s.workspace_id = $1
           ${cursorClause}
           ORDER BY s.observed_at DESC, s.canonical_job_id DESC
@@ -699,6 +714,14 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
 
       const maxAttemptsNumber =
         typeof maxAttempts === "number" ? Math.max(1, Math.min(20, Math.floor(maxAttempts))) : undefined;
+      const stageVersion = pipelineTaskStageVersion(taskType);
+      if (stageVersion && (typeof payload !== "object" || payload === null || Array.isArray(payload))) {
+        res.status(400).json({ ok: false, error: "Pipeline tasks require an object payload." });
+        return;
+      }
+      const intentOptions = stageVersion
+        ? { producer: "api.manual_task_enqueue", stageVersion, requestId: taskKey }
+        : {};
 
       const queued = await enqueuePipelineTask(
         {
@@ -707,6 +730,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
           payload,
           maxAttempts: maxAttemptsNumber,
           availableAt,
+          ...intentOptions,
         },
         pool,
         { context: ctx }
@@ -863,6 +887,20 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
             handoffBlocked: true,
             error: "The job does not have a current deterministic decision artifact. Re-run matching and decision stages before creating an application handoff.",
             reason: job.current_artifact_reason ?? job.current_artifact_status ?? "CURRENT_ARTIFACT_UNAVAILABLE",
+          };
+        }
+        const readiness = await loadCurrentApplicationReadiness(
+          client,
+          ctx.workspaceId,
+          job.canonical_job_id,
+          job.job_version_id,
+        );
+        if (!isCurrentReadyApplicationReadiness(readiness)) {
+          return {
+            handoffBlocked: true,
+            error: "Application handoffs require a current READY assessment.",
+            reason: readiness?.readiness_reason_codes?.[0] ??
+              (readiness?.readiness_status ? `READINESS_${readiness.readiness_status}` : "READINESS_NOT_COMPUTED"),
           };
         }
         let handoffBlockReason: string | null = null;
@@ -1545,22 +1583,39 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
 
         let recalculationEnqueued = 0;
         let recalculationExisting = 0;
-        const modeRevision = Number.isFinite(Date.parse(String(mode.updated_at)))
-          ? String(Date.parse(String(mode.updated_at)))
+        const preferenceModeUpdatedAt = String(mode.updated_at);
+        const modeRevision = Number.isFinite(Date.parse(preferenceModeUpdatedAt))
+          ? String(Date.parse(preferenceModeUpdatedAt))
           : crypto.randomUUID();
 
         for (const candidate of recalculationCandidates.rows) {
+          const taskType = "APPLY_HARD_GATES";
+          const taskVersion = "hard_gate_v1";
+          const payload = {
+            canonical_job_id: candidate.canonical_job_id,
+            job_version_id: candidate.job_version_id,
+            force_policy_recalculation: true,
+            preference_mode_key: mode.mode_key,
+            preference_mode_updated_at: preferenceModeUpdatedAt,
+          };
+          const requestId = `preference:${mode.mode_key}:${modeRevision}`;
+          const taskKey = `${taskType}:${candidate.job_version_id}:${taskVersion}:preference:${mode.mode_key}:${modeRevision}`;
+          const intent = createTaskIntentV2({
+            workspaceId: ctx.workspaceId,
+            taskType,
+            stageVersion: taskVersion,
+            producer: "api.preference_mode_change",
+            requestId,
+            mode: "FORCE_RECOMPUTE",
+            triggerRevisionId: modeRevision,
+            payload,
+          });
           const result = await enqueuePipelineTask(
             {
-              taskType: "APPLY_HARD_GATES",
-              taskKey: `APPLY_HARD_GATES:${candidate.job_version_id}:preference:${mode.mode_key}:${modeRevision}`,
-              payload: {
-                canonical_job_id: candidate.canonical_job_id,
-                job_version_id: candidate.job_version_id,
-                force_policy_recalculation: true,
-                preference_mode_key: mode.mode_key,
-                preference_mode_updated_at: mode.updated_at,
-              },
+              taskType,
+              taskKey,
+              payload,
+              intent,
               maxAttempts: 8,
             },
             client,

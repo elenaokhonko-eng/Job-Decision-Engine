@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { applyGlobalGates, isTechnicalRole, evaluateWorkability } from "../../services/criteria.js";
-import { loadWorkabilityPolicy } from "../../pipeline/workabilityPolicy.js";
+import { loadWorkabilityPolicy, mergeWorkabilityPreferenceContent } from "../../pipeline/workabilityPolicy.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -176,6 +176,111 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       const result = applyGlobalGates(job as any);
       expect(result.status).toBe("HARD_REJECT");
       expect(result.rejection_codes).toContain("GATE_UNKNOWN_WORK_MODE");
+    });
+
+    it("evaluates explicit worker-country alternatives as a set and ignores employer headquarters", () => {
+      const authorizedAlternative = evaluateWorkability(
+        "Remote",
+        "REMOTE",
+        "Must be authorized to work in Singapore or Australia.",
+        "PERMANENT",
+        loadWorkabilityPolicy(),
+      );
+      const usaOnly = evaluateWorkability(
+        "Remote",
+        "REMOTE",
+        "Must be authorized to work in the United States.",
+        "PERMANENT",
+        loadWorkabilityPolicy(),
+      );
+      const employerHeadquartersOnly = evaluateWorkability(
+        "Remote",
+        "REMOTE",
+        "Fully remote role. The company is headquartered in California.",
+        "PERMANENT",
+        loadWorkabilityPolicy(),
+      );
+
+      const gate = (description: string) => applyGlobalGates({
+        id: "country-condition-test",
+        title: "Senior AI Engineer",
+        company_name: "Test Systems",
+        raw_description: description,
+        location: "Remote",
+        workplace_type: "REMOTE",
+        employment_type: "PERMANENT",
+      } as any);
+      const alternativeGate = gate("Build deep learning models. Candidates must be authorized to work in Singapore or Australia.");
+      const separateMandatoryGate = gate("Build deep learning models. Must reside in the United States. Must be authorized to work in Singapore.");
+      const abbreviatedGate = gate("Build deep learning models. Must reside in the U.S.");
+      const citizenshipGate = gate("Build deep learning models. U.S. citizenship is required.");
+      const ambiguousGate = gate("Build deep learning models. Candidates must be authorized to work in Singapore, Australia.");
+
+      expect(authorizedAlternative.workable).toBe(true);
+      expect(usaOnly.reasonCode).toBe("WORK_AUTHORIZATION_INCOMPATIBLE");
+      expect(employerHeadquartersOnly.workable).toBe(true);
+      expect(alternativeGate.status).toBe("PASS");
+      expect(separateMandatoryGate.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+      expect(abbreviatedGate.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+      expect(citizenshipGate.rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+      expect(ambiguousGate.status).toBe("NEEDS_VERIFICATION");
+    });
+
+    it("retains a positive travel requirement after a negated clause and applies the numeric cap", () => {
+      const result = applyGlobalGates({
+        id: "mixed-travel-test",
+        title: "Senior AI Engineer",
+        company_name: "Test Systems",
+        raw_description: "Build deep learning models. No regular travel is required, but 30% travel is required for client deployments.",
+        location: "Singapore",
+        workplace_type: "REMOTE",
+        employment_type: "PERMANENT",
+      } as any);
+      const minimalTravelJob = {
+        id: "minimal-travel-test",
+        title: "Senior AI Engineer",
+        company_name: "Test Systems",
+        raw_description: "Build deep learning models. Minimal travel is required.",
+        location: "Singapore",
+        workplace_type: "REMOTE",
+        employment_type: "PERMANENT",
+      };
+      const minimalTravel = applyGlobalGates(minimalTravelJob as any);
+      const unacceptedMinimalTravel = applyGlobalGates(
+        minimalTravelJob as any,
+        { ...loadWorkabilityPolicy(), minimalTravelAllowed: false },
+      );
+
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+      expect(result.evidence_quotes.join(" ")).toContain("30% travel");
+      expect(minimalTravel.status).toBe("PASS");
+      expect(unacceptedMinimalTravel.status).toBe("NEEDS_VERIFICATION");
+    });
+
+    it("does not let an assumed or explicit hybrid mode override a remote-only preference", () => {
+      const remoteOnlyPolicy = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+        hard_constraints: { work_modes: ["REMOTE"], max_office_days_per_week: 0 },
+      });
+      const assumed = evaluateWorkability(
+        "Singapore",
+        "ASSUMED_HYBRID",
+        "Flexible workplace arrangement.",
+        "PERMANENT",
+        remoteOnlyPolicy,
+      );
+      const explicitHybrid = evaluateWorkability(
+        "Singapore",
+        "HYBRID",
+        "Two days per week in the office.",
+        "PERMANENT",
+        remoteOnlyPolicy,
+      );
+
+      expect(assumed.workable).toBe(false);
+      expect(assumed.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
+      expect(explicitHybrid.workable).toBe(false);
+      expect(explicitHybrid.reasonCode).toBe("GATE_HIGH_OFFICE_DAYS");
     });
 
     it.each([

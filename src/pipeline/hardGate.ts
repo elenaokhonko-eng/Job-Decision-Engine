@@ -18,8 +18,8 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/con
 import { calculateProfessionalExperienceYears, compareStructuredRequirement, type ComparableFact } from "./requirementComparators.js";
 import {
   applyVerificationAnswerOverrides,
-  extractTerritories,
-  hasExplicitTerritoryRestriction,
+  evaluateWorkerTerritoryRequirements,
+  extractExplicitWorkerTerritoryRequirements,
   isVerificationAnswerContextApplicable,
   isVerificationAnswerProvided,
   loadVerificationAnswerContext,
@@ -187,11 +187,18 @@ export function applyPersistedRequirementGates(
     salary_min?: number | null;
     salary_max?: number | null;
     salary_currency?: string | null;
-    salary_period?: 'ANNUAL' | 'MONTHLY' | null;
+    salary_period?: 'ANNUAL' | 'MONTHLY' | 'HOURLY' | 'UNKNOWN' | null;
+    salary_basis?: 'GROSS' | 'NET' | 'UNKNOWN';
+    component_type?: 'BASE_CASH' | 'VARIABLE_CASH' | 'EQUITY' | 'OTHER';
+    guaranteed_hours_per_week?: number | null;
+    paid_weeks_per_year?: number | null;
     travel_pct?: number | null;
     currency_to_sgd_rate?: number | null;
+    fx_rate_date?: string | null;
+    fx_rate_source?: string | null;
+    fx_rate_observation_id?: string | null;
     is_startup?: boolean;
-    opportunity_category?: 'COMMERCIAL' | 'UNIVERSITY_RESEARCH' | 'MISSION_MULTILATERAL';
+    opportunity_category?: 'COMMERCIAL' | 'UNIVERSITY_RESEARCH' | 'MISSION_MULTILATERAL' | null;
   },
   deterministicRequirements: PersistedRequirement[],
   policy: WorkabilityPolicy = loadWorkabilityPolicy(),
@@ -257,20 +264,32 @@ export function applyPersistedRequirementGates(
   }
 
   // Compensation floors are handled as non-Apply-Now policy downstream unless explicitly configured as a hard reject.
-  const compensationInput = job.salary_min !== null && job.salary_min !== undefined
+  const hasStructuredSalary =
+    (job.salary_min !== null && job.salary_min !== undefined)
+    || (job.salary_max !== null && job.salary_max !== undefined);
+  const compensationInput = hasStructuredSalary
     ? {
         salary_min: job.salary_min,
         salary_max: job.salary_max,
         salary_currency: job.salary_currency,
         salary_period: job.salary_period,
+        salary_basis: job.salary_basis,
+        component_type: job.component_type,
+        guaranteed_hours_per_week: job.guaranteed_hours_per_week,
+        paid_weeks_per_year: job.paid_weeks_per_year,
         currency_to_sgd_rate: job.currency_to_sgd_rate,
+        fx_rate_date: job.fx_rate_date,
+        fx_rate_source: job.fx_rate_source,
+        fx_rate_observation_id: job.fx_rate_observation_id,
         is_startup: job.is_startup,
       }
     : parseCompensationEvidence(job.compensation_raw);
   if (compensationInput) {
+    const opportunityCategory = job.opportunity_category
+      ?? inferOpportunityCategory(job.company_name, job.title, job.description || '');
     const compensation = evaluateCompensationPolicy(
       compensationInput,
-      job.opportunity_category || inferOpportunityCategory(job.company_name, job.title, job.description || ''),
+      opportunityCategory,
       stage3Preferences?.compensation
     );
     if (compensation.is_hard_reject) {
@@ -484,26 +503,36 @@ export function applyPersistedRequirementGates(
     return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(shiftReq)]);
   }
 
-  const workAuthReq = deterministicRequirements.find((r) => r.requirement_type === "WORK_AUTH");
-  if (workAuthReq) {
+  const workAuthRequirements = deterministicRequirements.filter((r) => r.requirement_type === "WORK_AUTH");
+  const unresolvedTerritoryRequirements: string[] = [];
+  const incompatibleTerritories: string[] = [];
+  for (const workAuthReq of workAuthRequirements) {
     const authText = quoteOrText(workAuthReq);
-    const authorizedRegions = new Set(effectivePolicy.authorizedRegions);
-    const explicitlyRestrictedTerritories = extractTerritories(authText)
-      .filter((territory) => hasExplicitTerritoryRestriction(authText, territory));
-    const incompatibleTerritory = explicitlyRestrictedTerritories.find(
-      (territory) => authorizedRegions.size === 0 || !authorizedRegions.has(territory)
+    const conditions = extractExplicitWorkerTerritoryRequirements(authText);
+    const territoryEvaluation = evaluateWorkerTerritoryRequirements(
+      conditions,
+      effectivePolicy.authorizedRegions,
+      effectivePolicy.rejectExplicitForeignTerritory,
     );
+    unresolvedTerritoryRequirements.push(...territoryEvaluation.unresolvedRequirements.map((condition) => condition.evidenceText));
+    incompatibleTerritories.push(...territoryEvaluation.incompatibleTerritories);
+  }
 
-    // A city/country label, an employer location, or generic "remote" text is
-    // not a work-authorization restriction. Only explicit eligibility evidence
-    // can reject; every other remote role advances automatically.
-    if (effectivePolicy.rejectExplicitForeignTerritory && incompatibleTerritory) {
-      return makeReject(
-        ["WORK_AUTHORIZATION_INCOMPATIBLE"],
-        [authText],
-        { location_restriction: incompatibleTerritory }
-      );
-    }
+  // Each worker-territory condition is evaluated separately. An OR alternative
+  // inside one condition never masks another mandatory restriction.
+  if (incompatibleTerritories.length > 0) {
+    return makeReject(
+      ["WORK_AUTHORIZATION_INCOMPATIBLE"],
+      workAuthRequirements.map(quoteOrText),
+      { location_restriction: incompatibleTerritories[0] ?? "UNKNOWN" }
+    );
+  }
+  if (unresolvedTerritoryRequirements.length > 0) {
+    return makeVerification(
+      ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_WORK_AUTHORIZATION"],
+      unresolvedTerritoryRequirements,
+      { ...inferredWorkabilityFacts, location_restriction: null },
+    );
   }
 
   if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {
@@ -663,7 +692,7 @@ export function applyExactProfileGates(
       continue;
     }
 
-    let comparison = compareStructuredRequirement(requirement, profileFacts, answerContext);
+    let comparison = compareStructuredRequirement(requirement, profileFacts, answerContext ?? undefined);
     if (comparison.status === "UNKNOWN" && answerContext) {
       if (requirement.requirement_type === "WORK_AUTH"
         && answerContext.overrides.workAuthorizationRegions.length > 0) {
@@ -673,7 +702,7 @@ export function applyExactProfileGates(
           structured_value: { authorized_regions: answerContext.overrides.workAuthorizationRegions },
           source_type: "PROFILE_FACT",
         };
-        comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact], answerContext);
+        comparison = compareStructuredRequirement(requirement, [...profileFacts, answerFact], answerContext ?? undefined);
       }
     }
 

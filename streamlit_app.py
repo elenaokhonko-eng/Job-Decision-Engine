@@ -1,11 +1,8 @@
-import datetime
-import glob
+import hashlib
 import html
 import json
 import os
 import subprocess
-import sys
-import time
 import urllib.request
 from io import BytesIO
 
@@ -13,7 +10,12 @@ import docx
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
-from streamlit_application_workflow import is_document_generation_eligible
+from streamlit_application_workflow import (
+    application_api_path,
+    is_document_generation_eligible,
+    parse_application_document_pair_status,
+)
+from streamlit_application_review import render_document_pair_review_checkbox
 from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
 from streamlit_workspace_contracts import (
@@ -193,6 +195,12 @@ SHORTLIST_READ_MODEL_QUERY = """
       s.document_ready,
       s.current_artifact_status,
       s.current_artifact_reason,
+      readiness.readiness_status,
+      readiness.readiness_fingerprint,
+      readiness.readiness_expires_at,
+      readiness.readiness_reason_codes,
+      readiness.availability_status,
+      readiness.availability_recheck_at,
       s.blocked_task_count,
       s.requires_user_action,
       s.user_action_type,
@@ -201,6 +209,10 @@ SHORTLIST_READ_MODEL_QUERY = """
       s.technical_error_count,
       s.pipeline_display_category
     FROM v_canonical_shortlist_actions_scoped s
+    LEFT JOIN v_application_readiness_current readiness
+      ON readiness.workspace_id = s.workspace_id
+     AND readiness.canonical_job_id = s.canonical_job_id
+     AND readiness.job_version_id::text = s.job_version_id::text
     WHERE s.workspace_id = %s
     ORDER BY s.observed_at DESC NULLS LAST, s.canonical_job_id DESC
     LIMIT %s
@@ -258,9 +270,21 @@ TOP_TEN_READY_QUERY = """
            office_requirement_score, timezone_compatibility_score,
            employment_verifiability_score, stage3_preference_context_id,
            ranking_component_availability, ranking_component_provenance,
-           current_artifact_status, version_mismatch
-    FROM v_top_ten_ready_jobs_stage3_scoped
-    WHERE workspace_id = %s
+           current_artifact_status, version_mismatch,
+           current_readiness.readiness_status, current_readiness.readiness_fingerprint,
+           current_readiness.readiness_expires_at, current_readiness.readiness_reason_codes,
+           current_readiness.availability_status, current_readiness.availability_recheck_at
+    FROM v_top_ten_ready_jobs_stage3_scoped AS jobs
+    LEFT JOIN LATERAL (
+      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+             readiness_reason_codes, availability_status, availability_recheck_at
+      FROM v_application_readiness_current readiness
+      WHERE readiness.workspace_id = jobs.workspace_id
+        AND readiness.canonical_job_id = jobs.canonical_job_id
+        AND readiness.job_version_id::text = jobs.job_version_id::text
+      LIMIT 1
+    ) AS current_readiness ON TRUE
+    WHERE jobs.workspace_id = %s
     ORDER BY ranking_position ASC
     LIMIT 10
 """
@@ -285,9 +309,21 @@ APPLY_NOW_JOBS_QUERY = """
            country_flexibility_score, office_requirement_score,
            timezone_compatibility_score, employment_verifiability_score,
            stage3_preference_context_id, ranking_component_availability,
-           ranking_component_provenance
-    FROM v_apply_now_jobs_stage3_scoped
-    WHERE workspace_id = %s
+           ranking_component_provenance, current_readiness.readiness_status,
+           current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
+           current_readiness.readiness_reason_codes, current_readiness.availability_status,
+           current_readiness.availability_recheck_at
+    FROM v_apply_now_jobs_stage3_scoped AS jobs
+    LEFT JOIN LATERAL (
+      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+             readiness_reason_codes, availability_status, availability_recheck_at
+      FROM v_application_readiness_current readiness
+      WHERE readiness.workspace_id = jobs.workspace_id
+        AND readiness.canonical_job_id = jobs.canonical_job_id
+        AND readiness.job_version_id::text = jobs.job_version_id::text
+      LIMIT 1
+    ) AS current_readiness ON TRUE
+    WHERE jobs.workspace_id = %s
     ORDER BY overall_rank_score DESC NULLS LAST,
              CASE recommendation_outcome WHEN 'PRIORITY' THEN 0 ELSE 1 END,
              deterministic_match_score DESC NULLS LAST,
@@ -303,9 +339,21 @@ TRACK_JOBS_QUERY = """
            recommendation_eligibility, recommendation_outcome, version_mismatch,
            current_artifact_status, current_artifact_reason, blocked_task_count,
            deterministic_decision_id, deterministic_context_fingerprint,
-           deterministic_trace_notes
-    FROM v_track_jobs_scoped
-    WHERE workspace_id = %s
+           deterministic_trace_notes, current_readiness.readiness_status,
+           current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
+           current_readiness.readiness_reason_codes, current_readiness.availability_status,
+           current_readiness.availability_recheck_at
+    FROM v_track_jobs_scoped AS jobs
+    LEFT JOIN LATERAL (
+      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+             readiness_reason_codes, availability_status, availability_recheck_at
+      FROM v_application_readiness_current readiness
+      WHERE readiness.workspace_id = jobs.workspace_id
+        AND readiness.canonical_job_id = jobs.canonical_job_id
+        AND readiness.job_version_id::text = jobs.job_version_id::text
+      LIMIT 1
+    ) AS current_readiness ON TRUE
+    WHERE jobs.workspace_id = %s
     ORDER BY deterministic_match_score DESC NULLS LAST, observed_at DESC NULLS LAST
     LIMIT 5000
 """
@@ -598,7 +646,8 @@ def api_request(method, path, params=None, body=None, timeout=30):
         raise RuntimeError(
             "Managed API base URL is not configured. Set JDEC_API_BASE_URL for API operations."
         )
-    url = f"{base}{path}"
+    normalized_path = application_api_path(path)
+    url = f"{base}{normalized_path}"
     if params:
         query = urllib.parse.urlencode(params)
         url = f"{url}?{query}"
@@ -816,15 +865,18 @@ st.markdown("""
 def get_workspace_key():
     return (os.environ.get("WORKSPACE_KEY") or "default").strip()
 
-def run_checked_command(command_args, step_label):
+def run_checked_command(command_args, step_label, extra_env=None):
     """Run a local command safely and surface stdout/stderr to the UI."""
+    command_env = os.environ.copy()
+    if extra_env:
+        command_env.update(extra_env)
     result = subprocess.run(
         command_args,
         capture_output=True,
         text=True,
         check=True,
         shell=False,
-        env=os.environ,
+        env=command_env,
     )
     if result.stdout:
         st.code(result.stdout, language="text")
@@ -832,27 +884,199 @@ def run_checked_command(command_args, step_label):
         st.warning(f"{step_label} stderr:\n{result.stderr}")
     return result
 
-def show_generated_document_downloads(started_at, key_prefix):
-    """Offer files created by the just-completed local document command."""
-    export_paths = sorted(
-        glob.glob(os.path.join("scripts", "exports", "*")),
-        key=os.path.getmtime,
-        reverse=True,
+def ensure_draft_application(job):
+    application_key = f"{job['canonical_job_id']}:{job['job_version_id']}"
+    cached = st.session_state.setdefault("pilot_application_ids", {}).get(application_key)
+    if cached:
+        return cached
+
+    response = api_request(
+        "POST",
+        "/api/v2/applications",
+        body={
+            "canonical_job_id": job["canonical_job_id"],
+            "job_version_id": job["job_version_id"],
+            "status": "INTENT",
+            "submission_url": job.get("canonical_url"),
+        },
     )
-    generated = [p for p in export_paths if os.path.isfile(p) and os.path.getmtime(p) >= started_at]
-    if not generated:
-        st.info("No local artifacts were created. In hosted mode, retrieve workflow artifacts from GitHub Actions.")
+    application = response.get("application") if isinstance(response, dict) else None
+    application_id = application.get("application_record_id") if isinstance(application, dict) else None
+    if not isinstance(response, dict) or not response.get("ok") or not application_id:
+        raise RuntimeError("The API did not confirm creation of a draft application.")
+    st.session_state["pilot_application_ids"][application_key] = application_id
+    return application_id
+
+
+def parse_document_run(result, expected_type, job, application_id):
+    for line in reversed(result.stdout.splitlines()):
+        try:
+            manifest = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(manifest, dict) or manifest.get("event") != "DOCUMENT_GENERATION_COMPLETED":
+            continue
+        if (
+            manifest.get("documentType") != expected_type
+            or manifest.get("applicationRecordId") != application_id
+            or manifest.get("canonicalJobId") != job["canonical_job_id"]
+            or manifest.get("jobVersionId") != job["job_version_id"]
+            or not manifest.get("profileVersionId")
+            or not manifest.get("deterministicDecisionId")
+            or not manifest.get("contextFingerprint")
+            or not manifest.get("documentRunId")
+            or not isinstance(manifest.get("outputs"), dict)
+            or not isinstance(manifest["outputs"].get("docx"), dict)
+            or not manifest["outputs"]["docx"].get("path")
+            or not manifest["outputs"]["docx"].get("sha256")
+        ):
+            raise RuntimeError("Generated document run does not match the selected application and job version.")
+        return manifest
+    raise RuntimeError("The document command did not return an exact document-run manifest.")
+
+
+def verified_document_bytes(output):
+    path = output.get("path") if isinstance(output, dict) else None
+    expected_hash = output.get("sha256") if isinstance(output, dict) else None
+    if not isinstance(path, str) or not isinstance(expected_hash, str):
+        raise TypeError("The document manifest does not contain a path and SHA-256 hash.")
+    export_root = os.path.realpath(os.path.join("scripts", "exports"))
+    artifact_path = os.path.realpath(path)
+    try:
+        within_exports = os.path.commonpath([export_root, artifact_path]) == export_root
+    except ValueError:
+        within_exports = False
+    if not within_exports or not os.path.isfile(artifact_path):
+        raise RuntimeError("The document manifest points outside the local exports directory or to a missing file.")
+    with open(artifact_path, "rb") as artifact:
+        content = artifact.read()
+    if hashlib.sha256(content).hexdigest() != expected_hash:
+        raise RuntimeError("The document file hash does not match its persisted run manifest.")
+    return os.path.basename(artifact_path), content
+
+
+def show_document_run_downloads(manifest, key_prefix):
+    st.caption(f"Document run: {manifest['documentRunId']}")
+    outputs = manifest.get("outputs") or {}
+    for output_type in ("docx", "pdf"):
+        output = outputs.get(output_type)
+        if output is None:
+            continue
+        filename, content = verified_document_bytes(output)
+        st.download_button(
+            label=f"Download {output_type.upper()}: {filename}",
+            data=content,
+            file_name=filename,
+            mime=output.get("mimeType", "application/octet-stream"),
+            key=f"{key_prefix}_{manifest['documentRunId']}_{output_type}",
+        )
+
+
+def render_job_document_actions(job, key_prefix):
+    pair_key = f"{job['canonical_job_id']}:{job['job_version_id']}"
+    pairs = st.session_state.setdefault("application_document_pairs", {})
+    pair = pairs.setdefault(pair_key, {})
+    cv_col, letter_col = st.columns(2)
+    with cv_col:
+        if st.button("Generate CV", key=f"{key_prefix}_cv", width="stretch"):
+            with st.spinner("Generating a current, evidence-grounded CV... "):
+                application_id = ensure_draft_application(job)
+                result = run_checked_command(
+                    ["npx", "tsx", "scripts/generate_cv.ts", str(job["canonical_job_id"]), str(job["job_version_id"])],
+                    "generate_cv",
+                    {"JDEC_APPLICATION_RECORD_ID": application_id},
+                )
+                pair["cv"] = parse_document_run(result, "CV", job, application_id)
+    with letter_col:
+        if st.button("Generate cover letter", key=f"{key_prefix}_letter", width="stretch"):
+            with st.spinner("Generating a current, evidence-grounded cover letter... "):
+                application_id = ensure_draft_application(job)
+                result = run_checked_command(
+                    ["npx", "tsx", "scripts/generate_cover_letter.ts", str(job["canonical_job_id"]), str(job["job_version_id"])],
+                    "generate_cover_letter",
+                    {"JDEC_APPLICATION_RECORD_ID": application_id},
+                )
+                pair["cover_letter"] = parse_document_run(result, "COVER_LETTER", job, application_id)
+
+    cv = pair.get("cv")
+    letter = pair.get("cover_letter")
+    if not cv or not letter:
+        for document_type, manifest in (("cv", cv), ("cover_letter", letter)):
+            if manifest:
+                show_document_run_downloads(manifest, f"{key_prefix}_{document_type}_download")
+        st.info("Generate both customised documents for this exact job version to complete the application document pair.")
         return
 
-    st.markdown("### Download generated artifacts")
-    for index, artifact_path in enumerate(generated):
-        with open(artifact_path, "rb") as artifact:
-            st.download_button(
-                label=f"Download {os.path.basename(artifact_path)}",
-                data=artifact.read(),
-                file_name=os.path.basename(artifact_path),
-                key=f"{key_prefix}_{index}",
-            )
+    matching_context = all(
+        cv.get(field) == letter.get(field)
+        for field in (
+            "applicationRecordId",
+            "canonicalJobId",
+            "jobVersionId",
+            "profileVersionId",
+            "deterministicDecisionId",
+            "contextFingerprint",
+        )
+    )
+    if not matching_context:
+        st.warning("The CV and cover letter use different application context. Regenerate the stale document before review.")
+        show_document_run_downloads(cv, f"{key_prefix}_cv_historical")
+        show_document_run_downloads(letter, f"{key_prefix}_letter_historical")
+        return
+
+    verification = run_checked_command(
+        [
+            "npx",
+            "tsx",
+            "scripts/validate_application_document_pair.ts",
+            cv["applicationRecordId"],
+            cv["documentRunId"],
+            letter["documentRunId"],
+        ],
+        "validate_document_pair",
+    )
+    application_status = parse_application_document_pair_status(
+        verification.stdout,
+        application_record_id=cv["applicationRecordId"],
+        cv_document_run_id=cv["documentRunId"],
+        cover_letter_document_run_id=letter["documentRunId"],
+    )
+    if not application_status.get("pairCurrent"):
+        st.warning("This document pair is no longer current or attached to this draft application. Regenerate before marking it ready.")
+        show_document_run_downloads(cv, f"{key_prefix}_cv_stale")
+        show_document_run_downloads(letter, f"{key_prefix}_letter_stale")
+        return
+
+    show_document_run_downloads(cv, f"{key_prefix}_cv_download")
+    show_document_run_downloads(letter, f"{key_prefix}_letter_download")
+    review_key = f"{key_prefix}_pair_reviewed_{cv['documentRunId']}_{letter['documentRunId']}"
+    already_reviewed = bool(application_status.get("reviewedAt"))
+
+    def persist_pair_review() -> None:
+        review_response = api_request(
+            "PATCH",
+            f"/api/v2/applications/{cv['applicationRecordId']}",
+            body={
+                "event_payload": {
+                    "event": "DOCUMENT_PAIR_REVIEWED",
+                    "cv_document_run_id": cv["documentRunId"],
+                    "cover_letter_document_run_id": letter["documentRunId"],
+                    "cv_sha256": cv["outputs"]["docx"]["sha256"],
+                    "cover_letter_sha256": letter["outputs"]["docx"]["sha256"],
+                },
+            },
+        )
+        if not isinstance(review_response, dict) or not review_response.get("ok"):
+            raise RuntimeError("The API did not persist the document review event.")
+        st.success("Document review recorded on the draft application.")
+
+    reviewed = render_document_pair_review_checkbox(
+        review_key=review_key,
+        already_reviewed=already_reviewed,
+        on_review=persist_pair_review,
+    )
+    if application_status.get("documentReady") or reviewed:
+        st.success("Document pair reviewed. The application remains a draft; no employer submission was recorded.")
 
 def validate_shortlist_row_shape(row):
     required = [
@@ -1245,42 +1469,6 @@ def save_application_status(job, status, application=None):
         raise RuntimeError("The application tracker did not confirm the status change.")
     st.success(f"Application tracker updated to {status}.")
     st.rerun()
-
-
-def render_job_document_actions(job, key_prefix):
-    cv_col, letter_col = st.columns(2)
-    with cv_col:
-        if st.button("Generate CV", key=f"{key_prefix}_cv", width="stretch"):
-            with st.spinner("Generating a current, evidence-grounded CV..."):
-                started_at = time.time()
-                run_checked_command(
-                    [
-                        "npx",
-                        "tsx",
-                        "scripts/generate_cv.ts",
-                        str(job["canonical_job_id"]),
-                        str(job["job_version_id"]),
-                    ],
-                    "generate_cv",
-                )
-                st.success("CV generated from the current profile and match evidence.")
-                show_generated_document_downloads(started_at, f"{key_prefix}_cv_download")
-    with letter_col:
-        if st.button("Generate cover letter", key=f"{key_prefix}_letter", width="stretch"):
-            with st.spinner("Generating a current, evidence-grounded cover letter..."):
-                started_at = time.time()
-                run_checked_command(
-                    [
-                        "npx",
-                        "tsx",
-                        "scripts/generate_cover_letter.ts",
-                        str(job["canonical_job_id"]),
-                        str(job["job_version_id"]),
-                    ],
-                    "generate_cover_letter",
-                )
-                st.success("Cover letter generated from current requirement evidence.")
-                show_generated_document_downloads(started_at, f"{key_prefix}_letter_download")
 
 
 # Fetch data
@@ -2788,54 +2976,7 @@ with tab_cv:
             else:
                 st.text_area("Description", str(description), height=220, disabled=True)
 
-        btn_col1, btn_col2 = st.columns(2)
-        with btn_col1:
-            if st.button("Generate customized CV", width="stretch"):
-                with st.spinner("Generating CV from canonical job/version..."):
-                    try:
-                        started_at = time.time()
-                        run_checked_command(
-                            [
-                                "npx",
-                                "tsx",
-                                "scripts/generate_cv.ts",
-                                str(selected_job.get("canonical_job_id")),
-                                str(selected_job.get("job_version_id"))
-                            ],
-                            "generate_cv"
-                        )
-                        st.success("CV generation completed. See scripts/exports for artifacts.")
-                        show_generated_document_downloads(started_at, "cv_download")
-                    except subprocess.CalledProcessError as e:
-                        st.error(f"CV generation failed with exit code {e.returncode}.")
-                        if e.stdout:
-                            st.code(e.stdout, language="text")
-                        if e.stderr:
-                            st.error(e.stderr)
-
-        with btn_col2:
-            if st.button("Generate cover letter", width="stretch"):
-                with st.spinner("Generating cover letter from canonical job/version..."):
-                    try:
-                        started_at = time.time()
-                        run_checked_command(
-                            [
-                                "npx",
-                                "tsx",
-                                "scripts/generate_cover_letter.ts",
-                                str(selected_job.get("canonical_job_id")),
-                                str(selected_job.get("job_version_id"))
-                            ],
-                            "generate_cover_letter"
-                        )
-                        st.success("Cover letter generation completed. See scripts/exports for artifacts.")
-                        show_generated_document_downloads(started_at, "cover_letter_download")
-                    except subprocess.CalledProcessError as e:
-                        st.error(f"Cover letter generation failed with exit code {e.returncode}.")
-                        if e.stdout:
-                            st.code(e.stdout, language="text")
-                        if e.stderr:
-                            st.error(e.stderr)
+        render_job_document_actions(selected_job, f"selected_{selected_job['canonical_job_id']}")
 
 # Footer section
 st.markdown("---")

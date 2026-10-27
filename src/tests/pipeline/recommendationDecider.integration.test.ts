@@ -100,4 +100,56 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     expect(Array.isArray(decisionJson.trace?.notes)).toBe(true);
     expect(decisionJson.trace.notes).toContain("legacy_gate_decision:FAIL->PASS");
   });
+
+  it("persists a new decision when availability and evidence change", async ({ skip }) => {
+    const readinessView = await q(
+      "SELECT to_regclass('v_application_readiness_current') IS NOT NULL AS available",
+    );
+    if (readinessView.rows[0]?.available !== true) skip();
+
+    const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
+    const first = await runRecommendationDecider(client);
+    expect(first.errors).toBe(0);
+    const before = await q(
+      `SELECT id, context_fingerprint, readiness_fingerprint, evidence_revision_hash
+       FROM deterministic_decisions
+       WHERE canonical_job_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [JOB_ID],
+    );
+    expect(before.rows).toHaveLength(1);
+
+    await q(
+      `UPDATE job_versions
+       SET evidence_revision_hash = $2,
+           availability_status = 'OPEN',
+           availability_evidence = $3::jsonb,
+           availability_verified_at = NOW() - INTERVAL '1 minute',
+           availability_recheck_at = NOW() + INTERVAL '1 day'
+       WHERE id = $1`,
+      [
+        VERSION_ID,
+        "a".repeat(64),
+        JSON.stringify({ status: "OPEN", verification_method: "TEST_FIXTURE", reason_code: "SOURCE_CONFIRMED", evidence: [] }),
+      ],
+    );
+
+    const second = await runRecommendationDecider(client);
+    expect(second.errors).toBe(0);
+    expect(second.decisionsInserted).toBe(1);
+    const after = await q(
+      `SELECT id, context_fingerprint, readiness_fingerprint, evidence_revision_hash
+       FROM deterministic_decisions
+       WHERE canonical_job_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [JOB_ID],
+    );
+    expect(after.rows).toHaveLength(1);
+    expect(after.rows[0].id).not.toBe(before.rows[0].id);
+    expect(after.rows[0].context_fingerprint).not.toBe(before.rows[0].context_fingerprint);
+    expect(after.rows[0].readiness_fingerprint).not.toBe(before.rows[0].readiness_fingerprint);
+    expect(after.rows[0].evidence_revision_hash).toBe("a".repeat(64));
+  });
 });

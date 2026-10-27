@@ -84,6 +84,12 @@ def test_apply_now_contract_requires_deterministic_apply_eligibility():
         "recommendation_eligibility": "ELIGIBLE",
         "recommendation_outcome": "REVIEW",
         "current_artifact_status": "EVALUATION_MISSING",
+        "readiness_status": "READY",
+        "readiness_fingerprint": "a" * 64,
+        "readiness_expires_at": "2099-01-01T00:00:00Z",
+        "readiness_reason_codes": [],
+        "availability_status": "OPEN",
+        "availability_recheck_at": "2099-01-01T00:00:00Z",
         "policy_recheck_required": False,
         "overall_rank_score": None,
         "ranking_confidence": None,
@@ -96,6 +102,20 @@ def test_apply_now_contract_requires_deterministic_apply_eligibility():
         pass
     else:
         raise AssertionError("Apply Now contract accepted a TRACK decision")
+
+    try:
+        validate_apply_now_row(
+            row
+            | {
+                "readiness_status": "NEEDS_VERIFICATION",
+                "readiness_reason_codes": ["COMPENSATION_BASIS_UNRESOLVED"],
+            },
+            WORKSPACE_ID,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Apply Now contract accepted unresolved readiness")
 
 
 def test_top_ten_contract_requires_all_current_artifacts_and_no_recheck():
@@ -113,6 +133,12 @@ def test_top_ten_contract_requires_all_current_artifacts_and_no_recheck():
         "overall_rank_score": 82.5,
         "ranking_confidence": 97.5,
         "is_top_ten_ready": True,
+        "readiness_status": "READY",
+        "readiness_fingerprint": "a" * 64,
+        "readiness_expires_at": "2099-01-01T00:00:00Z",
+        "readiness_reason_codes": [],
+        "availability_status": "OPEN",
+        "availability_recheck_at": "2099-01-01T00:00:00Z",
         "policy_recheck_required": False,
         "recommendation_eligibility": "ELIGIBLE",
         "recommendation_outcome": "REVIEW",

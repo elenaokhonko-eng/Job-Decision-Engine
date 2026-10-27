@@ -14,6 +14,8 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain("github.event.workflow_run.conclusion != 'cancelled'");
     expect(workflow).toContain('npx tsx scripts/process_pipeline_tasks.ts');
     expect(workflow).toContain('id: process_pipeline_worker');
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT: ${{ vars.PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT || '100' }}");
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS: ${{ vars.PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS || '10000' }}");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_DEAD_LETTER_REPORT_FILE: pipeline-dead-letter-health.json');
     expect(workflow).toContain('pipeline-dead-letter-health-${{ github.run_id }}');
     expect(workflow).toContain('PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}');
@@ -25,6 +27,9 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain("if: ${{ always() && steps.database_migrations.outcome == 'success' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '2500' }}");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_STAGE_MAX_TASKS');
+    expect(workflow).toContain("PIPELINE_TASK_WORKER_STAGE_QUANTUM: ${{ vars.PIPELINE_TASK_WORKER_STAGE_QUANTUM || '1' }}");
+    expect(workflow).toContain('PIPELINE_TASK_WORKER_RECONCILIATION_REPORT_FILE: pipeline-task-reconciliation.json');
+    expect(workflow).toContain('pipeline-task-reconciliation-${{ github.run_id }}');
     expect(workflow).toContain("PIPELINE_TASK_WORKER_WALL_CLOCK_MS: ${{ vars.PIPELINE_TASK_WORKER_WALL_CLOCK_MS || '600000' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS: ${{ vars.PIPELINE_TASK_WORKER_MIN_TIME_TO_START_TASK_MS || '120000' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_TASK_TYPES: ${{ vars.PIPELINE_TASK_WORKER_TASK_TYPES || '' }}");
@@ -104,6 +109,12 @@ describe('process backlog workflow', () => {
     expect(script).toContain('actionableCurrentDeadLetter');
     expect(script).toContain('staleHistoricalDeadLetter');
     expect(script).toContain('dead_lettered_this_run=${summary.deadLettered}');
+    expect(script).toContain('successor_tasks_created_this_run=${summary.successorTasksCreated}');
+    expect(script).toContain('stale_pending_reconciled_this_run=${summary.stalePendingReconciliation.stalePendingReconciledThisRun}');
+    expect(script).toContain('by_reason: reconciliationReport.byReason');
+    expect(script).toContain('by_task_type: reconciliationReport.byTaskType');
+    expect(script).toContain('net_active_pending_delta=${activePending - activePendingBefore}');
+    expect(script).toContain('PIPELINE_TASK_WORKER_RECONCILIATION_REPORT_FILE');
     expect(script).toContain('PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT');
     expect(script).toContain('PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS');
     expect(script).toContain('process.exitCode = workerError instanceof PipelineWorkerCancelledError ? 130 : 1');

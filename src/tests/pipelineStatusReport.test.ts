@@ -34,6 +34,9 @@ describe("pipeline status report", () => {
       status: "RETRYING",
       retry_wait: 2,
       dead_letter: 0,
+      oldest_age_seconds: 0,
+      oldest_retry_wait_age_seconds: 30,
+      oldest_dead_letter_age_seconds: 0,
     });
     expect(stages.find((stage) => stage.stage === "PROFILE_MATCH")).toMatchObject({
       status: "BLOCKED",
@@ -63,6 +66,64 @@ describe("pipeline status report", () => {
       dead_letter: 8,
       actionable_dead_letter: 0,
       stale_historical_dead_letter: 8,
+      oldest_age_seconds: 0,
+      oldest_retry_wait_age_seconds: 0,
+      oldest_dead_letter_age_seconds: 120,
+    });
+  });
+
+  it("excludes historical dead-letter age from pending-age classification", () => {
+    const stages = summarizeTaskStages([
+      {
+        task_type: "PUBLISH_EMBEDDING",
+        status: "PENDING",
+        task_count: 139,
+        oldest_age_seconds: 1500,
+      },
+      {
+        task_type: "PUBLISH_EMBEDDING",
+        status: "DEAD_LETTER",
+        task_count: 8,
+        oldest_age_seconds: 413320,
+        actionable_dead_letter_count: 0,
+        stale_historical_dead_letter_count: 8,
+      },
+    ]);
+
+    expect(stages.find((stage) => stage.stage === "EMBEDDINGS")).toMatchObject({
+      status: "BACKLOG_HEALTHY",
+      pending: 139,
+      dead_letter: 8,
+      stale_historical_dead_letter: 8,
+      oldest_age_seconds: 1500,
+    });
+  });
+
+  it("distinguishes aged pending backlog from healthy pending work", () => {
+    const stages = summarizeTaskStages([
+      {
+        task_type: "NORMALIZE_OBSERVATION",
+        status: "PENDING",
+        task_count: 7,
+        oldest_age_seconds: 7201,
+      },
+      {
+        task_type: "PUBLISH_EMBEDDING",
+        status: "PENDING",
+        task_count: 2,
+        oldest_age_seconds: 7200,
+      },
+    ]);
+
+    expect(stages.find((stage) => stage.stage === "NORMALIZATION")).toMatchObject({
+      status: "BACKLOG_AGED",
+      pending: 7,
+      oldest_age_seconds: 7201,
+    });
+    expect(stages.find((stage) => stage.stage === "EMBEDDINGS")).toMatchObject({
+      status: "BACKLOG_HEALTHY",
+      pending: 2,
+      oldest_age_seconds: 7200,
     });
   });
 

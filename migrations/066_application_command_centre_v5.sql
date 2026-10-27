@@ -729,12 +729,14 @@ BEGIN
   FOR existing_constraint IN
     SELECT constraint_row.conname
     FROM pg_constraint AS constraint_row
-    WHERE constraint_row.conrelid = 'public.application_records'::REGCLASS
+    WHERE constraint_row.conrelid = to_regclass(format('%I.%I', current_schema(), 'application_records'))
       AND constraint_row.contype = 'c'
       AND pg_get_constraintdef(constraint_row.oid) ILIKE '%status%'
   LOOP
     EXECUTE FORMAT(
-      'ALTER TABLE public.application_records DROP CONSTRAINT %I',
+      'ALTER TABLE %I.%I DROP CONSTRAINT IF EXISTS %I',
+      current_schema(),
+      'application_records',
       existing_constraint.conname
     );
   END LOOP;

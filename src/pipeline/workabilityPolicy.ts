@@ -7,6 +7,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/con
 
 export interface WorkabilityPolicy {
   unknownWorkModeDisposition: "PASS" | "HARD_REJECT" | "NEEDS_VERIFICATION";
+  allowedWorkModes: Array<"REMOTE" | "HYBRID" | "ONSITE">;
   onsiteOnlyAllowed: boolean;
   maxOfficeDaysPerWeek: number;
   hardFailOfficeDaysPerWeek: number;
@@ -16,6 +17,7 @@ export interface WorkabilityPolicy {
   rejectExplicitForeignTerritory: boolean;
   unknownWorkAuthorizationNeedsVerification: boolean;
   maxTravelPct: number;
+  minimalTravelAllowed: boolean;
   contractAllowed: boolean;
   minimumBuildingResearchPct: number;
   maximumInteractionPct: number;
@@ -70,6 +72,7 @@ const defaults: WorkabilityPolicy = {
   // conflict. It must not be held for manual verification or inferred as
   // onsite from a non-empty location label.
   unknownWorkModeDisposition: "HARD_REJECT",
+  allowedWorkModes: ["REMOTE", "HYBRID"],
   onsiteOnlyAllowed: false,
   maxOfficeDaysPerWeek: 3,
   hardFailOfficeDaysPerWeek: 4,
@@ -79,6 +82,7 @@ const defaults: WorkabilityPolicy = {
   rejectExplicitForeignTerritory: true,
   unknownWorkAuthorizationNeedsVerification: false,
   maxTravelPct: 20,
+  minimalTravelAllowed: true,
   contractAllowed: false,
   minimumBuildingResearchPct: 60,
   maximumInteractionPct: 40,
@@ -157,6 +161,28 @@ function normalizeTerritorySearchText(value: unknown): string {
     .replace(/\be\s*\.\s*u\.?/g, "eu");
 }
 
+const PROTECTED_ABBREVIATION_PERIOD = "\uE000";
+
+function protectTerritoryAbbreviationPeriods(value: string): string {
+  const protect = (match: string, offset: number, source: string): string => {
+    const nextText = source.slice(offset + match.length);
+    const hasSentenceBoundaryAfterAbbreviation = match.endsWith(".") && /^\s+[A-Z]/.test(nextText);
+    const abbreviation = hasSentenceBoundaryAfterAbbreviation ? match.slice(0, -1) : match;
+    return abbreviation.replace(/\./g, PROTECTED_ABBREVIATION_PERIOD) + match.slice(abbreviation.length);
+  };
+  return value
+    .replace(/\bu\s*\.\s*s\.?/gi, protect)
+    .replace(/\bu\s*\.\s*k\.?/gi, protect)
+    .replace(/\be\s*\.\s*u\.?/gi, protect);
+}
+
+export function splitWorkabilityClauses(value: unknown): string[] {
+  return String(value ?? "")
+    .split(/(?:[.!?;]+\s*|\r?\n+|,\s*(?=(?:but|however|although|yet)\b))/i)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+}
+
 export function normalizeTerritory(value: unknown): string | null {
   const normalized = String(value ?? "")
     .trim()
@@ -182,6 +208,34 @@ export function extractTerritories(value: unknown): string[] {
     }
   }
   return found;
+}
+
+export function inferTerritoryOperator(value: unknown): "ANY" | "ALL" | "UNKNOWN" {
+  const text = normalizeTerritorySearchText(value);
+  const mentions = TERRITORY_ALIASES.flatMap(([territory, aliases]) => aliases.flatMap((alias) => {
+    const matches = [...text.matchAll(new RegExp(`\\b${escapeRegExp(alias)}\\b`, "gi"))];
+    return matches.map((match) => ({ territory, index: match.index ?? -1, end: (match.index ?? -1) + match[0].length }));
+  })).filter((mention) => mention.index >= 0)
+    .sort((left, right) => left.index - right.index || right.end - left.end);
+  const distinctMentions = mentions.filter((mention, index) =>
+    index === 0 || mention.index >= (mentions[index - 1]?.end ?? -1)
+  );
+  const countries = [...new Set(distinctMentions.map((mention) => mention.territory))];
+  if (countries.length === 0) return "UNKNOWN";
+  if (countries.length === 1) return "ANY";
+
+  const joins: Array<"ANY" | "ALL" | "UNKNOWN"> = [];
+  for (let index = 1; index < distinctMentions.length; index++) {
+    const previous = distinctMentions[index - 1];
+    const current = distinctMentions[index];
+    if (!previous || !current || previous.territory === current.territory) continue;
+    const between = text.slice(previous.end, current.index).trim();
+    if (/\b(?:or|either)\b|\//i.test(between)) joins.push("ANY");
+    else if (/^and$/i.test(between)) joins.push("ALL");
+    else joins.push("UNKNOWN");
+  }
+  if (joins.length === 0 || joins.includes("UNKNOWN") || new Set(joins).size !== 1) return "UNKNOWN";
+  return joins[0] ?? "UNKNOWN";
 }
 
 const KNOWN_TERRITORIES = new Set(TERRITORY_ALIASES.map(([territory]) => territory));
@@ -476,6 +530,67 @@ export async function loadVerificationAnswerContext(
  * sentence also contains an employment/location qualifier. This prevents
  * references such as "US clients" from becoming false location rejections.
  */
+export interface ExplicitWorkerTerritoryRequirement {
+  readonly territories: readonly string[];
+  readonly operator: "ANY" | "ALL" | "UNKNOWN";
+  readonly evidenceText: string;
+}
+
+export interface WorkerTerritoryEvaluation {
+  readonly status: "ALLOWED" | "INCOMPATIBLE" | "NEEDS_VERIFICATION";
+  readonly incompatibleTerritories: readonly string[];
+  readonly unresolvedRequirements: readonly ExplicitWorkerTerritoryRequirement[];
+}
+
+export function extractExplicitWorkerTerritoryRequirements(value: unknown): ExplicitWorkerTerritoryRequirement[] {
+  const protectedText = protectTerritoryAbbreviationPeriods(String(value ?? ""));
+  const requirements: ExplicitWorkerTerritoryRequirement[] = [];
+  for (const part of protectedText.split(/[.!?;\n]+/)) {
+    const sentence = part.replaceAll(PROTECTED_ABBREVIATION_PERIOD, ".").trim();
+    if (!sentence) continue;
+    const territories = extractTerritories(sentence).filter((territory) => hasExplicitTerritoryRestriction(sentence, territory));
+    if (territories.length === 0) continue;
+    requirements.push({
+      territories: [...new Set(territories)],
+      operator: inferTerritoryOperator(sentence),
+      evidenceText: sentence,
+    });
+  }
+  return requirements;
+}
+
+export function evaluateWorkerTerritoryRequirements(
+  requirements: readonly ExplicitWorkerTerritoryRequirement[],
+  authorizedRegions: readonly string[],
+  rejectExplicitForeignTerritory = true,
+): WorkerTerritoryEvaluation {
+  const allowed = new Set(normalizeTerritories([...authorizedRegions]));
+  const incompatibleTerritories: string[] = [];
+  const unresolvedRequirements: ExplicitWorkerTerritoryRequirement[] = [];
+  for (const requirement of requirements) {
+    const territories = normalizeTerritories([...requirement.territories]);
+    if (territories.length === 0 || requirement.operator === "UNKNOWN") {
+      unresolvedRequirements.push(requirement);
+      continue;
+    }
+    const permittedCount = territories.filter((territory) => allowed.size === 0 || allowed.has(territory)).length;
+    const satisfied = requirement.operator === "ANY"
+      ? permittedCount > 0
+      : permittedCount === territories.length;
+    if (!satisfied && rejectExplicitForeignTerritory && allowed.size > 0) {
+      incompatibleTerritories.push(...territories.filter((territory) => !allowed.has(territory)));
+    }
+  }
+  const uniqueIncompatible = [...new Set(incompatibleTerritories)];
+  return {
+    status: uniqueIncompatible.length > 0
+      ? "INCOMPATIBLE"
+      : unresolvedRequirements.length > 0 ? "NEEDS_VERIFICATION" : "ALLOWED",
+    incompatibleTerritories: uniqueIncompatible,
+    unresolvedRequirements,
+  };
+}
+
 export function hasExplicitTerritoryRestriction(value: unknown, territory: string): boolean {
   const canonical = normalizeTerritory(territory);
   if (!canonical) return false;
@@ -572,11 +687,19 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
   const composition = document?.global_workability_gates?.work_composition ?? {};
   const configuredHardFail = finiteNumber(workMode.max_office_days_hard_fail, defaults.hardFailOfficeDaysPerWeek);
   const configuredMaxOffice = finiteNumber(workMode.max_office_days_per_week, defaults.maxOfficeDaysPerWeek);
+  const configuredModes = stringArray(firstDefined(workMode.allowed_work_modes, workMode.work_modes))
+    .map((mode) => mode.toUpperCase().replace(/[-\s]+/g, "_"))
+    .filter((mode): mode is "REMOTE" | "HYBRID" | "ONSITE" => ["REMOTE", "HYBRID", "ONSITE"].includes(mode));
 
   return {
     unknownWorkModeDisposition: normalizeUnknownWorkModeDisposition(
       firstDefined(workMode.unknown_work_mode_policy, workMode.unknownWorkModePolicy)
     ),
+    allowedWorkModes: configuredModes.length > 0
+      ? configuredModes
+      : workMode.onsite_only_allowed === true
+        ? ["REMOTE", "HYBRID", "ONSITE"]
+        : defaults.allowedWorkModes,
     onsiteOnlyAllowed: workMode.onsite_only_allowed === true,
     maxOfficeDaysPerWeek: configuredMaxOffice,
     hardFailOfficeDaysPerWeek: normalizeHardFailDays(configuredMaxOffice, configuredHardFail),
@@ -600,6 +723,10 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
       defaults.unknownWorkAuthorizationNeedsVerification
     ),
     maxTravelPct: finiteNumber(document?.global_workability_gates?.travel?.max_travel_pct, defaults.maxTravelPct),
+    minimalTravelAllowed: booleanValue(
+      document?.global_workability_gates?.travel?.minimal_qualitative_travel_allowed,
+      defaults.minimalTravelAllowed
+    ),
     contractAllowed: document?.global_workability_gates?.employment?.contract_allowed === true,
     minimumBuildingResearchPct: finiteNumber(composition.minimum_building_research_pct, defaults.minimumBuildingResearchPct),
     maximumInteractionPct: finiteNumber(composition.maximum_interaction_pct, defaults.maximumInteractionPct),
@@ -635,11 +762,15 @@ export function mergeWorkabilityPreferenceContent(
   const workability = objectValue(firstDefined(root.workability, root.hard_constraints));
   const territory = objectValue(firstDefined(workability.territory, root.territory));
   const operations = objectValue(firstDefined(workability.operations, root.operations));
+  const travel = objectValue(firstDefined(workability.travel, root.travel));
   const composition = objectValue(firstDefined(workability.work_composition, root.work_composition));
 
   const allowedWorkModes = stringArray(
     firstDefined(workability.work_modes, workability.allowed_work_modes, root.work_modes)
-  ).map((mode) => mode.toUpperCase().replace(/[-\s]+/g, "_"));
+  ).map((mode) => mode.toUpperCase().replace(/[-\s]+/g, "_").replace("ON_SITE", "ONSITE"));
+  const normalizedAllowedWorkModes = allowedWorkModes.filter(
+    (mode): mode is "REMOTE" | "HYBRID" | "ONSITE" => ["REMOTE", "HYBRID", "ONSITE"].includes(mode),
+  );
 
   const maxOfficeDays = finitePolicyNumber(
     firstDefined(
@@ -676,6 +807,14 @@ export function mergeWorkabilityPreferenceContent(
         root.unknownWorkModePolicy
       ) ?? basePolicy.unknownWorkModeDisposition
     ),
+    allowedWorkModes: normalizedAllowedWorkModes.length > 0
+      ? normalizedAllowedWorkModes
+      : booleanValue(
+          firstDefined(workability.onsite_only_allowed, workability.onsiteOnlyAllowed, root.onsite_only_allowed),
+          basePolicy.onsiteOnlyAllowed,
+        )
+        ? [...new Set([...basePolicy.allowedWorkModes, "ONSITE" as const])]
+        : basePolicy.allowedWorkModes,
     onsiteOnlyAllowed: allowedWorkModes.length > 0
       ? allowedWorkModes.some((mode) => mode === "ONSITE" || mode === "ON_SITE")
       : booleanValue(
@@ -736,6 +875,14 @@ export function mergeWorkabilityPreferenceContent(
       basePolicy.maxTravelPct,
       0,
       100
+    ),
+    minimalTravelAllowed: booleanValue(
+      firstDefined(
+        travel.minimal_qualitative_travel_allowed,
+        workability.minimal_qualitative_travel_allowed,
+        root.minimal_qualitative_travel_allowed
+      ),
+      basePolicy.minimalTravelAllowed
     ),
     contractAllowed: employmentTypes.length > 0
       ? employmentTypes.some((type) => type === "CONTRACT" || type === "CONTRACTOR")

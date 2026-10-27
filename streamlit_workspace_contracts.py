@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from decimal import Decimal
 import math
 
+from streamlit_application_workflow import has_current_ready_assessment
+
 
 APPLICATION_STATUSES = frozenset(
     {
@@ -153,6 +155,12 @@ def validate_ranked_job_row(row: Mapping[str, object], workspace_id: object) -> 
             "overall_rank_score",
             "ranking_confidence",
             "is_top_ten_ready",
+            "readiness_status",
+            "readiness_fingerprint",
+            "readiness_expires_at",
+            "readiness_reason_codes",
+            "availability_status",
+            "availability_recheck_at",
             "policy_recheck_required",
             "recommendation_eligibility",
             "recommendation_outcome",
@@ -184,6 +192,8 @@ def validate_ranked_job_row(row: Mapping[str, object], workspace_id: object) -> 
         )
     if row.get("policy_recheck_required") is not False:
         raise ValueError("Top 10 rows cannot have a pending policy recheck.")
+    if not has_current_ready_assessment(row):
+        raise ValueError("Top 10 rows require a current READY assessment.")
     for field in (
         "overall_rank_score",
         "ranking_confidence",
@@ -232,6 +242,12 @@ def validate_apply_now_row(row: Mapping[str, object], workspace_id: object) -> N
             "recommendation_eligibility",
             "recommendation_outcome",
             "current_artifact_status",
+            "readiness_status",
+            "readiness_fingerprint",
+            "readiness_expires_at",
+            "readiness_reason_codes",
+            "availability_status",
+            "availability_recheck_at",
             "policy_recheck_required",
             "overall_rank_score",
             "ranking_confidence",
@@ -255,6 +271,8 @@ def validate_apply_now_row(row: Mapping[str, object], workspace_id: object) -> N
         "EVALUATION_STALE",
     }:
         raise ValueError("Apply Now row deterministic context is stale or incomplete.")
+    if not has_current_ready_assessment(row):
+        raise ValueError("Apply Now rows require a current READY assessment.")
     for field in (
         "overall_rank_score",
         "ranking_confidence",

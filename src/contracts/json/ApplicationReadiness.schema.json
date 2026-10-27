@@ -1,0 +1,251 @@
+{
+  "$ref": "#/definitions/ApplicationReadiness",
+  "definitions": {
+    "ApplicationReadiness": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "application_readiness_v1"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "READY",
+            "BLOCKED",
+            "NEEDS_VERIFICATION",
+            "PROCESSING"
+          ]
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{2,127}$"
+          },
+          "default": []
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "enum": [
+                  "SOURCE_IDENTITY",
+                  "DESCRIPTION_COMPLETENESS",
+                  "AVAILABILITY",
+                  "FRESHNESS",
+                  "WORK_AUTHORIZATION",
+                  "WORK_MODE",
+                  "TRAVEL",
+                  "EMPLOYMENT_ROUTE",
+                  "COMPENSATION",
+                  "MANDATORY_QUALIFICATIONS",
+                  "EMPLOYER_POLICY",
+                  "ROLE_SHAPE",
+                  "EVIDENCE_CONTEXT"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "MET",
+                  "BLOCKED",
+                  "NEEDS_VERIFICATION",
+                  "PROCESSING",
+                  "NOT_APPLICABLE"
+                ]
+              },
+              "importance": {
+                "type": "string",
+                "enum": [
+                  "MUST",
+                  "PREFERRED",
+                  "NICE_TO_HAVE"
+                ]
+              },
+              "reason_code": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{2,127}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "rationale": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "evidence_keys": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "default": []
+              },
+              "policy_reference": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "assessed_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "expires_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "key",
+              "status",
+              "importance",
+              "reason_code",
+              "rationale",
+              "assessed_at"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "profile_version_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requirement_set_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "match_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preference_context_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy_snapshot_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "qualification_comparator_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_revision_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "readiness_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "evaluated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "status",
+        "checks",
+        "canonical_job_id",
+        "job_version_id",
+        "profile_version_id",
+        "requirement_set_id",
+        "match_run_id",
+        "preference_context_id",
+        "policy_snapshot_id",
+        "policy_version",
+        "qualification_comparator_version",
+        "evidence_revision_hash",
+        "readiness_fingerprint",
+        "evaluated_at",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
