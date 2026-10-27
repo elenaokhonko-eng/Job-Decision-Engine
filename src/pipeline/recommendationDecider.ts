@@ -7,7 +7,21 @@ import { RecommendationDecisionSchema } from "../decision/contracts.js";
 import { evaluateDecisionPolicy } from "../policy/decisionPolicy.js";
 import { resolveWorkspacePolicySnapshot } from "../policy/policySnapshot.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
-import { evaluateCompensationPolicy, inferOpportunityCategory, parseCompensationEvidence } from "../policy/stage3PolicyEngine.js";
+import {
+  evaluateCompensationPolicy,
+  evaluateJobFreshness,
+  inferOpportunityCategory,
+  parseCompensationEvidence,
+  type CompensationEvaluationResult,
+  type JobCompensationInput,
+} from "../policy/stage3PolicyEngine.js";
+import { resolveFrankfurterSgdRate } from "../policy/fxRateService.js";
+import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
+import type { MaterialReadinessCheck } from "../contracts/applicationReadiness.js";
+import { assessApplicationReadiness, buildApplicationReadinessFingerprint, QUALIFICATION_COMPARATOR_VERSION } from "../eligibility/applicationReadiness.js";
+import { assessHiringTerritoryReadiness, assessTravelReadiness, assessWorkModeReadiness } from "../eligibility/workabilityReadiness.js";
+import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
+import { resolveWorkspaceWorkabilityPolicy } from "./workabilityPolicy.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 
 dotenv.config();
@@ -91,6 +105,113 @@ function computeEvidenceCompleteness(workplaceTypeRaw: unknown, workabilityFacts
   return Number(completeness.toFixed(3));
 }
 
+function jsonRecord(value: unknown): Record<string, unknown> | null {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    try {
+      candidate = JSON.parse(candidate) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  return candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : null;
+}
+
+function parseSourceEvidence(value: unknown): JobSourceEvidence | null {
+  const record = jsonRecord(value);
+  if (!record) return null;
+  const parsed = JobSourceEvidenceSchema.safeParse(record);
+  return parsed.success ? parsed.data : null;
+}
+
+function readinessCheck(
+  key: MaterialReadinessCheck["key"],
+  status: MaterialReadinessCheck["status"],
+  rationale: string,
+  assessedAt: string,
+  options: {
+    readonly reasonCode?: string | null;
+    readonly evidenceKeys?: string[];
+    readonly importance?: MaterialReadinessCheck["importance"];
+    readonly policyReference?: string | null;
+    readonly expiresAt?: string | null;
+  } = {},
+): MaterialReadinessCheck {
+  return {
+    key,
+    status,
+    importance: options.importance ?? "MUST",
+    reason_code: options.reasonCode ?? null,
+    rationale,
+    evidence_keys: options.evidenceKeys ?? [],
+    policy_reference: options.policyReference ?? null,
+    assessed_at: assessedAt,
+    expires_at: options.expiresAt ?? null,
+  };
+}
+
+function sha256Json(value: unknown): string {
+  return sha256Hex(stableStringify(value));
+}
+
+function availabilityEvidenceHash(value: unknown): string | null {
+  const record = jsonRecord(value);
+  if (!record) return null;
+  const spans = Array.isArray(record.evidence)
+    ? record.evidence.flatMap((item) => {
+        const span = jsonRecord(item);
+        return span ? [{
+          evidence_key: span.evidence_key ?? null,
+          quote_text: span.quote_text ?? null,
+          source_name: span.source_name ?? null,
+          source_external_id: span.source_external_id ?? null,
+          source_url: span.source_url ?? null,
+        }] : [];
+      })
+    : [];
+  return sha256Json({
+    status: record.status ?? null,
+    verification_method: record.verification_method ?? null,
+    reason_code: record.reason_code ?? null,
+    evidence: spans,
+  });
+}
+
+function availabilityEvidenceHashForJob(sourceEvidence: JobSourceEvidence | null, stored: unknown): string | null {
+  return availabilityEvidenceHash(sourceEvidence?.availability ?? stored);
+}
+
+function asIso(value: Date | string | null): string | null {
+  if (value === null) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function compensationInputForJob(raw: string | null, evidence: JobSourceEvidence | null): JobCompensationInput | null {
+  if (evidence?.compensation.status === "CONFLICTING") return null;
+  const baseCashComponents = evidence?.compensation.components.filter((component) => component.component_type === "BASE_CASH") ?? [];
+  if (baseCashComponents.length === 0) return parseCompensationEvidence(raw);
+  if (baseCashComponents.length !== 1) return null;
+  const baseCash = baseCashComponents[0];
+  if (!baseCash) return null;
+  const salaryPeriod = baseCash.period === "ANNUAL" || baseCash.period === "MONTHLY" || baseCash.period === "HOURLY"
+    ? baseCash.period
+    : "UNKNOWN";
+  const quote = baseCash.evidence.map((span) => span.quote_text).join(" ");
+  return parseCompensationEvidence(quote, {
+    salary_min: baseCash.amount_min,
+    salary_max: baseCash.amount_max,
+    salary_currency: baseCash.currency,
+    salary_period: salaryPeriod,
+    salary_basis: baseCash.pay_basis,
+    component_type: baseCash.component_type,
+    guaranteed_hours_per_week: baseCash.guaranteed_hours_per_week,
+    paid_weeks_per_year: baseCash.paid_weeks_per_year,
+  });
+}
+
 export async function runRecommendationDecider(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options?: {
@@ -110,7 +231,8 @@ export async function runRecommendationDecider(
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
-    const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['stage3']);
+    const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['lane_intent', 'stage3']);
+    const workabilityPolicyResolution = await resolveWorkspaceWorkabilityPolicy(client as any, { context: ctx });
     const snapshot = await resolveWorkspacePolicySnapshot(client as any, { context: ctx });
 
     const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
@@ -130,16 +252,19 @@ export async function runRecommendationDecider(
     const { rows: jobs } = await client.query<{
       canonical_job_id: string;
       job_version_id: string | null;
+      canonical_latest_job_version_id: string | null;
       processing_state: string | null;
       gate_decision: string | null;
       deterministic_match_score: any;
       deterministic_match_coverage: any;
       workplace_type: string | null;
+      employment_type: string | null;
       routing_disposition: string | null;
       profile_match_status: string | null;
       workability_facts: any;
       latest_match_run_id: string | null;
       match_canonical_job_id: string | null;
+      match_job_version_id: string | null;
       match_status: string | null;
       match_matched_count: number | null;
       match_profile_version_id: string | null;
@@ -147,8 +272,23 @@ export async function runRecommendationDecider(
       match_job_content_hash: string | null;
       match_context_fingerprint: string | null;
       active_profile_version_id: string | null;
+      active_profile_source_hash: string | null;
       active_requirement_set_id: string | null;
       job_content_hash: string | null;
+      source_posting_identity_hash: string | null;
+      evidence_revision_hash: string | null;
+      source_published_at: Date | string | null;
+      source_updated_at: Date | string | null;
+      source_expires_at: Date | string | null;
+      reposted_at: Date | string | null;
+      freshness_basis: string | null;
+      availability_status: "OPEN" | "CLOSED" | "UNKNOWN" | null;
+      availability_evidence: unknown;
+      availability_verified_at: Date | string | null;
+      availability_recheck_at: Date | string | null;
+      description_quality_status: string | null;
+      normalized_source_evidence: unknown;
+      latest_observation_raw_payload_hash: string | null;
       match_embedding_space_id: string | null;
       recommendation_eligibility: string | null;
       recommendation_outcome: string | null;
@@ -166,16 +306,19 @@ export async function runRecommendationDecider(
       SELECT
         c.id AS canonical_job_id,
         COALESCE(c.latest_job_version_id, lv.id) AS job_version_id,
+        c.latest_job_version_id AS canonical_latest_job_version_id,
         COALESCE(c.processing_state, c.processing_status) AS processing_state,
         c.gate_decision,
         c.deterministic_match_score,
         c.deterministic_match_coverage,
         c.workplace_type,
+        c.employment_type,
         c.routing_disposition,
         c.profile_match_status,
         c.workability_facts,
         c.latest_match_run_id,
         mr.canonical_job_id AS match_canonical_job_id,
+        mr.job_version_id AS match_job_version_id,
         mr.status AS match_status,
         mr.matched_count AS match_matched_count,
         mr.profile_version_id AS match_profile_version_id,
@@ -183,8 +326,21 @@ export async function runRecommendationDecider(
         mr.job_content_hash AS match_job_content_hash,
         mr.context_fingerprint AS match_context_fingerprint,
         active_profile.id AS active_profile_version_id,
+        active_profile.source_hash AS active_profile_source_hash,
         lv.active_requirement_set_id,
         lv.content_hash AS job_content_hash,
+        lv.source_posting_identity_hash,
+        lv.evidence_revision_hash,
+        lv.source_published_at,
+        lv.source_updated_at,
+        lv.source_expires_at,
+        lv.reposted_at,
+        lv.freshness_basis,
+        lv.availability_status,
+        lv.availability_evidence,
+        lv.availability_verified_at,
+        lv.availability_recheck_at,
+        c.description_quality_status,
         mr.embedding_space_id AS match_embedding_space_id,
         c.recommendation_eligibility,
         c.recommendation_outcome,
@@ -196,13 +352,15 @@ export async function runRecommendationDecider(
         c.company_name,
         c.normalized_title,
         lv.description_text,
-        source_observation.compensation_raw
+        source_observation.compensation_raw,
+        source_evidence.normalized_evidence AS normalized_source_evidence,
+        source_observation.raw_payload_hash AS latest_observation_raw_payload_hash
       FROM canonical_jobs c
       LEFT JOIN match_runs mr
         ON mr.workspace_id = c.workspace_id
        AND mr.id = c.latest_match_run_id
       LEFT JOIN LATERAL (
-        SELECT pv.id
+        SELECT pv.id, pv.source_hash
         FROM profile_versions pv
         WHERE pv.workspace_id = c.workspace_id
           AND pv.status = 'ACTIVE'
@@ -210,7 +368,10 @@ export async function runRecommendationDecider(
         LIMIT 1
       ) active_profile ON TRUE
       LEFT JOIN LATERAL (
-        SELECT id, active_requirement_set_id, content_hash, description_text
+        SELECT id, active_requirement_set_id, content_hash, description_text,
+               source_posting_identity_hash, evidence_revision_hash,
+               source_published_at, source_updated_at, source_expires_at, reposted_at, freshness_basis,
+               availability_status, availability_evidence, availability_verified_at, availability_recheck_at
         FROM job_versions
         WHERE canonical_job_id = c.id
           AND workspace_id = $1
@@ -219,13 +380,39 @@ export async function runRecommendationDecider(
         LIMIT 1
       ) lv ON TRUE
       LEFT JOIN LATERAL (
-        SELECT observation.compensation_raw
+        SELECT observation.compensation_raw,
+               observation.raw_payload_hash
         FROM raw_job_observations AS observation
         WHERE observation.workspace_id = c.workspace_id
           AND observation.job_version_id = lv.id
         ORDER BY observation.retrieved_at DESC, observation.id DESC
         LIMIT 1
       ) AS source_observation ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT evidence_event.normalized_evidence
+        FROM (
+          SELECT observation.normalized_evidence,
+                 observation.retrieved_at AS observed_at,
+                 observation.id AS event_id
+          FROM raw_job_observations AS observation
+          WHERE observation.workspace_id = c.workspace_id
+            AND observation.job_version_id = lv.id
+            AND observation.normalized_evidence IS NOT NULL
+          UNION ALL
+          SELECT disposition.normalized_evidence,
+                 disposition.fetched_at AS observed_at,
+                 disposition.id AS event_id
+          FROM source_candidate_dispositions AS disposition
+          JOIN raw_job_observations AS observation
+            ON observation.workspace_id = disposition.workspace_id
+           AND observation.id = disposition.job_observation_id
+           AND observation.job_version_id = lv.id
+          WHERE disposition.workspace_id = c.workspace_id
+            AND disposition.normalized_evidence IS NOT NULL
+        ) evidence_event
+        ORDER BY evidence_event.observed_at DESC, evidence_event.event_id DESC
+        LIMIT 1
+      ) AS source_evidence ON TRUE
       WHERE c.workspace_id = $1
         AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
         ${jobVersionFilter}
@@ -248,6 +435,36 @@ export async function runRecommendationDecider(
         );
         continue;
       }
+      const sourceEvidence = parseSourceEvidence(job.normalized_source_evidence);
+      const compensationInput = compensationInputForJob(job.compensation_raw, sourceEvidence);
+      let fxRateObservationId: string | null = null;
+      let fxRateFailure: string | null = null;
+      if (
+        compensationInput
+        && compensationInput.salary_currency
+        && compensationInput.salary_currency.toUpperCase() !== "SGD"
+        && preferenceContext.stage3?.compensation?.target_salary_basis
+        && compensationInput.salary_basis === preferenceContext.stage3.compensation.target_salary_basis
+      ) {
+        try {
+          const fxObservation = await resolveFrankfurterSgdRate(client, compensationInput.salary_currency, {
+            maxAgeDays: preferenceContext.stage3.compensation.fx_rate_max_age_days ?? 7,
+          });
+          compensationInput.currency_to_sgd_rate = fxObservation.rate;
+          compensationInput.fx_rate_date = fxObservation.rateDate;
+          compensationInput.fx_rate_source = fxObservation.sourceName;
+          compensationInput.fx_rate_observation_id = fxObservation.id;
+          fxRateObservationId = fxObservation.id;
+        } catch (error) {
+          fxRateFailure = error instanceof Error ? error.message : String(error);
+        }
+      }
+      const evidenceCategory = sourceEvidence?.opportunity_category.status === "SUPPORTED"
+        ? sourceEvidence.opportunity_category.value
+        : inferOpportunityCategory(job.company_name, job.normalized_title, "");
+      const compensationAssessment = compensationInput && preferenceContext.stage3?.compensation
+        ? evaluateCompensationPolicy(compensationInput, evidenceCategory, preferenceContext.stage3.compensation)
+        : null;
       await client.query("BEGIN");
       try {
         const normalizedGateDecision =
@@ -255,8 +472,11 @@ export async function runRecommendationDecider(
           inferGateDecisionFromProcessingState(job.processing_state);
 
         const currentMatch =
+          job.canonical_latest_job_version_id !== null &&
+          job.canonical_latest_job_version_id === job.job_version_id &&
           job.match_status === "COMPLETED" &&
           job.match_canonical_job_id === job.canonical_job_id &&
+          job.match_job_version_id === job.job_version_id &&
           job.match_profile_version_id !== null &&
           job.match_profile_version_id === job.active_profile_version_id &&
           job.match_requirement_set_id !== null &&
@@ -327,21 +547,364 @@ export async function runRecommendationDecider(
           adjustedNotes.push("priority_downgraded_semantic_pending");
         }
 
-        const compensationInput = parseCompensationEvidence(job.compensation_raw);
-        if (compensationInput && preferenceContext.stage3?.compensation) {
-          const compensation = evaluateCompensationPolicy(
-            compensationInput,
-            inferOpportunityCategory(job.company_name, job.normalized_title, job.description_text || ""),
-            preferenceContext.stage3.compensation
+        if (fxRateFailure) adjustedNotes.push("FX_RATE_RETRIEVAL_INCOMPLETE");
+        if (compensationAssessment?.is_hard_reject) {
+          adjustedEligibility = "INELIGIBLE";
+          adjustedOutcome = "SKIP";
+          adjustedNotes.push(compensationAssessment.rejection_code || "COMPENSATION_BELOW_USER_FLOOR");
+        } else if (compensationAssessment?.prevents_apply_now) {
+          adjustedOutcome = "TRACK";
+          adjustedNotes.push(compensationAssessment.rejection_code || "COMPENSATION_REQUIRES_VERIFICATION");
+        }
+
+        const readinessAssessedAt = new Date().toISOString();
+        const evidenceRevisionHash = typeof job.evidence_revision_hash === "string" && /^[a-f0-9]{64}$/i.test(job.evidence_revision_hash)
+          ? job.evidence_revision_hash.toLowerCase()
+          : sourceEvidence
+            ? buildEvidenceRevisionHash(sourceEvidence)
+            : sha256Json({ schema_version: "legacy_evidence_unknown", job_version_id: job.job_version_id, content_hash: job.job_content_hash });
+        const availabilityEvidenceHash = availabilityEvidenceHashForJob(sourceEvidence, job.availability_evidence);
+        const readinessChecks: MaterialReadinessCheck[] = [];
+        const sourceIdentityPresent = Boolean(
+          job.source_posting_identity_hash
+          || sourceEvidence?.source_identity_hash
+          || sourceEvidence?.source_external_id
+          || sourceEvidence?.employer_posting_url
+        );
+        readinessChecks.push(readinessCheck(
+          "SOURCE_IDENTITY",
+          sourceIdentityPresent ? "MET" : "NEEDS_VERIFICATION",
+          sourceIdentityPresent ? "Stable source posting identity is recorded." : "No stable source posting ID or canonical employer posting URL is recorded.",
+          readinessAssessedAt,
+          { reasonCode: sourceIdentityPresent ? null : "SOURCE_IDENTITY_MISSING", evidenceKeys: sourceEvidence?.source_identity_hash ? [sourceEvidence.source_identity_hash] : [] },
+        ));
+
+        const descriptionStatus = sourceEvidence?.description.completeness_status ?? "UNKNOWN";
+        readinessChecks.push(readinessCheck(
+          "DESCRIPTION_COMPLETENESS",
+          descriptionStatus === "COMPLETE" ? "MET" : "NEEDS_VERIFICATION",
+          descriptionStatus === "COMPLETE"
+            ? "Normalized description has a complete, structured evidence assessment."
+            : "Description completeness is not established; enrich the employer source before application readiness.",
+          readinessAssessedAt,
+          { reasonCode: descriptionStatus === "COMPLETE" ? null : "DESCRIPTION_EVIDENCE_INCOMPLETE", evidenceKeys: sourceEvidence?.description.completeness_reasons ?? [] },
+        ));
+
+        const now = new Date();
+        const availabilityStatus = sourceEvidence
+          ? sourceEvidence.availability.status
+          : job.availability_status;
+        const availabilityVerifiedAt = sourceEvidence
+          ? sourceEvidence.availability.verified_at
+          : asIso(job.availability_verified_at);
+        const availabilityExpiresAt = sourceEvidence
+          ? sourceEvidence.availability.expires_at
+          : asIso(job.availability_recheck_at);
+        const postingExpiry = asIso(job.source_expires_at);
+        const postingExpired = postingExpiry !== null && new Date(postingExpiry).getTime() <= now.getTime();
+        const availabilityCurrent = availabilityStatus === "OPEN"
+          && availabilityVerifiedAt !== null
+          && availabilityExpiresAt !== null
+          && new Date(availabilityExpiresAt).getTime() > now.getTime()
+          && !postingExpired;
+        const availabilityVerificationRevision = availabilityVerifiedAt
+          ? sha256Json({
+              status: availabilityStatus,
+              verified_at: availabilityVerifiedAt,
+              expires_at: availabilityExpiresAt,
+              verification_method: sourceEvidence?.availability.verification_method ?? null,
+            })
+          : null;
+        readinessChecks.push(readinessCheck(
+          "AVAILABILITY",
+          postingExpired || availabilityStatus === "CLOSED" ? "BLOCKED" : availabilityCurrent ? "MET" : "NEEDS_VERIFICATION",
+          postingExpired
+            ? "The authoritative source expiry date has passed."
+            : availabilityStatus === "CLOSED"
+              ? "The source currently marks this posting closed."
+              : availabilityCurrent
+                ? "Employer/source availability evidence is current."
+                : "Open status is missing or its verification TTL has expired.",
+          readinessAssessedAt,
+          {
+            reasonCode: postingExpired || availabilityStatus === "CLOSED" ? "JOB_NOT_OPEN" : availabilityCurrent ? null : "AVAILABILITY_NOT_VERIFIED",
+            evidenceKeys: [
+              ...(sourceEvidence?.availability.evidence.map((item) => item.evidence_key) ?? []),
+              ...(availabilityVerificationRevision ? [`availability_verification_revision:${availabilityVerificationRevision}`] : []),
+            ],
+            policyReference: `availability_verification_v1:${availabilityVerifiedAt ?? "unknown"}:${availabilityExpiresAt ?? "unknown"}`,
+            expiresAt: availabilityExpiresAt,
+          },
+        ));
+
+        const freshnessPolicy = preferenceContext.stage3?.freshness;
+        const freshness = evaluateJobFreshness({
+          posted_at: job.source_published_at,
+          reposted_at: job.reposted_at,
+          source_updated_at: job.source_updated_at,
+          freshness_basis: job.freshness_basis,
+          is_repost: job.freshness_basis === "REPOSTED_AT",
+        }, freshnessPolicy);
+        const freshnessStatus = !freshnessPolicy?.max_posting_age_days
+          ? "NEEDS_VERIFICATION"
+          : freshness.status === "STALE"
+            ? freshness.is_hard_reject ? "BLOCKED" : "NEEDS_VERIFICATION"
+            : freshness.status === "UNKNOWN" ? "NEEDS_VERIFICATION" : "MET";
+        const freshnessExpiry = asIso(job.source_published_at ?? job.reposted_at)
+          && freshnessPolicy?.max_posting_age_days
+          ? new Date(new Date(asIso(job.reposted_at ?? job.source_published_at) as string).getTime() + freshnessPolicy.max_posting_age_days * 24 * 60 * 60 * 1000).toISOString()
+          : null;
+        readinessChecks.push(readinessCheck(
+          "FRESHNESS",
+          freshnessStatus,
+          freshnessStatus === "MET" ? freshness.evidence : freshnessPolicy?.max_posting_age_days
+            ? freshness.evidence : "No active, versioned maximum-posting-age policy is available.",
+          readinessAssessedAt,
+          {
+            reasonCode: freshnessStatus === "BLOCKED" ? freshness.rejection_code ?? "POSTING_STALE" : freshnessStatus === "MET" ? null : "FRESHNESS_UNVERIFIED",
+            evidenceKeys: freshnessPolicy?.max_posting_age_days ? [`posting_age_days:${freshness.job_age_days ?? "unknown"}`] : [],
+            expiresAt: freshnessExpiry,
+          },
+        ));
+
+        const workabilityEvidence = sourceEvidence?.workability;
+        const territoryEvidence = workabilityEvidence?.hiring_territories ?? null;
+        const workAuthorization = assessHiringTerritoryReadiness(
+          sourceEvidence?.description.normalized_text ?? job.description_text ?? "",
+          territoryEvidence,
+          workabilityEvidence?.work_mode.value ?? null,
+          workabilityPolicyResolution.policy,
+        );
+        readinessChecks.push(readinessCheck(
+          "WORK_AUTHORIZATION",
+          workAuthorization.status,
+          workAuthorization.rationale,
+          readinessAssessedAt,
+          {
+            reasonCode: workAuthorization.reasonCode,
+            evidenceKeys: [...workAuthorization.evidenceKeys],
+            policyReference: workAuthorization.policyReferenceRequired
+              ? `workability_policy:${workabilityPolicyResolution.policyHash}`
+              : null,
+          },
+        ));
+
+        const workabilityFacts = normalizeWorkabilityFacts(job.workability_facts);
+        const modeEvidence = workabilityEvidence?.work_mode ?? null;
+        const workModeAssessment = assessWorkModeReadiness(
+          modeEvidence,
+          job.workplace_type,
+          workabilityFacts["office_days_max"],
+          workabilityFacts["attendance_basis"],
+          normalizedGateDecision,
+          workabilityPolicyResolution.policy,
+        );
+        readinessChecks.push(readinessCheck(
+          "WORK_MODE",
+          workModeAssessment.status,
+          workModeAssessment.rationale,
+          readinessAssessedAt,
+          {
+            reasonCode: workModeAssessment.reasonCode,
+            evidenceKeys: [...workModeAssessment.evidenceKeys],
+            policyReference: workModeAssessment.policyReferenceRequired
+              ? `workability_policy:${workabilityPolicyResolution.policyHash}`
+              : null,
+          },
+        ));
+
+        const travelAssessment = assessTravelReadiness(
+          job.description_text ?? "",
+          workabilityEvidence?.travel_pct ?? null,
+          workabilityPolicyResolution.policy,
+        );
+        readinessChecks.push(readinessCheck(
+          "TRAVEL",
+          travelAssessment.status,
+          travelAssessment.rationale,
+          readinessAssessedAt,
+          {
+            reasonCode: travelAssessment.reasonCode,
+            evidenceKeys: [...travelAssessment.evidenceKeys],
+            policyReference: travelAssessment.policyReferenceRequired
+              ? `workability_policy:${workabilityPolicyResolution.policyHash}`
+              : null,
+          },
+        ));
+
+        const employmentType = String(workabilityFacts["employment_type"] ?? job.employment_type ?? "UNKNOWN").toUpperCase();
+        const employmentStatus = employmentType === "CONTRACT" && !workabilityPolicyResolution.policy.contractAllowed
+          ? "BLOCKED"
+          : employmentType === "PERMANENT" || employmentType === "CONTRACT" ? "MET" : "NEEDS_VERIFICATION";
+        readinessChecks.push(readinessCheck(
+          "EMPLOYMENT_ROUTE",
+          employmentStatus,
+          employmentStatus === "MET" ? `Employment type ${employmentType} is permitted by the active preference.` : employmentStatus === "BLOCKED" ? "Contract employment conflicts with the active employment preference." : "Employment type or hiring route is unknown.",
+          readinessAssessedAt,
+          { reasonCode: employmentStatus === "BLOCKED" ? "CONTRACT_EMPLOYMENT_NOT_ALLOWED" : employmentStatus === "NEEDS_VERIFICATION" ? "EMPLOYMENT_ROUTE_UNKNOWN" : null },
+        ));
+
+        let mandatoryQualificationCheck: MaterialReadinessCheck;
+        if (!currentMatch || !job.active_requirement_set_id || !job.latest_match_run_id) {
+          mandatoryQualificationCheck = readinessCheck(
+            "MANDATORY_QUALIFICATIONS", "PROCESSING", "Current requirement matching has not completed against the active profile and requirement set.", readinessAssessedAt,
+            { reasonCode: "CURRENT_MATCH_PENDING" },
           );
-          if (compensation.is_hard_reject) {
-            adjustedEligibility = "INELIGIBLE";
-            adjustedOutcome = "SKIP";
-            adjustedNotes.push(compensation.rejection_code || "COMPENSATION_BELOW_USER_FLOOR");
-          } else if (compensation.prevents_apply_now) {
-            adjustedOutcome = "TRACK";
-            adjustedNotes.push(compensation.rejection_code || "COMPENSATION_BELOW_USER_FLOOR");
-          }
+        } else {
+          const { rows: qualificationRows } = await client.query<{
+            total_mandatory: number | string;
+            matched_mandatory: number | string;
+            blocked_mandatory: number | string;
+            unresolved_mandatory: number | string;
+          }>(
+            `SELECT COUNT(jr.id) AS total_mandatory,
+                   COUNT(jr.id) FILTER (WHERE current_match.match_type IN ('EXACT', 'SEMANTIC')) AS matched_mandatory,
+                    COUNT(jr.id) FILTER (WHERE current_match.match_type = 'NO_MATCH') AS blocked_mandatory,
+                   COUNT(jr.id) FILTER (WHERE current_match.match_type IS DISTINCT FROM 'EXACT' AND current_match.match_type IS DISTINCT FROM 'SEMANTIC' AND current_match.match_type IS DISTINCT FROM 'NO_MATCH') AS unresolved_mandatory
+             FROM job_requirements jr
+             LEFT JOIN LATERAL (
+               SELECT rem.match_type
+               FROM requirement_evidence_matches rem
+               WHERE rem.workspace_id = jr.workspace_id
+                 AND rem.match_run_id = $3
+                 AND rem.requirement_id = jr.id
+               ORDER BY rem.created_at DESC, rem.id DESC
+               LIMIT 1
+             ) current_match ON TRUE
+             WHERE jr.workspace_id = $1 AND jr.canonical_job_id = $2
+               AND jr.job_version_id = $4 AND jr.requirement_set_id = $5
+               AND jr.importance = 'MUST'
+               AND jr.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')`,
+            [ctx.workspaceId, job.canonical_job_id, job.latest_match_run_id, job.job_version_id, job.active_requirement_set_id],
+          );
+          const qualificationSummary = qualificationRows[0];
+          const totalMandatory = asNumber(qualificationSummary?.total_mandatory) ?? 0;
+          const blockedMandatory = asNumber(qualificationSummary?.blocked_mandatory) ?? 0;
+          const unresolvedMandatory = asNumber(qualificationSummary?.unresolved_mandatory) ?? 0;
+          mandatoryQualificationCheck = totalMandatory === 0
+            ? readinessCheck("MANDATORY_QUALIFICATIONS", "NOT_APPLICABLE", "The current requirement set contains no MUST qualifications.", readinessAssessedAt, { policyReference: `requirement_set:${job.active_requirement_set_id}` })
+            : blockedMandatory > 0
+              ? readinessCheck("MANDATORY_QUALIFICATIONS", "BLOCKED", `${blockedMandatory} mandatory qualification(s) have supported mismatching evidence.`, readinessAssessedAt, { reasonCode: "MANDATORY_QUALIFICATION_MISMATCH" })
+              : unresolvedMandatory > 0
+                ? readinessCheck("MANDATORY_QUALIFICATIONS", "NEEDS_VERIFICATION", `${unresolvedMandatory} mandatory qualification(s) remain unknown or unresolved.`, readinessAssessedAt, { reasonCode: "MANDATORY_QUALIFICATION_UNKNOWN" })
+                : readinessCheck("MANDATORY_QUALIFICATIONS", "MET", `${totalMandatory} mandatory qualification(s) have matching evidence.`, readinessAssessedAt);
+        }
+        readinessChecks.push(mandatoryQualificationCheck);
+
+        const compensationPolicy = preferenceContext.stage3?.compensation;
+        const hasCompensationFloor = Boolean(compensationPolicy && [
+          compensationPolicy.commercial_min_annual_sgd,
+          compensationPolicy.university_research_min_annual_sgd,
+          compensationPolicy.mission_multilateral_min_annual_sgd,
+          compensationPolicy.startup_min_cash_salary_monthly_sgd,
+        ].some((value) => typeof value === "number" && value > 0));
+        const compensationStatus = !hasCompensationFloor
+          ? "NOT_APPLICABLE"
+          : compensationAssessment === null || compensationAssessment.status === "UNKNOWN"
+            ? "NEEDS_VERIFICATION"
+            : compensationAssessment.status === "BELOW_FLOOR" ? "BLOCKED" : "MET";
+        const compensationBasisUnconfigured = hasCompensationFloor && !compensationPolicy?.target_salary_basis;
+        readinessChecks.push(readinessCheck(
+          "COMPENSATION",
+          compensationStatus,
+          compensationStatus === "NOT_APPLICABLE"
+            ? "No active compensation floor is configured."
+            : compensationStatus === "NEEDS_VERIFICATION"
+              ? fxRateFailure
+                ? "Compensation conversion or source evidence is unavailable and requires retry/verification."
+                : compensationBasisUnconfigured
+                  ? "The active compensation policy does not define whether the salary target is gross or net; no advertised basis is assumed."
+                  : "Guaranteed base compensation, salary basis, period, currency, or category is unresolved."
+              : compensationStatus === "BLOCKED"
+                ? compensationAssessment?.evidence ?? "Guaranteed base compensation is below the active floor."
+                : compensationAssessment?.evidence ?? "Guaranteed base compensation meets the active floor.",
+          readinessAssessedAt,
+          {
+            reasonCode: compensationStatus === "BLOCKED"
+              ? "COMPENSATION_BELOW_USER_FLOOR"
+              : compensationStatus === "NEEDS_VERIFICATION"
+                ? compensationBasisUnconfigured ? "COMPENSATION_TARGET_BASIS_UNCONFIGURED" : "COMPENSATION_UNKNOWN"
+                : null,
+            importance: compensationStatus === "NOT_APPLICABLE" ? "PREFERRED" : "MUST",
+            evidenceKeys: fxRateObservationId ? [`fx_rate_observation:${fxRateObservationId}`] : [],
+            policyReference: compensationStatus === "NOT_APPLICABLE" ? `stage3_compensation:${preferenceContext.revisionsByDomain.stage3 ?? "unconfigured"}` : null,
+          },
+        ));
+
+        const employerPolicyStatus = normalizedGateDecision === "HARD_REJECT"
+          ? "BLOCKED"
+          : normalizedGateDecision === "PASS" ? "MET" : normalizedGateDecision === "NEEDS_VERIFICATION" ? "NEEDS_VERIFICATION" : "PROCESSING";
+        readinessChecks.push(readinessCheck(
+          "EMPLOYER_POLICY",
+          employerPolicyStatus,
+          employerPolicyStatus === "MET" ? "Current deterministic employer exclusion and operating-model checks passed." : employerPolicyStatus === "BLOCKED" ? "A deterministic active employer or workability policy blocked this job." : employerPolicyStatus === "NEEDS_VERIFICATION" ? "An employer/workability policy fact remains unresolved." : "Current deterministic gate decision is not available.",
+          readinessAssessedAt,
+          { reasonCode: employerPolicyStatus === "BLOCKED" ? "DETERMINISTIC_POLICY_BLOCK" : employerPolicyStatus === "NEEDS_VERIFICATION" ? "POLICY_FACT_UNRESOLVED" : employerPolicyStatus === "PROCESSING" ? "GATE_DECISION_PENDING" : null },
+        ));
+
+        const roleShape = sourceEvidence?.role_shape;
+        const roleShapeStatus = roleShape?.status === "SUPPORTED" && roleShape.role_families.length > 0
+          ? "MET"
+          : normalizedGateDecision === "HARD_REJECT" ? "BLOCKED" : "NEEDS_VERIFICATION";
+        readinessChecks.push(readinessCheck(
+          "ROLE_SHAPE",
+          roleShapeStatus,
+          roleShapeStatus === "MET" ? "Source evidence identifies a target technical or technical-delivery role shape." : roleShapeStatus === "BLOCKED" ? "Deterministic function gates rejected the role shape." : "Role-function and technical-ownership evidence is incomplete.",
+          readinessAssessedAt,
+          { reasonCode: roleShapeStatus === "BLOCKED" ? "ROLE_SHAPE_OUT_OF_SCOPE" : roleShapeStatus === "NEEDS_VERIFICATION" ? "ROLE_SHAPE_UNVERIFIED" : null, evidenceKeys: roleShape?.evidence.map((item) => item.evidence_key) ?? [] },
+        ));
+
+        const evidenceContextStatus = currentMatch && job.active_profile_version_id && job.active_requirement_set_id
+          ? "MET" : "PROCESSING";
+        readinessChecks.push(readinessCheck(
+          "EVIDENCE_CONTEXT",
+          evidenceContextStatus,
+          evidenceContextStatus === "MET" ? "Current job, profile, requirement set, and match context are lineage-pinned." : "Current profile/match/requirement artifacts are pending or stale.",
+          readinessAssessedAt,
+          { reasonCode: evidenceContextStatus === "PROCESSING" ? "DECISION_CONTEXT_PENDING" : null },
+        ));
+
+        const readinessFingerprint = buildApplicationReadinessFingerprint({
+          workspace_id: ctx.workspaceId,
+          canonical_job_id: job.canonical_job_id,
+          job_version_id: job.job_version_id,
+          job_content_hash: job.job_content_hash ?? "legacy-content-unknown",
+          evidence_revision_hash: evidenceRevisionHash,
+          profile_version_id: job.active_profile_version_id,
+          profile_evidence_hash: job.active_profile_source_hash ?? null,
+          requirement_set_id: job.active_requirement_set_id,
+          requirements_hash: job.match_context_fingerprint,
+          match_run_id: job.latest_match_run_id,
+          match_context_fingerprint: job.match_context_fingerprint,
+          embedding_space_id: job.match_embedding_space_id,
+          preference_context_id: preferenceContext.contextId,
+          workability_policy_hash: workabilityPolicyResolution.policyHash,
+          decision_policy_hash: snapshot.snapshotHash,
+          fx_rate_observation_ids: fxRateObservationId ? [fxRateObservationId] : [],
+          comparator_version: QUALIFICATION_COMPARATOR_VERSION,
+          evidence_schema_version: sourceEvidence?.schema_version ?? "legacy_unknown",
+          availability_evidence_hash: availabilityEvidenceHash,
+          availability_verification_revision: availabilityVerificationRevision,
+        });
+        const readiness = assessApplicationReadiness({
+          canonicalJobId: job.canonical_job_id,
+          jobVersionId: job.job_version_id,
+          profileVersionId: job.active_profile_version_id,
+          requirementSetId: job.active_requirement_set_id,
+          matchRunId: job.latest_match_run_id,
+          preferenceContextId: preferenceContext.contextId,
+          policySnapshotId: snapshot.snapshotId,
+          policyVersion: snapshot.decisionPolicy.policy.policy_version,
+          evidenceRevisionHash,
+          readinessFingerprint,
+          checks: readinessChecks,
+          evaluatedAt: readinessAssessedAt,
+          artifactsCurrent: currentMatch,
+        });
+        if (readiness.status === "BLOCKED") {
+          adjustedEligibility = "INELIGIBLE";
+          adjustedOutcome = "SKIP";
+          adjustedNotes.push("application_readiness_blocked");
         }
 
         const decisionJson = RecommendationDecisionSchema.parse({
@@ -367,12 +930,19 @@ export async function runRecommendationDecider(
             policy_snapshot_id: snapshot.snapshotId,
             eligibility_rule_id: evaluation.eligibilityRuleId,
             outcome_rule_id: evaluation.outcomeRuleId,
+            evidence_revision_hash: evidenceRevisionHash,
+            readiness_fingerprint: readiness.readiness_fingerprint,
+            availability_evidence_hash: availabilityEvidenceHash,
+            fx_rate_observation_id: fxRateObservationId,
+            qualification_comparator_version: QUALIFICATION_COMPARATOR_VERSION,
             notes: adjustedNotes,
           },
         });
 
         const decisionHash = sha256Hex(stableStringify({
           decision: decisionJson,
+          application_readiness: readiness,
+          evidence_revision_hash: evidenceRevisionHash,
           preference_context_id: preferenceContext.contextId,
         }));
         const decisionContextFingerprint = buildPipelineTaskContextFingerprint({
@@ -389,6 +959,12 @@ export async function runRecommendationDecider(
             policy_snapshot_id: snapshot.snapshotId,
             policy_hash: snapshot.snapshotHash,
             preference_context_id: preferenceContext.contextId,
+            evidence_revision_hash: evidenceRevisionHash,
+            readiness_fingerprint: readiness.readiness_fingerprint,
+            availability_evidence_hash: availabilityEvidenceHash,
+            fx_rate_observation_id: fxRateObservationId,
+            qualification_comparator_version: QUALIFICATION_COMPARATOR_VERSION,
+            workability_policy_hash: workabilityPolicyResolution.policyHash,
           },
         });
 
@@ -408,9 +984,12 @@ export async function runRecommendationDecider(
               recommendation_outcome,
               created_by_user_id,
               preference_user_id,
-              preference_context_id
+              preference_context_id,
+              readiness_json,
+              evidence_revision_hash,
+              readiness_fingerprint
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (
               workspace_id,
               canonical_job_id,
@@ -446,6 +1025,9 @@ export async function runRecommendationDecider(
             ctx.userId,
             preferenceContext.contextId ? ctx.userId : null,
             preferenceContext.contextId,
+            JSON.stringify(readiness),
+            evidenceRevisionHash,
+            readiness.readiness_fingerprint,
           ]
         );
 

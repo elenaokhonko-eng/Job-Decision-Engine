@@ -1,8 +1,30 @@
 import { z } from "zod";
 
 import { SCHEMA_VERSION, SchemaVersionSchema } from "./version.js";
+import {
+  ApplicationReadinessSchema,
+  ApplicationReadinessStatusSchema,
+} from "./applicationReadiness.js";
+import { JobSourceEvidenceSchema } from "./jobSourceEvidence.js";
 export { SCHEMA_VERSION } from "./version.js";
 export { SourcePluginSchema, type SourcePlugin } from "./sourcePlugin.js";
+export {
+  ApplicationReadinessSchema,
+  ApplicationReadinessStatusSchema,
+  type ApplicationReadiness,
+  type ApplicationReadinessStatus,
+} from "./applicationReadiness.js";
+export {
+  JobSourceEvidenceSchema,
+  type JobSourceEvidence,
+  type JobEvidenceSpan,
+} from "./jobSourceEvidence.js";
+export {
+  ExperienceRequirementScopeSchema,
+  ProfileExperienceEvidenceSchema,
+  type ExperienceRequirementScope,
+  type ProfileExperienceEvidence,
+} from "./experienceScope.js";
 
 export const SourceNameSchema = z.enum([
   "GMAIL_ALERT",
@@ -49,6 +71,8 @@ export const ExtractedJobSchema = z.object({
   workplace_type_raw: z.string().default("UNKNOWN"),
   employment_type_raw: z.string().default("UNKNOWN"),
   compensation_raw: z.string().default("UNKNOWN"),
+  employer_posting_url: z.string().url().optional(),
+  application_url: z.string().url().optional(),
   canonical_apply_url: z.string().url().or(z.string().min(1)),
   description_raw: z.string().min(1),
   published_at: z.string().datetime().optional(),
@@ -138,6 +162,15 @@ export const CanonicalJobVersionSchema = z.object({
   workplace_type: z.enum(["REMOTE", "HYBRID", "ONSITE", "UNKNOWN"]).default("UNKNOWN"),
   employment_type: z.string().default("UNKNOWN"),
   description_text: z.string().min(1),
+  source_identity_hash: z.string().min(1).nullable().optional(),
+  evidence_revision_hash: z.string().min(1).nullable().optional(),
+  job_source_evidence: JobSourceEvidenceSchema.nullable().optional(),
+  source_published_at: z.string().datetime().nullable().optional(),
+  source_updated_at: z.string().datetime().nullable().optional(),
+  source_expires_at: z.string().datetime().nullable().optional(),
+  availability_status: z.enum(["OPEN", "CLOSED", "UNKNOWN"]).nullable().optional(),
+  availability_verified_at: z.string().datetime().nullable().optional(),
+  availability_recheck_at: z.string().datetime().nullable().optional(),
   version_number: z.number().int().positive().default(1),
   observed_at: z.string().datetime(),
   processing_state: z.enum([
@@ -465,6 +498,8 @@ export type ApplicationEvent = z.infer<typeof ApplicationEventSchema>;
  * Stable read model for Streamlit UI and dashboard analytics.
  */
 export const ShortlistRowSchema = z.object({
+  schema_version: SchemaVersionSchema.optional(),
+  read_model_version: z.string().min(1).optional(),
   canonical_job_id: z.string().uuid(),
   job_version_id: z.string().min(1),
   title: z.string().min(1),
@@ -502,6 +537,18 @@ export const ShortlistRowSchema = z.object({
   eval_provider: z.string().nullable().default(null),
   eval_is_fallback: z.boolean().nullable().default(null),
   version_mismatch: z.boolean().default(false),
+  application_readiness: ApplicationReadinessSchema.nullable().optional(),
+  job_source_evidence: JobSourceEvidenceSchema.nullable().optional(),
+  source_published_at: z.string().datetime().nullable().optional(),
+  source_expires_at: z.string().datetime().nullable().optional(),
+  readiness_status: ApplicationReadinessStatusSchema.optional(),
+  readiness_reason_codes: z.array(z.string()).optional(),
+  readiness_fingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  readiness_expires_at: z.string().datetime().nullable().optional(),
+  evidence_revision_hash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  availability_status: z.enum(["OPEN", "CLOSED", "UNKNOWN"]).nullable().optional(),
+  availability_verified_at: z.string().datetime().nullable().optional(),
+  availability_recheck_at: z.string().datetime().nullable().optional(),
   observed_at: z.string().datetime(),
   evaluated_at: z.string().datetime().nullable().default(null),
   lane_matches: z.array(z.unknown()).nullable().default(null),

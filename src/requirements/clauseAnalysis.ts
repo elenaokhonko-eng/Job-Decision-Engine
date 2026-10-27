@@ -107,7 +107,9 @@ export function isOccurrenceNegated(
 }
 
 const PREFERENCE_REGEX = /\b(preferred|preference|preferable|nice\s+to\s+have|bonus|plus|optional|desired|desirable|advantageous)\b/i;
+const NICE_TO_HAVE_REGEX = /\b(nice\s+to\s+have|bonus|optional)\b/i;
 const MANDATORY_OVERRIDE_REGEX = /\b(required|mandatory|must\s+have|essential|strictly\s+required)\b/i;
+const QUALIFICATION_HEADING_REGEX = /^\s*(required|minimum|basic|preferred|nice\s+to\s+have|bonus|optional|desired)\b[^\n:]{0,80}:?\s*$/i;
 
 const SUBCLAUSE_BOUNDARY_REGEX = /(?:;\s*|\(\s*|\)\s*|,\s*(?:but|however|although|whereas|while|yet|though|except|and|or)\s+|\b(?:but|however|although|whereas|while|yet|though|except)\s+)/gi;
 
@@ -158,46 +160,57 @@ export function findEnclosingSubclause(
   };
 }
 
-/**
- * Infers requirement importance (MUST vs PREFERRED) strictly within the enclosing subclause / bullet.
- * Avoids cross-sentence, cross-bullet, or cross-conjunction clause bleed.
- */
+function importanceFromHeading(text: string, matchStart: number): 'MUST' | 'PREFERRED' | 'NICE_TO_HAVE' | null {
+  const precedingLines = text.slice(0, matchStart).split(/\r?\n/).slice(-13, -1);
+  let blankLines = 0;
+  for (let index = precedingLines.length - 1; index >= 0; index -= 1) {
+    const line = precedingLines[index].replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim();
+    if (!line) {
+      blankLines += 1;
+      if (blankLines > 1) return null;
+      continue;
+    }
+    if (QUALIFICATION_HEADING_REGEX.test(line)) {
+      const normalized = line.toLowerCase();
+      if (/\b(nice\s+to\s+have|bonus|optional)\b/.test(normalized)) return 'NICE_TO_HAVE';
+      if (/\b(preferred|desired)\b/.test(normalized)) return 'PREFERRED';
+      if (/\b(required|minimum|basic)\b/.test(normalized)) return 'MUST';
+      return null;
+    }
+    if (/^[^.!?]{1,100}:$/.test(line) || /^\s*(?:[-*•]|\d+[.)])\s*/.test(precedingLines[index])) {
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** Infers importance from the requirement clause and its nearest qualification heading. */
 export function inferClauseImportance(
   text: string,
   matchStart: number,
-  matchEnd: number
-): 'MUST' | 'PREFERRED' {
+  matchEnd: number,
+): 'MUST' | 'PREFERRED' | 'NICE_TO_HAVE' {
   const subclause = findEnclosingSubclause(text, matchStart, matchEnd);
   const subclauseLower = subclause.clauseText.toLowerCase();
+  const directPreferenceIndex = subclauseLower.search(PREFERENCE_REGEX);
+  const directMandatoryIndex = subclauseLower.search(MANDATORY_OVERRIDE_REGEX);
+  const matchOffset = Math.max(0, matchStart - subclause.startOffset);
 
-  // If subclause explicitly indicates preference or optionality
-  if (PREFERENCE_REGEX.test(subclauseLower)) {
-    // If the subclause also has mandatory wording, check whether the match is in the preferred or mandatory sub-span
-    if (MANDATORY_OVERRIDE_REGEX.test(subclauseLower)) {
-      const suffixHasMandatory = MANDATORY_OVERRIDE_REGEX.test(subclause.clauseSuffix);
-      const prefixHasMandatory = MANDATORY_OVERRIDE_REGEX.test(subclause.clausePrefix);
-      const suffixHasPref = PREFERENCE_REGEX.test(subclause.clauseSuffix);
-      const prefixHasPref = PREFERENCE_REGEX.test(subclause.clausePrefix);
-
-      if (suffixHasMandatory && !suffixHasPref) {
-        return 'MUST';
-      }
-      if (prefixHasMandatory && !prefixHasPref) {
-        return 'MUST';
-      }
-      return 'PREFERRED';
-    }
+  if (directPreferenceIndex >= 0 && directPreferenceIndex <= matchOffset) {
+    if (NICE_TO_HAVE_REGEX.test(subclauseLower.slice(0, matchOffset + 1))) return 'NICE_TO_HAVE';
     return 'PREFERRED';
   }
+  if (directMandatoryIndex >= 0 && directMandatoryIndex <= matchOffset) return 'MUST';
 
-  // If subclause doesn't have preference indicators, check whether the enclosing sentence is a pure preference header
-  // (e.g. "Preferred qualifications: Python, CISSP, AWS") without any mandatory wording anywhere in the clause
-  const clause = findEnclosingClause(text, matchStart, matchEnd);
-  const clauseLower = clause.clauseText.toLowerCase();
-  if (PREFERENCE_REGEX.test(clauseLower) && !MANDATORY_OVERRIDE_REGEX.test(clauseLower)) {
+  const headingImportance = importanceFromHeading(text, matchStart);
+  if (headingImportance) return headingImportance;
+
+  if (directPreferenceIndex >= 0) {
+    if (NICE_TO_HAVE_REGEX.test(subclauseLower)) return 'NICE_TO_HAVE';
     return 'PREFERRED';
   }
-
+  if (MANDATORY_OVERRIDE_REGEX.test(subclauseLower)) return 'MUST';
   return 'MUST';
 }
 

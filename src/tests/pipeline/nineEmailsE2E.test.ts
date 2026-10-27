@@ -14,6 +14,10 @@ import { fileURLToPath } from "url";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
+import { buildEvidenceRevisionHash } from "../../ingestion/jobSourceEvidence.js";
+import { SourceBroker } from "../../ingestion/sourceBroker.js";
+import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../../contracts/jobSourceEvidence.js";
+import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -676,6 +680,361 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     }
   });
 
+  it("PostgreSQL positive path — normal scoped pipeline stages can produce READY from actual matcher rows", async () => {
+    const { runHardGates } = await import("../../pipeline/hardGate.js");
+    const { runRequirementsExtraction } = await import("../../pipeline/requirementsExtractor.js");
+    const { runEmbeddingBatchWithFallback } = await import("../../embeddings/batchCoordinator.js");
+    const { runLaneRouter } = await import("../../pipeline/laneRouter.js");
+    const { runDeterministicMatcher } = await import("../../pipeline/deterministicMatcher.js");
+    const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
+    const { runNormalization } = await import("../../pipeline/normalize.js");
+
+    await saveWorkspacePreferenceRevision(getClient(), getContext(), {
+      preferenceDomain: "stage3",
+      schemaVersion: "3.0.0",
+      activate: true,
+      preferenceValue: {
+        schema_version: "3.0.0",
+        freshness: { max_posting_age_days: 60, stale_gate_disposition: "HARD_REJECT" },
+        compensation: {
+          target_salary_basis: "GROSS",
+          commercial_min_annual_sgd: 240000,
+          disposition_below_floor: "PREVENT_APPLY_NOW",
+        },
+      },
+    });
+
+    const postings = [
+      {
+        externalId: `readiness-positive-${crypto.randomUUID()}`,
+        companyName: "Readiness Evidence Fixture Labs",
+        salary: "SGD250,000",
+        expectedStatus: "READY",
+      },
+      {
+        externalId: `readiness-below-floor-${crypto.randomUUID()}`,
+        companyName: "Readiness Below Floor Fixture Labs",
+        salary: "SGD200,000",
+        expectedStatus: "BLOCKED",
+      },
+    ] as const;
+    const retrievedAt = new Date().toISOString();
+    const publishedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const broker = new SourceBroker(getClient(), getContext());
+    await broker.startRun("READINESS_COMPENSATION_POSTGRES_E2E");
+    const observationIds: string[] = [];
+    for (const posting of postings) {
+      const postingUrl = `https://boards.greenhouse.io/readiness-fixture/jobs/${posting.externalId}`;
+      const description = [
+        "<h1>Principal AI Systems Architect</h1>",
+        `<h2>About the role</h2><p>${posting.companyName} builds production AI platforms for enterprise data teams.</p>`,
+        "<h2>Responsibilities</h2><ul><li>Architect and build distributed AI and machine-learning systems used in production.</li><li>Implement reliable Python services and data infrastructure with engineering teams.</li></ul>",
+        "<h2>Qualifications</h2><ul><li>8+ years of professional production experience.</li></ul>",
+        `<h2>Compensation</h2><p>${posting.salary} gross base salary per year.</p>`,
+        "<p>This position is fully remote. Candidates must be authorized to work in Singapore or Australia. No travel is required.</p>",
+      ].join("");
+      const rawPayload = {
+        id: posting.externalId,
+        title: "Principal AI Systems Architect",
+        status: "active",
+        publishedAt,
+        location: "Singapore",
+        workplaceType: "REMOTE",
+        employmentType: "PERMANENT",
+        organizationType: "commercial",
+        description,
+      };
+      const staged = await broker.processObservation({
+        sourceName: "GREENHOUSE",
+        sourcePluginKey: "greenhouse",
+        sourceExternalId: posting.externalId,
+        sourceUrl: postingUrl,
+        canonicalApplyUrl: postingUrl,
+        retrievedAt,
+        companyName: posting.companyName,
+        title: "Principal AI Systems Architect",
+        descriptionRaw: description,
+        locationRaw: "Singapore",
+        workplaceTypeRaw: "REMOTE",
+        employmentTypeRaw: "PERMANENT",
+        compensationRaw: "UNKNOWN",
+        sourceLane: "CORE_AI_DATA",
+        searchPlanVersion: "readiness-compensation-v1",
+        rawPayload,
+      }, rawPayload);
+      expect(staged.observationId).toBeTruthy();
+      expect(staged.normalizedEvidence?.description.completeness_status).toBe("COMPLETE");
+      expect(staged.normalizedEvidence?.availability.status).toBe("OPEN");
+      expect(staged.normalizedEvidence?.workability.hiring_territories).toMatchObject({
+        status: "SUPPORTED",
+        operator: "ANY",
+        countries: ["SINGAPORE", "AUSTRALIA"],
+      });
+      expect(staged.normalizedEvidence?.opportunity_category).toMatchObject({
+        status: "SUPPORTED",
+        value: "COMMERCIAL",
+      });
+      expect(staged.normalizedEvidence?.compensation.components[0]).toMatchObject({
+        component_type: "BASE_CASH",
+        amount_min: Number(posting.salary.replace(/[^0-9]/g, "")),
+        currency: "SGD",
+        period: "ANNUAL",
+        pay_basis: "GROSS",
+      });
+      if (staged.observationId) observationIds.push(staged.observationId);
+    }
+    await broker.endRun("COMPLETED");
+
+    const normalized = await runNormalization(getClient(), {
+      context: getContext(),
+      observationIds,
+    });
+    expect(normalized.totalErrors).toBe(0);
+    const { rows: versionRows } = await q(
+      `SELECT observation.source_external_id,
+              observation.job_version_id::text AS job_version_id,
+              version.canonical_job_id::text AS canonical_job_id
+       FROM raw_job_observations observation
+       JOIN job_versions version ON version.workspace_id = observation.workspace_id AND version.id = observation.job_version_id
+       WHERE observation.workspace_id = $1 AND observation.id = ANY($2::uuid[])`,
+      [getContext().workspaceId, observationIds],
+    );
+    expect(versionRows).toHaveLength(postings.length);
+    const versionsByExternalId = new Map(versionRows.map((row) => [row.source_external_id, row]));
+    const jobVersionIds = postings.map((posting) => versionsByExternalId.get(posting.externalId)?.job_version_id).filter((id): id is string => Boolean(id));
+    expect(jobVersionIds).toHaveLength(postings.length);
+
+    const gates = await runHardGates(getClient(), { context: getContext(), jobVersionIds });
+    expect(gates.errors).toBe(0);
+    expect(gates.passed).toBe(postings.length);
+    const extraction = await runRequirementsExtraction(getClient(), {
+      context: getContext(),
+      jobVersionIds,
+      quotedMode: "deterministic_only",
+    });
+    expect(extraction.errors).toBe(0);
+    const embeddings = await runEmbeddingBatchWithFallback(200, getClient(), {
+      context: getContext(),
+      jobVersionIds,
+    });
+    expect(embeddings.primary.failed).toBe(0);
+    const routing = await runLaneRouter(getClient(), { context: getContext(), jobVersionIds });
+    expect(routing.deferred).toBe(0);
+    const matching = await runDeterministicMatcher(getClient(), { context: getContext(), jobVersionIds });
+    expect(matching.errors).toBe(0);
+    expect(matching.matchedJobs).toBe(postings.length);
+    const decisions = await runRecommendationDecider(getClient(), { context: getContext(), jobVersionIds });
+    expect(decisions.errors).toBe(0);
+
+    for (const posting of postings) {
+      const version = versionsByExternalId.get(posting.externalId);
+      const jobVersionId = version?.job_version_id;
+      const canonicalJobId = version?.canonical_job_id;
+      expect(jobVersionId).toBeTruthy();
+      expect(canonicalJobId).toBeTruthy();
+
+      const { rows: qualificationRows } = await q(
+        `SELECT requirement.requirement_type, latest_match.match_type
+         FROM job_requirements requirement
+         JOIN canonical_jobs canonical
+           ON canonical.workspace_id = requirement.workspace_id
+          AND canonical.id = requirement.canonical_job_id
+         LEFT JOIN LATERAL (
+           SELECT match.match_type
+           FROM requirement_evidence_matches match
+           WHERE match.workspace_id = requirement.workspace_id
+             AND match.match_run_id = canonical.latest_match_run_id
+             AND match.requirement_id = requirement.id
+           ORDER BY match.created_at DESC, match.id DESC
+           LIMIT 1
+         ) latest_match ON TRUE
+         WHERE requirement.workspace_id = $1
+           AND requirement.job_version_id = $2::uuid
+           AND requirement.importance = 'MUST'
+           AND requirement.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')`,
+        [getContext().workspaceId, jobVersionId],
+      );
+      expect(qualificationRows.length).toBeGreaterThan(0);
+      expect(qualificationRows.every((row) => ["EXACT", "SEMANTIC"].includes(row.match_type))).toBe(true);
+
+      const { rows: decisionRows } = await q(
+        `SELECT readiness_json
+         FROM deterministic_decisions
+         WHERE workspace_id = $1 AND canonical_job_id = $2::uuid AND job_version_id = $3::uuid
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [getContext().workspaceId, canonicalJobId, jobVersionId],
+      );
+      const readiness = decisionRows[0]?.readiness_json;
+      expect(readiness).toBeDefined();
+      expect(readiness.status).toBe(posting.expectedStatus);
+      expect(readiness.checks.find((check: { key: string }) => check.key === "MANDATORY_QUALIFICATIONS").status).toBe("MET");
+      expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").status)
+        .toBe(posting.expectedStatus === "READY" ? "MET" : "BLOCKED");
+      if (posting.expectedStatus === "BLOCKED") {
+        expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").reason_code)
+          .toBe("COMPENSATION_BELOW_USER_FLOOR");
+      }
+    }
+
+    const positivePosting = postings[0];
+    if (!positivePosting) throw new Error("Positive readiness fixture is missing.");
+    const positiveVersion = versionsByExternalId.get(positivePosting.externalId);
+    if (!positiveVersion?.job_version_id || !positiveVersion.canonical_job_id) {
+      throw new Error("Positive readiness fixture has no canonical version identity.");
+    }
+    const { rows: observationRows } = await q(
+      `SELECT id::text AS id, normalized_evidence
+       FROM raw_job_observations
+       WHERE workspace_id = $1 AND source_external_id = $2 AND job_version_id = $3::uuid
+       ORDER BY retrieved_at DESC, id DESC
+       LIMIT 1`,
+      [getContext().workspaceId, positivePosting.externalId, positiveVersion.job_version_id],
+    );
+    const originalObservation = observationRows[0];
+    if (!originalObservation?.id) throw new Error("Positive readiness fixture has no source observation.");
+    const originalEvidence = JobSourceEvidenceSchema.parse(originalObservation.normalized_evidence);
+    const decisionForPositive = async () => {
+      const { rows } = await q(
+        `SELECT id::text AS id, context_fingerprint, evidence_revision_hash,
+                readiness_fingerprint, readiness_json
+         FROM deterministic_decisions
+         WHERE workspace_id = $1 AND canonical_job_id = $2::uuid AND job_version_id = $3::uuid
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [getContext().workspaceId, positiveVersion.canonical_job_id, positiveVersion.job_version_id],
+      );
+      return rows[0];
+    };
+    const originalDecision = await decisionForPositive();
+    if (!originalDecision?.id) throw new Error("Positive readiness fixture has no persisted decision.");
+    expect(originalDecision.readiness_json.status).toBe("READY");
+
+    const refreshAvailability = async (input: {
+      readonly status: "OPEN" | "CLOSED";
+      readonly verifiedAt: string;
+      readonly expiresAt: string | null;
+      readonly reasonCode: string;
+      readonly quote: string;
+    }): Promise<JobSourceEvidence> => {
+      const rawPayload = {
+        id: positivePosting.externalId,
+        status: input.status === "OPEN" ? "active" : "closed",
+        title: "Principal AI Systems Architect",
+        location: "Singapore",
+        workplaceType: "REMOTE",
+        employmentType: "PERMANENT",
+        organizationType: "commercial",
+      };
+      const rawPayloadHash = crypto.createHash("sha256").update(JSON.stringify(rawPayload)).digest("hex");
+      const refreshedEvidence = JobSourceEvidenceSchema.parse({
+        ...originalEvidence,
+        raw_payload_hash: rawPayloadHash,
+        retrieved_at: input.verifiedAt,
+        availability: {
+          ...originalEvidence.availability,
+          status: input.status,
+          verified_at: input.verifiedAt,
+          expires_at: input.expiresAt,
+          reason_code: input.reasonCode,
+          evidence: originalEvidence.availability.evidence.map((span) => ({
+            ...span,
+            quote_text: input.quote,
+          })),
+        },
+      });
+      const refreshBroker = new SourceBroker(getClient(), getContext());
+      await refreshBroker.startRun("READINESS_AVAILABILITY_REFRESH_E2E");
+      await refreshBroker.recordCandidateDisposition({
+        sourcePluginKey: "greenhouse",
+        planKey: "company:readiness-fixture:CORE_AI_DATA",
+        laneKey: "CORE_AI_DATA",
+        sourceExternalId: positivePosting.externalId,
+        sourceUrl: `https://boards.greenhouse.io/readiness-fixture/jobs/${positivePosting.externalId}`,
+        rawPayloadHash,
+        rawPayload,
+        disposition: "DUPLICATE",
+        canonicalJobId: positiveVersion.canonical_job_id,
+        observationId: originalObservation.id,
+        normalizedEvidence: refreshedEvidence,
+      }, null);
+      await refreshBroker.endRun("COMPLETED");
+      await q(
+        `UPDATE job_versions
+         SET evidence_revision_hash = $3
+         WHERE workspace_id = $1 AND id = $2::uuid`,
+        [getContext().workspaceId, positiveVersion.job_version_id, buildEvidenceRevisionHash(refreshedEvidence)],
+      );
+      return refreshedEvidence;
+    };
+
+    const closedEvidence = await refreshAvailability({
+      status: "CLOSED",
+      verifiedAt: new Date().toISOString(),
+      expiresAt: null,
+      reasonCode: "SOURCE_EXPLICITLY_CLOSED",
+      quote: "Source status: closed",
+    });
+    const closedRun = await runRecommendationDecider(getClient(), {
+      context: getContext(),
+      jobVersionIds: [positiveVersion.job_version_id],
+    });
+    expect(closedRun.errors).toBe(0);
+    expect(closedRun.decisionsInserted).toBe(1);
+    const closedDecision = await decisionForPositive();
+    expect(closedDecision?.readiness_json.status).toBe("BLOCKED");
+    expect(closedDecision?.id).not.toBe(originalDecision.id);
+    expect(closedDecision?.context_fingerprint).not.toBe(originalDecision.context_fingerprint);
+    expect(closedDecision?.readiness_fingerprint).not.toBe(originalDecision.readiness_fingerprint);
+    expect(closedDecision?.evidence_revision_hash).toBe(buildEvidenceRevisionHash(closedEvidence));
+
+    const expiredAt = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const expiredEvidence = await refreshAvailability({
+      status: "OPEN",
+      verifiedAt: expiredAt,
+      expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      reasonCode: "CURRENT_LISTING_EVIDENCE",
+      quote: "Active public listing observed from GREENHOUSE",
+    });
+    const expiredRun = await runRecommendationDecider(getClient(), {
+      context: getContext(),
+      jobVersionIds: [positiveVersion.job_version_id],
+    });
+    expect(expiredRun.errors).toBe(0);
+    expect(expiredRun.decisionsInserted).toBe(1);
+    const expiredDecision = await decisionForPositive();
+    expect(expiredDecision?.readiness_json.status).toBe("NEEDS_VERIFICATION");
+    expect(expiredDecision?.readiness_json.checks.find((check: { key: string }) => check.key === "AVAILABILITY").status)
+      .toBe("NEEDS_VERIFICATION");
+    expect(expiredDecision?.id).not.toBe(closedDecision?.id);
+    expect(expiredDecision?.context_fingerprint).not.toBe(closedDecision?.context_fingerprint);
+    expect(expiredDecision?.readiness_fingerprint).not.toBe(closedDecision?.readiness_fingerprint);
+    expect(expiredDecision?.evidence_revision_hash).toBe(buildEvidenceRevisionHash(expiredEvidence));
+
+    const freshAt = new Date().toISOString();
+    const freshEvidence = await refreshAvailability({
+      status: "OPEN",
+      verifiedAt: freshAt,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      reasonCode: "CURRENT_LISTING_EVIDENCE",
+      quote: "Active public listing observed from GREENHOUSE",
+    });
+    const reassessedRun = await runRecommendationDecider(getClient(), {
+      context: getContext(),
+      jobVersionIds: [positiveVersion.job_version_id],
+    });
+    expect(reassessedRun.errors).toBe(0);
+    expect(reassessedRun.decisionsInserted).toBe(1);
+    const reassessedDecision = await decisionForPositive();
+    expect(reassessedDecision?.readiness_json.status).toBe("READY");
+    expect(reassessedDecision?.readiness_json.checks.find((check: { key: string }) => check.key === "AVAILABILITY").status)
+      .toBe("MET");
+    expect(reassessedDecision?.id).not.toBe(expiredDecision?.id);
+    expect(reassessedDecision?.id).not.toBe(originalDecision.id);
+    expect(reassessedDecision?.context_fingerprint).not.toBe(expiredDecision?.context_fingerprint);
+    expect(reassessedDecision?.readiness_fingerprint).not.toBe(expiredDecision?.readiness_fingerprint);
+    expect(reassessedDecision?.evidence_revision_hash).toBe(buildEvidenceRevisionHash(freshEvidence));
+  });
   it("Conservation — no observation, canonical job, or version disappears", async () => {
     const conservation = await q(
       `SELECT COUNT(*)::int AS observation_count,
@@ -691,7 +1050,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(Number(conservation.rows[0].observation_count)).toBe(9);
     expect(Number(conservation.rows[0].observed_version_count)).toBe(9);
     expect(Number(conservation.rows[0].canonical_count)).toBe(8);
-    expect(versionCount).toBe(9);
+    expect(versionCount).toBe(11); // Nine email fixture versions plus positive and below-floor readiness jobs.
   });
 
   it("Integrity — every fixture observation maps to a live canonical job version", async () => {
@@ -710,5 +1069,119 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     expect(unmapped).toBe(0);
     expect(Number(orphaned.rows[0].count)).toBe(0);
+  });
+
+  it("preserves posting identity while creating a new immutable version only when content changes", async () => {
+    const { runNormalization } = await import("../../pipeline/normalize.js");
+    const broker = new SourceBroker(getClient(), getContext());
+    const sourceRunId = await broker.startRun("EVIDENCE_VERSION_TEST");
+    const identity = "jdec-evidence-version-test-42";
+    const common = {
+      sourceName: "GREENHOUSE" as const,
+      sourcePluginKey: "greenhouse",
+      sourceExternalId: identity,
+      sourceUrl: "https://boards.greenhouse.io/evidence-test/jobs/42",
+      canonicalApplyUrl: "https://boards.greenhouse.io/evidence-test/jobs/42",
+      retrievedAt: "2026-10-24T00:00:00.000Z",
+      companyName: "Evidence Version Test",
+      title: "Platform Engineer",
+      locationRaw: "Singapore",
+      workplaceTypeRaw: "HYBRID",
+      employmentTypeRaw: "PERMANENT",
+      compensationRaw: "UNKNOWN",
+      sourceLane: "CORE_AI_DATA",
+      searchPlanVersion: "evidence-identity-v1",
+    };
+    const descriptions = [
+      "Build the original production platform. Responsibilities include API design, data processing, and engineering operations.",
+      "Build the revised production platform. Responsibilities include API design, data processing, and engineering operations.",
+      "Build the revised production platform. Responsibilities include API design, data processing, and engineering operations.",
+    ];
+    const observationIds: string[] = [];
+
+    for (const [index, description] of descriptions.entries()) {
+      const result = await broker.processObservation(
+        { ...common, descriptionRaw: description, retrievedAt: new Date(Date.UTC(2026, 9, 24, 0, index)).toISOString(), rawPayload: { id: identity, description } },
+        { id: identity, publishedAt: "2026-10-20T00:00:00Z", updatedAt: `2026-10-${20 + index}T00:00:00Z`, version: index + 1, description },
+      );
+      if (!result.observationId) throw new Error("Test observation insert returned no ID.");
+      observationIds.push(result.observationId);
+      const summary = await runNormalization(getClient(), { context: getContext(), observationIds: [result.observationId] });
+      expect(summary.totalProcessed).toBe(1);
+    }
+    await broker.endRun("COMPLETED");
+
+    const { rows } = await q(
+      `SELECT c.id AS canonical_job_id, c.latest_job_version_id,
+              COUNT(DISTINCT jv.id)::int AS version_count,
+              COUNT(DISTINCT jv.source_posting_identity_hash)::int AS identity_count,
+              ARRAY_AGG(DISTINCT jv.content_hash) AS content_hashes,
+              ARRAY_AGG(DISTINCT jv.source_posting_identity_hash) AS posting_identity_hashes
+         FROM canonical_jobs c
+         JOIN job_versions jv ON jv.workspace_id = c.workspace_id AND jv.canonical_job_id = c.id
+         JOIN raw_job_observations rjo ON rjo.workspace_id = c.workspace_id AND rjo.job_version_id = jv.id
+        WHERE c.workspace_id = $1 AND rjo.id = ANY($2::uuid[])
+        GROUP BY c.id, c.latest_job_version_id`,
+      [getContext().workspaceId, observationIds],
+    );
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].version_count)).toBe(2);
+    expect(Number(rows[0].identity_count)).toBe(1);
+    expect(rows[0].content_hashes).toHaveLength(2);
+    expect(rows[0].posting_identity_hashes).toHaveLength(1);
+  });
+
+  it("does not merge the same external ID across different normalized locations", async () => {
+    const { runNormalization } = await import("../../pipeline/normalize.js");
+    const broker = new SourceBroker(getClient(), getContext());
+    await broker.startRun("LOCATION_IDENTITY_COLLISION_TEST");
+    const identity = "jdec-location-identity-collision-42";
+    const base = {
+      sourceName: "GREENHOUSE" as const,
+      sourcePluginKey: "greenhouse",
+      sourceExternalId: identity,
+      sourceUrl: "https://boards.greenhouse.io/location-test/jobs/42",
+      canonicalApplyUrl: "https://boards.greenhouse.io/location-test/jobs/42",
+      companyName: "Location Identity Test",
+      title: "Platform Engineer",
+      workplaceTypeRaw: "REMOTE",
+      employmentTypeRaw: "PERMANENT",
+      compensationRaw: "UNKNOWN",
+      sourceLane: "CORE_AI_DATA",
+      searchPlanVersion: "location-identity-v1",
+    };
+    const observationIds: string[] = [];
+    for (const [index, location] of ["Singapore", "New York, United States"].entries()) {
+      const rawPayload = { id: identity, location, occurrence: index };
+      const staged = await broker.processObservation({
+        ...base,
+        locationRaw: location,
+        descriptionRaw: "Build and maintain the production data platform for this role.",
+        retrievedAt: new Date(Date.UTC(2026, 9, 24, 0, index)).toISOString(),
+        rawPayload,
+      }, rawPayload);
+      if (!staged.observationId) throw new Error("Location-collision fixture observation returned no ID.");
+      observationIds.push(staged.observationId);
+      const summary = await runNormalization(getClient(), {
+        context: getContext(),
+        observationIds: [staged.observationId],
+      });
+      expect(summary.totalProcessed).toBe(1);
+    }
+    await broker.endRun("COMPLETED");
+
+    const { rows } = await q(
+      `SELECT COUNT(DISTINCT jv.canonical_job_id)::int AS canonical_count,
+              COUNT(DISTINCT jv.source_posting_identity_hash)::int AS identity_count,
+              ARRAY_AGG(DISTINCT COALESCE(c.location, c.location_summary, 'Unknown')) AS locations
+         FROM raw_job_observations rjo
+         JOIN job_versions jv ON jv.workspace_id = rjo.workspace_id AND jv.id = rjo.job_version_id
+         JOIN canonical_jobs c ON c.workspace_id = jv.workspace_id AND c.id = jv.canonical_job_id
+        WHERE rjo.workspace_id = $1 AND rjo.id = ANY($2::uuid[])`,
+      [getContext().workspaceId, observationIds],
+    );
+    expect(Number(rows[0].canonical_count)).toBe(2);
+    expect(Number(rows[0].identity_count)).toBe(1);
+    expect(rows[0].locations).toEqual(expect.arrayContaining(["Singapore", "New York, United States"]));
   });
 });

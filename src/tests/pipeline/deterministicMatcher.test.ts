@@ -569,9 +569,14 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
         typeof call[0] === 'string' && call[0].includes('INSERT INTO requirement_evidence_matches')
     );
     expect(matchInserts.length).toBe(2);
-    // Both structured comparison mismatches against credential and engagement must set profile_fact_id to null
+    // Engagement-backed or unresolved experience evidence must never be written as a profile_facts foreign key.
     for (const insert of matchInserts) {
-      expect(insert[1][3]).toBeNull();
+      const sql = String(insert[0]);
+      if (/VALUES\s*\(\$1,\s*\$2,\s*\$3,\s*NULL,\s*'UNKNOWN'/i.test(sql)) {
+        expect(insert[1][3]).toContain("years are evidenced");
+      } else {
+        expect(insert[1][3]).toBeNull();
+      }
     }
   });
 });

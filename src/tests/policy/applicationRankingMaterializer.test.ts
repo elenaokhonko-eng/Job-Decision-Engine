@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { materializeApplicationRankings } from "../../services/applicationRankingMaterializer.js";
+import { Stage3WorkPreferencesSchema } from "../../policy/stage3Contracts.js";
 
 const POLICY_WEIGHTS = {
   requirementFit: 37.5,
@@ -22,6 +23,14 @@ function currentApplyNowRow(overrides: Record<string, unknown> = {}) {
     match_run_id: "match-1",
     deterministic_decision_id: "decision-1",
     deterministic_context_fingerprint: "context-1",
+    application_readiness_status: "READY",
+    application_readiness_fingerprint: "readiness-fingerprint-1",
+    decision_readiness_fingerprint: "readiness-fingerprint-1",
+    decision_evidence_revision_hash: "evidence-hash-1",
+    current_evidence_revision_hash: "evidence-hash-1",
+    culture_source_name: "GREENHOUSE",
+    culture_source_url: "https://jobs.example.test/role",
+    culture_source_observed_at: "2026-10-18T00:00:00.000Z",
     match_job_content_hash: "job-hash-1",
     current_job_content_hash: "job-hash-1",
     current_job_description: "Work independently with minimal supervision.",
@@ -138,6 +147,104 @@ describe("application ranking materializer", () => {
     });
   });
 
+  it("does not materialize rankings when readiness is blocked or its evidence fingerprint is stale", async () => {
+    const { pool, calls } = createPool([
+      currentApplyNowRow({ application_readiness_status: "NEEDS_VERIFICATION" }),
+    ]);
+
+    const result = await materializeApplicationRankings(pool, "workspace-1");
+
+    expect(result.incompleteRequiredInputs).toBe(1);
+    expect(result.snapshotsInserted).toBe(0);
+    expect(calls.some((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"))).toBe(false);
+  });
+
+  it("applies versioned culture priorities and persists attributed culture evidence", async () => {
+    const { pool, calls } = createPool([
+      currentApplyNowRow({
+        current_job_description: "Work independently with minimal supervision. No-meeting days protect deep work.",
+        evaluation_payload: {
+          culture_evidence: [
+            { signal: "AUTONOMY", quote: "Work independently with minimal supervision." },
+            { signal: "FOCUS_PROTECTION", quote: "No-meeting days protect deep work." },
+          ],
+        },
+      }),
+    ]);
+    const preferences = Stage3WorkPreferencesSchema.parse({
+      culture_priorities: [
+        { priority_order: 1, name: "autonomy", configured_weight: 60 },
+        { priority_order: 2, name: "low meeting load", configured_weight: 40 },
+      ],
+    });
+    const preferenceContext = {
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      contextId: "preference-context-1",
+      contextHash: "preference-hash-1",
+      revisionsByDomain: { stage3: "revision-1" },
+      laneIntent: null,
+      stage3: preferences,
+    };
+
+    await materializeApplicationRankings(pool, "workspace-1", { preferenceContext });
+
+    const insert = calls.find((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
+    const provenance = JSON.parse(String(insert?.params?.[25]));
+    expect(insert?.params?.[38]).toBe(80);
+    expect(provenance.culture_priority_policy_version).toBe("culture_priority_mapping_v1");
+    expect(provenance.effective_ranking_weights).toMatchObject({
+      autonomy: 0,
+      politicsRisk: 0,
+      sensoryWorkloadRisk: 0,
+      culturePriorityFit: 22.5,
+    });
+    expect(provenance.culture_evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        signal: "AUTONOMY",
+        source_name: "GREENHOUSE",
+        observed_at: "2026-10-18T00:00:00.000Z",
+        scope: "JOB_DESCRIPTION",
+      }),
+    ]));
+  });
+
+  it("does not count one description quote toward multiple culture priorities", async () => {
+    const { pool, calls } = createPool([
+      currentApplyNowRow({
+        evaluation_payload: {
+          culture_evidence: [
+            { signal: "AUTONOMY", quote: "Work independently with minimal supervision." },
+            { signal: "FOCUS_PROTECTION", quote: "Work independently with minimal supervision." },
+          ],
+        },
+      }),
+    ]);
+    const preferences = Stage3WorkPreferencesSchema.parse({
+      culture_priorities: [
+        { priority_order: 1, name: "autonomy", configured_weight: 60 },
+        { priority_order: 2, name: "focus protection", configured_weight: 40 },
+      ],
+    });
+    const preferenceContext = {
+      workspaceId: "workspace-1",
+      userId: "user-1",
+      contextId: "preference-context-2",
+      contextHash: "preference-hash-2",
+      revisionsByDomain: { stage3: "revision-1" },
+      laneIntent: null,
+      stage3: preferences,
+    };
+
+    const result = await materializeApplicationRankings(pool, "workspace-1", { preferenceContext });
+
+    const insert = calls.find((call) => call.sql.includes("INSERT INTO job_ranking_snapshots"));
+    const provenance = JSON.parse(String(insert?.params?.[25]));
+    expect(result.snapshotsInserted).toBe(1);
+    expect(insert?.params?.[38]).toBeNull();
+    expect(provenance.culture_evidence.filter((item: { score: number | null }) => item.score !== null)).toHaveLength(1);
+  });
+
   it("neutralizes unsupported optional culture quotes without failing ranking materialization", async () => {
     const { pool, calls } = createPool([
       currentApplyNowRow({
@@ -162,6 +269,12 @@ describe("application ranking materializer", () => {
       signal: "AUTONOMY",
       score: null,
       quote: null,
+      source_name: "GREENHOUSE",
+      source_url: "https://jobs.example.test/role",
+      observed_at: "2026-10-18T00:00:00.000Z",
+      scope: "JOB_DESCRIPTION",
+      confidence: "UNKNOWN",
+      uncertainty_code: "SOURCE_QUOTE_NOT_VERIFIED",
       score_derivation_version: "quote_phrase_rules_v1",
     }]);
   });

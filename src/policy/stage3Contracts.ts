@@ -88,6 +88,8 @@ export const OpportunityCategorySchema = z.enum([
 export type OpportunityCategory = z.infer<typeof OpportunityCategorySchema>;
 
 export const CompensationPolicySchema = z.object({
+  target_salary_basis: z.enum(["GROSS", "NET"]).optional(),
+  fx_rate_max_age_days: z.number().int().min(1).max(90).optional(),
   startup_min_cash_salary_monthly_sgd: z.number().min(0).optional(),
   commercial_min_annual_sgd: z.number().min(0).optional(),
   commercial_target_annual_sgd: z.number().min(0).optional(),

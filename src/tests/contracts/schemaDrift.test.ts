@@ -64,6 +64,16 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
     expect(() => ShortlistRowSchema.parse(sampleEvaluatedShortlistRow)).not.toThrow();
   });
 
+  it.each(["readiness_fingerprint", "evidence_revision_hash"] as const)(
+    "validates %s as a lowercase SHA-256 digest",
+    (field) => {
+      const validHash = "a".repeat(64);
+      expect(() => ShortlistRowSchema.parse({ ...sampleEvaluatedShortlistRow, [field]: validHash })).not.toThrow();
+      expect(() => ShortlistRowSchema.parse({ ...sampleEvaluatedShortlistRow, [field]: "not-a-hash" })).toThrow();
+      expect(() => ShortlistRowSchema.parse({ ...sampleEvaluatedShortlistRow, [field]: "A".repeat(64) })).toThrow();
+    },
+  );
+
   it("requires explicit schema versions at persistence boundaries", () => {
     const observationPersistence = {
       schema_version: SCHEMA_VERSION,
@@ -222,6 +232,16 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
     expect(lineageDoc).toContain("# Shortlist Read Model Field Lineage");
     expect(lineageDoc).toContain("canonical_job_id");
     expect(lineageDoc).toContain("strategic_value");
+
+    const availabilityLineage = SHORTLIST_FIELD_LINEAGE.filter((entry) => entry.field.startsWith("availability_"));
+    expect(availabilityLineage).toHaveLength(3);
+    for (const entry of availabilityLineage) {
+      expect(entry.sourceTable).toContain("raw_job_observations");
+      expect(entry.sourceTable).toContain("source_candidate_dispositions");
+      expect(entry.sourceTable).toContain("job_versions");
+      expect(entry.transformation).toContain("Latest normalized source");
+      expect(entry.transformation).toContain("falls back to job_versions");
+    }
   });
 
   it("should enforce the state-conservation invariant: N_in = N_terminal + N_active", () => {

@@ -1,0 +1,116 @@
+{
+  "$ref": "#/definitions/ExperienceRequirementScope",
+  "definitions": {
+    "ExperienceRequirementScope": {
+      "type": "object",
+      "properties": {
+        "scope_schema_version": {
+          "type": "string",
+          "const": "experience_scope_v2"
+        },
+        "minimum_years": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximum_years": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "role_families": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "HANDS_ON_SOFTWARE_ENGINEERING",
+              "AI_ENGINEERING",
+              "DATA_ENGINEERING",
+              "ARCHITECTURE",
+              "RESEARCH_SOFTWARE",
+              "SCIENTIFIC_ENGINEERING",
+              "TECHNICAL_DELIVERY",
+              "TECHNICAL_PRODUCT",
+              "SALES_OWNERSHIP",
+              "CUSTOMER_SUPPORT",
+              "PEOPLE_MANAGEMENT"
+            ]
+          },
+          "default": []
+        },
+        "domain_families": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "SOFTWARE",
+              "AI",
+              "DATA",
+              "LEGAL_REGTECH",
+              "HEALTH_BIO_PHARMA",
+              "INVESTMENT_MARKETS_FINTECH",
+              "SOCIAL_IMPACT_MULTILATERAL",
+              "UNIVERSITY_AI_RESEARCH"
+            ]
+          },
+          "default": []
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "ANY",
+            "ALL"
+          ],
+          "default": "ANY"
+        },
+        "seniority_scope": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "duration_basis": {
+          "type": "string",
+          "enum": [
+            "PROFESSIONAL_PRODUCTION",
+            "DEPLOYED_OPEN_SOURCE",
+            "APPLIED_PROJECT",
+            "COURSEWORK",
+            "UNSPECIFIED"
+          ],
+          "default": "PROFESSIONAL_PRODUCTION"
+        },
+        "alternative_group_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "scope_schema_version",
+        "minimum_years"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
