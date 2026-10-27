@@ -479,10 +479,10 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
   },
   {
     field: "job_source_evidence",
-    sourceTable: "raw_job_observations",
+    sourceTable: "raw_job_observations / source_candidate_dispositions",
     sourceColumn: "normalized_evidence",
     producerStage: "sourceBroker.ts -> v_application_readiness_current",
-    transformation: "Latest source evidence normalized for the displayed job version",
+    transformation: "Newest normalized source evidence for the displayed job version, including availability refreshes",
     nullable: true
   },
   {
@@ -543,26 +543,26 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
   },
   {
     field: "availability_status",
-    sourceTable: "job_versions",
-    sourceColumn: "availability_status",
-    producerStage: "sourceBroker.ts -> recommendationDecider.ts",
-    transformation: "Evidence-backed OPEN/CLOSED/UNKNOWN status",
+    sourceTable: "raw_job_observations / source_candidate_dispositions / job_versions",
+    sourceColumn: "normalized_evidence.availability.status / availability_status",
+    producerStage: "sourceBroker.ts -> migration 078 v_application_readiness_current",
+    transformation: "Latest normalized source evidence takes precedence; falls back to job_versions.availability_status",
     nullable: true
   },
   {
     field: "availability_verified_at",
-    sourceTable: "job_versions",
-    sourceColumn: "availability_verified_at",
-    producerStage: "sourceBroker.ts -> recommendationDecider.ts",
-    transformation: "Timestamp when the current availability evidence was verified",
+    sourceTable: "raw_job_observations / source_candidate_dispositions / job_versions",
+    sourceColumn: "normalized_evidence.availability.verified_at / availability_verified_at",
+    producerStage: "sourceBroker.ts -> migration 078 v_application_readiness_current",
+    transformation: "Latest normalized source verification timestamp takes precedence; falls back to job_versions.availability_verified_at",
     nullable: true
   },
   {
     field: "availability_recheck_at",
-    sourceTable: "job_versions",
-    sourceColumn: "availability_recheck_at",
-    producerStage: "sourceBroker.ts -> recommendationDecider.ts",
-    transformation: "TTL expiry for rechecking current vacancy availability",
+    sourceTable: "raw_job_observations / source_candidate_dispositions / job_versions",
+    sourceColumn: "normalized_evidence.availability.expires_at / availability_recheck_at",
+    producerStage: "sourceBroker.ts -> migration 078 v_application_readiness_current",
+    transformation: "Latest normalized source expiry takes precedence; falls back to job_versions.availability_recheck_at",
     nullable: true
   }
 ];

@@ -1464,6 +1464,21 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       );
       expect(after.rows).toHaveLength(1);
 
+      const scopedApplicationStatusConstraint = await client.query<{
+        schema_name: string;
+        definition: string;
+      }>(
+        `SELECT nsp.nspname AS schema_name, pg_get_constraintdef(constraint_row.oid) AS definition
+         FROM pg_constraint AS constraint_row
+         JOIN pg_class AS relation ON relation.oid = constraint_row.conrelid
+         JOIN pg_namespace AS nsp ON nsp.oid = relation.relnamespace
+         WHERE constraint_row.conrelid = 'application_records'::regclass
+           AND constraint_row.conname = 'application_records_status_v5_check'`
+      );
+      expect(scopedApplicationStatusConstraint.rows).toHaveLength(1);
+      expect(scopedApplicationStatusConstraint.rows[0]?.schema_name).toBe(schemaName);
+      expect(scopedApplicationStatusConstraint.rows[0]?.definition).toContain('READY_TO_APPLY');
+
       // Migration 008 temporarily repairs unlinked queue rows. Migration 010 then
       // quarantines synthetic placeholder-linked queue rows and removes them from
       // active evaluation_queue.
