@@ -109,16 +109,40 @@ function postingUrl(job: ExtractedJob): string | null {
   return job.employer_posting_url ?? job.canonical_apply_url ?? job.application_url ?? null;
 }
 
+function isHttpUrl(value: string | null): boolean {
+  if (value === null) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function expectedPostingUrl(
+  sourceExternalId: string | null,
+  sourceUrl: string | null,
+  sourceName: string,
+): string | null {
+  const externalIdUrl = isHttpUrl(sourceExternalId) ? sourceExternalId : null;
+  if (externalIdUrl !== null && sourceUrl !== null &&
+      normalizePostingUrl(externalIdUrl, sourceName) !== normalizePostingUrl(sourceUrl, sourceName)) {
+    return null;
+  }
+  const url = sourceUrl ?? externalIdUrl;
+  return url ? normalizePostingUrl(url, sourceName) : null;
+}
+
 function sourceIdentityMatches(
   externalId: string | null,
   sourceUrl: string | null,
   candidate: ExtractedJob,
   sourceName: string,
 ): boolean {
-  if (externalId !== null) {
+  if (externalId !== null && !isHttpUrl(externalId)) {
     return candidate.source_external_id?.trim() === externalId.trim();
   }
-  const expectedUrl = sourceUrl ? normalizePostingUrl(sourceUrl, sourceName) : null;
+  const expectedUrl = expectedPostingUrl(externalId, sourceUrl, sourceName);
   const candidateUrl = postingUrl(candidate);
   return expectedUrl !== null && candidateUrl !== null &&
     normalizePostingUrl(candidateUrl, sourceName) === expectedUrl;
@@ -130,8 +154,9 @@ function rawIdentityMatches(
   sourceUrl: string | null,
   sourceName: string,
 ): boolean {
-  if (sourceExternalId !== null && identity.trim() === sourceExternalId.trim()) return true;
-  const expectedUrl = sourceUrl ? normalizePostingUrl(sourceUrl, sourceName) : null;
+  if (sourceExternalId !== null && !isHttpUrl(sourceExternalId) &&
+      identity.trim() === sourceExternalId.trim()) return true;
+  const expectedUrl = expectedPostingUrl(sourceExternalId, sourceUrl, sourceName);
   return expectedUrl !== null && normalizePostingUrl(identity, sourceName) === expectedUrl;
 }
 
