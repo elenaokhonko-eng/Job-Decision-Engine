@@ -294,7 +294,7 @@ function payloadHash(payload: unknown): string {
 }
 
 function isPool(value: pg.Pool | pg.PoolClient): value is pg.Pool {
-  return "connect" in value && typeof value.connect === "function";
+  return "connect" in value && typeof value.connect === "function" && !("release" in value);
 }
 
 async function loadRefreshTarget(
