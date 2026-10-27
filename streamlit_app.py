@@ -1,4 +1,3 @@
-import hashlib
 import html
 import json
 import os
@@ -13,6 +12,7 @@ from fpdf import FPDF
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
+    load_verified_document_bytes,
     parse_application_document_pair_status,
     salary_disclosure_message,
 )
@@ -941,23 +941,7 @@ def parse_document_run(result, expected_type, job, application_id):
 
 
 def verified_document_bytes(output):
-    path = output.get("path") if isinstance(output, dict) else None
-    expected_hash = output.get("sha256") if isinstance(output, dict) else None
-    if not isinstance(path, str) or not isinstance(expected_hash, str):
-        raise TypeError("The document manifest does not contain a path and SHA-256 hash.")
-    export_root = os.path.realpath(os.path.join("scripts", "exports"))
-    artifact_path = os.path.realpath(path)
-    try:
-        within_exports = os.path.commonpath([export_root, artifact_path]) == export_root
-    except ValueError:
-        within_exports = False
-    if not within_exports or not os.path.isfile(artifact_path):
-        raise RuntimeError("The document manifest points outside the local exports directory or to a missing file.")
-    with open(artifact_path, "rb") as artifact:
-        content = artifact.read()
-    if hashlib.sha256(content).hexdigest() != expected_hash:
-        raise RuntimeError("The document file hash does not match its persisted run manifest.")
-    return os.path.basename(artifact_path), content
+    return load_verified_document_bytes(output)
 
 
 def show_document_run_downloads(manifest, key_prefix):

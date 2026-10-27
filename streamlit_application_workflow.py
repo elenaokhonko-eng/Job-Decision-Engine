@@ -2,7 +2,9 @@
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+import hashlib
 import json
+from pathlib import Path
 
 CURRENT_DETERMINISTIC_CONTEXTS = frozenset(
     {
@@ -50,6 +52,69 @@ def parse_application_document_pair_status(
             )
         return status
     raise ValueError("The document-pair validator returned no structured status.")
+
+
+def load_verified_document_bytes(
+    output: Mapping[str, object], export_root: Path = Path("scripts") / "exports"
+) -> tuple[str, bytes]:
+    """Load a hash-verified document from the local exports directory.
+
+    Args:
+        output: Document output manifest containing a path and SHA-256 hash.
+        export_root: Directory where downloaded or generated artifacts are stored.
+
+    Returns:
+        The safe local filename and verified document bytes.
+
+    Raises:
+        TypeError: If the manifest path or hash is missing or invalid.
+        RuntimeError: If no local export matches the manifest hash.
+
+    Example:
+        >>> name, content = load_verified_document_bytes(
+        ...     {"path": "/runner/scripts/exports/cv.docx", "sha256": "..."},
+        ...     Path("scripts") / "exports",
+        ... )
+    """
+    if not isinstance(output, Mapping):
+        raise TypeError("The document manifest output is not an object.")
+    manifest_path = output.get("path")
+    expected_hash = output.get("sha256")
+    if not isinstance(manifest_path, str) or not isinstance(expected_hash, str):
+        raise TypeError(
+            "The document manifest does not contain a path and SHA-256 hash."
+        )
+
+    root = export_root.resolve()
+    source_path = Path(manifest_path)
+    candidates = []
+    if source_path.is_absolute():
+        candidates.append(source_path.resolve())
+    else:
+        candidates.append((Path.cwd() / source_path).resolve())
+    if source_path.name:
+        candidates.extend(
+            candidate.resolve() for candidate in root.rglob(source_path.name)
+        )
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if not candidate.is_file():
+            continue
+        content = candidate.read_bytes()
+        if hashlib.sha256(content).hexdigest() == expected_hash:
+            return candidate.name, content
+
+    raise RuntimeError(
+        "The document manifest does not resolve to a local export with the expected SHA-256 hash."
+    )
 
 
 def _is_future_timestamp(value: object) -> bool:

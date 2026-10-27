@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: '0 * * * *' # Run hourly
   workflow_dispatch:
+    inputs:
+      canonical_job_id:
+        description: Canonical job UUID for the scoped pilot
+        required: false
+        type: string
+      job_version_id:
+        description: Current job version UUID for the scoped pilot
+        required: false
+        type: string
 
 concurrency:
   group: evaluation-queue-worker
@@ -16,7 +25,7 @@ jobs:
   evaluate-queue:
     name: Process Pending & Retrying Evaluations
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && (github.event_name != 'workflow_dispatch' || (inputs.canonical_job_id == '' && inputs.job_version_id == '')) }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -39,6 +48,7 @@ jobs:
           npx tsx src/db/migrate.ts
 
       - name: Run AI Evaluation Queue Processor
+        if: ${{ github.event_name != 'workflow_dispatch' || (inputs.canonical_job_id == '' && inputs.job_version_id == '') }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
@@ -54,8 +64,51 @@ jobs:
         run: npx tsx scripts/evaluate_queue.ts
 
       - name: Materialize current application rankings
-        if: ${{ success() }}
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || (inputs.canonical_job_id == '' && inputs.job_version_id == '')) }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
         run: npx tsx scripts/materialize_application_rankings.ts
+
+  scoped-pilot:
+    name: Run one-job production pilot
+    runs-on: ubuntu-latest
+    if: ${{ vars.WORKFLOW_KILL_SWITCH == 'true' && github.event_name == 'workflow_dispatch' && inputs.canonical_job_id != '' && inputs.job_version_id != '' }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Preflight and run canonical migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+        run: |
+          npx tsx scripts/preflight_database.ts
+          npx tsx src/db/migrate.ts
+
+      - name: Process only the selected job version
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
+          PILOT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
+          PILOT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
+          MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
+        run: npx tsx scripts/run_scoped_pilot.ts --canonical-job-id "$PILOT_CANONICAL_JOB_ID" --job-version-id "$PILOT_JOB_VERSION_ID"

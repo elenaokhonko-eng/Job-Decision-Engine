@@ -8,7 +8,11 @@ on:
         required: false
         type: string
       job_version_id:
-        description: Job version UUID (optional strict pin)
+        description: Current job version UUID
+        required: false
+        type: string
+      application_record_id:
+        description: Draft application record UUID for this document pair
         required: false
         type: string
 
@@ -22,7 +26,7 @@ concurrency:
 jobs:
   generate-documents:
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' || (inputs.canonical_job_id != '' && inputs.job_version_id != '' && inputs.application_record_id != '') }}
     timeout-minutes: 40
     steps:
       - name: Checkout repository
@@ -37,6 +41,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install LibreOffice for PDF rendering
+        run: |
+          if ! command -v libreoffice >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y libreoffice-writer
+          fi
+
       - name: Run DB migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -49,8 +60,10 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PICK_DOCUMENTS_ALLOW_EMPTY: "true"
+          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
           INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
           INPUT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
+          INPUT_APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -66,11 +79,22 @@ jobs:
               echo "job_version_id must be a UUID when provided." >&2
               exit 1
             fi
+            if [[ -n "$INPUT_APPLICATION_RECORD_ID" && ! "$INPUT_APPLICATION_RECORD_ID" =~ $uuid_re ]]; then
+              echo "application_record_id must be a UUID when provided." >&2
+              exit 1
+            fi
+            if [[ "$WORKFLOW_KILL_SWITCH" == "true" && ( -z "$INPUT_JOB_VERSION_ID" || -z "$INPUT_APPLICATION_RECORD_ID" ) ]]; then
+              echo "With the workflow kill switch enabled, both job_version_id and application_record_id are required." >&2
+              exit 1
+            fi
             {
               echo "CANONICAL_JOB_ID=$INPUT_CANONICAL_JOB_ID"
               echo "DOCUMENTS_JOB_FOUND=true"
               if [[ -n "$INPUT_JOB_VERSION_ID" ]]; then
                 echo "JOB_VERSION_ID=$INPUT_JOB_VERSION_ID"
+              fi
+              if [[ -n "$INPUT_APPLICATION_RECORD_ID" ]]; then
+                echo "APPLICATION_RECORD_ID=$INPUT_APPLICATION_RECORD_ID"
               fi
             } >> "$GITHUB_ENV"
             exit 0
@@ -117,6 +141,7 @@ jobs:
         run: mkdir -p scripts/exports
 
       - name: Generate customized CV
+        id: generate_cv
         if: env.DOCUMENTS_JOB_FOUND == 'true'
         timeout-minutes: 15
         env:
@@ -131,16 +156,26 @@ jobs:
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
           DOCUMENT_CONTACT_JSON: ${{ secrets.DOCUMENT_CONTACT_JSON }}
           MASTER_PROFILE_JSON: ${{ secrets.MASTER_PROFILE_JSON }}
+          JDEC_APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
         shell: bash
         run: |
           set -euo pipefail
+          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
           if [[ -n "${JOB_VERSION_ID:-}" ]]; then
-            npx tsx scripts/generate_cv.ts "$CANONICAL_JOB_ID" "$JOB_VERSION_ID"
+            document_output="$(npx tsx scripts/generate_cv.ts "$CANONICAL_JOB_ID" "$JOB_VERSION_ID")"
           else
-            npx tsx scripts/generate_cv.ts "$CANONICAL_JOB_ID"
+            document_output="$(npx tsx scripts/generate_cv.ts "$CANONICAL_JOB_ID")"
           fi
+          printf '%s\n' "$document_output"
+          document_run_id="$(printf '%s\n' "$document_output" | sed -n 's/.*"documentRunId":[[:space:]]*"\([^"]*\)".*/\1/p' | tail -n 1)"
+          if [[ ! "$document_run_id" =~ $uuid_re ]]; then
+            echo "CV generator did not return a valid document run ID." >&2
+            exit 1
+          fi
+          echo "document_run_id=$document_run_id" >> "$GITHUB_OUTPUT"
 
       - name: Generate cover letter
+        id: generate_cover_letter
         if: env.DOCUMENTS_JOB_FOUND == 'true'
         timeout-minutes: 15
         env:
@@ -155,14 +190,47 @@ jobs:
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
           DOCUMENT_CONTACT_JSON: ${{ secrets.DOCUMENT_CONTACT_JSON }}
           MASTER_PROFILE_JSON: ${{ secrets.MASTER_PROFILE_JSON }}
+          JDEC_APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
         shell: bash
         run: |
           set -euo pipefail
+          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
           if [[ -n "${JOB_VERSION_ID:-}" ]]; then
-            npx tsx scripts/generate_cover_letter.ts "$CANONICAL_JOB_ID" "$JOB_VERSION_ID"
+            document_output="$(npx tsx scripts/generate_cover_letter.ts "$CANONICAL_JOB_ID" "$JOB_VERSION_ID")"
           else
-            npx tsx scripts/generate_cover_letter.ts "$CANONICAL_JOB_ID"
+            document_output="$(npx tsx scripts/generate_cover_letter.ts "$CANONICAL_JOB_ID")"
           fi
+          printf '%s\n' "$document_output"
+          document_run_id="$(printf '%s\n' "$document_output" | sed -n 's/.*"documentRunId":[[:space:]]*"\([^"]*\)".*/\1/p' | tail -n 1)"
+          if [[ ! "$document_run_id" =~ $uuid_re ]]; then
+            echo "Cover-letter generator did not return a valid document run ID." >&2
+            exit 1
+          fi
+          echo "document_run_id=$document_run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify DOCX/PDF outputs and validate the pair
+        if: env.DOCUMENTS_JOB_FOUND == 'true' && inputs.application_record_id != ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
+          CV_DOCUMENT_RUN_ID: ${{ steps.generate_cv.outputs.document_run_id }}
+          COVER_LETTER_DOCUMENT_RUN_ID: ${{ steps.generate_cover_letter.outputs.document_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          docx_files=(scripts/exports/*.docx)
+          pdf_files=(scripts/exports/*.pdf)
+          if (( ${#docx_files[@]} < 2 )); then
+            echo "Expected both generated DOCX files in scripts/exports." >&2
+            exit 1
+          fi
+          if (( ${#pdf_files[@]} < 2 )); then
+            echo "Expected both generated PDF files in scripts/exports." >&2
+            exit 1
+          fi
+          npx tsx scripts/validate_application_document_pair.ts \
+            "$APPLICATION_RECORD_ID" "$CV_DOCUMENT_RUN_ID" "$COVER_LETTER_DOCUMENT_RUN_ID"
 
       - name: Upload generated documents
         if: ${{ always() && env.DOCUMENTS_JOB_FOUND == 'true' }}

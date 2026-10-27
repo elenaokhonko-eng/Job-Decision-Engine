@@ -1,10 +1,13 @@
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
+    load_verified_document_bytes,
     parse_application_document_pair_status,
     salary_disclosure_message,
 )
@@ -20,6 +23,49 @@ def test_application_routes_are_namespaced_under_api_v2():
         application_api_path("/api/v2/applications/record-id/events")
         == "/api/v2/applications/record-id/events"
     )
+
+
+def test_loads_downloaded_ci_artifact_from_local_exports_by_name_and_hash(
+    tmp_path: Path,
+):
+    export_root = tmp_path / "scripts" / "exports"
+    artifact_dir = export_root / "application-documents"
+    artifact_dir.mkdir(parents=True)
+    content = b"synthetic DOCX payload"
+    filename = "Candidate_CV_Example.docx"
+    (artifact_dir / filename).write_bytes(content)
+    expected_hash = hashlib.sha256(content).hexdigest()
+
+    name, loaded = load_verified_document_bytes(
+        {
+            "path": f"/home/runner/work/repository/scripts/exports/{filename}",
+            "sha256": expected_hash,
+        },
+        export_root,
+    )
+
+    assert name == filename
+    assert loaded == content
+
+
+def test_rejects_non_object_document_output():
+    with pytest.raises(TypeError, match="manifest output"):
+        load_verified_document_bytes([], Path("scripts") / "exports")
+
+
+def test_rejects_local_download_when_manifest_hash_does_not_match(tmp_path: Path):
+    export_root = tmp_path / "scripts" / "exports"
+    export_root.mkdir(parents=True)
+    (export_root / "document.docx").write_bytes(b"different content")
+
+    with pytest.raises(RuntimeError, match="SHA-256"):
+        load_verified_document_bytes(
+            {
+                "path": "/home/runner/work/repository/scripts/exports/document.docx",
+                "sha256": hashlib.sha256(b"expected content").hexdigest(),
+            },
+            export_root,
+        )
 
 
 def test_parses_read_only_document_pair_status_for_exact_run_ids():
