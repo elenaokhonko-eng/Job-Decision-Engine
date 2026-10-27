@@ -68,13 +68,7 @@ async function extractDocxText(filePath: string, content: Buffer): Promise<strin
     encoding: "utf8",
     maxBuffer: 8 * 1024 * 1024,
   });
-  return result.stdout
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'");
+  return result.stdout.replace(/<[^>]+>/g, " ");
 }
 
 async function extractPdfText(content: Buffer, filePath: string): Promise<{ readonly text: string; readonly pages: number }> {
