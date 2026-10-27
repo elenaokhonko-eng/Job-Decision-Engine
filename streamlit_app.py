@@ -195,6 +195,12 @@ SHORTLIST_READ_MODEL_QUERY = """
       s.document_ready,
       s.current_artifact_status,
       s.current_artifact_reason,
+      readiness.readiness_status,
+      readiness.readiness_fingerprint,
+      readiness.readiness_expires_at,
+      readiness.readiness_reason_codes,
+      readiness.availability_status,
+      readiness.availability_recheck_at,
       s.blocked_task_count,
       s.requires_user_action,
       s.user_action_type,
@@ -203,6 +209,10 @@ SHORTLIST_READ_MODEL_QUERY = """
       s.technical_error_count,
       s.pipeline_display_category
     FROM v_canonical_shortlist_actions_scoped s
+    LEFT JOIN v_application_readiness_current readiness
+      ON readiness.workspace_id = s.workspace_id
+     AND readiness.canonical_job_id = s.canonical_job_id
+     AND readiness.job_version_id::text = s.job_version_id::text
     WHERE s.workspace_id = %s
     ORDER BY s.observed_at DESC NULLS LAST, s.canonical_job_id DESC
     LIMIT %s
@@ -260,9 +270,21 @@ TOP_TEN_READY_QUERY = """
            office_requirement_score, timezone_compatibility_score,
            employment_verifiability_score, stage3_preference_context_id,
            ranking_component_availability, ranking_component_provenance,
-           current_artifact_status, version_mismatch
-    FROM v_top_ten_ready_jobs_stage3_scoped
-    WHERE workspace_id = %s
+           current_artifact_status, version_mismatch,
+           current_readiness.readiness_status, current_readiness.readiness_fingerprint,
+           current_readiness.readiness_expires_at, current_readiness.readiness_reason_codes,
+           current_readiness.availability_status, current_readiness.availability_recheck_at
+    FROM v_top_ten_ready_jobs_stage3_scoped AS jobs
+    LEFT JOIN LATERAL (
+      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+             readiness_reason_codes, availability_status, availability_recheck_at
+      FROM v_application_readiness_current readiness
+      WHERE readiness.workspace_id = jobs.workspace_id
+        AND readiness.canonical_job_id = jobs.canonical_job_id
+        AND readiness.job_version_id::text = jobs.job_version_id::text
+      LIMIT 1
+    ) AS current_readiness ON TRUE
+    WHERE jobs.workspace_id = %s
     ORDER BY ranking_position ASC
     LIMIT 10
 """
@@ -287,9 +309,21 @@ APPLY_NOW_JOBS_QUERY = """
            country_flexibility_score, office_requirement_score,
            timezone_compatibility_score, employment_verifiability_score,
            stage3_preference_context_id, ranking_component_availability,
-           ranking_component_provenance
-    FROM v_apply_now_jobs_stage3_scoped
-    WHERE workspace_id = %s
+           ranking_component_provenance, current_readiness.readiness_status,
+           current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
+           current_readiness.readiness_reason_codes, current_readiness.availability_status,
+           current_readiness.availability_recheck_at
+    FROM v_apply_now_jobs_stage3_scoped AS jobs
+    LEFT JOIN LATERAL (
+      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+             readiness_reason_codes, availability_status, availability_recheck_at
+      FROM v_application_readiness_current readiness
+      WHERE readiness.workspace_id = jobs.workspace_id
+        AND readiness.canonical_job_id = jobs.canonical_job_id
+        AND readiness.job_version_id::text = jobs.job_version_id::text
+      LIMIT 1
+    ) AS current_readiness ON TRUE
+    WHERE jobs.workspace_id = %s
     ORDER BY overall_rank_score DESC NULLS LAST,
              CASE recommendation_outcome WHEN 'PRIORITY' THEN 0 ELSE 1 END,
              deterministic_match_score DESC NULLS LAST,
@@ -305,9 +339,21 @@ TRACK_JOBS_QUERY = """
            recommendation_eligibility, recommendation_outcome, version_mismatch,
            current_artifact_status, current_artifact_reason, blocked_task_count,
            deterministic_decision_id, deterministic_context_fingerprint,
-           deterministic_trace_notes
-    FROM v_track_jobs_scoped
-    WHERE workspace_id = %s
+           deterministic_trace_notes, current_readiness.readiness_status,
+           current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
+           current_readiness.readiness_reason_codes, current_readiness.availability_status,
+           current_readiness.availability_recheck_at
+    FROM v_track_jobs_scoped AS jobs
+    LEFT JOIN LATERAL (
+      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+             readiness_reason_codes, availability_status, availability_recheck_at
+      FROM v_application_readiness_current readiness
+      WHERE readiness.workspace_id = jobs.workspace_id
+        AND readiness.canonical_job_id = jobs.canonical_job_id
+        AND readiness.job_version_id::text = jobs.job_version_id::text
+      LIMIT 1
+    ) AS current_readiness ON TRUE
+    WHERE jobs.workspace_id = %s
     ORDER BY deterministic_match_score DESC NULLS LAST, observed_at DESC NULLS LAST
     LIMIT 5000
 """

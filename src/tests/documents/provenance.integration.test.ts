@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import crypto from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 import { runMigrations } from "../../db/migrate.js";
@@ -11,11 +14,31 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
+const streamlitAppPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../streamlit_app.py");
+
+function streamlitQuery(name: string): string {
+  const source = readFileSync(streamlitAppPath, "utf8");
+  const pattern = new RegExp(`${name}\\s*=\\s*"""([\\s\\S]*?)"""`);
+  const query = pattern.exec(source)?.[1];
+  if (!query) throw new Error(`Streamlit read-model query ${name} was not found.`);
+  let parameterIndex = 0;
+  return query.replace(/%s/g, () => `$${++parameterIndex}`);
+}
 
 let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
 let schemaName = "";
 let context: WorkspaceContext | undefined;
+
+interface StreamlitReadinessRow {
+  readonly canonical_job_id: string;
+  readonly readiness_status: string | null;
+  readonly readiness_fingerprint: string | null;
+  readonly readiness_expires_at: Date | string | null;
+  readonly readiness_reason_codes: string[];
+  readonly availability_status: string | null;
+  readonly availability_recheck_at: Date | string | null;
+}
 
 function getClient(): pg.PoolClient {
   if (!client) throw new Error("The document provenance test client is not initialized.");
@@ -260,6 +283,23 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
     );
     expect(currentReadiness.rows[0]?.readiness_status).toBe("READY");
     expect(currentReadiness.rows[0]?.readiness_reason_codes).toEqual([]);
+
+    const readyShortlist = await database.query<StreamlitReadinessRow>(
+      streamlitQuery("SHORTLIST_READ_MODEL_QUERY"),
+      [workspace.workspaceId, 5000],
+    );
+    const shortlistJob = readyShortlist.rows.find((row) => row.canonical_job_id === canonicalJobId);
+    expect(shortlistJob?.readiness_status).toBe("READY");
+    expect(shortlistJob?.readiness_fingerprint).toBe(readinessFingerprint);
+    const applyNowRows = await database.query<StreamlitReadinessRow>(
+      streamlitQuery("APPLY_NOW_JOBS_QUERY"),
+      [workspace.workspaceId],
+    );
+    const applyNowJob = applyNowRows.rows.find((row) => row.canonical_job_id === canonicalJobId);
+    expect(applyNowJob?.readiness_status).toBe("READY");
+    expect(applyNowJob?.availability_status).toBe("OPEN");
+    await database.query(streamlitQuery("TRACK_JOBS_QUERY"), [workspace.workspaceId]);
+
     const application = await database.query<{ id: string }>(
       `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status)
        VALUES ($1, $2, $3, $4, 'INTENT')
@@ -393,6 +433,17 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
     );
     expect(expiredView.rows[0]?.readiness_status).toBe("NEEDS_VERIFICATION");
     expect(expiredView.rows[0]?.readiness_reason_codes).toContain("READINESS_EVIDENCE_EXPIRED");
+    const staleShortlist = await database.query<StreamlitReadinessRow>(
+      streamlitQuery("SHORTLIST_READ_MODEL_QUERY"),
+      [workspace.workspaceId, 5000],
+    );
+    const staleShortlistJob = staleShortlist.rows.find((row) => row.canonical_job_id === canonicalJobId);
+    expect(staleShortlistJob?.readiness_status).toBe("NEEDS_VERIFICATION");
+    const staleApplyNowRows = await database.query<StreamlitReadinessRow>(
+      streamlitQuery("APPLY_NOW_JOBS_QUERY"),
+      [workspace.workspaceId],
+    );
+    expect(staleApplyNowRows.rows.some((row) => row.canonical_job_id === canonicalJobId)).toBe(false);
 
     const seeded = await seedRecoverablePipelineTasks(database, {
       context: workspace,

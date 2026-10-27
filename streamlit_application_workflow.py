@@ -65,6 +65,41 @@ def _is_future_timestamp(value: object) -> bool:
     return parsed.tzinfo is not None and parsed > datetime.now(UTC)
 
 
+def has_current_ready_assessment(job: Mapping[str, object]) -> bool:
+    """Check that the read-model row carries a current, unexpired READY assessment.
+
+    Args:
+        job: A row from a readiness-enriched canonical read model.
+
+    Returns:
+        True only when readiness and availability evidence are current and resolved.
+
+    Example:
+        >>> has_current_ready_assessment({
+        ...     "readiness_status": "READY",
+        ...     "readiness_fingerprint": "a" * 64,
+        ...     "readiness_reason_codes": [],
+        ...     "readiness_expires_at": "2099-01-01T00:00:00Z",
+        ...     "availability_status": "OPEN",
+        ...     "availability_recheck_at": "2099-01-01T00:00:00Z",
+        ... })
+        True
+    """
+    readiness_fingerprint = job.get("readiness_fingerprint")
+    readiness_reason_codes = job.get("readiness_reason_codes")
+    return (
+        job.get("readiness_status") == "READY"
+        and isinstance(readiness_fingerprint, str)
+        and len(readiness_fingerprint) == 64
+        and all(character in "0123456789abcdef" for character in readiness_fingerprint)
+        and isinstance(readiness_reason_codes, list)
+        and not readiness_reason_codes
+        and job.get("availability_status") == "OPEN"
+        and _is_future_timestamp(job.get("readiness_expires_at"))
+        and _is_future_timestamp(job.get("availability_recheck_at"))
+    )
+
+
 def is_document_generation_eligible(
     job: Mapping[str, object], *, include_track: bool = False
 ) -> bool:
@@ -104,21 +139,7 @@ def is_document_generation_eligible(
         return False
     if job.get("current_artifact_status") not in CURRENT_DETERMINISTIC_CONTEXTS:
         return False
-    readiness_fingerprint = job.get("readiness_fingerprint")
-    readiness_reason_codes = job.get("readiness_reason_codes")
-    if (
-        job.get("readiness_status") != "READY"
-        or not isinstance(readiness_fingerprint, str)
-        or len(readiness_fingerprint) != 64
-        or any(
-            character not in "0123456789abcdef" for character in readiness_fingerprint
-        )
-        or not isinstance(readiness_reason_codes, list)
-        or readiness_reason_codes
-        or job.get("availability_status") != "OPEN"
-        or not _is_future_timestamp(job.get("readiness_expires_at"))
-        or not _is_future_timestamp(job.get("availability_recheck_at"))
-    ):
+    if not has_current_ready_assessment(job):
         return False
 
     outcomes = APPLY_NOW_OUTCOMES | ({"TRACK"} if include_track else set())
