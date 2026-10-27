@@ -24,9 +24,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  generate-documents:
+  validate-document-dispatch:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' || (inputs.canonical_job_id != '' && inputs.job_version_id != '' && inputs.application_record_id != '') }}
+    steps:
+      - name: Validate production ref and document pins
+        env:
+          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
+          REQUESTED_REF: ${{ github.ref }}
+          INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
+          INPUT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
+          INPUT_APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          if [[ "$REQUESTED_REF" != "refs/heads/main" ]]; then
+            echo "Document workflows may only use reviewed code from main." >&2
+            exit 1
+          fi
+          for value in "$INPUT_CANONICAL_JOB_ID" "$INPUT_JOB_VERSION_ID" "$INPUT_APPLICATION_RECORD_ID"; do
+            if [[ -n "$value" && ! "$value" =~ $uuid_re ]]; then
+              echo "All supplied application and job IDs must be UUIDs." >&2
+              exit 1
+            fi
+          done
+          if [[ -n "$INPUT_APPLICATION_RECORD_ID" && ( -z "$INPUT_CANONICAL_JOB_ID" || -z "$INPUT_JOB_VERSION_ID" ) ]]; then
+            echo "application_record_id requires both pinned job IDs." >&2
+            exit 1
+          fi
+          if [[ "$WORKFLOW_KILL_SWITCH" == "true" && ( -z "$INPUT_CANONICAL_JOB_ID" || -z "$INPUT_JOB_VERSION_ID" || -z "$INPUT_APPLICATION_RECORD_ID" ) ]]; then
+            echo "With the workflow kill switch enabled, all three IDs must be supplied." >&2
+            exit 1
+          fi
+
+  generate-documents:
+    needs: validate-document-dispatch
+    runs-on: ubuntu-latest
+    if: ${{ always() && needs.validate-document-dispatch.result == 'success' && github.ref == 'refs/heads/main' }}
     timeout-minutes: 40
     steps:
       - name: Checkout repository
@@ -48,13 +83,18 @@ jobs:
             sudo apt-get install -y libreoffice-writer
           fi
 
-      - name: Run DB migrations
+      - name: Verify schema or migrate after dispatch validation
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
         run: |
           npx tsx scripts/preflight_database.ts
-          npx tsx src/db/migrate.ts
+          if [[ "$WORKFLOW_KILL_SWITCH" == "true" ]]; then
+            npx tsx scripts/verify_migration_status.ts
+          else
+            npx tsx src/db/migrate.ts
+          fi
 
       - name: Resolve canonical_job_id/job_version_id (auto-pick if missing)
         env:
@@ -136,6 +176,19 @@ jobs:
             echo "DOCUMENTS_JOB_FOUND=true"
           } >> "$GITHUB_ENV"
 
+      - name: Verify the pinned application draft and current readiness
+        if: env.DOCUMENTS_JOB_FOUND == 'true' && inputs.application_record_id != ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
+        run: npx tsx scripts/preflight_application_document_draft.ts "$APPLICATION_RECORD_ID" "$CANONICAL_JOB_ID" "$JOB_VERSION_ID"
+
+      - name: Verify the pinned application draft and current readiness
+        if: env.DOCUMENTS_JOB_FOUND == 'true' && env.APPLICATION_RECORD_ID != ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx tsx scripts/preflight_application_document_draft.ts "$APPLICATION_RECORD_ID" "$CANONICAL_JOB_ID" "$JOB_VERSION_ID"
+
       - name: Ensure exports directory exists
         if: env.DOCUMENTS_JOB_FOUND == 'true'
         run: mkdir -p scripts/exports
@@ -213,6 +266,10 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
+          CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
+          JOB_VERSION_ID: ${{ inputs.job_version_id }}
+          DOCUMENT_CONTACT_JSON: ${{ secrets.DOCUMENT_CONTACT_JSON }}
+          MASTER_PROFILE_JSON: ${{ secrets.MASTER_PROFILE_JSON }}
           CV_DOCUMENT_RUN_ID: ${{ steps.generate_cv.outputs.document_run_id }}
           COVER_LETTER_DOCUMENT_RUN_ID: ${{ steps.generate_cover_letter.outputs.document_run_id }}
         shell: bash
@@ -230,10 +287,13 @@ jobs:
             exit 1
           fi
           npx tsx scripts/validate_application_document_pair.ts \
-            "$APPLICATION_RECORD_ID" "$CV_DOCUMENT_RUN_ID" "$COVER_LETTER_DOCUMENT_RUN_ID"
+            "$APPLICATION_RECORD_ID" "$CV_DOCUMENT_RUN_ID" "$COVER_LETTER_DOCUMENT_RUN_ID" --require-current
+          npx tsx scripts/verify_document_artifacts.ts \
+            "$APPLICATION_RECORD_ID" "$CANONICAL_JOB_ID" "$JOB_VERSION_ID" \
+            "$CV_DOCUMENT_RUN_ID" "$COVER_LETTER_DOCUMENT_RUN_ID" --require-current
 
       - name: Upload generated documents
-        if: ${{ always() && env.DOCUMENTS_JOB_FOUND == 'true' }}
+        if: ${{ success() && env.DOCUMENTS_JOB_FOUND == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: application-documents-${{ inputs.canonical_job_id || 'auto' }}

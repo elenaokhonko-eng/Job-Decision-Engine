@@ -17,8 +17,24 @@ function assessment(overrides: Record<string, unknown> = {}): Record<string, unk
     profile_version_id: "44444444-4444-4444-8444-444444444444",
     requirement_set_id: "55555555-5555-4555-8555-555555555555",
     match_run_id: "66666666-6666-4666-8666-666666666666",
+    preference_context_id: null,
+    policy_snapshot_id: null,
+    policy_version: "test-policy-v1",
+    qualification_comparator_version: "test-comparator-v1",
     evidence_revision_hash: "b".repeat(64),
     readiness_fingerprint: fingerprint,
+    reason_codes: [],
+    checks: [{
+      key: "COMPENSATION",
+      status: "MET",
+      importance: "PREFERRED",
+      reason_code: null,
+      rationale: "Supported test compensation evidence.",
+      evidence_keys: [],
+      policy_reference: null,
+      assessed_at: "2098-01-01T00:00:00.000Z",
+      expires_at: null,
+    }],
     evaluated_at: "2098-01-01T00:00:00.000Z",
     expires_at: expiry,
     ...overrides,
@@ -57,6 +73,28 @@ describe("current application readiness", () => {
     { evidence_revision_hash: "c".repeat(64) },
   ])("rejects a readiness assessment that is unresolved, stale, or expired", (overrides) => {
     expect(isCurrentReadyApplicationReadiness(readiness(overrides), Date.parse("2026-01-01T00:00:00Z"))).toBe(false);
+  });
+
+  it("rejects a READY payload with unresolved mandatory checks", () => {
+    const malformedReady = readiness({
+      application_readiness: assessment({
+        checks: [{
+          key: "WORK_AUTHORIZATION",
+          status: "NEEDS_VERIFICATION",
+          importance: "MUST",
+          reason_code: "WORK_AUTHORIZATION_UNKNOWN",
+          rationale: "Eligibility requires verification.",
+          evidence_keys: [],
+          policy_reference: null,
+          assessed_at: "2098-01-01T00:00:00.000Z",
+          expires_at: null,
+        }],
+        reason_codes: ["WORK_AUTHORIZATION_UNKNOWN"],
+      }),
+    });
+
+    expect(isCurrentReadyApplicationReadiness(malformedReady, Date.parse("2026-01-01T00:00:00Z")))
+      .toBe(false);
   });
 
   it("requires reassessment when readiness evidence expires before it was evaluated", () => {

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from streamlit.testing.v1 import AppTest
 
 from streamlit_application_workflow import (
     application_api_path,
@@ -23,6 +24,48 @@ def test_application_routes_are_namespaced_under_api_v2():
         application_api_path("/api/v2/applications/record-id/events")
         == "/api/v2/applications/record-id/events"
     )
+
+
+def test_streamlit_renders_download_buttons_for_ci_document_pair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    export_root = tmp_path / "scripts" / "exports"
+    artifact_dir = export_root / "application-documents"
+    artifact_dir.mkdir(parents=True)
+    manifests = {}
+    for document_type in ("cv", "cover_letter"):
+        outputs = {}
+        for output_type, suffix, content in (
+            ("docx", "docx", f"{document_type} docx".encode()),
+            ("pdf", "pdf", f"{document_type} pdf".encode()),
+        ):
+            filename = f"{document_type}.{suffix}"
+            (artifact_dir / filename).write_bytes(content)
+            outputs[output_type] = {
+                "path": f"/home/runner/work/repository/scripts/exports/{filename}",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "mimeType": "application/octet-stream",
+            }
+        manifests[document_type] = {
+            "documentRunId": f"{document_type}-run",
+            "outputs": outputs,
+        }
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]))
+    monkeypatch.setenv("JDEC_TEST_EXPORT_ROOT", str(export_root))
+    monkeypatch.setenv("JDEC_TEST_DOCUMENT_MANIFESTS", json.dumps(manifests))
+    app_path = Path(__file__).parent / "fixtures" / "streamlit_document_download_app.py"
+    app = AppTest.from_file(str(app_path)).run()
+
+    assert not app.exception
+    download_buttons = app.get("download_button")
+    assert len(download_buttons) == 4
+    assert {button.label for button in download_buttons} == {
+        "Download DOCX: cv.docx",
+        "Download PDF: cv.pdf",
+        "Download DOCX: cover_letter.docx",
+        "Download PDF: cover_letter.pdf",
+    }
 
 
 def test_loads_downloaded_ci_artifact_from_local_exports_by_name_and_hash(

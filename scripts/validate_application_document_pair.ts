@@ -3,6 +3,7 @@ import pg from "pg";
 
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
+import { assertApplicationDocumentPairCurrent } from "../src/documents/documentPairPolicy.js";
 import { validatePersistedDocumentCurrentness } from "../src/documents/provenanceCurrentness.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
@@ -75,9 +76,11 @@ async function readRun(
 }
 
 async function main(): Promise<void> {
-  const applicationRecordId = requiredUuid(process.argv[2], "application record");
-  const cvDocumentRunId = requiredUuid(process.argv[3], "CV document run");
-  const coverLetterDocumentRunId = requiredUuid(process.argv[4], "cover-letter document run");
+  const requireCurrentPair = process.argv.includes("--require-current");
+  const positionalArgs = process.argv.slice(2).filter((argument) => argument !== "--require-current");
+  const applicationRecordId = requiredUuid(positionalArgs[0], "application record");
+  const cvDocumentRunId = requiredUuid(positionalArgs[1], "CV document run");
+  const coverLetterDocumentRunId = requiredUuid(positionalArgs[2], "cover-letter document run");
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error("DATABASE_URL is required for read-only document pair verification.");
 
@@ -119,6 +122,7 @@ async function main(): Promise<void> {
       cv.run.deterministic_decision_id === coverLetter.run.deterministic_decision_id &&
       cv.run.context_fingerprint === coverLetter.run.context_fingerprint);
     const pairCurrent = Boolean(linkedToApplication && sameContext && cv.ready && coverLetter.ready);
+    assertApplicationDocumentPairCurrent(pairCurrent, requireCurrentPair);
 
     let reviewedAt: string | null = null;
     if (pairCurrent && cv.run && coverLetter.run) {

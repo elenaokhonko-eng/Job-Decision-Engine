@@ -12,8 +12,8 @@ from fpdf import FPDF
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
-    load_verified_document_bytes,
     parse_application_document_pair_status,
+    render_document_run_downloads,
     salary_disclosure_message,
 )
 from streamlit_application_review import render_document_pair_review_checkbox
@@ -940,25 +940,8 @@ def parse_document_run(result, expected_type, job, application_id):
     raise RuntimeError("The document command did not return an exact document-run manifest.")
 
 
-def verified_document_bytes(output):
-    return load_verified_document_bytes(output)
-
-
 def show_document_run_downloads(manifest, key_prefix):
-    st.caption(f"Document run: {manifest['documentRunId']}")
-    outputs = manifest.get("outputs") or {}
-    for output_type in ("docx", "pdf"):
-        output = outputs.get(output_type)
-        if output is None:
-            continue
-        filename, content = verified_document_bytes(output)
-        st.download_button(
-            label=f"Download {output_type.upper()}: {filename}",
-            data=content,
-            file_name=filename,
-            mime=output.get("mimeType", "application/octet-stream"),
-            key=f"{key_prefix}_{manifest['documentRunId']}_{output_type}",
-        )
+    render_document_run_downloads(st, manifest, key_prefix)
 
 
 def render_job_document_actions(job, key_prefix):

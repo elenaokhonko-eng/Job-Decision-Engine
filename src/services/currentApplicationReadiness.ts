@@ -1,5 +1,7 @@
 import pg from "pg";
 
+import { ApplicationReadinessSchema } from "../contracts/applicationReadiness.js";
+
 export interface CurrentApplicationReadiness {
   readonly application_readiness: unknown;
   readonly readiness_status: string | null;
@@ -115,10 +117,14 @@ export function isCurrentReadyApplicationReadiness(
       !/^[a-f0-9]{64}$/.test(readiness.readiness_fingerprint ?? "") ||
       readiness.readiness_reason_codes?.length !== 0) return false;
 
-  const payload = record(readiness.application_readiness);
+  const payloadCandidate = record(readiness.application_readiness);
+  if (!payloadCandidate) return false;
+  const parsed = ApplicationReadinessSchema.safeParse(payloadCandidate);
+  if (!parsed.success) return false;
+  const payload = parsed.data;
   const expiry = timestamp(readiness.readiness_expires_at);
-  const payloadExpiry = typeof payload?.expires_at === "string" ? Date.parse(payload.expires_at) : Number.NaN;
-  return payload?.status === "READY" &&
+  const payloadExpiry = Date.parse(payload.expires_at ?? "");
+  return payload.status === "READY" &&
     identityMatches(readiness, payload) &&
     expiry !== null && expiry > now &&
     Number.isFinite(payloadExpiry) && payloadExpiry === expiry;

@@ -117,6 +117,55 @@ def load_verified_document_bytes(
     )
 
 
+def render_document_run_downloads(
+    streamlit: object,
+    manifest: Mapping[str, object],
+    key_prefix: str,
+    export_root: Path = Path("scripts") / "exports",
+) -> None:
+    """Render hash-verified local copies of a document run's artifacts.
+
+    Args:
+        streamlit: Streamlit module or compatible UI object.
+        manifest: Exact document-run manifest emitted by a generator.
+        key_prefix: Stable widget-key prefix for this document context.
+        export_root: Local directory containing downloaded CI or generated artifacts.
+
+    Returns:
+        None.
+
+    Raises:
+        TypeError: If the output manifest has an unsupported shape.
+        RuntimeError: If an artifact is absent or its hash does not match.
+
+    Example:
+        >>> render_document_run_downloads(st, document_manifest, "application_cv")
+    """
+    document_run_id = manifest.get("documentRunId")
+    if not isinstance(document_run_id, str) or not document_run_id:
+        raise TypeError("The document manifest does not contain a document run ID.")
+    outputs = manifest.get("outputs")
+    if not isinstance(outputs, Mapping):
+        raise TypeError("The document manifest does not contain outputs.")
+    streamlit.caption(f"Document run: {document_run_id}")
+    for output_type in ("docx", "pdf"):
+        output = outputs.get(output_type)
+        if output is None:
+            continue
+        if not isinstance(output, Mapping):
+            raise TypeError(
+                f"The {output_type.upper()} manifest entry is not an object."
+            )
+        filename, content = load_verified_document_bytes(output, export_root)
+        streamlit.download_button(
+            label=f"Download {output_type.upper()}: {filename}",
+            data=content,
+            file_name=filename,
+            mime=output.get("mimeType", "application/octet-stream"),
+            key=f"{key_prefix}_{document_run_id}_{output_type}",
+        )
+
+
 def _is_future_timestamp(value: object) -> bool:
     if isinstance(value, datetime):
         parsed = value

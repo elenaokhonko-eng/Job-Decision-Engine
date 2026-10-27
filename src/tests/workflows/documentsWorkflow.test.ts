@@ -6,14 +6,25 @@ describe("documents workflow", () => {
   it("skips auto-pick cleanly when no document-ready job exists", () => {
     const workflow = readFileSync(resolve(".github/workflows/documents.yml"), "utf8");
     const picker = readFileSync(resolve("scripts/pick_documents_job.ts"), "utf8");
+    const pairValidator = readFileSync(resolve("scripts/validate_application_document_pair.ts"), "utf8");
+    const artifactVerifier = readFileSync(resolve("scripts/verify_document_artifacts.ts"), "utf8");
 
     expect(workflow).toContain('PICK_DOCUMENTS_ALLOW_EMPTY: "true"');
     expect(workflow).toContain("DOCUMENTS_JOB_FOUND=false");
     expect(workflow).toContain("DOCUMENTS_JOB_FOUND=true");
     expect(workflow).toContain("No eligible jobs found for document generation yet. Generation was skipped.");
     expect(workflow).toContain("if: env.DOCUMENTS_JOB_FOUND == 'true'");
-    expect(workflow).toContain("always() && env.DOCUMENTS_JOB_FOUND == 'true'");
+    expect(workflow).toContain("success() && env.DOCUMENTS_JOB_FOUND == 'true'");
+    expect(workflow).toContain("validate_application_document_pair.ts");
+    expect(workflow).toContain("--require-current");
+    expect(workflow).toContain("verify_document_artifacts.ts");
+    expect(workflow).toContain("refs/heads/main");
+    expect(pairValidator).toContain("assertApplicationDocumentPairCurrent(pairCurrent, requireCurrentPair)");
+    expect(artifactVerifier).toContain("phonePresentInDocx: true");
+    expect(artifactVerifier).toContain("phonePresentInPdf: true");
     expect(workflow).toContain("npx tsx scripts/preflight_database.ts");
+    expect(workflow).toContain("npx tsx scripts/verify_migration_status.ts");
+    expect(workflow).toContain("application_record_id requires both pinned job IDs.");
     expect(workflow).toContain("INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}");
     expect(workflow).toContain("canonical_job_id must be a UUID.");
     expect(workflow).toContain("job_version_id must be a UUID when provided.");
