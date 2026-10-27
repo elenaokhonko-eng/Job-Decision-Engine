@@ -78,6 +78,29 @@ describe("single-version source evidence refresh assessment", () => {
     expect(result).toMatchObject({ kind: "MATCHED", job: { source_external_id: "ashby-role-42" } });
   });
 
+  it("rejects an Ashby provider ID when its fetched URL points to a different posting", () => {
+    const originalUrl = "https://jobs.ashbyhq.com/cohere/role-42";
+    const changedUrl = "https://jobs.ashbyhq.com/cohere/role-99";
+    const candidate = {
+      ...job,
+      source_external_id: "role-42",
+      employer_posting_url: changedUrl,
+      application_url: changedUrl,
+      canonical_apply_url: changedUrl,
+    };
+
+    const result = assessSourceEvidenceCandidate({
+      adapterSourceName: "ASHBY",
+      observedSourceName: "ASHBY",
+      sourceExternalId: originalUrl,
+      sourceUrl: originalUrl,
+      expectedContentHash: generateContentHash(candidate.company_name, candidate.title, candidate.description_raw),
+    }, [candidate]);
+
+    expect(result).toMatchObject({ kind: "CONFLICT" });
+    if (result.kind === "CONFLICT") expect(result.reason).toMatch(/URL/i);
+  });
+
   it("recognizes quarantined Ashby records by posting URL when the stored ID is legacy URL-shaped", () => {
     const ashbyUrl = "https://jobs.ashbyhq.com/cohere/role-42";
     const result = assessSourceEvidenceCandidate({

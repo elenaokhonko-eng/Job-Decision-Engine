@@ -133,6 +133,16 @@ function expectedPostingUrl(
   return url ? normalizePostingUrl(url, sourceName) : null;
 }
 
+function providerIdFromPostingUrl(value: string | null): string | null {
+  if (!isHttpUrl(value)) return null;
+  try {
+    const segments = new URL(value as string).pathname.split("/").filter(Boolean);
+    return segments.at(-1) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function sourceIdentityMatches(
   externalId: string | null,
   sourceUrl: string | null,
@@ -144,8 +154,11 @@ function sourceIdentityMatches(
   }
   const expectedUrl = expectedPostingUrl(externalId, sourceUrl, sourceName);
   const candidateUrl = postingUrl(candidate);
-  return expectedUrl !== null && candidateUrl !== null &&
-    normalizePostingUrl(candidateUrl, sourceName) === expectedUrl;
+  if (expectedUrl === null || candidateUrl === null) return false;
+  if (normalizePostingUrl(candidateUrl, sourceName) === expectedUrl) return true;
+
+  const legacyProviderId = providerIdFromPostingUrl(externalId ?? sourceUrl);
+  return legacyProviderId !== null && candidate.source_external_id?.trim() === legacyProviderId;
 }
 
 function rawPostingUrl(rawPayload: unknown, sourceName: string): string | null {
@@ -669,16 +682,17 @@ export async function refreshCanonicalJobSourceEvidence(
     const revisionHash = buildEvidenceRevisionHash(evidence);
     const supported = supportedVersionEvidence(evidence);
     const versionEvidenceIdentity = evidence.source_identity_hash;
-    if (target.source_posting_identity_hash !== null &&
-        versionEvidenceIdentity !== target.source_posting_identity_hash) {
+    if (versionEvidenceIdentity === null) {
       await recordRefreshAudit(broker, request, target, rawPayload, rawPayloadHash, {
         status: "CONFLICT",
-        reasonCode: "SOURCE_POSTING_IDENTITY_CONFLICT",
-        reason: "Fetched source identity does not match the identity stored on the linked version.",
+        reasonCode: "SOURCE_POSTING_IDENTITY_UNRESOLVED",
+        reason: "The fetched record matched the source URL, but a stable posting identity fingerprint could not be derived.",
         evidence,
       });
-      return refreshResult(request, "CONFLICT", "SOURCE_POSTING_IDENTITY_CONFLICT");
+      return refreshResult(request, "CONFLICT", "SOURCE_POSTING_IDENTITY_UNRESOLVED");
     }
+    const identityFingerprintRekeyed = target.source_posting_identity_hash !== null &&
+      versionEvidenceIdentity !== target.source_posting_identity_hash;
 
     await client.query("BEGIN");
     try {
@@ -808,8 +822,12 @@ export async function refreshCanonicalJobSourceEvidence(
 
       await recordRefreshAudit(broker, request, target, rawPayload, rawPayloadHash, {
         status: "REFRESHED",
-        reasonCode: "SOURCE_EVIDENCE_REFRESHED",
-        reason: `evidence_revision_hash=${revisionHash}`,
+        reasonCode: identityFingerprintRekeyed
+          ? "SOURCE_IDENTITY_FINGERPRINT_REKEYED"
+          : "SOURCE_EVIDENCE_REFRESHED",
+        reason: identityFingerprintRekeyed
+          ? `Validated the current source URL and unchanged content, then refreshed the legacy identity fingerprint. evidence_revision_hash=${revisionHash}`
+          : `evidence_revision_hash=${revisionHash}`,
         evidence,
       });
       await client.query("COMMIT");

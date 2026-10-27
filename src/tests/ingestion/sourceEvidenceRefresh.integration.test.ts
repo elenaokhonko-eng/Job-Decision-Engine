@@ -50,7 +50,7 @@ describe.skipIf(skipReal)("single-version source evidence refresh (PostgreSQL)",
     vi.unstubAllGlobals();
   });
 
-  it("refreshes missing evidence on an unchanged linked observation without duplicating its job or version", async () => {
+  it("refreshes missing evidence and rekeys a legacy posting fingerprint without duplicating its job or version", async () => {
     const database = getClient();
     const workspaceId = getContext().workspaceId;
     const canonicalJobId = randomUUID();
@@ -77,6 +77,7 @@ describe.skipIf(skipReal)("single-version source evidence refresh (PostgreSQL)",
       canonicalUrl: postingUrl,
       contentHash,
     }).postingIdentityHash;
+    const legacyPostingIdentityHash = "b".repeat(64);
 
     await database.query(
       `INSERT INTO canonical_jobs (
@@ -90,7 +91,7 @@ describe.skipIf(skipReal)("single-version source evidence refresh (PostgreSQL)",
          id, workspace_id, canonical_job_id, content_hash, description_text, observed_at,
          source_posting_identity_hash
        ) VALUES ($1, $2, $3, $4, $5, NOW(), $6)`,
-      [jobVersionId, workspaceId, canonicalJobId, contentHash, description, postingIdentityHash],
+      [jobVersionId, workspaceId, canonicalJobId, contentHash, description, legacyPostingIdentityHash],
     );
     await database.query(
       `UPDATE canonical_jobs SET latest_job_version_id = $1 WHERE workspace_id = $2 AND id = $3`,
@@ -207,12 +208,14 @@ describe.skipIf(skipReal)("single-version source evidence refresh (PostgreSQL)",
 
     const audit = await database.query<{
       reason_detail: string;
+      reason_code: string;
       disposition: string;
       plan_key: string;
       run_status: string;
       total_fetched: number;
     }>(
       `SELECT disposition.reason_detail,
+              disposition.reason_code,
               disposition.disposition,
               disposition.plan_key,
               source_run.status AS run_status,
@@ -224,11 +227,12 @@ describe.skipIf(skipReal)("single-version source evidence refresh (PostgreSQL)",
        WHERE disposition.workspace_id = $1
          AND disposition.canonical_job_id = $2
          AND disposition.job_observation_id = $3
-         AND disposition.reason_code = 'SOURCE_EVIDENCE_REFRESHED'`,
+         AND disposition.reason_code = 'SOURCE_IDENTITY_FINGERPRINT_REKEYED'`,
       [workspaceId, canonicalJobId, observationId],
     );
     expect(audit.rows).toHaveLength(1);
     expect(audit.rows[0]).toMatchObject({
+      reason_code: "SOURCE_IDENTITY_FINGERPRINT_REKEYED",
       disposition: "DUPLICATE",
       run_status: "COMPLETED",
       total_fetched: 1,
