@@ -1505,6 +1505,8 @@ async function classifySemanticMatchDependency(
         AND fact.profile_version_id = profile.id
        WHERE profile.workspace_id = $1
          AND profile.status = 'ACTIVE'
+         AND fact.fact_type <> 'CONTACT'
+         AND fact.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')
      )
      SELECT
        EXISTS (SELECT 1 FROM active_spaces) AS has_active_space,

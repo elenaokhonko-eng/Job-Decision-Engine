@@ -25,7 +25,15 @@ Use one exact commit SHA for all runs.
 2. Dispatch `ingest.yml` and record migrations, model preflight, Gmail counts, per-source counts, gate counts, queue outcomes, and shortlist count.
 3. Select one viable `AI_EVALUATED` row from `v_canonical_shortlist`; record its `canonical_job_id` and `job_version_id`.
 4. Dispatch `documents.yml` with those IDs.
-5. Confirm CV and cover-letter artifacts upload, provenance/claim validation against the active PostgreSQL profile facts, and explicit provider/fallback reporting (contact info may come from `DOCUMENT_CONTACT_JSON` or legacy `MASTER_PROFILE_JSON.contact`).
+5. Confirm CV and cover-letter artifacts upload, provenance/claim validation against the active PostgreSQL profile facts, and explicit provider/fallback reporting. Active profile-graph contact facts are authoritative; legacy contact sources are fallback-only.
+
+## Single-Job Supervised Pilot
+
+1. Keep `WORKFLOW_KILL_SWITCH=true` and confirm scheduled workflows and workers are stopped.
+2. Verify the selected canonical job ID, current job-version ID, source identity, and absence of prior evaluation, application, or document history.
+3. Run `npx tsx scripts/run_scoped_pilot.ts --canonical-job-id <uuid> --job-version-id <uuid>`. The runner requires both database URLs to target the same branch, a direct `DATABASE_URL_UNPOOLED` for the worker lock, and the workflow kill switch. It refreshes the official ATS source, then scopes task seeding, reconciliation, execution, and evaluation to the selected job version. It does not create applications or documents.
+4. Continue only if the persisted decision and current readiness permit document preparation. Create one draft application through the existing workflow, generate both documents from the active profile graph, and inspect the rendered DOCX and PDF.
+5. Record neither document review nor employer submission without explicit user confirmation. Keep broad processing paused after the pilot.
 
 ## Release Evidence
 

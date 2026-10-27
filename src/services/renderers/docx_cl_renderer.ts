@@ -1,7 +1,15 @@
 import * as fs from "fs";
+
 import { Document, Packer, Paragraph, TextRun, AlignmentType } from "docx";
 
-export async function generateCoverLetterDocx(clData: any, outputPath: string, contactInfo: any) {
+import {
+  formatContactLine,
+  requireDocumentCandidateName,
+  type DocumentContactInfo,
+} from "../../documents/contactInfo.js";
+
+export async function generateCoverLetterDocx(clData: any, outputPath: string, contactInfo: DocumentContactInfo) {
+  const candidateName = requireDocumentCandidateName(contactInfo);
   const children: any[] = [];
 
   // Contact Info (Centered, matching CV style)
@@ -9,14 +17,14 @@ export async function generateCoverLetterDocx(clData: any, outputPath: string, c
     new Paragraph({
       alignment: AlignmentType.CENTER,
       children: [
-        new TextRun({ text: contactInfo.full_name || "Elena Okhonko", bold: true, size: 32, font: "Arial" }),
+        new TextRun({ text: candidateName, bold: true, size: 32, font: "Arial" }),
       ],
       spacing: { after: 120 },
     }),
     new Paragraph({
       alignment: AlignmentType.CENTER,
       children: [
-        new TextRun({ text: `${contactInfo.location || ""} | ${contactInfo.phone || ""} | ${contactInfo.email || ""} | ${contactInfo.linkedin || ""}`, size: 20, font: "Arial" }),
+        new TextRun({ text: formatContactLine(contactInfo), size: 20, font: "Arial" }),
       ],
       spacing: { after: 300 },
     })
@@ -90,7 +98,7 @@ export async function generateCoverLetterDocx(clData: any, outputPath: string, c
     }),
     new Paragraph({
       children: [
-        new TextRun({ text: contactInfo.full_name || "Elena Okhonko", size: 24, font: "Arial" }),
+        new TextRun({ text: candidateName, size: 24, font: "Arial" }),
       ]
     })
   );

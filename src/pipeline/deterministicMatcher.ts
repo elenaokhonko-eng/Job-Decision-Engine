@@ -410,7 +410,8 @@ export async function runDeterministicMatcher(
               pf.fact_type, pf.statement, pf.evidence_tier, pf.verification_status, pf.structured_value
        FROM profile_facts pf
        WHERE pf.workspace_id = $1
-         AND pf.profile_version_id = $2`,
+         AND pf.profile_version_id = $2
+         AND pf.fact_type <> 'CONTACT'`,
       [ctx.workspaceId, profileVersionId]
     );
 

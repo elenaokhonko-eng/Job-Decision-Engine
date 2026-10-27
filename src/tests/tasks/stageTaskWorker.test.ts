@@ -825,6 +825,9 @@ describe("stageTaskWorker", () => {
     );
 
     expect(stateReads).toBeGreaterThanOrEqual(2);
+    const profileEmbeddingCheck = calls.find((call) => call.sql.includes("WITH active_spaces AS"));
+    expect(profileEmbeddingCheck?.sql).toContain("fact.fact_type <> 'CONTACT'");
+    expect(profileEmbeddingCheck?.sql).toContain("fact.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')");
     expect(summary).toMatchObject({ completed: 0, blocked: 1, failed: 0, deadLettered: 0 });
     expect(deps.runDeterministicMatcher).toHaveBeenCalledOnce();
     expect(

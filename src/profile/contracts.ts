@@ -18,6 +18,7 @@ import {
   ResearchGeographyPreferencesSchema,
 } from '../policy/stage3Contracts.js';
 import { LaneIntentPreferencesSchema } from '../policy/laneIntentContracts.js';
+import { ContactFactRevisionSchema } from './contactFactContract.js';
 
 export const SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
@@ -73,6 +74,7 @@ export const FactTypeSchema = z.enum([
   'TECHNOLOGY',
   'PUBLICATION',
   'OPEN_SOURCE',
+  'CONTACT',
 ]);
 
 export const CredentialTypeSchema = z.enum([
@@ -259,6 +261,14 @@ export const ProfileFactSchema = z.object({
   is_current: z.boolean(),
   confidentiality: ConfidentialitySchema,
   created_at: z.date(),
+}).superRefine((fact, context) => {
+  if (fact.fact_type !== 'CONTACT') return;
+  const contactFact = ContactFactRevisionSchema.safeParse(fact);
+  if (!contactFact.success) {
+    for (const issue of contactFact.error.issues) {
+      context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
+    }
+  }
 });
 
 export const ProfileFactConceptSchema = z.object({
@@ -372,6 +382,20 @@ export const FactJsonSchema = z.object({
       evidence_source_keys: z.string().array().optional(),
     })
   ),
+}).superRefine((profile, context) => {
+  profile.facts.forEach((fact, index) => {
+    if (fact.fact_type !== 'CONTACT') return;
+    const contactFact = ContactFactRevisionSchema.safeParse(fact);
+    if (!contactFact.success) {
+      for (const issue of contactFact.error.issues) {
+        context.addIssue({
+          code: 'custom',
+          path: ['facts', index, ...issue.path],
+          message: issue.message,
+        });
+      }
+    }
+  });
 });
 
 export const CredentialJsonSchema = z.object({

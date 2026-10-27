@@ -11,6 +11,7 @@ import {
   VerificationStatusSchema,
   ConfidentialitySchema,
 } from './contracts.js';
+import { ContactFactRevisionSchema } from './contactFactContract.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -36,11 +37,19 @@ const FactRevisionPayloadSchema = z.object({
   confidentiality: ConfidentialitySchema,
 });
 
-const FactOperationPayloadSchema = FactRevisionPayloadSchema.extend({
+export const FactOperationPayloadSchema = FactRevisionPayloadSchema.extend({
   fact_key: FactKeySchema,
   engagement_key: EngagementKeySchema.optional().nullable(),
   concept_keys: z.array(z.string().min(1)).optional(),
   evidence_source_keys: z.array(z.string().min(1)).optional(),
+}).superRefine((payload, context) => {
+  if (payload.fact_type !== 'CONTACT') return;
+  const contactFact = ContactFactRevisionSchema.safeParse(payload);
+  if (!contactFact.success) {
+    for (const issue of contactFact.error.issues) {
+      context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
+    }
+  }
 });
 
 const FactLinkPayloadSchema = z.object({

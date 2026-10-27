@@ -14,6 +14,7 @@ from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
     parse_application_document_pair_status,
+    salary_disclosure_message,
 )
 from streamlit_application_review import render_document_pair_review_checkbox
 from streamlit_database import read_only_database_ssl_options
@@ -195,6 +196,7 @@ SHORTLIST_READ_MODEL_QUERY = """
       s.document_ready,
       s.current_artifact_status,
       s.current_artifact_reason,
+      readiness.application_readiness,
       readiness.readiness_status,
       readiness.readiness_fingerprint,
       readiness.readiness_expires_at,
@@ -271,12 +273,13 @@ TOP_TEN_READY_QUERY = """
            employment_verifiability_score, stage3_preference_context_id,
            ranking_component_availability, ranking_component_provenance,
            current_artifact_status, version_mismatch,
-           current_readiness.readiness_status, current_readiness.readiness_fingerprint,
+           current_readiness.application_readiness, current_readiness.readiness_status,
+           current_readiness.readiness_fingerprint,
            current_readiness.readiness_expires_at, current_readiness.readiness_reason_codes,
            current_readiness.availability_status, current_readiness.availability_recheck_at
     FROM v_top_ten_ready_jobs_stage3_scoped AS jobs
     LEFT JOIN LATERAL (
-      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+      SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
              readiness_reason_codes, availability_status, availability_recheck_at
       FROM v_application_readiness_current readiness
       WHERE readiness.workspace_id = jobs.workspace_id
@@ -309,13 +312,14 @@ APPLY_NOW_JOBS_QUERY = """
            country_flexibility_score, office_requirement_score,
            timezone_compatibility_score, employment_verifiability_score,
            stage3_preference_context_id, ranking_component_availability,
-           ranking_component_provenance, current_readiness.readiness_status,
+           ranking_component_provenance, current_readiness.application_readiness,
+           current_readiness.readiness_status,
            current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
            current_readiness.availability_recheck_at
     FROM v_apply_now_jobs_stage3_scoped AS jobs
     LEFT JOIN LATERAL (
-      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+      SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
              readiness_reason_codes, availability_status, availability_recheck_at
       FROM v_application_readiness_current readiness
       WHERE readiness.workspace_id = jobs.workspace_id
@@ -339,13 +343,14 @@ TRACK_JOBS_QUERY = """
            recommendation_eligibility, recommendation_outcome, version_mismatch,
            current_artifact_status, current_artifact_reason, blocked_task_count,
            deterministic_decision_id, deterministic_context_fingerprint,
-           deterministic_trace_notes, current_readiness.readiness_status,
+           deterministic_trace_notes, current_readiness.application_readiness,
+           current_readiness.readiness_status,
            current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
            current_readiness.availability_recheck_at
     FROM v_track_jobs_scoped AS jobs
     LEFT JOIN LATERAL (
-      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+      SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
              readiness_reason_codes, availability_status, availability_recheck_at
       FROM v_application_readiness_current readiness
       WHERE readiness.workspace_id = jobs.workspace_id
@@ -1898,6 +1903,9 @@ with tab_dashboard:
             with st.container(border=True):
                 st.subheader(f"#{rank_position} {title}")
                 st.caption(f"{company} · {ranked_job.get('location') or 'Location unknown'} · {ranked_job.get('primary_lane') or 'Lane unknown'}")
+                salary_note = salary_disclosure_message(ranked_job)
+                if salary_note:
+                    st.caption(salary_note)
                 score_columns = st.columns(4)
                 score_columns[0].metric("Overall rank", format_score(ranked_job.get("overall_rank_score")))
                 score_columns[1].metric("Ranking confidence", format_percent(ranked_job.get("ranking_confidence")))
@@ -2228,6 +2236,9 @@ with tab_dashboard:
                         st.markdown(f"**Source:** `{job.get('source') or 'UNKNOWN'}`")
                         st.markdown(f"**Lane:** `{job.get('primary_lane') or 'UNCLASSIFIED'}` | **Lane confidence:** `{job.get('lane_confidence') or 'None'}`")
                         st.markdown(f"**Location:** {job.get('location') or 'Unknown'} ({job.get('workplace_type') or 'UNKNOWN'}) | **Employment:** `{job.get('employment_type') or 'UNKNOWN'}`")
+                        salary_note = salary_disclosure_message(job)
+                        if salary_note:
+                            st.caption(salary_note)
 
                         url = safe_http_url(job.get("canonical_url"))
                         if url:

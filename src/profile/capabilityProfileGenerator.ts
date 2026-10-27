@@ -96,7 +96,7 @@ export function generateCapabilityProfile(
   options?: GenerationOptions
 ): GeneratedCapabilityArtifacts {
   const profile = loaded.profile;
-  const facts = loaded.facts.facts;
+  const facts = loaded.facts.facts.filter((fact) => fact.fact_type !== 'CONTACT');
   const credentials = loaded.credentials.credentials;
   const engagements = loaded.engagements.engagements;
   const profileVersionId = options?.profileVersionId || `v${profile.profile_version}`;
@@ -409,12 +409,12 @@ export function generateCapabilityProfile(
   CapabilityProfileSchema.parse(capabilityProfile);
 
   // Generate skills.md Markdown
-  const markdown = renderSkillsMarkdown(capabilityProfile, loaded);
+  const markdown = renderSkillsMarkdown(capabilityProfile);
 
   return { capabilityProfile, markdown };
 }
 
-function renderSkillsMarkdown(profile: CapabilityProfile, loaded: LoadedProfile): string {
+function renderSkillsMarkdown(profile: CapabilityProfile): string {
   const lines: string[] = [];
 
   lines.push(`# Candidate Capability Profile & Evidence Ledger`);

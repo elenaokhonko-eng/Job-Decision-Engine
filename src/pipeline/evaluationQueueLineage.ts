@@ -35,6 +35,7 @@ export interface EvaluationQueueSelection {
 export interface EvaluationQueueReconciliation {
   readonly workspaceId: string;
   readonly profileVersionId?: string;
+  readonly jobVersionIds?: readonly string[];
 }
 
 export async function selectEligibleEvaluationQueueRows(
@@ -139,6 +140,9 @@ export async function supersedeStaleEvaluationQueueRows(
   const profileFilter = reconciliation.profileVersionId
     ? `AND eq.profile_version_id = $${params.push(reconciliation.profileVersionId)}::uuid`
     : "";
+  const jobVersionFilter = reconciliation.jobVersionIds && reconciliation.jobVersionIds.length > 0
+    ? `AND eq.job_version_id = ANY($${params.push([...reconciliation.jobVersionIds])}::uuid[])`
+    : "";
   const { rowCount } = await client.query(
     `UPDATE evaluation_queue eq
      SET status = 'SUPERSEDED',
@@ -153,6 +157,7 @@ export async function supersedeStaleEvaluationQueueRows(
          updated_at = NOW()
      WHERE eq.workspace_id = $1
        ${profileFilter}
+       ${jobVersionFilter}
        AND (
          eq.status IN ('PENDING', 'RETRY_WAIT')
          OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())

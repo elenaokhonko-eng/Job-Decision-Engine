@@ -6,6 +6,7 @@ import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationW
 import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { isProfileFactModelShareable } from "../src/profile/privacy.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
 import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
 import {
@@ -68,6 +69,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
       supersededQueueCount = await supersedeStaleEvaluationQueueRows(client, {
         workspaceId: ctx.workspaceId,
         ...(options.profileVersionId ? { profileVersionId: options.profileVersionId } : {}),
+        ...(jobVersionIds.length > 0 ? { jobVersionIds } : {}),
       });
       queueItems = await selectEligibleEvaluationQueueRows(client, {
         workspaceId: ctx.workspaceId,
@@ -91,14 +93,10 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
     if (queueItems.length > 0) {
       const profileVersionRes = await client.query<{
         id: string;
-        display_name: string;
         source_hash: string;
       }>(
-        `SELECT pv.id, cp.display_name, pv.source_hash
+        `SELECT pv.id, pv.source_hash
          FROM profile_versions pv
-         JOIN candidate_profiles cp
-           ON cp.workspace_id = pv.workspace_id
-          AND cp.id = pv.candidate_profile_id
          WHERE pv.workspace_id = $1
            AND pv.status = 'ACTIVE'
          ORDER BY pv.created_at DESC
@@ -118,6 +116,8 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
            WHERE workspace_id = $1
              AND profile_version_id = $2
              AND verification_status IN ('VERIFIED', 'SELF_ATTESTED')
+             AND fact_type <> 'CONTACT'
+             AND confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')
            ORDER BY fact_key`,
           [ctx.workspaceId, profileVersion.id]
         ),
@@ -144,11 +144,11 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
         ),
       ]);
 
+      const modelShareableFacts = factsRes.rows.filter(isProfileFactModelShareable);
       candidateProfileContext = JSON.stringify({
         profile_version_id: profileVersion.id,
-        profile_display_name: profileVersion.display_name,
         profile_source_hash: profileVersion.source_hash,
-        verified_profile_facts: factsRes.rows,
+        verified_profile_facts: modelShareableFacts,
         verified_credentials: credentialsRes.rows,
         active_workability_preference_mode: preferenceRes.rows[0] ?? null,
       });

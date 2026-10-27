@@ -11,6 +11,7 @@ QUERY_NAMES = (
     "TOP_TEN_READY_QUERY",
 )
 READINESS_FIELDS = (
+    "application_readiness",
     "readiness_status",
     "readiness_fingerprint",
     "readiness_expires_at",
