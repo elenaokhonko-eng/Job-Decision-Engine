@@ -512,10 +512,10 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
   },
   {
     field: "readiness_reason_codes",
-    sourceTable: "deterministic_decisions",
-    sourceColumn: "readiness_json.reason_codes",
-    producerStage: "recommendationDecider.ts -> v_application_readiness_current",
-    transformation: "Persisted material verification, block, processing, or evidence-expiry reasons",
+    sourceTable: "v_application_readiness_current",
+    sourceColumn: "readiness_reason_codes",
+    producerStage: "recommendationDecider.ts -> migration 078 read model",
+    transformation: "Starts with readiness_json.reason_codes and adds READINESS_EVIDENCE_STALE, READINESS_FINGERPRINT_STALE, READINESS_CONTEXT_STALE, READINESS_EVIDENCE_EXPIRED, and READINESS_EXPIRY_MISSING when current lineage checks detect them",
     nullable: true
   },
   {
