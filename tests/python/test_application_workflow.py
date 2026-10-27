@@ -99,7 +99,9 @@ def test_undisclosed_salary_is_visible_but_does_not_block_documents():
         }
     )
 
-    assert salary_disclosure_message(job) == "Salary undisclosed—confirm with recruiter."
+    assert (
+        salary_disclosure_message(job) == "Salary undisclosed—confirm with recruiter."
+    )
     assert is_document_generation_eligible(job)
 
 
