@@ -31,7 +31,7 @@ Use one exact commit SHA for all runs.
 
 1. Keep `WORKFLOW_KILL_SWITCH=true` and confirm scheduled workflows and workers are stopped.
 2. Verify the selected canonical job ID, current job-version ID, source identity, and absence of prior evaluation, application, or document history.
-3. Run `npx tsx scripts/run_scoped_pilot.ts --canonical-job-id <uuid> --job-version-id <uuid>`. The runner requires both database URLs to target the same branch, a direct `DATABASE_URL_UNPOOLED` for the worker lock, and the workflow kill switch. It refreshes the official ATS source, then scopes task seeding, reconciliation, execution, and evaluation to the selected job version. It does not create applications or documents.
+3. Run `npx tsx scripts/run_scoped_pilot.ts --canonical-job-id <uuid> --job-version-id <uuid>`. The runner requires both database URLs to target the same branch, a direct `DATABASE_URL_UNPOOLED` for the worker lock, and the workflow kill switch. It refreshes the official ATS source, then scopes task seeding, reconciliation, execution, and evaluation to the selected job version. Re-running the same IDs resumes existing pipeline history and reuses only a current persisted evaluation; it refuses versions with application or document history. The runner does not create applications or documents.
 4. Continue only if the persisted decision and current readiness permit document preparation. Create one draft application through the existing workflow, generate both documents from the active profile graph, and inspect the rendered DOCX and PDF.
 5. Record neither document review nor employer submission without explicit user confirmation. Keep broad processing paused after the pilot.
 
