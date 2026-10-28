@@ -206,7 +206,8 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
           claimedBy: 'requirements-integration-empty',
         }
       );
-      expect(workerSummary.completed).toBe(1);
+      expect(workerSummary.completed).toBe(0);
+      expect(workerSummary.blocked).toBe(1);
       expect(workerSummary.failed).toBe(0);
       expect(workerSummary.errors).toEqual([]);
 
@@ -229,10 +230,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
          LIMIT 1`,
         [sparseJobVersionId]
       );
-      expect(sparseRun.rows[0]).toEqual({
-        status: 'COMPLETED',
-        requirements_extracted: 0,
-      });
+      expect(sparseRun.rows).toHaveLength(0);
 
       const sparseTask = await client.query(
         `SELECT status
@@ -240,7 +238,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
          WHERE task_key = $1`,
         [sparseTaskKey]
       );
-      expect(sparseTask.rows[0].status).toBe('COMPLETED');
+      expect(sparseTask.rows[0].status).toBe('BLOCKED_DEPENDENCY');
 
       const nextTask = await client.query(
         `SELECT COUNT(*)::int AS n
@@ -249,7 +247,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
            AND task_key = $1`,
         [`APPLY_HARD_GATES:${sparseJobVersionId}:hard_gate_v1`]
       );
-      expect(nextTask.rows[0].n).toBe(1);
+      expect(nextTask.rows[0].n).toBe(0);
 
       const lateCanonicalJobId = '90000000-0000-4000-8000-000000000005';
       const lateJobVersionId = '90000000-0000-4000-8000-000000000006';

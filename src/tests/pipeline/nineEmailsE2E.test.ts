@@ -398,7 +398,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
            id, workspace_id, source_name, source_external_id, source_url, company_name, title,
            description_raw, location_raw, workplace_type_raw, employment_type_raw,
            raw_payload, raw_payload_hash, processing_status
-         ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, 'FETCH_COMPLETE')`,
+         ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, 'FETCH_COMPLETE')`,
         [
           alertObservationId,
           getContext().workspaceId,
