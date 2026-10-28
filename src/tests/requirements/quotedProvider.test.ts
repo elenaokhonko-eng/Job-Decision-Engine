@@ -14,7 +14,10 @@ import {
   runQuotedRequirementProvider,
 } from '../../requirements/quotedProvider.js';
 import { REQUIREMENTS_SCHEMA_VERSION } from '../../requirements/contracts.js';
-import { validateQuotedRequirements } from '../../requirements/quotedRequirementExtractor.js';
+import {
+  parseQuotedExtractorResponse,
+  validateQuotedRequirements,
+} from '../../requirements/quotedRequirementExtractor.js';
 
 const mockedGenerateContentAudited = vi.mocked(generateContentAudited);
 
@@ -126,11 +129,15 @@ describe('quotedRequirementProviderSchema', () => {
 
   it('rejects oversized requirement collections before Zod visits their items', () => {
     const invalidItems = Array.from({ length: 26 }, () => ({ invalid: true }));
-
-    expect(() => validateQuotedRequirements('A job description.', {
+    const payload = {
       schema_version: REQUIREMENTS_SCHEMA_VERSION,
       requirements: invalidItems,
-    })).toThrow(/25-item limit/);
+    };
+
+    expect(() => validateQuotedRequirements('A job description.', payload))
+      .toThrow(/25-item limit/);
+    expect(() => parseQuotedExtractorResponse(payload))
+      .toThrow(/25-item limit/);
   });
 
   it('rejects oversized provider response text before JSON parsing', async () => {
