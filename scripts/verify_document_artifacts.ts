@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";
 import pg from "pg";
+import JSZip from "jszip";
 import { PDFParse } from "pdf-parse";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { loadProfileContactInfo, requireCvContactInfo } from "../src/documents/contactInfo.js";
@@ -14,7 +13,6 @@ import { ContactFactRevisionSchema } from "../src/profile/contactFactContract.js
 import { isCurrentReadyApplicationReadiness, loadCurrentApplicationReadiness } from "../src/services/currentApplicationReadiness.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
-const execFileAsync = promisify(execFile);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DOCX_SIGNATURE = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 
@@ -43,7 +41,12 @@ function digits(value: string): string {
   return value.replace(/\D/g, "");
 }
 
-async function readVerifiedArtifact(
+export function containsPhoneNumber(documentText: string, phone: string): boolean {
+  const phoneDigits = digits(phone);
+  return phoneDigits.length > 0 && digits(documentText).includes(phoneDigits);
+}
+
+export async function readVerifiedArtifact(
   manifest: Record<string, unknown>,
   format: "docx" | "pdf",
   exportRoot: string,
@@ -67,25 +70,26 @@ async function readVerifiedArtifact(
   return { path: actualPath, content };
 }
 
-async function extractDocxText(filePath: string, content: Buffer): Promise<string> {
+export async function extractDocxText(filePath: string, content: Buffer): Promise<string> {
   if (!content.subarray(0, DOCX_SIGNATURE.length).equals(DOCX_SIGNATURE)) {
     throw new Error(`DOCX artifact ${path.basename(filePath)} is not a ZIP-based Office document.`);
   }
-  await execFileAsync("unzip", ["-t", filePath], { maxBuffer: 2 * 1024 * 1024 });
-  const result = await execFileAsync("unzip", ["-p", filePath, "word/document.xml"], {
-    encoding: "utf8",
-    maxBuffer: 8 * 1024 * 1024,
-  });
   try {
-    return extractReadableDocumentXmlText(result.stdout);
+    const archive = await JSZip.loadAsync(content);
+    if (!archive.file("[Content_Types].xml")) {
+      throw new Error("DOCX package content types are missing.");
+    }
+    const documentXml = archive.file("word/document.xml");
+    if (!documentXml) throw new Error("DOCX package document.xml is missing.");
+    return extractReadableDocumentXmlText(await documentXml.async("string"));
   } catch (error) {
     throw new Error(
-      `DOCX artifact ${path.basename(filePath)} contains invalid or unreadable document XML: ${error instanceof Error ? error.message : String(error)}`,
+      `DOCX artifact ${path.basename(filePath)} is invalid or unreadable: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
 
-async function extractPdfText(content: Buffer, filePath: string): Promise<{ readonly text: string; readonly pages: number }> {
+export async function extractPdfText(content: Buffer, filePath: string): Promise<{ readonly text: string; readonly pages: number }> {
   const parser = new PDFParse({ data: content });
   try {
     const parsed = await parser.getText();
@@ -250,8 +254,7 @@ async function main(): Promise<void> {
       extractDocxText(letterDocx.path, letterDocx.content),
       extractPdfText(letterPdf.content, letterPdf.path),
     ]);
-    const phoneDigits = digits(graphPhone);
-    if (!phoneDigits || !digits(cvDocxText).includes(phoneDigits) || !digits(cvPdfText.text).includes(phoneDigits)) {
+    if (!containsPhoneNumber(cvDocxText, graphPhone) || !containsPhoneNumber(cvPdfText.text, graphPhone)) {
       throw new Error("The required active-profile phone number was not found in both rendered CV formats.");
     }
 
@@ -321,7 +324,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  console.error("Document artifact verification failed:", error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1]?.endsWith("verify_document_artifacts.ts")) {
+  main().catch((error: unknown) => {
+    console.error("Document artifact verification failed:", error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

@@ -25,6 +25,91 @@ def application_api_path(path: str) -> str:
     return f"{API_V2_PREFIX}{normalized}"
 
 
+def validate_document_output_manifest(
+    manifest: object,
+    outputs: object,
+) -> dict[str, object]:
+    """Validate a versioned document manifest and its exposed output paths/hashes.
+
+    Args:
+        manifest: Versioned persisted output manifest from the document generator.
+        outputs: Output projection included in the generator's event payload.
+
+    Returns:
+        A copy of the validated manifest.
+
+    Raises:
+        TypeError: If either value has the wrong JSON shape.
+        ValueError: If the schema, manifest hash, or output projection is invalid.
+    """
+    if not isinstance(manifest, Mapping) or not isinstance(outputs, Mapping):
+        raise TypeError("Document output manifest and outputs must be objects.")
+    allowed_keys = {
+        "schema_version",
+        "json_path",
+        "docx_path",
+        "docx_sha256",
+        "pdf_path",
+        "pdf_sha256",
+        "manifest_hash",
+    }
+    if set(manifest) - allowed_keys:
+        raise ValueError("Document output manifest contains unsupported fields.")
+    if manifest.get("schema_version") != "document_output_manifest_v1":
+        raise ValueError("Document output manifest has an unsupported schema version.")
+    for key in ("docx_path", "docx_sha256", "manifest_hash"):
+        if not isinstance(manifest.get(key), str):
+            raise ValueError(f"Document output manifest is missing {key}.")
+    for key in ("docx_sha256", "manifest_hash"):
+        value = manifest[key]
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError(f"Document output manifest has an invalid {key}.")
+
+    pdf_path = manifest.get("pdf_path")
+    pdf_hash = manifest.get("pdf_sha256")
+    if (pdf_path is None) != (pdf_hash is None):
+        raise ValueError("PDF output path and hash must both be present or both be null.")
+    if pdf_path is not None and (
+        not isinstance(pdf_path, str)
+        or not isinstance(pdf_hash, str)
+        or len(pdf_hash) != 64
+        or any(character not in "0123456789abcdef" for character in pdf_hash)
+    ):
+        raise ValueError("Document output manifest has an invalid PDF path or hash.")
+
+    payload = {key: value for key, value in manifest.items() if key != "manifest_hash"}
+    canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    expected_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    if expected_hash != manifest["manifest_hash"]:
+        raise ValueError("Document output manifest hash does not match its content.")
+
+    docx_output = outputs.get("docx")
+    if not isinstance(docx_output, Mapping) or (
+        docx_output.get("path") != manifest["docx_path"]
+        or docx_output.get("sha256") != manifest["docx_sha256"]
+    ):
+        raise ValueError("DOCX output projection does not match the verified manifest.")
+
+    pdf_output = outputs.get("pdf")
+    if pdf_path is None:
+        if pdf_output is not None:
+            raise ValueError("PDF output projection is present without a PDF manifest entry.")
+    elif not isinstance(pdf_output, Mapping) or (
+        pdf_output.get("path") != pdf_path or pdf_output.get("sha256") != pdf_hash
+    ):
+        raise ValueError("PDF output projection does not match the verified manifest.")
+
+    json_path = manifest.get("json_path")
+    json_output = outputs.get("json")
+    if json_path is not None and (
+        not isinstance(json_path, str)
+        or not isinstance(json_output, Mapping)
+        or json_output.get("path") != json_path
+    ):
+        raise ValueError("JSON output projection does not match the verified manifest.")
+    return dict(manifest)
+
+
 def parse_application_document_pair_status(
     stdout: str,
     *,

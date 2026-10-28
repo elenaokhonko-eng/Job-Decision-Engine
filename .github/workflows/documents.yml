@@ -31,6 +31,7 @@ jobs:
       - name: Validate production ref and document pins
         env:
           REQUESTED_REF: ${{ github.ref }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
           INPUT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
           INPUT_APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
@@ -38,6 +39,10 @@ jobs:
         run: |
           set -euo pipefail
           uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          if [[ "$REPOSITORY_PRIVATE" != "true" ]]; then
+            echo "Document workflows are disabled for public repositories because generated application documents are sensitive." >&2
+            exit 1
+          fi
           if [[ "$REQUESTED_REF" != "refs/heads/main" ]]; then
             echo "Document workflows may only use reviewed code from main." >&2
             exit 1
@@ -101,13 +106,6 @@ jobs:
             echo "APPLICATION_RECORD_ID=$INPUT_APPLICATION_RECORD_ID"
             echo "DOCUMENTS_JOB_FOUND=true"
           } >> "$GITHUB_ENV"
-
-      - name: Verify the pinned application draft and current readiness
-        if: env.DOCUMENTS_JOB_FOUND == 'true' && inputs.application_record_id != ''
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
-        run: npx tsx scripts/preflight_application_document_draft.ts "$APPLICATION_RECORD_ID" "$CANONICAL_JOB_ID" "$JOB_VERSION_ID"
 
       - name: Verify the pinned application draft and current readiness
         if: env.DOCUMENTS_JOB_FOUND == 'true' && env.APPLICATION_RECORD_ID != ''
@@ -219,7 +217,7 @@ jobs:
             "$CV_DOCUMENT_RUN_ID" "$COVER_LETTER_DOCUMENT_RUN_ID" --require-current
 
       - name: Upload generated documents
-        if: ${{ success() && env.DOCUMENTS_JOB_FOUND == 'true' }}
+        if: ${{ success() && env.DOCUMENTS_JOB_FOUND == 'true' && github.event.repository.private == true }}
         uses: actions/upload-artifact@v4
         with:
           name: application-documents-${{ inputs.canonical_job_id || 'auto' }}

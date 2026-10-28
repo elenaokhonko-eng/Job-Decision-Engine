@@ -12,6 +12,7 @@ from fpdf import FPDF
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
+    validate_document_output_manifest,
     parse_application_document_pair_status,
     render_document_run_downloads,
     salary_disclosure_message,
@@ -936,6 +937,12 @@ def parse_document_run(result, expected_type, job, application_id):
             or not manifest["outputs"]["docx"].get("sha256")
         ):
             raise RuntimeError("Generated document run does not match the selected application and job version.")
+        try:
+            manifest["outputManifest"] = validate_document_output_manifest(
+                manifest.get("outputManifest"), manifest["outputs"]
+            )
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("Generated document output manifest is invalid.") from error
         return manifest
     raise RuntimeError("The document command did not return an exact document-run manifest.")
 

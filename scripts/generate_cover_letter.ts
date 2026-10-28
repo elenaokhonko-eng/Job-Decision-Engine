@@ -525,6 +525,14 @@ ${JSON.stringify(coverLetterSchema)}`;
 
     const pdfCreated = fs.existsSync(pdfPath);
     const claims = collectCoverLetterClaims(finalCl);
+    const outputManifest = {
+      schema_version: "document_output_manifest_v1",
+      json_path: jsonPath,
+      docx_path: docxPath,
+      docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
+      pdf_path: pdfCreated ? pdfPath : null,
+      pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
+    };
     const provenance = await persistDocumentProvenance(
       {
         applicationRecordId,
@@ -540,14 +548,7 @@ ${JSON.stringify(coverLetterSchema)}`;
         modelRouteInvocationId: generation.invocationId ?? null,
         documentTemplatePluginRevisionId: pluginRevision?.revisionId ?? null,
         documentTemplatePluginKey: pluginRevision?.pluginKey ?? null,
-        outputManifest: {
-          schema_version: "document_output_manifest_v1",
-          json_path: jsonPath,
-          docx_path: docxPath,
-          docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
-          pdf_path: pdfCreated ? pdfPath : null,
-          pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
-        },
+        outputManifest,
         claims,
       },
       pool,
@@ -570,6 +571,7 @@ ${JSON.stringify(coverLetterSchema)}`;
       deterministicDecisionId: job.deterministic_decision_id,
       contextFingerprint: job.decision_context_fingerprint,
       templateRevisionId: pluginRevision?.revisionId ?? null,
+      outputManifest: { ...outputManifest, manifest_hash: provenance.outputManifestHash },
       outputs: {
         json: { path: jsonPath },
         docx: {

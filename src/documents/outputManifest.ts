@@ -6,6 +6,11 @@ import { stableStringify } from "../config/structuredLoader.js";
 import { DocumentOutputManifestRecordSchema } from "./contracts.js";
 
 export type DocumentOutputManifestRecord = z.infer<typeof DocumentOutputManifestRecordSchema>;
+export type DocumentOutputManifest = Omit<DocumentOutputManifestRecord, "manifest_hash">;
+
+export function hashDocumentOutputManifest(manifest: DocumentOutputManifest): string {
+  return createHash("sha256").update(stableStringify(manifest)).digest("hex");
+}
 
 export function parseDocumentOutputManifest(value: unknown): DocumentOutputManifestRecord {
   const parsed = DocumentOutputManifestRecordSchema.safeParse(value);

@@ -1,7 +1,17 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseDesktopVersion, validateDesktopRelease } from "../../../scripts/validate_desktop_release.js";
 
 describe("desktop release validation", () => {
+  it("limits signing to published tags on reviewed main history", () => {
+    const workflow = readFileSync(resolve(".github/workflows/desktop-release.yml"), "utf8");
+
+    expect(workflow).toContain("git merge-base --is-ancestor $env:GITHUB_SHA origin/main");
+    expect(workflow).toContain("inputs.publish == true && env.SIGNPATH_API_TOKEN != ''");
+    expect(workflow).toContain("github.ref == 'refs/heads/main' && inputs.publish != true");
+  });
+
   it("parses stable and prerelease desktop versions", () => {
     expect(parseDesktopVersion("1.2.3")).toMatchObject({ prerelease: [] });
     expect(parseDesktopVersion("1.2.3-beta.4")).toMatchObject({ prerelease: ["beta", "4"] });

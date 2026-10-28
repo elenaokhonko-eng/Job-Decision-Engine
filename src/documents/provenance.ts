@@ -2,9 +2,9 @@ import crypto from 'crypto';
 import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../db/pgSsl.js';
-import { stableStringify } from '../config/structuredLoader.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 import { DocumentOutputManifestSchema } from './contracts.js';
+import { hashDocumentOutputManifest } from './outputManifest.js';
 import { getActiveDocumentTemplatePluginRevision } from './plugins.js';
 import { validatePersistedDocumentCurrentness } from './provenanceCurrentness.js';
 
@@ -41,6 +41,7 @@ export interface DocumentProvenanceInput {
 export interface DocumentProvenanceResult {
   documentRunId: string;
   claimCount: number;
+  outputManifestHash: string;
 }
 
 interface RequirementRow {
@@ -53,10 +54,6 @@ function uniqueStrings(values: string[] | undefined): string[] {
     return [];
   }
   return [...new Set(values.map((v) => v.trim()).filter((v) => v.length > 0))];
-}
-
-function hashManifest(outputManifest: Record<string, unknown>): string {
-  return crypto.createHash('sha256').update(stableStringify(outputManifest)).digest('hex');
 }
 
 async function upsertDocumentReadyStage(
@@ -264,6 +261,7 @@ export async function persistDocumentProvenance(
   options?: { context?: WorkspaceContext }
 ): Promise<DocumentProvenanceResult> {
   const outputManifest = DocumentOutputManifestSchema.parse(input.outputManifest);
+  const outputManifestHash = hashDocumentOutputManifest(outputManifest);
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
     typeof (value as pg.Pool).connect === 'function' && !('release' in value);
@@ -326,7 +324,7 @@ export async function persistDocumentProvenance(
           input.documentTemplatePluginKey || null,
           {
             ...outputManifest,
-            manifest_hash: hashManifest(outputManifest),
+            manifest_hash: outputManifestHash,
           },
           claimRows.length,
         ]
@@ -369,7 +367,7 @@ export async function persistDocumentProvenance(
           input.generatorVersion,
           {
             ...outputManifest,
-            manifest_hash: hashManifest(outputManifest),
+            manifest_hash: outputManifestHash,
           },
           claimRows.length,
         ]
@@ -506,6 +504,7 @@ export async function persistDocumentProvenance(
     return {
       documentRunId,
       claimCount: claimRows.length,
+      outputManifestHash,
     };
   } catch (error) {
     await client.query('ROLLBACK');

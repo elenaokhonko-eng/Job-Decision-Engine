@@ -13,6 +13,9 @@ describe("documents workflow", () => {
     expect(workflow).toContain("application_record_id:");
     expect(workflow).toContain("required: true");
     expect(workflow).toContain("refs/heads/main");
+    expect(workflow).toContain("REPOSITORY_PRIVATE: ${{ github.event.repository.private }}");
+    expect(workflow).toContain("Document workflows are disabled for public repositories");
+    expect(workflow).toContain("github.event.repository.private == true");
     expect(workflow).toContain("APPLICATION_RECORD_ID=$INPUT_APPLICATION_RECORD_ID");
     expect(workflow).toContain("DOCUMENTS_JOB_FOUND=true");
     expect(preflightService).toContain('application.status !== "INTENT"');

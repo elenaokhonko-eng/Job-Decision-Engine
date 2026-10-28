@@ -816,6 +816,14 @@ async function generateTailoredCV(): Promise<void> {
 
     const pluginRevision = await getActiveDocumentTemplatePluginRevision("CV", pool, { context: ctx });
     const claims = collectCvClaims(finalCv);
+    const outputManifest = {
+      schema_version: "document_output_manifest_v1",
+      json_path: jsonPath,
+      docx_path: docxPath,
+      docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
+      pdf_path: pdfCreated ? pdfPath : null,
+      pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
+    };
     const provenance = await persistDocumentProvenance(
       {
         applicationRecordId,
@@ -831,14 +839,7 @@ async function generateTailoredCV(): Promise<void> {
         modelRouteInvocationId: null,
         documentTemplatePluginRevisionId: pluginRevision?.revisionId ?? null,
         documentTemplatePluginKey: pluginRevision?.pluginKey ?? null,
-        outputManifest: {
-          schema_version: "document_output_manifest_v1",
-          json_path: jsonPath,
-          docx_path: docxPath,
-          docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
-          pdf_path: pdfCreated ? pdfPath : null,
-          pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
-        },
+        outputManifest,
         claims,
       },
       pool,
@@ -861,6 +862,7 @@ async function generateTailoredCV(): Promise<void> {
       deterministicDecisionId: job.deterministic_decision_id,
       contextFingerprint: job.decision_context_fingerprint,
       templateRevisionId: pluginRevision?.revisionId ?? null,
+      outputManifest: { ...outputManifest, manifest_hash: provenance.outputManifestHash },
       outputs: {
         json: { path: jsonPath },
         docx: {
