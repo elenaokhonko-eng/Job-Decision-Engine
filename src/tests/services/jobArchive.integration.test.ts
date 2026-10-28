@@ -115,7 +115,7 @@ async function createJobFixture(
          company_name, title, description_raw, raw_payload, raw_payload_hash,
          processing_status, normalized_evidence, evidence_schema_version, job_version_id
        ) VALUES ($1, $2, 'GREENHOUSE', $3, $4, $5, $6, $7, $8, '{}'::jsonb,
-                 $9, 'PROCESSED', $10::jsonb, $11, $12)`, 
+                 $9, 'PROCESSED', $10::jsonb, $11, $12)`,
       [
         randomUUID(), context.workspaceId, `posting-${canonicalJobId}`, sourceUrl,
         options.observationAt ?? options.firstSeenAt ?? oldFirstObservation,

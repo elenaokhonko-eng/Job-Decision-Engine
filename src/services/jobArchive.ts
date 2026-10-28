@@ -1079,4 +1079,3 @@ export async function listActiveArchiveHolds(
   );
   return result.rows.map((row: Record<string, unknown>) => mapArchiveHold(row));
 }
-
