@@ -5,9 +5,13 @@ import {
   ARCHIVE_CONTRACT_SCHEMA_VERSION,
   ArchiveCandidateSchema,
   ArchiveHoldSchema,
+  ArchiveJobRowSchema,
+  ArchiveOperationsStatusSchema,
   ArchiveRunReportSchema,
   type ArchiveCandidate,
   type ArchiveHold,
+  type ArchiveJobRow,
+  type ArchiveOperationsStatus,
   type ArchiveRunReport,
 } from "../contracts/archive.js";
 import {
@@ -1078,4 +1082,94 @@ export async function listActiveArchiveHolds(
     [workspaceId],
   );
   return result.rows.map((row: Record<string, unknown>) => mapArchiveHold(row));
+}
+
+export async function listArchivedJobsWithOperationalStatus(
+  client: pg.Pool | pg.PoolClient,
+  input: {
+    readonly workspaceId: string;
+    readonly userId: string;
+    readonly limit: number;
+    readonly offset: number;
+  },
+): Promise<{
+  readonly jobs: ArchiveJobRow[];
+  readonly totalCount: number;
+  readonly operationalStatus: ArchiveOperationsStatus;
+}> {
+  const [jobsResult, countResult, operationsResult] = await Promise.all([
+    client.query<Record<string, unknown>>(
+      `SELECT
+         archived.workspace_id::text AS workspace_id,
+         archived.canonical_job_id::text AS canonical_job_id,
+         archived.job_version_id::text AS job_version_id,
+         archived.title,
+         archived.company,
+         archived.canonical_url,
+         archived.description,
+         archived.source_name AS source,
+         archived.location,
+         archived.workplace_type,
+         archived.processing_state,
+         archived.recommendation_outcome,
+         archived.archived_at,
+         archived.archive_reason,
+         archived.archive_age_basis,
+         archived.archive_reference_at,
+         application.status AS application_status,
+         archived.active_hold_until
+       FROM v_archived_jobs_scoped archived
+       LEFT JOIN LATERAL (
+         SELECT record.status
+         FROM application_records record
+         WHERE record.workspace_id = archived.workspace_id
+           AND record.user_id = $2
+           AND record.canonical_job_id = archived.canonical_job_id
+         ORDER BY record.updated_at DESC, record.id DESC
+         LIMIT 1
+       ) application ON TRUE
+       WHERE archived.workspace_id = $1
+       ORDER BY archived.archived_at DESC, archived.canonical_job_id DESC
+       LIMIT $3 OFFSET $4`,
+      [input.workspaceId, input.userId, input.limit, input.offset],
+    ),
+    client.query<{ total_count: number }>(
+      `SELECT COUNT(*)::int AS total_count
+       FROM v_archived_jobs_scoped
+       WHERE workspace_id = $1`,
+      [input.workspaceId],
+    ),
+    client.query<Record<string, unknown>>(
+      "SELECT * FROM v_job_archive_operational_status",
+    ),
+  ]);
+  const jobs = jobsResult.rows.map((row: Record<string, unknown>) => ArchiveJobRowSchema.parse({
+    schema_version: ARCHIVE_CONTRACT_SCHEMA_VERSION,
+    ...row,
+    archived_at: toIso(row.archived_at as Date | string | null | undefined),
+    archive_reference_at: toIso(row.archive_reference_at as Date | string | null | undefined),
+    active_hold_until: toIso(row.active_hold_until as Date | string | null | undefined),
+  }));
+  const operations = operationsResult.rows[0] ?? {};
+  const operationalStatus = ArchiveOperationsStatusSchema.parse({
+    schema_version: ARCHIVE_CONTRACT_SCHEMA_VERSION,
+    last_success_at: toIso(operations.last_success_at as Date | string | null | undefined),
+    latest_run_id: operations.latest_run_id ?? null,
+    latest_run_status: operations.latest_run_status ?? null,
+    latest_run_mode: operations.latest_run_mode ?? null,
+    latest_run_started_at: toIso(operations.latest_run_started_at as Date | string | null | undefined),
+    latest_run_scanned_count: operations.latest_run_scanned_count ?? null,
+    latest_run_eligible_count: operations.latest_run_eligible_count ?? null,
+    latest_run_archived_count: operations.latest_run_archived_count ?? null,
+    latest_run_protected_count: operations.latest_run_protected_count ?? null,
+    latest_run_invalid_date_count: operations.latest_run_invalid_date_count ?? null,
+    latest_run_failed_count: operations.latest_run_failed_count ?? null,
+    latest_run_observed_age_publication_unknown_count:
+      operations.latest_run_observed_age_publication_unknown_count ?? null,
+  });
+  return {
+    jobs,
+    totalCount: Number(countResult.rows[0]?.total_count ?? 0),
+    operationalStatus,
+  };
 }
