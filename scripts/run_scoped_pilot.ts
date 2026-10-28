@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
 import { isCurrentReadyApplicationReadiness, loadCurrentApplicationReadiness } from "../src/services/currentApplicationReadiness.js";
 import { readDeadLetterTaskHealth } from "../src/tasks/deadLetterPolicy.js";
+import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
 import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
 import type { PipelineStageTaskType, PipelineStageWorkerOptions, PipelineStageWorkerSummary } from "../src/tasks/stageTaskWorker.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
@@ -85,8 +86,13 @@ export function hasScopedPilotHistory(history: ScopedPilotHistory): boolean {
 export function canResumeScopedPilotState(
   processingState: string | null,
   history: ScopedPilotHistory,
+  rejectionReason: string | null = null,
 ): boolean {
-  if (processingState === "HARD_REJECTED" || processingState === "MANUALLY_REMOVED") return false;
+  if (processingState === "MANUALLY_REMOVED") return false;
+  if (processingState === "HARD_REJECTED") {
+    return /\bGATE_UNKNOWN_WORK_MODE\b/i.test(rejectionReason || "") &&
+      !history.hasCurrentMatchRun && !history.hasEvaluation;
+  }
   return processingState !== "PROCESSING_ERROR" || hasScopedPilotHistory(history);
 }
 
@@ -98,6 +104,7 @@ interface PilotTarget extends pg.QueryResultRow {
   readonly normalized_title: string;
   readonly company_name: string;
   readonly processing_state: string | null;
+  readonly rejection_reason: string | null;
   readonly latest_match_run_id: string | null;
   readonly latest_deterministic_decision_id: string | null;
   readonly has_current_match_run: boolean;
@@ -288,6 +295,7 @@ async function loadPilotTarget(
             canonical.normalized_title,
             canonical.company_name,
             COALESCE(canonical.processing_state, canonical.processing_status) AS processing_state,
+            canonical.rejection_reason,
             canonical.latest_match_run_id::TEXT AS latest_match_run_id,
             canonical.latest_deterministic_decision_id::TEXT AS latest_deterministic_decision_id,
             EXISTS (
@@ -367,7 +375,7 @@ async function loadPilotTarget(
     hasEvaluation: target.has_evaluation,
     hasPipelineHistory: target.has_pipeline_history,
   };
-  if (!canResumeScopedPilotState(target.processing_state, history)) {
+  if (!canResumeScopedPilotState(target.processing_state, history, target.rejection_reason)) {
     throw new Error(`The selected job is in non-resumable state ${target.processing_state}.`);
   }
   if (target.has_application || target.has_documents) {
@@ -700,6 +708,28 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
           documentsEligible: false,
           operationalError: `Source evidence refresh ended with ${sourceRefresh.status}${sourceRefresh.reasonCode ? ` (${sourceRefresh.reasonCode})` : ""}.`,
         };
+      }
+
+      if (target.processing_state === "HARD_REJECTED" &&
+          /\bGATE_UNKNOWN_WORK_MODE\b/i.test(target.rejection_reason || "")) {
+        const taskKey = `scoped-pilot:unknown-work-mode-policy-correction:${args.jobVersionId}`;
+        await enqueuePipelineTask({
+          taskType: "APPLY_HARD_GATES",
+          taskKey,
+          payload: {
+            canonical_job_id: args.canonicalJobId,
+            job_version_id: args.jobVersionId,
+            observation_id: target.observation_id,
+            force_policy_recalculation: true,
+            reprocess: true,
+            reassessment_reason: "UNKNOWN_WORK_MODE_REQUIRES_VERIFICATION",
+          },
+          producer: "run_scoped_pilot",
+          stageVersion: "hard_gate_v1",
+          requestId: taskKey,
+          mode: "FORCE_RECOMPUTE",
+          maxAttempts: 3,
+        }, client, { context });
       }
 
       const worker = await runPipelineStageTaskWorker(pool, {

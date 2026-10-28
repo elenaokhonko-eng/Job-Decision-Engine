@@ -88,7 +88,7 @@ describe("readiness workability evidence", () => {
     });
   });
 
-  it("accepts the configured assumed Singapore hybrid default without claiming employer confirmation", () => {
+  it("keeps an assumed Singapore hybrid workplace model pending verification", () => {
     const result = assessWorkModeReadiness(
       { status: "UNKNOWN", value: "HYBRID", office_days_max: null, evidence: [{ evidence_key: "assumed-hybrid" }] },
       "ASSUMED_HYBRID",
@@ -98,9 +98,8 @@ describe("readiness workability evidence", () => {
       policy,
     );
 
-    expect(result).toMatchObject({ status: "MET", policyReferenceRequired: true });
-    expect(result.rationale).toContain("policy assumption, not employer-confirmed evidence");
-    expect(result.evidenceKeys).toContain("policy_assumption:POLICY_HYBRID_3_2");
+    expect(result).toMatchObject({ status: "NEEDS_VERIFICATION", policyReferenceRequired: false });
+    expect(result.reasonCode).toBe("WORK_MODE_UNVERIFIED");
   });
 
   it("does not accept an assumed hybrid office requirement beyond the active cap", () => {
@@ -113,8 +112,8 @@ describe("readiness workability evidence", () => {
       policy,
     );
 
-    expect(result.status).toBe("BLOCKED");
-    expect(result.policyReferenceRequired).toBe(true);
+    expect(result.status).toBe("NEEDS_VERIFICATION");
+    expect(result.reasonCode).toBe("WORK_MODE_UNVERIFIED");
   });
 
   it("uses range upper bounds and treats minimum-only travel disclosures conservatively", () => {

@@ -279,10 +279,10 @@ export function assessWorkModeReadiness(
   gateDecision: string | null,
   policy: Pick<WorkabilityReadinessPolicy, "allowedWorkModes" | "maxOfficeDaysPerWeek" | "hardFailOfficeDaysPerWeek" | "hybridWithoutOfficeDaysAllowed">,
 ): WorkabilityReadinessResult {
-  const mode = evidence?.value ?? (workplaceType === "ASSUMED_HYBRID" ? "HYBRID" : "UNKNOWN");
+  const mode = workplaceType === "ASSUMED_HYBRID" ? "UNKNOWN" : evidence?.value ?? "UNKNOWN";
   const assumedHybrid = mode === "HYBRID"
     && evidence?.status !== "SUPPORTED"
-    && (workplaceType === "ASSUMED_HYBRID" || attendanceBasis === "POLICY_HYBRID_3_2");
+    && attendanceBasis === "POLICY_HYBRID_3_2";
   const officeDays = evidence?.office_days_max
     ?? (typeof officeDaysFact === "number" && Number.isFinite(officeDaysFact) ? officeDaysFact : null)
     ?? (assumedHybrid && policy.hybridWithoutOfficeDaysAllowed ? policy.maxOfficeDaysPerWeek : null);

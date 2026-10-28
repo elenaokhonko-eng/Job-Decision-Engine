@@ -145,8 +145,8 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
     });
   });
 
-  describe("Part J: Singapore Unknown Work Mode Assumption", () => {
-    it("applies ASSUMED_HYBRID_3_2 for Singapore roles with unknown workplace mode after enrichment", async () => {
+  describe("Part J: Unknown Work Mode Verification", () => {
+    it("preserves unknown workplace facts after enrichment for Singapore roles", async () => {
       const { enrichWorkModeIfNeeded } = await import("../../services/workModeEnrichment.js");
       const mockPool: any = {
         query: vi.fn().mockImplementation(async (sql: string) => {
@@ -164,10 +164,10 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
         description_text: "We are looking for an AI Engineer based in our Singapore office. Flexible workplace arrangement.",
       });
 
-      expect(enriched.workplace_type).toBe("ASSUMED_HYBRID");
-      expect(enriched.office_days_min).toBe(3);
-      expect(enriched.office_days_max).toBe(3);
-      expect(enriched.attendance_basis).toBe("OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE");
+      expect(enriched.workplace_type).toBe("UNKNOWN");
+      expect(enriched.office_days_min).toBeNull();
+      expect(enriched.office_days_max).toBeNull();
+      expect(enriched.attendance_basis).toBe("UNKNOWN");
 
       const workability = evaluateWorkability(
         "Singapore",
@@ -177,12 +177,13 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
         policy
       );
 
-      expect(workability.workable).toBe(false);
+      expect(workability.workable).toBe(true);
+      expect(workability.needsVerify).toBe(true);
       expect(workability.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
       expect(workability.facts?.workplace_type).toBeUndefined();
     });
 
-    it("rejects foreign roles when work mode is unknown", () => {
+    it("requires verification for roles outside Singapore when work mode is unknown", () => {
       const workability = evaluateWorkability(
         "Unknown",
         "UNKNOWN",
@@ -191,7 +192,8 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
         policy
       );
 
-      expect(workability.workable).toBe(false);
+      expect(workability.workable).toBe(true);
+      expect(workability.needsVerify).toBe(true);
       expect(workability.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
     });
 

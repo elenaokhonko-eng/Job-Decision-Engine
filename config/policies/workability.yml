@@ -8,9 +8,9 @@ global_workability_gates:
     max_office_days_per_week: 3
     max_office_days_hard_fail: 4
     hybrid_without_office_days_allowed: true
-    # Funnel V3 owner policy: do not infer a workplace model from a location
-    # label and do not hold an unestablished arrangement for verification.
-    unknown_work_mode_policy: HARD_REJECT
+    # Unknown workplace facts stay pending until employer evidence or the user
+    # establishes the arrangement. Do not infer a model from location alone.
+    unknown_work_mode_policy: NEEDS_VERIFICATION
 
   territory:
     # Default profile policy. User preference modes can override this list.

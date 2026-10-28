@@ -65,6 +65,37 @@ describe("job source evidence builder", () => {
     expect(evidence.availability.status).toBe("UNKNOWN");
   });
 
+  it("verifies a current matching SMBC employer job-detail page as an application listing", () => {
+    const evidence = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "SMBC",
+      sourcePluginKey: "smbc_careers",
+      sourceUrl: "https://careerasia.smbc.co.jp/SMBC/job/Director%2C-AI-Solution-Architect/1441267233/",
+      canonicalApplyUrl: "https://careerasia.smbc.co.jp/SMBC/job/Director%2C-AI-Solution-Architect/1441267233/",
+      sourceExternalId: "1441267233",
+      rawPayload: {},
+    });
+
+    expect(evidence.availability).toMatchObject({
+      status: "OPEN",
+      verification_method: "EMPLOYER_APPLICATION_PAGE",
+      reason_code: "CURRENT_LISTING_EVIDENCE",
+    });
+    expect(evidence.availability.evidence[0]?.quote_text).toContain("current source refresh");
+  });
+
+  it("does not treat an unrelated host using the SMBC plugin key as availability evidence", () => {
+    const evidence = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "SMBC",
+      sourcePluginKey: "smbc_careers",
+      sourceUrl: "https://example.com/SMBC/job/1441267233/",
+      rawPayload: {},
+    });
+
+    expect(evidence.availability).toMatchObject({ status: "UNKNOWN", verification_method: "NONE" });
+  });
+
   it("preserves separate base, variable, and equity compensation components with k notation", () => {
     const evidence = buildJobSourceEvidence({
       ...baseInput,

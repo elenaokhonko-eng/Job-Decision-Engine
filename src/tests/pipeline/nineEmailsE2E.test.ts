@@ -58,7 +58,7 @@ type FixtureLane =
   | "UNCLASSIFIED";
 type FixtureAction = "PRIORITY_APPLY" | "APPLY_AFTER_VERIFICATION" | "HARD_REJECT";
 type RecommendationOutcome = "PRIORITY" | "REVIEW" | "TRACK" | "SKIP";
-type LifecycleStatus = "QUEUED_FOR_AI" | "MATCHED" | "HARD_REJECTED";
+type LifecycleStatus = "QUEUED_FOR_AI" | "MATCHED" | "NEEDS_VERIFICATION" | "HARD_REJECTED";
 
 interface NineEmailFixture {
   readonly id: string;
@@ -665,7 +665,9 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       expect(row.processing_state).toBe(fixture.expected_status);
       expect(row.processing_status).toBe(fixture.expected_status);
       expect(row.recommendation_eligibility).toBe(
-        fixture.expected_gate === "HARD_REJECT" ? "INELIGIBLE" : "ELIGIBLE"
+        fixture.expected_gate === "HARD_REJECT"
+          ? "INELIGIBLE"
+          : fixture.expected_gate === "NEEDS_VERIFICATION" ? "VERIFY" : "ELIGIBLE"
       );
       expect(row.version_count).toBe(fixture.expected_version);
 

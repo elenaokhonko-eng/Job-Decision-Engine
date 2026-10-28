@@ -133,7 +133,7 @@ describe("Funnel V3 Independent Test Suite — Work Mode and Authorization (H01-
     expect(result.rejection_codes).toContain("GATE_HIGH_OFFICE_DAYS");
   });
 
-  it("H09: truly missing workplace is a hard rejection with persisted policy evidence", () => {
+  it("H09: truly missing workplace remains pending with explicit verification evidence", () => {
     const fixture = WORK_MODE_FIXTURES.H09;
     const result = applyGlobalGates({
       id: fixture.id,
@@ -144,10 +144,10 @@ describe("Funnel V3 Independent Test Suite — Work Mode and Authorization (H01-
       raw_description: fixture.raw_description,
     });
 
-    expect(result.status).toBe("HARD_REJECT");
+    expect(result.status).toBe("NEEDS_VERIFICATION");
     expect(result.passed).toBe(false);
     expect(result.rejection_codes).toEqual(["GATE_UNKNOWN_WORK_MODE"]);
-    expect(result.evidence_quotes.join(" ")).toMatch(/workplace model unspecified/i);
+    expect(result.evidence_quotes.join(" ")).toMatch(/workplace model is unknown/i);
     expect(result.workability_facts.office_days_min).toBeNull();
     expect(result.workability_facts.office_days_max).toBeNull();
     expect(result.workability_facts.attendance_basis).toBe("UNKNOWN");

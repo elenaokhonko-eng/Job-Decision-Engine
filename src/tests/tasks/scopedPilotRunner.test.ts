@@ -103,6 +103,9 @@ describe("scoped pilot runner", () => {
     expect(canResumeScopedPilotState("PROCESSING_ERROR", history)).toBe(true);
     expect(canResumeScopedPilotState("PROCESSING_ERROR", { ...history, hasPipelineHistory: false })).toBe(false);
     expect(canResumeScopedPilotState("HARD_REJECTED", history)).toBe(false);
+    expect(canResumeScopedPilotState("HARD_REJECTED", history, "GATE_UNKNOWN_WORK_MODE")).toBe(true);
+    expect(canResumeScopedPilotState("HARD_REJECTED", { ...history, hasCurrentMatchRun: true }, "GATE_UNKNOWN_WORK_MODE")).toBe(false);
+    expect(canResumeScopedPilotState("HARD_REJECTED", history, "GATE_LOCATION_RESTRICTED")).toBe(false);
     expect(canResumeScopedPilotState("MANUALLY_REMOVED", history)).toBe(false);
   });
 

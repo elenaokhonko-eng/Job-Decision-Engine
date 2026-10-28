@@ -244,22 +244,14 @@ export function evaluateWorkability(
   const baseFacts: Partial<GateResult["workability_facts"]> = {
     employment_type: normalizedEmp,
   };
-  const unknownWorkModeOutcome = (assumedHybrid = false) => {
+  const unknownWorkModeOutcome = () => {
     const facts: Partial<GateResult["workability_facts"]> = {
       ...baseFacts,
-      office_days_min: assumedHybrid ? 3 : null,
-      office_days_max: assumedHybrid ? 3 : null,
-      attendance_basis: assumedHybrid ? "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE" : "UNKNOWN",
+      office_days_min: null,
+      office_days_max: null,
+      attendance_basis: "UNKNOWN",
     };
-    switch (effectivePolicy.unknownWorkModeDisposition) {
-      case "PASS":
-        return { workable: true, needsVerify: false, reason: "Workplace model unspecified; accepted by configured policy", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
-      case "NEEDS_VERIFICATION":
-        return { workable: true, needsVerify: true, reason: "Workplace model unspecified; needs manual verification", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
-      case "HARD_REJECT":
-      default:
-        return { workable: false, needsVerify: false, reason: "Workplace model unspecified and remains unknown after evidence review", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
-    }
+    return { workable: true, needsVerify: true, reason: "Workplace model is unknown and requires verification", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
   };
 
   // Structured or strongly indicated contract employment is deterministic.
@@ -273,19 +265,10 @@ export function evaluateWorkability(
     };
   }
 
-  // An inferred hybrid signal is never affirmative employer evidence.
+  // Legacy synthetic hybrid values are unknown, not employer evidence.
   const isAssumedHybrid = String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID";
   if (isAssumedHybrid) {
-    if (!effectivePolicy.allowedWorkModes.includes("HYBRID")) {
-      return {
-        workable: false,
-        needsVerify: false,
-        reason: "Hybrid is not permitted by the active work-mode preference, and the inferred mode cannot override it",
-        reasonCode: "GATE_UNKNOWN_WORK_MODE",
-        facts: { ...baseFacts, office_days_min: 3, office_days_max: 3, attendance_basis: "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE" },
-      };
-    }
-    return unknownWorkModeOutcome(true);
+    return unknownWorkModeOutcome();
   }
 
   // 1. Explicit ONSITE structured field or work-mode heading/text -> HARD REJECT.
@@ -696,7 +679,7 @@ export function applyGlobalGates(
   const loc = (job.location || "").toLowerCase();
   const wp = (job.workplace_type || "").toUpperCase();
   const emp = (job.employment_type || "").toUpperCase();
-  let pendingVerification: { reason: string; facts?: Partial<GateResult["workability_facts"]> } | null = null;
+  let pendingVerification: { reason: string; reasonCode?: string; facts?: Partial<GateResult["workability_facts"]> } | null = null;
 
   // ── 0. Global Title Exclusions ──
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
@@ -747,6 +730,7 @@ export function applyGlobalGates(
   if (workability.needsVerify) {
     pendingVerification = {
       reason: workability.reason || "Workplace model unspecified; needs manual verification",
+      reasonCode: workability.reasonCode,
       facts: workability.facts,
     };
   }
@@ -1132,7 +1116,9 @@ export function applyGlobalGates(
   // ── All deterministic gates passed ──
   if (pendingVerification) {
     return makeVerification(
-      ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+      pendingVerification.reasonCode
+        ? [pendingVerification.reasonCode]
+        : ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
       [pendingVerification.reason],
       pendingVerification.facts
     );

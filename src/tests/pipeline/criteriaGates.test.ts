@@ -58,12 +58,12 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       const rejectCount = results.filter(r => r.status === "HARD_REJECT").length;
       const verifyCount = results.filter(r => r.status === "NEEDS_VERIFICATION").length;
 
-      expect(rejectCount).toBe(3);
-      expect(verifyCount).toBe(0);
+      expect(rejectCount).toBe(2);
+      expect(verifyCount).toBe(1);
       expect(passCount).toBe(6); // 6 eligible observations; fixtures 001 and 009 are one reposted job.
 
       for (const res of results) {
-        expect(res.status).toBe(res.expected);
+        expect(res.status, res.id).toBe(res.expected);
         if (res.expected === "HARD_REJECT") {
           expect(res.rejectionCodes).toEqual(expect.arrayContaining(Array.from(res.expectedRejectionCodes)));
         }
@@ -163,7 +163,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       expect(result.status).toBe("PASS");
     });
 
-    it("rejects unknown workplace arrangement rather than assuming hybrid", () => {
+    it("keeps an unknown workplace arrangement pending verification", () => {
       const job = {
         id: "hybrid-ambiguous",
         title: "Senior AI Engineer",
@@ -174,7 +174,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
         employment_type: "PERMANENT"
       };
       const result = applyGlobalGates(job as any);
-      expect(result.status).toBe("HARD_REJECT");
+      expect(result.status).toBe("NEEDS_VERIFICATION");
       expect(result.rejection_codes).toContain("GATE_UNKNOWN_WORK_MODE");
     });
 
@@ -277,27 +277,27 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
         remoteOnlyPolicy,
       );
 
-      expect(assumed.workable).toBe(false);
+      expect(assumed.workable).toBe(true);
+      expect(assumed.needsVerify).toBe(true);
       expect(assumed.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
       expect(explicitHybrid.workable).toBe(false);
       expect(explicitHybrid.reasonCode).toBe("GATE_HIGH_OFFICE_DAYS");
     });
 
-    it.each([
-      ["PASS", false, true],
-      ["NEEDS_VERIFICATION", true, true],
-      ["HARD_REJECT", false, false],
-    ] as const)("honors the configured unknown-work-mode disposition: %s", (disposition, needsVerify, workable) => {
-      const result = evaluateWorkability(
-        "Singapore",
-        "UNKNOWN",
-        "Build deep learning models.",
-        "PERMANENT",
-        { ...loadWorkabilityPolicy(), unknownWorkModeDisposition: disposition },
-      );
-      expect(result.workable).toBe(workable);
-      expect(result.needsVerify).toBe(needsVerify);
-      expect(result.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
-    });
+    it.each(["PASS", "NEEDS_VERIFICATION", "HARD_REJECT"] as const)(
+      "requires verification for unknown workplace facts even if legacy policy says %s",
+      (disposition) => {
+        const result = evaluateWorkability(
+          "Singapore",
+          "UNKNOWN",
+          "Build deep learning models.",
+          "PERMANENT",
+          { ...loadWorkabilityPolicy(), unknownWorkModeDisposition: disposition },
+        );
+        expect(result.workable).toBe(true);
+        expect(result.needsVerify).toBe(true);
+        expect(result.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
+      },
+    );
   });
 });

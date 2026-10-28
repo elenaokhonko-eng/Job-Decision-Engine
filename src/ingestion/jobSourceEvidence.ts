@@ -579,18 +579,41 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
   const retrievedAt = Number.isFinite(at.getTime()) ? at.toISOString() : new Date().toISOString();
   const explicitStatus = String(firstValue(records, ["status", "jobStatus", "applicationStatus"]) ?? "").toLowerCase();
   const directAts = ["GREENHOUSE", "LEVER", "ASHBY"].includes(input.sourceName.toUpperCase());
+  let isSmbcEmployerApplicationPage = false;
+  if (input.sourcePluginKey?.toLowerCase() === "smbc_careers" && input.sourceUrl) {
+    try {
+      const sourceUrl = new URL(input.sourceUrl);
+      isSmbcEmployerApplicationPage = sourceUrl.protocol === "https:" &&
+        sourceUrl.hostname.toLowerCase() === "careerasia.smbc.co.jp" &&
+        /^\/SMBC\/job\//i.test(sourceUrl.pathname);
+    } catch {
+      isSmbcEmployerApplicationPage = false;
+    }
+  }
   const isClosed = /^(closed|expired|filled|inactive|not accepting applications)$/.test(explicitStatus)
     || firstValue(records, ["isClosed", "closed"]) === true;
   const isExplicitOpen = /^(open|active|published|live)$/.test(explicitStatus)
     || firstValue(records, ["isOpen", "active"]) === true;
-  const availabilityStatus = isClosed ? "CLOSED" : directAts || isExplicitOpen ? "OPEN" : "UNKNOWN";
+  const availabilityStatus = isClosed
+    ? "CLOSED"
+    : directAts || isExplicitOpen || isSmbcEmployerApplicationPage ? "OPEN" : "UNKNOWN";
   const availabilityVerifiedAt = availabilityStatus === "UNKNOWN" ? null : retrievedAt;
   const availabilityExpiresAt = availabilityVerifiedAt
     ? new Date(new Date(availabilityVerifiedAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
     : null;
   const availabilityEvidence = availabilityStatus === "UNKNOWN"
     ? []
-    : [evidenceSpan(input, "AVAILABILITY", isClosed ? `Source status: ${explicitStatus || "closed"}` : `Active public listing observed from ${input.sourceName}`)];
+    : [evidenceSpan(
+      input,
+      "AVAILABILITY",
+      isClosed
+        ? `Source status: ${explicitStatus || "closed"}`
+        : isSmbcEmployerApplicationPage && !isExplicitOpen
+          ? "Matching official SMBC job-detail page returned during the current source refresh"
+          : isExplicitOpen
+            ? `Source status: ${explicitStatus || "open"}`
+            : `Active public listing observed from ${input.sourceName}`,
+    )];
   const modeValue = normalizedWorkMode(input.workplaceTypeRaw);
   const assumedMode = (input.workplaceTypeRaw ?? "").toUpperCase() === "ASSUMED_HYBRID";
   const officeDaysMatch = input.descriptionText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i);
@@ -645,7 +668,15 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
       status: availabilityStatus,
       verified_at: availabilityVerifiedAt,
       expires_at: availabilityExpiresAt,
-      verification_method: availabilityStatus === "UNKNOWN" ? "NONE" : directAts ? "EMPLOYER_ATS_LISTING" : "EXPLICIT_SOURCE_STATUS",
+      verification_method: availabilityStatus === "UNKNOWN"
+        ? "NONE"
+        : isClosed
+          ? "EXPLICIT_SOURCE_STATUS"
+          : directAts
+            ? "EMPLOYER_ATS_LISTING"
+            : isExplicitOpen
+              ? "EXPLICIT_SOURCE_STATUS"
+              : isSmbcEmployerApplicationPage ? "EMPLOYER_APPLICATION_PAGE" : "EXPLICIT_SOURCE_STATUS",
       reason_code: availabilityStatus === "OPEN" ? "CURRENT_LISTING_EVIDENCE" : availabilityStatus === "CLOSED" ? "SOURCE_EXPLICITLY_CLOSED" : "AVAILABILITY_NOT_VERIFIED",
       evidence: availabilityEvidence,
     },
