@@ -415,12 +415,16 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
     });
     expect(source.rows[0]?.normalized_evidence).not.toBeNull();
 
-    const original = await getClient().query<{ description_raw: string; processing_status: string }>(
-      `SELECT description_raw, processing_status FROM raw_job_observations
+    const original = await getClient().query<{ description_raw: string; processing_status: string; job_version_id: string | null }>(
+      `SELECT description_raw, processing_status, job_version_id::text AS job_version_id FROM raw_job_observations
        WHERE workspace_id = $1 AND id = $2::uuid`,
       [getContext().workspaceId, observationId],
     );
-    expect(original.rows[0]).toEqual({ description_raw: "short Gmail alert snippet", processing_status: "FETCH_COMPLETE" });
+    expect(original.rows[0]).toEqual({
+      description_raw: "short Gmail alert snippet",
+      processing_status: "PROCESSED",
+      job_version_id: source.rows[0]?.job_version_id,
+    });
 
     const version = await getClient().query<{
       id: string;
