@@ -1993,7 +1993,9 @@ async function maybeEnqueueAfterTask(
       });
       return insertedSuccessors;
     }
-    await enqueueSuccessor("APPLY_HARD_GATES", jobVersionId, payload);
+    const gatePayload = { ...payload };
+    delete gatePayload.task_intent;
+    await enqueueSuccessor("APPLY_HARD_GATES", jobVersionId, gatePayload);
     return insertedSuccessors;
   }
 
