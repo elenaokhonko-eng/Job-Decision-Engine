@@ -1,0 +1,355 @@
+{
+  "$ref": "#/definitions/ManualPersistedDraft",
+  "definitions": {
+    "ManualPersistedDraft": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workspace_id": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+        },
+        "user_id": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+        },
+        "candidate_profile_id": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+        },
+        "canonical_job_id": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+        },
+        "job_version_id": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+        },
+        "source_observation_id": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+        },
+        "job_content_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "profile_version_id": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+        },
+        "profile_contact_fact_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+          }
+        },
+        "profile_contact_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "preference_context_fingerprint": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/profile_contact_fingerprint"
+        },
+        "requirement_set_id": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+        },
+        "comparator_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "context_fingerprint": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/profile_contact_fingerprint"
+        },
+        "comparison_fingerprint": {
+          "$ref": "#/definitions/ManualPersistedDraft/properties/profile_contact_fingerprint"
+        },
+        "comparison_payload": {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "const": "manual_application_v1"
+            },
+            "comparator_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "canonical_job_id": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+            },
+            "job_version_id": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+            },
+            "source_observation_id": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+            },
+            "source_evidence_fingerprint": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/profile_contact_fingerprint"
+            },
+            "job_content_hash": {
+              "type": "string",
+              "minLength": 1
+            },
+            "profile_version_id": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+            },
+            "candidate_profile_id": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+            },
+            "requirement_set_id": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+            },
+            "profile_contact_fact_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ManualPersistedDraft/properties/id"
+              }
+            },
+            "profile_contact_fingerprint": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/profile_contact_fingerprint"
+            },
+            "preference_context_fingerprint": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/profile_contact_fingerprint"
+            },
+            "context_fingerprint": {
+              "$ref": "#/definitions/ManualPersistedDraft/properties/profile_contact_fingerprint"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1
+            },
+            "company": {
+              "type": "string",
+              "minLength": 1
+            },
+            "canonical_url": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uri"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "requirements": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "requirement_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "requirement_type": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "importance": {
+                    "type": "string",
+                    "enum": [
+                      "MUST",
+                      "PREFERRED",
+                      "NICE_TO_HAVE"
+                    ]
+                  },
+                  "requirement_text": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "requirement_key",
+                  "requirement_type",
+                  "importance",
+                  "requirement_text"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "evidence_type": {
+                    "type": "string",
+                    "enum": [
+                      "FACT",
+                      "CREDENTIAL",
+                      "ENGAGEMENT"
+                    ]
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "evidence_type",
+                  "label",
+                  "statement"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "requirement_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "requirement_type": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "importance": {
+                    "type": "string",
+                    "enum": [
+                      "MUST",
+                      "PREFERRED",
+                      "NICE_TO_HAVE"
+                    ]
+                  },
+                  "requirement": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "FACT",
+                            "CREDENTIAL",
+                            "ENGAGEMENT"
+                          ]
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "statement": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "type",
+                        "label",
+                        "statement"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "gap": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "comparison_method": {
+                    "type": "string",
+                    "const": "literal-term overlap; potential evidence only"
+                  }
+                },
+                "required": [
+                  "requirement_key",
+                  "requirement_type",
+                  "importance",
+                  "requirement",
+                  "evidence",
+                  "gap",
+                  "comparison_method"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "suitability_warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "evidence_notice": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "schema_version",
+            "comparator_version",
+            "canonical_job_id",
+            "job_version_id",
+            "source_observation_id",
+            "source_evidence_fingerprint",
+            "job_content_hash",
+            "profile_version_id",
+            "candidate_profile_id",
+            "requirement_set_id",
+            "profile_contact_fact_ids",
+            "profile_contact_fingerprint",
+            "preference_context_fingerprint",
+            "context_fingerprint",
+            "title",
+            "company",
+            "canonical_url",
+            "requirements",
+            "evidence",
+            "rows",
+            "suitability_warnings",
+            "evidence_notice"
+          ],
+          "additionalProperties": false
+        },
+        "suitability_warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "user_id",
+        "candidate_profile_id",
+        "canonical_job_id",
+        "job_version_id",
+        "source_observation_id",
+        "job_content_hash",
+        "profile_version_id",
+        "profile_contact_fact_ids",
+        "profile_contact_fingerprint",
+        "preference_context_fingerprint",
+        "requirement_set_id",
+        "comparator_version",
+        "context_fingerprint",
+        "comparison_fingerprint",
+        "comparison_payload",
+        "suitability_warnings"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

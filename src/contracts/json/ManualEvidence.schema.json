@@ -1,0 +1,38 @@
+{
+  "$ref": "#/definitions/ManualEvidence",
+  "definitions": {
+    "ManualEvidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_type": {
+          "type": "string",
+          "enum": [
+            "FACT",
+            "CREDENTIAL",
+            "ENGAGEMENT"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "id",
+        "evidence_type",
+        "label",
+        "statement"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

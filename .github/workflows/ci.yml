@@ -111,4 +111,5 @@ jobs:
     - name: Run Vitest Unit Tests
       env:
         DATABASE_URL: postgres://test:password@localhost:5432/testdb
+        JDEC_MANUAL_PREPARATION_TEST_DATABASE_URL: postgres://test:password@localhost:5432/testdb
       run: npm run test

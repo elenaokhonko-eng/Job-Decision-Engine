@@ -575,3 +575,33 @@ export const ShortlistRowSchema = z.object({
   ]).default("PROCESSING_AUTOMATICALLY"),
 });
 export type ShortlistRow = z.infer<typeof ShortlistRowSchema>;
+
+export {
+  MANUAL_APPLICATION_SCHEMA_VERSION,
+  ManualPostingInputSchema,
+  ManualStagedPostingIdentitySchema,
+  ManualCandidateProfileOptionSchema,
+  ManualCandidateProfilesResponseSchema,
+  ManualComparisonSourceSchema,
+  ManualRequirementSchema,
+  ManualEvidenceSchema,
+  ManualComparisonRowSchema,
+  ManualComparisonSchema,
+  ManualCompareResponseSchema,
+  ManualPersistedDraftSchema,
+  ManualApprovalRequestSchema,
+  ManualApprovalResponseSchema,
+  ManualApprovalIdentitySchema,
+  ManualPersistedApprovalSchema,
+  ManualGenerateRequestSchema,
+  ManualArtifactSchema,
+  ManualDocumentsResponseSchema,
+  ManualDownloadResponseSchema,
+  ManualApiErrorSchema,
+  ManualFetchDescriptionRequestSchema,
+  ManualFetchDescriptionResponseSchema,
+  ManualFetchDescriptionOutcomeSchema,
+  ManualFetchSourceEvidenceSchema,
+  ManualPersistedFetchReceiptSchema,
+} from "./manualApplication.js";
+export type { ManualPostingInput, ManualComparison, ManualFetchSourceEvidence } from "./manualApplication.js";

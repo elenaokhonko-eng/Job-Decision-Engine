@@ -1,0 +1,24 @@
+{
+  "$ref": "#/definitions/ManualApprovalRequest",
+  "definitions": {
+    "ManualApprovalRequest": {
+      "type": "object",
+      "properties": {
+        "approved": {
+          "type": "boolean",
+          "const": true
+        },
+        "comparison_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "approved",
+        "comparison_fingerprint"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -1,0 +1,163 @@
+{
+  "$ref": "#/definitions/ManualPostingInput",
+  "definitions": {
+    "ManualPostingInput": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "const": "manual_application_v1"
+            },
+            "candidate_profile_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 300
+            },
+            "company": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "maxLength": 2048
+            },
+            "requisition_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 160
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "type": "string",
+              "minLength": 100,
+              "maxLength": 100000
+            },
+            "location": {
+              "type": "string",
+              "maxLength": 300,
+              "default": "Unknown"
+            },
+            "source_kind": {
+              "type": "string",
+              "const": "PASTED"
+            }
+          },
+          "required": [
+            "schema_version",
+            "candidate_profile_id",
+            "title",
+            "company",
+            "url",
+            "description",
+            "source_kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/schema_version"
+            },
+            "candidate_profile_id": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/candidate_profile_id"
+            },
+            "title": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/title"
+            },
+            "company": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/company"
+            },
+            "url": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/url"
+            },
+            "requisition_id": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/requisition_id"
+            },
+            "description": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/description"
+            },
+            "location": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/location"
+            },
+            "source_kind": {
+              "type": "string",
+              "const": "UPLOAD"
+            }
+          },
+          "required": [
+            "schema_version",
+            "candidate_profile_id",
+            "title",
+            "company",
+            "url",
+            "description",
+            "source_kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/schema_version"
+            },
+            "candidate_profile_id": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/candidate_profile_id"
+            },
+            "title": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/title"
+            },
+            "company": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/company"
+            },
+            "url": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/url"
+            },
+            "requisition_id": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/requisition_id"
+            },
+            "description": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/description"
+            },
+            "location": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/location"
+            },
+            "source_kind": {
+              "type": "string",
+              "const": "FETCHED"
+            },
+            "fetch_receipt_id": {
+              "$ref": "#/definitions/ManualPostingInput/anyOf/0/properties/candidate_profile_id"
+            }
+          },
+          "required": [
+            "schema_version",
+            "candidate_profile_id",
+            "title",
+            "company",
+            "url",
+            "description",
+            "source_kind",
+            "fetch_receipt_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

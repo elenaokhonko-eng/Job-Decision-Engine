@@ -1,0 +1,38 @@
+{
+  "$ref": "#/definitions/ManualRequirement",
+  "definitions": {
+    "ManualRequirement": {
+      "type": "object",
+      "properties": {
+        "requirement_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requirement_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "importance": {
+          "type": "string",
+          "enum": [
+            "MUST",
+            "PREFERRED",
+            "NICE_TO_HAVE"
+          ]
+        },
+        "requirement_text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "requirement_key",
+        "requirement_type",
+        "importance",
+        "requirement_text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

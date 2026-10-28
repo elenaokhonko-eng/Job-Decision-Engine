@@ -1,6 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
-
+import crypto from "node:crypto";
 import pg from "pg";
 
 import { CONTACT_FACT_DEFINITIONS, ContactFactRevisionSchema } from "../profile/contactFactContract.js";
@@ -24,6 +22,7 @@ export interface CvContactInfo {
 }
 
 interface ProfileContactFactRow extends pg.QueryResultRow {
+  readonly id: string;
   readonly fact_key: string;
   readonly fact_type: string;
   readonly structured_value: unknown;
@@ -31,78 +30,26 @@ interface ProfileContactFactRow extends pg.QueryResultRow {
   readonly confidentiality: string;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  let candidate = value;
-  if (typeof candidate === "string") {
-    try {
-      candidate = JSON.parse(candidate);
-    } catch {
-      return null;
-    }
-  }
-  return candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)
-    ? Object.fromEntries(Object.entries(candidate))
-    : null;
+export interface ProfileContactSnapshot {
+  readonly contact: DocumentContactInfo;
+  readonly factIds: readonly string[];
+  readonly fingerprint: string;
 }
 
-function fallbackContact(value: unknown): DocumentContactInfo {
-  const record = asRecord(value);
-  if (!record) return {};
-  const contact = asRecord(record.contact) ?? record;
-  const take = (primary: string, alternate?: string): string | undefined => {
-    const candidate = contact[primary] ?? (alternate ? contact[alternate] : undefined);
-    return typeof candidate === "string" && candidate.trim() ? candidate.trim() : undefined;
-  };
-  return {
-    full_name: take("full_name", "name"),
-    location: take("location"),
-    email: take("email"),
-    phone: take("phone"),
-    linkedin: take("linkedin"),
-    work_authorisation: take("work_authorisation"),
-  };
-}
-
-function optionalEnvironmentJson(name: string): unknown | null {
-  const raw = process.env[name]?.trim();
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`Failed to parse ${name}: ${error instanceof Error ? error.message : String(error)}`);
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(",")}}`;
   }
-}
-
-function legacyContactFallback(): DocumentContactInfo {
-  const root = process.cwd();
-  const sources: unknown[] = [];
-  const masterProfilePath = path.join(root, "master_profile.json");
-  const contactPath = path.join(root, "private", "profile", "contact.json");
-
-  if (fs.existsSync(masterProfilePath)) sources.push(JSON.parse(fs.readFileSync(masterProfilePath, "utf8")));
-  if (fs.existsSync(contactPath)) sources.push(JSON.parse(fs.readFileSync(contactPath, "utf8")));
-  const masterProfile = optionalEnvironmentJson("MASTER_PROFILE_JSON");
-  if (masterProfile) sources.push(masterProfile);
-  const documentContact = optionalEnvironmentJson("DOCUMENT_CONTACT_JSON");
-  if (documentContact) sources.push(documentContact);
-
-  const merged: Record<string, string> = {};
-  for (const source of sources) {
-    for (const [key, value] of Object.entries(fallbackContact(source))) {
-      if (typeof value === "string") merged[key] = value;
-    }
-  }
-  return merged;
+  return JSON.stringify(value);
 }
 
 export function resolveDocumentContactInfo(
   profileContactFacts: readonly ProfileContactFactRow[],
-  fallback: unknown,
   candidateName: string,
 ): DocumentContactInfo {
-  const resolved: Record<string, string> = Object.fromEntries(
-    Object.entries(fallbackContact(fallback)).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-  );
+  const resolved: Record<string, string> = {};
   const graphValues = new Map<keyof DocumentContactInfo, string>();
 
   for (const fact of profileContactFacts) {
@@ -131,12 +78,12 @@ export function resolveDocumentContactInfo(
   };
 }
 
-export async function loadProfileContactInfo(
+export async function loadProfileContactSnapshot(
   clientOrPool: pg.Pool | pg.PoolClient,
   workspaceId: string,
   profileVersionId: string,
   candidateName: string,
-): Promise<DocumentContactInfo> {
+): Promise<ProfileContactSnapshot> {
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
     typeof (value as pg.Pool).connect === "function" && !("release" in value);
   const ownsClient = isPool(clientOrPool);
@@ -144,7 +91,7 @@ export async function loadProfileContactInfo(
 
   try {
     const result = await client.query<ProfileContactFactRow>(
-      `SELECT fact_key, fact_type, structured_value, verification_status, confidentiality
+      `SELECT id::text, fact_key, fact_type, structured_value, verification_status, confidentiality
        FROM profile_facts
        WHERE workspace_id = $1
          AND profile_version_id = $2
@@ -155,16 +102,28 @@ export async function loadProfileContactInfo(
        ORDER BY fact_key`,
       [workspaceId, profileVersionId],
     );
-    const graphContact = resolveDocumentContactInfo(result.rows, null, candidateName);
-    const graphHasRequiredContact = Boolean(
-      graphContact.full_name && graphContact.location && graphContact.email && graphContact.phone,
-    );
-    return graphHasRequiredContact
-      ? graphContact
-      : resolveDocumentContactInfo(result.rows, legacyContactFallback(), candidateName);
+    const orderedRows = [...result.rows].sort((left, right) => left.fact_key.localeCompare(right.fact_key));
+    const fingerprint = crypto.createHash("sha256").update(stableStringify({
+      facts: orderedRows,
+      candidateNameFallback: candidateName.trim(),
+    })).digest("hex");
+    return {
+      contact: resolveDocumentContactInfo(orderedRows, candidateName),
+      factIds: orderedRows.map((row) => row.id),
+      fingerprint,
+    };
   } finally {
     if (ownsClient) client.release();
   }
+}
+
+export async function loadProfileContactInfo(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  workspaceId: string,
+  profileVersionId: string,
+  candidateName: string,
+): Promise<DocumentContactInfo> {
+  return (await loadProfileContactSnapshot(clientOrPool, workspaceId, profileVersionId, candidateName)).contact;
 }
 
 export function requireDocumentCandidateName(contact: DocumentContactInfo): string {

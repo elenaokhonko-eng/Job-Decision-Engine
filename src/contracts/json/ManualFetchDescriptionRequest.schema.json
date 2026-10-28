@@ -1,0 +1,43 @@
+{
+  "$ref": "#/definitions/ManualFetchDescriptionRequest",
+  "definitions": {
+    "ManualFetchDescriptionRequest": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048
+        },
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 300
+        },
+        "company": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "requisition_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 160
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "url",
+        "title",
+        "company"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

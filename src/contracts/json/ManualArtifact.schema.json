@@ -1,0 +1,41 @@
+{
+  "$ref": "#/definitions/ManualArtifact",
+  "definitions": {
+    "ManualArtifact": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "CV",
+            "COVER_LETTER"
+          ]
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "DOCX",
+            "PDF"
+          ]
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "mime_type": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "type",
+        "format",
+        "filename",
+        "mime_type"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
