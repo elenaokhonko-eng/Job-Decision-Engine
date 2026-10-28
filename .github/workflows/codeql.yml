@@ -15,7 +15,6 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5

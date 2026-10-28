@@ -4,24 +4,29 @@ import json
 import os
 import subprocess
 import urllib.request
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from uuid import UUID
 
 import docx
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
+
+from streamlit_application_review import render_document_pair_review_checkbox
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
     parse_application_document_pair_status,
 )
-from streamlit_application_review import render_document_pair_review_checkbox
+from streamlit_archive import render_archive_hold_form, render_archive_jobs
 from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
 from streamlit_workspace_contracts import (
     validate_application_row,
     validate_application_workspace_summary,
     validate_apply_now_row,
+    validate_archive_job_row,
     validate_company_culture_coverage_summary,
     validate_company_culture_evidence_row,
     validate_company_culture_row,
@@ -249,6 +254,52 @@ APPLICATION_WORKSPACE_SUMMARY_QUERY = """
     FROM v_application_workspace_summary_scoped
     WHERE workspace_id = %s AND user_key = %s
     LIMIT 1
+"""
+
+ARCHIVED_JOBS_READ_MODEL_QUERY = """
+    SELECT
+      'job_archive_v1' AS schema_version,
+      archived.workspace_id::text AS workspace_id,
+      archived.canonical_job_id::text AS canonical_job_id,
+      archived.job_version_id::text AS job_version_id,
+      archived.title,
+      archived.company,
+      archived.canonical_url,
+      archived.description,
+      archived.source_name AS source,
+      archived.location,
+      archived.workplace_type,
+      archived.processing_state,
+      archived.recommendation_outcome,
+      archived.archived_at,
+      archived.archive_reason,
+      archived.archive_age_basis,
+      archived.archive_reference_at,
+      application.status AS application_status,
+      archived.active_hold_until
+    FROM v_archived_jobs_scoped archived
+    LEFT JOIN LATERAL (
+      SELECT record.status
+      FROM application_records record
+      WHERE record.workspace_id = archived.workspace_id
+        AND record.user_id = %s
+        AND record.canonical_job_id = archived.canonical_job_id
+      ORDER BY record.updated_at DESC, record.id DESC
+      LIMIT 1
+    ) application ON TRUE
+    WHERE archived.workspace_id = %s
+    ORDER BY archived.archived_at DESC, archived.canonical_job_id DESC
+    LIMIT %s OFFSET %s
+"""
+
+ARCHIVED_JOB_COUNT_QUERY = """
+    SELECT COUNT(*)::int AS archived_count
+    FROM v_archived_jobs_scoped
+    WHERE workspace_id = %s
+"""
+
+ARCHIVE_OPERATIONAL_STATUS_QUERY = """
+    SELECT * FROM v_job_archive_operational_status
 """
 
 TOP_TEN_READY_QUERY = """
@@ -670,6 +721,129 @@ def api_request(method, path, params=None, body=None, timeout=30):
             return {}
         raw = response.read().decode("utf-8")
         return json.loads(raw) if raw else {}
+
+def fetch_archive_job_count():
+    """Return the number of archived jobs visible to the active workspace.
+
+    Returns:
+        The unpaginated archived-job count.
+
+    Example:
+        count = fetch_archive_job_count()
+    """
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(ARCHIVED_JOB_COUNT_QUERY, (workspace_id,))
+    return int(rows[0].get("archived_count", 0)) if rows else 0
+
+
+def fetch_archive_jobs(limit=25, offset=0):
+    """Fetch and validate one page of archived jobs for the active workspace.
+
+    Args:
+        limit: Maximum rows to return.
+        offset: Number of rows to skip.
+
+    Returns:
+        Workspace-validated archive read-model rows.
+
+    Example:
+        rows = fetch_archive_jobs(limit=25, offset=0)
+    """
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+        user_id = _read_model_user_id(connection, workspace_id)
+    finally:
+        connection.close()
+    rows = _read_model_query(
+        ARCHIVED_JOBS_READ_MODEL_QUERY,
+        (user_id, workspace_id, limit, offset),
+    )
+    return _validate_workspace_rows(rows, workspace_id, validate_archive_job_row)
+
+
+def fetch_archive_operational_status():
+    """Return the persisted archive workflow status for operational reporting.
+
+    Returns:
+        The most recent archive run and last-success timestamp.
+
+    Example:
+        status = fetch_archive_operational_status()
+    """
+    rows = _read_model_query(ARCHIVE_OPERATIONAL_STATUS_QUERY, ())
+    if not rows:
+        return {"schema_version": "job_archive_v1", "last_success_at": None}
+    return {"schema_version": "job_archive_v1", **rows[0]}
+
+
+def restore_archived_job(row, reason):
+    """Restore one archived job through the authenticated application API.
+
+    Args:
+        row: A validated archived-job read-model row.
+        reason: User-provided audit reason.
+
+    Returns:
+        None. The page reruns after a successful restore.
+
+    Example:
+        restore_archived_job(row, "Pilot job selected for review")
+    """
+    try:
+        canonical_job_id = str(UUID(str(row.get("canonical_job_id", ""))))
+        response = api_request(
+            "POST",
+            f"/archive/{canonical_job_id}/restore",
+            body={"reason": reason.strip()},
+        )
+        if response.get("ok") is not True:
+            raise RuntimeError(response.get("error", "Archive restore was rejected."))
+        st.success("Job restored. Availability, freshness, and readiness reassessment was queued.")
+        st.rerun()
+    except Exception as exc:
+        st.error(f"Could not restore archived job: {exc}")
+
+
+def create_archive_hold(canonical_job_id, reason, hold_type, expires_in_days):
+    """Create a workspace-scoped temporary archive hold through the API.
+
+    Args:
+        canonical_job_id: The job UUID to preserve.
+        reason: The audit reason for preserving the job.
+        hold_type: Either USER_PRESERVE or AGENT2_PILOT.
+        expires_in_days: Positive hold duration in days.
+
+    Returns:
+        None. The page reruns after a successful hold creation.
+
+    Example:
+        create_archive_hold(job_id, "Live application pilot", "AGENT2_PILOT", 30)
+    """
+    try:
+        job_id = str(UUID(canonical_job_id))
+        expires_at = (datetime.now(UTC) + timedelta(days=expires_in_days)).isoformat().replace("+00:00", "Z")
+        response = api_request(
+            "POST",
+            "/archive/holds",
+            body={
+                "canonical_job_id": job_id,
+                "hold_reason": reason,
+                "hold_type": hold_type,
+                "expires_at": expires_at,
+            },
+        )
+        if response.get("ok") is not True:
+            raise RuntimeError(response.get("error", "Archive hold was rejected."))
+        st.success("Temporary archive hold created.")
+        st.rerun()
+    except Exception as exc:
+        st.error(f"Could not create archive hold: {exc}")
+
 
 def default_accessibility_settings():
     return {
@@ -2008,7 +2182,7 @@ with tab_dashboard:
             except Exception as exc:
                 st.error(f"Current profile evidence could not be loaded: {exc}")
 
-    category_options = ["Top 10", "Apply Now", "Track", "Processing", "Applied", "Skip", "Rejected / Unmatched", "All"]
+    category_options = ["Top 10", "Apply Now", "Track", "Processing", "Applied", "Skip", "Rejected / Unmatched", "Archive", "All"]
     workspace_category = st.selectbox("Opportunity category", category_options, index=1, key="application_workspace_category")
     category_counts = {
         "Top 10": application_workspace_summary.get("top_ten_ready_count"),
@@ -2021,6 +2195,12 @@ with tab_dashboard:
         "All": application_workspace_summary.get("total_jobs"),
     }
     category_count = category_counts.get(workspace_category)
+    if workspace_category == "Archive":
+        try:
+            category_count = fetch_archive_job_count()
+        except Exception as exc:
+            category_count = None
+            st.error(f"Archive count is unavailable: {exc}")
     st.subheader(f"{workspace_category} ({category_count if category_count is not None else 'unavailable'})")
     page_size = 25
     total_pages = max(1, ((int(category_count) + page_size - 1) // page_size) if category_count is not None else 1)
@@ -2029,9 +2209,14 @@ with tab_dashboard:
         key=f"application_workspace_page_{workspace_category}",
     )
     category_offset = (int(category_page) - 1) * page_size
+    archive_rows = []
+    archive_operations_status = None
 
     try:
-        if workspace_category == "Top 10":
+        if workspace_category == "Archive":
+            category_rows = fetch_archive_jobs(page_size, category_offset)
+            archive_operations_status = fetch_archive_operational_status()
+        elif workspace_category == "Top 10":
             category_rows = fetch_top_ten_ready_jobs()
         elif workspace_category == "Apply Now":
             category_rows = fetch_apply_now_jobs()
@@ -2059,6 +2244,10 @@ with tab_dashboard:
 
     if category_rows is None:
         st.error("This category is unavailable because its authoritative read model could not be loaded.")
+        filtered_jobs = []
+        archive_rows = []
+    elif workspace_category == "Archive":
+        archive_rows = category_rows
         filtered_jobs = []
     else:
         if workspace_category not in ("Applied", "Rejected / Unmatched"):
@@ -2185,12 +2374,34 @@ with tab_dashboard:
         )
         start_index = (int(listing_page) - 1) * listing_page_size
         active_jobs = sorted_filtered_jobs[start_index:start_index + listing_page_size]
-        rejected_jobs = [] if workspace_category == "Rejected / Unmatched" else rejected_jobs_audit
+        rejected_jobs = [] if workspace_category in ("Rejected / Unmatched", "Archive") else rejected_jobs_audit
 
-        st.subheader(f"{workspace_category} opportunities")
-        if not active_jobs and not rejected_jobs:
-            st.info("No matching jobs in the current Postgres database.")
+        if workspace_category == "Archive":
+            st.subheader("Archived jobs")
+            if archive_operations_status:
+                last_success = archive_operations_status.get("last_success_at")
+                if last_success:
+                    st.caption(f"Last successful archive run: {last_success}")
+                else:
+                    st.info("No successful archive run has been recorded yet.")
+                unknown_age_count = archive_operations_status.get(
+                    "latest_run_observed_age_publication_unknown_count"
+                )
+                if unknown_age_count is not None:
+                    st.caption(f"Jobs with observed age and unknown publication date in the latest run: {unknown_age_count}")
+            render_archive_hold_form(
+                create_archive_hold,
+                enabled=bool(get_api_base_url()),
+            )
+            render_archive_jobs(
+                archive_rows,
+                restore_archived_job,
+                restore_enabled=bool(get_api_base_url()),
+            )
         else:
+            st.subheader(f"{workspace_category} opportunities")
+            if not active_jobs and not rejected_jobs:
+                st.info("No matching jobs in the current Postgres database.")
             # Render Active (Green & Orange) Jobs
             if active_jobs:
                 st.write(f"Showing {len(active_jobs)} listings:")

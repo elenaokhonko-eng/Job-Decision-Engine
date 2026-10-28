@@ -1,0 +1,143 @@
+{
+  "$ref": "#/definitions/ArchiveJobRow",
+  "definitions": {
+    "ArchiveJobRow": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "job_archive_v1"
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workplace_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "processing_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommendation_outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archived_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "archive_reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "archive_age_basis": {
+          "type": "string",
+          "enum": [
+            "GENUINE_REPOST_DATE",
+            "AUTHORITATIVE_PUBLICATION_DATE",
+            "OBSERVED_AGE_PUBLICATION_UNKNOWN"
+          ]
+        },
+        "archive_reference_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "application_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "active_hold_until": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "workspace_id",
+        "canonical_job_id",
+        "job_version_id",
+        "title",
+        "company",
+        "canonical_url",
+        "description",
+        "source",
+        "location",
+        "workplace_type",
+        "processing_state",
+        "recommendation_outcome",
+        "archived_at",
+        "archive_reason",
+        "archive_age_basis",
+        "archive_reference_at",
+        "application_status",
+        "active_hold_until"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

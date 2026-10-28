@@ -104,9 +104,31 @@
             "COMPLETED",
             "RETRY_WAIT",
             "FAILED",
-            "NEEDS_MANUAL_REVIEW"
+            "NEEDS_MANUAL_REVIEW",
+            "SUPERSEDED",
+            "CANCELLED",
+            "SKIPPED_ARCHIVED"
           ],
           "default": "PENDING"
+        },
+        "skipped_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "skip_reason_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "budget_run_id": {
           "anyOf": [

@@ -1,0 +1,83 @@
+{
+  "$ref": "#/definitions/ArchiveHold",
+  "definitions": {
+    "ArchiveHold": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "job_archive_v1"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "hold_reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "hold_type": {
+          "type": "string",
+          "enum": [
+            "USER_PRESERVE",
+            "AGENT2_PILOT",
+            "RESTORE_REASSESSMENT"
+          ]
+        },
+        "created_by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "released_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "release_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "id",
+        "workspace_id",
+        "canonical_job_id",
+        "hold_reason",
+        "hold_type",
+        "created_by",
+        "created_at",
+        "expires_at",
+        "released_at",
+        "release_reason"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

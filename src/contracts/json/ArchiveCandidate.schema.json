@@ -1,0 +1,57 @@
+{
+  "$ref": "#/definitions/ArchiveCandidate",
+  "definitions": {
+    "ArchiveCandidate": {
+      "type": "object",
+      "properties": {
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "company": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "age_basis": {
+          "type": "string",
+          "enum": [
+            "GENUINE_REPOST_DATE",
+            "AUTHORITATIVE_PUBLICATION_DATE",
+            "OBSERVED_AGE_PUBLICATION_UNKNOWN"
+          ]
+        },
+        "archive_reason": {
+          "type": "string",
+          "const": "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS"
+        },
+        "publication_date_unknown": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "canonical_job_id",
+        "workspace_id",
+        "title",
+        "company",
+        "reference_at",
+        "age_basis",
+        "archive_reason",
+        "publication_date_unknown"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

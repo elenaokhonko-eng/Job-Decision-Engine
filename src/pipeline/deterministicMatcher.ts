@@ -546,6 +546,7 @@ export async function runDeterministicMatcher(
          LIMIT 1
        ) jv ON TRUE
         WHERE c.workspace_id = $1
+         AND c.archived_at IS NULL
          AND (
            (
              $${actionableOnlyParam}::boolean

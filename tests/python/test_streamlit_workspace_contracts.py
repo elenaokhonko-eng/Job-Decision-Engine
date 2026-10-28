@@ -2,6 +2,7 @@ from streamlit_workspace_contracts import (
     validate_application_row,
     validate_application_workspace_summary,
     validate_apply_now_row,
+    validate_archive_job_row,
     validate_company_culture_coverage_summary,
     validate_company_culture_evidence_row,
     validate_company_culture_row,
@@ -10,7 +11,6 @@ from streamlit_workspace_contracts import (
     validate_ranked_job_row,
     validate_track_row,
 )
-
 
 WORKSPACE_ID = "workspace-1"
 
@@ -268,3 +268,41 @@ def test_profile_evidence_and_coverage_contracts_require_workspace_scope():
         raise AssertionError(
             "Profile coverage contract accepted a string version number"
         )
+
+
+def test_archive_job_contract_validates_basis_scope_and_timestamps():
+    row = {
+        "schema_version": "job_archive_v1",
+        "workspace_id": WORKSPACE_ID,
+        "canonical_job_id": "job-1",
+        "job_version_id": "version-1",
+        "title": "Archived data engineer",
+        "company": "Example Corp",
+        "canonical_url": None,
+        "description": None,
+        "source": "ATS",
+        "location": "Singapore",
+        "workplace_type": "REMOTE",
+        "processing_state": "MATCHED",
+        "recommendation_outcome": "TRACK",
+        "archived_at": "2026-10-01T00:00:00Z",
+        "archive_reason": "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS",
+        "archive_age_basis": "OBSERVED_AGE_PUBLICATION_UNKNOWN",
+        "archive_reference_at": "2026-06-01T00:00:00+00:00",
+        "application_status": "APPLIED",
+        "active_hold_until": None,
+    }
+    validate_archive_job_row(row, WORKSPACE_ID)
+    for invalid_row, expected_error in (
+        (row | {"archive_age_basis": "UNKNOWN"}, ValueError),
+        (row | {"archived_at": "2026-10-01T00:00:00"}, ValueError),
+        (row | {"application_status": "INVALID"}, ValueError),
+    ):
+        try:
+            validate_archive_job_row(invalid_row, WORKSPACE_ID)
+        except expected_error:
+            pass
+        else:
+            raise AssertionError(
+                "Archive job contract accepted invalid lifecycle metadata"
+            )

@@ -24,6 +24,7 @@ export type PipelineTaskCurrentnessStatus =
   | "CURRENT"
   | "PROVEN_SUPERSEDED"
   | "PROVEN_SATISFIED"
+  | "PROVEN_ARCHIVED"
   | "UNRESOLVED";
 
 export interface PipelineTaskCurrentnessResult {
@@ -73,6 +74,7 @@ export interface PipelineTaskLaneCurrentContext {
 
 interface PipelineTaskLineageFacts {
   canonical_job_id: string;
+  archived_at: Date | string | null;
   latest_job_version_id: string | null;
   task_job_version_id: string;
   task_content_hash: string | null;
@@ -283,6 +285,7 @@ async function readLineageFacts(
 
   const { rows } = await client.query<PipelineTaskLineageFacts>(
     `SELECT canonical.id::text AS canonical_job_id,
+            canonical.archived_at,
             canonical.latest_job_version_id::text AS latest_job_version_id,
             task_version.id::text AS task_job_version_id,
             task_version.content_hash AS task_content_hash,
@@ -693,6 +696,15 @@ export async function classifyPipelineTaskCurrentness(
   }
   const facts = await readLineageFacts(client, context, payload, taskVersionId);
   if (!facts) return result("UNRESOLVED", "CANONICAL_LINEAGE_NOT_FOUND", { jobVersionId: taskVersionId });
+  if (facts.archived_at !== null) {
+    const archivedAt = facts.archived_at instanceof Date ? facts.archived_at.toISOString() : facts.archived_at;
+    return result("PROVEN_ARCHIVED", "JOB_ARCHIVED", {
+      canonicalJobId: facts.canonical_job_id,
+      jobVersionId: taskVersionId,
+      latestJobVersionId: facts.latest_job_version_id,
+      archivedAt,
+    });
+  }
 
   if (!facts.latest_job_version_id) {
     return result("UNRESOLVED", "LATEST_JOB_VERSION_POINTER_MISSING", {
@@ -1079,6 +1091,7 @@ export async function classifyPipelineTaskCurrentness(
 function reconciliationAction(currentness: PipelineTaskCurrentnessResult): string {
   if (currentness.status === "PROVEN_SATISFIED") return "RECONCILED_PROVEN_SATISFIED";
   if (currentness.status === "PROVEN_SUPERSEDED") return "RECONCILED_PROVEN_SUPERSEDED";
+  if (currentness.status === "PROVEN_ARCHIVED") return "SKIPPED_ARCHIVED_JOB";
   return `RECONCILED_${currentness.status}`;
 }
 
@@ -1266,7 +1279,8 @@ export async function reconcileStalePendingPipelineTasks(
              claimed_by = NULL,
              completed_at = NOW(),
              updated_at = NOW(),
-             last_error = concat_ws(E'\\n', NULLIF(task.last_error, ''), $6::text),
+             last_error = CASE WHEN $10::text = 'PROVEN_ARCHIVED' THEN NULL
+               ELSE concat_ws(E'\\n', NULLIF(task.last_error, ''), $6::text) END,
              repair_action = concat_ws(E'\\n', NULLIF(task.repair_action, ''), $7::text)
          WHERE task.workspace_id = $1
            AND task.id = $2
@@ -1294,6 +1308,7 @@ export async function reconcileStalePendingPipelineTasks(
           `${reconciliationAction(auditedCurrentness)} ${marker}`,
           expectedLatestJobVersionId,
           canonicalJobId,
+          currentness.status,
         ],
       );
       if (rowCount !== 1) {

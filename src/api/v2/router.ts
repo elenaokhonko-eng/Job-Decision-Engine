@@ -25,6 +25,18 @@ import {
   isCurrentReadyApplicationReadiness,
   loadCurrentApplicationReadiness,
 } from "../../services/currentApplicationReadiness.js";
+import {
+  ArchiveHoldCreateRequestSchema,
+  ArchiveHoldReleaseRequestSchema,
+  ArchiveRestoreRequestSchema,
+} from "../../contracts/archive.js";
+import {
+  createArchiveHold,
+  listActiveArchiveHolds,
+  listArchivedJobsWithOperationalStatus,
+  releaseArchiveHold,
+  restoreArchivedJob,
+} from "../../services/jobArchive.js";
 import { RejectedJobRowSchema, ShortlistRowV2Schema } from "../../readModels/contracts.js";
 
 type QueryClient = {
@@ -112,6 +124,13 @@ function parseOptionalIsoDate(value: unknown): string | null | undefined {
   if (trimmed === "") return null;
   const date = new Date(trimmed);
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function isoTimestamp(value: unknown): string | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
 function jsonObjectOrEmpty(value: unknown): Record<string, unknown> {
@@ -210,6 +229,129 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         user_key: ctx.userKey,
       });
     })
+  );
+
+  router.get(
+    "/archive",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const limit = parsePositiveInt(req.query.limit, 100, { min: 1, max: 500 });
+      const offset = parsePositiveInt(req.query.offset, 0, { min: 0, max: 1000000 });
+      const archivePage = await listArchivedJobsWithOperationalStatus(pool, {
+        workspaceId: ctx.workspaceId,
+        userId: ctx.userId,
+        limit,
+        offset,
+      });
+      res.json({
+        ok: true,
+        jobs: archivePage.jobs,
+        total_count: archivePage.totalCount,
+        limit,
+        offset,
+        operational_status: archivePage.operationalStatus,
+      });
+    }),
+  );
+
+  router.get(
+    "/archive/holds",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      const holds = await listActiveArchiveHolds(pool, ctx.workspaceId);
+      res.json({ ok: true, holds });
+    }),
+  );
+
+  router.post(
+    "/archive/holds",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      if (ctx.role === "READER") {
+        res.status(403).json({ ok: false, error: "A writable workspace role is required to create an archive hold." });
+        return;
+      }
+      const request = ArchiveHoldCreateRequestSchema.safeParse(req.body);
+      if (!request.success) {
+        res.status(400).json({ ok: false, error: "Archive hold request is invalid.", details: request.error.issues });
+        return;
+      }
+      const expiresAt = new Date(request.data.expires_at);
+      if (expiresAt.getTime() <= Date.now()) {
+        res.status(400).json({ ok: false, error: "Archive hold expiration must be in the future." });
+        return;
+      }
+      const hold = await withTransaction(pool, (client) => createArchiveHold(client, {
+        workspaceId: ctx.workspaceId,
+        canonicalJobId: request.data.canonical_job_id,
+        holdReason: request.data.hold_reason,
+        holdType: request.data.hold_type,
+        createdBy: `user:${ctx.userId}`,
+        expiresAt,
+      }));
+      res.status(201).json({ ok: true, hold });
+    }),
+  );
+
+  router.post(
+    "/archive/holds/:hold_id/release",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      if (ctx.role === "READER") {
+        res.status(403).json({ ok: false, error: "A writable workspace role is required to release an archive hold." });
+        return;
+      }
+      const holdId = String(req.params.hold_id || "").trim();
+      const request = ArchiveHoldReleaseRequestSchema.safeParse(req.body);
+      if (!isUuid(holdId) || !request.success) {
+        res.status(400).json({ ok: false, error: "Archive hold release request is invalid." });
+        return;
+      }
+      const released = await withTransaction(pool, (client) => releaseArchiveHold(client, {
+        workspaceId: ctx.workspaceId,
+        holdId,
+        actor: `user:${ctx.userId}`,
+        reason: request.data.reason,
+      }));
+      if (!released) {
+        res.status(404).json({ ok: false, error: "No active archive hold was found for this workspace." });
+        return;
+      }
+      res.json({ ok: true, released: true });
+    }),
+  );
+
+  router.post(
+    "/archive/:canonical_job_id/restore",
+    asyncHandler(async (req, res) => {
+      const ctx = (req as any).workspaceContext as WorkspaceContext;
+      if (ctx.role === "READER") {
+        res.status(403).json({ ok: false, error: "A writable workspace role is required to restore archived jobs." });
+        return;
+      }
+      const canonicalJobId = String(req.params.canonical_job_id || "").trim();
+      const request = ArchiveRestoreRequestSchema.safeParse(req.body);
+      if (!isUuid(canonicalJobId) || !request.success) {
+        res.status(400).json({ ok: false, error: "Archive restore request is invalid." });
+        return;
+      }
+      const result = await withTransaction(pool, (client) => restoreArchivedJob(client, {
+        workspaceId: ctx.workspaceId,
+        canonicalJobId,
+        actor: `user:${ctx.userId}`,
+        reason: request.data.reason,
+        context: ctx,
+      }));
+      if (result.reasonCode === "JOB_NOT_FOUND") {
+        res.status(404).json({ ok: false, error: "Canonical job was not found in this workspace." });
+        return;
+      }
+      if (result.reasonCode === "JOB_NOT_ARCHIVED") {
+        res.status(409).json({ ok: false, error: "Canonical job is already active.", reason: result.reasonCode });
+        return;
+      }
+      res.json({ ok: true, result });
+    }),
   );
 
   router.get(
@@ -834,6 +976,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         const jobRes = await client.query<{
           canonical_job_id: string;
           job_version_id: string;
+          archived_at: Date | string | null;
           canonical_url: string | null;
           current_artifact_status: string | null;
           current_artifact_reason: string | null;
@@ -844,6 +987,7 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
           `
             SELECT c.id AS canonical_job_id,
                    jv.id AS job_version_id,
+                   c.archived_at,
                    c.canonical_url,
                    current_shortlist.current_artifact_status,
                    current_shortlist.current_artifact_reason,
@@ -878,6 +1022,13 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         );
         const job = jobRes.rows[0];
         if (!job) return null;
+        if (job.archived_at !== null && job.archived_at !== undefined) {
+          return {
+            handoffBlocked: true,
+            error: "Archived jobs cannot receive new application handoffs. Restore the posting and complete fresh readiness checks first.",
+            reason: "JOB_ARCHIVED",
+          };
+        }
         if (![
           "CURRENT_OR_NOT_APPLICABLE",
           "EVALUATION_MISSING",

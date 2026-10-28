@@ -7,12 +7,12 @@ Example:
     validate_track_row(row, workspace_id)
 """
 
-from collections.abc import Mapping
-from decimal import Decimal
 import math
+from collections.abc import Mapping
+from datetime import datetime
+from decimal import Decimal
 
 from streamlit_application_workflow import has_current_ready_assessment
-
 
 APPLICATION_STATUSES = frozenset(
     {
@@ -53,6 +53,27 @@ def _require_string(row: Mapping[str, object], field: str) -> None:
         raise TypeError(f"Read-model field {field} must be a string.")
     if not value.strip():
         raise ValueError(f"Read-model field {field} must be a non-empty string.")
+
+
+def _require_timestamp(
+    row: Mapping[str, object], field: str, *, nullable: bool = False
+) -> None:
+    value = row.get(field)
+    if value is None and nullable:
+        return
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"Read-model timestamp {field} must be ISO-8601.") from exc
+    else:
+        raise TypeError(
+            f"Read-model timestamp {field} must be a datetime or ISO string."
+        )
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"Read-model timestamp {field} must include a timezone.")
 
 
 def _optional_score(row: Mapping[str, object], field: str) -> None:
@@ -649,3 +670,77 @@ def validate_company_culture_coverage_summary(
     _require_scope(row, workspace_id)
     for field in fields[1:]:
         _require_nonnegative_count(row, field)
+
+
+def validate_archive_job_row(row: Mapping[str, object], workspace_id: object) -> None:
+    """Validate an archived job and its workspace-scoped lifecycle metadata.
+
+    Args:
+        row: A row returned by the archived-job API or canonical read model.
+        workspace_id: The workspace requested by the caller.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If scope, timestamps, or age-basis values are invalid.
+        TypeError: If required archive fields have invalid types.
+
+    Example:
+        validate_archive_job_row(row, workspace_id)
+    """
+    fields = (
+        "schema_version",
+        "workspace_id",
+        "canonical_job_id",
+        "job_version_id",
+        "title",
+        "company",
+        "canonical_url",
+        "description",
+        "source",
+        "location",
+        "workplace_type",
+        "processing_state",
+        "recommendation_outcome",
+        "archived_at",
+        "archive_reason",
+        "archive_age_basis",
+        "archive_reference_at",
+        "application_status",
+        "active_hold_until",
+    )
+    _require_fields(row, fields)
+    _require_scope(row, workspace_id)
+    if row.get("schema_version") != "job_archive_v1":
+        raise ValueError("Archived job schema version is unsupported.")
+    for field in ("canonical_job_id", "title", "company", "archive_reason"):
+        _require_string(row, field)
+    if row.get("archive_age_basis") not in {
+        "GENUINE_REPOST_DATE",
+        "AUTHORITATIVE_PUBLICATION_DATE",
+        "OBSERVED_AGE_PUBLICATION_UNKNOWN",
+    }:
+        raise ValueError("Archived job age basis is invalid.")
+    for field in (
+        "job_version_id",
+        "canonical_url",
+        "description",
+        "source",
+        "location",
+        "workplace_type",
+        "processing_state",
+        "recommendation_outcome",
+        "application_status",
+    ):
+        value = row.get(field)
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"Read-model field {field} must be a string or NULL.")
+    if (
+        row.get("application_status") is not None
+        and row.get("application_status") not in APPLICATION_STATUSES
+    ):
+        raise ValueError("Archived job application status is invalid.")
+    _require_timestamp(row, "archived_at")
+    _require_timestamp(row, "archive_reference_at")
+    _require_timestamp(row, "active_hold_until", nullable=True)

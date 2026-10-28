@@ -12,7 +12,6 @@ env:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
     timeout-minutes: 25
     
     services:
@@ -60,8 +59,8 @@ jobs:
     - name: Run Python tests and Ruff
       run: |
         python -m pytest tests/python
-        ruff check --isolated --ignore I001 tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_database.py streamlit_workspace_contracts.py
-        ruff format --check --isolated tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_database.py streamlit_workspace_contracts.py
+        ruff check --isolated --ignore I001 tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_database.py streamlit_workspace_contracts.py streamlit_archive.py
+        ruff format --check --isolated tests/python streamlit_formatters.py streamlit_application_workflow.py streamlit_database.py streamlit_workspace_contracts.py streamlit_archive.py
 
     - name: Reject UTF-8 BOM in executable and migration sources
       shell: bash

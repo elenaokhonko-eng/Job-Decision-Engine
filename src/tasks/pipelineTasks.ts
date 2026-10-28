@@ -3,6 +3,7 @@ import pg from "pg";
 import { z } from "zod";
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { archivedJobForPipelineTask } from "./jobArchiveGuard.js";
 import {
   createTaskIntentV2,
   TaskIntentV2Schema,
@@ -87,6 +88,7 @@ export interface EnqueuePipelineTaskResult {
   taskId: string;
   inserted: boolean;
   reactivated?: boolean;
+  skippedReason?: "JOB_ARCHIVED";
 }
 
 export interface ReplayDeadLetterPipelineTaskInput {
@@ -113,6 +115,10 @@ export async function enqueuePipelineTask(
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const archivedJob = await archivedJobForPipelineTask(client, ctx.workspaceId, input.taskType, input.payload);
+    if (archivedJob) {
+      return { taskId: "", inserted: false, reactivated: false, skippedReason: "JOB_ARCHIVED" };
+    }
     const availableAt = input.availableAt ? input.availableAt.toISOString() : null;
     let taskPayload: unknown = input.payload;
     let contextFingerprint = input.contextFingerprint ?? "legacy_pipeline_context_v1";
@@ -366,6 +372,30 @@ export async function claimPipelineTasks(
             WHERE candidate.workspace_id = $1
               AND candidate.task_type = $2
               AND (
+                candidate.task_type = 'NORMALIZE_OBSERVATION'
+                OR NOT EXISTS (
+                  SELECT 1
+                  FROM canonical_jobs archived_job
+                  LEFT JOIN job_versions archived_version
+                    ON archived_version.workspace_id = archived_job.workspace_id
+                   AND archived_version.canonical_job_id = archived_job.id
+                  WHERE archived_job.workspace_id = candidate.workspace_id
+                    AND archived_job.archived_at IS NOT NULL
+                    AND (candidate.payload->>'canonical_job_id' = archived_job.id::text
+                      OR candidate.payload->>'job_version_id' = archived_version.id::text
+                      OR EXISTS (
+                        SELECT 1
+                        FROM raw_job_observations archived_observation
+                        JOIN job_versions observation_version
+                          ON observation_version.workspace_id = archived_observation.workspace_id
+                         AND observation_version.id = archived_observation.job_version_id
+                        WHERE archived_observation.workspace_id = candidate.workspace_id
+                          AND archived_observation.id::text = candidate.payload->>'observation_id'
+                          AND observation_version.canonical_job_id = archived_job.id
+                      ))
+                )
+              )
+              AND (
                 ($6::text[] IS NULL AND $7::text[] IS NULL)
                 OR candidate.payload->>'job_version_id' = ANY($6::text[])
                 OR candidate.payload->>'observation_id' = ANY($7::text[])
@@ -499,7 +529,7 @@ export async function heartbeatPipelineTask(
 export async function completePipelineTask(
   task: ClaimedPipelineTask,
   clientOrPool: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: { context?: WorkspaceContext; repairAction?: string }
 ): Promise<void> {
   await completePipelineTaskAndRun(task, clientOrPool, options);
 }
@@ -509,6 +539,7 @@ export async function completePipelineTaskAndRun(
   clientOrPool: pg.Pool | pg.PoolClient,
   options?: {
     context?: WorkspaceContext;
+    repairAction?: string;
     afterComplete?: (client: pg.PoolClient | pg.Pool) => Promise<void>;
   }
 ): Promise<void> {
@@ -544,7 +575,7 @@ export async function completePipelineTaskAndRun(
               last_error = NULL,
               blocked_on = NULL,
               blocked_reason = NULL,
-              repair_action = NULL,
+              repair_action = $4,
               completed_at = NOW(),
               updated_at = NOW()
           WHERE workspace_id = $1
@@ -553,7 +584,7 @@ export async function completePipelineTaskAndRun(
             AND lease_id = $3::uuid
           RETURNING id
         `,
-        [ctx.workspaceId, task.taskId, task.leaseId]
+        [ctx.workspaceId, task.taskId, task.leaseId, options?.repairAction ?? null]
       );
       if (updatedTask.rows.length === 0) {
         throw new Error(`Lost lease while completing pipeline task ${task.taskId}.`);

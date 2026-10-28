@@ -15,6 +15,7 @@ import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } fro
 import { applicationReadinessViewAvailable } from "../services/currentApplicationReadiness.js";
 import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
 import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
+import { archivedJobForPipelineTask } from "./jobArchiveGuard.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
 import { planPipelineStageRound } from "./pipelineStageScheduler.js";
 import { scopeSeedQuery } from "./seedQueryScope.js";
@@ -2246,6 +2247,23 @@ async function processClaimedTask(
   const taskType = task.taskType as PipelineStageTaskType;
   if (!PIPELINE_STAGE_TASK_TYPES.includes(taskType)) {
     throw new Error(`Unsupported pipeline task type: ${task.taskType}`);
+  }
+  const archivedJob = await archivedJobForPipelineTask(clientOrPool, ctx.workspaceId, task.taskType, task.payload);
+  if (archivedJob) {
+    const leaseState = await clientOrPool.query<{ status: string; lease_id: string | null }>(
+      `SELECT status, lease_id::text AS lease_id
+       FROM pipeline_tasks
+       WHERE workspace_id = $1 AND id = $2`,
+      [ctx.workspaceId, task.taskId],
+    );
+    const currentLease = leaseState.rows[0];
+    if (currentLease?.status === "RUNNING" && currentLease.lease_id === task.leaseId) {
+      await completePipelineTaskAndRun(task, clientOrPool, {
+        context: ctx,
+        repairAction: "SKIPPED_ARCHIVED_JOB",
+      });
+    }
+    return;
   }
   const isTestFixture = !options.includeTestFixtures && await taskTargetsTestFixture(task, clientOrPool, ctx);
 

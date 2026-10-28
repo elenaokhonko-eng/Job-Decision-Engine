@@ -82,6 +82,23 @@ describe("P0-03: Additive Migration Chain & Canonical Schema Integrity", () => {
     expect(migration).not.toMatch(/UPDATE\s+(?:job_versions|deterministic_decisions)\s+SET\s+(?:availability_status|readiness_json)/i);
   });
 
+  it("adds an independent archive lifecycle and active-view filters without moving job history", () => {
+    const migration = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, "080_reversible_job_archiving.sql"),
+      "utf8",
+    );
+
+    expect(migration).toContain("ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ");
+    expect(migration).toContain("ADD COLUMN IF NOT EXISTS archive_reference_at TIMESTAMPTZ");
+    expect(migration).toContain("ADD COLUMN IF NOT EXISTS archive_run_id UUID");
+    expect(migration).toContain("CREATE TABLE IF NOT EXISTS job_archive_events");
+    expect(migration).toContain("CREATE TABLE IF NOT EXISTS job_archive_holds");
+    expect(migration).toContain("CREATE TABLE IF NOT EXISTS job_archive_runs");
+    expect(migration).toContain("canonical.archived_at IS NULL");
+    expect(migration).toContain("observed age; publication date unknown");
+    expect(migration).not.toMatch(/DELETE\s+FROM\s+(?:canonical_jobs|job_versions|raw_job_observations|application_records)/i);
+  });
+
   it("defines stable scoped Stage 3 read models from canonical ranking snapshots", () => {
     const source = fs.readFileSync(
       path.join(MIGRATIONS_DIR, "075_user_preference_lineage_freshness_company_policy.sql"),
@@ -204,79 +221,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("074_rebalance_optional_ranking_confidence.sql");
     expect(versions).toContain("076_lower_top_ten_confidence_threshold.sql");
     expect(versions).toContain("078_evidence_readiness_discovery.sql");
-  });
-
-  it("078 is replay-safe and creates workspace-scoped evidence/readiness ledgers and read models", async () => {
-    const client = await realPool.connect();
-    try {
-      await applyMigrationFile(client, "078_evidence_readiness_discovery.sql");
-      const { rows: columns } = await client.query<{ table_name: string; column_name: string; data_type: string }>(`
-        SELECT table_name, column_name, data_type
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND (table_name, column_name) IN (
-            ('raw_job_observations', 'normalized_evidence'),
-            ('raw_job_observations', 'evidence_schema_version'),
-            ('job_versions', 'availability_status'),
-            ('job_versions', 'evidence_revision_hash'),
-            ('deterministic_decisions', 'readiness_json'),
-            ('deterministic_decisions', 'readiness_fingerprint'),
-            ('job_ranking_snapshots', 'culture_priority_score'),
-            ('source_candidate_dispositions', 'normalized_evidence'),
-            ('source_candidate_dispositions', 'evidence_schema_version')
-          )
-      `);
-      expect(columns).toHaveLength(9);
-      expect(columns.find((column) => column.table_name === 'raw_job_observations' && column.column_name === 'normalized_evidence')?.data_type).toBe('jsonb');
-      expect(columns.find((column) => column.table_name === 'source_candidate_dispositions' && column.column_name === 'normalized_evidence')?.data_type).toBe('jsonb');
-
-      const { rows: ledgers } = await client.query<{ table_name: string }>(`
-        SELECT table_name FROM information_schema.tables
-        WHERE table_schema = 'public' AND table_name IN (
-          'fx_rate_observations', 'source_plan_runs', 'source_candidate_dispositions'
-        ) ORDER BY table_name
-      `);
-      expect(ledgers.map((row) => row.table_name)).toEqual([
-        'fx_rate_observations', 'source_candidate_dispositions', 'source_plan_runs',
-      ]);
-
-      const { rows: views } = await client.query<{ table_name: string }>(`
-        SELECT table_name FROM information_schema.views
-        WHERE table_schema = 'public' AND table_name IN (
-          'v_application_readiness_current', 'v_canonical_shortlist_readiness_scoped'
-        ) ORDER BY table_name
-      `);
-      expect(views.map((row) => row.table_name)).toEqual([
-        'v_application_readiness_current', 'v_canonical_shortlist_readiness_scoped',
-      ]);
-
-      const { rows: indexes } = await client.query<{ indexname: string }>(`
-        SELECT indexname FROM pg_indexes
-        WHERE schemaname = 'public' AND indexname IN (
-          'uq_job_versions_posting_content',
-          'uq_job_versions_unidentified_content',
-          'uq_job_versions_workspace_canonical_posting_identity'
-        ) ORDER BY indexname
-      `);
-      expect(indexes.map((row) => row.indexname)).toEqual([
-        'uq_job_versions_posting_content', 'uq_job_versions_unidentified_content',
-      ]);
-
-      const { rows: applyView } = await client.query<{ definition: string }>(
-        `SELECT pg_get_viewdef('public.v_apply_now_jobs_scoped'::regclass, TRUE) AS definition`
-      );
-      const { rows: topTenView } = await client.query<{ definition: string }>(
-        `SELECT pg_get_viewdef('public.v_top_ten_ready_jobs_scoped'::regclass, TRUE) AS definition`
-      );
-      const { rows: readinessView } = await client.query<{ definition: string }>(
-        `SELECT pg_get_viewdef('public.v_application_readiness_current'::regclass, TRUE) AS definition`
-      );
-      expect(applyView[0]?.definition).toMatch(/readiness_status\s*=\s*'READY'/i);
-      expect(topTenView[0]?.definition).toMatch(/readiness_status\s*=\s*'READY'/i);
-      expect(readinessView[0]?.definition).toContain('source_candidate_dispositions');
-    } finally {
-      client.release();
-    }
+    expect(versions).toContain("080_reversible_job_archiving.sql");
   });
 
   it("V5 creates the ranking, culture, and workspace-scoped application read models", async () => {
@@ -1351,6 +1296,8 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     try {
       await applyMigrationFile(client, '075_user_preference_lineage_freshness_company_policy.sql');
       await applyMigrationFile(client, '075_user_preference_lineage_freshness_company_policy.sql');
+      await applyMigrationFile(client, '078_evidence_readiness_discovery.sql');
+      await applyMigrationFile(client, '080_reversible_job_archiving.sql');
 
       const preferenceTables = await client.query<{ table_name: string }>(
         `SELECT table_name
@@ -1505,4 +1452,122 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       client.release();
     }
   }, 30_000);
+
+  it("078 is replay-safe and creates workspace-scoped evidence/readiness ledgers and read models", async () => {
+    const client = await realPool.connect();
+    try {
+      await applyMigrationFile(client, "078_evidence_readiness_discovery.sql");
+      await applyMigrationFile(client, "080_reversible_job_archiving.sql");
+      const { rows: columns } = await client.query<{ table_name: string; column_name: string; data_type: string }>(`
+        SELECT table_name, column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND (table_name, column_name) IN (
+            ('raw_job_observations', 'normalized_evidence'),
+            ('raw_job_observations', 'evidence_schema_version'),
+            ('job_versions', 'availability_status'),
+            ('job_versions', 'evidence_revision_hash'),
+            ('deterministic_decisions', 'readiness_json'),
+            ('deterministic_decisions', 'readiness_fingerprint'),
+            ('job_ranking_snapshots', 'culture_priority_score'),
+            ('source_candidate_dispositions', 'normalized_evidence'),
+            ('source_candidate_dispositions', 'evidence_schema_version')
+          )
+      `);
+      expect(columns).toHaveLength(9);
+      expect(columns.find((column) => column.table_name === 'raw_job_observations' && column.column_name === 'normalized_evidence')?.data_type).toBe('jsonb');
+      expect(columns.find((column) => column.table_name === 'source_candidate_dispositions' && column.column_name === 'normalized_evidence')?.data_type).toBe('jsonb');
+
+      const { rows: ledgers } = await client.query<{ table_name: string }>(`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name IN (
+          'fx_rate_observations', 'source_plan_runs', 'source_candidate_dispositions'
+        ) ORDER BY table_name
+      `);
+      expect(ledgers.map((row) => row.table_name)).toEqual([
+        'fx_rate_observations', 'source_candidate_dispositions', 'source_plan_runs',
+      ]);
+
+      const { rows: views } = await client.query<{ table_name: string }>(`
+        SELECT table_name FROM information_schema.views
+        WHERE table_schema = 'public' AND table_name IN (
+          'v_application_readiness_current', 'v_canonical_shortlist_readiness_scoped'
+        ) ORDER BY table_name
+      `);
+      expect(views.map((row) => row.table_name)).toEqual([
+        'v_application_readiness_current', 'v_canonical_shortlist_readiness_scoped',
+      ]);
+
+      const { rows: indexes } = await client.query<{ indexname: string }>(`
+        SELECT indexname FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname IN (
+          'uq_job_versions_posting_content',
+          'uq_job_versions_unidentified_content',
+          'uq_job_versions_workspace_canonical_posting_identity'
+        ) ORDER BY indexname
+      `);
+      expect(indexes.map((row) => row.indexname)).toEqual([
+        'uq_job_versions_posting_content', 'uq_job_versions_unidentified_content',
+      ]);
+
+      const { rows: applyView } = await client.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('public.v_apply_now_jobs_scoped'::regclass, TRUE) AS definition`
+      );
+      const { rows: topTenView } = await client.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('public.v_top_ten_ready_jobs_scoped'::regclass, TRUE) AS definition`
+      );
+      const { rows: readinessView } = await client.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('public.v_application_readiness_current'::regclass, TRUE) AS definition`
+      );
+      expect(applyView[0]?.definition).toMatch(/readiness_status\s*=\s*'READY'/i);
+      expect(topTenView[0]?.definition).toMatch(/readiness_status\s*=\s*'READY'/i);
+      expect(readinessView[0]?.definition).toContain('source_candidate_dispositions');
+    } finally {
+      client.release();
+    }
+  });
+
+  it("080 replays safely and exposes archive lifecycle and operational views", async () => {
+    const client = await realPool.connect();
+    try {
+      await applyMigrationFile(client, "080_reversible_job_archiving.sql");
+      const { rows: columns } = await client.query<{ table_name: string; column_name: string }>(`
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND (
+            (table_name = 'canonical_jobs' AND column_name IN (
+              'archived_at', 'archive_reason', 'archive_age_basis', 'archive_reference_at', 'archive_run_id'
+            ))
+            OR (table_name = 'evaluation_queue' AND column_name IN ('skipped_at', 'skip_reason_code'))
+          )
+      `);
+      expect(columns).toHaveLength(7);
+
+      const { rows: views } = await client.query<{ view_name: string }>(`
+        SELECT table_name AS view_name
+        FROM information_schema.views
+        WHERE table_schema = 'public'
+          AND table_name IN (
+            'v_archived_jobs_scoped',
+            'v_job_archive_operational_status',
+            'v_canonical_shortlist_scoped',
+            'v_pipeline_task_queue_health'
+          )
+      `);
+      expect(views.map((row) => row.view_name)).toEqual(expect.arrayContaining([
+        'v_archived_jobs_scoped',
+        'v_job_archive_operational_status',
+        'v_canonical_shortlist_scoped',
+        'v_pipeline_task_queue_health',
+      ]));
+
+      const { rows: shortlistDefinition } = await client.query<{ definition: string }>(
+        `SELECT pg_get_viewdef('v_canonical_shortlist_scoped'::regclass, TRUE) AS definition`,
+      );
+      expect(shortlistDefinition[0]?.definition).toContain('archived_at IS NULL');
+    } finally {
+      client.release();
+    }
+  });
 });

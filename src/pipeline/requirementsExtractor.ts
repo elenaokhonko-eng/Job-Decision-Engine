@@ -420,6 +420,7 @@ export async function runRequirementsExtraction(
      AND ps.job_version_id = jv.id
      AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
     WHERE c.workspace_id = $1
+      AND c.archived_at IS NULL
       AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
       AND (
         COALESCE(c.processing_state, c.processing_status) IN ('RAW_STAGED', 'PREQUALIFIED')
