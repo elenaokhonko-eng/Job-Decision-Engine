@@ -22,7 +22,9 @@ FINGERPRINT = "a" * 64
 CONTACT_FINGERPRINT = "b" * 64
 PREFERENCE_FINGERPRINT = "c" * 64
 CONTEXT_FINGERPRINT = "d" * 64
-DESCRIPTION = "A detailed role description fetched from the selected public posting. " * 8
+DESCRIPTION = (
+    "A detailed role description fetched from the selected public posting. " * 8
+)
 
 
 def _docx_bytes():
@@ -40,14 +42,28 @@ def _artifact_bytes(format_name):
 
 
 def _artifact(item_type, format_name):
-    mime = "application/pdf" if format_name == "PDF" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    mime = (
+        "application/pdf"
+        if format_name == "PDF"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
     suffix = format_name.lower()
     prefix = "cv" if item_type == "CV" else "cover-letter"
-    return {"type": item_type, "format": format_name, "filename": f"{prefix}.{suffix}", "mime_type": mime}
+    return {
+        "type": item_type,
+        "format": format_name,
+        "filename": f"{prefix}.{suffix}",
+        "mime_type": mime,
+    }
 
 
 def _comparison_response(source_content_status="COMPLETE"):
-    evidence = {"id": "fact-1", "evidence_type": "FACT", "label": "data systems", "statement": "Designed data systems."}
+    evidence = {
+        "id": "fact-1",
+        "evidence_type": "FACT",
+        "label": "data systems",
+        "statement": "Designed data systems.",
+    }
     return {
         "schema_version": SCHEMA_VERSION,
         "ok": True,
@@ -67,7 +83,9 @@ def _comparison_response(source_content_status="COMPLETE"):
                 "source_kind": "FETCHED",
                 "source_content_status": source_content_status,
                 "provider": "EMPLOYER_WEBSITE",
-                "fetched_content_hash": hashlib.sha256(DESCRIPTION.encode()).hexdigest(),
+                "fetched_content_hash": hashlib.sha256(
+                    DESCRIPTION.encode()
+                ).hexdigest(),
                 "source_evidence": {
                     "requestedUrl": "https://example.test/job",
                     "resolvedUrl": "https://example.test/job",
@@ -97,15 +115,33 @@ def _comparison_response(source_content_status="COMPLETE"):
             "title": "Data Architect",
             "company": "Example",
             "canonical_url": "https://example.test/job",
-            "requirements": [{"requirement_key": "R-001", "requirement_type": "FUNCTION", "importance": "MUST", "requirement_text": "Experience building data systems"}],
+            "requirements": [
+                {
+                    "requirement_key": "R-001",
+                    "requirement_type": "FUNCTION",
+                    "importance": "MUST",
+                    "requirement_text": "Experience building data systems",
+                }
+            ],
             "evidence": [evidence],
-            "rows": [{
-                "requirement_key": "R-001", "requirement_type": "FUNCTION", "importance": "MUST",
-                "requirement": "Experience building data systems",
-                "evidence": [{"id": "fact-1", "type": "FACT", "label": "data systems", "statement": "Designed data systems."}],
-                "gap": None,
-                "comparison_method": "literal-term overlap; potential evidence only",
-            }],
+            "rows": [
+                {
+                    "requirement_key": "R-001",
+                    "requirement_type": "FUNCTION",
+                    "importance": "MUST",
+                    "requirement": "Experience building data systems",
+                    "evidence": [
+                        {
+                            "id": "fact-1",
+                            "type": "FACT",
+                            "label": "data systems",
+                            "statement": "Designed data systems.",
+                        }
+                    ],
+                    "gap": None,
+                    "comparison_method": "literal-term overlap; potential evidence only",
+                }
+            ],
             "suitability_warnings": ["Automatic suitability gate: NEEDS_VERIFICATION."],
             "evidence_notice": "Potential matches are retrieval hints, not a suitability decision.",
         },
@@ -121,7 +157,9 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
         return {
             "schema_version": SCHEMA_VERSION,
             "ok": True,
-            "profiles": [{"candidate_profile_id": CANDIDATE_ID, "display_name": "Candidate"}],
+            "profiles": [
+                {"candidate_profile_id": CANDIDATE_ID, "display_name": "Candidate"}
+            ],
         }
     if path.endswith("/fetch-description"):
         assert body["title"] == "Data Architect"
@@ -149,19 +187,34 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
         assert body["source_kind"] == "FETCHED"
         assert body["candidate_profile_id"] == CANDIDATE_ID
         assert body["fetch_receipt_id"] == FETCH_RECEIPT_ID
-        source_content_status = "COMPLETE" if body["description"] == DESCRIPTION.strip() else "USER_EDITED"
+        source_content_status = (
+            "COMPLETE" if body["description"] == DESCRIPTION.strip() else "USER_EDITED"
+        )
         return _comparison_response(source_content_status)
     if path.endswith("/approve"):
-        return {"schema_version": SCHEMA_VERSION, "ok": True, "approval_id": APPROVAL_ID, "approved": True, "comparison_fingerprint": FINGERPRINT}
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "approval_id": APPROVAL_ID,
+            "approved": True,
+            "comparison_fingerprint": FINGERPRINT,
+        }
     if path.endswith("/documents"):
-        artifacts = [_artifact(kind, format_name) for kind in ("CV", "COVER_LETTER") for format_name in ("DOCX", "PDF")]
+        artifacts = [
+            _artifact(kind, format_name)
+            for kind in ("CV", "COVER_LETTER")
+            for format_name in ("DOCX", "PDF")
+        ]
         return {
             "schema_version": SCHEMA_VERSION,
             "ok": True,
             "draft_id": DRAFT_ID,
             "approval_id": APPROVAL_ID,
             "comparison_fingerprint": FINGERPRINT,
-            "preview": {"cv": "# Candidate\n- Designed data systems.", "cover_letter": "Dear team\n- Designed data systems."},
+            "preview": {
+                "cv": "# Candidate\n- Designed data systems.",
+                "cover_letter": "Dear team\n- Designed data systems.",
+            },
             "artifacts": artifacts,
         }
     if "/documents/" in path:

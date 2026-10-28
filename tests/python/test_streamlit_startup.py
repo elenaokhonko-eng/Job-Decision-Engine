@@ -57,5 +57,8 @@ def test_hosted_runtime_requires_an_authenticated_reachable_api():
     with pytest.raises(RuntimeError, match="health check"):
         validate_api_health({"ok": False})
 
-    assert validate_hosted_api_configuration("https://api.example.test/", "token") == "https://api.example.test"
+    assert (
+        validate_hosted_api_configuration("https://api.example.test/", "token")
+        == "https://api.example.test"
+    )
     validate_api_health({"ok": True})

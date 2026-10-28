@@ -9,7 +9,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import docx
-from jsonschema import Draft202012Validator, ValidationError
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 import streamlit as st
 
 
@@ -27,7 +27,7 @@ def _validate_payload(schema_name, payload):
         Draft202012Validator.check_schema(schema)
         _SCHEMA_CACHE[schema_name] = schema
     try:
-        Draft202012Validator(schema).validate(payload)
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(payload)
     except ValidationError as error:
         location = ".".join(str(part) for part in error.absolute_path) or "<root>"
         raise ValueError(f"API {schema_name} contract violation at {location}: {error.message}") from error
