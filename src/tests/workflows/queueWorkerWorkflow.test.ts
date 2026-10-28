@@ -74,6 +74,7 @@ describe("evaluation queue workflow", () => {
     expect(workflow).toContain("REQUESTED_REF");
     expect(workflow).toContain("refs/heads/main");
     expect(workflow).toContain("valid canonical_job_id and job_version_id inputs are required.");
+    expect(workflow).toContain("[1-8][0-9a-fA-F]{3}");
     expect(workflow).toContain("npx tsx scripts/verify_migration_status.ts");
     expect(workflow).toContain("run_scoped_pilot.ts --canonical-job-id");
   });
