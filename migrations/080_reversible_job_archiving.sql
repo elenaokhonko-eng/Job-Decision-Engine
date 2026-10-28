@@ -5,6 +5,8 @@
 -- Rollback: disable archive writers and restore the previous active-list views while leaving
 -- the archive columns, runs, holds, and event history intact. Do not drop archive history.
 
+DROP INDEX IF EXISTS uq_job_versions_workspace_canonical_posting_identity;
+
 ALTER TABLE canonical_jobs
   ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS archive_reason TEXT,

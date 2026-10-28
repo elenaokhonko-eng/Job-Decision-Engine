@@ -587,6 +587,7 @@ describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
       payload: repeatPayload,
       normalizedEvidence: repeatEvidence,
     });
+    await pool.query("DROP INDEX IF EXISTS uq_job_versions_workspace_canonical_posting_identity");
     const repeatedNormalization = await runNormalization(pool, {
       context,
       observationIds: [repeatedObservationId],
