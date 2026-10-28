@@ -1008,6 +1008,26 @@ describe("stageTaskWorker", () => {
     expect(orphanSeed?.sql).toContain("mr.embedding_space_id IS NULL");
   });
 
+  it("projects the version column used by scoped observation seeding", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [], rowCount: 0 };
+    });
+
+    await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["NORMALIZE_OBSERVATION"],
+      jobVersionIds: ["selected-version"],
+      maxSeedPerType: 1,
+    });
+
+    const normalizationSeed = calls.find((call) => call.sql.includes("FROM raw_job_observations obs"));
+    expect(normalizationSeed?.sql).toContain("obs.job_version_id AS job_version_id");
+    expect(normalizationSeed?.sql).toContain("scoped_seed.job_version_id::text = ANY($2::text[])");
+    expect(normalizationSeed?.params).toEqual([ctx.workspaceId, ["selected-version"], 1]);
+  });
+
   it("does not seed unrelated provider stages during a stage-scoped recovery", async () => {
     const calls: string[] = [];
     const query = vi.fn(async (sql: string) => {
