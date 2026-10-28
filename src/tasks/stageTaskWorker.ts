@@ -577,7 +577,8 @@ export async function seedRecoverablePipelineTasks(
       ctx,
       summary,
       "NORMALIZE_OBSERVATION",
-      `SELECT obs.id AS observation_id
+      `SELECT obs.id AS observation_id,
+              obs.job_version_id AS job_version_id
        FROM raw_job_observations obs
        WHERE obs.workspace_id = $1
          AND obs.job_version_id IS NULL
