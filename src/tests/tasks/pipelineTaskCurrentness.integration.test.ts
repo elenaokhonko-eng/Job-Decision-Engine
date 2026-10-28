@@ -887,6 +887,25 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const normalizationJob = await insertJobVersions();
     const embeddingSpaceId = await createEmbeddingSpace();
     const recommendationJob = await insertJobVersions();
+    const completeFixtureDescription = [
+      "About the role: Build and operate reliable data systems with partner teams.",
+      "Responsibilities: Design platform services, review architecture, improve data quality, and coordinate delivery across engineering and business stakeholders.",
+      "Requirements: Demonstrated experience with production systems, cloud services, data governance, incident response, and clear written communication.",
+    ].join(" ").repeat(12);
+    for (const jobVersionId of [normalizationJob.latestVersionId, recommendationJob.latestVersionId]) {
+      await getClient().query(
+        `UPDATE job_versions SET description_text = $1 WHERE workspace_id = $2 AND id = $3`,
+        [completeFixtureDescription, getContext().workspaceId, jobVersionId],
+      );
+      await getClient().query(
+        `INSERT INTO raw_job_observations (
+           workspace_id, source_name, company_name, title, description_raw,
+           raw_payload_hash, processing_status, job_version_id
+         ) VALUES ($1, 'EMPLOYER_WEBSITE', 'Pipeline Currentness Test', 'Fixture Role', $2,
+           $3, 'PROCESSED', $4)`,
+        [getContext().workspaceId, completeFixtureDescription, `source-${crypto.randomUUID()}`, jobVersionId],
+      );
+    }
     await getClient().query(
       `UPDATE canonical_jobs
        SET processing_state = 'HARD_REJECTED',
