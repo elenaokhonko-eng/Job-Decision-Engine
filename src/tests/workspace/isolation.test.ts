@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import pg from 'pg';
 import { runMigrations } from '../../db/migrate.js';
+import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from '../fixtures/completePostingEvidence.js';
 import { isLocalPostgresConnectionString, pgConnectionConfig } from '../../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../../workspace/context.js';
 import { runDeterministicMatcher } from '../../pipeline/deterministicMatcher.js';
@@ -143,6 +144,7 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
     };
 
     const makeJob = async (workspaceId: string, company: string) => {
+      const sourceUrl = `https://example.com/${company}`;
       const canonicalId = (
         await q(
           `INSERT INTO canonical_jobs (
@@ -156,18 +158,27 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
            )
            VALUES ($1, $2, 'data engineer', $3, 'LANE_ROUTED', 'LANE_ROUTED', 'CORE_AI_DATA')
            RETURNING id`,
-          [workspaceId, company, `https://example.com/${company}`]
+          [workspaceId, company, sourceUrl]
         )
       ).rows[0].id as string;
 
       const versionId = (
         await q(
           `INSERT INTO job_versions (workspace_id, canonical_job_id, content_hash, description_text)
-           VALUES ($1, $2, $3, 'desc')
+           VALUES ($1, $2, $3, $4)
            RETURNING id`,
-          [workspaceId, canonicalId, `hash-${company}-${Math.random()}`]
+          [workspaceId, canonicalId, `hash-${company}-${Math.random()}`, COMPLETE_TEST_POSTING_DESCRIPTION]
         )
       ).rows[0].id as string;
+
+      await insertCompletePostingEvidence(client!, {
+        workspaceId,
+        jobVersionId: versionId,
+        companyName: company,
+        title: 'data engineer',
+        sourceUrl,
+        description: COMPLETE_TEST_POSTING_DESCRIPTION,
+      });
 
       const identityId = (
         await q(

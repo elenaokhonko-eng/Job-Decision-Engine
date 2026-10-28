@@ -3,6 +3,7 @@ import pg from 'pg';
 import { runMigrations } from '../../db/migrate.js';
 import { isLocalPostgresConnectionString, pgConnectionConfig } from '../../db/pgSsl.js';
 import { runRequirementsExtraction } from '../../pipeline/requirementsExtractor.js';
+import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from '../fixtures/completePostingEvidence.js';
 
 const DB_URL = process.env.DATABASE_URL || '';
 const isCI = isLocalPostgresConnectionString(DB_URL);
@@ -30,6 +31,7 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
       );
 
       const description = [
+        COMPLETE_TEST_POSTING_DESCRIPTION,
         'Hybrid role with 2 days per week in office.',
         'Must have at least 5 years of experience.',
         'Work rights required.',
@@ -41,6 +43,19 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
          VALUES ($1, $2, 'req-int-hash-1', $3, NOW())`,
         [jobVersionId, canonicalJobId, description]
       );
+
+      const workspace = await client.query<{ workspace_id: string }>(
+        `SELECT workspace_id::text AS workspace_id FROM canonical_jobs WHERE id = $1`,
+        [canonicalJobId],
+      );
+      await insertCompletePostingEvidence(client, {
+        workspaceId: workspace.rows[0]!.workspace_id,
+        jobVersionId,
+        companyName: 'Integration Co',
+        title: 'ml engineer',
+        sourceUrl: 'https://integration.example.com/job/1',
+        description,
+      });
 
       await client.query(
         `UPDATE canonical_jobs SET latest_job_version_id = $1, updated_at = NOW() WHERE id = $2`,

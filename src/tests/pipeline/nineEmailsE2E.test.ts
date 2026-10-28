@@ -15,6 +15,7 @@ import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { buildEvidenceRevisionHash } from "../../ingestion/jobSourceEvidence.js";
+import { htmlToPlainText } from "../../ingestion/emailAlertExtractor.js";
 import { SourceBroker } from "../../ingestion/sourceBroker.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../../contracts/jobSourceEvidence.js";
 import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
@@ -279,7 +280,8 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       "CloudScale Data",
     ];
     await q("DELETE FROM canonical_jobs WHERE company_name = ANY($1)", [fixtureCompanies]);
-    await q("DELETE FROM raw_job_observations WHERE source_name = 'gmail'");
+    await q("DELETE FROM raw_job_observations WHERE source_name = 'EMPLOYER_WEBSITE' AND source_external_id LIKE 'employer-fixture-email-%'");
+    await q("DELETE FROM raw_job_observations WHERE source_name = 'GMAIL_ALERT'");
     await q("DELETE FROM raw_email_alerts WHERE gmail_message_id LIKE 'fixture-email-%'");
 
     // Mock embeddings for deterministic offline CI runs
@@ -354,39 +356,93 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         [email.subject, email.raw_html || email.subject, email.id]
       );
 
-      const contentHash = crypto.createHash("sha256").update(email.raw_html || email.subject).digest("hex");
+      const emailPayload = {
+        message_id: email.id,
+        subject: email.subject,
+        body_text: htmlToPlainText(email.raw_html || email.subject),
+      };
+      const emailPayloadHash = crypto.createHash("sha256").update(JSON.stringify(emailPayload)).digest("hex");
       const company = email.subject.split(" at ")[1] || "Unknown Corp";
       const title =
         email.subject
           .replace("Job Alert: ", "")
           .replace("REPOST - ", "")
           .split(" at ")[0] || "Unknown Title";
+      const sourceUrl = `https://example.com/jobs/${email.id}`;
+      const alertObservationId = crypto.randomUUID();
+      const description = [
+        htmlToPlainText(email.raw_html || email.subject),
+        `About the role: ${title} at ${company} delivers the specific systems and outcomes described in the employer posting.`,
+        `Responsibilities: Plan and carry out the work described for ${title}, coordinate implementation with relevant teams, document decisions, monitor quality, and resolve delivery risks.`,
+        `Qualifications: The successful candidate brings relevant professional experience, role-specific skills, sound judgment, clear communication, and the ability to deliver the stated responsibilities.`,
+      ].join(" ");
+      const contentHash = crypto.createHash("sha256").update(description).digest("hex");
+      const sourcePayload = {
+        source_content_status: "COMPLETE",
+        discovery_observation_id: alertObservationId,
+        source_provider: "EMPLOYER_WEBSITE",
+        requested_url: sourceUrl,
+        canonical_url: sourceUrl,
+        source_evidence: {
+          requestedUrl: sourceUrl,
+          resolvedUrl: sourceUrl,
+          responseHash: contentHash,
+        },
+        posting: { title, companyName: company, description },
+        content_hash: contentHash,
+      };
+      const sourcePayloadHash = crypto.createHash("sha256").update(JSON.stringify(sourcePayload)).digest("hex");
 
       await q(
         `INSERT INTO raw_job_observations (
-           source_name, source_external_id, source_url, company_name, title,
+           id, workspace_id, source_name, source_external_id, source_url, company_name, title,
            description_raw, location_raw, workplace_type_raw, employment_type_raw,
-           raw_payload_hash, processing_status
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING')`,
+           raw_payload, raw_payload_hash, processing_status
+         ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, 'FETCH_COMPLETE')`,
         [
-          "gmail",
+          alertObservationId,
+          getContext().workspaceId,
           email.id,
-          `https://example.com/jobs/${email.id}`,
+          sourceUrl,
           company,
           title,
           email.raw_html || email.subject,
           email.location_raw,
           email.workplace_type_raw,
           email.employment_type_raw,
-          contentHash,
+          JSON.stringify(emailPayload),
+          emailPayloadHash,
         ]
+      );
+
+      await q(
+        `INSERT INTO raw_job_observations (
+           workspace_id, source_name, source_external_id, source_url, retrieved_at,
+           company_name, title, description_raw, location_raw, workplace_type_raw,
+           employment_type_raw, raw_payload, raw_payload_hash, processing_status,
+           derived_from_observation_id
+         ) VALUES ($1, 'EMPLOYER_WEBSITE', $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10::jsonb, $11, 'PENDING', $12::uuid)`,
+        [
+          getContext().workspaceId,
+          `employer-${email.id}`,
+          sourceUrl,
+          company,
+          title,
+          description,
+          email.location_raw,
+          email.workplace_type_raw,
+          email.employment_type_raw,
+          JSON.stringify(sourcePayload),
+          sourcePayloadHash,
+          alertObservationId,
+        ],
       );
     }
 
     const alertCount = await countWhere("raw_email_alerts", "gmail_message_id LIKE 'fixture-email-%'");
     const obsCount = await countWhere(
       "raw_job_observations",
-      "source_name = 'gmail' AND source_external_id LIKE 'fixture-email-%'"
+      "source_name = 'GMAIL_ALERT' AND source_external_id LIKE 'fixture-email-%'"
     );
     expect(alertCount).toBe(9);
     expect(obsCount).toBe(9);
@@ -398,7 +454,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     const observationCount = await countWhere(
       "raw_job_observations",
-      "source_name = 'gmail' AND source_external_id LIKE 'fixture-email-%'"
+      "source_name = 'GMAIL_ALERT' AND source_external_id LIKE 'fixture-email-%'"
     );
     const canonicalCount = await countWhere("canonical_jobs", "processing_status = 'RAW_STAGED'");
     const versionCount = await countWhere("job_versions", "TRUE");
@@ -409,7 +465,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
               COUNT(DISTINCT jv.canonical_job_id)::int AS canonical_count
          FROM raw_job_observations rjo
          LEFT JOIN job_versions jv ON jv.id = rjo.job_version_id
-        WHERE rjo.source_name = 'gmail'
+        WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'`
     );
 
@@ -636,7 +692,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
          FROM raw_job_observations rjo
          JOIN job_versions jv ON jv.id = rjo.job_version_id
          JOIN canonical_jobs c ON c.id = jv.canonical_job_id
-        WHERE rjo.source_name = 'gmail'
+        WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'
         ORDER BY rjo.source_external_id`
     );
@@ -1042,7 +1098,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
               COUNT(DISTINCT jv.canonical_job_id)::int AS canonical_count
          FROM raw_job_observations rjo
          JOIN job_versions jv ON jv.id = rjo.job_version_id
-        WHERE rjo.source_name = 'gmail'
+        WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'`
     );
     const versionCount = await countWhere("job_versions", "TRUE");
@@ -1056,13 +1112,13 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
   it("Integrity — every fixture observation maps to a live canonical job version", async () => {
     const unmapped = await countWhere(
       "raw_job_observations",
-      "source_name = 'gmail' AND source_external_id LIKE 'fixture-email-%' AND job_version_id IS NULL"
+      "source_name = 'GMAIL_ALERT' AND source_external_id LIKE 'fixture-email-%' AND job_version_id IS NULL"
     );
     const orphaned = await q(
       `SELECT COUNT(*)::int AS count
          FROM raw_job_observations rjo
          LEFT JOIN job_versions jv ON jv.id = rjo.job_version_id
-        WHERE rjo.source_name = 'gmail'
+        WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'
           AND jv.id IS NULL`
     );

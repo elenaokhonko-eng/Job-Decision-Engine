@@ -452,7 +452,7 @@ describe.skipIf(skipReal)('P3: profile update sessions (optimistic + idempotent 
     expect(contactRevision.rows).toEqual([
       {
         revision_number: 1,
-        schema_version: '2.2.0',
+        schema_version: '2.3.0',
         fact_type: 'CONTACT',
         profile_status: 'ACTIVE',
       },
