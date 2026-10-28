@@ -4,6 +4,7 @@ import pg from "pg";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
 import { assertApplicationDocumentPairCurrent } from "../src/documents/documentPairPolicy.js";
+import { parseDocumentOutputManifest, type DocumentOutputManifestRecord } from "../src/documents/outputManifest.js";
 import { validatePersistedDocumentCurrentness } from "../src/documents/provenanceCurrentness.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
@@ -20,7 +21,7 @@ interface DocumentRunRow {
   readonly context_fingerprint: string | null;
   readonly document_type: "CV" | "COVER_LETTER";
   readonly document_template_plugin_revision_id: string | null;
-  readonly output_manifest: Record<string, unknown>;
+  readonly output_manifest: DocumentOutputManifestRecord;
 }
 
 interface PairRunResult {
@@ -44,7 +45,7 @@ async function readRun(
   documentType: "CV" | "COVER_LETTER",
 ): Promise<PairRunResult> {
   if (!runId) return { ready: false, reason: "DOCUMENT_RUN_MISSING", run: null };
-  const { rows } = await client.query<DocumentRunRow>(
+  const { rows } = await client.query<Omit<DocumentRunRow, "output_manifest"> & { readonly output_manifest: unknown }>(
     `SELECT id, canonical_job_id, job_version_id, match_run_id, profile_version_id,
             deterministic_decision_id, context_fingerprint, document_type,
             document_template_plugin_revision_id, output_manifest
@@ -54,8 +55,16 @@ async function readRun(
      LIMIT 1`,
     [context.workspaceId, runId, application.canonical_job_id, application.job_version_id, documentType],
   );
-  const run = rows[0];
-  if (!run || run.id !== runId) return { ready: false, reason: "DOCUMENT_RUN_NOT_FOUND", run: null };
+  const persistedRun = rows[0];
+  if (!persistedRun || persistedRun.id !== runId) {
+    return { ready: false, reason: "DOCUMENT_RUN_NOT_FOUND", run: null };
+  }
+  let run: DocumentRunRow;
+  try {
+    run = { ...persistedRun, output_manifest: parseDocumentOutputManifest(persistedRun.output_manifest) };
+  } catch {
+    return { ready: false, reason: "DOCUMENT_MANIFEST_INVALID", run: null };
+  }
 
   const currentness = await validatePersistedDocumentCurrentness(client, context.workspaceId, {
     canonicalJobId: run.canonical_job_id,

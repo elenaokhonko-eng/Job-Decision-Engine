@@ -541,6 +541,7 @@ ${JSON.stringify(coverLetterSchema)}`;
         documentTemplatePluginRevisionId: pluginRevision?.revisionId ?? null,
         documentTemplatePluginKey: pluginRevision?.pluginKey ?? null,
         outputManifest: {
+          schema_version: "document_output_manifest_v1",
           json_path: jsonPath,
           docx_path: docxPath,
           docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),

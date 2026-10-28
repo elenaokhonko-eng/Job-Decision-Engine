@@ -320,7 +320,11 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
       policyVersion: "documents-test-v1",
       generatorVersion: "cv-test-v1",
       documentTemplatePluginRevisionId: null,
-      outputManifest: { docx_path: "test/cv.docx", docx_sha256: "a".repeat(64) },
+      outputManifest: {
+            schema_version: "document_output_manifest_v1",
+            docx_path: "test/cv.docx",
+            docx_sha256: "a".repeat(64),
+          },
       claims: [],
     }, database, { context: workspace });
     const letter = await persistDocumentProvenance({
@@ -335,7 +339,11 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
       policyVersion: "documents-test-v1",
       generatorVersion: "cover-letter-test-v1",
       documentTemplatePluginRevisionId: null,
-      outputManifest: { docx_path: "test/cover-letter.docx", docx_sha256: "b".repeat(64) },
+      outputManifest: {
+            schema_version: "document_output_manifest_v1",
+            docx_path: "test/cover-letter.docx",
+            docx_sha256: "b".repeat(64),
+          },
       claims: [],
     }, database, { context: workspace });
 

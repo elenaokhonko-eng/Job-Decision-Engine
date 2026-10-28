@@ -7,6 +7,10 @@ import pg from "pg";
 import { PDFParse } from "pdf-parse";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { loadProfileContactInfo, requireCvContactInfo } from "../src/documents/contactInfo.js";
+import { extractReadableDocumentXmlText } from "../src/documents/documentArtifactValidation.js";
+import { parseDocumentOutputManifest } from "../src/documents/outputManifest.js";
+import { validatePersistedDocumentCurrentness } from "../src/documents/provenanceCurrentness.js";
+import { isCurrentReadyApplicationReadiness, loadCurrentApplicationReadiness } from "../src/services/currentApplicationReadiness.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 const execFileAsync = promisify(execFile);
@@ -18,8 +22,11 @@ interface DocumentRun extends pg.QueryResultRow {
   readonly canonical_job_id: string;
   readonly job_version_id: string;
   readonly profile_version_id: string;
+  readonly match_run_id: string | null;
+  readonly deterministic_decision_id: string | null;
+  readonly context_fingerprint: string | null;
   readonly document_type: "CV" | "COVER_LETTER";
-  readonly output_manifest: Record<string, unknown>;
+  readonly output_manifest: unknown;
 }
 
 function requiredUuid(value: string | undefined, label: string): string {
@@ -68,7 +75,13 @@ async function extractDocxText(filePath: string, content: Buffer): Promise<strin
     encoding: "utf8",
     maxBuffer: 8 * 1024 * 1024,
   });
-  return result.stdout.replace(/<[^>]+>/g, " ");
+  try {
+    return extractReadableDocumentXmlText(result.stdout);
+  } catch (error) {
+    throw new Error(
+      `DOCX artifact ${path.basename(filePath)} contains invalid or unreadable document XML: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 async function extractPdfText(content: Buffer, filePath: string): Promise<{ readonly text: string; readonly pages: number }> {
@@ -95,7 +108,11 @@ async function main(): Promise<void> {
 
   const pool = new pg.Pool(pgPoolConfig(databaseUrl));
   const client = await pool.connect();
+  let transactionStarted = false;
   try {
+    await client.query("BEGIN");
+    transactionStarted = true;
+    await client.query("SET TRANSACTION READ ONLY");
     const context = await resolveWorkspaceContext(client);
     const { rows: applications } = await client.query<{
       readonly status: string;
@@ -125,10 +142,20 @@ async function main(): Promise<void> {
         application.cover_letter_document_run_id !== coverLetterDocumentRunId) {
       throw new Error("The application draft is not linked to both requested document runs.");
     }
+    const readiness = await loadCurrentApplicationReadiness(
+      client,
+      context.workspaceId,
+      canonicalJobId,
+      jobVersionId,
+    );
+    if (!isCurrentReadyApplicationReadiness(readiness)) {
+      throw new Error("The selected job no longer has current READY application evidence.");
+    }
 
     const { rows } = await client.query<DocumentRun>(
       `SELECT id::text, canonical_job_id::text, job_version_id::text,
-              profile_version_id::text, document_type, output_manifest
+              profile_version_id::text, match_run_id::text, deterministic_decision_id::text,
+              context_fingerprint, document_type, output_manifest
        FROM document_runs
        WHERE workspace_id = $1
          AND id = ANY($2::UUID[])
@@ -144,6 +171,21 @@ async function main(): Promise<void> {
     }
     if (cvRun!.profile_version_id !== coverLetterRun!.profile_version_id) {
       throw new Error("The CV and cover letter were generated from different profile versions.");
+    }
+    const cvManifest = parseDocumentOutputManifest(cvRun!.output_manifest);
+    const coverLetterManifest = parseDocumentOutputManifest(coverLetterRun!.output_manifest);
+    for (const run of [cvRun!, coverLetterRun!]) {
+      const currentness = await validatePersistedDocumentCurrentness(client, context.workspaceId, {
+        canonicalJobId,
+        jobVersionId,
+        matchRunId: run.match_run_id,
+        profileVersionId: run.profile_version_id,
+        deterministicDecisionId: run.deterministic_decision_id,
+        contextFingerprint: run.context_fingerprint,
+      });
+      if (!currentness.current) {
+        throw new Error(`Document run ${run.id} is stale: ${currentness.reason}.`);
+      }
     }
 
     const profile = await client.query<{ candidate_name: string }>(
@@ -165,12 +207,15 @@ async function main(): Promise<void> {
       cvRun!.profile_version_id,
       candidateName,
     ));
+    await client.query("COMMIT");
+    transactionStarted = false;
+
     const exportRoot = path.resolve("scripts", "exports");
     const [cvDocx, cvPdf, letterDocx, letterPdf] = await Promise.all([
-      readVerifiedArtifact(cvRun!.output_manifest, "docx", exportRoot),
-      readVerifiedArtifact(cvRun!.output_manifest, "pdf", exportRoot),
-      readVerifiedArtifact(coverLetterRun!.output_manifest, "docx", exportRoot),
-      readVerifiedArtifact(coverLetterRun!.output_manifest, "pdf", exportRoot),
+      readVerifiedArtifact(cvManifest, "docx", exportRoot),
+      readVerifiedArtifact(cvManifest, "pdf", exportRoot),
+      readVerifiedArtifact(coverLetterManifest, "docx", exportRoot),
+      readVerifiedArtifact(coverLetterManifest, "pdf", exportRoot),
     ]);
     const [cvDocxText, cvPdfText, letterDocxText, letterPdfText] = await Promise.all([
       extractDocxText(cvDocx.path, cvDocx.content),
@@ -182,6 +227,51 @@ async function main(): Promise<void> {
     if (!phoneDigits || !digits(cvDocxText).includes(phoneDigits) || !digits(cvPdfText.text).includes(phoneDigits)) {
       throw new Error("The required active-profile phone number was not found in both rendered CV formats.");
     }
+
+    await client.query("BEGIN");
+    transactionStarted = true;
+    await client.query("SET TRANSACTION READ ONLY");
+    const [latestApplication, latestReadiness] = await Promise.all([
+      client.query<{ status: string; cv_document_run_id: string | null; cover_letter_document_run_id: string | null }>(
+        `SELECT status, cv_document_run_id::text, cover_letter_document_run_id::text
+         FROM application_records
+         WHERE workspace_id = $1 AND user_id = $2 AND id = $3::UUID
+           AND canonical_job_id = $4::UUID AND job_version_id = $5::UUID
+         LIMIT 1`,
+        [context.workspaceId, context.userId, applicationRecordId, canonicalJobId, jobVersionId],
+      ),
+      loadCurrentApplicationReadiness(client, context.workspaceId, canonicalJobId, jobVersionId),
+    ]);
+    const currentApplication = latestApplication.rows[0];
+    if (currentApplication?.status !== "INTENT" ||
+        currentApplication.cv_document_run_id !== cvDocumentRunId ||
+        currentApplication.cover_letter_document_run_id !== coverLetterDocumentRunId ||
+        !isCurrentReadyApplicationReadiness(latestReadiness)) {
+      throw new Error("The application or readiness context changed while document artifacts were being inspected.");
+    }
+    const [currentCv, currentLetter] = await Promise.all([
+      validatePersistedDocumentCurrentness(client, context.workspaceId, {
+        canonicalJobId,
+        jobVersionId,
+        matchRunId: cvRun!.match_run_id,
+        profileVersionId: cvRun!.profile_version_id,
+        deterministicDecisionId: cvRun!.deterministic_decision_id,
+        contextFingerprint: cvRun!.context_fingerprint,
+      }),
+      validatePersistedDocumentCurrentness(client, context.workspaceId, {
+        canonicalJobId,
+        jobVersionId,
+        matchRunId: coverLetterRun!.match_run_id,
+        profileVersionId: coverLetterRun!.profile_version_id,
+        deterministicDecisionId: coverLetterRun!.deterministic_decision_id,
+        contextFingerprint: coverLetterRun!.context_fingerprint,
+      }),
+    ]);
+    if (!currentCv.current || !currentLetter.current) {
+      throw new Error("The document pair became stale while artifact files were being inspected.");
+    }
+    await client.query("COMMIT");
+    transactionStarted = false;
 
     console.log(JSON.stringify({
       event: "DOCUMENT_ARTIFACTS_VERIFIED",
@@ -195,6 +285,9 @@ async function main(): Promise<void> {
         coverLetter: { docx: path.basename(letterDocx.path), pdf: path.basename(letterPdf.path), pdfPages: letterPdfText.pages },
       },
     }));
+  } catch (error) {
+    if (transactionStarted) await client.query("ROLLBACK");
+    throw error;
   } finally {
     client.release();
     await pool.end();

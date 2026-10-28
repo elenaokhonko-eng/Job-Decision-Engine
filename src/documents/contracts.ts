@@ -12,6 +12,39 @@ export const DOCUMENTS_SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 export const DocumentTypeSchema = z.enum(['CV', 'COVER_LETTER']);
 export const DocumentRunStatusSchema = z.enum(['STARTED', 'COMPLETED', 'FAILED']);
 
+const DocumentOutputManifestFieldsSchema = z.object({
+  schema_version: z.literal('document_output_manifest_v1'),
+  json_path: z.string().min(1).optional(),
+  docx_path: z.string().min(1),
+  docx_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  pdf_path: z.string().min(1).nullable().optional(),
+  pdf_sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+});
+
+function validatePdfManifestPair(
+  manifest: { pdf_path?: string | null; pdf_sha256?: string | null },
+  context: z.RefinementCtx,
+): void {
+  const pdfPathPresent = typeof manifest.pdf_path === 'string';
+  const pdfHashPresent = typeof manifest.pdf_sha256 === 'string';
+  if (pdfPathPresent !== pdfHashPresent) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['pdf_path'],
+      message: 'PDF path and hash must both be present or both be null/absent.',
+    });
+  }
+}
+
+export const DocumentOutputManifestSchema = DocumentOutputManifestFieldsSchema
+  .strict()
+  .superRefine(validatePdfManifestPair);
+
+export const DocumentOutputManifestRecordSchema = DocumentOutputManifestFieldsSchema
+  .extend({ manifest_hash: z.string().regex(/^[a-f0-9]{64}$/) })
+  .strict()
+  .superRefine(validatePdfManifestPair);
+
 export const MatchSnapshotSchema = z.object({
   match_run_id: z.string().uuid(),
   overall_match_score: z.number().min(0).max(100),
@@ -52,7 +85,7 @@ export const DocumentRunSchema = z.object({
   status: DocumentRunStatusSchema,
   policy_version: z.string().min(1).max(100),
   generator_version: z.string().min(1).max(100),
-  output_manifest: z.record(z.unknown()),
+  output_manifest: DocumentOutputManifestRecordSchema,
   claim_count: z.number().int().min(0),
   error_message: z.string().max(4000).nullable().optional(),
   created_at: z.date().optional(),

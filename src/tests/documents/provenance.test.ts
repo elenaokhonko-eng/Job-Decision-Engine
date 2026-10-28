@@ -137,9 +137,10 @@ describe('persistDocumentProvenance', () => {
         policyVersion: 'documents_v2',
         generatorVersion: 'cv_generator_v2',
         outputManifest: {
+          schema_version: 'document_output_manifest_v1',
           json_path: 'scripts/exports/example.cv.json',
           docx_path: 'scripts/exports/example.docx',
-          docx_sha256: 'test-docx-sha256',
+          docx_sha256: 'a'.repeat(64),
         },
         claims: [
           {

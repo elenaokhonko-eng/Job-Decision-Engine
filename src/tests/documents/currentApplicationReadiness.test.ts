@@ -75,6 +75,15 @@ describe("current application readiness", () => {
     expect(isCurrentReadyApplicationReadiness(readiness(overrides), Date.parse("2026-01-01T00:00:00Z"))).toBe(false);
   });
 
+  it("rejects unknown fields in persisted readiness payloads", () => {
+    const payloadWithUnknownField = readiness({
+      application_readiness: assessment({ unexpected: true }),
+    });
+
+    expect(isCurrentReadyApplicationReadiness(payloadWithUnknownField, Date.parse("2026-01-01T00:00:00Z")))
+      .toBe(false);
+  });
+
   it("rejects a READY payload with unresolved mandatory checks", () => {
     const malformedReady = readiness({
       application_readiness: assessment({
@@ -104,6 +113,18 @@ describe("current application readiness", () => {
       readiness_expires_at: new Date("2025-01-01T00:00:00.000Z"),
       application_readiness: assessment({
         status: "NEEDS_VERIFICATION",
+        reason_codes: ["WORK_AUTHORIZATION_UNKNOWN"],
+        checks: [{
+          key: "WORK_AUTHORIZATION",
+          status: "NEEDS_VERIFICATION",
+          importance: "MUST",
+          reason_code: "WORK_AUTHORIZATION_UNKNOWN",
+          rationale: "Eligibility requires verification.",
+          evidence_keys: [],
+          policy_reference: null,
+          assessed_at: "2024-12-01T00:00:00.000Z",
+          expires_at: null,
+        }],
         expires_at: "2025-01-01T00:00:00.000Z",
         evaluated_at: "2024-12-01T00:00:00.000Z",
       }),
@@ -118,6 +139,18 @@ describe("current application readiness", () => {
       readiness_expires_at: new Date("2025-01-01T00:00:00.000Z"),
       application_readiness: assessment({
         status: "NEEDS_VERIFICATION",
+        reason_codes: ["WORK_AUTHORIZATION_UNKNOWN"],
+        checks: [{
+          key: "WORK_AUTHORIZATION",
+          status: "NEEDS_VERIFICATION",
+          importance: "MUST",
+          reason_code: "WORK_AUTHORIZATION_UNKNOWN",
+          rationale: "Eligibility requires verification.",
+          evidence_keys: [],
+          policy_reference: null,
+          assessed_at: "2025-01-02T00:00:00.000Z",
+          expires_at: null,
+        }],
         expires_at: "2025-01-01T00:00:00.000Z",
         evaluated_at: "2025-01-02T00:00:00.000Z",
       }),

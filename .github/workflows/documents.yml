@@ -5,15 +5,15 @@ on:
     inputs:
       canonical_job_id:
         description: Canonical job UUID
-        required: false
+        required: true
         type: string
       job_version_id:
         description: Current job version UUID
-        required: false
+        required: true
         type: string
       application_record_id:
-        description: Draft application record UUID for this document pair
-        required: false
+        description: INTENT draft application record UUID for this document pair
+        required: true
         type: string
 
 env:
@@ -30,7 +30,6 @@ jobs:
     steps:
       - name: Validate production ref and document pins
         env:
-          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
           REQUESTED_REF: ${{ github.ref }}
           INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
           INPUT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
@@ -38,25 +37,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
           if [[ "$REQUESTED_REF" != "refs/heads/main" ]]; then
             echo "Document workflows may only use reviewed code from main." >&2
             exit 1
           fi
           for value in "$INPUT_CANONICAL_JOB_ID" "$INPUT_JOB_VERSION_ID" "$INPUT_APPLICATION_RECORD_ID"; do
-            if [[ -n "$value" && ! "$value" =~ $uuid_re ]]; then
-              echo "All supplied application and job IDs must be UUIDs." >&2
+            if [[ ! "$value" =~ $uuid_re ]]; then
+              echo "canonical_job_id, job_version_id, and application_record_id must all be valid UUIDs." >&2
               exit 1
             fi
           done
-          if [[ -n "$INPUT_APPLICATION_RECORD_ID" && ( -z "$INPUT_CANONICAL_JOB_ID" || -z "$INPUT_JOB_VERSION_ID" ) ]]; then
-            echo "application_record_id requires both pinned job IDs." >&2
-            exit 1
-          fi
-          if [[ "$WORKFLOW_KILL_SWITCH" == "true" && ( -z "$INPUT_CANONICAL_JOB_ID" || -z "$INPUT_JOB_VERSION_ID" || -z "$INPUT_APPLICATION_RECORD_ID" ) ]]; then
-            echo "With the workflow kill switch enabled, all three IDs must be supplied." >&2
-            exit 1
-          fi
 
   generate-documents:
     needs: validate-document-dispatch
@@ -96,83 +87,18 @@ jobs:
             npx tsx src/db/migrate.ts
           fi
 
-      - name: Resolve canonical_job_id/job_version_id (auto-pick if missing)
+      - name: Resolve validated job, version, and application pins
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          PICK_DOCUMENTS_ALLOW_EMPTY: "true"
-          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
           INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
           INPUT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
           INPUT_APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
         shell: bash
         run: |
           set -euo pipefail
-
-          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
-
-          if [[ -n "$INPUT_CANONICAL_JOB_ID" ]]; then
-            if [[ ! "$INPUT_CANONICAL_JOB_ID" =~ $uuid_re ]]; then
-              echo "canonical_job_id must be a UUID." >&2
-              exit 1
-            fi
-            if [[ -n "$INPUT_JOB_VERSION_ID" && ! "$INPUT_JOB_VERSION_ID" =~ $uuid_re ]]; then
-              echo "job_version_id must be a UUID when provided." >&2
-              exit 1
-            fi
-            if [[ -n "$INPUT_APPLICATION_RECORD_ID" && ! "$INPUT_APPLICATION_RECORD_ID" =~ $uuid_re ]]; then
-              echo "application_record_id must be a UUID when provided." >&2
-              exit 1
-            fi
-            if [[ "$WORKFLOW_KILL_SWITCH" == "true" && ( -z "$INPUT_JOB_VERSION_ID" || -z "$INPUT_APPLICATION_RECORD_ID" ) ]]; then
-              echo "With the workflow kill switch enabled, both job_version_id and application_record_id are required." >&2
-              exit 1
-            fi
-            {
-              echo "CANONICAL_JOB_ID=$INPUT_CANONICAL_JOB_ID"
-              echo "DOCUMENTS_JOB_FOUND=true"
-              if [[ -n "$INPUT_JOB_VERSION_ID" ]]; then
-                echo "JOB_VERSION_ID=$INPUT_JOB_VERSION_ID"
-              fi
-              if [[ -n "$INPUT_APPLICATION_RECORD_ID" ]]; then
-                echo "APPLICATION_RECORD_ID=$INPUT_APPLICATION_RECORD_ID"
-              fi
-            } >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          echo "No canonical_job_id provided; selecting an eligible job automatically..."
-          set +e
-          OUT="$(npx tsx scripts/pick_documents_job.ts)"
-          PICK_STATUS=$?
-          set -e
-          echo "$OUT"
-
-          if [[ $PICK_STATUS -ne 0 ]]; then
-            exit $PICK_STATUS
-          fi
-
-          FOUND="$(echo "$OUT" | sed -n 's/^documents_job_found: //p' | head -n 1 | tr -d '\r')"
-          if [[ "$FOUND" == "false" ]]; then
-            echo "DOCUMENTS_JOB_FOUND=false" >> "$GITHUB_ENV"
-            {
-              echo "### Documents Generator"
-              echo ""
-              echo "No eligible jobs found for document generation yet. Generation was skipped."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          CANONICAL="$(echo "$OUT" | sed -n 's/^canonical_job_id: //p' | head -n 1 | tr -d '\r')"
-          VERSION="$(echo "$OUT" | sed -n 's/^job_version_id:[[:space:]]*//p' | head -n 1 | tr -d '\r')"
-
-          if [[ -z "$CANONICAL" || -z "$VERSION" ]]; then
-            echo "Failed to parse canonical_job_id/job_version_id from pick_documents_job output." >&2
-            exit 1
-          fi
-
           {
-            echo "CANONICAL_JOB_ID=$CANONICAL"
-            echo "JOB_VERSION_ID=$VERSION"
+            echo "CANONICAL_JOB_ID=$INPUT_CANONICAL_JOB_ID"
+            echo "JOB_VERSION_ID=$INPUT_JOB_VERSION_ID"
+            echo "APPLICATION_RECORD_ID=$INPUT_APPLICATION_RECORD_ID"
             echo "DOCUMENTS_JOB_FOUND=true"
           } >> "$GITHUB_ENV"
 
@@ -213,7 +139,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
           if [[ -n "${JOB_VERSION_ID:-}" ]]; then
             document_output="$(npx tsx scripts/generate_cv.ts "$CANONICAL_JOB_ID" "$JOB_VERSION_ID")"
           else
@@ -247,7 +173,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
           if [[ -n "${JOB_VERSION_ID:-}" ]]; then
             document_output="$(npx tsx scripts/generate_cover_letter.ts "$CANONICAL_JOB_ID" "$JOB_VERSION_ID")"
           else
