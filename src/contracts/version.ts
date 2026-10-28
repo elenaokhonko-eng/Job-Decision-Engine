@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-export const SCHEMA_VERSION = "2.2.0" as const;
-export const LEGACY_SCHEMA_VERSIONS = ["2.0", "1.0.0"] as const;
+export const SCHEMA_VERSION = "2.3.0" as const;
+export const LEGACY_SCHEMA_VERSIONS = ["2.2.0", "2.0", "1.0.0"] as const;
 
 const schemaVersions = [SCHEMA_VERSION, ...LEGACY_SCHEMA_VERSIONS] as const;
 

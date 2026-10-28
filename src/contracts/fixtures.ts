@@ -49,7 +49,10 @@ export const sampleAtsObservation: JobObservation = {
   raw_payload_hash: "sha256-databricks9988",
   processing_status: "PENDING",
   error_history: [],
-  job_version_id: null
+  job_version_id: null,
+  raw_email_alert_id: null,
+  gmail_message_id: null,
+  derived_from_observation_id: null,
 };
 
 export const sampleDuplicateRepostVersion: CanonicalJobVersion = {

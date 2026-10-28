@@ -103,6 +103,12 @@ jobs:
     - name: Verify generated contract schemas
       run: npm run contracts:check
 
+    - name: Run required PostgreSQL posting persistence tests
+      env:
+        DATABASE_URL: postgres://test:password@localhost:5432/testdb
+        REQUIRE_POSTGRES_INTEGRATION: "true"
+      run: npx vitest run --no-file-parallelism src/tests/tasks/jobContentFetchPersistence.integration.test.ts src/tests/tasks/pipelineTaskCurrentness.integration.test.ts
+
     - name: Initialize Database
       env:
         DATABASE_URL: postgres://test:password@localhost:5432/testdb
@@ -111,4 +117,4 @@ jobs:
     - name: Run Vitest Unit Tests
       env:
         DATABASE_URL: postgres://test:password@localhost:5432/testdb
-      run: npm run test
+      run: npm run test -- --no-file-parallelism --exclude src/tests/tasks/jobContentFetchPersistence.integration.test.ts --exclude src/tests/tasks/pipelineTaskCurrentness.integration.test.ts

@@ -28,6 +28,7 @@ export {
 
 export const SourceNameSchema = z.enum([
   "GMAIL_ALERT",
+  "EMPLOYER_WEBSITE",
   "GREENHOUSE",
   "LEVER",
   "ASHBY",
@@ -111,9 +112,23 @@ export const JobObservationSchema = z.object({
   description_text: z.string().min(1),
   raw_payload: z.unknown().nullable().default(null),
   raw_payload_hash: z.string().min(1),
-  processing_status: z.enum(["PENDING", "PROCESSED", "PARSE_FAILED", "FETCH_FAILED", "DESCRIPTION_INCOMPLETE"]).default("PENDING"),
+  processing_status: z.enum([
+    "PENDING",
+    "PROCESSED",
+    "PARSE_FAILED",
+    "FETCH_FAILED",
+    "DESCRIPTION_INCOMPLETE",
+    "FETCH_PENDING",
+    "FETCH_STAGED",
+    "FETCH_COMPLETE",
+    "FETCH_BLOCKED",
+  ]).default("PENDING"),
   error_history: z.array(z.record(z.unknown())).default([]),
   job_version_id: z.string().uuid().nullable().default(null),
+  raw_email_alert_id: z.string().uuid().nullable().default(null),
+  gmail_message_id: z.string().nullable().default(null),
+  derived_from_observation_id: z.string().uuid().nullable().default(null),
+  source_content_status: z.enum(["DISCOVERY_ONLY", "COMPLETE", "UNVERIFIED"]).optional(),
 });
 export type JobObservation = z.infer<typeof JobObservationSchema>;
 

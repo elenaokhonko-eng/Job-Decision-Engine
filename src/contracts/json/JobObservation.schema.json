@@ -7,11 +7,12 @@
         "schema_version": {
           "type": "string",
           "enum": [
+            "2.3.0",
             "2.2.0",
             "2.0",
             "1.0.0"
           ],
-          "default": "2.2.0"
+          "default": "2.3.0"
         },
         "id": {
           "type": "string",
@@ -25,6 +26,7 @@
           "type": "string",
           "enum": [
             "GMAIL_ALERT",
+            "EMPLOYER_WEBSITE",
             "GREENHOUSE",
             "LEVER",
             "ASHBY",
@@ -171,7 +173,11 @@
             "PROCESSED",
             "PARSE_FAILED",
             "FETCH_FAILED",
-            "DESCRIPTION_INCOMPLETE"
+            "DESCRIPTION_INCOMPLETE",
+            "FETCH_PENDING",
+            "FETCH_STAGED",
+            "FETCH_COMPLETE",
+            "FETCH_BLOCKED"
           ],
           "default": "PENDING"
         },
@@ -194,6 +200,45 @@
             }
           ],
           "default": null
+        },
+        "raw_email_alert_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gmail_message_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "derived_from_observation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_content_status": {
+          "type": "string",
+          "enum": [
+            "DISCOVERY_ONLY",
+            "COMPLETE",
+            "UNVERIFIED"
+          ]
         }
       },
       "required": [

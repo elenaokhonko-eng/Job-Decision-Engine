@@ -1,210 +1,232 @@
 import pg from "pg";
 import dotenv from "dotenv";
+import crypto from "node:crypto";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
+import { extractEmailJobCards, EmailExtractionError } from "../src/ingestion/emailAlertExtractor.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
+import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
+import {
+  buildEmailAlertSelectionQuery,
+  parseEmailParseArguments,
+  type EmailParseArguments,
+} from "../src/ingestion/emailParserReplay.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
 const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
 
-export async function parseEmails(): Promise<{ parsedEmails: number; extractedJobs: number; failedEmails: number }> {
-  console.log("====================================================");
-  console.log("         STAGE 0: EMAIL PARSING SCOUT               ");
-  console.log("====================================================");
+export interface ParseEmailsSummary {
+  parsedEmails: number;
+  extractedJobs: number;
+  failedEmails: number;
+}
 
-  const { generateContent, MODEL_REGISTRY } = await import("../src/services/agent.js");
+function stableLinkId(url: string): string {
+  return crypto.createHash("sha256").update(url, "utf8").digest("hex").slice(0, 32);
+}
 
-  const ctx = await resolveWorkspaceContext(pool as any);
+async function markEmailBlocked(
+  client: pg.PoolClient,
+  workspaceId: string,
+  alertId: string,
+  reason: string,
+): Promise<void> {
+  await client.query(
+    "UPDATE raw_email_alerts SET processed = TRUE, lifecycle_status = 'SOURCE_BLOCKED', last_error = $1 WHERE workspace_id = $2 AND id = $3",
+    [reason, workspaceId, alertId],
+  );
+}
 
+export async function parseEmails(options: Partial<EmailParseArguments> = {}): Promise<ParseEmailsSummary> {
+  console.log("Starting deterministic Gmail job-card extraction.");
+
+  const ctx = await resolveWorkspaceContext(pool as any, {
+    ...(options.workspaceKey ? { workspaceKey: options.workspaceKey } : {}),
+    ...(options.userKey ? { userKey: options.userKey } : {}),
+  });
   const { rows: emails } = await pool.query(
-    `SELECT id, gmail_message_id, subject, body
-     FROM raw_email_alerts
-     WHERE workspace_id = $1
-       AND processed = FALSE
-     ORDER BY id ASC
-     LIMIT 20`,
-    [ctx.workspaceId]
+    buildEmailAlertSelectionQuery(options.replayBlocked === true),
+    [ctx.workspaceId, options.limit ?? 20],
   );
 
   if (emails.length === 0) {
-    console.log("No unprocessed email alerts found.");
+    console.log("No eligible email alerts found.");
     return { parsedEmails: 0, extractedJobs: 0, failedEmails: 0 };
   }
 
-  console.log(`Found ${emails.length} unprocessed email alerts. Parsing via LLM...`);
-
   const broker = new SourceBroker(pool, ctx);
-  await broker.startRun("EMAIL_PARSER_RUN");
-
+  await broker.startRun("EMAIL_DISCOVERY_PARSE");
   let parsedEmails = 0;
   let extractedJobs = 0;
   let failedEmails = 0;
 
   for (const email of emails) {
-    console.log(`\nParsing email #${email.id} (${email.gmail_message_id || "no-uid"}): "${email.subject}"`);
-
-    const prompt = `
-      You are an expert recruitment parser. Extract all individual job listings from this job alert email.
-      Return the output strictly as a JSON object matching this schema:
-      {
-        "jobs": [
-          {
-            "company_name": "Name of the company",
-            "title": "Job title",
-            "location_raw": "Location string if specified or 'Unknown'",
-            "workplace_type_raw": "REMOTE | HYBRID | ONSITE | UNKNOWN",
-            "employment_type_raw": "FULL_TIME | CONTRACT | UNKNOWN",
-            "compensation_raw": "Compensation string if specified or 'UNKNOWN'",
-            "canonical_apply_url": "Direct application or view URL",
-            "description_raw": "Full text snippet or description of the role"
-          }
-        ]
-      }
-      If no jobs are found, return {"jobs": []}.
-
-      Email Subject: ${email.subject}
-      Email Body:
-      ${email.body.substring(0, 15000)}
-    `;
-
-    const dbClient = await pool.connect();
-    let emailSucceeded = false;
-    let emailJobsStaged = 0;
-    const emailErrors: string[] = [];
-
+    const alertId = String(email.id);
+    let cards;
     try {
-      const responseText = await generateContent({
-        model: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
-        contents: prompt,
-        responseMimeType: "application/json"
-      });
-
-      let cleaned = responseText.trim();
-      if (cleaned.startsWith("```json")) {
-        cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-      } else if (cleaned.startsWith("```")) {
-        cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      cards = await extractEmailJobCards(String(email.body ?? ""));
+      if (cards.length === 0) {
+        throw new EmailExtractionError(
+          "MISSING_POSTING_URL",
+          "MISSING_POSTING_URL: no genuine vacancy link was found in the decoded email.",
+        );
       }
-
-      const parsed = JSON.parse(cleaned);
-      const rawJobs = parsed.jobs || [];
-      console.log(`-> Extracted ${rawJobs.length} raw jobs from email #${email.id}.`);
-
-      // Stage ALL jobs in a single transaction; roll back if ANY fail
-      await dbClient.query("BEGIN");
-
+    } catch (error) {
+      const message = error instanceof EmailExtractionError
+        ? error.code + ": " + error.message
+        : "EMAIL_EXTRACTION_FAILED: " + (error instanceof Error ? error.message : String(error));
+      const client = await pool.connect();
       try {
-        for (const rawJob of rawJobs) {
-          const validated = ExtractedJobSchema.safeParse({
-            schema_version: SCHEMA_VERSION,
-            company_name: rawJob.company_name || rawJob.companyName || "Unknown Company",
-            title: rawJob.title || "Unknown Title",
-            location_raw: rawJob.location_raw || rawJob.locationRaw || "Unknown",
-            workplace_type_raw: rawJob.workplace_type_raw || rawJob.workplaceTypeRaw || "UNKNOWN",
-            employment_type_raw: rawJob.employment_type_raw || rawJob.employmentTypeRaw || "UNKNOWN",
-            compensation_raw: rawJob.compensation_raw || rawJob.compensationRaw || "UNKNOWN",
-            canonical_apply_url: rawJob.canonical_apply_url || rawJob.url || `https://email-alert.internal/${email.id}`,
-            description_raw: rawJob.description_raw || rawJob.descriptionRaw || email.subject
-          });
+        await client.query("BEGIN");
+        await markEmailBlocked(client, ctx.workspaceId, alertId, message);
+        await client.query("COMMIT");
+      } catch (stageError) {
+        await client.query("ROLLBACK");
+        throw stageError;
+      } finally {
+        client.release();
+      }
+      broker.recordError(message);
+      failedEmails += 1;
+      continue;
+    }
 
-          if (!validated.success) {
-            // Schema validation failure is a structured error — accumulate it
-            const msg = `Schema validation failed for job "${rawJob.title}": ${validated.error.message}`;
-            console.warn(`⚠️ ${msg}`);
-            emailErrors.push(msg);
-            broker.recordError(msg);
-            continue;
-          }
-
-          const job = validated.data;
-          // processObservation now executes on dbClient — rolled back if transaction fails
-          await broker.processObservation(
-            {
-              sourceName: "GMAIL_ALERT",
-              sourceExternalId: `gmail-${email.gmail_message_id || email.id}-${job.title}`,
-              sourceUrl: job.canonical_apply_url,
-              retrievedAt: new Date().toISOString(),
-              companyName: job.company_name,
-              title: job.title,
-              descriptionRaw: job.description_raw,
-              locationRaw: job.location_raw,
-              workplaceTypeRaw: job.workplace_type_raw,
-              employmentTypeRaw: job.employment_type_raw,
-              compensationRaw: job.compensation_raw,
-              canonicalApplyUrl: job.canonical_apply_url,
-              sourceLane: "UNKNOWN",
-              searchPlanVersion: "1.0",
-              rawPayload: {
-                ...job,
-                raw_email_alert_id: email.id,
-                gmail_message_id: email.gmail_message_id,
-              }
-            },
-            job,
-            dbClient
+    const client = await pool.connect();
+    let stagedForEmail = 0;
+    try {
+      await client.query("BEGIN");
+      for (const card of cards) {
+        const messageIdentity = String(email.gmail_message_id || alertId);
+        const sourceExternalId = "gmail-" + messageIdentity + "-" + stableLinkId(card.sourceUrl);
+        const validated = ExtractedJobSchema.safeParse({
+          schema_version: SCHEMA_VERSION,
+          company_name: card.companyName || "Unknown Company",
+          title: card.title || "Unknown Title",
+          location_raw: card.location || "Unknown",
+          workplace_type_raw: "UNKNOWN",
+          employment_type_raw: "UNKNOWN",
+          compensation_raw: "UNKNOWN",
+          canonical_apply_url: card.sourceUrl,
+          employer_posting_url: card.sourceUrl,
+          description_raw: card.descriptionRaw,
+        });
+        if (!validated.success) {
+          throw new Error(
+            "Invalid Gmail discovery card: " +
+            validated.error.issues.map((issue) => issue.path.join(".") + " " + issue.message).join("; "),
           );
-          emailJobsStaged++;
         }
 
-        if (emailErrors.length > 0) {
-          throw new Error(`Schema validation failed for ${emailErrors.length} extracted job(s).`);
+        const job = validated.data;
+        const staged = await broker.processObservation(
+          {
+            sourceName: "GMAIL_ALERT",
+            sourceExternalId,
+            sourceUrl: card.sourceUrl,
+            retrievedAt: new Date().toISOString(),
+            companyName: job.company_name,
+            title: job.title,
+            descriptionRaw: job.description_raw,
+            locationRaw: job.location_raw,
+            workplaceTypeRaw: job.workplace_type_raw,
+            employmentTypeRaw: job.employment_type_raw,
+            compensationRaw: job.compensation_raw,
+            canonicalApplyUrl: card.sourceUrl,
+            sourceLane: "UNKNOWN",
+            searchPlanVersion: "1.0",
+            rawEmailAlertId: alertId,
+            gmailMessageId: email.gmail_message_id ? String(email.gmail_message_id) : null,
+            rawPayload: {
+              source_content_status: "DISCOVERY_ONLY",
+              raw_email_alert_id: alertId,
+              gmail_message_id: email.gmail_message_id ? String(email.gmail_message_id) : null,
+              source_url: card.sourceUrl,
+              discovered_title: job.title,
+              discovered_company: job.company_name,
+              email_context: job.description_raw,
+            },
+          },
+          {
+            ...job,
+            source_content_status: "DISCOVERY_ONLY",
+            raw_email_alert_id: alertId,
+            gmail_message_id: email.gmail_message_id ? String(email.gmail_message_id) : null,
+            source_url: card.sourceUrl,
+          },
+          client,
+        );
+        if (!staged.observationId) {
+          throw new Error("Gmail discovery observation did not receive a durable id.");
         }
 
-        // Only mark processed = TRUE when all staging succeeded
-        await dbClient.query(
-          `UPDATE raw_email_alerts
-           SET processed = TRUE, lifecycle_status = 'PARSED', last_error = NULL
-           WHERE workspace_id = $1 AND id = $2`,
-          [ctx.workspaceId, email.id]
+        await client.query(
+          "UPDATE raw_job_observations SET processing_status = 'FETCH_PENDING' WHERE workspace_id = $1 AND id = $2",
+          [ctx.workspaceId, staged.observationId],
         );
 
-        await dbClient.query("COMMIT");
-        emailSucceeded = true;
-        extractedJobs += emailJobsStaged;
-        parsedEmails++;
-      } catch (stageErr: any) {
-        await dbClient.query("ROLLBACK");
-        // Mark with error but do NOT set processed = TRUE — email will be retried
-        await dbClient.query(
-          `UPDATE raw_email_alerts
-           SET last_error = $1
-           WHERE workspace_id = $2 AND id = $3`,
-          [stageErr.message, ctx.workspaceId, email.id]
+        const taskKey = "FETCH_JOB_CONTENT:" + staged.observationId + ":posting_fetch_v1";
+        await enqueuePipelineTask(
+          {
+            taskType: "FETCH_JOB_CONTENT",
+            taskKey,
+            payload: { observation_id: staged.observationId },
+            maxAttempts: 8,
+            producer: "parse_emails",
+            stageVersion: "posting_fetch_v1",
+            requestId: taskKey,
+          },
+          client,
+          { context: ctx },
         );
-        throw stageErr;
+        stagedForEmail += 1;
       }
-    } catch (err: any) {
-      if (!emailSucceeded) {
-        failedEmails++;
-        const message = err.message || String(err);
-        broker.recordError(`Email ${email.id}: ${message}`);
-        console.error(`❌ Failed to parse or stage email ${email.id}:`, message);
-      }
+
+      await client.query(
+        "UPDATE raw_email_alerts SET processed = TRUE, lifecycle_status = 'SOURCE_PENDING', last_error = NULL WHERE workspace_id = $1 AND id = $2",
+        [ctx.workspaceId, alertId],
+      );
+      await client.query("COMMIT");
+      parsedEmails += 1;
+      extractedJobs += stagedForEmail;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      const message = error instanceof Error ? error.message : String(error);
+      await client.query(
+        "UPDATE raw_email_alerts SET last_error = $1 WHERE workspace_id = $2 AND id = $3",
+        [message, ctx.workspaceId, alertId],
+      );
+      broker.recordError("Email discovery staging failed: " + message);
+      failedEmails += 1;
     } finally {
-      dbClient.release();
+      client.release();
     }
   }
 
-  await broker.endRun(
-    failedEmails === 0 ? "COMPLETED" : parsedEmails > 0 ? "DEGRADED" : "FAILED"
-  );
-  console.log(`\n✅ Email parsing complete. Parsed: ${parsedEmails}, Jobs: ${extractedJobs}, Failed: ${failedEmails}`);
+  await broker.endRun(failedEmails === 0 ? "COMPLETED" : parsedEmails > 0 ? "DEGRADED" : "FAILED");
+  console.log("Email discovery complete. Parsed alerts: " + parsedEmails + ", vacancy links staged: " + extractedJobs + ", failed alerts: " + failedEmails);
   return { parsedEmails, extractedJobs, failedEmails };
 }
 
 if (process.argv[1] && process.argv[1].includes("parse_emails")) {
-  parseEmails()
-    .then((res) => {
-      if (res.failedEmails > 0) {
-        process.exit(1);
-      }
-      process.exit(0);
-    })
-    .catch((err) => {
-      console.error("Fatal email parsing error:", err);
-      process.exit(1);
-    });
+  let args: EmailParseArguments | null = null;
+  try {
+    args = parseEmailParseArguments(process.argv.slice(2));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
+  if (args) {
+    void parseEmails(args)
+      .then((summary) => {
+        if (summary.failedEmails > 0) process.exitCode = 1;
+      })
+      .catch((error) => {
+        console.error("Fatal email discovery failure:", error instanceof Error ? error.message : "unknown error");
+        process.exitCode = 1;
+      })
+      .finally(() => pool.end());
+  }
 }

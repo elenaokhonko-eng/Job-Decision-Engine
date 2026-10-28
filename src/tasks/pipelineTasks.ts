@@ -376,6 +376,20 @@ export async function claimPipelineTasks(
                     AND scoped_observation.id::text = candidate.payload->>'observation_id'
                     AND scoped_observation.job_version_id::text = ANY($6::text[])
                 ))
+                OR ($7::text[] IS NOT NULL AND EXISTS (
+                  SELECT 1
+                  FROM raw_job_observations AS scoped_child
+                  WHERE scoped_child.workspace_id = candidate.workspace_id
+                    AND scoped_child.id::text = candidate.payload->>'observation_id'
+                    AND scoped_child.derived_from_observation_id::text = ANY($7::text[])
+                ))
+                OR ($7::text[] IS NOT NULL AND EXISTS (
+                  SELECT 1
+                  FROM raw_job_observations AS scoped_parent
+                  WHERE scoped_parent.workspace_id = candidate.workspace_id
+                    AND scoped_parent.id::text = ANY($7::text[])
+                    AND scoped_parent.job_version_id::text = candidate.payload->>'job_version_id'
+                ))
               )
               AND (
                 (
@@ -659,7 +673,7 @@ export async function failPipelineTask(
   task: ClaimedPipelineTask,
   errorMessage: string,
   clientOrPool: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
+  options?: { context?: WorkspaceContext; retryAt?: Date }
 ): Promise<void> {
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
     typeof (value as pg.Pool).connect === "function" && !("release" in value);
@@ -671,7 +685,14 @@ export async function failPipelineTask(
   const delaySeconds = task.attemptNumber <= 1
     ? 0
     : Math.min(3600, 30 * Math.pow(2, task.attemptNumber - 2));
-  const availableAt = new Date(Date.now() + delaySeconds * 1000).toISOString();
+  const now = Date.now();
+  const backoffAt = now + delaySeconds * 1000;
+  const requestedRetryAt = options?.retryAt?.getTime();
+  const availableAt = new Date(
+    Number.isFinite(requestedRetryAt)
+      ? Math.max(backoffAt, Math.min(requestedRetryAt as number, now + 3600 * 1000))
+      : backoffAt,
+  ).toISOString();
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
