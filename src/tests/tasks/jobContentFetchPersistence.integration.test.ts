@@ -389,14 +389,12 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
       raw_payload: Record<string, unknown>;
       derived_from_observation_id: string | null;
       job_version_id: string | null;
-      published_at: string | null;
       workplace_type_raw: string | null;
       compensation_raw: string | null;
       normalized_evidence: Record<string, unknown> | null;
     }>(
       `SELECT id::text, source_name, processing_status, description_raw, raw_payload,
               derived_from_observation_id::text, job_version_id::text,
-              to_char(published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS published_at,
               workplace_type_raw, compensation_raw, normalized_evidence
        FROM raw_job_observations
        WHERE workspace_id = $1 AND derived_from_observation_id = $2::uuid`,
@@ -408,7 +406,6 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
       processing_status: "PROCESSED",
       derived_from_observation_id: observationId,
       description_raw: postingDescription,
-      published_at: "2025-08-01T12:00:00.000Z",
       workplace_type_raw: "REMOTE",
       compensation_raw: "USD 150000-200000 per year",
     });
