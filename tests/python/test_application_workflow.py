@@ -138,6 +138,18 @@ def test_validates_versioned_output_manifest_and_generator_projection():
     assert validate_document_output_manifest(manifest, outputs) == manifest
 
 
+def test_rejects_missing_required_manifest_string_field():
+    with pytest.raises(TypeError, match="missing docx_path"):
+        validate_document_output_manifest(
+            {
+                "schema_version": "document_output_manifest_v1",
+                "docx_sha256": "a" * 64,
+                "manifest_hash": "b" * 64,
+            },
+            {},
+        )
+
+
 def test_rejects_tampered_manifest_and_mismatched_output_projection():
     manifest = {
         "schema_version": "document_output_manifest_v1",

@@ -59,7 +59,7 @@ def validate_document_output_manifest(
         raise ValueError("Document output manifest has an unsupported schema version.")
     for key in ("docx_path", "docx_sha256", "manifest_hash"):
         if not isinstance(manifest.get(key), str):
-            raise ValueError(f"Document output manifest is missing {key}.")
+            raise TypeError(f"Document output manifest is missing {key}.")
     for key in ("docx_sha256", "manifest_hash"):
         value = manifest[key]
         if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
