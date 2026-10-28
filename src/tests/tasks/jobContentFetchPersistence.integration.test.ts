@@ -177,7 +177,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
     try {
       const migrationFiles = await fs.readdir(migrationsRoot);
       for (const file of migrationFiles) {
-        const prefix = file.match(/^(\d+)_.*\.sql$/)?.[1];
+        const prefix = file.match(/^(\d+)[a-z]?_.*\.sql$/)?.[1];
         if (prefix && Number(prefix) <= 79) {
           await fs.copyFile(path.join(migrationsRoot, file), path.join(legacyMigrationsRoot, file));
         }
