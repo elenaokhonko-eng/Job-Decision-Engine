@@ -7,6 +7,28 @@
  */
 export const MIN_COMPLETE_DESCRIPTION_CHARS = 1000;
 
+/**
+ * Require source evidence for the exact job version before preparing documents.
+ * Gmail alerts are discovery records; they count only when the persisted payload
+ * explicitly marks the linked content as complete.
+ */
+export function sourceContentEvidencePredicate(workspaceExpression: string, jobVersionExpression: string): string {
+  const trustedExpression = /^[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*$/i;
+  if (!trustedExpression.test(workspaceExpression) || !trustedExpression.test(jobVersionExpression)) {
+    throw new Error("Source-content SQL expressions must be trusted identifiers.");
+  }
+  return `EXISTS (
+    SELECT 1
+    FROM raw_job_observations source_content_observation
+    WHERE source_content_observation.workspace_id = ${workspaceExpression}
+      AND source_content_observation.job_version_id = ${jobVersionExpression}
+      AND (
+        source_content_observation.source_name <> 'GMAIL_ALERT'
+        OR source_content_observation.raw_payload->>'source_content_status' = 'COMPLETE'
+      )
+  )`;
+}
+
 export type DescriptionQualityStatus = "COMPLETE" | "INCOMPLETE" | "UNKNOWN";
 
 export function classifyDescriptionQuality(value: unknown): {
