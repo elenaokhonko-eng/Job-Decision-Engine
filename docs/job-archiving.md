@@ -22,9 +22,9 @@ A source-normalized genuine repost with a newer evidenced repost date, or a new 
 
 ## Running and enabling the workflow
 
-The scheduled workflow runs daily at 19:15 UTC, approximately 03:15 Singapore time. It uses the existing `WORKFLOW_KILL_SWITCH`, a PostgreSQL advisory lock, page size 250, and a maximum of 500 archives per apply run.
+The scheduled workflow runs daily at 19:15 UTC, approximately 03:15 Singapore time. Like other production workflows, it restricts execution to `refs/heads/main` before accessing production credentials, enforces `WORKFLOW_KILL_SWITCH`, uses a PostgreSQL advisory lock, and runs with page size 250 and a maximum of 500 archives per apply run.
 
-Scheduled runs remain dry-run until `JOB_ARCHIVING_ENABLED=true` and `JOB_ARCHIVING_PILOT_COMPLETE=true`. Apply mode also requires `JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID` to identify the selected pilot job and an unexpired `AGENT2_PILOT` hold for that job. These gates prevent the first bulk archive run from starting before the pilot is complete and protected. The hold can be created in the Streamlit Archive category.
+Scheduled runs remain dry-run until `JOB_ARCHIVING_ENABLED=true` and `JOB_ARCHIVING_PILOT_COMPLETE=true`. The **initial** `APPLY` activation run also requires `JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID` to identify the selected pilot job and an unexpired `AGENT2_PILOT` hold for that job, preventing the first bulk archive run from starting before the pilot is complete and protected. Once the initial `APPLY` run has succeeded, ongoing daily `APPLY` runs continue operating after that temporary `AGENT2_PILOT` hold expires or is released (while `runJobArchive` still honors any unexpired holds in `job_archive_holds`). The hold can be created in the Streamlit Archive category.
 
 Run a dry-run locally with:
 

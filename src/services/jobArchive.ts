@@ -524,7 +524,7 @@ async function archiveOne(
        UPDATE pipeline_task_attempts attempt
        SET status = 'COMPLETED', finished_at = $3::timestamptz
        WHERE attempt.workspace_id = $1::uuid
-         AND attempt.status = 'RUNNING'
+         AND attempt.status = 'STARTED'
          AND attempt.task_id IN (SELECT id FROM completed_tasks)`,
       [input.workspaceId, input.canonicalJobId, input.runStartedAt],
     );

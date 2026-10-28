@@ -28,13 +28,19 @@ function argumentValue(args: readonly string[], flag: string): string | undefine
   return prefixed?.slice(flag.length + 1);
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export interface ArchiveApplyActivationStatus {
+  readonly activationState: "INITIAL_ACTIVATION_VERIFIED" | "ONGOING_DAILY_OPERATION";
+}
+
 function parseOptions(args: readonly string[]): ArchiveCliOptions {
   const rawMode = argumentValue(args, "--mode")?.toUpperCase() ?? "DRY_RUN";
   if (rawMode !== "DRY_RUN" && rawMode !== "APPLY") {
     throw new Error("--mode must be DRY_RUN or APPLY.");
   }
   const workspaceId = argumentValue(args, "--workspace-id")?.trim() || null;
-  if (workspaceId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId)) {
+  if (workspaceId !== null && !UUID_PATTERN.test(workspaceId)) {
     throw new Error("--workspace-id must be a UUID.");
   }
   return {
@@ -45,32 +51,90 @@ function parseOptions(args: readonly string[]): ArchiveCliOptions {
   };
 }
 
-async function requireActivePilotHold(
+async function hasCompletedInitialApplyRun(
+  pool: pg.Pool,
+  workspaceId: string | null,
+): Promise<boolean> {
+  const result = await pool.query<{ completed: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM job_archive_runs
+       WHERE mode = 'APPLY'
+         AND status = 'SUCCEEDED'
+         AND ($1::uuid IS NULL OR report_summary->>'workspace_id' = ($1::uuid)::text)
+     ) AS completed`,
+    [workspaceId],
+  );
+  return result.rows[0]?.completed === true;
+}
+
+async function requireActivePilotHoldForInitialActivation(
   pool: pg.Pool,
   pilotJobId: string,
   runStartedAt: Date,
+  workspaceId: string | null,
 ): Promise<void> {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(pilotJobId)) {
+  if (!UUID_PATTERN.test(pilotJobId)) {
     throw new Error("JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID must be a UUID.");
   }
   const result = await pool.query<{ held: boolean }>(
     `SELECT EXISTS (
        SELECT 1 FROM job_archive_holds
-       WHERE canonical_job_id = $1
+       WHERE canonical_job_id = $1::uuid
+         AND ($3::uuid IS NULL OR workspace_id = $3::uuid)
          AND hold_type = 'AGENT2_PILOT'
          AND released_at IS NULL
-         AND expires_at > $2
+         AND expires_at > $2::timestamptz
      ) AS held`,
-    [pilotJobId, runStartedAt],
+    [pilotJobId, runStartedAt, workspaceId],
   );
   if (result.rows[0]?.held !== true) {
-    throw new Error("APPLY requires an active AGENT2_PILOT archive hold for JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID.");
+    throw new Error(
+      "Initial APPLY activation requires an active AGENT2_PILOT archive hold for JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID.",
+    );
   }
 }
 
-export async function run(): Promise<void> {
-  const options = parseOptions(process.argv.slice(2));
-  const runStartedAt = new Date();
+export async function verifyArchiveApplyActivation(
+  pool: pg.Pool,
+  options: {
+    readonly runStartedAt: Date;
+    readonly workspaceId?: string | null;
+    readonly env?: NodeJS.ProcessEnv;
+  },
+): Promise<ArchiveApplyActivationStatus> {
+  const env = options.env ?? process.env;
+  const workspaceId = options.workspaceId ?? null;
+  if (env.WORKFLOW_KILL_SWITCH?.trim().toLowerCase() === "true") {
+    throw new Error("Archive apply is disabled by WORKFLOW_KILL_SWITCH.");
+  }
+  if (env.JOB_ARCHIVING_ENABLED?.trim().toLowerCase() !== "true") {
+    throw new Error("Archive apply requires JOB_ARCHIVING_ENABLED=true.");
+  }
+  if (env.JOB_ARCHIVING_PILOT_COMPLETE?.trim().toLowerCase() !== "true") {
+    throw new Error("Archive apply requires JOB_ARCHIVING_PILOT_COMPLETE=true after the live-job pilot.");
+  }
+  const pilotJobId = env.JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID?.trim() || "";
+  if (pilotJobId !== "" && !UUID_PATTERN.test(pilotJobId)) {
+    throw new Error("JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID must be a UUID.");
+  }
+  if (await hasCompletedInitialApplyRun(pool, workspaceId)) {
+    return { activationState: "ONGOING_DAILY_OPERATION" };
+  }
+  if (!pilotJobId) {
+    throw new Error(
+      "Initial APPLY activation requires JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID and its active AGENT2_PILOT hold.",
+    );
+  }
+  await requireActivePilotHoldForInitialActivation(pool, pilotJobId, options.runStartedAt, workspaceId);
+  return { activationState: "INITIAL_ACTIVATION_VERIFIED" };
+}
+
+export async function run(
+  args: readonly string[] = process.argv.slice(2),
+  runStartedAt: Date = new Date(),
+): Promise<void> {
+  const options = parseOptions(args);
   if (options.mode === "APPLY") {
     if (process.env.WORKFLOW_KILL_SWITCH?.trim().toLowerCase() === "true") {
       throw new Error("Archive apply is disabled by WORKFLOW_KILL_SWITCH.");
@@ -89,11 +153,10 @@ export async function run(): Promise<void> {
   const pool = new pg.Pool(pgPoolConfig(databaseUrl));
   try {
     if (options.mode === "APPLY") {
-      const pilotJobId = process.env.JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID?.trim();
-      if (!pilotJobId) {
-        throw new Error("APPLY requires JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID and its active AGENT2_PILOT hold.");
-      }
-      await requireActivePilotHold(pool, pilotJobId, runStartedAt);
+      await verifyArchiveApplyActivation(pool, {
+        runStartedAt,
+        workspaceId: options.workspaceId,
+      });
     }
     const report = await runJobArchive(pool, {
       mode: options.mode,

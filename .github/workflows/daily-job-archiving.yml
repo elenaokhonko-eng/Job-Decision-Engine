@@ -22,19 +22,45 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  validate-manual-dispatch:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate production ref and archive dispatch inputs
+        env:
+          REQUESTED_REF: ${{ github.ref }}
+          INPUT_MODE: ${{ inputs.mode }}
+          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH || 'false' }}
+          JOB_ARCHIVING_ENABLED: ${{ vars.JOB_ARCHIVING_ENABLED || 'false' }}
+          JOB_ARCHIVING_PILOT_COMPLETE: ${{ vars.JOB_ARCHIVING_PILOT_COMPLETE || 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$REQUESTED_REF" != "refs/heads/main" ]]; then
+            echo "Production archive workflows may only run reviewed code from main." >&2
+            exit 1
+          fi
+          if [[ "$INPUT_MODE" != "DRY_RUN" && "$INPUT_MODE" != "APPLY" ]]; then
+            echo "Archive mode must be DRY_RUN or APPLY." >&2
+            exit 1
+          fi
+          if [[ "$INPUT_MODE" == "APPLY" ]]; then
+            if [[ "$WORKFLOW_KILL_SWITCH" == "true" ]]; then
+              echo "Archive APPLY dispatch is disabled while WORKFLOW_KILL_SWITCH=true." >&2
+              exit 1
+            fi
+            if [[ "$JOB_ARCHIVING_ENABLED" != "true" || "$JOB_ARCHIVING_PILOT_COMPLETE" != "true" ]]; then
+              echo "Archive APPLY dispatch requires JOB_ARCHIVING_ENABLED=true and JOB_ARCHIVING_PILOT_COMPLETE=true." >&2
+              exit 1
+            fi
+          fi
+
   archive_jobs:
     name: Archive aged canonical jobs
+    needs: validate-manual-dispatch
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.validate-manual-dispatch.result == 'success') && github.ref == 'refs/heads/main' && vars.WORKFLOW_KILL_SWITCH != 'true' }}
     timeout-minutes: 30
-    env:
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
-      WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH || 'false' }}
-      JOB_ARCHIVING_ENABLED: ${{ vars.JOB_ARCHIVING_ENABLED || 'false' }}
-      JOB_ARCHIVING_PILOT_COMPLETE: ${{ vars.JOB_ARCHIVING_PILOT_COMPLETE || 'false' }}
-      JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID: ${{ vars.JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID || '' }}
-      ARCHIVE_MODE: ${{ github.event_name == 'schedule' && (vars.JOB_ARCHIVING_ENABLED == 'true' && vars.JOB_ARCHIVING_PILOT_COMPLETE == 'true' && 'APPLY' || 'DRY_RUN') || inputs.mode }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -46,8 +72,19 @@ jobs:
       - name: Install Node.js dependencies
         run: npm ci
       - name: Run database migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
         run: |
           npx tsx scripts/preflight_database.ts
           npx tsx src/db/migrate.ts
       - name: Run daily archive scan
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH || 'false' }}
+          JOB_ARCHIVING_ENABLED: ${{ vars.JOB_ARCHIVING_ENABLED || 'false' }}
+          JOB_ARCHIVING_PILOT_COMPLETE: ${{ vars.JOB_ARCHIVING_PILOT_COMPLETE || 'false' }}
+          JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID: ${{ vars.JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID || '' }}
+          ARCHIVE_MODE: ${{ github.event_name == 'schedule' && (vars.JOB_ARCHIVING_ENABLED == 'true' && vars.JOB_ARCHIVING_PILOT_COMPLETE == 'true' && 'APPLY' || 'DRY_RUN') || inputs.mode }}
         run: npx tsx scripts/archive_jobs.ts --mode "${ARCHIVE_MODE}" --page-size 250 --max-archives 500

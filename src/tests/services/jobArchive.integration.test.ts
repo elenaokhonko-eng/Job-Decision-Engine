@@ -4,6 +4,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createApiV2Router } from "../../api/v2/router.js";
+import { verifyArchiveApplyActivation } from "../../../scripts/archive_jobs.js";
 import { buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
 import { runNormalization } from "../../pipeline/normalize.js";
 import { runJobArchive, createArchiveHold } from "../../services/jobArchive.js";
@@ -346,6 +347,44 @@ describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
        ) VALUES ($1, 'APPLY_HARD_GATES', $2, $3::jsonb, 'archive-test-lease', 'RUNNING', $4, $5)`,
       [context.workspaceId, `archive-lease-${randomUUID()}`, JSON.stringify({ canonical_job_id: runningLeaseJob.canonicalJobId, job_version_id: runningLeaseJob.jobVersionId }), randomUUID(), new Date(runStartedAt.getTime() + 60 * 60 * 1000)],
     );
+    const expiredRunningTaskRes = await pool.query<{ id: string }>(
+      `INSERT INTO pipeline_tasks (
+         workspace_id, task_type, task_key, payload, context_fingerprint, status,
+         lease_id, lease_expires_at, attempt_count
+       ) VALUES ($1, 'APPLY_HARD_GATES', $2, $3::jsonb, 'archive-expired-lease', 'RUNNING', $4, $5, 1)
+       RETURNING id::text`,
+      [
+        context.workspaceId,
+        `archive-expired-lease-${randomUUID()}`,
+        JSON.stringify({ canonical_job_id: eligibleJob.canonicalJobId, job_version_id: eligibleJob.jobVersionId }),
+        randomUUID(),
+        new Date(runStartedAt.getTime() - 60 * 1000),
+      ],
+    );
+    const expiredRunningTaskId = expiredRunningTaskRes.rows[0]?.id;
+    if (!expiredRunningTaskId) throw new Error("Expired running task fixture was not inserted.");
+    await pool.query(
+      `INSERT INTO pipeline_task_attempts (
+         workspace_id, task_id, attempt_number, status, started_at
+       ) VALUES ($1, $2::uuid, 1, 'STARTED', $3::timestamptz)`,
+      [context.workspaceId, expiredRunningTaskId, new Date(runStartedAt.getTime() - 120 * 1000)],
+    );
+
+    const activationEnv: NodeJS.ProcessEnv = {
+      WORKFLOW_KILL_SWITCH: "false",
+      JOB_ARCHIVING_ENABLED: "true",
+      JOB_ARCHIVING_PILOT_COMPLETE: "true",
+      JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID: pilotJob.canonicalJobId,
+    };
+    await expect(
+      verifyArchiveApplyActivation(pool, {
+        runStartedAt,
+        workspaceId: context.workspaceId,
+        env: activationEnv,
+      }),
+    ).rejects.toThrow(/Initial APPLY activation requires an active AGENT2_PILOT archive hold/i);
+
+    const holdExpiresAt = new Date(runStartedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
     const client = await pool.connect();
     try {
       await createArchiveHold(client, {
@@ -354,11 +393,18 @@ describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
         holdReason: "Preserve the selected live-job application pilot.",
         holdType: "AGENT2_PILOT",
         createdBy: `user:${context.userId}`,
-        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        expiresAt: holdExpiresAt,
       });
     } finally {
       client.release();
     }
+
+    const initialActivation = await verifyArchiveApplyActivation(pool, {
+      runStartedAt,
+      workspaceId: context.workspaceId,
+      env: activationEnv,
+    });
+    expect(initialActivation).toEqual({ activationState: "INITIAL_ACTIVATION_VERIFIED" });
 
     const report = await runJobArchive(pool, {
       mode: "APPLY",
@@ -373,6 +419,49 @@ describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
     for (const protectedJob of [applicationJob, documentJob, runningLeaseJob, pilotJob]) {
       expect((await readArchiveState(protectedJob)).archived_at).toBeNull();
     }
+
+    const cleanedTask = await pool.query<{
+      status: string;
+      repair_action: string | null;
+      lease_id: string | null;
+      lease_expires_at: Date | null;
+      completed_at: Date | null;
+    }>(
+      `SELECT status, repair_action, lease_id::text, lease_expires_at, completed_at
+       FROM pipeline_tasks WHERE workspace_id = $1 AND id = $2::uuid`,
+      [context.workspaceId, expiredRunningTaskId],
+    );
+    expect(cleanedTask.rows[0]?.status).toBe("COMPLETED");
+    expect(cleanedTask.rows[0]?.repair_action).toBe("SKIPPED_ARCHIVED_JOB");
+    expect(cleanedTask.rows[0]?.lease_id).toBeNull();
+    expect(cleanedTask.rows[0]?.lease_expires_at).toBeNull();
+    expect(cleanedTask.rows[0]?.completed_at).toBeInstanceOf(Date);
+
+    const cleanedAttempt = await pool.query<{ status: string; finished_at: Date | null }>(
+      `SELECT status, finished_at
+       FROM pipeline_task_attempts WHERE workspace_id = $1 AND task_id = $2::uuid AND attempt_number = 1`,
+      [context.workspaceId, expiredRunningTaskId],
+    );
+    expect(cleanedAttempt.rows[0]?.status).toBe("COMPLETED");
+    expect(cleanedAttempt.rows[0]?.finished_at).toBeInstanceOf(Date);
+
+    const afterPilotHoldExpired = new Date(holdExpiresAt.getTime() + 24 * 60 * 60 * 1000);
+    const ongoingActivation = await verifyArchiveApplyActivation(pool, {
+      runStartedAt: afterPilotHoldExpired,
+      workspaceId: context.workspaceId,
+      env: activationEnv,
+    });
+    expect(ongoingActivation).toEqual({ activationState: "ONGOING_DAILY_OPERATION" });
+    const ongoingWithoutPilotEnv = await verifyArchiveApplyActivation(pool, {
+      runStartedAt: afterPilotHoldExpired,
+      workspaceId: context.workspaceId,
+      env: {
+        WORKFLOW_KILL_SWITCH: "false",
+        JOB_ARCHIVING_ENABLED: "true",
+        JOB_ARCHIVING_PILOT_COMPLETE: "true",
+      },
+    });
+    expect(ongoingWithoutPilotEnv).toEqual({ activationState: "ONGOING_DAILY_OPERATION" });
   });
 
   it("skips archived worker and handoff requests, preserves application history, and restores for reassessment", async () => {
