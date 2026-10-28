@@ -18,12 +18,25 @@ export function scopeSeedQuery(
   const hasObservationScope = scope.observationIds !== undefined;
   if (!hasJobScope && !hasObservationScope) return { sql, params: [...params] };
 
-  const limitMatch = /\s+LIMIT\s+\$\d+\s*$/i.exec(sql);
+  const limitMatch = /\s+LIMIT\s+\$(\d+)\s*$/i.exec(sql);
   if (!limitMatch || limitMatch.index === undefined) {
     throw new Error("Scoped task seeding requires a query with a final parameterized LIMIT.");
   }
-  const baseSql = sql.slice(0, limitMatch.index);
-  const baseParams = params.slice(0, -1);
+  const limitParameterIndex = Number(limitMatch[1]);
+  if (!Number.isInteger(limitParameterIndex) || limitParameterIndex < 1 || limitParameterIndex > params.length) {
+    throw new Error("Scoped task seeding requires the LIMIT placeholder to have a matching parameter.");
+  }
+  const unscopedSql = sql.slice(0, limitMatch.index);
+  const limitParameterIsReused = new RegExp(`\\$${limitParameterIndex}(?!\\d)`).test(unscopedSql);
+  const baseSql = limitParameterIsReused
+    ? unscopedSql
+    : unscopedSql.replace(/\$(\d+)/g, (placeholder, rawIndex: string) => {
+      const index = Number(rawIndex);
+      return index > limitParameterIndex ? `$${index - 1}` : placeholder;
+    });
+  const baseParams = limitParameterIsReused
+    ? [...params]
+    : [...params.slice(0, limitParameterIndex - 1), ...params.slice(limitParameterIndex)];
   const filters: string[] = [];
   const scopedParams = [...baseParams];
 
