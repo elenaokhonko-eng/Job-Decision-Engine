@@ -19,6 +19,14 @@ import {
   JobSourceEvidenceSchema,
   ExperienceRequirementScopeSchema,
   ProfileExperienceEvidenceSchema,
+  ArchiveJobRowSchema,
+  ArchiveHoldSchema,
+  ArchiveHoldCreateRequestSchema,
+  ArchiveHoldReleaseRequestSchema,
+  ArchiveRestoreRequestSchema,
+  ArchiveCandidateSchema,
+  ArchiveRunReportSchema,
+  ArchiveOperationsStatusSchema,
 } from "../src/contracts/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -46,6 +54,14 @@ const schemas = {
   JobSourceEvidence: JobSourceEvidenceSchema,
   ExperienceRequirementScope: ExperienceRequirementScopeSchema,
   ProfileExperienceEvidence: ProfileExperienceEvidenceSchema,
+  ArchiveJobRow: ArchiveJobRowSchema,
+  ArchiveHold: ArchiveHoldSchema,
+  ArchiveHoldCreateRequest: ArchiveHoldCreateRequestSchema,
+  ArchiveHoldReleaseRequest: ArchiveHoldReleaseRequestSchema,
+  ArchiveRestoreRequest: ArchiveRestoreRequestSchema,
+  ArchiveCandidate: ArchiveCandidateSchema,
+  ArchiveRunReport: ArchiveRunReportSchema,
+  ArchiveOperationsStatus: ArchiveOperationsStatusSchema,
 };
 
 console.log("Exporting runtime Zod contracts to JSON Schemas for Python and Streamlit...");

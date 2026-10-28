@@ -1,0 +1,153 @@
+{
+  "$ref": "#/definitions/ArchiveOperationsStatus",
+  "definitions": {
+    "ArchiveOperationsStatus": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "job_archive_v1"
+        },
+        "last_success_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_run_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latest_run_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latest_run_started_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_run_scanned_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_run_eligible_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_run_archived_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_run_protected_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_run_invalid_date_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_run_failed_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_run_observed_age_publication_unknown_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "last_success_at",
+        "latest_run_id",
+        "latest_run_status",
+        "latest_run_mode",
+        "latest_run_started_at",
+        "latest_run_scanned_count",
+        "latest_run_eligible_count",
+        "latest_run_archived_count",
+        "latest_run_protected_count",
+        "latest_run_invalid_date_count",
+        "latest_run_failed_count",
+        "latest_run_observed_age_publication_unknown_count"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

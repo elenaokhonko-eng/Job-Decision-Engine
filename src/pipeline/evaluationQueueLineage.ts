@@ -98,6 +98,7 @@ export async function selectEligibleEvaluationQueueRows(
          OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
        )
        AND eq.profile_version_id IS NOT NULL
+       AND c.archived_at IS NULL
        AND eq.job_version_id = c.latest_job_version_id
        AND eq.match_run_id = c.latest_match_run_id
        AND eq.deterministic_decision_id = c.latest_deterministic_decision_id
@@ -141,11 +142,34 @@ export async function supersedeStaleEvaluationQueueRows(
     : "";
   const { rowCount } = await client.query(
     `UPDATE evaluation_queue eq
-     SET status = 'SUPERSEDED',
+     SET status = CASE WHEN EXISTS (
+           SELECT 1 FROM canonical_jobs archived_job
+           WHERE archived_job.workspace_id = eq.workspace_id
+             AND archived_job.id = eq.canonical_job_id
+             AND archived_job.archived_at IS NOT NULL
+         ) THEN 'SKIPPED_ARCHIVED' ELSE 'SUPERSEDED' END,
+         skipped_at = CASE WHEN EXISTS (
+           SELECT 1 FROM canonical_jobs archived_job
+           WHERE archived_job.workspace_id = eq.workspace_id
+             AND archived_job.id = eq.canonical_job_id
+             AND archived_job.archived_at IS NOT NULL
+         ) THEN NOW() ELSE NULL END,
+         skip_reason_code = CASE WHEN EXISTS (
+           SELECT 1 FROM canonical_jobs archived_job
+           WHERE archived_job.workspace_id = eq.workspace_id
+             AND archived_job.id = eq.canonical_job_id
+             AND archived_job.archived_at IS NOT NULL
+         ) THEN 'JOB_ARCHIVED' ELSE NULL END,
          available_at = NULL,
          lease_id = NULL,
          lease_expires_at = NULL,
          last_error = CASE
+           WHEN EXISTS (
+             SELECT 1 FROM canonical_jobs archived_job
+             WHERE archived_job.workspace_id = eq.workspace_id
+               AND archived_job.id = eq.canonical_job_id
+               AND archived_job.archived_at IS NOT NULL
+           ) THEN NULL
            WHEN COALESCE(BTRIM(eq.last_error), '') = ''
              THEN 'SUPERSEDED: queue lineage is no longer authoritative.'
            ELSE eq.last_error || E'\\nSUPERSEDED: queue lineage is no longer authoritative.'
@@ -157,7 +181,14 @@ export async function supersedeStaleEvaluationQueueRows(
          eq.status IN ('PENDING', 'RETRY_WAIT')
          OR (eq.status = 'EVALUATING' AND eq.lease_expires_at < NOW())
        )
-       AND NOT EXISTS (
+       AND (
+         EXISTS (
+           SELECT 1 FROM canonical_jobs archived_job
+           WHERE archived_job.workspace_id = eq.workspace_id
+             AND archived_job.id = eq.canonical_job_id
+             AND archived_job.archived_at IS NOT NULL
+         )
+         OR NOT EXISTS (
          SELECT 1
          FROM canonical_jobs c
          JOIN job_versions jv
@@ -192,6 +223,7 @@ export async function supersedeStaleEvaluationQueueRows(
            AND eq.match_run_id = mr.id
            AND eq.deterministic_decision_id = dd.id
            AND eq.job_content_hash = jv.content_hash
+         )
        )
      RETURNING eq.id`,
     params,

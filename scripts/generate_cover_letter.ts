@@ -142,7 +142,8 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const jobRes = await pool.query(
       `SELECT
          c.id,
-         COALESCE(c.latest_job_version_id, (
+        c.archived_at,
+        COALESCE(c.latest_job_version_id, (
            SELECT jv_current.id
            FROM job_versions jv_current
            WHERE jv_current.canonical_job_id = c.id
@@ -243,6 +244,9 @@ async function generateTailoredCoverLetter(): Promise<void> {
     }
 
     const job = jobRes.rows[0];
+    if (job.archived_at !== null && job.archived_at !== undefined) {
+      throw new Error("Document generation rejected: archived jobs must be restored and reassessed first.");
+    }
     const jdTitle = job.title || "Unknown Role";
     const jdCompany = job.company_name || "Unknown Company";
     const jdDescription = job.raw_description || "";

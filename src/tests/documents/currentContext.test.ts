@@ -33,6 +33,13 @@ describe("documents/currentContext", () => {
     recommendation_outcome: "REVIEW",
   });
 
+  it("rejects archived jobs before evaluating document readiness", () => {
+    expect(validateDocumentCurrentContext({
+      ...currentContext(),
+      archived_at: "2026-10-01T00:00:00.000Z",
+    })).toEqual({ ok: false, reason: "JOB_ARCHIVED" });
+  });
+
   it("rejects a selected job version that is no longer current", () => {
     const context = { ...currentContext(), selected_job_version_id: "job-version-old" };
 

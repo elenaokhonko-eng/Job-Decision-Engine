@@ -922,6 +922,7 @@ export async function runLaneRouter(
           LIMIT 1
         ) jv ON TRUE
         WHERE c.workspace_id = $1
+          AND c.archived_at IS NULL
           AND (${replayableStateFilter})
           ${replayExistingDecisionFilter}
           ${jobVersionFilter}

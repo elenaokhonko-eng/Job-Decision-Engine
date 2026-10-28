@@ -186,6 +186,7 @@ export async function runExplanationQueueEnqueuer(
           LEFT JOIN lane_budgets lb ON lb.lane = c.primary_lane
           LEFT JOIN budget_usage bu ON bu.lane = c.primary_lane
           WHERE c.workspace_id = $1::uuid
+            AND c.archived_at IS NULL
             AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
             AND c.primary_lane IS NOT NULL
             AND c.primary_lane <> 'UNCLASSIFIED'

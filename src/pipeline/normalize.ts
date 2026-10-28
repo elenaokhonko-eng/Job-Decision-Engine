@@ -8,6 +8,8 @@ import { classifyDescriptionQuality, MIN_COMPLETE_DESCRIPTION_CHARS } from "./de
 import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { extractFreshnessEvidence } from "../ingestion/freshnessEvidence.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
+import { assessJobArchiveAge, referenceIsOlderThanCutoff, subtractCalendarMonths } from "../services/jobArchivePolicy.js";
+import { reactivateGenuineRepost } from "../services/jobArchive.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -116,6 +118,28 @@ export async function runNormalization(
             console.warn(`Normalized source evidence is invalid for observation ${obs.id}; continuing with unknown evidence.`);
           }
         }
+        const normalizationStartedAt = new Date();
+        const incomingAgeAssessment = assessJobArchiveAge([{
+          job_version_id: "incoming-observation",
+          source_posting_identity_hash: freshnessEvidence.postingIdentityHash,
+          source_published_at: freshnessEvidence.sourcePublishedAt,
+          reposted_at: freshnessEvidence.repostedAt,
+          first_seen_at: obs.retrieved_at,
+          observation_first_seen_at: obs.retrieved_at,
+          date_evidence: normalizedEvidence,
+        }], freshnessEvidence.postingIdentityHash, normalizationStartedAt);
+        let incomingSourcePublishedAt: string | null = null;
+        if (incomingAgeAssessment.status === "REFERENCE_FOUND" &&
+            (incomingAgeAssessment.ageBasis === "AUTHORITATIVE_PUBLICATION_DATE" ||
+              incomingAgeAssessment.ageBasis === "GENUINE_REPOST_DATE")) {
+          incomingSourcePublishedAt = normalizedEvidence?.dates.published_at.status === "SUPPORTED"
+            ? normalizedEvidence.dates.published_at.value
+            : freshnessEvidence.sourcePublishedAt;
+        }
+        const incomingRepostedAt = incomingAgeAssessment.status === "REFERENCE_FOUND" &&
+          incomingAgeAssessment.ageBasis === "GENUINE_REPOST_DATE"
+          ? incomingAgeAssessment.referenceAt.toISOString()
+          : null;
         const evidenceRevisionHash = normalizedEvidence ? buildEvidenceRevisionHash(normalizedEvidence) : null;
         let canonicalJobId: string | null = null;
         let isExistingJob = false;
@@ -220,7 +244,20 @@ export async function runNormalization(
           );
           canonicalJobId = insertCanon.rows[0].id;
         }
-        
+        if (canonicalJobId === null) throw new Error("Normalization did not resolve a canonical job identity.");
+        const archiveStateResult = await client.query<{
+          archived_at: Date | null;
+          archive_reference_at: Date | null;
+        }>(
+          `SELECT archived_at, archive_reference_at
+           FROM canonical_jobs
+           WHERE workspace_id = $1 AND id = $2
+           FOR UPDATE`,
+          [ctx.workspaceId, canonicalJobId],
+        );
+        const archiveState = archiveStateResult.rows[0];
+        if (!archiveState) throw new Error(`Canonical job ${canonicalJobId} disappeared during normalization.`);
+
         // A repeated source posting identity reuses its version; a verified new posting
         // identity can create a new version even when the description content hash is equal.
         if (!existingVersionId) {
@@ -255,14 +292,19 @@ export async function runNormalization(
           !existingVersionId &&
           typeof obs.source_external_id === 'string' &&
           obs.source_external_id.trim().length > 0;
-        const effectiveFreshnessBasis = freshnessEvidence.repostedAt
-          ? 'REPOSTED_AT'
-          : newSourcePostingIdentity
-            ? 'NEW_POSTING_ID'
-            : freshnessEvidence.freshnessBasis;
-        const effectiveFreshnessConfidence = newSourcePostingIdentity
+        let effectiveFreshnessBasis: 'REPOSTED_AT' | 'POSTED_AT' | 'NEW_POSTING_ID' | null = null;
+        if (incomingRepostedAt !== null) {
+          effectiveFreshnessBasis = 'REPOSTED_AT';
+        } else if (incomingSourcePublishedAt !== null) {
+          effectiveFreshnessBasis = 'POSTED_AT';
+        } else if (newSourcePostingIdentity) {
+          effectiveFreshnessBasis = 'NEW_POSTING_ID';
+        }
+        const effectiveFreshnessConfidence = effectiveFreshnessBasis === 'NEW_POSTING_ID'
           ? 75
-          : freshnessEvidence.freshnessConfidence;
+          : effectiveFreshnessBasis === null
+            ? null
+            : 100;
 
         let resolvedVersionId = existingVersionId;
         let createdNewVersion = false;
@@ -282,10 +324,10 @@ export async function runNormalization(
               canonicalJobId,
               normalizedContentHash,
               obs.description_raw,
-              freshnessEvidence.sourcePublishedAt,
+              incomingSourcePublishedAt,
               freshnessEvidence.sourceUpdatedAt,
               freshnessEvidence.sourceExpiresAt,
-              freshnessEvidence.repostedAt,
+              incomingRepostedAt,
               freshnessEvidence.postingIdentityHash,
               obs.retrieved_at,
               effectiveFreshnessBasis,
@@ -311,9 +353,21 @@ export async function runNormalization(
                    ELSE source_updated_at
                  END,
                  source_expires_at = COALESCE(source_expires_at, $4),
-                 reposted_at = COALESCE(reposted_at, $5),
-                 freshness_basis = COALESCE(freshness_basis, $6),
-                 freshness_confidence = COALESCE(freshness_confidence, $7),
+                 reposted_at = CASE
+                   WHEN $5::timestamptz IS NULL THEN reposted_at
+                   WHEN reposted_at IS NULL OR reposted_at < $5::timestamptz THEN $5::timestamptz
+                   ELSE reposted_at
+                 END,
+                 freshness_basis = CASE
+                   WHEN $6::text = 'REPOSTED_AT' THEN 'REPOSTED_AT'
+                   WHEN freshness_basis IS NULL THEN $6
+                   ELSE freshness_basis
+                 END,
+                 freshness_confidence = CASE
+                   WHEN $6::text = 'REPOSTED_AT' THEN $7
+                   WHEN freshness_confidence IS NULL THEN $7
+                   ELSE freshness_confidence
+                 END,
                  source_posting_identity_hash = COALESCE(source_posting_identity_hash, $8),
                  availability_status = CASE
                    WHEN $11::text IN ('OPEN', 'CLOSED')
@@ -342,10 +396,10 @@ export async function runNormalization(
              WHERE workspace_id = $9 AND id = $10`,
             [
               obs.retrieved_at,
-              freshnessEvidence.sourcePublishedAt,
+              incomingSourcePublishedAt,
               freshnessEvidence.sourceUpdatedAt,
               freshnessEvidence.sourceExpiresAt,
-              freshnessEvidence.repostedAt,
+              incomingRepostedAt,
               effectiveFreshnessBasis,
               effectiveFreshnessConfidence,
               freshnessEvidence.postingIdentityHash,
@@ -435,6 +489,41 @@ export async function runNormalization(
               isNewVersionInferior,
             ]
           );
+        }
+
+        let reactivationDate: Date | null = null;
+        let reactivationEvidenceType: "GENUINE_REPOST_DATE" | "NEW_POSTING_IDENTITY" | null = null;
+        if (incomingRepostedAt !== null) {
+          reactivationDate = new Date(incomingRepostedAt);
+          reactivationEvidenceType = "GENUINE_REPOST_DATE";
+        } else if (
+          newSourcePostingIdentity &&
+          incomingAgeAssessment.status === "REFERENCE_FOUND" &&
+          !referenceIsOlderThanCutoff(
+            incomingAgeAssessment.referenceAt,
+            subtractCalendarMonths(normalizationStartedAt, 3),
+          )
+        ) {
+          reactivationDate = incomingAgeAssessment.referenceAt;
+          reactivationEvidenceType = "NEW_POSTING_IDENTITY";
+        }
+        if (archiveState.archived_at !== null && reactivationDate !== null && reactivationEvidenceType !== null) {
+          const currentVersion = await client.query<{ latest_job_version_id: string | null }>(
+            `SELECT latest_job_version_id::text
+             FROM canonical_jobs
+             WHERE workspace_id = $1 AND id = $2`,
+            [ctx.workspaceId, canonicalJobId],
+          );
+          if (currentVersion.rows[0]?.latest_job_version_id === resolvedVersionId) {
+            await reactivateGenuineRepost(client, {
+              workspaceId: ctx.workspaceId,
+              canonicalJobId,
+              actor: "system:source-normalizer",
+              repostedAt: reactivationDate,
+              repostEvidenceHash: evidenceRevisionHash ?? freshnessEvidence.postingIdentityHash ?? String(obs.raw_payload_hash),
+              evidenceType: reactivationEvidenceType,
+            });
+          }
         }
 
         // Every observation, including a duplicate, receives a durable version mapping.

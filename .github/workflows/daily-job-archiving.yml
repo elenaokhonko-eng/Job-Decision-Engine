@@ -1,0 +1,53 @@
+name: Daily Job Archiving
+
+on:
+  schedule:
+    - cron: "15 19 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Archive mode. Apply requires JOB_ARCHIVING_ENABLED=true."
+        type: choice
+        options:
+          - DRY_RUN
+          - APPLY
+        default: DRY_RUN
+        required: true
+
+concurrency:
+  group: job-decision-daily-archiving
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  archive_jobs:
+    name: Archive aged canonical jobs
+    runs-on: ubuntu-latest
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+      WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH || 'false' }}
+      JOB_ARCHIVING_ENABLED: ${{ vars.JOB_ARCHIVING_ENABLED || 'false' }}
+      JOB_ARCHIVING_PILOT_COMPLETE: ${{ vars.JOB_ARCHIVING_PILOT_COMPLETE || 'false' }}
+      JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID: ${{ vars.JOB_ARCHIVE_PILOT_CANONICAL_JOB_ID || '' }}
+      ARCHIVE_MODE: ${{ github.event_name == 'schedule' && (vars.JOB_ARCHIVING_ENABLED == 'true' && vars.JOB_ARCHIVING_PILOT_COMPLETE == 'true' && 'APPLY' || 'DRY_RUN') || inputs.mode }}
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v5
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Node.js dependencies
+        run: npm ci
+      - name: Run database migrations
+        run: |
+          npx tsx scripts/preflight_database.ts
+          npx tsx src/db/migrate.ts
+      - name: Run daily archive scan
+        run: npx tsx scripts/archive_jobs.ts --mode "${ARCHIVE_MODE}" --page-size 250 --max-archives 500

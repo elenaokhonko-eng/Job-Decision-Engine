@@ -1,0 +1,38 @@
+{
+  "$ref": "#/definitions/ArchiveHoldCreateRequest",
+  "definitions": {
+    "ArchiveHoldCreateRequest": {
+      "type": "object",
+      "properties": {
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "hold_reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "hold_type": {
+          "type": "string",
+          "enum": [
+            "USER_PRESERVE",
+            "AGENT2_PILOT"
+          ]
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "canonical_job_id",
+        "hold_reason",
+        "hold_type",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

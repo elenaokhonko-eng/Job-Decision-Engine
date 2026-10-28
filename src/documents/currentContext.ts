@@ -1,4 +1,5 @@
 export interface DocumentCurrentContext {
+  readonly archived_at?: Date | string | null;
   readonly current_job_version_id: string | null;
   readonly selected_job_version_id: string | null;
   readonly active_profile_version_id: string | null;
@@ -33,7 +34,7 @@ export type DocumentCurrentnessResult =
   | { readonly ok: true }
   | {
       readonly ok: false;
-      readonly reason: "JOB_VERSION_STALE" | "PROFILE_STALE" | "MATCH_STALE" | "DECISION_STALE" | "READINESS_NOT_READY";
+      readonly reason: "JOB_ARCHIVED" | "JOB_VERSION_STALE" | "PROFILE_STALE" | "MATCH_STALE" | "DECISION_STALE" | "READINESS_NOT_READY";
     };
 
 function isPresent(value: string | null): value is string {
@@ -54,6 +55,10 @@ function hasCurrentReadyAssessment(context: DocumentCurrentContext): boolean {
 }
 
 export function validateDocumentCurrentContext(context: DocumentCurrentContext): DocumentCurrentnessResult {
+  if (context.archived_at !== null && context.archived_at !== undefined) {
+    return { ok: false, reason: "JOB_ARCHIVED" };
+  }
+
   if (
     !isPresent(context.current_job_version_id) ||
     context.selected_job_version_id !== context.current_job_version_id
