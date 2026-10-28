@@ -221,7 +221,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("074_rebalance_optional_ranking_confidence.sql");
     expect(versions).toContain("076_lower_top_ten_confidence_threshold.sql");
     expect(versions).toContain("078_evidence_readiness_discovery.sql");
-    expect(versions).toContain("079_reversible_job_archiving.sql");
+    expect(versions).toContain("080_reversible_job_archiving.sql");
   });
 
   it("078 is replay-safe and creates workspace-scoped evidence/readiness ledgers and read models", async () => {

@@ -481,15 +481,15 @@ async function archiveOne(
       `WITH skipped_tasks AS (
          SELECT task.id
          FROM pipeline_tasks task
-         WHERE task.workspace_id = $1
+         WHERE task.workspace_id = $1::uuid
            AND task.task_type <> 'NORMALIZE_OBSERVATION'
            AND (task.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
-             OR (task.status = 'RUNNING' AND (task.lease_expires_at IS NULL OR task.lease_expires_at <= $3)))
-           AND (task.payload->>'canonical_job_id' = $2::text
+             OR (task.status = 'RUNNING' AND (task.lease_expires_at IS NULL OR task.lease_expires_at <= $3::timestamptz)))
+           AND (task.payload->>'canonical_job_id' = ($2::uuid)::text
              OR EXISTS (
                SELECT 1 FROM job_versions version
-               WHERE version.workspace_id = $1
-                 AND version.canonical_job_id = $2
+               WHERE version.workspace_id = $1::uuid
+                 AND version.canonical_job_id = $2::uuid
                  AND task.payload->>'job_version_id' = version.id::text
              )
              OR EXISTS (
@@ -497,29 +497,29 @@ async function archiveOne(
                JOIN job_versions version
                  ON version.workspace_id = observation.workspace_id
                 AND version.id = observation.job_version_id
-               WHERE observation.workspace_id = $1
+               WHERE observation.workspace_id = $1::uuid
                  AND observation.id::text = task.payload->>'observation_id'
-                 AND version.canonical_job_id = $2
+                 AND version.canonical_job_id = $2::uuid
              ))
          FOR UPDATE SKIP LOCKED
        ), completed_tasks AS (
          UPDATE pipeline_tasks task
          SET status = 'COMPLETED',
-             completed_at = $3,
+             completed_at = $3::timestamptz,
              lease_id = NULL,
              lease_expires_at = NULL,
              heartbeat_at = NULL,
              last_error = NULL,
              dead_letter_reason = NULL,
              repair_action = 'SKIPPED_ARCHIVED_JOB',
-             updated_at = $3
+             updated_at = $3::timestamptz
          FROM skipped_tasks
-         WHERE task.workspace_id = $1 AND task.id = skipped_tasks.id
+         WHERE task.workspace_id = $1::uuid AND task.id = skipped_tasks.id
          RETURNING task.id
        )
        UPDATE pipeline_task_attempts attempt
-       SET status = 'COMPLETED', finished_at = $3
-       WHERE attempt.workspace_id = $1
+       SET status = 'COMPLETED', finished_at = $3::timestamptz
+       WHERE attempt.workspace_id = $1::uuid
          AND attempt.status = 'RUNNING'
          AND attempt.task_id IN (SELECT id FROM completed_tasks)`,
       [input.workspaceId, input.canonicalJobId, input.runStartedAt],
@@ -613,7 +613,7 @@ export async function runJobArchive(
 
     capabilities = await readSchemaCapabilities(client);
     if (options.mode === "APPLY" && (!capabilities.archiveColumns || !capabilities.archiveRunTable || !capabilities.archiveHoldTable || !capabilities.evaluationQueueSkipColumns || !capabilities.rawObservationEvidence)) {
-      throw new Error("Archive schema migration 079 must be applied before archive mode.");
+      throw new Error("Archive schema migration 080 must be applied before archive mode.");
     }
     if (!capabilities.archiveColumns) {
       throw new Error("Archive age scan requires migration 075 and the canonical job-version date columns.");
@@ -728,6 +728,10 @@ export async function runJobArchive(
       failed_jobs: failedJobs,
     });
 
+    if (readOnlyTransaction) {
+      await client.query("COMMIT");
+      readOnlyTransaction = false;
+    }
     if (runId !== null) {
       const persistedRunStatus = runStatus === "DRY_RUN" ? "SUCCEEDED" : runStatus;
       await client.query(
@@ -756,10 +760,6 @@ export async function runJobArchive(
           }),
           JSON.stringify(failedJobs), completedAt],
       );
-    }
-    if (readOnlyTransaction) {
-      await client.query("COMMIT");
-      readOnlyTransaction = false;
     }
     console.log(JSON.stringify(report, null, 2));
     await appendWorkflowSummary(report);
