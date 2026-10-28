@@ -3,6 +3,7 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { isProfileFactModelShareable } from '../profile/privacy.js';
 import { listActiveLaneRevisions } from '../lanes/registry.js';
 import type { LaneFileConfig } from '../lanes/contracts.js';
 
@@ -232,15 +233,18 @@ export async function buildEmbeddingInputs(
         statement: string;
         structured_value: unknown;
         evidence_tier: string;
+        confidentiality: string;
       }>(
         `SELECT pf.id, COALESCE(pf.fact_revision_id, pf.id) AS embedding_node_id,
-                pf.fact_type, pf.statement, pf.structured_value, pf.evidence_tier
+                pf.fact_type, pf.statement, pf.structured_value, pf.evidence_tier, pf.confidentiality
          FROM profile_facts pf
          JOIN profile_versions pv
            ON pv.workspace_id = pf.workspace_id
           AND pv.id = pf.profile_version_id
           AND pv.status = 'ACTIVE'
          WHERE pf.workspace_id = $1
+           AND pf.fact_type <> 'CONTACT'
+           AND pf.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')
            ${profileVersionScope}
          ORDER BY pf.created_at ASC
          LIMIT ${profileFactLimit}`,
@@ -248,6 +252,7 @@ export async function buildEmbeddingInputs(
       );
 
       for (const row of factRows.rows) {
+        if (!isProfileFactModelShareable(row)) continue;
         const contentText = buildProfileFactInputText(row);
         const contentHash = hashText(contentText);
         const embeddingNodeId = row.embedding_node_id || row.id;

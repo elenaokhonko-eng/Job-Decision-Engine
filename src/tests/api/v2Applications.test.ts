@@ -47,13 +47,35 @@ describe("api/v2 application tracker", () => {
   function readinessRow(readinessStatus: string | null, reasonCodes: string[] = []) {
     const expiresAt = "2099-01-01T00:00:00.000Z";
     const fingerprint = "a".repeat(64);
+    const status = readinessStatus ?? "READY";
+    const nonReadyCheckStatus = status === "BLOCKED" || status === "NEEDS_VERIFICATION" || status === "PROCESSING"
+      ? status
+      : "MET";
+    const readinessReason = reasonCodes[0] ?? null;
     const applicationReadiness = {
-      status: readinessStatus ?? "READY",
+      schema_version: "application_readiness_v1",
+      status,
+      reason_codes: reasonCodes,
+      checks: [{
+        key: "COMPENSATION",
+        status: nonReadyCheckStatus,
+        importance: status === "READY" ? "PREFERRED" : "MUST",
+        reason_code: status === "READY" ? null : readinessReason,
+        rationale: "Deterministic application readiness fixture.",
+        evidence_keys: [],
+        policy_reference: null,
+        assessed_at: "2098-01-01T00:00:00.000Z",
+        expires_at: null,
+      }],
       canonical_job_id: "22222222-2222-4222-8222-222222222222",
       job_version_id: "33333333-3333-4333-8333-333333333333",
       profile_version_id: null,
       requirement_set_id: null,
       match_run_id: null,
+      preference_context_id: null,
+      policy_snapshot_id: null,
+      policy_version: "test-policy-v1",
+      qualification_comparator_version: "test-comparator-v1",
       evidence_revision_hash: "b".repeat(64),
       readiness_fingerprint: fingerprint,
       evaluated_at: "2098-01-01T00:00:00.000Z",

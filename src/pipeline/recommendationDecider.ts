@@ -11,10 +11,10 @@ import {
   evaluateCompensationPolicy,
   evaluateJobFreshness,
   inferOpportunityCategory,
-  parseCompensationEvidence,
   type CompensationEvaluationResult,
-  type JobCompensationInput,
 } from "../policy/stage3PolicyEngine.js";
+import { resolveCompensationEvidence } from "./compensationEvidence.js";
+import { buildCompensationReadinessCheck } from "./compensationReadiness.js";
 import { resolveFrankfurterSgdRate } from "../policy/fxRateService.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
 import type { MaterialReadinessCheck } from "../contracts/applicationReadiness.js";
@@ -187,29 +187,6 @@ function asIso(value: Date | string | null): string | null {
   if (value === null) return null;
   const date = value instanceof Date ? value : new Date(value);
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
-}
-
-function compensationInputForJob(raw: string | null, evidence: JobSourceEvidence | null): JobCompensationInput | null {
-  if (evidence?.compensation.status === "CONFLICTING") return null;
-  const baseCashComponents = evidence?.compensation.components.filter((component) => component.component_type === "BASE_CASH") ?? [];
-  if (baseCashComponents.length === 0) return parseCompensationEvidence(raw);
-  if (baseCashComponents.length !== 1) return null;
-  const baseCash = baseCashComponents[0];
-  if (!baseCash) return null;
-  const salaryPeriod = baseCash.period === "ANNUAL" || baseCash.period === "MONTHLY" || baseCash.period === "HOURLY"
-    ? baseCash.period
-    : "UNKNOWN";
-  const quote = baseCash.evidence.map((span) => span.quote_text).join(" ");
-  return parseCompensationEvidence(quote, {
-    salary_min: baseCash.amount_min,
-    salary_max: baseCash.amount_max,
-    salary_currency: baseCash.currency,
-    salary_period: salaryPeriod,
-    salary_basis: baseCash.pay_basis,
-    component_type: baseCash.component_type,
-    guaranteed_hours_per_week: baseCash.guaranteed_hours_per_week,
-    paid_weeks_per_year: baseCash.paid_weeks_per_year,
-  });
 }
 
 export async function runRecommendationDecider(
@@ -436,7 +413,8 @@ export async function runRecommendationDecider(
         continue;
       }
       const sourceEvidence = parseSourceEvidence(job.normalized_source_evidence);
-      const compensationInput = compensationInputForJob(job.compensation_raw, sourceEvidence);
+      const compensationResolution = resolveCompensationEvidence(job.compensation_raw, sourceEvidence?.compensation ?? null);
+      const compensationInput = compensationResolution.input;
       let fxRateObservationId: string | null = null;
       let fxRateFailure: string | null = null;
       if (
@@ -798,38 +776,17 @@ export async function runRecommendationDecider(
           compensationPolicy.mission_multilateral_min_annual_sgd,
           compensationPolicy.startup_min_cash_salary_monthly_sgd,
         ].some((value) => typeof value === "number" && value > 0));
-        const compensationStatus = !hasCompensationFloor
-          ? "NOT_APPLICABLE"
-          : compensationAssessment === null || compensationAssessment.status === "UNKNOWN"
-            ? "NEEDS_VERIFICATION"
-            : compensationAssessment.status === "BELOW_FLOOR" ? "BLOCKED" : "MET";
-        const compensationBasisUnconfigured = hasCompensationFloor && !compensationPolicy?.target_salary_basis;
-        readinessChecks.push(readinessCheck(
-          "COMPENSATION",
-          compensationStatus,
-          compensationStatus === "NOT_APPLICABLE"
-            ? "No active compensation floor is configured."
-            : compensationStatus === "NEEDS_VERIFICATION"
-              ? fxRateFailure
-                ? "Compensation conversion or source evidence is unavailable and requires retry/verification."
-                : compensationBasisUnconfigured
-                  ? "The active compensation policy does not define whether the salary target is gross or net; no advertised basis is assumed."
-                  : "Guaranteed base compensation, salary basis, period, currency, or category is unresolved."
-              : compensationStatus === "BLOCKED"
-                ? compensationAssessment?.evidence ?? "Guaranteed base compensation is below the active floor."
-                : compensationAssessment?.evidence ?? "Guaranteed base compensation meets the active floor.",
-          readinessAssessedAt,
-          {
-            reasonCode: compensationStatus === "BLOCKED"
-              ? "COMPENSATION_BELOW_USER_FLOOR"
-              : compensationStatus === "NEEDS_VERIFICATION"
-                ? compensationBasisUnconfigured ? "COMPENSATION_TARGET_BASIS_UNCONFIGURED" : "COMPENSATION_UNKNOWN"
-                : null,
-            importance: compensationStatus === "NOT_APPLICABLE" ? "PREFERRED" : "MUST",
-            evidenceKeys: fxRateObservationId ? [`fx_rate_observation:${fxRateObservationId}`] : [],
-            policyReference: compensationStatus === "NOT_APPLICABLE" ? `stage3_compensation:${preferenceContext.revisionsByDomain.stage3 ?? "unconfigured"}` : null,
-          },
-        ));
+        readinessChecks.push(buildCompensationReadinessCheck({
+          floorConfigured: hasCompensationFloor,
+          resolutionKind: compensationResolution.kind,
+          assessment: compensationAssessment,
+          resolutionReason: compensationResolution.reason,
+          basisConfigured: Boolean(compensationPolicy?.target_salary_basis),
+          fxRateFailure,
+          fxRateObservationId,
+          preferenceRevisionId: preferenceContext.revisionsByDomain.stage3 ?? null,
+          assessedAt: readinessAssessedAt,
+        }));
 
         const employerPolicyStatus = normalizedGateDecision === "HARD_REJECT"
           ? "BLOCKED"

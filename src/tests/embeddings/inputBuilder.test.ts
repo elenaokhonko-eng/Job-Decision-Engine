@@ -30,6 +30,15 @@ describe('buildEmbeddingInputs', () => {
               statement: 'Built production data pipelines',
               structured_value: { throughput: '2M/day' },
               evidence_tier: 'PROFESSIONAL_PRODUCTION',
+              confidentiality: 'PRIVATE_REUSABLE',
+            },
+            {
+              id: '33333333-3333-4333-8333-333333333333',
+              fact_type: 'CONTACT',
+              statement: 'Private contact detail for document rendering',
+              structured_value: { kind: 'phone', value: '+6500000000' },
+              evidence_tier: 'KNOWLEDGE_ONLY',
+              confidentiality: 'PRIVATE_INTERNAL',
             },
           ],
         };
@@ -58,6 +67,9 @@ describe('buildEmbeddingInputs', () => {
     expect(summary.fromProfileFacts).toBe(1);
 
     const calls = query.mock.calls.map((c: unknown[]) => String(c[0]));
+    const profileFactQuery = calls.find((sql) => sql.includes('FROM profile_facts pf'));
+    expect(profileFactQuery).toContain("pf.fact_type <> 'CONTACT'");
+    expect(profileFactQuery).toContain("pf.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')");
     expect(calls.filter((sql) => sql.includes('INSERT INTO embedding_inputs')).length).toBe(2);
   });
 
@@ -143,6 +155,7 @@ describe('buildEmbeddingInputs', () => {
           statement: 'Active v6 profile fact',
           structured_value: null,
           evidence_tier: 'PROFESSIONAL_PRODUCTION',
+          confidentiality: 'PRIVATE_REUSABLE',
         }] };
       }
       if (sql.includes('FROM canonical_jobs c')) {
@@ -195,6 +208,7 @@ describe('buildEmbeddingInputs', () => {
           statement: 'Active profile fact',
           structured_value: null,
           evidence_tier: 'PROFESSIONAL_PRODUCTION',
+          confidentiality: 'PRIVATE_REUSABLE',
         }] };
       }
       if (sql.includes('FROM canonical_jobs c')) {

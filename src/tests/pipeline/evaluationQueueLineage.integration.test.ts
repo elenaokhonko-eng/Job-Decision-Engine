@@ -223,6 +223,7 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
   let policySnapshotId = "";
   let validFixture: LineageFixture;
   let staleFixture: LineageFixture;
+  let unrelatedStaleFixture: LineageFixture;
   let bulkFixtures: LineageFixture[] = [];
   let latestGateDecisionId = "";
 
@@ -260,6 +261,7 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
 
     validFixture = await createFixture(profileVersionId, policySnapshotId, "valid-different-match-fingerprint");
     staleFixture = await createFixture(profileVersionId, policySnapshotId, "stale-match");
+    unrelatedStaleFixture = await createFixture(profileVersionId, policySnapshotId, "stale-match");
     latestGateDecisionId = (await insertGateDecisionHistory(validFixture, 9)) ?? "";
     if (!latestGateDecisionId) throw new Error("The gate-decision fan-out fixture was not seeded.");
 
@@ -308,9 +310,15 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
     const superseded = await supersedeStaleEvaluationQueueRows(database, {
       workspaceId: getContext().workspaceId,
       profileVersionId,
+      jobVersionIds: [staleFixture.jobVersionId],
     });
 
     expect(superseded).toBe(1);
+    const unrelated = await database.query<{ status: string }>(
+      `SELECT status FROM evaluation_queue WHERE id = $1`,
+      [unrelatedStaleFixture.queueId],
+    );
+    expect(unrelated.rows[0]?.status).toBe("PENDING");
     const preserved = await database.query<{
       status: string;
       last_error: string | null;
@@ -425,6 +433,11 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
         [getContext().workspaceId, validFixture.queueId],
       );
       expect(queue.rows[0]?.status).toBe("NEEDS_MANUAL_REVIEW");
+      const unrelatedQueue = await getClient().query<{ status: string }>(
+        `SELECT status FROM evaluation_queue WHERE workspace_id = $1 AND id = $2`,
+        [getContext().workspaceId, unrelatedStaleFixture.queueId],
+      );
+      expect(unrelatedQueue.rows[0]?.status).toBe("PENDING");
       await closeEvaluationQueuePool();
       closeQueuePool = undefined;
     } finally {

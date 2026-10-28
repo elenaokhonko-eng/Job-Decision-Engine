@@ -3,6 +3,7 @@ import pg from 'pg';
 import { runMigrations } from '../../db/migrate.js';
 import { isLocalPostgresConnectionString, pgConnectionConfig } from '../../db/pgSsl.js';
 import { applyApprovedProfileUpdateSession } from '../../profile/updateSession.js';
+import { loadProfileContactInfo } from '../../documents/contactInfo.js';
 import type { WorkspaceContext } from '../../workspace/context.js';
 
 const DB_URL = process.env.DATABASE_URL || '';
@@ -266,6 +267,70 @@ describe.skipIf(skipReal)('P3: profile update sessions (optimistic + idempotent 
       )
     ).rows[0].id as string;
 
+    const addContactOpId = (
+      await q(
+        `INSERT INTO profile_update_proposed_operations (
+           workspace_id,
+           session_id,
+           operation_type,
+           operation_key,
+           target_fact_key,
+           payload
+         )
+         VALUES ($1, $2, 'ADD_FACT', 'add-contact-1', NULL, $3::jsonb)
+         RETURNING id`,
+        [
+          workspaceId,
+          sessionId,
+          JSON.stringify({
+            fact_key: 'contact_email',
+            fact_type: 'CONTACT',
+            statement: 'Synthetic test contact',
+            structured_value: { kind: 'email', value: 'contact-test@example.invalid' },
+            evidence_tier: 'KNOWLEDGE_ONLY',
+            verification_status: 'SELF_ATTESTED',
+            start_date: null,
+            end_date: null,
+            is_current: true,
+            confidentiality: 'PRIVATE_INTERNAL',
+            engagement_key: null,
+          }),
+        ]
+      )
+    ).rows[0].id as string;
+
+    const addContactPhoneOpId = (
+      await q(
+        `INSERT INTO profile_update_proposed_operations (
+           workspace_id,
+           session_id,
+           operation_type,
+           operation_key,
+           target_fact_key,
+           payload
+         )
+         VALUES ($1, $2, 'ADD_FACT', 'add-contact-phone-1', NULL, $3::jsonb)
+         RETURNING id`,
+        [
+          workspaceId,
+          sessionId,
+          JSON.stringify({
+            fact_key: 'contact_phone',
+            fact_type: 'CONTACT',
+            statement: 'Synthetic test phone contact',
+            structured_value: { kind: 'phone', value: '+6500000000' },
+            evidence_tier: 'KNOWLEDGE_ONLY',
+            verification_status: 'SELF_ATTESTED',
+            start_date: null,
+            end_date: null,
+            is_current: true,
+            confidentiality: 'PRIVATE_INTERNAL',
+            engagement_key: null,
+          }),
+        ]
+      )
+    ).rows[0].id as string;
+
     await q(
       `INSERT INTO profile_update_operation_approvals (
          workspace_id,
@@ -290,6 +355,30 @@ describe.skipIf(skipReal)('P3: profile update sessions (optimistic + idempotent 
        ON CONFLICT (operation_id) DO NOTHING`,
       [workspaceId, sessionId, addOpId, userId]
     );
+    await q(
+      `INSERT INTO profile_update_operation_approvals (
+         workspace_id,
+         session_id,
+         operation_id,
+         approved_by_user_id,
+         decision
+       )
+       VALUES ($1, $2, $3, $4, 'APPROVED')
+       ON CONFLICT (operation_id) DO NOTHING`,
+      [workspaceId, sessionId, addContactOpId, userId]
+    );
+    await q(
+      `INSERT INTO profile_update_operation_approvals (
+         workspace_id,
+         session_id,
+         operation_id,
+         approved_by_user_id,
+         decision
+       )
+       VALUES ($1, $2, $3, $4, 'APPROVED')
+       ON CONFLICT (operation_id) DO NOTHING`,
+      [workspaceId, sessionId, addContactPhoneOpId, userId]
+    );
 
     const applied = await applyApprovedProfileUpdateSession(sessionId, client, { context: ctx });
     expect(applied.status).toBe('APPLIED');
@@ -301,24 +390,84 @@ describe.skipIf(skipReal)('P3: profile update sessions (optimistic + idempotent 
     expect(applied.alreadyApplied).toBe(false);
 
     const versions = await q(
-      `SELECT version_number, status
+      `SELECT id, version_number, status
        FROM profile_versions
        WHERE workspace_id = $1 AND candidate_profile_id = $2
        ORDER BY version_number ASC`,
       [workspaceId, candidateProfileId]
     );
-    expect(versions.rows.map((r) => r.status)).toEqual(['RETIRED', 'ACTIVE']);
+    expect(versions.rows.map((r) => [r.version_number, r.status])).toEqual([
+      [1, 'RETIRED'],
+      [2, 'ACTIVE'],
+    ]);
+    expect(versions.rows[1].id).toBe(applied.appliedProfileVersionId);
 
     const facts = await q(
-      `SELECT fact_key, statement
+      `SELECT fact_key, fact_type, statement, structured_value, confidentiality, fact_revision_id
        FROM profile_facts
        WHERE workspace_id = $1 AND profile_version_id = $2
        ORDER BY fact_key ASC`,
       [workspaceId, applied.appliedProfileVersionId]
     );
-    expect(facts.rows).toHaveLength(2);
+    expect(facts.rows).toHaveLength(4);
     expect(facts.rows.find((r) => r.fact_key === 'skill_python')?.statement).toBe('Python + SQL');
     expect(facts.rows.find((r) => r.fact_key === 'project_alpha')?.statement).toBe('Built alpha system');
+
+    const contactFact = facts.rows.find((r) => r.fact_key === 'contact_email');
+    expect(contactFact).toMatchObject({
+      fact_type: 'CONTACT',
+      statement: 'Synthetic test contact',
+      structured_value: { kind: 'email', value: 'contact-test@example.invalid' },
+      confidentiality: 'PRIVATE_INTERNAL',
+    });
+    expect(contactFact?.fact_revision_id).toBeTruthy();
+    expect(facts.rows.find((r) => r.fact_key === 'contact_phone')).toMatchObject({
+      fact_type: 'CONTACT',
+      structured_value: { kind: 'phone', value: '+6500000000' },
+      confidentiality: 'PRIVATE_INTERNAL',
+    });
+    const contactInfo = await loadProfileContactInfo(
+      client,
+      workspaceId,
+      applied.appliedProfileVersionId,
+      'Profile Display Name',
+    );
+    expect(contactInfo.phone).toBe('+6500000000');
+
+    const contactRevision = await q(
+      `SELECT revision.revision_number, revision.schema_version, revision.fact_type,
+              profile_version.status AS profile_status
+       FROM profile_facts fact
+       JOIN profile_fact_revisions revision ON revision.id = fact.fact_revision_id
+       JOIN profile_version_fact_snapshots snapshot
+         ON snapshot.profile_version_id = fact.profile_version_id
+        AND snapshot.fact_identity_id = fact.fact_identity_id
+        AND snapshot.fact_revision_id = fact.fact_revision_id
+       JOIN profile_versions profile_version ON profile_version.id = snapshot.profile_version_id
+       WHERE fact.workspace_id = $1
+         AND fact.profile_version_id = $2
+         AND fact.fact_key = 'contact_email'`,
+      [workspaceId, applied.appliedProfileVersionId]
+    );
+    expect(contactRevision.rows).toEqual([
+      {
+        revision_number: 1,
+        schema_version: '2.2.0',
+        fact_type: 'CONTACT',
+        profile_status: 'ACTIVE',
+      },
+    ]);
+
+    const historicalFacts = await q(
+      `SELECT fact_key, fact_type, statement
+       FROM profile_facts
+       WHERE workspace_id = $1 AND profile_version_id = $2
+       ORDER BY fact_key ASC`,
+      [workspaceId, baseProfileVersionId]
+    );
+    expect(historicalFacts.rows).toEqual([
+      { fact_key: 'skill_python', fact_type: 'SKILL', statement: 'Python' },
+    ]);
 
     const appliedAgain = await applyApprovedProfileUpdateSession(sessionId, client, { context: ctx });
     expect(appliedAgain.status).toBe('APPLIED');

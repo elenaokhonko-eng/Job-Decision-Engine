@@ -925,6 +925,7 @@ export async function runHardGates(
             `SELECT pf.id, pf.statement, pf.structured_value
              FROM profile_facts pf
              WHERE pf.workspace_id = $1
+               AND pf.fact_type <> 'CONTACT'
              ${activeProfileVersionId ? "AND pf.profile_version_id = $2" : "AND FALSE"}`,
             activeProfileVersionId ? [ctx.workspaceId, activeProfileVersionId] : [ctx.workspaceId]
           );

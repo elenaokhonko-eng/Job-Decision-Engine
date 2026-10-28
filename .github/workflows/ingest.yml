@@ -19,7 +19,7 @@ jobs:
   gmail_ingestion:
     name: Ingest Gmail job alerts
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.WORKFLOW_KILL_SWITCH != 'true' }}
     timeout-minutes: 20
     steps:
       - name: Checkout repository code
@@ -69,7 +69,7 @@ jobs:
   public_source_ingestion:
     name: Ingest public job sources
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.WORKFLOW_KILL_SWITCH != 'true' }}
     timeout-minutes: 20
     steps:
       - name: Checkout repository code
@@ -104,7 +104,7 @@ jobs:
     needs: [gmail_ingestion, public_source_ingestion]
     # Drain staged work whenever at least one discovery source ran without cancellation.
     # An ingestion error will be surfaced at the end so partial work is processed.
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && !cancelled() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success' || needs.gmail_ingestion.result == 'failure' || needs.public_source_ingestion.result == 'failure') }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.WORKFLOW_KILL_SWITCH != 'true' && !cancelled() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success' || needs.gmail_ingestion.result == 'failure' || needs.public_source_ingestion.result == 'failure') }}
     timeout-minutes: 60
     steps:
       - name: Checkout repository code

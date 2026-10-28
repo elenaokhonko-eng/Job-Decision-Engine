@@ -32,11 +32,29 @@ jobs:
   desktop-release:
     name: Build Windows desktop installer
     runs-on: windows-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    env:
+      JDEC_DESKTOP_PUBLISH_REQUESTED: ${{ inputs.publish }}
+      WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
+    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && ((github.ref == 'refs/heads/main' && inputs.publish != true) || (startsWith(github.ref, 'refs/tags/v') && inputs.publish == true)) }}
     timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify release tag targets reviewed main history
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not fetch the reviewed main branch for release validation."
+          }
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tags must point to a commit already contained in reviewed main history."
+          }
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -115,7 +133,7 @@ jobs:
 
       - name: Upload unsigned installer for SignPath signing
         id: upload-unsigned-installer
-        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ inputs.publish == true && env.SIGNPATH_API_TOKEN != '' }}
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
         uses: actions/upload-artifact@v4
@@ -126,7 +144,7 @@ jobs:
 
       - name: Submit signing request to SignPath Foundation
         id: signpath-signing
-        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ inputs.publish == true && env.SIGNPATH_API_TOKEN != '' }}
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
           SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
@@ -143,7 +161,7 @@ jobs:
           output-artifact-directory: ${{ runner.temp }}\signed-desktop-build
 
       - name: Apply signed installer and verify SignPath signature
-        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ inputs.publish == true && env.SIGNPATH_API_TOKEN != '' }}
         shell: pwsh
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}

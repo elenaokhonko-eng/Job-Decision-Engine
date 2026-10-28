@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: '0 * * * *' # Run hourly
   workflow_dispatch:
+    inputs:
+      canonical_job_id:
+        description: Canonical job UUID for the scoped pilot
+        required: false
+        type: string
+      job_version_id:
+        description: Current job version UUID for the scoped pilot
+        required: false
+        type: string
 
 concurrency:
   group: evaluation-queue-worker
@@ -13,10 +22,39 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  validate-manual-dispatch:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate ref and scoped pilot inputs
+        env:
+          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
+          REQUESTED_REF: ${{ github.ref }}
+          INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
+          INPUT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          if [[ "$REQUESTED_REF" != "refs/heads/main" ]]; then
+            echo "Production queue workflows may only run reviewed code from main." >&2
+            exit 1
+          fi
+          if [[ "$WORKFLOW_KILL_SWITCH" == "true" ]]; then
+            if [[ ! "$INPUT_CANONICAL_JOB_ID" =~ $uuid_re || ! "$INPUT_JOB_VERSION_ID" =~ $uuid_re ]]; then
+              echo "With the workflow kill switch enabled, valid canonical_job_id and job_version_id inputs are required." >&2
+              exit 1
+            fi
+          elif [[ -n "$INPUT_CANONICAL_JOB_ID" || -n "$INPUT_JOB_VERSION_ID" ]]; then
+            echo "Scoped pilot dispatches require WORKFLOW_KILL_SWITCH=true." >&2
+            exit 1
+          fi
+
   evaluate-queue:
     name: Process Pending & Retrying Evaluations
+    needs: validate-manual-dispatch
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.validate-manual-dispatch.result == 'success') && github.ref == 'refs/heads/main' && vars.WORKFLOW_KILL_SWITCH != 'true' }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -39,6 +77,7 @@ jobs:
           npx tsx src/db/migrate.ts
 
       - name: Run AI Evaluation Queue Processor
+        if: ${{ github.event_name != 'workflow_dispatch' || (inputs.canonical_job_id == '' && inputs.job_version_id == '') }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
@@ -54,8 +93,52 @@ jobs:
         run: npx tsx scripts/evaluate_queue.ts
 
       - name: Materialize current application rankings
-        if: ${{ success() }}
+        if: ${{ success() && (github.event_name != 'workflow_dispatch' || (inputs.canonical_job_id == '' && inputs.job_version_id == '')) }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
         run: npx tsx scripts/materialize_application_rankings.ts
+
+  scoped-pilot:
+    name: Run one-job production pilot
+    needs: validate-manual-dispatch
+    runs-on: ubuntu-latest
+    if: ${{ always() && needs.validate-manual-dispatch.result == 'success' && vars.WORKFLOW_KILL_SWITCH == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.canonical_job_id != '' && inputs.job_version_id != '' }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Verify the production schema before scoped execution
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+        run: |
+          npx tsx scripts/preflight_database.ts
+          npx tsx scripts/verify_migration_status.ts
+
+      - name: Process only the selected job version
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
+          PILOT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
+          PILOT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
+          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
+          MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
+        run: npx tsx scripts/run_scoped_pilot.ts --canonical-job-id "$PILOT_CANONICAL_JOB_ID" --job-version-id "$PILOT_JOB_VERSION_ID"

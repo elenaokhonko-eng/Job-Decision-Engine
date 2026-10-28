@@ -10,7 +10,7 @@
  *
  * Notes:
  *  - No dependency on master_profile.json for evidence.
- *  - Contact info is supplied via DOCUMENT_CONTACT_JSON (preferred) or private/profile/contact.json.
+ *  - Contact info is resolved from the active profile graph; legacy local sources only fill missing fields.
  */
 
 import pg from "pg";
@@ -24,6 +24,7 @@ import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
+import { loadProfileContactInfo, requireCvContactInfo } from "../src/documents/contactInfo.js";
 import { validateDocumentCurrentContext, type DocumentCurrentContext } from "../src/documents/currentContext.js";
 import {
   isCurrentReadyApplicationReadiness,
@@ -154,53 +155,6 @@ function clampText(value: string, maxLen: number): string {
   const text = String(value || "").trim();
   if (text.length <= maxLen) return text;
   return `${text.slice(0, Math.max(0, maxLen - 1)).trim()}…`;
-}
-
-function parseJsonEnv(name: string): unknown | null {
-  const raw = String(process.env[name] || "").trim();
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch (err: any) {
-    throw new Error(`Failed to parse ${name}: ${err?.message || err}`);
-  }
-}
-
-function loadContactInfo(candidateName: string): any {
-  let contact: any = parseJsonEnv("DOCUMENT_CONTACT_JSON");
-
-  if (!contact && process.env.MASTER_PROFILE_JSON) {
-    const parsed = parseJsonEnv("MASTER_PROFILE_JSON") as any;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.contact) {
-      console.warn("WARNING: Using MASTER_PROFILE_JSON.contact for contact info only. Prefer DOCUMENT_CONTACT_JSON.");
-      contact = parsed.contact;
-    }
-  }
-
-  if (!contact) {
-    const contactPath = path.join(process.cwd(), "private", "profile", "contact.json");
-    if (fs.existsSync(contactPath)) {
-      contact = JSON.parse(fs.readFileSync(contactPath, "utf8"));
-    }
-  }
-
-  if (!contact || typeof contact !== "object" || Array.isArray(contact)) {
-    contact = {};
-  }
-
-  if (typeof contact.full_name !== "string" || contact.full_name.trim().length === 0) {
-    contact.full_name = candidateName;
-  }
-
-  const required = ["full_name", "location", "email", "phone"];
-  const missing = required.filter((key) => typeof contact[key] !== "string" || String(contact[key]).trim().length === 0);
-  if (missing.length > 0) {
-    throw new Error(
-      `Missing required contact fields (${missing.join(", ")}). Provide DOCUMENT_CONTACT_JSON or private/profile/contact.json.`
-    );
-  }
-
-  return contact;
 }
 
 function ensureKnownEvidenceIds(finalCv: any, knownFactIds: Set<string>): void {
@@ -429,7 +383,6 @@ async function generateTailoredCV(): Promise<void> {
     const job = jobRes.rows[0];
     const jdTitle = job.title || "Unknown Role";
     const jdCompany = job.company_name || "Unknown Company";
-    const jdLocation = job.location || "";
 
     const profileRes = await pool.query<ProfileRow>(
       `SELECT
@@ -477,6 +430,11 @@ async function generateTailoredCV(): Promise<void> {
     if (!currentness.ok) {
       throw new Error(`Document generation rejected stale context: ${currentness.reason}.`);
     }
+    const deterministicDecisionId = job.latest_deterministic_decision_id;
+    const contextFingerprint = job.decision_context_fingerprint;
+    if (!deterministicDecisionId || !contextFingerprint) {
+      throw new Error("Document generation rejected missing deterministic decision context.");
+    }
 
     const matchRunId = job.latest_match_run_id;
     if (!matchRunId) {
@@ -494,7 +452,12 @@ async function generateTailoredCV(): Promise<void> {
     const candidateName = String(profile.display_name || "").trim();
     const profileVersionNumber = String(profile.version_number || "").trim() || "unknown";
 
-    const contactInfo = loadContactInfo(candidateName);
+    const contactInfo = requireCvContactInfo(await loadProfileContactInfo(
+      pool,
+      ctx.workspaceId,
+      profileVersionId,
+      candidateName,
+    ));
 
     const schemaDir = path.join(process.cwd(), "scripts", "schemas");
     const tailoredCvSchemaPath = path.join(schemaDir, "tailored_cv.schema.json");
@@ -559,7 +522,8 @@ async function generateTailoredCV(): Promise<void> {
        FROM profile_facts pf
        WHERE pf.workspace_id = $1
          AND pf.profile_version_id = $2
-         AND pf.confidentiality <> 'PRIVATE_INTERNAL'
+         AND pf.fact_type <> 'CONTACT'
+         AND pf.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')
        ORDER BY pf.created_at ASC`,
       [ctx.workspaceId, profileVersionId]
     );
@@ -693,7 +657,6 @@ async function generateTailoredCV(): Promise<void> {
         employer: employerPrimary,
         ...(employerContext ? { employer_context: employerContext } : {}),
         title: engagement.role_title,
-        location: String(contactInfo.location || jdLocation || "").trim(),
         date_display: formatDateDisplay({
           start: engagement.start_date,
           end: engagement.end_date,
@@ -714,7 +677,8 @@ async function generateTailoredCV(): Promise<void> {
          ON tc.id = pfc.concept_id
        WHERE pfc.workspace_id = $1
          AND pf.profile_version_id = $2
-         AND pf.confidentiality <> 'PRIVATE_INTERNAL'
+         AND pf.fact_type <> 'CONTACT'
+         AND pf.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')
          AND tc.active = TRUE
        GROUP BY tc.canonical_label
        ORDER BY n DESC, tc.canonical_label ASC
@@ -802,10 +766,10 @@ async function generateTailoredCV(): Promise<void> {
       },
       cv: {
         contact: {
-          full_name: String(contactInfo.full_name),
-          location: String(contactInfo.location),
-          email: String(contactInfo.email),
-          phone: String(contactInfo.phone),
+          full_name: contactInfo.full_name,
+          location: contactInfo.location,
+          email: contactInfo.email,
+          phone: contactInfo.phone,
           ...(typeof contactInfo.linkedin === "string" && contactInfo.linkedin.trim().length > 0 ? { linkedin: contactInfo.linkedin } : {}),
           ...(typeof contactInfo.work_authorisation === "string" && contactInfo.work_authorisation.trim().length > 0
             ? { work_authorisation: contactInfo.work_authorisation }
@@ -857,28 +821,30 @@ async function generateTailoredCV(): Promise<void> {
 
     const pluginRevision = await getActiveDocumentTemplatePluginRevision("CV", pool, { context: ctx });
     const claims = collectCvClaims(finalCv);
+    const outputManifest = {
+      schema_version: "document_output_manifest_v1",
+      json_path: jsonPath,
+      docx_path: docxPath,
+      docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
+      pdf_path: pdfCreated ? pdfPath : null,
+      pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
+    };
     const provenance = await persistDocumentProvenance(
       {
         applicationRecordId,
         canonicalJobId: jobId,
         jobVersionId: resolvedJobVersionId,
         matchRunId: matchRunId,
-        profileVersionId: profileVersionId,
-        deterministicDecisionId: job.deterministic_decision_id,
-        contextFingerprint: job.decision_context_fingerprint,
+        profileVersionId,
+        deterministicDecisionId,
+        contextFingerprint,
         documentType: "CV",
         policyVersion: "documents_v2",
         generatorVersion: "cv_generator_deterministic_v1",
         modelRouteInvocationId: null,
         documentTemplatePluginRevisionId: pluginRevision?.revisionId ?? null,
         documentTemplatePluginKey: pluginRevision?.pluginKey ?? null,
-        outputManifest: {
-          json_path: jsonPath,
-          docx_path: docxPath,
-          docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
-          pdf_path: pdfCreated ? pdfPath : null,
-          pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
-        },
+        outputManifest,
         claims,
       },
       pool,
@@ -901,6 +867,7 @@ async function generateTailoredCV(): Promise<void> {
       deterministicDecisionId: job.deterministic_decision_id,
       contextFingerprint: job.decision_context_fingerprint,
       templateRevisionId: pluginRevision?.revisionId ?? null,
+      outputManifest: { ...outputManifest, manifest_hash: provenance.outputManifestHash },
       outputs: {
         json: { path: jsonPath },
         docx: {

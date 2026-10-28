@@ -1,5 +1,8 @@
 import * as fs from "fs";
+
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, convertInchesToTwip } from "docx";
+
+import { formatContactLine } from "../../documents/contactInfo.js";
 
 export async function generateDocx(cvData: any, outputPath: string) {
   const children: any[] = [];
@@ -17,7 +20,7 @@ export async function generateDocx(cvData: any, outputPath: string) {
     new Paragraph({
       alignment: AlignmentType.CENTER,
       children: [
-        new TextRun({ text: `${contact.location || ""} | ${contact.phone || ""} | ${contact.email || ""} | ${contact.linkedin || ""}`, size: 20, font: "Arial" }),
+        new TextRun({ text: formatContactLine(contact), size: 20, font: "Arial" }),
       ],
       spacing: { after: 300 },
     })

@@ -112,7 +112,10 @@ async function readEmbeddingCounts(
     `WITH active_profile_facts AS (
        SELECT DISTINCT COALESCE(fact.fact_revision_id, fact.id) AS node_id
        FROM profile_facts AS fact
-       WHERE fact.workspace_id = $1 AND fact.profile_version_id = $2
+       WHERE fact.workspace_id = $1
+         AND fact.profile_version_id = $2
+         AND fact.fact_type <> 'CONTACT'
+         AND fact.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')
      ),
      current_requirements AS (
        SELECT DISTINCT requirement.id AS node_id

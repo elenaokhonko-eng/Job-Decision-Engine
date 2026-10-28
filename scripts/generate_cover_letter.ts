@@ -28,6 +28,7 @@ import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
+import { loadProfileContactInfo, requireDocumentCandidateName } from "../src/documents/contactInfo.js";
 import { validateDocumentCurrentContext } from "../src/documents/currentContext.js";
 import {
   isCurrentReadyApplicationReadiness,
@@ -333,43 +334,16 @@ async function generateTailoredCoverLetter(): Promise<void> {
       );
     }
 
+    if (!selectedProfileVersionId) {
+      throw new Error("An active profile version is required to resolve document contact information.");
+    }
     const candidateName = String(profileNameRes.rows[0]?.display_name || "").trim();
-
-    let contactInfo: any = {};
-    const contactJson = String(process.env.DOCUMENT_CONTACT_JSON || "").trim();
-    if (contactJson) {
-      try {
-        contactInfo = JSON.parse(contactJson);
-      } catch (err: any) {
-        throw new Error(`Failed to parse DOCUMENT_CONTACT_JSON: ${err?.message || err}`);
-      }
-    } else if (process.env.MASTER_PROFILE_JSON) {
-      // Backward-compatibility: allow using MASTER_PROFILE_JSON *only* for contact info.
-      try {
-        const parsed = JSON.parse(String(process.env.MASTER_PROFILE_JSON));
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && (parsed as any).contact) {
-          console.warn("WARNING: Using MASTER_PROFILE_JSON.contact for contact info only. Prefer DOCUMENT_CONTACT_JSON.");
-          contactInfo = (parsed as any).contact;
-        }
-      } catch {
-        // Ignore legacy parse failures here; contact can still be derived from DB display_name.
-      }
-    } else {
-      const contactPath = path.join(process.cwd(), "private", "profile", "contact.json");
-      if (fs.existsSync(contactPath)) {
-        contactInfo = JSON.parse(fs.readFileSync(contactPath, "utf8"));
-      }
-    }
-
-    if (!contactInfo || typeof contactInfo !== "object" || Array.isArray(contactInfo)) {
-      contactInfo = {};
-    }
-    if (typeof contactInfo.full_name !== "string" || contactInfo.full_name.trim().length === 0) {
-      if (candidateName.length === 0) {
-        throw new Error("No ACTIVE profile display_name found and no DOCUMENT_CONTACT_JSON.full_name provided.");
-      }
-      contactInfo.full_name = candidateName;
-    }
+    const contactInfo = await loadProfileContactInfo(
+      pool,
+      ctx.workspaceId,
+      selectedProfileVersionId,
+      candidateName,
+    );
 
     // ── Step 3: Load cover letter schema ─────────────────────────────────────
     const schemaDir = path.join(process.cwd(), "scripts", "schemas");
@@ -442,7 +416,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
     // ── Step 4: Build prompt ─────────────────────────────────────────────────
     console.log("STAGE 1: Requesting AI cover letter draft...");
 
-    const clPrompt = `You are an expert cover letter writer generating a professional cover letter for ${contactInfo.full_name}.
+    const clPrompt = `You are an expert cover letter writer generating a professional cover letter for the candidate.
 
 ROLE: ${jdTitle} at ${jdCompany}
 LANE: ${primaryLane}
@@ -524,7 +498,8 @@ ${JSON.stringify(coverLetterSchema)}`;
 
     const safeTitle = jdTitle.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 20);
     const safeCompany = jdCompany.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 20);
-    const safeCandidate = String(contactInfo.full_name || "Candidate")
+    const candidateFullName = requireDocumentCandidateName(contactInfo);
+    const safeCandidate = candidateFullName
       .replace(/[^a-zA-Z0-9]/g, "_")
       .substring(0, 20);
     const baseFilename = `${safeCandidate}_CL_${safeCompany}_${safeTitle}`;
@@ -550,6 +525,14 @@ ${JSON.stringify(coverLetterSchema)}`;
 
     const pdfCreated = fs.existsSync(pdfPath);
     const claims = collectCoverLetterClaims(finalCl);
+    const outputManifest = {
+      schema_version: "document_output_manifest_v1",
+      json_path: jsonPath,
+      docx_path: docxPath,
+      docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
+      pdf_path: pdfCreated ? pdfPath : null,
+      pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
+    };
     const provenance = await persistDocumentProvenance(
       {
         applicationRecordId,
@@ -565,13 +548,7 @@ ${JSON.stringify(coverLetterSchema)}`;
         modelRouteInvocationId: generation.invocationId ?? null,
         documentTemplatePluginRevisionId: pluginRevision?.revisionId ?? null,
         documentTemplatePluginKey: pluginRevision?.pluginKey ?? null,
-        outputManifest: {
-          json_path: jsonPath,
-          docx_path: docxPath,
-          docx_sha256: crypto.createHash("sha256").update(fs.readFileSync(docxPath)).digest("hex"),
-          pdf_path: pdfCreated ? pdfPath : null,
-          pdf_sha256: pdfCreated ? crypto.createHash("sha256").update(fs.readFileSync(pdfPath)).digest("hex") : null,
-        },
+        outputManifest,
         claims,
       },
       pool,
@@ -594,6 +571,7 @@ ${JSON.stringify(coverLetterSchema)}`;
       deterministicDecisionId: job.deterministic_decision_id,
       contextFingerprint: job.decision_context_fingerprint,
       templateRevisionId: pluginRevision?.revisionId ?? null,
+      outputManifest: { ...outputManifest, manifest_hash: provenance.outputManifestHash },
       outputs: {
         json: { path: jsonPath },
         docx: {

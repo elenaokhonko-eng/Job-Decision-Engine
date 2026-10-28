@@ -216,6 +216,13 @@ export class SourceBroker {
     return this.sourceRunId as string;
   }
 
+  recordFetched(count: number): void {
+    if (!Number.isInteger(count) || count < 0) {
+      throw new Error("Fetched source record count must be a non-negative integer.");
+    }
+    this.stats.fetched += count;
+  }
+
   recordError(message: string): void {
     this.stats.errors++;
     this.errors.push(message);

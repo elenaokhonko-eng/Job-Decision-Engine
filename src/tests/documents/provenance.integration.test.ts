@@ -7,6 +7,7 @@ import pg from "pg";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { preflightApplicationDocumentDraft } from "../../documents/applicationDocumentPreflight.js";
 import { persistDocumentProvenance } from "../../documents/provenance.js";
 import { reconcileStalePendingPipelineTasks } from "../../tasks/pipelineTaskCurrentness.js";
 import { seedRecoverablePipelineTasks } from "../../tasks/stageTaskWorker.js";
@@ -307,6 +308,16 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
       [workspace.workspaceId, workspace.userId, canonicalJobId, jobVersionId],
     );
     const applicationRecordId = application.rows[0]?.id;
+    const draftPreflight = await preflightApplicationDocumentDraft(database, workspace, {
+      applicationRecordId: applicationRecordId ?? "",
+      canonicalJobId: canonicalJobId ?? "",
+      jobVersionId: jobVersionId ?? "",
+    });
+    expect(draftPreflight).toMatchObject({
+      applicationStatus: "INTENT",
+      readinessStatus: "READY",
+      readinessReasonCodes: [],
+    });
 
     const cv = await persistDocumentProvenance({
       applicationRecordId,
@@ -320,7 +331,11 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
       policyVersion: "documents-test-v1",
       generatorVersion: "cv-test-v1",
       documentTemplatePluginRevisionId: null,
-      outputManifest: { docx_path: "test/cv.docx", docx_sha256: "a".repeat(64) },
+      outputManifest: {
+            schema_version: "document_output_manifest_v1",
+            docx_path: "test/cv.docx",
+            docx_sha256: "a".repeat(64),
+          },
       claims: [],
     }, database, { context: workspace });
     const letter = await persistDocumentProvenance({
@@ -335,7 +350,11 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
       policyVersion: "documents-test-v1",
       generatorVersion: "cover-letter-test-v1",
       documentTemplatePluginRevisionId: null,
-      outputManifest: { docx_path: "test/cover-letter.docx", docx_sha256: "b".repeat(64) },
+      outputManifest: {
+            schema_version: "document_output_manifest_v1",
+            docx_path: "test/cover-letter.docx",
+            docx_sha256: "b".repeat(64),
+          },
       claims: [],
     }, database, { context: workspace });
 
@@ -444,6 +463,11 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
       [workspace.workspaceId],
     );
     expect(staleApplyNowRows.rows.some((row) => row.canonical_job_id === canonicalJobId)).toBe(false);
+    await expect(preflightApplicationDocumentDraft(database, workspace, {
+      applicationRecordId: applicationRecordId ?? "",
+      canonicalJobId: canonicalJobId ?? "",
+      jobVersionId: jobVersionId ?? "",
+    })).rejects.toThrow(/READY application evidence/i);
 
     const seeded = await seedRecoverablePipelineTasks(database, {
       context: workspace,

@@ -3,6 +3,8 @@ import pg from "pg";
 
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
+import { assertApplicationDocumentPairCurrent } from "../src/documents/documentPairPolicy.js";
+import { parseDocumentOutputManifest, type DocumentOutputManifestRecord } from "../src/documents/outputManifest.js";
 import { validatePersistedDocumentCurrentness } from "../src/documents/provenanceCurrentness.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
@@ -19,7 +21,7 @@ interface DocumentRunRow {
   readonly context_fingerprint: string | null;
   readonly document_type: "CV" | "COVER_LETTER";
   readonly document_template_plugin_revision_id: string | null;
-  readonly output_manifest: Record<string, unknown>;
+  readonly output_manifest: DocumentOutputManifestRecord;
 }
 
 interface PairRunResult {
@@ -43,7 +45,7 @@ async function readRun(
   documentType: "CV" | "COVER_LETTER",
 ): Promise<PairRunResult> {
   if (!runId) return { ready: false, reason: "DOCUMENT_RUN_MISSING", run: null };
-  const { rows } = await client.query<DocumentRunRow>(
+  const { rows } = await client.query<Omit<DocumentRunRow, "output_manifest"> & { readonly output_manifest: unknown }>(
     `SELECT id, canonical_job_id, job_version_id, match_run_id, profile_version_id,
             deterministic_decision_id, context_fingerprint, document_type,
             document_template_plugin_revision_id, output_manifest
@@ -53,8 +55,16 @@ async function readRun(
      LIMIT 1`,
     [context.workspaceId, runId, application.canonical_job_id, application.job_version_id, documentType],
   );
-  const run = rows[0];
-  if (!run || run.id !== runId) return { ready: false, reason: "DOCUMENT_RUN_NOT_FOUND", run: null };
+  const persistedRun = rows[0];
+  if (!persistedRun || persistedRun.id !== runId) {
+    return { ready: false, reason: "DOCUMENT_RUN_NOT_FOUND", run: null };
+  }
+  let run: DocumentRunRow;
+  try {
+    run = { ...persistedRun, output_manifest: parseDocumentOutputManifest(persistedRun.output_manifest) };
+  } catch {
+    return { ready: false, reason: "DOCUMENT_MANIFEST_INVALID", run: null };
+  }
 
   const currentness = await validatePersistedDocumentCurrentness(client, context.workspaceId, {
     canonicalJobId: run.canonical_job_id,
@@ -75,9 +85,11 @@ async function readRun(
 }
 
 async function main(): Promise<void> {
-  const applicationRecordId = requiredUuid(process.argv[2], "application record");
-  const cvDocumentRunId = requiredUuid(process.argv[3], "CV document run");
-  const coverLetterDocumentRunId = requiredUuid(process.argv[4], "cover-letter document run");
+  const requireCurrentPair = process.argv.includes("--require-current");
+  const positionalArgs = process.argv.slice(2).filter((argument) => argument !== "--require-current");
+  const applicationRecordId = requiredUuid(positionalArgs[0], "application record");
+  const cvDocumentRunId = requiredUuid(positionalArgs[1], "CV document run");
+  const coverLetterDocumentRunId = requiredUuid(positionalArgs[2], "cover-letter document run");
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error("DATABASE_URL is required for read-only document pair verification.");
 
@@ -119,6 +131,7 @@ async function main(): Promise<void> {
       cv.run.deterministic_decision_id === coverLetter.run.deterministic_decision_id &&
       cv.run.context_fingerprint === coverLetter.run.context_fingerprint);
     const pairCurrent = Boolean(linkedToApplication && sameContext && cv.ready && coverLetter.ready);
+    assertApplicationDocumentPairCurrent(pairCurrent, requireCurrentPair);
 
     let reviewedAt: string | null = null;
     if (pairCurrent && cv.run && coverLetter.run) {

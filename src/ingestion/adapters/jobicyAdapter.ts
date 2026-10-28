@@ -40,7 +40,7 @@ export class JobicyAdapter extends BaseSourceAdapter {
       if (response.status === 429) return this.errorResult("429 Rate limited", { isRateLimited: true });
       if (!response.ok) return this.errorResult(`HTTP ${response.status}: ${response.statusText}`);
 
-      const payload: unknown = await response.json();
+      const payload = await this.readJsonResponse(response);
       const data = asRecord(payload);
       const rawJobs: unknown[] = Array.isArray(payload)
         ? payload
@@ -49,6 +49,7 @@ export class JobicyAdapter extends BaseSourceAdapter {
           : Array.isArray(data?.data)
             ? data.data
             : [];
+      this.assertRecordCount(rawJobs, limit);
       const serverCursorValue = data?.nextCursor ?? data?.next_cursor ?? null;
       const serverNextCursor = typeof serverCursorValue === "string" && serverCursorValue.length > 0 ? serverCursorValue : null;
       const page = serverNextCursor !== null || (options.cursor && !options.cursor.startsWith("after:"))

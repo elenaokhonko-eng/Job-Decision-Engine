@@ -38,7 +38,7 @@ export const MaterialReadinessCheckSchema = z.object({
   policy_reference: z.string().min(1).nullable().default(null),
   assessed_at: z.string().datetime(),
   expires_at: z.string().datetime().nullable().default(null),
-}).superRefine((check, context) => {
+}).strict().superRefine((check, context) => {
   if (check.status === "NOT_APPLICABLE" && !check.policy_reference) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -67,7 +67,7 @@ export const ApplicationReadinessSchema = z.object({
   readiness_fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   evaluated_at: z.string().datetime(),
   expires_at: z.string().datetime().nullable(),
-}).superRefine((readiness, context) => {
+}).strict().superRefine((readiness, context) => {
   const mandatoryChecks = readiness.checks.filter((check) => check.importance === "MUST");
   const hasBlocker = mandatoryChecks.some((check) => check.status === "BLOCKED");
   const hasUnknown = mandatoryChecks.some((check) => check.status === "NEEDS_VERIFICATION");

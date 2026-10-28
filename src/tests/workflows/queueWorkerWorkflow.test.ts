@@ -62,6 +62,23 @@ describe("evaluation queue workflow", () => {
     expect(evaluator).not.toContain("LEFT JOIN gate_decisions");
   });
 
+  it("validates scoped production dispatches from main before database access", () => {
+    const workflow = readFileSync(resolve(".github/workflows/queue_worker.yml"), "utf8");
+    const validationJob = workflow.indexOf("validate-manual-dispatch:");
+    const standardJob = workflow.indexOf("evaluate-queue:");
+    const scopedJob = workflow.indexOf("scoped-pilot:");
+
+    expect(validationJob).toBeGreaterThan(-1);
+    expect(standardJob).toBeGreaterThan(validationJob);
+    expect(scopedJob).toBeGreaterThan(standardJob);
+    expect(workflow).toContain("REQUESTED_REF");
+    expect(workflow).toContain("refs/heads/main");
+    expect(workflow).toContain("valid canonical_job_id and job_version_id inputs are required.");
+    expect(workflow).toContain("[1-8][0-9a-fA-F]{3}");
+    expect(workflow).toContain("npx tsx scripts/verify_migration_status.ts");
+    expect(workflow).toContain("run_scoped_pilot.ts --canonical-job-id");
+  });
+
   it("requires queue context to match the current deterministic artifacts", () => {
     const lineage = readFileSync(resolve("src/pipeline/evaluationQueueLineage.ts"), "utf8");
 

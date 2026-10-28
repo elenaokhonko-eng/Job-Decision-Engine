@@ -3,7 +3,10 @@ import fs from "fs";
 import path from "path";
 import * as yaml from "js-yaml";
 import crypto from "crypto";
+import { GreenhouseAdapter } from "../../src/ingestion/adapters/greenhouseAdapter.js";
 import { JobicyAdapter } from "../../src/ingestion/adapters/jobicyAdapter.js";
+import { MAX_SOURCE_RECORDS, MAX_SOURCE_RESPONSE_BYTES } from "../../src/ingestion/adapters/baseAdapter.js";
+import { readResponseTextBounded } from "../../src/security/boundedResponse.js";
 import {
   SourcePluginSchema,
   IngestionEnvelopeSchema,
@@ -192,6 +195,41 @@ describe("Funnel V3 Independent Test Suite — Source Plugins & Adapters Audit (
       title: "Data Engineer",
     });
     expect(result.jobs.some((job) => job.source_external_id === "invalid-1")).toBe(false);
+  });
+
+  it("enforces byte limits while streaming when content length is absent", async () => {
+    const response = new Response("x".repeat(33));
+
+    await expect(readResponseTextBounded(response, 32, "Test response"))
+      .rejects.toThrow(/32-byte limit/);
+  });
+
+  it("rejects oversized source responses before parsing JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}", {
+        headers: { "content-length": String(MAX_SOURCE_RESPONSE_BYTES + 1) },
+      })),
+    );
+
+    const result = await new JobicyAdapter("https://jobicy.example/api").fetchJobs();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(`${MAX_SOURCE_RESPONSE_BYTES}-byte limit`);
+    expect(result.quarantined).toBeUndefined();
+  });
+
+  it("rejects an oversized source collection before item validation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ jobs: Array.from({ length: MAX_SOURCE_RECORDS + 1 }, () => ({})) })),
+    );
+
+    const result = await new GreenhouseAdapter("example").fetchJobs();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(`${MAX_SOURCE_RECORDS + 1} records`);
+    expect(result.quarantined).toBeUndefined();
   });
 
   it("S07: Exposes a Jobicy rate-limit response as an observable adapter failure", async () => {
