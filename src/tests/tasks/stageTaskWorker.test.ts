@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { planPipelineStageRound } from "../../tasks/pipelineStageScheduler.js";
 import { scopeSeedQuery } from "../../tasks/seedQueryScope.js";
+import { createTaskIntentV2 } from "../../tasks/taskIntent.js";
 import {
   PipelineWorkerCancelledError,
   buildPipelineTaskKey,
@@ -558,6 +559,15 @@ describe("stageTaskWorker", () => {
 
   it("completes deterministic extraction tasks when no deterministic patterns are found", async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const extractionPayload = { canonical_job_id: "job-empty", job_version_id: "version-empty" };
+    const extractionIntent = createTaskIntentV2({
+      workspaceId: ctx.workspaceId,
+      taskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      stageVersion: "deterministic_v3",
+      producer: "stageTaskWorker:EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      requestId: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v3",
+      payload: extractionPayload,
+    });
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params });
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
@@ -571,7 +581,7 @@ describe("stageTaskWorker", () => {
               workspace_id: ctx.workspaceId,
               task_type: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
               task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v3",
-              payload: { canonical_job_id: "job-empty", job_version_id: "version-empty" },
+              payload: { ...extractionPayload, task_intent: extractionIntent },
               status: "RUNNING",
               available_at: new Date().toISOString(),
               lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
@@ -666,14 +676,23 @@ describe("stageTaskWorker", () => {
       ignoreRetryWindow: true,
       reprocess: false,
     });
-    expect(
-      calls.some(
-        (call) =>
-          call.sql.includes("INSERT INTO pipeline_tasks") &&
-          call.params?.[1] === "APPLY_HARD_GATES" &&
-          call.params?.[2] === "APPLY_HARD_GATES:version-empty:hard_gate_v1"
-      )
-    ).toBe(true);
+    const gateTaskInsert = calls.find(
+      (call) =>
+        call.sql.includes("INSERT INTO pipeline_tasks") &&
+        call.params?.[1] === "APPLY_HARD_GATES" &&
+        call.params?.[2] === "APPLY_HARD_GATES:version-empty:hard_gate_v1",
+    );
+    expect(gateTaskInsert).toBeDefined();
+    expect(gateTaskInsert?.params?.[3]).toMatchObject({
+      canonical_job_id: "job-empty",
+      job_version_id: "version-empty",
+      task_intent: {
+        taskType: "APPLY_HARD_GATES",
+        target: { canonicalJobId: "job-empty", jobVersionId: "version-empty" },
+      },
+    });
+    expect((gateTaskInsert?.params?.[3] as Record<string, unknown>).task_intent)
+      .not.toEqual(extractionIntent);
   });
 
   it("defers an old match task until deterministic requirements have been repaired", async () => {
