@@ -2,3 +2,4 @@
 pytest==9.1.1
 ruff==0.17.1
 streamlit>=1.63.0
+jsonschema>=4.23.0

@@ -1,0 +1,39 @@
+{
+  "$ref": "#/definitions/ManualApprovalResponse",
+  "definitions": {
+    "ManualApprovalResponse": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "manual_application_v1"
+        },
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "approval_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "approved": {
+          "type": "boolean",
+          "const": true
+        },
+        "comparison_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "approval_id",
+        "approved",
+        "comparison_fingerprint"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

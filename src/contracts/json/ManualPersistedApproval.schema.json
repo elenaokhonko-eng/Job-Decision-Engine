@@ -1,0 +1,96 @@
+{
+  "$ref": "#/definitions/ManualPersistedApproval",
+  "definitions": {
+    "ManualPersistedApproval": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workspace_id": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+        },
+        "user_id": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+        },
+        "draft_id": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+        },
+        "candidate_profile_id": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+        },
+        "canonical_job_id": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+        },
+        "job_version_id": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+        },
+        "source_observation_id": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+        },
+        "job_content_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "profile_version_id": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+        },
+        "profile_contact_fact_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+          }
+        },
+        "profile_contact_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "preference_context_fingerprint": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/profile_contact_fingerprint"
+        },
+        "requirement_set_id": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/id"
+        },
+        "comparator_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "context_fingerprint": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/profile_contact_fingerprint"
+        },
+        "comparison_fingerprint": {
+          "$ref": "#/definitions/ManualPersistedApproval/properties/profile_contact_fingerprint"
+        },
+        "approved": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "user_id",
+        "draft_id",
+        "candidate_profile_id",
+        "canonical_job_id",
+        "job_version_id",
+        "source_observation_id",
+        "job_content_hash",
+        "profile_version_id",
+        "profile_contact_fact_ids",
+        "profile_contact_fingerprint",
+        "preference_context_fingerprint",
+        "requirement_set_id",
+        "comparator_version",
+        "context_fingerprint",
+        "comparison_fingerprint",
+        "approved"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

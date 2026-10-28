@@ -1,0 +1,53 @@
+{
+  "$ref": "#/definitions/ManualApiError",
+  "definitions": {
+    "ManualApiError": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "manual_application_v1"
+        },
+        "ok": {
+          "type": "boolean",
+          "const": false
+        },
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "INVALID_REQUEST",
+            "DESCRIPTION_INSUFFICIENT",
+            "FORBIDDEN",
+            "NOT_FOUND",
+            "JOB_VERSION_CHANGED",
+            "IDENTITY_CONFLICT",
+            "APPROVAL_STALE",
+            "DEPENDENCY_UNAVAILABLE",
+            "INTERNAL_ERROR"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retry_after": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "error",
+        "code",
+        "message"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

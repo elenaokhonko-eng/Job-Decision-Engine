@@ -1,0 +1,108 @@
+{
+  "$ref": "#/definitions/ManualFetchDescriptionResponse",
+  "definitions": {
+    "ManualFetchDescriptionResponse": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "manual_application_v1"
+        },
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "fetch_receipt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 100,
+          "maxLength": 100000
+        },
+        "final_url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "ASHBY",
+            "GREENHOUSE",
+            "LEVER",
+            "EMPLOYER_WEBSITE"
+          ]
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_evidence": {
+          "type": "object",
+          "properties": {
+            "requestedUrl": {
+              "$ref": "#/definitions/ManualFetchDescriptionResponse/properties/final_url"
+            },
+            "resolvedUrl": {
+              "$ref": "#/definitions/ManualFetchDescriptionResponse/properties/final_url"
+            },
+            "redirectHistory": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ManualFetchDescriptionResponse/properties/final_url"
+              },
+              "maxItems": 5
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "httpStatus": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 599
+            },
+            "contentType": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 255
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "responseHash": {
+              "$ref": "#/definitions/ManualFetchDescriptionResponse/properties/content_hash"
+            }
+          },
+          "required": [
+            "requestedUrl",
+            "resolvedUrl",
+            "redirectHistory",
+            "retrievedAt",
+            "httpStatus",
+            "contentType",
+            "responseHash"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "fetch_receipt_id",
+        "description",
+        "final_url",
+        "provider",
+        "content_hash",
+        "source_evidence"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

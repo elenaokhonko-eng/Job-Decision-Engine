@@ -32,6 +32,8 @@ from streamlit_workspace_contracts import (
     validate_ranked_job_row,
     validate_track_row,
 )
+from streamlit_manual_application import render_manual_application_flow
+from streamlit_runtime import ensure_hosted_api_ready
 
 
 # Load environment variables from Streamlit secrets, .env, and .env.local
@@ -42,8 +44,9 @@ def load_dotenv():
             for key, val in st.secrets.items():
                 if isinstance(val, str):
                     os.environ.setdefault(key, val)
-    except Exception:
-        pass
+    except Exception as exc:
+        if exc.__class__.__name__ != "StreamlitSecretNotFoundError":
+            raise
 
     # Load from local .env and .env.local files
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -677,6 +680,9 @@ def api_request(method, path, params=None, body=None, timeout=30):
         raw = response.read().decode("utf-8")
         return json.loads(raw) if raw else {}
 
+
+ensure_hosted_api_ready()
+
 def default_accessibility_settings():
     return {
         "quiet_mode": False,
@@ -818,8 +824,8 @@ def derive_deterministic_recommendation(job):
 
 # Configure the page setting with modern style
 st.set_page_config(
-    page_title="Job Decision Engine — Application Command Centre",
-    page_icon="💼",
+    page_title="Job Decision Engine â€” Application Command Centre",
+    page_icon="ðŸ’¼",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -1183,7 +1189,7 @@ def delete_job_from_db(job_id):
     try:
         resp = api_request("DELETE", f"/api/v2/jobs/{job_id}", timeout=30)
         if resp.get("ok") and resp.get("updated"):
-            st.success("Listing removed successfully (soft-delete — record preserved for audit).")
+            st.success("Listing removed successfully (soft-delete â€” record preserved for audit).")
             return True
         if resp.get("ok") and not resp.get("updated"):
             st.warning("Job was not updated (not found or already removed).")
@@ -1208,7 +1214,7 @@ def save_new_job_to_db(job):
         }
         resp = api_request("POST", "/api/v2/observations/manual", body=body, timeout=60)
         if resp.get("ok") and resp.get("inserted"):
-            st.success("✅ Job staged successfully. It will be normalized, gated, and evaluated in the next run.")
+            st.success("âœ… Job staged successfully. It will be normalized, gated, and evaluated in the next run.")
             return True
         if resp.get("ok") and not resp.get("inserted"):
             st.warning("Job was already staged previously (duplicate raw payload).")
@@ -1376,7 +1382,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
                     openai_success = True
                     break # Break out of the loop on success
             except Exception as openai_err:
-                st.warning(f"⚠️ OpenAI model {model_name} failed: {openai_err}. Trying next fallback...")
+                st.warning(f"âš ï¸ OpenAI model {model_name} failed: {openai_err}. Trying next fallback...")
                 continue
                 
         if openai_success:
@@ -1407,7 +1413,7 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
                 text = res_data["candidates"][0]["content"]["parts"][0]["text"]
                 return text
         except Exception as gemini_err:
-            st.warning(f"⚠️ Gemini request failed: {gemini_err}.")
+            st.warning(f"âš ï¸ Gemini request failed: {gemini_err}.")
             
     raise Exception("All configured models (OpenAI, Gemini) failed or no API keys are set.")
 
@@ -1463,7 +1469,7 @@ for job in jobs_list:
     job["decision_evidence_completeness"] = evidence_completeness
 
 # Title
-st.title("Job Decision Engine — Application Command Centre")
+st.title("Job Decision Engine â€” Application Command Centre")
 st.caption("Discover, rank, prepare, and track grounded job applications.")
 st.markdown("---")
 
@@ -1684,12 +1690,12 @@ with st.sidebar.expander("Accessibility & Preferences", expanded=False):
 
     st.markdown("---")
 
-st.sidebar.header("🎯 Navigation & Filters")
+st.sidebar.header("ðŸŽ¯ Navigation & Filters")
 api_base_url = get_api_base_url()
 if api_base_url:
-    st.sidebar.caption(f"🔌 Connected to Managed API (`{api_base_url}`)")
+    st.sidebar.caption(f"ðŸ”Œ Connected to Managed API (`{api_base_url}`)")
 else:
-    st.sidebar.caption("📦 PostgreSQL Direct Read Model (Live)")
+    st.sidebar.caption("ðŸ“¦ PostgreSQL Direct Read Model (Live)")
 
 # Unpaginated counts come only from the authoritative V5 workspace read model.
 application_workspace_summary = {}
@@ -1745,21 +1751,21 @@ if application_records is not None:
 
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📅 Automated Schedules")
+st.sidebar.subheader("ðŸ“… Automated Schedules")
 st.sidebar.info("""
 * **Daily Ingestion & Evaluation**: Runs daily at **10:00 AM SGT** (02:00 UTC) via GitHub Actions.
 * **Weekly LinkedIn Auto-Sync**: Runs every **Sunday at 10:00 AM SGT** (02:00 UTC) via GitHub Actions.
 """)
 
-st.sidebar.subheader("⚡ Pipeline Action Controls")
+st.sidebar.subheader("âš¡ Pipeline Action Controls")
 
 is_local = os.path.exists(".env.local")
 github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_PAT")
 
 # Button 1: Ingest & Process Pipeline (GitHub Actions or Local)
-if st.sidebar.button("⚡ Run Job Discovery & Evaluation Pipeline", help="Runs the full pipeline: Ingest Gmail & ATS adapters, Normalize, Hard Gate, Semantic Lane Route, Budget, and AI Evaluate."):
+if st.sidebar.button("âš¡ Run Job Discovery & Evaluation Pipeline", help="Runs the full pipeline: Ingest Gmail & ATS adapters, Normalize, Hard Gate, Semantic Lane Route, Budget, and AI Evaluate."):
     if not is_local and not github_token:
-        st.sidebar.error("⚠️ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
+        st.sidebar.error("âš ï¸ GITHUB_TOKEN is missing in Streamlit secrets. Please configure it to trigger GitHub Action workflows from the cloud.")
     else:
         if github_token:
             with st.spinner("Triggering GitHub Actions ingest.yml workflow..."):
@@ -1772,7 +1778,7 @@ if st.sidebar.button("⚡ Run Job Discovery & Evaluation Pipeline", help="Runs t
                     )
                     with urllib.request.urlopen(req) as resp:
                         if resp.status in (204, 200, 201):
-                            st.success("🐙 Triggered GitHub Actions Job Discovery Ingestion (ingest.yml) workflow!")
+                            st.success("ðŸ™ Triggered GitHub Actions Job Discovery Ingestion (ingest.yml) workflow!")
                             st.balloons()
                 except Exception as gh_err:
                     st.error(f"GitHub Trigger Error: {gh_err}")
@@ -1793,7 +1799,7 @@ if st.sidebar.button("⚡ Run Job Discovery & Evaluation Pipeline", help="Runs t
 
                     st.info("Step 5/5: Running AI Evaluation Queue Processor...")
                     run_checked_command(["npx", "tsx", "scripts/evaluate_queue.ts"], "evaluate_queue")
-                    st.success("✅ Full pipeline execution finished!")
+                    st.success("âœ… Full pipeline execution finished!")
                     st.balloons()
                 except subprocess.CalledProcessError as cpe:
                     st.error(f"Execution failed at step with exit code {cpe.returncode}.")
@@ -1806,7 +1812,7 @@ if st.sidebar.button("⚡ Run Job Discovery & Evaluation Pipeline", help="Runs t
         st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔍 Filter Listings")
+st.sidebar.subheader("ðŸ” Filter Listings")
 search_query = st.sidebar.text_input("Keyword Search", "")
 lane_filter = st.sidebar.selectbox("Filter Target Lane", ["All Lanes", "CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", "UNCLASSIFIED"])
 status_filter = st.sidebar.selectbox(
@@ -1876,7 +1882,7 @@ with tab_dashboard:
             ranked_job["decision_outcome"] = ranked_job.get("recommendation_outcome")
             with st.container(border=True):
                 st.subheader(f"#{rank_position} {title}")
-                st.caption(f"{company} · {ranked_job.get('location') or 'Location unknown'} · {ranked_job.get('primary_lane') or 'Lane unknown'}")
+                st.caption(f"{company} Â· {ranked_job.get('location') or 'Location unknown'} Â· {ranked_job.get('primary_lane') or 'Lane unknown'}")
                 salary_note = salary_disclosure_message(ranked_job)
                 if salary_note:
                     st.caption(salary_note)
@@ -1891,19 +1897,19 @@ with tab_dashboard:
                 detail_columns[2].metric("Politics risk", format_signal(ranked_job.get("politics_risk_score")))
                 detail_columns[3].metric("Sensory/workload risk", format_signal(ranked_job.get("sensory_workload_risk_score")))
                 st.caption(
-                    f"Stage 3 — base: {format_score(ranked_job.get('base_rank_score'))} · "
-                    f"freshness: {format_score(ranked_job.get('freshness_score'))} · "
-                    f"remote freedom: {format_score(ranked_job.get('remote_freedom_score'))} · "
+                    f"Stage 3 â€” base: {format_score(ranked_job.get('base_rank_score'))} Â· "
+                    f"freshness: {format_score(ranked_job.get('freshness_score'))} Â· "
+                    f"remote freedom: {format_score(ranked_job.get('remote_freedom_score'))} Â· "
                     f"employment verifiability: {format_score(ranked_job.get('employment_verifiability_score'))}"
                 )
                 st.caption(
-                    f"Focus protection: {format_signal(ranked_job.get('focus_protection_score'))} · "
-                    f"Building/research: {format_percent(ranked_job.get('building_ratio_score'))} · "
-                    f"Interaction burden: {format_percent(ranked_job.get('interaction_burden_score'))} · "
+                    f"Focus protection: {format_signal(ranked_job.get('focus_protection_score'))} Â· "
+                    f"Building/research: {format_percent(ranked_job.get('building_ratio_score'))} Â· "
+                    f"Interaction burden: {format_percent(ranked_job.get('interaction_burden_score'))} Â· "
                     f"Strategic value: {format_percent(ranked_job.get('strategic_value_score'))}"
                 )
                 st.caption(
-                    f"Decision: {ranked_job.get('recommendation_outcome')} · "
+                    f"Decision: {ranked_job.get('recommendation_outcome')} Â· "
                     f"{ranked_job.get('evaluation_summary') or 'No concise evaluation summary is available.'}"
                 )
                 action_columns = st.columns(3)
@@ -1934,7 +1940,7 @@ with tab_dashboard:
                     current_status = application_record.get("application_status") if application_record else "Not tracked"
                     cv_status = application_record.get("cv_document_status") if application_record else "NOT_GENERATED"
                     letter_status = application_record.get("cover_letter_document_status") if application_record else "NOT_GENERATED"
-                    st.caption(f"Application: {current_status} · CV: {cv_status} · Cover letter: {letter_status}")
+                    st.caption(f"Application: {current_status} Â· CV: {cv_status} Â· Cover letter: {letter_status}")
                 try:
                     render_job_document_actions(ranked_job, f"top_{rank_position}")
                 except subprocess.CalledProcessError as exc:
@@ -1947,11 +1953,11 @@ with tab_dashboard:
     evidence_options = {}
     if top_ten_ready_jobs is not None:
         evidence_options = {
-            f"#{index} {job.get('title') or 'Untitled role'} — {job.get('company') or 'Unknown company'}": job
+            f"#{index} {job.get('title') or 'Untitled role'} â€” {job.get('company') or 'Unknown company'}": job
             for index, job in enumerate(top_ten_ready_jobs, start=1)
         }
     if evidence_options:
-        with st.expander("Why I fit — inspect requirement and profile evidence", expanded=False):
+        with st.expander("Why I fit â€” inspect requirement and profile evidence", expanded=False):
             selected_evidence_label = st.selectbox("Ranked job", list(evidence_options), key="top_ten_evidence_job")
             selected_evidence_job = evidence_options[selected_evidence_label]
             try:
@@ -2065,7 +2071,7 @@ with tab_dashboard:
     ]
 
     st.markdown("---")
-    with st.expander(f"⚙️ Processing automatically ({processing_count})", expanded=False):
+    with st.expander(f"âš™ï¸ Processing automatically ({processing_count})", expanded=False):
         st.caption("These jobs are advancing or retrying automatically. No user action is required.")
         if processing_jobs:
             st.dataframe([
@@ -2080,7 +2086,7 @@ with tab_dashboard:
         else:
             st.info("No jobs are awaiting automatic pipeline work.")
 
-    with st.expander(f"🔴 Rejected / Unmatched ({rejected_count})", expanded=False):
+    with st.expander(f"ðŸ”´ Rejected / Unmatched ({rejected_count})", expanded=False):
         st.caption("Terminal career outcomes. These are not retry queues.")
         if unmatched_jobs:
             st.dataframe([
@@ -2094,7 +2100,7 @@ with tab_dashboard:
         else:
             st.info("No unmatched jobs in the current shortlist.")
 
-    with st.expander(f"🛠️ Technical errors requiring support ({technical_error_count})", expanded=False):
+    with st.expander(f"ðŸ› ï¸ Technical errors requiring support ({technical_error_count})", expanded=False):
         st.caption("These are dead-lettered processing dependencies, not career-review items.")
         if technical_error_jobs:
             st.dataframe([
@@ -2112,9 +2118,9 @@ with tab_dashboard:
     # Interactive search filters inside the main tab
     search_col1, search_col2 = st.columns(2)
     with search_col1:
-        search_title = st.text_input("🔍 Search Job Title", "", key="search_title_main")
+        search_title = st.text_input("ðŸ” Search Job Title", "", key="search_title_main")
     with search_col2:
-        search_company = st.text_input("🏢 Search Company Name", "", key="search_company_main")
+        search_company = st.text_input("ðŸ¢ Search Company Name", "", key="search_company_main")
 
     if search_title:
         filtered_jobs = [j for j in filtered_jobs if search_title.lower() in (j.get("title") or "").lower()]
@@ -2186,17 +2192,17 @@ with tab_dashboard:
                     eligibility = job.get("decision_eligibility") or "VERIFY"
 
                     if gate_status == "HARD_REJECT":
-                        badge_style = "⛔"
+                        badge_style = "â›”"
                     elif gate_status == "NEEDS_VERIFICATION":
-                        badge_style = "🔎"
+                        badge_style = "ðŸ”Ž"
                     elif status == "AI_EVALUATED" and outcome == "PRIORITY":
-                        badge_style = "⭐"
+                        badge_style = "â­"
                     elif status == "AI_EVALUATED" and outcome == "REVIEW":
-                        badge_style = "🟡"
+                        badge_style = "ðŸŸ¡"
                     else:
-                        badge_style = "📌"
+                        badge_style = "ðŸ“Œ"
                     
-                    with st.expander(f"{badge_style} {title} — {company} ({status})"):
+                    with st.expander(f"{badge_style} {title} â€” {company} ({status})"):
                         st.markdown(f"**Decision:** `{outcome}` ({eligibility}) | **Gate:** `{gate_status}`")
                         artifact_status = job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN"
                         artifact_reason = job.get("current_artifact_reason")
@@ -2204,7 +2210,7 @@ with tab_dashboard:
                         if artifact_status != "CURRENT_OR_NOT_APPLICABLE":
                             st.warning(
                                 f"Pipeline artifact status: `{artifact_status}`"
-                                + (f" — {artifact_reason}" if artifact_reason else "")
+                                + (f" â€” {artifact_reason}" if artifact_reason else "")
                                 + (f"; blocked tasks: {blocked_count}" if blocked_count else "")
                             )
                         st.markdown(f"**Source:** `{job.get('source') or 'UNKNOWN'}`")
@@ -2287,12 +2293,12 @@ with tab_dashboard:
                             except Exception as exc:
                                 st.error(f"Document generation failed: {exc}")
                         
-                        if st.button("🗑️ Delete Listing", key=f"active_del_{job.get('canonical_job_id') or idx}"):
+                        if st.button("ðŸ—‘ï¸ Delete Listing", key=f"active_del_{job.get('canonical_job_id') or idx}"):
                             if delete_job_from_db(job.get("canonical_job_id")):
                                 st.rerun()
             else:
                 if rejected_jobs:
-                    st.info(f"💡 No active matches found, but {len(rejected_jobs)} matching listings are in the Rejected/Discarded folder below.")
+                    st.info(f"ðŸ’¡ No active matches found, but {len(rejected_jobs)} matching listings are in the Rejected/Discarded folder below.")
                 else:
                     st.info("No active listings match the current filters.")
 
@@ -2300,14 +2306,14 @@ with tab_dashboard:
             if rejected_jobs:
                 st.markdown("---")
                 is_search_active = bool(search_title or search_company or search_query)
-                with st.expander(f"🔴 View Rejected/Discarded Listings ({len(rejected_jobs)} jobs)", expanded=is_search_active):
+                with st.expander(f"ðŸ”´ View Rejected/Discarded Listings ({len(rejected_jobs)} jobs)", expanded=is_search_active):
                     # Limit rendering of rejected popovers to top 50 to prevent severe browser lag
                     display_limit = 50
                     for idx, job in enumerate(rejected_jobs[:display_limit]):
                         company = job.get("company", "Unknown")
                         title = job.get("title", "Job Title")
                         
-                        with st.popover(f"🔴 {title} — {company}"):
+                        with st.popover(f"ðŸ”´ {title} â€” {company}"):
                             st.markdown(f"**Source Board:** `{job.get('source')}`")
                             url = safe_http_url(job.get("canonical_url"))
                             if url:
@@ -2336,14 +2342,14 @@ with tab_dashboard:
                                     pass
                             st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"rej_desc_{idx}")
                             
-                            if job.get("processing_state") != "MANUALLY_REMOVED" and st.button("🗑️ Remove Listing", key=f"rej_del_{job.get('canonical_job_id') or idx}"):
+                            if job.get("processing_state") != "MANUALLY_REMOVED" and st.button("ðŸ—‘ï¸ Remove Listing", key=f"rej_del_{job.get('canonical_job_id') or idx}"):
                                 if delete_job_from_db(job.get("canonical_job_id")):
                                     st.rerun()
                     if len(rejected_jobs) > display_limit:
-                        st.caption(f"⚠️ Showing first {display_limit} rejected listings to maintain UI performance. Use the search inputs above to filter down further.")
+                        st.caption(f"âš ï¸ Showing first {display_limit} rejected listings to maintain UI performance. Use the search inputs above to filter down further.")
 
     with col_right:
-        st.subheader("🤖 Scoring & Match Analysis Details")
+        st.subheader("ðŸ¤– Scoring & Match Analysis Details")
         st.write("Select an evaluated job/version to view deterministic match scores, gate evidence, and the latest AI evaluation summary.")
         
         evaluated_jobs = [j for j in filtered_jobs if j.get("processing_state") == "AI_EVALUATED"]
@@ -2351,9 +2357,9 @@ with tab_dashboard:
         def format_job_option(j):
             outcome = j.get("decision_outcome") or "TRACK"
             eligibility = j.get("decision_eligibility") or "VERIFY"
-            version_warn = " ⚠️ stale" if j.get("version_mismatch") else ""
+            version_warn = " âš ï¸ stale" if j.get("version_mismatch") else ""
             suffix = str(j.get("job_version_id") or "")[:8]
-            return f"{j.get('company') or 'Unknown'} — {j.get('title') or 'Job Title'} [{outcome}/{eligibility}]{version_warn} ({suffix})"
+            return f"{j.get('company') or 'Unknown'} â€” {j.get('title') or 'Job Title'} [{outcome}/{eligibility}]{version_warn} ({suffix})"
             
         selected_job_title = st.selectbox(
             "Select evaluated job/version", 
@@ -2370,7 +2376,7 @@ with tab_dashboard:
             st.markdown(f"#### Selected: **{job_to_show.get('title') or ''}** at *{job_to_show.get('company') or ''}*")
             url = safe_http_url(job_to_show.get("canonical_url"))
             if url:
-                st.markdown(f"🔗 [View Posting]({url})")
+                st.markdown(f"ðŸ”— [View Posting]({url})")
             else:
                 st.caption("Posting URL unavailable or invalid.")
 
@@ -2432,49 +2438,20 @@ with tab_dashboard:
             st.info("No evaluated jobs in view. Run the discovery & evaluation pipeline to populate AI_EVALUATED rows.")
 
 with tab_add_job:
-    st.subheader("➕ Import a New Job Advertisement")
-    st.write("Add raw jobs manually to the Postgres Vault. The daily evaluation cron job will automatically score and route them.")
-    if "manual_import_success" in st.session_state:
-        st.success(st.session_state["manual_import_success"])
-        del st.session_state["manual_import_success"]
-
-    with st.form("custom_job_form"):
-        title = st.text_input("Job Title", "Principal AI Architect")
-        company = st.text_input("Company Name", "Novartis Pharmaceuticals")
-        source = st.selectbox("Source Portal", ["LinkedIn", "MyCareersFuture", "eFinancialCareers", "Gmail"])
-        salary = st.text_input("Salary Range Indicator", "SGD 22,000 - SGD 26,000 / month")
-        location = st.text_input("Location", "Singapore (Remote)")
-        careers_url = st.text_input("Careers Portal Direct Link (Verification)", "https://www.novartis.com/careers")
-        desc = st.text_area("Job Description Raw text", "Paste raw details here...")
-        
-        submitted = st.form_submit_button("Import & Save to Postgres Vault")
-        if submitted:
-            new_job = {
-                "title": title,
-                "company": company,
-                "source": source,
-                "salaryRange": salary,
-                "location": location,
-                "careers_portal_url": careers_url if careers_url else f"https://www.{company.lower().replace(' ', '')}.com/careers",
-                "description": desc
-            }
-            if save_new_job_to_db(new_job):
-                st.session_state["manual_import_success"] = f"✅ Successfully added '{title}' to the Staging Vault! It is now pending evaluation. To evaluate it immediately, click the '🧠 2. Run LLM Evaluation & Processing' button in the sidebar."
-                st.rerun()
-
+    render_manual_application_flow(api_request)
 with tab_linkedin:
-    st.subheader("🔗 Import Saved LinkedIn Jobs")
+    st.subheader("ðŸ”— Import Saved LinkedIn Jobs")
     st.write("Sync your saved LinkedIn jobs and stage them in your Postgres database for evaluation. Auto-unsave is disabled to keep ingestion read-only.")
     
     col_auto, col_manual = st.columns(2)
     
     with col_auto:
-        st.markdown("### 🤖 Option A: Headless Auto-Sync")
+        st.markdown("### ðŸ¤– Option A: Headless Auto-Sync")
         st.warning("Auto-sync/unsave is disabled by policy to keep source ingestion non-destructive.")
         st.caption("Use Option B (manual export and upload) for read-only ingestion.")
 
     with col_manual:
-        st.markdown("### 📋 Option B: Manual Export & Upload")
+        st.markdown("### ðŸ“‹ Option B: Manual Export & Upload")
         st.write("If your cookie expires or you prefer manual control, run the browser console script below and upload the exported JSON file.")
         script_code = r"""(async function extractSavedJobs() {
   if (window._jobScraperRunning) {
@@ -2487,7 +2464,7 @@ with tab_linkedin:
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);color:white;z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:sans-serif;font-size:18px;';
   const statusText = document.createElement('div');
-  statusText.innerText = "🚀 Starting LinkedIn Saved Jobs extraction...";
+  statusText.innerText = "ðŸš€ Starting LinkedIn Saved Jobs extraction...";
   const progressText = document.createElement('div');
   progressText.style.marginTop = '10px';
   progressText.style.fontSize = '24px';
@@ -2503,7 +2480,7 @@ with tab_linkedin:
     let hasNextPage = true;
     
     while (hasNextPage && pageNum <= 40) {
-      statusText.innerText = `📄 Scanning Page ${pageNum}...`;
+      statusText.innerText = `ðŸ“„ Scanning Page ${pageNum}...`;
       
       // Scroll to bottom to ensure elements render
       window.scrollTo(0, document.body.scrollHeight);
@@ -2542,8 +2519,8 @@ with tab_linkedin:
                 const innerSpans = Array.from(container.querySelectorAll('span, div, p'));
                 for (const span of innerSpans) {
                   const t = span.innerText.trim();
-                  if (t.includes('·') && !t.includes('\n')) {
-                    const parts = t.split('·');
+                  if (t.includes('Â·') && !t.includes('\n')) {
+                    const parts = t.split('Â·');
                     company = parts[0].trim();
                     location = parts[1].trim();
                     break;
@@ -2568,24 +2545,24 @@ with tab_linkedin:
                       });
                       
       if (nextBtn && !nextBtn.disabled && !nextBtn.classList.contains('artdeco-button--disabled')) {
-        statusText.innerText = `➡️ Moving to Next page...`;
+        statusText.innerText = `âž¡ï¸ Moving to Next page...`;
         nextBtn.click();
         pageNum++;
         await new Promise(r => setTimeout(r, 3000));
       } else {
-        statusText.innerText = `🏁 No more pages found. Ending scan.`;
+        statusText.innerText = `ðŸ No more pages found. Ending scan.`;
         hasNextPage = false;
       }
     }
     
     if (uniqueJobs.length === 0) {
-      alert("⚠️ No saved jobs identified. Make sure you are on the 'Saved' tab of your Job Tracker.");
+      alert("âš ï¸ No saved jobs identified. Make sure you are on the 'Saved' tab of your Job Tracker.");
       window._jobScraperRunning = false;
       document.body.removeChild(overlay);
       return;
     }
     
-    statusText.innerText = "🧠 Fetching job descriptions...";
+    statusText.innerText = "ðŸ§  Fetching job descriptions...";
     const finalizedJobs = [];
     
     // Robust XHR wrapper to bypass broken extensions intercepting fetch
@@ -2625,7 +2602,7 @@ with tab_linkedin:
           description: description || "Full description not available. Please visit job link to apply."
         });
       } catch (err) {
-        console.error(`❌ Failed: ${job.title}`, err);
+        console.error(`âŒ Failed: ${job.title}`, err);
         finalizedJobs.push({
           title: job.title,
           company: job.company,
@@ -2639,7 +2616,7 @@ with tab_linkedin:
       await new Promise(r => setTimeout(r, 2000));
     }
     
-    statusText.innerText = "🎉 All done! Downloading JSON...";
+    statusText.innerText = "ðŸŽ‰ All done! Downloading JSON...";
     progressText.innerText = "";
     
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(finalizedJobs, null, 2));
@@ -2682,10 +2659,10 @@ with tab_linkedin:
                         st.write(f"*... and {len(jobs_data) - 10} more jobs.*")
                     
                     # Ingest button
-                    if st.button("📥 Import All Saved Jobs to Staging Vault"):
+                    if st.button("ðŸ“¥ Import All Saved Jobs to Staging Vault"):
                         with st.spinner("Inserting jobs into staging table..."):
                             inserted, skipped = ingest_linkedin_saved_json(jobs_data)
-                            st.success(f"✅ Ingestion complete! **{inserted}** new jobs imported, **{skipped}** skipped as duplicates/invalid.")
+                            st.success(f"âœ… Ingestion complete! **{inserted}** new jobs imported, **{skipped}** skipped as duplicates/invalid.")
                             st.rerun()
             except Exception as e:
                 st.error(f"Error reading JSON file: {e}")
@@ -2713,7 +2690,7 @@ with tab_applications:
         ]
         st.dataframe(tracker_rows, hide_index=True, alt="Current and historical application tracker records")
         tracker_labels = {
-            f"{record.get('company') or 'Unknown company'} — {record.get('title') or 'Untitled role'} ({record.get('application_status')})": record
+            f"{record.get('company') or 'Unknown company'} â€” {record.get('title') or 'Untitled role'} ({record.get('application_status')})": record
             for record in application_records
         }
         selected_tracker_label = st.selectbox("Update application status", list(tracker_labels), key="application_tracker_record")
@@ -2734,7 +2711,7 @@ with tab_applications:
                 save_application_status({}, next_status, selected_tracker_record)
             except Exception as exc:
                 st.error(f"Application status update failed: {exc}")
-        st.caption(f"CV linked: {'yes' if selected_tracker_record.get('cv_document_run_id') else 'not generated'} · Cover letter linked: {'yes' if selected_tracker_record.get('cover_letter_document_run_id') else 'not generated'}")
+        st.caption(f"CV linked: {'yes' if selected_tracker_record.get('cv_document_run_id') else 'not generated'} Â· Cover letter linked: {'yes' if selected_tracker_record.get('cover_letter_document_run_id') else 'not generated'}")
         if get_api_base_url():
             try:
                 event_response = api_request(
@@ -2782,7 +2759,7 @@ with tab_analytics:
                 "Evidence confidence": row.get("confidence_level") or "UNKNOWN",
                 "Safety / compatibility assessment": (
                     "UNKNOWN" if row.get("confidence_level") in (None, "UNKNOWN", "LOW")
-                    else "Evidence available — human review"
+                    else "Evidence available â€” human review"
                 ),
                 "Last updated": row.get("last_updated"),
             })
@@ -2872,7 +2849,7 @@ with tab_analytics:
         st.info("Source plugin health analytics are available when connected to the backend API.")
 
 with tab_cv:
-    st.subheader("📄 Canonical Documents")
+    st.subheader("ðŸ“„ Canonical Documents")
     st.write("Generate CV and cover letter from canonical job/version records and the active PostgreSQL evidence ledger.")
 
     profile_source = "PostgreSQL active profile (document generator)"
@@ -2952,7 +2929,7 @@ with tab_cv:
         st.markdown(f"**Company:** {selected_job.get('company')} | **Role:** {selected_job.get('title')}")
         url = safe_http_url(selected_job.get("canonical_url"))
         if url:
-            st.markdown(f"🔗 [View Posting]({url})")
+            st.markdown(f"ðŸ”— [View Posting]({url})")
 
         with st.expander("Preview job description"):
             description = selected_job.get("description") or ""
@@ -2965,4 +2942,4 @@ with tab_cv:
 
 # Footer section
 st.markdown("---")
-st.markdown("<p class='disclaimer'>Job Decision Engine V5 • Recommendations and documents remain human-reviewed</p>", unsafe_allow_html=True)
+st.markdown("<p class='disclaimer'>Job Decision Engine V5 â€¢ Recommendations and documents remain human-reviewed</p>", unsafe_allow_html=True)

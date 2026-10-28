@@ -1,0 +1,499 @@
+{
+  "$ref": "#/definitions/ManualCompareResponse",
+  "definitions": {
+    "ManualCompareResponse": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "manual_application_v1"
+        },
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "draft_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "comparison_id": {
+          "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+        },
+        "comparison_fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "selected_job": {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "const": "manual_application_v1"
+            },
+            "canonicalJobId": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+            },
+            "jobVersionId": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+            },
+            "sourceObservationId": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+            },
+            "contentHash": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1
+            },
+            "company": {
+              "type": "string",
+              "minLength": 1
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uri"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_kind": {
+                      "type": "string",
+                      "enum": [
+                        "PASTED",
+                        "UPLOAD"
+                      ]
+                    },
+                    "source_content_status": {
+                      "type": "string",
+                      "const": "USER_PROVIDED"
+                    },
+                    "provider": {
+                      "type": "null"
+                    },
+                    "fetched_content_hash": {
+                      "type": "null"
+                    },
+                    "source_evidence": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "source_kind",
+                    "source_content_status",
+                    "provider",
+                    "fetched_content_hash",
+                    "source_evidence"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_kind": {
+                      "type": "string",
+                      "const": "FETCHED"
+                    },
+                    "source_content_status": {
+                      "type": "string",
+                      "enum": [
+                        "COMPLETE",
+                        "USER_EDITED"
+                      ]
+                    },
+                    "provider": {
+                      "type": "string",
+                      "enum": [
+                        "ASHBY",
+                        "GREENHOUSE",
+                        "LEVER",
+                        "EMPLOYER_WEBSITE"
+                      ]
+                    },
+                    "fetched_content_hash": {
+                      "$ref": "#/definitions/ManualCompareResponse/properties/comparison_fingerprint"
+                    },
+                    "source_evidence": {
+                      "type": "object",
+                      "properties": {
+                        "requestedUrl": {
+                          "type": "string",
+                          "format": "uri",
+                          "maxLength": 2048
+                        },
+                        "resolvedUrl": {
+                          "$ref": "#/definitions/ManualCompareResponse/properties/selected_job/properties/source/anyOf/1/properties/source_evidence/properties/requestedUrl"
+                        },
+                        "redirectHistory": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/ManualCompareResponse/properties/selected_job/properties/source/anyOf/1/properties/source_evidence/properties/requestedUrl"
+                          },
+                          "maxItems": 5
+                        },
+                        "retrievedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "httpStatus": {
+                          "type": "integer",
+                          "minimum": 100,
+                          "maximum": 599
+                        },
+                        "contentType": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 255
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "responseHash": {
+                          "$ref": "#/definitions/ManualCompareResponse/properties/comparison_fingerprint"
+                        }
+                      },
+                      "required": [
+                        "requestedUrl",
+                        "resolvedUrl",
+                        "redirectHistory",
+                        "retrievedAt",
+                        "httpStatus",
+                        "contentType",
+                        "responseHash"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "source_kind",
+                    "source_content_status",
+                    "provider",
+                    "fetched_content_hash",
+                    "source_evidence"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "schema_version",
+            "canonicalJobId",
+            "jobVersionId",
+            "sourceObservationId",
+            "contentHash",
+            "title",
+            "company",
+            "url",
+            "source"
+          ],
+          "additionalProperties": false
+        },
+        "comparison": {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "type": "string",
+              "const": "manual_application_v1"
+            },
+            "comparator_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "canonical_job_id": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+            },
+            "job_version_id": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+            },
+            "source_observation_id": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+            },
+            "source_evidence_fingerprint": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/comparison_fingerprint"
+            },
+            "job_content_hash": {
+              "type": "string",
+              "minLength": 1
+            },
+            "profile_version_id": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+            },
+            "candidate_profile_id": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+            },
+            "requirement_set_id": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+            },
+            "profile_contact_fact_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ManualCompareResponse/properties/draft_id"
+              }
+            },
+            "profile_contact_fingerprint": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/comparison_fingerprint"
+            },
+            "preference_context_fingerprint": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/comparison_fingerprint"
+            },
+            "context_fingerprint": {
+              "$ref": "#/definitions/ManualCompareResponse/properties/comparison_fingerprint"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1
+            },
+            "company": {
+              "type": "string",
+              "minLength": 1
+            },
+            "canonical_url": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uri"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "requirements": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "requirement_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "requirement_type": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "importance": {
+                    "type": "string",
+                    "enum": [
+                      "MUST",
+                      "PREFERRED",
+                      "NICE_TO_HAVE"
+                    ]
+                  },
+                  "requirement_text": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "requirement_key",
+                  "requirement_type",
+                  "importance",
+                  "requirement_text"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "evidence_type": {
+                    "type": "string",
+                    "enum": [
+                      "FACT",
+                      "CREDENTIAL",
+                      "ENGAGEMENT"
+                    ]
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "evidence_type",
+                  "label",
+                  "statement"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "requirement_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "requirement_type": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "importance": {
+                    "type": "string",
+                    "enum": [
+                      "MUST",
+                      "PREFERRED",
+                      "NICE_TO_HAVE"
+                    ]
+                  },
+                  "requirement": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "FACT",
+                            "CREDENTIAL",
+                            "ENGAGEMENT"
+                          ]
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "statement": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "type",
+                        "label",
+                        "statement"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "gap": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "comparison_method": {
+                    "type": "string",
+                    "const": "literal-term overlap; potential evidence only"
+                  }
+                },
+                "required": [
+                  "requirement_key",
+                  "requirement_type",
+                  "importance",
+                  "requirement",
+                  "evidence",
+                  "gap",
+                  "comparison_method"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "suitability_warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "evidence_notice": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "schema_version",
+            "comparator_version",
+            "canonical_job_id",
+            "job_version_id",
+            "source_observation_id",
+            "source_evidence_fingerprint",
+            "job_content_hash",
+            "profile_version_id",
+            "candidate_profile_id",
+            "requirement_set_id",
+            "profile_contact_fact_ids",
+            "profile_contact_fingerprint",
+            "preference_context_fingerprint",
+            "context_fingerprint",
+            "title",
+            "company",
+            "canonical_url",
+            "requirements",
+            "evidence",
+            "rows",
+            "suitability_warnings",
+            "evidence_notice"
+          ],
+          "additionalProperties": false
+        },
+        "document_contact_ready": {
+          "type": "boolean"
+        },
+        "missing_contact_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "full_name",
+              "phone"
+            ]
+          }
+        },
+        "requirements_extracted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "draft_id",
+        "comparison_id",
+        "comparison_fingerprint",
+        "selected_job",
+        "comparison",
+        "document_contact_ready",
+        "missing_contact_fields",
+        "requirements_extracted"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

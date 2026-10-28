@@ -1,0 +1,38 @@
+{
+  "$ref": "#/definitions/ManualStagedPostingIdentity",
+  "definitions": {
+    "ManualStagedPostingIdentity": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "manual_application_v1"
+        },
+        "canonicalJobId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "jobVersionId": {
+          "$ref": "#/definitions/ManualStagedPostingIdentity/properties/canonicalJobId"
+        },
+        "sourceObservationId": {
+          "$ref": "#/definitions/ManualStagedPostingIdentity/properties/canonicalJobId"
+        },
+        "contentHash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "schema_version",
+        "canonicalJobId",
+        "jobVersionId",
+        "sourceObservationId",
+        "contentHash"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
