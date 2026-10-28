@@ -58,19 +58,27 @@ def validate_document_output_manifest(
     if manifest.get("schema_version") != "document_output_manifest_v1":
         raise ValueError("Document output manifest has an unsupported schema version.")
     for key in ("docx_path", "docx_sha256", "manifest_hash"):
-        if not isinstance(manifest.get(key), str):
+        value = manifest.get(key)
+        if not isinstance(value, str):
             raise TypeError(f"Document output manifest is missing {key}.")
+        if not value:
+            raise ValueError(f"Document output manifest has an empty {key}.")
     for key in ("docx_sha256", "manifest_hash"):
         value = manifest[key]
-        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        if len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
             raise ValueError(f"Document output manifest has an invalid {key}.")
 
     pdf_path = manifest.get("pdf_path")
     pdf_hash = manifest.get("pdf_sha256")
     if (pdf_path is None) != (pdf_hash is None):
-        raise ValueError("PDF output path and hash must both be present or both be null.")
+        raise ValueError(
+            "PDF output path and hash must both be present or both be null."
+        )
     if pdf_path is not None and (
         not isinstance(pdf_path, str)
+        or not pdf_path
         or not isinstance(pdf_hash, str)
         or len(pdf_hash) != 64
         or any(character not in "0123456789abcdef" for character in pdf_hash)
@@ -78,7 +86,9 @@ def validate_document_output_manifest(
         raise ValueError("Document output manifest has an invalid PDF path or hash.")
 
     payload = {key: value for key, value in manifest.items() if key != "manifest_hash"}
-    canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    canonical_json = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     expected_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
     if expected_hash != manifest["manifest_hash"]:
         raise ValueError("Document output manifest hash does not match its content.")
@@ -93,7 +103,9 @@ def validate_document_output_manifest(
     pdf_output = outputs.get("pdf")
     if pdf_path is None:
         if pdf_output is not None:
-            raise ValueError("PDF output projection is present without a PDF manifest entry.")
+            raise ValueError(
+                "PDF output projection is present without a PDF manifest entry."
+            )
     elif not isinstance(pdf_output, Mapping) or (
         pdf_output.get("path") != pdf_path or pdf_output.get("sha256") != pdf_hash
     ):
@@ -103,6 +115,7 @@ def validate_document_output_manifest(
     json_output = outputs.get("json")
     if json_path is not None and (
         not isinstance(json_path, str)
+        or not json_path
         or not isinstance(json_output, Mapping)
         or json_output.get("path") != json_path
     ):

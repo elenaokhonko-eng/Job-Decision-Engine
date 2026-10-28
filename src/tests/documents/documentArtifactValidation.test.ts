@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { extractDocxText, containsPhoneNumber } from "../../../scripts/verify_document_artifacts.js";
+import { DocumentCurrentnessFieldsSchema } from "../../documents/contracts.js";
 import { extractReadableDocumentXmlText } from "../../documents/documentArtifactValidation.js";
 
 describe("extractReadableDocumentXmlText", () => {
@@ -15,6 +16,19 @@ describe("extractReadableDocumentXmlText", () => {
       .toThrow(/malformed/i);
     expect(() => extractReadableDocumentXmlText('<w:document xmlns:w="urn:word"/>'))
       .toThrow(/no readable text/i);
+  });
+});
+
+describe("document currentness fields contract", () => {
+  it("requires a profile, deterministic decision, and context fingerprint", () => {
+    expect(DocumentCurrentnessFieldsSchema.safeParse({}).success).toBe(false);
+    expect(
+      DocumentCurrentnessFieldsSchema.safeParse({
+        profileVersionId: "11111111-1111-4111-8111-111111111111",
+        deterministicDecisionId: "22222222-2222-4222-8222-222222222222",
+        contextFingerprint: "context-fingerprint",
+      }).success,
+    ).toBe(true);
   });
 });
 

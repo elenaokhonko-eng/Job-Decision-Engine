@@ -28,31 +28,28 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Validate production ref and document pins
+      - name: Checkout reviewed main policy
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install policy-check dependencies
+        run: npm ci
+
+      - name: Validate private-repository policy, production ref, and document pins
         env:
           REQUESTED_REF: ${{ github.ref }}
           REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
           INPUT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
           INPUT_APPLICATION_RECORD_ID: ${{ inputs.application_record_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
-          if [[ "$REPOSITORY_PRIVATE" != "true" ]]; then
-            echo "Document workflows are disabled for public repositories because generated application documents are sensitive." >&2
-            exit 1
-          fi
-          if [[ "$REQUESTED_REF" != "refs/heads/main" ]]; then
-            echo "Document workflows may only use reviewed code from main." >&2
-            exit 1
-          fi
-          for value in "$INPUT_CANONICAL_JOB_ID" "$INPUT_JOB_VERSION_ID" "$INPUT_APPLICATION_RECORD_ID"; do
-            if [[ ! "$value" =~ $uuid_re ]]; then
-              echo "canonical_job_id, job_version_id, and application_record_id must all be valid UUIDs." >&2
-              exit 1
-            fi
-          done
+        run: npx tsx scripts/validate_document_workflow_dispatch.ts
 
   generate-documents:
     needs: validate-document-dispatch

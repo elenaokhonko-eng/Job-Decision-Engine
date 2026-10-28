@@ -150,6 +150,35 @@ def test_rejects_missing_required_manifest_string_field():
         )
 
 
+@pytest.mark.parametrize("empty_path", ["docx_path", "pdf_path", "json_path"])
+def test_rejects_empty_document_manifest_paths(empty_path: str):
+    manifest = {
+        "schema_version": "document_output_manifest_v1",
+        "json_path": "scripts/exports/cv.json",
+        "docx_path": "scripts/exports/cv.docx",
+        "docx_sha256": "a" * 64,
+        "pdf_path": "scripts/exports/cv.pdf",
+        "pdf_sha256": "b" * 64,
+    }
+    manifest[empty_path] = ""
+    manifest["manifest_hash"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in manifest.items()},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    outputs = {
+        "json": {"path": manifest["json_path"]},
+        "docx": {"path": manifest["docx_path"], "sha256": manifest["docx_sha256"]},
+        "pdf": {"path": manifest["pdf_path"], "sha256": manifest["pdf_sha256"]},
+    }
+
+    with pytest.raises(ValueError):
+        validate_document_output_manifest(manifest, outputs)
+
+
 def test_rejects_tampered_manifest_and_mismatched_output_projection():
     manifest = {
         "schema_version": "document_output_manifest_v1",
@@ -168,15 +197,21 @@ def test_rejects_tampered_manifest_and_mismatched_output_projection():
     ).hexdigest()
 
     with pytest.raises(ValueError, match="hash"):
-        validate_document_output_manifest({**manifest, "docx_path": "tampered.docx"}, {
-            "docx": {"path": "scripts/exports/cv.docx", "sha256": "a" * 64},
-            "pdf": None,
-        })
+        validate_document_output_manifest(
+            {**manifest, "docx_path": "tampered.docx"},
+            {
+                "docx": {"path": "scripts/exports/cv.docx", "sha256": "a" * 64},
+                "pdf": None,
+            },
+        )
     with pytest.raises(ValueError, match="projection"):
-        validate_document_output_manifest(manifest, {
-            "docx": {"path": "scripts/exports/other.docx", "sha256": "a" * 64},
-            "pdf": None,
-        })
+        validate_document_output_manifest(
+            manifest,
+            {
+                "docx": {"path": "scripts/exports/other.docx", "sha256": "a" * 64},
+                "pdf": None,
+            },
+        )
 
 
 def test_parses_read_only_document_pair_status_for_exact_run_ids():

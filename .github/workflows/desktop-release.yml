@@ -32,6 +32,9 @@ jobs:
   desktop-release:
     name: Build Windows desktop installer
     runs-on: windows-latest
+    env:
+      JDEC_DESKTOP_PUBLISH_REQUESTED: ${{ inputs.publish }}
+      WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
     if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && ((github.ref == 'refs/heads/main' && inputs.publish != true) || (startsWith(github.ref, 'refs/tags/v') && inputs.publish == true)) }}
     timeout-minutes: 45
     steps:

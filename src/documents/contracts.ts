@@ -45,6 +45,12 @@ export const DocumentOutputManifestRecordSchema = DocumentOutputManifestFieldsSc
   .strict()
   .superRefine(validatePdfManifestPair);
 
+export const DocumentCurrentnessFieldsSchema = z.object({
+  profileVersionId: z.string().uuid(),
+  deterministicDecisionId: z.string().uuid(),
+  contextFingerprint: z.string().min(1),
+}).strict();
+
 export const MatchSnapshotSchema = z.object({
   match_run_id: z.string().uuid(),
   overall_match_score: z.number().min(0).max(100),

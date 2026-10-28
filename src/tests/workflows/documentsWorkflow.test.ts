@@ -1,10 +1,39 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { getDocumentWorkflowDispatchFailure } from "../../services/documentWorkflowDispatchPolicy.js";
 
 describe("documents workflow", () => {
+  const validDispatch = {
+    repositoryPrivate: true,
+    requestedRef: "refs/heads/main",
+    canonicalJobId: "11111111-1111-4111-8111-111111111111",
+    jobVersionId: "22222222-2222-4222-8222-222222222222",
+    applicationRecordId: "33333333-3333-4333-8333-333333333333",
+  };
+
+  it("rejects document generation for public repositories", () => {
+    expect(
+      getDocumentWorkflowDispatchFailure({ ...validDispatch, repositoryPrivate: false }),
+    ).toMatch(/disabled for public repositories/i);
+  });
+
+  it("rejects unreviewed refs and unpinned document identities", () => {
+    expect(
+      getDocumentWorkflowDispatchFailure({ ...validDispatch, requestedRef: "refs/heads/feature" }),
+    ).toMatch(/reviewed code from main/i);
+    expect(
+      getDocumentWorkflowDispatchFailure({ ...validDispatch, jobVersionId: "not-a-uuid" }),
+    ).toMatch(/valid UUIDs/i);
+  });
+
+  it("accepts only fully pinned dispatches on private main", () => {
+    expect(getDocumentWorkflowDispatchFailure(validDispatch)).toBeNull();
+  });
+
   it("requires pinned application and job identities before document generation", () => {
     const workflow = readFileSync(resolve(".github/workflows/documents.yml"), "utf8");
+    const dispatchPolicy = readFileSync(resolve("scripts/validate_document_workflow_dispatch.ts"), "utf8");
     const preflight = readFileSync(resolve("scripts/preflight_application_document_draft.ts"), "utf8");
     const preflightService = readFileSync(resolve("src/documents/applicationDocumentPreflight.ts"), "utf8");
     const pairValidator = readFileSync(resolve("scripts/validate_application_document_pair.ts"), "utf8");
@@ -14,8 +43,9 @@ describe("documents workflow", () => {
     expect(workflow).toContain("required: true");
     expect(workflow).toContain("refs/heads/main");
     expect(workflow).toContain("REPOSITORY_PRIVATE: ${{ github.event.repository.private }}");
-    expect(workflow).toContain("Document workflows are disabled for public repositories");
+    expect(workflow).toContain("validate_document_workflow_dispatch.ts");
     expect(workflow).toContain("github.event.repository.private == true");
+    expect(dispatchPolicy).toContain("getDocumentWorkflowDispatchFailure");
     expect(workflow).toContain("APPLICATION_RECORD_ID=$INPUT_APPLICATION_RECORD_ID");
     expect(workflow).toContain("DOCUMENTS_JOB_FOUND=true");
     expect(preflightService).toContain('application.status !== "INTENT"');
@@ -29,6 +59,6 @@ describe("documents workflow", () => {
     expect(artifactVerifier).toContain("phonePresentInPdf: true");
     expect(workflow).toContain("npx tsx scripts/preflight_database.ts");
     expect(workflow).toContain("npx tsx scripts/verify_migration_status.ts");
-    expect(workflow).toContain("canonical_job_id, job_version_id, and application_record_id must all be valid UUIDs.");
+    expect(dispatchPolicy).toContain("applicationRecordId: process.env.INPUT_APPLICATION_RECORD_ID");
   });
 });

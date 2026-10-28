@@ -430,6 +430,11 @@ async function generateTailoredCV(): Promise<void> {
     if (!currentness.ok) {
       throw new Error(`Document generation rejected stale context: ${currentness.reason}.`);
     }
+    const deterministicDecisionId = job.latest_deterministic_decision_id;
+    const contextFingerprint = job.decision_context_fingerprint;
+    if (!deterministicDecisionId || !contextFingerprint) {
+      throw new Error("Document generation rejected missing deterministic decision context.");
+    }
 
     const matchRunId = job.latest_match_run_id;
     if (!matchRunId) {
@@ -830,9 +835,9 @@ async function generateTailoredCV(): Promise<void> {
         canonicalJobId: jobId,
         jobVersionId: resolvedJobVersionId,
         matchRunId: matchRunId,
-        profileVersionId: profileVersionId,
-        deterministicDecisionId: job.deterministic_decision_id,
-        contextFingerprint: job.decision_context_fingerprint,
+        profileVersionId,
+        deterministicDecisionId,
+        contextFingerprint,
         documentType: "CV",
         policyVersion: "documents_v2",
         generatorVersion: "cv_generator_deterministic_v1",
