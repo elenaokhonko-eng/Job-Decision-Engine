@@ -11,15 +11,84 @@ import {
   type PipelineStageWorkerDependencies,
   type PipelineStageWorkerOptions,
 } from "../../tasks/stageTaskWorker.js";
+import { classifyDescriptionQuality } from "../../pipeline/descriptionQuality.js";
 
 describe("stageTaskWorker", () => {
   it("parses a validated task allowlist for deterministic recovery", () => {
+    expect(parsePipelineTaskTypes("FETCH_JOB_CONTENT,NORMALIZE_OBSERVATION")).toEqual([
+      "FETCH_JOB_CONTENT",
+      "NORMALIZE_OBSERVATION",
+    ]);
     expect(parsePipelineTaskTypes("NORMALIZE_OBSERVATION, MATCH_PROFILE_EVIDENCE, NORMALIZE_OBSERVATION")).toEqual([
       "NORMALIZE_OBSERVATION",
       "MATCH_PROFILE_EVIDENCE",
     ]);
     expect(() => parsePipelineTaskTypes("NOT_A_STAGE")).toThrow("Unsupported PIPELINE_TASK_WORKER_TASK_TYPES");
     expect(() => parsePipelineTaskTypes("  , ")).toThrow("must contain at least one task type");
+  });
+
+  it("blocks substantive stages when a sectioned Gmail description lacks fetched-source evidence", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const sectionedAlertText = [
+      "About the role: Build and operate a research data platform used by scientists.",
+      "Responsibilities: Design services, implement data workflows, and support production releases.",
+      "Requirements: Experience with Python, cloud systems, and cross-functional technical delivery.",
+      "The position is full-time and based in Singapore with a hybrid work arrangement.",
+    ].join(" ");
+    expect(classifyDescriptionQuality(sectionedAlertText).status).toBe("COMPLETE");
+    const task = {
+      id: "task-snippet",
+      workspace_id: ctx.workspaceId,
+      task_type: "APPLY_HARD_GATES",
+      task_key: "APPLY_HARD_GATES:version-snippet:hard_gate_v1",
+      payload: { canonical_job_id: "canonical-snippet", job_version_id: "version-snippet" },
+      status: "RUNNING",
+      available_at: new Date().toISOString(),
+      lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+      heartbeat_at: new Date().toISOString(),
+      claimed_by: "worker:test",
+      attempt_count: 1,
+      max_attempts: 8,
+      last_error: null,
+      dead_letter_reason: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      completed_at: null,
+    };
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) return { rows: [task], rowCount: 1 };
+      if (sql.includes("SELECT canonical.latest_job_version_id::text AS latest_job_version_id")) {
+        return { rows: [{ latest_job_version_id: "version-snippet", description_text: sectionedAlertText, has_source_content_evidence: false }], rowCount: 1 };
+      }
+      if (sql.includes("FROM raw_job_observations") && sql.includes("source_name = 'GMAIL_ALERT'")) {
+        return { rows: [{ raw_email_alert_id: "alert-snippet" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks") || sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [{ id: task.id }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorkerImpl(client, {
+      context: ctx,
+      seed: false,
+      reconcileStalePending: false,
+      taskTypes: ["APPLY_HARD_GATES"],
+      maxTasks: 1,
+      heartbeatSeconds: 0,
+    }, deps);
+
+    expect(summary.blocked).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(deps.runHardGates).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.params?.some((value) => typeof value === "string" && value.includes("SOURCE_CONTENT_QUALITY_GATE")))).toBe(true);
+    expect(calls.some((call) => call.sql.includes("lifecycle_status = 'SOURCE_BLOCKED'"))).toBe(true);
+    expect(calls.some((call) => call.sql.includes("HARD_REJECTED"))).toBe(false);
   });
 
   const ctx = {
@@ -35,8 +104,27 @@ describe("stageTaskWorker", () => {
     options: PipelineStageWorkerOptions = {},
     dependenciesOverride?: PipelineStageWorkerDependencies,
   ) {
+    const client = clientOrPool as any;
+    if (client && typeof client.query === "function" && !client.__contentQualityFixture) {
+      const originalQuery = client.query.bind(client);
+      client.query = async (sql: unknown, ...args: unknown[]) => {
+        if (typeof sql === "string" && sql.includes("SELECT canonical.latest_job_version_id::text AS latest_job_version_id")) {
+          const parameters = args[0] as unknown[] | undefined;
+          return {
+            rows: [{
+              latest_job_version_id: parameters?.[1] ?? "version-1",
+              description_text: "Responsibilities include leading delivery, coordinating teams, documenting decisions, resolving risks, and maintaining reliable services. Requirements include relevant experience, strong communication skills, technical judgment, and the ability to manage cross-functional work in a regulated environment. The role supports partner teams and improves service quality.",
+              has_source_content_evidence: true,
+            }],
+            rowCount: 1,
+          };
+        }
+        return originalQuery(sql, ...args);
+      };
+      client.__contentQualityFixture = true;
+    }
     return runPipelineStageTaskWorkerImpl(
-      clientOrPool,
+      client,
       { reconcileStalePending: false, ...options },
       dependenciesOverride,
     );
@@ -44,6 +132,7 @@ describe("stageTaskWorker", () => {
 
   function dependencies(overrides: Partial<PipelineStageWorkerDependencies> = {}): PipelineStageWorkerDependencies {
     return {
+      fetchJobContent: vi.fn(async () => ({ kind: "BLOCKED" as const, reason: "MISSING_POSTING_URL" as const })),
       runNormalization: vi.fn(async () => ({
         totalDiscovered: 0,
         totalProcessed: 0,
@@ -133,6 +222,8 @@ describe("stageTaskWorker", () => {
     const claim = calls.find((call) => call.sql.includes("WITH claimable AS"));
     expect(claim?.sql).toContain("payload->>'job_version_id' = ANY($6::text[])");
     expect(claim?.sql).toContain("payload->>'observation_id' = ANY($7::text[])");
+    expect(claim?.sql).toContain("scoped_child.derived_from_observation_id::text = ANY($7::text[])");
+    expect(claim?.sql).toContain("scoped_parent.job_version_id::text = candidate.payload->>'job_version_id'");
     expect(claim?.params?.[5]).toEqual(["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]);
     expect(claim?.params?.[6]).toEqual(["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]);
     expect(summary.claimed).toBe(0);

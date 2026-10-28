@@ -28,8 +28,9 @@ function isPool(value: pg.Pool | pg.PoolClient | pg.Client): value is pg.Pool {
   );
 }
 
-export function resolveMigrationsDir(): string {
+export function resolveMigrationsDir(override?: string): string {
   const candidates = [
+    override,
     process.env.JDEC_MIGRATIONS_DIR,
     path.resolve(process.cwd(), "migrations"),
     path.resolve(__dirname, "../../migrations"),
@@ -113,8 +114,11 @@ export async function getMigrationStatus(clientOrPool: pg.Pool | pg.PoolClient |
   }
 }
 
-export async function runMigrations(clientOrPool: pg.Pool | pg.PoolClient | pg.Client): Promise<string[]> {
-  const migrationsDir = resolveMigrationsDir();
+export async function runMigrations(
+  clientOrPool: pg.Pool | pg.PoolClient | pg.Client,
+  options: { migrationsDir?: string } = {},
+): Promise<string[]> {
+  const migrationsDir = resolveMigrationsDir(options.migrationsDir);
   const pool = clientOrPool;
   const ownsClient = isPool(pool);
   const client = ownsClient ? await pool.connect() : pool;

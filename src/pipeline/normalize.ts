@@ -122,6 +122,23 @@ export async function runNormalization(
         let existingVersionId: string | null = null;
         let sourcePostingIdentitySeen = false;
         
+        if (obs.derived_from_observation_id) {
+          const parent = await client.query<{ canonical_job_id: string | null; job_version_id: string | null; content_hash: string | null }>(
+            "SELECT version.canonical_job_id, version.id AS job_version_id, version.content_hash FROM raw_job_observations discovery LEFT JOIN job_versions version ON version.workspace_id = discovery.workspace_id AND version.id = discovery.job_version_id WHERE discovery.workspace_id = $1 AND discovery.id = $2 AND discovery.source_name = 'GMAIL_ALERT' AND BTRIM(regexp_replace(lower(discovery.title), '[^a-z0-9]+', ' ', 'g')) = BTRIM(regexp_replace(lower($3), '[^a-z0-9]+', ' ', 'g')) LIMIT 1",
+            [ctx.workspaceId, obs.derived_from_observation_id, obs.title],
+          );
+          if (!parent.rows[0]) {
+            throw new Error("Retrieved posting could not prove a tenant-scoped Gmail parent with the same title.");
+          }
+          if (parent.rows[0].canonical_job_id) {
+            canonicalJobId = parent.rows[0].canonical_job_id;
+            isExistingJob = true;
+            sourcePostingIdentitySeen = true;
+            if (parent.rows[0].content_hash === normalizedContentHash) {
+              existingVersionId = parent.rows[0].job_version_id;
+            }
+          }
+        }
         // Stable source identity is accepted only when normalized employer and location also agree.
         const checkExt = freshnessEvidence.postingIdentityHash
           ? await client.query(
@@ -144,40 +161,63 @@ export async function runNormalization(
                  )
                  AND BTRIM(regexp_replace(lower(canonical.company_name), '[^a-z0-9]+', ' ', 'g'))
                    = BTRIM(regexp_replace(lower($5), '[^a-z0-9]+', ' ', 'g'))
-                 AND BTRIM(regexp_replace(lower(COALESCE(canonical.location, canonical.location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
-                   = BTRIM(regexp_replace(lower(COALESCE($6, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+                 AND ($7::boolean = FALSE OR canonical.normalized_title = lower($8))
+                 AND ($7::boolean = TRUE OR BTRIM(regexp_replace(lower(COALESCE(canonical.location, canonical.location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+                   = BTRIM(regexp_replace(lower(COALESCE($6, 'Unknown')), '[^a-z0-9]+', ' ', 'g')))
                ORDER BY version.observed_at DESC, version.id DESC
                LIMIT 1`,
-              [ctx.workspaceId, freshnessEvidence.postingIdentityHash, obs.source_name, obs.source_external_id, obs.company_name, obs.location_raw || "Unknown"]
+              [
+                ctx.workspaceId,
+                freshnessEvidence.postingIdentityHash,
+                obs.source_name,
+                obs.source_external_id,
+                obs.company_name,
+                obs.location_raw || "Unknown",
+                Boolean(obs.derived_from_observation_id),
+                obs.title,
+              ]
             )
           : { rows: [] };
 
         // Identity precedence: source/requisition identity, canonical URL, company+title+location,
         // then company+title only as a deliberately low-confidence fallback.
 
-        if (checkExt.rows.length > 0) {
+        if (checkExt.rows.length > 0 && !canonicalJobId) {
           canonicalJobId = checkExt.rows[0].canonical_job_id;
           isExistingJob = true;
           sourcePostingIdentitySeen = true;
           if (checkExt.rows[0].content_hash === normalizedContentHash) {
             existingVersionId = checkExt.rows[0].job_version_id;
           }
-        } else {
+        } else if (!canonicalJobId) {
+          const identityUrl = obs.derived_from_observation_id
+            ? obs.source_url
+            : obs.canonical_apply_url || obs.source_url;
           const checkUrl = await client.query(
-            `SELECT id FROM canonical_jobs
-             WHERE workspace_id = $1
-               AND canonical_url = $2
-               AND BTRIM(regexp_replace(lower(company_name), '[^a-z0-9]+', ' ', 'g'))
-                 = BTRIM(regexp_replace(lower($3), '[^a-z0-9]+', ' ', 'g'))
-               AND BTRIM(regexp_replace(lower(COALESCE(location, location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
-                 = BTRIM(regexp_replace(lower(COALESCE($4, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
-             LIMIT 1`,
-            [ctx.workspaceId, obs.canonical_apply_url || obs.source_url, obs.company_name, obs.location_raw || "Unknown"]
+            obs.derived_from_observation_id
+              ? `SELECT id FROM canonical_jobs
+                 WHERE workspace_id = $1
+                   AND canonical_url = $2
+                   AND normalized_title = lower($3)
+                   AND BTRIM(regexp_replace(lower(company_name), '[^a-z0-9]+', ' ', 'g'))
+                     = BTRIM(regexp_replace(lower($4), '[^a-z0-9]+', ' ', 'g'))
+                 LIMIT 1`
+              : `SELECT id FROM canonical_jobs
+                 WHERE workspace_id = $1
+                   AND canonical_url = $2
+                   AND BTRIM(regexp_replace(lower(company_name), '[^a-z0-9]+', ' ', 'g'))
+                     = BTRIM(regexp_replace(lower($3), '[^a-z0-9]+', ' ', 'g'))
+                   AND BTRIM(regexp_replace(lower(COALESCE(location, location_summary, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+                     = BTRIM(regexp_replace(lower(COALESCE($4, 'Unknown')), '[^a-z0-9]+', ' ', 'g'))
+                 LIMIT 1`,
+            obs.derived_from_observation_id
+              ? [ctx.workspaceId, identityUrl, obs.title.toLowerCase(), obs.company_name]
+              : [ctx.workspaceId, identityUrl, obs.company_name, obs.location_raw || "Unknown"]
           );
           if (checkUrl.rows.length > 0) {
             canonicalJobId = checkUrl.rows[0].id;
             isExistingJob = true;
-          } else {
+          } else if (!obs.derived_from_observation_id) {
             const checkTitleLocation = await client.query(
               `SELECT id FROM canonical_jobs
                WHERE workspace_id = $1
@@ -447,6 +487,12 @@ export async function runNormalization(
           );
         }
 
+        if (obs.derived_from_observation_id) {
+          await client.query(
+            "UPDATE raw_job_observations SET job_version_id = $1, processing_status = 'PROCESSED' WHERE workspace_id = $2 AND id = $3 AND source_name = 'GMAIL_ALERT'",
+            [resolvedVersionId, ctx.workspaceId, obs.derived_from_observation_id],
+          );
+        }
         await client.query("COMMIT");
         summary.totalProcessed++;
         summary.details.push({

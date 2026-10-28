@@ -159,4 +159,69 @@ describe('Pipeline Stage: Normalization', () => {
     const updateObsCall = calls.find((call: any[]) => call[0].includes('UPDATE raw_job_observations'));
     expect(updateObsCall[1]).toEqual(['existing-version-uuid', context.workspaceId, 'obs-uuid-2']);
   });
+
+  it('upgrades a Gmail discovery through a derived complete posting and resets the assessment state', async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+    const completeDescription = 'Responsibilities include leading delivery, coordinating teams, documenting decisions, resolving risks, and maintaining reliable services. Requirements include relevant experience, strong communication skills, technical judgment, and the ability to manage cross-functional work in a regulated environment. The role supports partner teams and improves service quality.';
+
+    (mPool.query as any).mockImplementation((sql: string) => {
+      if (sql.includes('SELECT obs.*')) {
+        return { rows: [{
+          id: 'derived-observation-id',
+          retrieved_at: '2026-10-28T00:00:00.000Z',
+          source_name: 'EMPLOYER_WEBSITE',
+          source_external_id: 'employer-1441267233',
+          source_url: 'https://careers.example.org/jobs/1441267233',
+          canonical_apply_url: 'https://careers.example.org/jobs/1441267233/apply',
+          company_name: 'Example Corporation',
+          title: 'Director, AI Solution Architect',
+          description_raw: completeDescription,
+          location_raw: 'Singapore',
+          workplace_type_raw: 'UNKNOWN',
+          employment_type_raw: 'UNKNOWN',
+          compensation_raw: 'UNKNOWN',
+          raw_payload: { source_content_status: 'COMPLETE' },
+          raw_payload_hash: 'derived-payload-hash',
+          normalized_evidence: null,
+          derived_from_observation_id: 'gmail-observation-id',
+        }] };
+      }
+      if (sql.includes('SELECT version.canonical_job_id, version.id AS job_version_id')) {
+        return { rows: [{ canonical_job_id: 'canonical-job-id', job_version_id: 'stub-version-id', content_hash: 'stub-content-hash' }] };
+      }
+      if (sql.includes('FROM job_versions version') && sql.includes('source_posting_identity_hash =')) return { rows: [] };
+      if (sql.includes('FROM job_versions version') && sql.includes('source_posting_identity_hash IS NULL')) return { rows: [] };
+      if (sql.includes('SELECT id FROM job_versions')) return { rows: [] };
+      if (sql.includes('INSERT INTO job_versions')) return { rows: [{ id: 'complete-version-id' }] };
+      if (sql.includes('SELECT c.latest_job_version_id')) {
+        return { rows: [{
+          latest_job_version_id: 'stub-version-id',
+          description_quality_status: 'INCOMPLETE',
+          existing_desc_len: 43,
+        }] };
+      }
+      return { rows: [] };
+    });
+
+    const summary = await runNormalization(undefined, { context });
+    const calls = (mPool.query as any).mock.calls;
+    const parentIdentityCheck = calls.find((call: any[]) => call[0].includes("discovery.source_name = 'GMAIL_ALERT'"));
+    const updateCanonical = calls.find((call: any[]) => call[0].includes('UPDATE canonical_jobs'));
+    const updateParent = calls.find((call: any[]) => call[0].includes('UPDATE raw_job_observations') && call[0].includes("source_name = 'GMAIL_ALERT'"));
+
+    expect(summary.totalProcessed).toBe(1);
+    expect(summary.totalErrors).toBe(0);
+    expect(parentIdentityCheck?.[1]).toEqual([context.workspaceId, 'gmail-observation-id', 'Director, AI Solution Architect']);
+    expect(updateCanonical?.[1][0]).toBe('complete-version-id');
+    expect(updateCanonical?.[1][7]).toBe('COMPLETE');
+    expect(updateCanonical?.[1][9]).toBe(false);
+    expect(updateParent?.[0]).toContain("SET job_version_id = $1, processing_status = 'PROCESSED'");
+    expect(updateParent?.[1]).toEqual(['complete-version-id', context.workspaceId, 'gmail-observation-id']);
+  });
 });

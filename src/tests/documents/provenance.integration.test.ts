@@ -110,20 +110,26 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
     const canonicalJobId = canonical.rows[0]?.id;
     const jobContentHash = `job-content-${crypto.randomUUID()}`;
     const evidenceRevisionHash = "e".repeat(64);
+    const fullPostingDescription = [
+      "About the role: Build and operate reliable data products used by research teams.",
+      "Responsibilities: Design data services, deliver integrations, and support production releases.",
+      "Requirements: Experience with SQL, cloud systems, and cross-functional technical delivery.",
+    ].join(" ").repeat(8);
     const jobVersion = await database.query<{ id: string }>(
       `INSERT INTO job_versions (
          workspace_id, canonical_job_id, version_number, content_hash,
          description_text, observed_at, evidence_revision_hash,
          availability_status, availability_evidence, availability_verified_at,
          availability_recheck_at
-       ) VALUES ($1, $2, 1, $3, 'Build reliable data products.', NOW(), $4,
-         'OPEN', $5::jsonb, '2098-01-01T00:00:00Z', '2099-01-01T00:00:00Z')
+       ) VALUES ($1, $2, 1, $3, $5, NOW(), $4,
+         'OPEN', $6::jsonb, '2098-01-01T00:00:00Z', '2099-01-01T00:00:00Z')
        RETURNING id`,
       [
         workspace.workspaceId,
         canonicalJobId,
         jobContentHash,
         evidenceRevisionHash,
+        fullPostingDescription,
         JSON.stringify({ status: "OPEN", verification_method: "TEST_FIXTURE", reason_code: "SOURCE_CONFIRMED", evidence: [] }),
       ],
     );
@@ -178,9 +184,27 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
     );
     await database.query(
       `UPDATE canonical_jobs
-       SET latest_job_version_id = $1, latest_match_run_id = $2
+       SET latest_job_version_id = $1, latest_match_run_id = $2,
+           description_quality_status = 'COMPLETE'
        WHERE workspace_id = $3 AND id = $4`,
       [jobVersionId, matchRunId, workspace.workspaceId, canonicalJobId],
+    );
+    await database.query(
+      `INSERT INTO raw_job_observations (
+         workspace_id, source_name, source_external_id, source_url,
+         company_name, title, description_raw, raw_payload, raw_payload_hash,
+         job_version_id
+       ) VALUES ($1, 'GREENHOUSE', $2, $3, 'Current Readiness Fixture', 'Data Engineer',
+         $4, $5::jsonb, $6, $7)`,
+      [
+        workspace.workspaceId,
+        `document-fixture-${crypto.randomUUID()}`,
+        `https://boards.greenhouse.io/example/jobs/${crypto.randomUUID()}`,
+        fullPostingDescription,
+        JSON.stringify({ source_content_status: "COMPLETE" }),
+        crypto.randomBytes(32).toString("hex"),
+        jobVersionId,
+      ],
     );
     const policyRevisions = await database.query<{
       config_key: string;

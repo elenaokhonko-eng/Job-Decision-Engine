@@ -25,6 +25,7 @@ import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
 import { generateContentAudited, MODEL_REGISTRY } from "../src/services/agent.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
+import { sourceContentEvidencePredicate } from "../src/pipeline/descriptionQuality.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
@@ -234,7 +235,9 @@ async function generateTailoredCoverLetter(): Promise<void> {
        ) ae ON TRUE
        WHERE c.workspace_id = $3
          AND c.id = $1
-         AND jv.canonical_job_id = c.id`,
+         AND jv.canonical_job_id = c.id
+         AND c.description_quality_status = 'COMPLETE'
+         AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}`,
       [jobId, requestedJobVersionId || null, ctx.workspaceId]
     );
 

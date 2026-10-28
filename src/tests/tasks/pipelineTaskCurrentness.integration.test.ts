@@ -242,6 +242,88 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     expect(after.rows[0]?.status).toBe("PENDING");
   });
 
+  it("does not accept PROCESSED plus a version as fetched content, but accepts a matching sourced snapshot", async () => {
+    const versions = await insertJobVersions();
+    await getClient().query(
+      `UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE workspace_id = $1 AND id = $2`,
+      [getContext().workspaceId, versions.canonicalJobId],
+    );
+    const observationId = crypto.randomUUID();
+    const description = [
+      "Responsibilities: Design and maintain the data platform, lead architecture reviews, and coordinate delivery with engineering and business teams.",
+      "Requirements: Experience with production systems, data governance, cloud services, and clear written communication.",
+    ].join(" ").repeat(10);
+    await getClient().query(
+      `UPDATE job_versions SET description_text = $1 WHERE workspace_id = $2 AND id = $3`,
+      [description, getContext().workspaceId, versions.latestVersionId],
+    );
+    await getClient().query(
+      `INSERT INTO raw_job_observations (
+         id, workspace_id, source_name, source_url, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id
+       ) VALUES ($1, $2, 'GMAIL_ALERT', 'https://jobs.lever.co/example/12345678',
+         'Pipeline Currentness Test', 'Fixture Role', 'short email snippet', '{}'::jsonb,
+         $3, 'PROCESSED', $4)`,
+      [observationId, getContext().workspaceId, `hash-${observationId}`, versions.latestVersionId],
+    );
+    const taskId = await insertPendingTask({
+      taskType: "FETCH_JOB_CONTENT",
+      taskKey: `FETCH_JOB_CONTENT:${observationId}:posting_fetch_v1`,
+      payload: { observation_id: observationId },
+      fingerprintTaskType: "FETCH_JOB_CONTENT",
+      fingerprintTaskVersion: "posting_fetch_v1",
+    });
+
+    const legacy = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
+      apply: false,
+      taskTypes: ["FETCH_JOB_CONTENT"],
+      observationIds: [observationId],
+    });
+    expect(legacy).toMatchObject({ unresolved: 1, current: 0 });
+    expect(legacy.decisions[0]).toMatchObject({
+      taskId,
+      classification: "UNRESOLVED",
+      reasonCode: "FETCH_OBSERVATION_STATE_UNPROVEN",
+    });
+
+    const proofHash = "a".repeat(64);
+    await getClient().query(
+      `INSERT INTO raw_job_observations (
+         workspace_id, source_name, source_url, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id, derived_from_observation_id
+       ) VALUES (
+         $1, 'LEVER', 'https://jobs.lever.co/example/12345678', 'Pipeline Currentness Test',
+         'Fixture Role', $2, $3::jsonb, $4, 'FETCH_STAGED', $5, $6
+       )`,
+      [getContext().workspaceId, description, JSON.stringify({
+        source_content_status: "COMPLETE",
+        content_hash: proofHash,
+        source_evidence: {
+          responseHash: proofHash,
+          requestedUrl: "https://jobs.lever.co/example/12345678",
+          resolvedUrl: "https://api.lever.co/v0/postings/example/12345678",
+        },
+        posting: { title: "Fixture Role", companyName: "Pipeline Currentness Test" },
+      }), `derived-${observationId}`, versions.latestVersionId, observationId],
+    );
+    await getClient().query(
+      `UPDATE raw_job_observations SET processing_status = 'FETCH_COMPLETE'
+       WHERE workspace_id = $1 AND id = $2`,
+      [getContext().workspaceId, observationId],
+    );
+    const retrieved = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
+      apply: false,
+      taskTypes: ["FETCH_JOB_CONTENT"],
+      observationIds: [observationId],
+    });
+    expect(retrieved).toMatchObject({ current: 0, unresolved: 0, byClassification: { PROVEN_SATISFIED: 1 } });
+    expect(retrieved.decisions[0]).toMatchObject({
+      taskId,
+      classification: "PROVEN_SATISFIED",
+      reasonCode: "POSTING_CONTENT_STAGED",
+    });
+  });
+
   it("dry-runs and reconciles stale or already-satisfied pending tasks without changing current work", async () => {
     const versions = await insertJobVersions();
     const staleTaskId = await insertPendingTask({
@@ -904,6 +986,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
 
     let normalizationCalls = 0;
     const workerDependencies = {
+      fetchJobContent: vi.fn(async () => ({ kind: "BLOCKED" as const, reason: "MISSING_POSTING_URL" as const })),
       runNormalization: vi.fn(async () => {
         normalizationCalls += 1;
         if (normalizationCalls === 1) {

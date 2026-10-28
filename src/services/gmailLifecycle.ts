@@ -49,6 +49,7 @@ export interface ReconcileOptions {
 }
 
 export function classifyLineage(row: {
+  lifecycle_status?: string | null;
   total_observations: string | number;
   total_canonical_jobs: string | number;
   terminal_jobs_count: string | number;
@@ -67,6 +68,9 @@ export function classifyLineage(row: {
   }
   if (hasError) {
     return { classification: "PROCESSING_ERROR", isEligibleForTrash: false };
+  }
+  if (["SOURCE_PENDING", "ASSESSMENT_PENDING", "SOURCE_BLOCKED"].includes(row.lifecycle_status ?? "")) {
+    return { classification: "IN_FLIGHT", isEligibleForTrash: false };
   }
   if (inFlightJobs > 0) {
     return { classification: "IN_FLIGHT", isEligibleForTrash: false };

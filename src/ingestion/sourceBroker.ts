@@ -419,6 +419,23 @@ export class SourceBroker {
         );
         observationId = existingObservation.rows[0]?.id ?? null;
       }
+      const hasLineage = Boolean(obs.rawEmailAlertId || obs.gmailMessageId || obs.derivedFromObservationId);
+      if (hasLineage) {
+        if (!observationId) throw new Error("Observation lineage cannot be written without a durable observation id.");
+        const lineage = await executor.query(
+          "UPDATE raw_job_observations SET raw_email_alert_id = COALESCE(raw_email_alert_id, $1::uuid), gmail_message_id = COALESCE(gmail_message_id, $2), derived_from_observation_id = COALESCE(derived_from_observation_id, $3::uuid) WHERE workspace_id = $4 AND id = $5 AND (raw_email_alert_id IS NULL OR $1::uuid IS NULL OR raw_email_alert_id = $1::uuid) AND (gmail_message_id IS NULL OR $2::text IS NULL OR gmail_message_id = $2::text) AND (derived_from_observation_id IS NULL OR $3::uuid IS NULL OR derived_from_observation_id = $3::uuid)",
+          [
+            obs.rawEmailAlertId ?? null,
+            obs.gmailMessageId ?? null,
+            obs.derivedFromObservationId ?? null,
+            persistenceInput.workspace_id,
+            observationId,
+          ],
+        );
+        if ((lineage.rowCount ?? 0) !== 1) {
+          throw new Error("Observation lineage conflicts with the existing workspace-scoped parent.");
+        }
+      }
       if (inserted) this.stats.new++;
       else this.stats.duplicates++;
       if (normalizedEvidenceError && observationId) {
