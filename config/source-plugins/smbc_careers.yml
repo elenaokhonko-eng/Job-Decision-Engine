@@ -1,0 +1,56 @@
+schema_version: "2.2.0"
+source_key: smbc_careers
+display_name: SMBC Careers schema.org job posting
+kind: schema_org
+status: active
+capabilities:
+  discovery: true
+  pagination: false
+  incremental: false
+  location_filter: false
+  work_mode_evidence: false
+compliance:
+  access_basis: user_supplied
+  terms_url: https://careerasia.smbc.co.jp/SMBC/
+  license: null
+  attribution_required: false
+  attribution_text: null
+  authenticated_scraping: false
+  reviewed_at: "2026-10-28"
+schedule:
+  enabled: false
+  interval_minutes: 1440
+  jitter_seconds: 0
+request:
+  endpoint: https://careerasia.smbc.co.jp/SMBC/job/Director%2C-AI-Solution-Architect/1441267233/
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 1
+    base_delay_ms: 1000
+    max_delay_ms: 3000
+  rate_limit:
+    requests_per_minute: 1
+    items_per_run: 1
+  pagination:
+    strategy: none
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: null
+  query:
+    keywords: ["AI Solution Architect", "SMBC"]
+    locations: ["Singapore"]
+    work_modes: [UNKNOWN]
+    lane_keys: [CORE_AI_DATA, INVESTMENT_MARKETS_FINTECH]
+mapping:
+  external_id: $.identifier
+  title: $.title
+  company: $.hiringOrganization.name
+  description: $.description
+  url: $.url
+  location: $.jobLocation.address
+  work_mode: $.jobLocationType
+  employment_type: $.employmentType
+  posted_at: $.datePosted
+  updated_at: null

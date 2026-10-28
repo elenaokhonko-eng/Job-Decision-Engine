@@ -12,6 +12,7 @@ import type { SourceEvidenceRefreshResult } from "../src/ingestion/sourceEvidenc
 import { AshbyAdapter } from "../src/ingestion/adapters/ashbyAdapter.js";
 import { GreenhouseAdapter } from "../src/ingestion/adapters/greenhouseAdapter.js";
 import { LeverAdapter } from "../src/ingestion/adapters/leverAdapter.js";
+import { SchemaOrgAdapter } from "../src/ingestion/adapters/schemaOrgAdapter.js";
 import type { EvaluateQueueOptions } from "./evaluate_queue.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
 import type { BaseSourceAdapter } from "../src/ingestion/adapters/baseAdapter.js";
@@ -64,6 +65,7 @@ export interface ScopedPilotReport {
       readonly reasonCode: string | null;
     }[];
   } | null;
+  readonly contentProvenanceCurrent: boolean;
   readonly documentsEligible: boolean;
   readonly operationalError: string | null;
 }
@@ -204,6 +206,9 @@ export function createEmployerAtsAdapter(sourcePluginKey: string, sourceUrl: str
   }
   if (pluginKey === "lever" && url.hostname === "jobs.lever.co" && pathParts.length >= 2) {
     return new LeverAdapter(pathParts[0]);
+  }
+  if (pluginKey === "smbc_careers" && url.hostname === "careerasia.smbc.co.jp" && pathParts.length >= 4) {
+    return new SchemaOrgAdapter(url.toString());
   }
   return null;
 }
@@ -460,6 +465,124 @@ export function isScopedEvaluationReadyForDocuments(
   return evaluation !== null && evaluation.failed === 0 && evaluation.manualReview === 0 && hasCurrentPersistedEvaluation;
 }
 
+export interface ScopedPilotContentProvenanceInput {
+  readonly requestedJobVersionId: string;
+  readonly latestJobVersionId: string | null;
+  readonly linkedObservationId: string | null;
+  readonly observationJobVersionId: string | null;
+  readonly expectedObservationId: string;
+  readonly expectedSourcePluginKey: string;
+  readonly observationSourcePluginKey: string | null;
+  readonly expectedSourceExternalId: string | null;
+  readonly observationSourceExternalId: string | null;
+  readonly expectedSourceUrl: string | null;
+  readonly observationSourceUrl: string | null;
+  readonly versionDescription: string | null;
+  readonly observationDescription: string | null;
+  readonly rawPayloadHash: string | null;
+  readonly evidenceSchemaVersion: string | null;
+  readonly versionEvidenceRevisionHash: string | null;
+  readonly observationRetrievedAt: Date | string | null;
+  readonly refreshStartedAt: Date;
+  readonly refreshStatus: SourceEvidenceRefreshResult["status"];
+  readonly evidenceRevisionHash: string | undefined;
+}
+
+export function hasCurrentScopedPilotContentProvenance(input: ScopedPilotContentProvenanceInput): boolean {
+  const retrievedAt = input.observationRetrievedAt === null
+    ? Number.NaN
+    : input.observationRetrievedAt instanceof Date
+      ? input.observationRetrievedAt.getTime()
+      : new Date(input.observationRetrievedAt).getTime();
+  return input.refreshStatus === "REFRESHED" &&
+    /^[a-f0-9]{64}$/i.test(input.evidenceRevisionHash ?? "") &&
+    input.versionEvidenceRevisionHash === input.evidenceRevisionHash &&
+    input.latestJobVersionId === input.requestedJobVersionId &&
+    input.linkedObservationId === input.expectedObservationId &&
+    input.observationJobVersionId === input.requestedJobVersionId &&
+    input.observationSourcePluginKey?.toLowerCase() === input.expectedSourcePluginKey.toLowerCase() &&
+    input.observationSourceExternalId === input.expectedSourceExternalId &&
+    input.observationSourceUrl === input.expectedSourceUrl &&
+    input.versionDescription !== null &&
+    input.observationDescription === input.versionDescription &&
+    /^[a-f0-9]{64}$/i.test(input.rawPayloadHash ?? "") &&
+    input.evidenceSchemaVersion === "job_source_evidence_v1" &&
+    Number.isFinite(retrievedAt) && retrievedAt >= input.refreshStartedAt.getTime();
+}
+
+async function readCurrentScopedPilotContentProvenance(
+  client: pg.PoolClient,
+  context: WorkspaceContext,
+  target: PilotTarget,
+  args: ScopedPilotArgs,
+  sourceRefresh: SourceEvidenceRefreshResult,
+  refreshStartedAt: Date,
+): Promise<boolean> {
+  const { rows } = await client.query<{
+    latest_job_version_id: string | null;
+    linked_observation_id: string | null;
+    observation_job_version_id: string | null;
+    observation_source_plugin_key: string | null;
+    observation_source_external_id: string | null;
+    observation_source_url: string | null;
+    version_description: string | null;
+    observation_description: string | null;
+    raw_payload_hash: string | null;
+    evidence_schema_version: string | null;
+    version_evidence_revision_hash: string | null;
+    observation_retrieved_at: Date | string | null;
+  }>(
+    `SELECT canonical.latest_job_version_id::TEXT AS latest_job_version_id,
+            observation.id::TEXT AS linked_observation_id,
+            observation.job_version_id::TEXT AS observation_job_version_id,
+            observation.source_plugin_key AS observation_source_plugin_key,
+            observation.source_external_id AS observation_source_external_id,
+            observation.source_url AS observation_source_url,
+            version.description_text AS version_description,
+            observation.description_raw AS observation_description,
+            observation.raw_payload_hash,
+            observation.evidence_schema_version,
+            version.evidence_revision_hash AS version_evidence_revision_hash,
+            observation.retrieved_at AS observation_retrieved_at
+     FROM canonical_jobs canonical
+     JOIN job_versions version
+       ON version.workspace_id = canonical.workspace_id
+      AND version.canonical_job_id = canonical.id
+      AND version.id = $3::UUID
+     JOIN raw_job_observations observation
+       ON observation.workspace_id = version.workspace_id
+      AND observation.job_version_id = version.id
+      AND observation.id = $4::UUID
+     WHERE canonical.workspace_id = $1
+       AND canonical.id = $2::UUID
+     LIMIT 1`,
+    [context.workspaceId, args.canonicalJobId, args.jobVersionId, target.observation_id],
+  );
+  const row = rows[0];
+  return hasCurrentScopedPilotContentProvenance({
+    requestedJobVersionId: args.jobVersionId,
+    latestJobVersionId: row?.latest_job_version_id ?? null,
+    linkedObservationId: row?.linked_observation_id ?? null,
+    observationJobVersionId: row?.observation_job_version_id ?? null,
+    expectedObservationId: target.observation_id,
+    expectedSourcePluginKey: target.source_plugin_key ?? "",
+    observationSourcePluginKey: row?.observation_source_plugin_key ?? null,
+    expectedSourceExternalId: target.source_external_id,
+    observationSourceExternalId: row?.observation_source_external_id ?? null,
+    expectedSourceUrl: target.source_url,
+    observationSourceUrl: row?.observation_source_url ?? null,
+    versionDescription: row?.version_description ?? null,
+    observationDescription: row?.observation_description ?? null,
+    rawPayloadHash: row?.raw_payload_hash ?? null,
+    evidenceSchemaVersion: row?.evidence_schema_version ?? null,
+    versionEvidenceRevisionHash: row?.version_evidence_revision_hash ?? null,
+    observationRetrievedAt: row?.observation_retrieved_at ?? null,
+    refreshStartedAt,
+    refreshStatus: sourceRefresh.status,
+    evidenceRevisionHash: sourceRefresh.evidenceRevisionHash,
+  });
+}
+
 async function readScopedEvaluationProfileVersion(client: pg.PoolClient, context: WorkspaceContext): Promise<string> {
   const { rows } = await client.query<{ id: string }>(
     `SELECT id::TEXT AS id
@@ -537,7 +660,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
         throw new Error(`The workspace has ${actionableDeadLetters} actionable current dead-letter task(s); scoped pilot is blocked.`);
       }
       if (!adapter) {
-        throw new Error(`No supported official ATS adapter is configured for source ${target.source_plugin_key ?? target.source_name}.`);
+        throw new Error(`No supported official source adapter is configured for source ${target.source_plugin_key ?? target.source_name}.`);
       }
 
       const preference = await client.query<{ revision_id: string }>(
@@ -553,6 +676,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
         [context.workspaceId, context.userId],
       );
       const preferenceRevisionId = preference.rows[0]?.revision_id ?? null;
+      const sourceRefreshStartedAt = new Date();
       const sourceRefresh = await refreshCanonicalJobSourceEvidence(pool, {
         canonicalJobId: args.canonicalJobId,
         jobVersionId: args.jobVersionId,
@@ -572,6 +696,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
           worker: null,
           evaluation: null,
           readiness: null,
+          contentProvenanceCurrent: false,
           documentsEligible: false,
           operationalError: `Source evidence refresh ended with ${sourceRefresh.status}${sourceRefresh.reasonCode ? ` (${sourceRefresh.reasonCode})` : ""}.`,
         };
@@ -639,6 +764,14 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
         args.jobVersionId,
         evaluationProfileVersionId,
       );
+      const currentContentProvenance = await readCurrentScopedPilotContentProvenance(
+        client,
+        context,
+        target,
+        args,
+        sourceRefresh,
+        sourceRefreshStartedAt,
+      );
       const readinessPayload = current.readiness?.application_readiness;
       const readinessRecord = readinessPayload !== null && typeof readinessPayload === "object"
         ? Object.fromEntries(Object.entries(readinessPayload))
@@ -659,7 +792,8 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
       const documentsEligible = isCurrentReadyApplicationReadiness(current.readiness) &&
         current.recommendationEligibility === "ELIGIBLE" &&
         (outcome === "PRIORITY" || outcome === "REVIEW") &&
-        isScopedEvaluationReadyForDocuments(evaluation, currentEvaluation);
+        isScopedEvaluationReadyForDocuments(evaluation, currentEvaluation) &&
+        currentContentProvenance;
       return {
         canonicalJobId: args.canonicalJobId,
         jobVersionId: args.jobVersionId,
@@ -681,6 +815,7 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
           availabilityStatus: current.availabilityStatus,
           checks: readinessChecks,
         },
+        contentProvenanceCurrent: currentContentProvenance,
         documentsEligible,
         operationalError: operationalError ?? (evaluation?.failed ? "Scoped evaluation queued one or more tasks for retry." : null),
       };
@@ -744,6 +879,7 @@ function thisReport(input: {
       availabilityStatus: input.current.availabilityStatus,
       checks: [],
     },
+    contentProvenanceCurrent: false,
     documentsEligible: false,
     operationalError: input.error,
   };
