@@ -32,7 +32,7 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
         "fetched from the selected public posting"
         in app.text_area(key="manual_job_description").value
     )
-    assert app.session_state.get("manual_job_source_kind") == "FETCHED"
+    assert app.session_state["manual_job_source_kind"] == "FETCHED"
     assert not any(
         button.label == "Generate customised CV and cover letter"
         for button in app.button
@@ -42,7 +42,7 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
     assert not app.exception, [(error.type, error.message) for error in app.exception]
     assert any("NEEDS_VERIFICATION" in warning.value for warning in app.warning), (
         [error.value for error in app.error],
-        app.session_state.get("test_api_calls"),
+        app.session_state["test_api_calls"],
     )
     assert any(
         "Requirement, evidence and gap review" in header.value

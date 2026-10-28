@@ -12,7 +12,7 @@ def test_document_review_checkbox_persists_without_session_state_widget_error(
     app = AppTest.from_file(str(app_path)).run()
 
     assert not app.exception
-    assert app.session_state.get("review_saved") is None
+    assert "review_saved" not in app.session_state
     app.checkbox[0].check().run()
 
     assert not app.exception
