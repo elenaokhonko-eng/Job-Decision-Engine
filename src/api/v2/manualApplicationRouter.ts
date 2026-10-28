@@ -77,6 +77,18 @@ function normalizeIdentity(value: string): string {
   return value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
 }
 
+export function matchesExactFetchedPostingIdentity(
+  expected: { title: string; company: string; requisitionId?: string | null },
+  posting: { title: string; companyName: string; requisitionId: string | null },
+): boolean {
+  const expectedTitle = normalizeIdentity(expected.title);
+  const expectedCompany = normalizeIdentity(expected.company);
+  return Boolean(expectedTitle && expectedCompany)
+    && expectedTitle === normalizeIdentity(posting.title)
+    && expectedCompany === normalizeIdentity(posting.companyName)
+    && (!expected.requisitionId || expected.requisitionId === posting.requisitionId);
+}
+
 function normalizePostingUrl(value: string): string {
   const url = new URL(value);
   url.hash = "";
@@ -512,6 +524,14 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
       return;
     }
     if (result.kind === "COMPLETE") {
+      if (!matchesExactFetchedPostingIdentity({
+        title: parsed.data.title,
+        company: parsed.data.company,
+        requisitionId: parsed.data.requisition_id,
+      }, result.posting)) {
+        sendApiError(res, 409, "IDENTITY_CONFLICT", "Fetched posting title, company, or requisition ID does not exactly match the confirmed posting identity.");
+        return;
+      }
       const sourceEvidence = ManualFetchSourceEvidenceSchema.parse(result.evidence);
       const client = await pool.connect();
       let receiptId: string;
