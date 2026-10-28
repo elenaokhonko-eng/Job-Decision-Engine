@@ -181,6 +181,18 @@ describe("Gmail Alert Lifecycle & Terminal Reconciliation", () => {
       expect(result.isEligibleForTrash).toBe(false);
     });
 
+    it("retains a source-pending email even when a stale canonical outcome looks terminal", () => {
+      const result = classifyLineage({
+        lifecycle_status: "SOURCE_PENDING",
+        total_observations: 1,
+        total_canonical_jobs: 1,
+        terminal_jobs_count: 1,
+        in_flight_jobs_count: 0,
+        has_error: false,
+      });
+      expect(result).toEqual({ classification: "IN_FLIGHT", isEligibleForTrash: false });
+    });
+
     it("4. zero observations: retained and never automatically trashed", () => {
       const row = {
         total_observations: 0,

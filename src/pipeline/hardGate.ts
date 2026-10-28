@@ -42,6 +42,7 @@ import {
 } from "../policy/stage3PolicyEngine.js";
 import type { Stage3PolicyPreferences } from "../policy/stage3Contracts.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
+import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -836,6 +837,8 @@ export async function runHardGates(
         )
         ${jobVersionFilter}
         ${canonicalJobFilter}
+        AND c.description_quality_status = 'COMPLETE'
+        AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
       ORDER BY c.created_at ASC, c.id ASC
       ${limitClause}
     `,

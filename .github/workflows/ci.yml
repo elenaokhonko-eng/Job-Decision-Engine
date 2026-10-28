@@ -108,6 +108,12 @@ jobs:
         DATABASE_URL: postgres://test:password@localhost:5432/testdb
       run: npm run db:init
 
+    - name: Run required PostgreSQL posting persistence tests
+      env:
+        DATABASE_URL: postgres://test:password@localhost:5432/testdb
+        REQUIRE_POSTGRES_INTEGRATION: "true"
+      run: npx vitest run src/tests/tasks/jobContentFetchPersistence.integration.test.ts src/tests/tasks/pipelineTaskCurrentness.integration.test.ts
+
     - name: Run Vitest Unit Tests
       env:
         DATABASE_URL: postgres://test:password@localhost:5432/testdb

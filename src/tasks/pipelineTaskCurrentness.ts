@@ -5,6 +5,7 @@ import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { GATE_VERSION } from "../contracts/version.js";
 import { loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
+import { completeRetrievedPostingPredicate } from "../pipeline/descriptionQuality.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import {
   applicationReadinessViewAvailable,
@@ -124,6 +125,7 @@ const lineageTaskTypes = new Set([
 
 export function pipelineTaskStageVersion(taskType: string): string | null {
   switch (taskType) {
+    case "FETCH_JOB_CONTENT": return "posting_fetch_v1";
     case "NORMALIZE_OBSERVATION": return "normalizer_v1";
     case "EXTRACT_DETERMINISTIC_REQUIREMENTS": return "deterministic_v3";
     case "APPLY_HARD_GATES": return "hard_gate_v1";
@@ -203,7 +205,7 @@ function supportsLegacyTaskKey(
   const parts = taskKey.split(":");
   if (!stageVersion || parts[0] !== taskType) return false;
 
-  if (taskType === "NORMALIZE_OBSERVATION") {
+  if (taskType === "FETCH_JOB_CONTENT" || taskType === "NORMALIZE_OBSERVATION") {
     return parts[1] === stringField(payload, "observation_id") && parts[2] === stageVersion;
   }
 
@@ -628,6 +630,72 @@ export async function classifyPipelineTaskCurrentness(
     if (!targetMatchesPayload) return result("UNRESOLVED", "TASK_INTENT_TARGET_OR_FINGERPRINT_MISMATCH");
   }
 
+  if (task.task_type === "FETCH_JOB_CONTENT") {
+    const observationId = stringField(payload, "observation_id");
+    const taskKeyParts = task.task_key.split(":");
+    const expectedStageVersion = pipelineTaskStageVersion(task.task_type);
+    if (!observationId || !UUID_PATTERN.test(observationId)) {
+      return result("UNRESOLVED", "FETCH_OBSERVATION_ID_MISSING");
+    }
+    if (!expectedStageVersion) {
+      return result("UNRESOLVED", "TASK_STAGE_VERSION_UNSUPPORTED");
+    }
+    if (taskIntent && taskIntent.stageVersion !== expectedStageVersion) {
+      return result("UNRESOLVED", "TASK_INTENT_STAGE_VERSION_UNSUPPORTED");
+    }
+    if (!taskIntent && !supportsLegacyTaskKey(task.task_type, task.task_key, payload)) {
+      return result("UNRESOLVED", "LEGACY_TASK_KEY_FORMAT_UNSUPPORTED");
+    }
+    if (taskKeyParts[1] !== observationId) {
+      return result("UNRESOLVED", "TASK_KEY_LINEAGE_MISMATCH");
+    }
+    const expectedFingerprint = buildPipelineTaskContextFingerprint({
+      workspaceId: context.workspaceId,
+      taskType: task.task_type,
+      taskVersion: expectedStageVersion,
+      payload,
+    });
+    if (!task.context_fingerprint || task.context_fingerprint !== expectedFingerprint) {
+      return result("UNRESOLVED", "TASK_CONTEXT_FINGERPRINT_UNPROVEN");
+    }
+    const { rows } = await client.query<{
+      source_name: string;
+      source_url: string | null;
+      processing_status: string | null;
+      job_version_id: string | null;
+      has_complete_derived_observation: boolean;
+    }>(
+      `SELECT observation.source_name,
+              observation.source_url,
+              observation.processing_status,
+              observation.job_version_id::text AS job_version_id,
+              EXISTS (
+              SELECT 1 FROM raw_job_observations derived
+              WHERE derived.workspace_id = observation.workspace_id
+                  AND derived.derived_from_observation_id = observation.id
+                  AND ${completeRetrievedPostingPredicate("derived")}
+              ) AS has_complete_derived_observation
+       FROM raw_job_observations observation
+       WHERE observation.workspace_id = $1 AND observation.id = $2::uuid
+       LIMIT 1`,
+      [context.workspaceId, observationId],
+    );
+    const observation = rows[0];
+    if (!observation) return result("UNRESOLVED", "FETCH_OBSERVATION_NOT_FOUND");
+    if (observation.source_name !== "GMAIL_ALERT" || !observation.source_url) {
+      return result("UNRESOLVED", "FETCH_OBSERVATION_SOURCE_INVALID");
+    }
+    const forceRefetch = booleanField(payload, "force_refetch");
+    if (!forceRefetch && observation.processing_status === "FETCH_COMPLETE" && observation.has_complete_derived_observation) {
+      return result("PROVEN_SATISFIED", "POSTING_CONTENT_STAGED", { observationId });
+    }
+    if (forceRefetch || ["FETCH_PENDING", "FETCH_BLOCKED", "FETCH_FAILED", "FETCH_COMPLETE"].includes(observation.processing_status ?? "")) {
+      return result("CURRENT", "POSTING_CONTENT_FETCH_REQUIRED", { observationId });
+    }
+    return result("UNRESOLVED", "FETCH_OBSERVATION_STATE_UNPROVEN", {
+      processingStatus: observation.processing_status,
+    });
+  }
   if (task.task_type === "NORMALIZE_OBSERVATION") {
     const observationId = stringField(payload, "observation_id");
     const taskKeyParts = task.task_key.split(":");
@@ -1127,6 +1195,20 @@ export async function reconcileStalePendingPipelineTasks(
           AND scoped_observation.id::text = task.payload->>'observation_id'
           AND scoped_observation.job_version_id::text = ANY($${jobVersionParam}::text[])
       )
+      OR EXISTS (
+        SELECT 1
+        FROM raw_job_observations AS scoped_child
+        WHERE scoped_child.workspace_id = task.workspace_id
+          AND scoped_child.id::text = task.payload->>'observation_id'
+          AND scoped_child.derived_from_observation_id::text = ANY($${observationParam}::text[])
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM raw_job_observations AS scoped_parent
+        WHERE scoped_parent.workspace_id = task.workspace_id
+          AND scoped_parent.id::text = ANY($${observationParam}::text[])
+          AND scoped_parent.job_version_id::text = task.payload->>'job_version_id'
+      )
     )`;
   } else if (options.jobVersionIds !== undefined) {
     params.push(jobVersionIds);
@@ -1143,7 +1225,24 @@ export async function reconcileStalePendingPipelineTasks(
     )`;
   } else if (options.observationIds !== undefined) {
     params.push(observationIds);
-    targetClause = `AND task.payload->>'observation_id' = ANY($${params.length}::text[])`;
+    const observationParam = params.length;
+    targetClause = `AND (
+      task.payload->>'observation_id' = ANY($${observationParam}::text[])
+      OR EXISTS (
+        SELECT 1
+        FROM raw_job_observations AS scoped_child
+        WHERE scoped_child.workspace_id = task.workspace_id
+          AND scoped_child.id::text = task.payload->>'observation_id'
+          AND scoped_child.derived_from_observation_id::text = ANY($${observationParam}::text[])
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM raw_job_observations AS scoped_parent
+        WHERE scoped_parent.workspace_id = task.workspace_id
+          AND scoped_parent.id::text = ANY($${observationParam}::text[])
+          AND scoped_parent.job_version_id::text = task.payload->>'job_version_id'
+      )
+    )`;
   }
   params.push(limit);
 
