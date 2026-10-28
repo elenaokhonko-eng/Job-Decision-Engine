@@ -99,10 +99,10 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
       `INSERT INTO canonical_jobs (
          workspace_id, company_name, normalized_title, canonical_url,
          location_summary, workplace_type, employment_type, primary_lane,
-         processing_state, processing_status, gate_decision,
+         processing_state, processing_status, description_quality_status, gate_decision,
          recommendation_eligibility, recommendation_outcome
        ) VALUES ($1, 'Current Readiness Fixture', 'Data Engineer', $2,
-         'Remote', 'REMOTE', 'PERMANENT', 'CORE_AI_DATA', 'MATCHED', 'MATCHED',
+         'Remote', 'REMOTE', 'PERMANENT', 'CORE_AI_DATA', 'MATCHED', 'MATCHED', 'COMPLETE',
          'PASS', 'ELIGIBLE', 'REVIEW')
        RETURNING id`,
       [workspace.workspaceId, `https://example.test/document-pair/${crypto.randomUUID()}`],
@@ -110,24 +110,34 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
     const canonicalJobId = canonical.rows[0]?.id;
     const jobContentHash = `job-content-${crypto.randomUUID()}`;
     const evidenceRevisionHash = "e".repeat(64);
+    const descriptionText = "About this role. Responsibilities include designing reliable data products, integrating systems, and collaborating with stakeholders. Requirements include architecture, data engineering, and practical delivery experience. ".repeat(8);
     const jobVersion = await database.query<{ id: string }>(
       `INSERT INTO job_versions (
          workspace_id, canonical_job_id, version_number, content_hash,
          description_text, observed_at, evidence_revision_hash,
          availability_status, availability_evidence, availability_verified_at,
          availability_recheck_at
-       ) VALUES ($1, $2, 1, $3, 'Build reliable data products.', NOW(), $4,
-         'OPEN', $5::jsonb, '2098-01-01T00:00:00Z', '2099-01-01T00:00:00Z')
+       ) VALUES ($1, $2, 1, $3, $4, NOW(), $5,
+         'OPEN', $6::jsonb, '2098-01-01T00:00:00Z', '2099-01-01T00:00:00Z')
        RETURNING id`,
       [
         workspace.workspaceId,
         canonicalJobId,
         jobContentHash,
+        descriptionText,
         evidenceRevisionHash,
         JSON.stringify({ status: "OPEN", verification_method: "TEST_FIXTURE", reason_code: "SOURCE_CONFIRMED", evidence: [] }),
       ],
     );
     const jobVersionId = jobVersion.rows[0]?.id;
+    await database.query(
+      `INSERT INTO raw_job_observations (
+         id, workspace_id, source_name, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id
+       ) VALUES ($1, $2, 'GMAIL_ALERT', 'Current Readiness Fixture', 'Data Engineer', $3,
+         '{"source_content_status":"SNIPPET"}'::jsonb, $4, 'PROCESSED', $5)`,
+      [crypto.randomUUID(), workspace.workspaceId, descriptionText.slice(0, 80), `gmail-${crypto.randomUUID()}`, jobVersionId],
+    );
     const requirementIdentity = await database.query<{ id: string }>(
       `INSERT INTO requirement_set_identities (
          workspace_id, canonical_job_id, identity_hash, job_content_hash,
@@ -308,6 +318,19 @@ describe.skipIf(skipReal)("current READY document provenance (PostgreSQL)", () =
       [workspace.workspaceId, workspace.userId, canonicalJobId, jobVersionId],
     );
     const applicationRecordId = application.rows[0]?.id;
+    await expect(preflightApplicationDocumentDraft(database, workspace, {
+      applicationRecordId: applicationRecordId ?? "",
+      canonicalJobId: canonicalJobId ?? "",
+      jobVersionId: jobVersionId ?? "",
+    })).rejects.toThrow("complete description quality and verified posting-source evidence");
+    await database.query(
+      `INSERT INTO raw_job_observations (
+         id, workspace_id, source_name, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id
+       ) VALUES ($1, $2, 'EMPLOYER_WEBSITE', 'Current Readiness Fixture', 'Data Engineer', $3,
+         '{"source_content_status":"COMPLETE"}'::jsonb, $4, 'PROCESSED', $5)`,
+      [crypto.randomUUID(), workspace.workspaceId, descriptionText, `employer-${crypto.randomUUID()}`, jobVersionId],
+    );
     const draftPreflight = await preflightApplicationDocumentDraft(database, workspace, {
       applicationRecordId: applicationRecordId ?? "",
       canonicalJobId: canonicalJobId ?? "",
