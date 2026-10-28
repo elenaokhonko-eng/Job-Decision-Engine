@@ -348,7 +348,37 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
       throw new Error(`CFGI posting fetch did not complete: ${JSON.stringify({ fetchRun, errors: completed.errors, task: taskState.rows[0] ?? null })}`);
     }
     expect(completed.byType.NORMALIZE_OBSERVATION).toMatchObject({ claimed: 1, completed: 1 });
-    expect(completed.byType.EXTRACT_DETERMINISTIC_REQUIREMENTS).toMatchObject({ claimed: 1, completed: 1 });
+    const requirementsRun = completed.byType.EXTRACT_DETERMINISTIC_REQUIREMENTS;
+    if (requirementsRun?.completed !== 1) {
+      const taskStates = await getClient().query<{
+        task_type: string;
+        status: string;
+        last_error: string | null;
+        payload: Record<string, unknown>;
+      }>(
+        `SELECT task.task_type, task.status, task.last_error, task.payload
+         FROM pipeline_tasks task
+         WHERE task.workspace_id = $1
+           AND (
+             task.payload->>'observation_id' IN (
+               SELECT observation.id::text
+               FROM raw_job_observations observation
+               WHERE observation.workspace_id = $1
+                 AND (observation.id = $2::uuid OR observation.derived_from_observation_id = $2::uuid)
+             )
+             OR task.payload->>'job_version_id' IN (
+               SELECT observation.job_version_id::text
+               FROM raw_job_observations observation
+               WHERE observation.workspace_id = $1
+                 AND (observation.id = $2::uuid OR observation.derived_from_observation_id = $2::uuid)
+                 AND observation.job_version_id IS NOT NULL
+             )
+           )
+         ORDER BY task.created_at, task.id`,
+        [getContext().workspaceId, observationId],
+      );
+      throw new Error(`CFGI deterministic-requirements stage did not complete: ${JSON.stringify({ requirementsRun, errors: completed.errors, tasks: taskStates.rows })}`);
+    }
     expect(completed.byType.APPLY_HARD_GATES).toMatchObject({ claimed: 1, completed: 1 });
 
     const source = await getClient().query<{
