@@ -167,6 +167,46 @@ describe("stageTaskWorker", () => {
     expect(secondRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
   });
 
+  it("preserves parameters that follow a non-terminal limit placeholder when scoping a seed query", () => {
+    const scoped = scopeSeedQuery(
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.canonical_job_id = c.id
+       WHERE c.workspace_id = $1
+         AND jv.source_provider = $3
+         AND jv.embedding_model = $4
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, 100, "gemini", "embedding-model"],
+      { jobVersionIds: ["target-version"] },
+      1,
+    );
+
+    expect(scoped.sql).toContain("jv.source_provider = $2");
+    expect(scoped.sql).toContain("jv.embedding_model = $3");
+    expect(scoped.sql).toContain("scoped_seed.job_version_id::text = ANY($4::text[])");
+    expect(scoped.sql).toContain("LIMIT $5");
+    expect(scoped.params).toEqual([ctx.workspaceId, "gemini", "embedding-model", ["target-version"], 1]);
+  });
+
+  it("preserves a limit parameter also referenced in the seed query body", () => {
+    const scoped = scopeSeedQuery(
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.canonical_job_id = c.id
+       WHERE c.workspace_id = $1 AND jv.priority <= $2
+       LIMIT $2`,
+      [ctx.workspaceId, 100],
+      { jobVersionIds: ["target-version"] },
+      1,
+    );
+
+    expect(scoped.sql).toContain("jv.priority <= $2");
+    expect(scoped.sql).toContain("scoped_seed.job_version_id::text = ANY($3::text[])");
+    expect(scoped.sql).toContain("LIMIT $4");
+    expect(scoped.params).toEqual([ctx.workspaceId, 100, ["target-version"], 1]);
+  });
+
   it("pushes the exact target filter into bounded seed queries before their limit", () => {
     const scoped = scopeSeedQuery(
       `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
