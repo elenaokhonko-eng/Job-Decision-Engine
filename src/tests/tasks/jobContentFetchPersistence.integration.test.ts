@@ -432,7 +432,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
       source_published_at: string | null;
       job_age_days: number | null;
       freshness_basis: string | null;
-      freshness_confidence: number | null;
+      freshness_confidence: string | null;
       active_requirement_set_id: string | null;
       processing_state: string | null;
       gate_decision: string | null;
@@ -453,7 +453,7 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
     expect(version.rows[0]?.source_published_at).toBe("2025-08-01T12:00:00.000Z");
     expect(version.rows[0]?.job_age_days).toBeGreaterThan(60);
     expect(version.rows[0]?.freshness_basis).toBe("POSTED_AT");
-    expect(version.rows[0]?.freshness_confidence).toBe(100);
+    expect(Number(version.rows[0]?.freshness_confidence)).toBe(100);
     expect(version.rows[0]?.active_requirement_set_id).not.toBeNull();
     expect(version.rows[0]?.gate_decision).not.toBeNull();
     expect(["PREQUALIFIED", "HARD_REJECTED", "NEEDS_VERIFICATION"]).toContain(version.rows[0]?.processing_state);
