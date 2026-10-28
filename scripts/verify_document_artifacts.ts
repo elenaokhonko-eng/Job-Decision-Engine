@@ -10,6 +10,7 @@ import { loadProfileContactInfo, requireCvContactInfo } from "../src/documents/c
 import { extractReadableDocumentXmlText } from "../src/documents/documentArtifactValidation.js";
 import { parseDocumentOutputManifest } from "../src/documents/outputManifest.js";
 import { validatePersistedDocumentCurrentness } from "../src/documents/provenanceCurrentness.js";
+import { ContactFactRevisionSchema } from "../src/profile/contactFactContract.js";
 import { isCurrentReadyApplicationReadiness, loadCurrentApplicationReadiness } from "../src/services/currentApplicationReadiness.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
@@ -201,12 +202,38 @@ async function main(): Promise<void> {
     );
     const candidateName = profile.rows[0]?.candidate_name?.trim();
     if (!candidateName) throw new Error("The document profile version has no authoritative candidate name.");
+    const graphPhoneResult = await client.query<{
+      readonly fact_key: string;
+      readonly fact_type: string;
+      readonly structured_value: unknown;
+      readonly verification_status: string;
+      readonly confidentiality: string;
+    }>(
+      `SELECT fact_key, fact_type, structured_value, verification_status, confidentiality
+       FROM profile_facts
+       WHERE workspace_id = $1 AND profile_version_id = $2::UUID
+         AND fact_key = 'contact_phone' AND fact_type = 'CONTACT'
+         AND confidentiality = 'PRIVATE_INTERNAL'
+         AND verification_status IN ('VERIFIED', 'SELF_ATTESTED')
+         AND is_current = TRUE
+       LIMIT 1`,
+      [context.workspaceId, cvRun!.profile_version_id],
+    );
+    const graphPhoneFact = graphPhoneResult.rows[0];
+    const parsedGraphPhone = ContactFactRevisionSchema.safeParse(graphPhoneFact);
+    if (!parsedGraphPhone.success || parsedGraphPhone.data.structured_value.kind !== "phone") {
+      throw new Error("The active profile graph has no valid private contact phone fact.");
+    }
     const contact = requireCvContactInfo(await loadProfileContactInfo(
       client,
       context.workspaceId,
       cvRun!.profile_version_id,
       candidateName,
     ));
+    const graphPhone = parsedGraphPhone.data.structured_value.value;
+    if (contact.phone !== graphPhone) {
+      throw new Error("The CV contact resolver did not use the active profile-graph phone.");
+    }
     await client.query("COMMIT");
     transactionStarted = false;
 
@@ -223,7 +250,7 @@ async function main(): Promise<void> {
       extractDocxText(letterDocx.path, letterDocx.content),
       extractPdfText(letterPdf.content, letterPdf.path),
     ]);
-    const phoneDigits = digits(contact.phone);
+    const phoneDigits = digits(graphPhone);
     if (!phoneDigits || !digits(cvDocxText).includes(phoneDigits) || !digits(cvPdfText.text).includes(phoneDigits)) {
       throw new Error("The required active-profile phone number was not found in both rendered CV formats.");
     }

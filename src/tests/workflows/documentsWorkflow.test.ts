@@ -6,6 +6,7 @@ describe("documents workflow", () => {
   it("requires pinned application and job identities before document generation", () => {
     const workflow = readFileSync(resolve(".github/workflows/documents.yml"), "utf8");
     const preflight = readFileSync(resolve("scripts/preflight_application_document_draft.ts"), "utf8");
+    const preflightService = readFileSync(resolve("src/documents/applicationDocumentPreflight.ts"), "utf8");
     const pairValidator = readFileSync(resolve("scripts/validate_application_document_pair.ts"), "utf8");
     const artifactVerifier = readFileSync(resolve("scripts/verify_document_artifacts.ts"), "utf8");
 
@@ -14,7 +15,7 @@ describe("documents workflow", () => {
     expect(workflow).toContain("refs/heads/main");
     expect(workflow).toContain("APPLICATION_RECORD_ID=$INPUT_APPLICATION_RECORD_ID");
     expect(workflow).toContain("DOCUMENTS_JOB_FOUND=true");
-    expect(preflight).toContain('application.status !== "INTENT"');
+    expect(preflightService).toContain('application.status !== "INTENT"');
     expect(workflow).toContain("if: env.DOCUMENTS_JOB_FOUND == 'true'");
     expect(workflow).toContain("success() && env.DOCUMENTS_JOB_FOUND == 'true'");
     expect(workflow).toContain("validate_application_document_pair.ts");
