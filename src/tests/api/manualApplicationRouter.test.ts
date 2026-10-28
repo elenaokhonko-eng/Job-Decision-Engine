@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { matchesExactFetchedPostingIdentity } from "../../api/v2/manualApplicationRouter.js";
 import {
   ManualApprovalRequestSchema,
   ManualCandidateProfilesResponseSchema,
@@ -29,6 +30,34 @@ const validPosting = {
 };
 
 describe("manual application request and persistence contracts", () => {
+  it("requires exact normalized fetched title/company and any supplied requisition ID", () => {
+    const expected = {
+      title: "Director, AI Solution Architect",
+      company: "SMBC",
+      requisitionId: "1441267233",
+    };
+    expect(matchesExactFetchedPostingIdentity(expected, {
+      title: "director ai solution architect",
+      companyName: "smbc",
+      requisitionId: "1441267233",
+    })).toBe(true);
+    expect(matchesExactFetchedPostingIdentity(expected, {
+      title: "Director, AI Solution Architect",
+      companyName: "SMBC Group",
+      requisitionId: "1441267233",
+    })).toBe(false);
+    expect(matchesExactFetchedPostingIdentity(expected, {
+      title: "Director, AI Solution Architect",
+      companyName: "SMBC",
+      requisitionId: "1441267234",
+    })).toBe(false);
+    expect(matchesExactFetchedPostingIdentity({ title: "Role", company: "Example" }, {
+      title: "Role",
+      companyName: "Example Careers",
+      requisitionId: null,
+    })).toBe(false);
+  });
+
   it("requires an explicit typed posting source and rejects incomplete or unknown inputs", () => {
     expect(ManualPostingInputSchema.parse(validPosting).source_kind).toBe("PASTED");
     expect(ManualPostingInputSchema.safeParse({ ...validPosting, source_kind: undefined }).success).toBe(false);
