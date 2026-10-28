@@ -244,6 +244,10 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
 
   it("does not accept PROCESSED plus a version as fetched content, but accepts a matching sourced snapshot", async () => {
     const versions = await insertJobVersions();
+    await getClient().query(
+      `UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE workspace_id = $1 AND id = $2`,
+      [getContext().workspaceId, versions.canonicalJobId],
+    );
     const observationId = crypto.randomUUID();
     const description = [
       "Responsibilities: Design and maintain the data platform, lead architecture reviews, and coordinate delivery with engineering and business teams.",
@@ -275,8 +279,12 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       taskTypes: ["FETCH_JOB_CONTENT"],
       observationIds: [observationId],
     });
-    expect(legacy).toMatchObject({ unresolved: 1, current: 0, byReason: { FETCH_OBSERVATION_STATE_UNPROVEN: 1 } });
-    expect(legacy.decisions[0]).toMatchObject({ taskId, classification: "UNRESOLVED" });
+    expect(legacy).toMatchObject({ unresolved: 1, current: 0 });
+    expect(legacy.decisions[0]).toMatchObject({
+      taskId,
+      classification: "UNRESOLVED",
+      reasonCode: "FETCH_OBSERVATION_STATE_UNPROVEN",
+    });
 
     const proofHash = "a".repeat(64);
     await getClient().query(

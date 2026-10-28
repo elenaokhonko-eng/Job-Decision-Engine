@@ -174,7 +174,6 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
     await client.query(`SET search_path TO ${schemaName}, public`);
     const migrationsRoot = path.resolve(process.cwd(), "migrations");
     const legacyMigrationsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "posting-fetch-migrations-"));
-    const priorMigrationsDir = process.env.JDEC_MIGRATIONS_DIR;
     try {
       const migrationFiles = await fs.readdir(migrationsRoot);
       for (const file of migrationFiles) {
@@ -183,14 +182,11 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
           await fs.copyFile(path.join(migrationsRoot, file), path.join(legacyMigrationsRoot, file));
         }
       }
-      process.env.JDEC_MIGRATIONS_DIR = legacyMigrationsRoot;
-      const initializedThrough079 = await runMigrations(client);
+      const initializedThrough079 = await runMigrations(client, { migrationsDir: legacyMigrationsRoot });
       if (!initializedThrough079.some((file) => file.startsWith("079_"))) {
         throw new Error("The integration fixture did not initialize through migration 079.");
       }
     } finally {
-      if (priorMigrationsDir === undefined) delete process.env.JDEC_MIGRATIONS_DIR;
-      else process.env.JDEC_MIGRATIONS_DIR = priorMigrationsDir;
       await fs.rm(legacyMigrationsRoot, { recursive: true, force: true });
     }
     const upgraded = await runMigrations(client);

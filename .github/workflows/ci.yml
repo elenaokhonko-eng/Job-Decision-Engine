@@ -112,9 +112,9 @@ jobs:
       env:
         DATABASE_URL: postgres://test:password@localhost:5432/testdb
         REQUIRE_POSTGRES_INTEGRATION: "true"
-      run: npx vitest run src/tests/tasks/jobContentFetchPersistence.integration.test.ts src/tests/tasks/pipelineTaskCurrentness.integration.test.ts
+      run: npx vitest run --no-file-parallelism src/tests/tasks/jobContentFetchPersistence.integration.test.ts src/tests/tasks/pipelineTaskCurrentness.integration.test.ts
 
     - name: Run Vitest Unit Tests
       env:
         DATABASE_URL: postgres://test:password@localhost:5432/testdb
-      run: npm run test
+      run: npm run test -- --no-file-parallelism
