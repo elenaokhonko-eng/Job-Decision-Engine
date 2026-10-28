@@ -327,10 +327,26 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
        WHERE workspace_id = $1 AND id = $2`,
       [getContext().workspaceId, taskId],
     );
-    const fetcher: PipelineStageWorkerDependencies["fetchJobContent"] = (url, expected) =>
-      fetchJobContent(url, expected, postingDependencies());
+    const fetcher: PipelineStageWorkerDependencies["fetchJobContent"] = async (url, expected) => {
+      const result = await fetchJobContent(url, expected, postingDependencies());
+      if (result.kind !== "COMPLETE") {
+        throw new Error(`CFGI posting fixture fetch returned ${result.kind}: ${"reason" in result ? result.reason : "no reason"}`);
+      }
+      return result;
+    };
     const completed = await runBoundedStages(observationId, dependencies(fetcher), 4);
-    expect(completed.byType.FETCH_JOB_CONTENT).toMatchObject({ claimed: 1, completed: 1 });
+    const fetchRun = completed.byType.FETCH_JOB_CONTENT;
+    if (fetchRun?.completed !== 1) {
+      const taskState = await getClient().query<{ status: string; last_error: string | null; processing_status: string | null }>(
+        `SELECT task.status, task.last_error, observation.processing_status
+         FROM pipeline_tasks task
+         JOIN raw_job_observations observation ON observation.workspace_id = task.workspace_id
+           AND observation.id::text = task.payload->>'observation_id'
+         WHERE task.workspace_id = $1 AND task.id = $2::uuid`,
+        [getContext().workspaceId, taskId],
+      );
+      throw new Error(`CFGI posting fetch did not complete: ${JSON.stringify({ fetchRun, errors: completed.errors, task: taskState.rows[0] ?? null })}`);
+    }
     expect(completed.byType.NORMALIZE_OBSERVATION).toMatchObject({ claimed: 1, completed: 1 });
     expect(completed.byType.EXTRACT_DETERMINISTIC_REQUIREMENTS).toMatchObject({ claimed: 1, completed: 1 });
     expect(completed.byType.APPLY_HARD_GATES).toMatchObject({ claimed: 1, completed: 1 });
