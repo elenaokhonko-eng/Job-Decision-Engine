@@ -15,6 +15,8 @@ export interface QuoteValidationResult {
   requirements: z.infer<typeof QuotedRequirementSchema>[];
 }
 
+export const MAX_QUOTED_REQUIREMENTS = 25;
+
 export function locateQuoteOffset(descriptionText: string, quoteText: string): number {
   return descriptionText.indexOf(quoteText);
 }
@@ -36,6 +38,16 @@ export function validateQuotedRequirements(
   descriptionText: string,
   payload: unknown
 ): QuoteValidationResult {
+  if (
+    payload !== null
+    && typeof payload === "object"
+    && !Array.isArray(payload)
+    && "requirements" in payload
+    && Array.isArray(payload.requirements)
+    && payload.requirements.length > MAX_QUOTED_REQUIREMENTS
+  ) {
+    throw new RangeError(`Quoted requirements exceed the ${MAX_QUOTED_REQUIREMENTS}-item limit.`);
+  }
   const parsed = QuotedRequirementExtractorResponseSchema.parse(payload);
   const issues: QuoteValidationIssue[] = [];
   const normalizedRequirements: z.infer<typeof QuotedRequirementSchema>[] = [];

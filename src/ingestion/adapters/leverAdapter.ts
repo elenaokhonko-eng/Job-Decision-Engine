@@ -43,8 +43,9 @@ export class LeverAdapter extends BaseSourceAdapter {
         return this.errorResult(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const rawPayload: unknown = await response.json();
+      const rawPayload = await this.readJsonResponse(response);
       const rawJobs = Array.isArray(rawPayload) ? rawPayload : [];
+      this.assertRecordCount(rawJobs, limit);
       const jobs: ExtractedJob[] = [];
       let quarantined = 0;
 

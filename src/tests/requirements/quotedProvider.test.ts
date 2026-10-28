@@ -14,6 +14,7 @@ import {
   runQuotedRequirementProvider,
 } from '../../requirements/quotedProvider.js';
 import { REQUIREMENTS_SCHEMA_VERSION } from '../../requirements/contracts.js';
+import { validateQuotedRequirements } from '../../requirements/quotedRequirementExtractor.js';
 
 const mockedGenerateContentAudited = vi.mocked(generateContentAudited);
 
@@ -121,6 +122,34 @@ describe('quotedRequirementProviderSchema', () => {
         })
       )
     ).toThrow(/Quote not found/);
+  });
+
+  it('rejects oversized requirement collections before Zod visits their items', () => {
+    const invalidItems = Array.from({ length: 26 }, () => ({ invalid: true }));
+
+    expect(() => validateQuotedRequirements('A job description.', {
+      schema_version: REQUIREMENTS_SCHEMA_VERSION,
+      requirements: invalidItems,
+    })).toThrow(/25-item limit/);
+  });
+
+  it('rejects oversized provider response text before JSON parsing', async () => {
+    mockedGenerateContentAudited.mockResolvedValueOnce({
+      text: ' '.repeat(256 * 1024 + 1),
+      provider: 'openai',
+      model: 'gpt-5.6-luna',
+      fallbackUsed: false,
+      attempts: 1,
+      errors: [],
+      latencyMs: 42,
+      routeKey: 'requirements_extraction',
+    });
+
+    await expect(runQuotedRequirementProvider({
+      canonicalJobId: 'job-1',
+      jobVersionId: 'version-1',
+      descriptionText: 'A job description.',
+    })).rejects.toThrow(/byte limit/);
   });
 
   it('rejects invalid provider JSON when no audited validated payload is supplied', async () => {

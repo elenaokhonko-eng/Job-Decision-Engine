@@ -7,6 +7,7 @@ import { fetchGmailAlerts } from "./gmail.js";
 import { extractWithFallback } from "./llmFallback.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION } from "../contracts/index.js";
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
+import { readJsonResponseBounded, readResponseTextBounded } from "../security/boundedResponse.js";
 import {
   CULTURE_SCORE_DERIVATION_VERSION,
   scoreCultureEvidenceFromQuote,
@@ -498,6 +499,7 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
           httpOptions: { timeout: timeoutMs },
           responseMimeType: options.responseMimeType as any,
           responseSchema: options.responseSchema,
+          maxOutputTokens: options.maxOutputTokens ?? MODEL_MAX_OUTPUT_TOKENS,
           systemInstruction: options.systemInstruction
         }
       });
@@ -576,6 +578,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
           model,
           messages,
           temperature: 1,
+          max_completion_tokens: options.maxOutputTokens ?? MODEL_MAX_OUTPUT_TOKENS,
           response_format: options.responseSchema && !isKimi
             ? { type: "json_schema", json_schema: { name: "extraction", strict: true, schema: options.responseSchema } }
             : (options.responseMimeType === "application/json" ? { type: "json_object" } : undefined)
@@ -584,7 +587,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
+        const errorText = await readResponseTextBounded(response, 64 * 1024, "Model API error response");
         const err: any = new Error(`API request failed with status ${response.status}: ${errorText}`);
         err.status = response.status;
         
@@ -598,7 +601,18 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
         throw err;
       }
 
-      const data = await response.json();
+      const responsePayload = await readJsonResponseBounded(
+        response,
+        MAX_MODEL_PROVIDER_RESPONSE_BYTES,
+        "Model API response",
+      );
+      if (!responsePayload || typeof responsePayload !== "object" || Array.isArray(responsePayload)) {
+        throw new Error("Model API response must be a JSON object.");
+      }
+      // The provider response shape is narrowed at this external API boundary.
+      const data = responsePayload as {
+        choices?: Array<{ message?: { content?: string | null } }>;
+      };
       const usage = extractTokenUsage(data);
       console.log(
         `[model:${providerLabel}] model=${model} attempt=${attempt}/${maxRetries} completed elapsed_ms=${Date.now() - startedAt}`
@@ -1977,6 +1991,28 @@ interface ValidatedSingleEvaluationPayload {
   jobPayload: Record<string, any>;
 }
 
+export const MAX_SINGLE_EVALUATION_RESPONSE_BYTES = 256 * 1024;
+const MAX_MODEL_PROVIDER_RESPONSE_BYTES = 1024 * 1024;
+const MODEL_MAX_OUTPUT_TOKENS = 8_192;
+const EVALUATION_ARRAY_LIMITS = {
+  secondary_lanes: 6,
+  rejection_codes: 50,
+  culture_evidence: 4,
+  strengths: 50,
+  gaps: 50,
+  risk_flags: 50,
+  policy_conflicts: 25,
+} as const;
+
+function assertEvaluationPayloadBounds(root: Record<string, any>): void {
+  for (const [field, limit] of Object.entries(EVALUATION_ARRAY_LIMITS)) {
+    const collection = root[field];
+    if (Array.isArray(collection) && collection.length > limit) {
+      throw new RangeError(`Evaluation output field "${field}" exceeds the ${limit}-item limit.`);
+    }
+  }
+}
+
 function hasOwnField(value: Record<string, any>, field: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, field);
 }
@@ -2026,6 +2062,9 @@ function parseStrictSingleEvaluationPayload(
   rawText: string,
   job: SingleEvaluationJobInput
 ): ValidatedSingleEvaluationPayload {
+  if (Buffer.byteLength(rawText, "utf8") > MAX_SINGLE_EVALUATION_RESPONSE_BYTES) {
+    throw new RangeError(`Evaluation response exceeds the ${MAX_SINGLE_EVALUATION_RESPONSE_BYTES}-byte limit.`);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(cleanJsonResponseText(rawText));
@@ -2038,13 +2077,15 @@ function parseStrictSingleEvaluationPayload(
   }
 
   const root = parsed as Record<string, any>;
-  const jobPayload = Array.isArray(root.evaluated_jobs) ? root.evaluated_jobs[0] : root;
-  if (Array.isArray(root.evaluated_jobs) && root.evaluated_jobs.length !== 1) {
-    throw new Error(`Evaluation output must contain exactly one evaluated job; received ${root.evaluated_jobs.length}.`);
+  const evaluatedJobs = root.evaluated_jobs;
+  if (Array.isArray(evaluatedJobs) && evaluatedJobs.length !== 1) {
+    throw new Error(`Evaluation output must contain exactly one evaluated job; received ${evaluatedJobs.length}.`);
   }
+  const jobPayload = Array.isArray(evaluatedJobs) ? evaluatedJobs[0] : root;
   if (!jobPayload || typeof jobPayload !== "object" || Array.isArray(jobPayload)) {
     throw new Error("Evaluation output contained no valid job payload.");
   }
+  assertEvaluationPayloadBounds(jobPayload);
 
   const reportedCanonicalJobId = requireStringField(jobPayload, "canonical_job_id");
   if (reportedCanonicalJobId !== job.canonicalJobId) {
