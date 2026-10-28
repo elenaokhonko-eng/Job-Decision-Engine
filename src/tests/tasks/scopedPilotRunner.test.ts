@@ -4,6 +4,7 @@ import {
   createScopedEvaluationOptions,
   canResumeScopedPilotState,
   createScopedPilotWorkerOptions,
+  hasCurrentScopedPilotContentProvenance,
   hasScopedPilotHistory,
   isScopedEvaluationReadyForDocuments,
   parseScopedPilotArgs,
@@ -124,6 +125,49 @@ describe("scoped pilot runner", () => {
       manualReview: 0,
       eligible: 1,
     }, true)).toBe(false);
+  });
+
+  it("requires the refreshed official source content to match the current job version before document eligibility", () => {
+    const refreshStartedAt = new Date("2026-10-28T08:00:00.000Z");
+    const provenance = {
+      requestedJobVersionId: jobVersionId,
+      latestJobVersionId: jobVersionId,
+      linkedObservationId: "40000000-0000-4000-8000-000000000004",
+      observationJobVersionId: jobVersionId,
+      expectedObservationId: "40000000-0000-4000-8000-000000000004",
+      expectedSourcePluginKey: "smbc_careers",
+      observationSourcePluginKey: "smbc_careers",
+      expectedSourceExternalId: "1441267233",
+      observationSourceExternalId: "1441267233",
+      expectedSourceUrl: "https://careerasia.smbc.co.jp/SMBC/job/Director%2C-AI-Solution-Architect/1441267233/",
+      observationSourceUrl: "https://careerasia.smbc.co.jp/SMBC/job/Director%2C-AI-Solution-Architect/1441267233/",
+      versionDescription: "Full official description",
+      observationDescription: "Full official description",
+      rawPayloadHash: "a".repeat(64),
+      evidenceSchemaVersion: "job_source_evidence_v1",
+      observationRetrievedAt: "2026-10-28T08:00:01.000Z",
+      refreshStartedAt,
+      refreshStatus: "REFRESHED" as const,
+      evidenceRevisionHash: "b".repeat(64),
+    };
+
+    expect(hasCurrentScopedPilotContentProvenance(provenance)).toBe(true);
+    expect(hasCurrentScopedPilotContentProvenance({
+      ...provenance,
+      versionDescription: "Full official description changed",
+    })).toBe(false);
+    expect(hasCurrentScopedPilotContentProvenance({
+      ...provenance,
+      latestJobVersionId: "50000000-0000-4000-8000-000000000005",
+    })).toBe(false);
+    expect(hasCurrentScopedPilotContentProvenance({
+      ...provenance,
+      observationRetrievedAt: "2026-10-28T07:59:59.000Z",
+    })).toBe(false);
+    expect(hasCurrentScopedPilotContentProvenance({
+      ...provenance,
+      refreshStatus: "FETCH_FAILED",
+    })).toBe(false);
   });
 
   it("passes the same version and active profile to evaluation selection and reconciliation", () => {

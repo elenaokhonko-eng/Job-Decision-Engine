@@ -14,6 +14,7 @@ function normalizedText(value: unknown): string {
     .toLowerCase()
     .replace(/[’']/g, "'")
     .replace(/[^a-z0-9+#]+/g, " ")
+    .replace(/\bsolutions\b/g, "solution")
     .replace(/\s+/g, " ")
     .trim();
 }

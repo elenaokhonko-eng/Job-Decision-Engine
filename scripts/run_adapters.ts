@@ -14,6 +14,7 @@ import { HimalayasAdapter } from "../src/ingestion/adapters/himalayasAdapter.js"
 import { JobicyAdapter } from "../src/ingestion/adapters/jobicyAdapter.js";
 import { RemotiveAdapter } from "../src/ingestion/adapters/remotiveAdapter.js";
 import { createWeWorkRemotelyAdapter } from "../src/ingestion/adapters/attributedRssAdapter.js";
+import { SchemaOrgAdapter } from "../src/ingestion/adapters/schemaOrgAdapter.js";
 import type { AdapterResult, BaseSourceAdapter } from "../src/ingestion/adapters/baseAdapter.js";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
 import type { JobSourceEvidence } from "../src/contracts/jobSourceEvidence.js";
@@ -56,6 +57,34 @@ function asSourceName(sourceKey: string): SourceName | null {
   const candidate = String(sourceKey || "").trim().toUpperCase();
   const parsed = SourceNameSchema.safeParse(candidate);
   return parsed.success ? parsed.data : null;
+}
+
+export function sourceNameForPlugin(plugin: SourcePlugin): SourceName | null {
+  return asSourceName(plugin.source_key) ?? (plugin.kind === "schema_org" ? "MANUAL_IMPORT" : null);
+}
+
+export function buildSourcePlanVersion(planVersion: string, pluginRevisionId: string): string {
+  const revisionToken = crypto.createHash("sha256").update(pluginRevisionId).digest("hex").slice(0, 16);
+  const maxPlanVersionLength = 50 - revisionToken.length - 1;
+  if (planVersion.length > maxPlanVersionLength) {
+    throw new Error(`Source plan version must be at most ${maxPlanVersionLength} characters before its revision token.`);
+  }
+  return `${planVersion}:${revisionToken}`;
+}
+
+export function parseSourceKeyArgs(argv: readonly string[]): { sourceKeys?: string[] } {
+  const sourceKeys: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg !== "--source-key") throw new Error(`Unsupported argument: ${arg}.`);
+    const value = argv[index + 1]?.trim().toLowerCase();
+    if (!value || value.startsWith("--")) throw new Error("--source-key requires a source key value.");
+    if (!/^[a-z][a-z0-9_]{2,63}$/u.test(value)) throw new Error("--source-key must be a valid source key.");
+    if (sourceKeys.includes(value)) throw new Error(`--source-key ${value} may only be provided once.`);
+    sourceKeys.push(value);
+    index += 1;
+  }
+  return sourceKeys.length > 0 ? { sourceKeys } : {};
 }
 
 function loadCompaniesConfig(): CompanyConfig[] {
@@ -352,6 +381,7 @@ function pickFeedAdapter(plugin: SourcePlugin): BaseSourceAdapter | null {
   if (plugin.source_key === "jobicy") return new JobicyAdapter(endpoint);
   if (plugin.source_key === "remotive") return new RemotiveAdapter(endpoint);
   if (plugin.source_key === "we_work_remotely") return createWeWorkRemotelyAdapter(endpoint);
+  if (plugin.kind === "schema_org" && plugin.source_key === "smbc_careers") return new SchemaOrgAdapter(endpoint);
   return null;
 }
 
@@ -376,7 +406,7 @@ function itemsPerRun(plugin: SourcePlugin): number {
   return configured && configured > 0 ? Math.min(configured, 200) : 50;
 }
 
-export async function runAdapters(): Promise<{
+export async function runAdapters(options: { readonly sourceKeys?: readonly string[] } = {}): Promise<{
   totalDiscovered: number;
   totalStaged: number;
   errors: number;
@@ -410,7 +440,21 @@ export async function runAdapters(): Promise<{
   for (const [laneKey, plan] of Object.entries(plans)) {
     laneCoverage[laneKey] = { plansExecuted: 0, sourcesFailed: 0, discovered: 0, staged: 0, filtered: 0, coverageNote: plan.coverageNote };
   }
-  const enabledPlugins = plugins.filter((plugin) => plugin.status === "active" && plugin.schedule.enabled);
+  const requestedSourceKeys = options.sourceKeys ? new Set(options.sourceKeys.map((key) => key.trim().toLowerCase())) : null;
+  if (requestedSourceKeys?.size === 0) throw new Error("A source-scoped adapter run requires at least one source key.");
+  const enabledPlugins = plugins.filter((plugin) =>
+    plugin.status === "active" && (plugin.schedule.enabled || requestedSourceKeys?.has(plugin.source_key) === true) &&
+    (requestedSourceKeys === null || requestedSourceKeys.has(plugin.source_key)),
+  );
+  const missingRequestedSources = [...(requestedSourceKeys ?? [])].filter((key) =>
+    !plugins.some((plugin) => plugin.source_key === key && plugin.status === "active"),
+  );
+  for (const sourceKey of missingRequestedSources) {
+    const detail = `Requested source plugin ${sourceKey} is missing or inactive.`;
+    broker.recordError(detail);
+    failedSources.push(sourceKey);
+    errorCount += 1;
+  }
 
   async function runGroup(input: {
     plugin: SourcePlugin;
@@ -422,7 +466,7 @@ export async function runAdapters(): Promise<{
     targetCompanyId: string | null;
     pluginRevisionId: string;
   }): Promise<void> {
-    const planVersion = `${plans[input.laneKeys[0]].planVersion}:${input.pluginRevisionId}`;
+    const planVersion = buildSourcePlanVersion(plans[input.laneKeys[0]].planVersion, input.pluginRevisionId);
     enabledSourceCount += 1;
     for (const laneKey of input.laneKeys) laneCoverage[laneKey].plansExecuted += 1;
     const summary = await processSourcePage({
@@ -459,7 +503,7 @@ export async function runAdapters(): Promise<{
   }
 
   for (const plugin of enabledPlugins) {
-    const sourceName = asSourceName(plugin.source_key);
+    const sourceName = sourceNameForPlugin(plugin);
     if (!sourceName) {
       const detail = `Unknown source key ${plugin.source_key}; source plan cannot execute.`;
       broker.recordError(detail);
@@ -564,9 +608,9 @@ export async function runAdapters(): Promise<{
     }
   }
 
-  const missingLanePlans = Object.entries(laneCoverage)
-    .filter(([, coverage]) => coverage.plansExecuted === 0)
-    .map(([lane]) => lane);
+  const missingLanePlans = requestedSourceKeys === null
+    ? Object.entries(laneCoverage).filter(([, coverage]) => coverage.plansExecuted === 0).map(([lane]) => lane)
+    : [];
   if (missingLanePlans.length > 0) {
     const detail = `No executable configured source plan ran for lanes: ${missingLanePlans.join(", ")}.`;
     broker.recordError(detail);
@@ -598,7 +642,7 @@ export async function runAdapters(): Promise<{
 }
 
 if (process.argv[1] && process.argv[1].includes("run_adapters")) {
-  runAdapters()
+  runAdapters(parseSourceKeyArgs(process.argv.slice(2)))
     .then((res) => {
       if (res.status === "FAILED") process.exit(1);
       process.exit(0);
