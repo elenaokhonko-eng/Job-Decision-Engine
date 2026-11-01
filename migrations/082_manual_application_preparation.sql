@@ -14,6 +14,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_job_versions_workspace_job_id_id
   ON job_versions (workspace_id, canonical_job_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_profile_versions_workspace_candidate_id
   ON profile_versions (workspace_id, candidate_profile_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_profile_versions_workspace_id_id
+  ON profile_versions (workspace_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_profile_facts_workspace_profile_id
   ON profile_facts (workspace_id, profile_version_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_profile_credentials_workspace_profile_id

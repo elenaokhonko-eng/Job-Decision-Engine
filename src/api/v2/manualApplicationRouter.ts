@@ -326,7 +326,7 @@ async function loadCurrentInputs(
        ))
      JOIN raw_job_observations observation ON observation.workspace_id = job.workspace_id
        AND observation.id = $4 AND observation.job_version_id = version.id
-     LEFT JOIN v_canonical_shortlist_scoped shortlist
+     LEFT JOIN v_canonical_shortlist_readiness_scoped shortlist
        ON shortlist.workspace_id = job.workspace_id AND shortlist.canonical_job_id = job.id AND shortlist.job_version_id = version.id
      LEFT JOIN LATERAL (
        SELECT decision.decision, decision.rejection_codes
@@ -1049,7 +1049,8 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
     }
     const client = await pool.connect();
     try {
-      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY");
+      // Not READ ONLY: hasWritableMembership locks the membership row FOR SHARE.
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
       if (!(await hasWritableMembership(client, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to download private documents.");
       const approvalResult = await client.query<{ id: string }>(
         `SELECT id FROM manual_application_preparation_approvals
