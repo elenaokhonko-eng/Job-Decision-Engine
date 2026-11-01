@@ -1,4 +1,8 @@
 import importlib
+import io
+import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -6,6 +10,7 @@ from streamlit.testing.v1 import AppTest
 
 from streamlit_runtime import (
     is_hosted_runtime,
+    open_api_json,
     validate_api_health,
     validate_hosted_api_configuration,
 )
@@ -62,3 +67,41 @@ def test_hosted_runtime_requires_an_authenticated_reachable_api():
         == "https://api.example.test"
     )
     validate_api_health({"ok": True})
+
+
+def _http_error_opener(status, body):
+    def opener(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url, status, "Conflict", {}, io.BytesIO(body.encode("utf-8"))
+        )
+
+    return opener
+
+
+def test_api_errors_surface_the_api_explanation_not_the_bare_http_status():
+    request = urllib.request.Request("http://127.0.0.1:3000/api/v2/application-drafts")
+    manual_error = json.dumps(
+        {
+            "ok": False,
+            "code": "JOB_VERSION_CHANGED",
+            "error": "JOB_VERSION_CHANGED",
+            "message": "The posting changed after comparison; compare it again.",
+        }
+    )
+    with pytest.raises(RuntimeError) as raised:
+        open_api_json(request, 5, opener=_http_error_opener(409, manual_error))
+    assert str(raised.value) == (
+        "HTTP 409 JOB_VERSION_CHANGED: The posting changed after comparison; compare it again."
+    )
+    assert isinstance(raised.value.__cause__, urllib.error.HTTPError)
+
+    with pytest.raises(RuntimeError, match=r"^HTTP 400: job id is required$"):
+        open_api_json(
+            request,
+            5,
+            opener=_http_error_opener(
+                400, '{"ok": false, "error": "job id is required"}'
+            ),
+        )
+    with pytest.raises(RuntimeError, match=r"^HTTP 502: Bad gateway$"):
+        open_api_json(request, 5, opener=_http_error_opener(502, "Bad gateway"))

@@ -33,7 +33,7 @@ from streamlit_workspace_contracts import (
     validate_track_row,
 )
 from streamlit_manual_application import render_manual_application_flow
-from streamlit_runtime import ensure_hosted_api_ready
+from streamlit_runtime import ensure_hosted_api_ready, open_api_json
 
 
 # Load environment variables from Streamlit secrets, .env, and .env.local
@@ -674,11 +674,7 @@ def api_request(method, path, params=None, body=None, timeout=30):
         data = json.dumps(body).encode("utf-8")
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        if response.status == 204:
-            return {}
-        raw = response.read().decode("utf-8")
-        return json.loads(raw) if raw else {}
+    return open_api_json(req, timeout)
 
 
 ensure_hosted_api_ready()
