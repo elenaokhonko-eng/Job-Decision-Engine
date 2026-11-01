@@ -11,34 +11,37 @@ import { resolveWorkspaceContext } from "../../workspace/context.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
-const scriptPath = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../../scripts/generate_cover_letter.ts",
-);
+const scriptsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../scripts");
 
-// The script runs on import, so the job query is read from its source text.
-const scriptSource = readFileSync(scriptPath, "utf8");
+// Both generators run on import, so their job queries are read from source text.
+// Each query takes ($1 canonical_job_id, $2 job_version_id | null, $3 workspace_id).
+const GENERATOR_SCRIPTS = ["generate_cover_letter.ts", "generate_cv.ts"] as const;
 
-function coverLetterJobQuery(): string {
-  const query = /const jobRes = await pool\.query\(\s*`([\s\S]*?)`/.exec(scriptSource)?.[1];
-  if (!query) throw new Error("generate_cover_letter.ts job query was not found.");
-  if (query.includes("${")) throw new Error("generate_cover_letter.ts job query must not interpolate values.");
+function scriptSource(script: string): string {
+  return readFileSync(path.join(scriptsDir, script), "utf8");
+}
+
+function generatorJobQuery(script: string): string {
+  const query = /const jobRes = await pool\.query(?:<\w+>)?\(\s*`([\s\S]*?)`/.exec(scriptSource(script))?.[1];
+  if (!query) throw new Error(`${script} job query was not found.`);
+  if (query.includes("${")) throw new Error(`${script} job query must not interpolate values.`);
   return query;
 }
 
-function jobFieldsReadByScript(): string[] {
-  return [...new Set([...scriptSource.matchAll(/\bjob\.([a-z_][a-z0-9_]*)/g)].map((match) => match[1]))].sort();
+function jobFieldsReadByScript(script: string): string[] {
+  const fields = [...scriptSource(script).matchAll(/\bjob\.([a-z_][a-z0-9_]*)/g)].map((match) => match[1]);
+  return [...new Set(fields)].sort();
 }
 
 let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
 let schemaName = "";
 
-describe.skipIf(skipReal)("generate_cover_letter.ts job query (PostgreSQL)", () => {
+describe.skipIf(skipReal)("document generator job queries (PostgreSQL)", () => {
   beforeAll(async () => {
     pool = new pg.Pool(pgConnectionConfig(databaseUrl));
     client = await pool.connect();
-    schemaName = `cover_letter_query_${crypto.randomUUID().replaceAll("-", "")}`;
+    schemaName = `generator_job_query_${crypto.randomUUID().replaceAll("-", "")}`;
     await client.query(`CREATE SCHEMA ${schemaName}`);
     await client.query(`SET search_path TO ${schemaName}, public`);
     await runMigrations(client);
@@ -55,17 +58,18 @@ describe.skipIf(skipReal)("generate_cover_letter.ts job query (PostgreSQL)", () 
     pool = undefined;
   });
 
-  it("returns every job field the script reads, including canonical_job_id", async () => {
-    if (!client) throw new Error("The cover-letter query test client is not initialized.");
+  it.each(GENERATOR_SCRIPTS)("%s returns every job field it reads, including canonical_job_id", async (script) => {
+    if (!client) throw new Error("The generator job query test client is not initialized.");
     const workspace = await resolveWorkspaceContext(client);
-    const result = await client.query(coverLetterJobQuery(), [
+    const result = await client.query(generatorJobQuery(script), [
       crypto.randomUUID(),
       null,
       workspace.workspaceId,
     ]);
     const returnedColumns = result.fields.map((field) => field.name);
 
+    expect(jobFieldsReadByScript(script).length).toBeGreaterThan(0);
     expect(returnedColumns).toContain("canonical_job_id");
-    expect(jobFieldsReadByScript().filter((field) => !returnedColumns.includes(field))).toEqual([]);
+    expect(jobFieldsReadByScript(script).filter((field) => !returnedColumns.includes(field))).toEqual([]);
   });
 });
