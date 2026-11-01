@@ -142,7 +142,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const ctx: WorkspaceContext = await resolveWorkspaceContext(pool as any);
     const jobRes = await pool.query(
       `SELECT
-         c.id,
+         c.id AS canonical_job_id,
          COALESCE(c.latest_job_version_id, (
            SELECT jv_current.id
            FROM job_versions jv_current
