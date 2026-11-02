@@ -92,7 +92,17 @@ export function isInternalAssessmentStatement(statement: string): boolean {
   return INTERNAL_ASSESSMENT.test(statement);
 }
 
-const FORBIDDEN_DOCUMENT_TEXT = /self[- ]?rating|\b\d(?:\.\d)?\s*\/\s*5\b|not a target/i;
+// Self-descriptions: an evaluative opening ("Strong ... capability", "Expert in", "Conceptual and
+// developing ... knowledge") or a statement of intent ("actively pursuing"). They describe the
+// person rather than work done, so documents never print them.
+const SELF_DESCRIPTION = /^(?:proven\s+|exceptionally\s+|very\s+)?(?:strong|advanced|deep|solid|conceptual|foundational|developing|basic|working|expert|proficient|good|excellent|emerging|growing)\b|\bactively pursuing\b|\bconceptual and developing\b/i;
+
+/** A statement that rates or describes the candidate instead of recording work done. */
+export function isSelfDescriptionStatement(statement: string): boolean {
+  return SELF_DESCRIPTION.test(statement.trim());
+}
+
+const FORBIDDEN_DOCUMENT_TEXT = /self[- ]?rating|\b\d(?:\.\d)?\s*\/\s*5\b|not a target|conceptual and developing|actively pursuing/i;
 
 /** Last check before rendering: no internal assessment text may reach an application document. */
 export function assertNoInternalAssessmentText(documentName: string, text: string): void {

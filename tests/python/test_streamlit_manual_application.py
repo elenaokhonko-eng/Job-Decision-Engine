@@ -54,7 +54,21 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
     )
 
     fingerprint = app.session_state["manual_comparison"]["comparison_fingerprint"]
+    # The fit check shows before approval, with each uncovered MUST requirement.
+    assert any("Only 1 of 3 MUST" in warning.value for warning in app.warning)
+    assert "No evidence: Operate Azure cloud infrastructure" in [
+        text.value for text in app.text
+    ]
+    table = app.dataframe[0].value
+    assert "confidence 0.90. Why: Designing data systems is the requirement." in str(
+        table.iloc[0]["Potential profile evidence"]
+    )
     app.checkbox(key=f"manual_approval_checked_{fingerprint}").check()
+    app.button(key="manual_approve").click().run(timeout=10)
+    # A poor fit needs an explicit acknowledgement before approval is recorded.
+    assert any("Fewer than half" in error.value for error in app.error)
+    assert "manual_approval" not in app.session_state
+    app.checkbox(key=f"manual_poor_fit_acknowledged_{fingerprint}").check()
     app.button(key="manual_approve").click().run(timeout=10)
     assert any(
         "approval is recorded" in success.value.lower() for success in app.success
