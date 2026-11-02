@@ -6,6 +6,7 @@ import { extractDeterministicRequirements } from '../requirements/deterministicE
 import { validateQuotedRequirements } from '../requirements/quotedRequirementExtractor.js';
 import { JobRequirementSchema, REQUIREMENTS_SCHEMA_VERSION } from '../requirements/contracts.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { sourceContentEvidencePredicate } from './descriptionQuality.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -431,6 +432,8 @@ export async function runRequirementsExtraction(
       )
       ${jobVersionFilter}
       ${completedRequirementClause}
+      AND c.description_quality_status = 'COMPLETE'
+      AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
       AND (
         ps.stage_status IS NULL
         OR ps.stage_status <> 'RETRY_WAIT'

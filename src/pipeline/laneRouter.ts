@@ -21,6 +21,7 @@ import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
 import { PersistedLaneDecisionSchema, SCHEMA_VERSION } from "../contracts/index.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
 import { SixLaneKeySchema, type LaneIntentPreferences, type LanePreferenceTaxonomy } from "../policy/laneIntentContracts.js";
+import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 
 export { loadGlobalLanesConfig, loadLanesConfig };
 export type { GlobalLanesConfig, LaneDefinition };
@@ -926,6 +927,8 @@ export async function runLaneRouter(
           ${replayExistingDecisionFilter}
           ${jobVersionFilter}
           ${canonicalJobFilter}
+          AND c.description_quality_status = 'COMPLETE'
+          AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
         ORDER BY c.created_at ASC, c.id ASC
         ${limitClause}
       `,
@@ -963,6 +966,8 @@ export async function runLaneRouter(
           ${replayExistingDecisionFilter}
           ${fallbackJobVersionFilter}
           ${fallbackCanonicalJobFilter}
+          AND c.description_quality_status = 'COMPLETE'
+          AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
         ORDER BY c.created_at ASC, c.id ASC
         ${fallbackLimitClause}
       `,

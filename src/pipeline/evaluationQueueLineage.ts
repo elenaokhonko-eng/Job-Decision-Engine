@@ -1,4 +1,5 @@
 import pg from "pg";
+import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 
 export interface EvaluationQueueCandidate extends pg.QueryResultRow {
   id: string;
@@ -103,6 +104,8 @@ export async function selectEligibleEvaluationQueueRows(
        AND eq.match_run_id = c.latest_match_run_id
        AND eq.deterministic_decision_id = c.latest_deterministic_decision_id
        AND eq.job_content_hash = jv.content_hash
+       AND c.description_quality_status = 'COMPLETE'
+       AND ${sourceContentEvidencePredicate("eq.workspace_id", "eq.job_version_id")}
        AND eq.context_fingerprint IS NOT NULL
        AND EXISTS (
          SELECT 1

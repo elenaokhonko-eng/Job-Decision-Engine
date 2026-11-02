@@ -21,6 +21,7 @@ import dotenv from "dotenv";
 import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
+import { sourceContentEvidencePredicate } from "../src/pipeline/descriptionQuality.js";
 import { generateDocx } from "../src/services/renderers/docx_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
@@ -370,6 +371,8 @@ async function generateTailoredCV(): Promise<void> {
        WHERE c.workspace_id = $3
          AND c.id = $1
          AND v.canonical_job_id = c.id
+         AND c.description_quality_status = 'COMPLETE'
+         AND ${sourceContentEvidencePredicate("c.workspace_id", "v.id")}
        LIMIT 1`,
       [jobId, requestedJobVersionId || null, ctx.workspaceId]
     );

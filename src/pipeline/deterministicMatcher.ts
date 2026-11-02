@@ -1,4 +1,5 @@
 import pg from "pg";
+import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
@@ -543,6 +544,7 @@ export async function runDeterministicMatcher(
          FROM job_versions
          WHERE workspace_id = $1
            AND canonical_job_id = c.id
+           AND (c.latest_job_version_id IS NULL OR id = c.latest_job_version_id)
          ORDER BY observed_at DESC
          LIMIT 1
        ) jv ON TRUE
@@ -567,6 +569,8 @@ export async function runDeterministicMatcher(
          )
          AND c.primary_lane IS NOT NULL
          AND c.primary_lane != 'UNCLASSIFIED'
+         AND c.description_quality_status = 'COMPLETE'
+         AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
          ${jobVersionFilter}
          ${canonicalJobFilter}
        ORDER BY c.created_at ASC, c.id ASC

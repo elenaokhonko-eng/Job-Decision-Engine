@@ -7,6 +7,7 @@ import { RecommendationDecisionSchema } from "../decision/contracts.js";
 import { evaluateDecisionPolicy } from "../policy/decisionPolicy.js";
 import { resolveWorkspacePolicySnapshot } from "../policy/policySnapshot.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
+import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 import {
   evaluateCompensationPolicy,
   evaluateJobFreshness,
@@ -392,6 +393,8 @@ export async function runRecommendationDecider(
       ) AS source_evidence ON TRUE
       WHERE c.workspace_id = $1
         AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+        AND c.description_quality_status = 'COMPLETE'
+        AND ${sourceContentEvidencePredicate("c.workspace_id", "lv.id")}
         ${jobVersionFilter}
         ${canonicalJobFilter}
       ORDER BY c.created_at ASC, c.id ASC

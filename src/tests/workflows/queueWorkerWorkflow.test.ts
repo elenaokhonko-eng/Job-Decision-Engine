@@ -3,6 +3,18 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("evaluation queue workflow", () => {
+  it("runs deterministic Gmail link extraction without sending email content to a model", () => {
+    const workflow = readFileSync(resolve(".github/workflows/ingest.yml"), "utf8");
+    const parserStep = workflow.slice(
+      workflow.indexOf("Extract Gmail job links and stage posting fetches"),
+      workflow.indexOf("public_source_ingestion:"),
+    );
+
+    expect(parserStep).toContain("npx tsx scripts/parse_emails.ts");
+    expect(parserStep).not.toContain("GEMINI_API_KEY");
+    expect(parserStep).not.toContain("OPENAI_API_KEY");
+  });
+
   it("does not cancel an active leased evaluation drain", () => {
     const workflow = readFileSync(resolve(".github/workflows/queue_worker.yml"), "utf8");
 

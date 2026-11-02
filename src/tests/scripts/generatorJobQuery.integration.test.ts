@@ -7,6 +7,7 @@ import pg from "pg";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { sourceContentEvidencePredicate } from "../../pipeline/descriptionQuality.js";
 import { resolveWorkspaceContext } from "../../workspace/context.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
@@ -22,8 +23,14 @@ function scriptSource(script: string): string {
 }
 
 function generatorJobQuery(script: string): string {
-  const query = /const jobRes = await pool\.query(?:<\w+>)?\(\s*`([\s\S]*?)`/.exec(scriptSource(script))?.[1];
-  if (!query) throw new Error(`${script} job query was not found.`);
+  const template = /const jobRes = await pool\.query(?:<\w+>)?\(\s*`([\s\S]*?)`;?\s*,\s*\[/.exec(scriptSource(script))?.[1];
+  if (!template) throw new Error(`${script} job query was not found.`);
+  // The only interpolation allowed is the trusted source-content predicate, expanded with its literal arguments.
+  const query = template.replace(
+    /\$\{sourceContentEvidencePredicate\("([\w.]+)", "([\w.]+)"\)\}/g,
+    (_match, workspaceExpression: string, jobVersionExpression: string) =>
+      sourceContentEvidencePredicate(workspaceExpression, jobVersionExpression),
+  );
   if (query.includes("${")) throw new Error(`${script} job query must not interpolate values.`);
   return query;
 }

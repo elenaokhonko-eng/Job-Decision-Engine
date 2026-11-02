@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SCHEMA_VERSION } from "./version.js";
+import { SchemaVersionSchema } from "./version.js";
 
 const SourceKeySchema = z.string().regex(/^[a-z][a-z0-9_]{2,63}$/);
 
@@ -97,7 +97,7 @@ const SourcePluginMappingSchema = z.object({
 });
 
 export const SourcePluginSchema = z.object({
-  schema_version: z.literal(SCHEMA_VERSION),
+  schema_version: SchemaVersionSchema,
   source_key: SourceKeySchema,
   display_name: z.string().min(1).max(100),
   kind: SourcePluginKindSchema,

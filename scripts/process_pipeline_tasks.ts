@@ -11,6 +11,8 @@ import {
 import type { PipelineTaskReconciliationSummary } from "../src/tasks/pipelineTaskCurrentness.js";
 import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
 import {
+  DEAD_LETTER_CLASSIFICATION_SQL,
+  DEAD_LETTER_LINEAGE_JOINS_SQL,
   readDeadLetterTaskHealth,
   reconcileStaleSupersededEmbeddingDeadLetters,
 } from "../src/tasks/deadLetterPolicy.js";
@@ -43,6 +45,16 @@ function parsePositiveIntEnv(name: string, fallback: number, max?: number): numb
   const parsed = raw ? Number.parseInt(raw, 10) : NaN;
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return max ? Math.min(parsed, max) : parsed;
+}
+
+function parseUuidListEnv(name: string): string[] | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const values = [...new Set(raw.split(",").map((value) => value.trim()).filter(Boolean))];
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const invalid = values.filter((value) => !uuidPattern.test(value));
+  if (invalid.length > 0) throw new Error(`${name} contains invalid UUID value(s).`);
+  return values;
 }
 
 function parseBooleanEnv(name: string, fallback: boolean): boolean {
@@ -112,9 +124,130 @@ interface PipelineTaskReconciliationReport {
   error: string | null;
 }
 
-async function readQueueHealth(pool: pg.Pool, workspaceId: string): Promise<QueueHealth> {
+interface QueueHealthScope {
+  taskTypes: readonly string[];
+  jobVersionIds?: readonly string[];
+  observationIds?: readonly string[];
+}
+
+function scopedTaskTargetClause(jobVersionParam: number, observationParam: number): string {
+  return `AND (
+    ($${jobVersionParam}::text[] IS NULL AND $${observationParam}::text[] IS NULL)
+    OR task.payload->>'job_version_id' = ANY(COALESCE($${jobVersionParam}::text[], ARRAY[]::text[]))
+    OR task.payload->>'observation_id' = ANY(COALESCE($${observationParam}::text[], ARRAY[]::text[]))
+    OR EXISTS (
+      SELECT 1
+      FROM raw_job_observations AS scoped_observation
+      WHERE scoped_observation.workspace_id = task.workspace_id
+        AND scoped_observation.id::text = task.payload->>'observation_id'
+        AND scoped_observation.job_version_id::text = ANY(COALESCE($${jobVersionParam}::text[], ARRAY[]::text[]))
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM raw_job_observations AS scoped_child
+      WHERE scoped_child.workspace_id = task.workspace_id
+        AND scoped_child.id::text = task.payload->>'observation_id'
+        AND scoped_child.derived_from_observation_id::text = ANY(COALESCE($${observationParam}::text[], ARRAY[]::text[]))
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM raw_job_observations AS scoped_parent
+      WHERE scoped_parent.workspace_id = task.workspace_id
+        AND scoped_parent.id::text = ANY(COALESCE($${observationParam}::text[], ARRAY[]::text[]))
+        AND scoped_parent.job_version_id::text = task.payload->>'job_version_id'
+    )
+  )`;
+}
+
+async function readQueueHealth(
+  pool: pg.Pool,
+  workspaceId: string,
+  scope?: QueueHealthScope,
+): Promise<QueueHealth> {
   const client = await pool.connect();
   try {
+    if (scope) {
+      const jobVersionIds = scope.jobVersionIds ?? null;
+      const observationIds = scope.observationIds ?? null;
+      const params = [workspaceId, [...scope.taskTypes], jobVersionIds, observationIds];
+      const targetClause = scopedTaskTargetClause(3, 4);
+      const queueResult = await client.query<QueueHealthRow>(
+        `SELECT task.task_type,
+                task.status,
+                COUNT(*)::INTEGER AS task_count,
+                EXTRACT(EPOCH FROM NOW() - MIN(task.created_at))::INTEGER AS oldest_age_seconds
+         FROM pipeline_tasks AS task
+         WHERE task.workspace_id = $1
+           AND task.task_type = ANY($2::text[])
+           AND task.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+           ${targetClause}
+         GROUP BY task.task_type, task.status
+         ORDER BY task.task_type, task.status`,
+        params,
+      );
+      const deadLetterResult = await client.query<{
+        task_type: string;
+        actionable_dead_letter_count: number;
+        stale_historical_dead_letter_count: number;
+      }>(
+        `SELECT task.task_type,
+                COUNT(*) FILTER (
+                  WHERE (${DEAD_LETTER_CLASSIFICATION_SQL}) = 'ACTIONABLE_CURRENT'
+                )::INTEGER AS actionable_dead_letter_count,
+                COUNT(*) FILTER (
+                  WHERE (${DEAD_LETTER_CLASSIFICATION_SQL}) = 'STALE_HISTORICAL'
+                )::INTEGER AS stale_historical_dead_letter_count
+         FROM pipeline_tasks AS task
+         ${DEAD_LETTER_LINEAGE_JOINS_SQL}
+         WHERE task.workspace_id = $1
+           AND task.task_type = ANY($2::text[])
+           AND task.status = 'DEAD_LETTER'
+           ${targetClause}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM canonical_jobs AS fixture_job
+             LEFT JOIN job_versions AS fixture_version
+               ON fixture_version.workspace_id = fixture_job.workspace_id
+              AND fixture_version.canonical_job_id = fixture_job.id
+             WHERE fixture_job.workspace_id = task.workspace_id
+               AND fixture_job.is_test_fixture = TRUE
+               AND (
+                 task.payload->>'canonical_job_id' = fixture_job.id::TEXT
+                 OR task.payload->>'job_version_id' = fixture_version.id::TEXT
+               )
+           )
+         GROUP BY task.task_type
+         ORDER BY task.task_type`,
+        params,
+      );
+      const actionableCurrentDeadLetter = deadLetterResult.rows.reduce(
+        (total, row) => total + Number(row.actionable_dead_letter_count),
+        0,
+      );
+      const staleHistoricalDeadLetter = deadLetterResult.rows.reduce(
+        (total, row) => total + Number(row.stale_historical_dead_letter_count),
+        0,
+      );
+      const byStatus = (status: string) => queueResult.rows
+        .filter((row) => row.status === status)
+        .reduce((total, row) => total + Number(row.task_count), 0);
+      const oldestAge = (status: string) => queueResult.rows
+        .filter((row) => row.status === status)
+        .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+
+      return {
+        pending: byStatus("PENDING"),
+        retryWait: byStatus("RETRY_WAIT"),
+        blockedDependency: byStatus("BLOCKED_DEPENDENCY"),
+        deadLetter: actionableCurrentDeadLetter + staleHistoricalDeadLetter,
+        actionableCurrentDeadLetter,
+        staleHistoricalDeadLetter,
+        oldestPendingAgeSeconds: oldestAge("PENDING"),
+        oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
+        byType: queueResult.rows,
+      };
+    }
+
     const queueResult = await client.query<QueueHealthRow>(
       `SELECT task_type, status, task_count, oldest_age_seconds
        FROM v_pipeline_task_queue_health
@@ -190,6 +323,12 @@ export async function processPipelineTasks(): Promise<void> {
   // them; an explicit task-type selection or opt-in environment flag drains
   // them after the mandatory pipeline without holding up routing/matching.
   const lockId = taskTypes.length === 1 && taskTypes[0] === "EXTRACT_QUOTED_REQUIREMENTS" ? 1002 : LOCK_ID;
+  const jobVersionIds = parseUuidListEnv("PIPELINE_TASK_WORKER_JOB_VERSION_IDS");
+  const observationIds = parseUuidListEnv("PIPELINE_TASK_WORKER_OBSERVATION_IDS");
+  const hasExplicitTargetScope = jobVersionIds !== undefined || observationIds !== undefined;
+  const queueHealthScope: QueueHealthScope | undefined = hasExplicitTargetScope
+    ? { taskTypes, jobVersionIds, observationIds }
+    : undefined;
 
   const checkAiPreflight = parseBooleanEnv("PIPELINE_TASK_WORKER_PREFLIGHT_MODELS", true);
   const requiresExtractionRoute = taskTypes.includes("EXTRACT_QUOTED_REQUIREMENTS");
@@ -274,7 +413,7 @@ export async function processPipelineTasks(): Promise<void> {
       contextClient.release();
     }
 
-    if (lockId === LOCK_ID) {
+    if (lockId === LOCK_ID && !hasExplicitTargetScope) {
       const reconciliationClient = await pool.connect();
       try {
         staleHistoricalDeadLettersReconciled = await reconcileStaleSupersededEmbeddingDeadLetters(
@@ -287,7 +426,7 @@ export async function processPipelineTasks(): Promise<void> {
       console.log("Stale historical embedding dead letters reconciled:", staleHistoricalDeadLettersReconciled);
     }
 
-    const queueHealthBefore = await readQueueHealth(pool, context.workspaceId);
+    const queueHealthBefore = await readQueueHealth(pool, context.workspaceId, queueHealthScope);
     const activeQueueRowsBefore = queueHealthBefore.byType.filter(
       (row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]),
     );
@@ -303,6 +442,8 @@ export async function processPipelineTasks(): Promise<void> {
     console.log("Pipeline stage start offset:", stageStartOffset);
     const summary = await runPipelineStageTaskWorker(pool, {
       taskTypes: activeTaskTypes,
+      jobVersionIds,
+      observationIds,
       stageStartOffset,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
       includeRoutingDeferred: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED", true),
@@ -345,7 +486,7 @@ export async function processPipelineTasks(): Promise<void> {
       ].join("\n") + "\n", "utf8");
     }
 
-    const queueHealth = await readQueueHealth(pool, context.workspaceId);
+    const queueHealth = await readQueueHealth(pool, context.workspaceId, queueHealthScope);
     deadLetterReport.actionableDeadLetters = queueHealth.actionableCurrentDeadLetter;
     deadLetterReport.staleHistoricalDeadLetters = queueHealth.staleHistoricalDeadLetter;
     deadLetterReport.newlyDeadLetteredThisRun = summary.deadLettered;
@@ -465,7 +606,7 @@ export async function processPipelineTasks(): Promise<void> {
   } finally {
     if (deadLetterReport.actionableDeadLetters === null && workspaceId !== null) {
       try {
-        const queueHealth = await readQueueHealth(pool, workspaceId);
+        const queueHealth = await readQueueHealth(pool, workspaceId, queueHealthScope);
         deadLetterReport.actionableDeadLetters = queueHealth.actionableCurrentDeadLetter;
         deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetter;
         deadLetterReport.staleHistoricalDeadLetters = queueHealth.staleHistoricalDeadLetter;
