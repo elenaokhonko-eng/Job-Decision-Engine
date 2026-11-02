@@ -206,6 +206,58 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     }
   });
 
+  it("keeps generated documents downloadable after the posting gets a new version, but not regenerable", async () => {
+    if (!profile) throw new Error("The manual router fixture profile is not imported.");
+    const candidateProfileId = profile.candidateProfileId;
+    const savedEnv = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
+    for (const key of MODEL_KEY_ENV) delete process.env[key];
+    try {
+      const post = async (route: string, body: object, expectedStatus = 200) => {
+        const response = await fetch(`${baseUrl}${route}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const json = await response.json() as Record<string, any>;
+        expect(response.status, JSON.stringify(json)).toBe(expectedStatus);
+        return json;
+      };
+      const description = [
+        "About the role: Example Bank is hiring a Risk Platform Lead in Singapore.",
+        "Responsibilities: design target operating models and lead front office transformation programmes.",
+        "Requirements: at least 8 years of experience in derivatives operations or investment technology.",
+        "You must have a bachelor's degree in finance, economics or computer science.",
+      ];
+      const posting = (lines: string[]) => ({
+        schema_version: "manual_application_v1", candidate_profile_id: candidateProfileId, source_kind: "PASTED",
+        title: "Risk Platform Lead", company: "Example Bank", url: "https://careers.example.test/risk-platform-lead",
+        location: "Singapore", description: lines.join("\n"),
+      });
+
+      const first = await post("/compare", posting(description));
+      const approved = await post(`/${first.draft_id}/approve`, { approved: true, comparison_fingerprint: first.comparison_fingerprint });
+      await post(`/${first.draft_id}/documents`, { approval_id: approved.approval_id });
+
+      // Re-pasting the posting with an edited description makes a new job version current.
+      const second = await post("/compare", posting([...description, "Experience with regulatory reporting is a plus."]));
+      expect(second.comparison.canonical_job_id).toBe(first.comparison.canonical_job_id);
+      expect(second.comparison.job_version_id).not.toBe(first.comparison.job_version_id);
+
+      for (const [type, format] of [["cv", "docx"], ["cover_letter", "pdf"]]) {
+        const download = await fetch(`${baseUrl}/${first.draft_id}/documents/${type}/${format}`);
+        const body = await download.json() as Record<string, any>;
+        expect(download.status, JSON.stringify(body)).toBe(200);
+        expect(crypto.createHash("sha256").update(Buffer.from(body.content_base64, "base64")).digest("hex")).toBe(body.sha256);
+      }
+      // Currentness still guards generation: the old approval cannot produce new documents.
+      const regenerate = await post(`/${first.draft_id}/documents`, { approval_id: approved.approval_id }, 409);
+      expect(JSON.stringify(regenerate)).toMatch(/JOB_VERSION_CHANGED|APPROVAL_STALE/);
+    } finally {
+      for (const key of MODEL_KEY_ENV) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    }
+  });
+
   it("checks download membership without a read-only transaction error", async () => {
     const response = await fetch(`${baseUrl}/${crypto.randomUUID()}/documents/CV/DOCX`);
     const body = await response.json() as { error?: { code?: string } | string };
