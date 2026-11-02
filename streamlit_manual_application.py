@@ -451,7 +451,7 @@ def render_manual_application_flow(api_request):
         )
     st.markdown("### Requirement, evidence and gap review")
     if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
     else:
         st.warning(
             "No deterministic requirements were extracted. Review the description and confirm the gap manually before approval."

@@ -574,6 +574,11 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
       sendApiError(res, 400, "INVALID_REQUEST", "Provide a public posting URL and the expected title and company.");
       return;
     }
+    // LinkedIn shows job descriptions only to signed-in browsers, so a fetch can never succeed.
+    if (/(^|\.)linkedin\.com$/i.test(new URL(parsed.data.url).hostname)) {
+      sendApiError(res, 422, "INVALID_REQUEST", "LinkedIn job pages can't be fetched because LinkedIn only shows them to signed-in browsers. Open the posting, copy the full description including the responsibilities and requirements, and paste it instead.");
+      return;
+    }
     let result: JobContentResult;
     try {
       result = await fetchJobContent(parsed.data.url, {

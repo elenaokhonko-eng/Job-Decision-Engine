@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Resolver } from "node:dns/promises";
+import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { isIP } from "node:net";
 import { request as httpsRequest } from "node:https";
@@ -203,23 +203,16 @@ async function resolvePublicAddresses(hostname: string, signal: AbortSignal): Pr
   const host = hostname.replace(/^\[|\]$/g, "");
   const literalFamily = isIP(host);
   if (literalFamily) return [{ address: host, family: literalFamily }];
-  if (signal.aborted) throw new Error("Posting fetch exceeded its total request time limit.");
-  const resolver = new Resolver();
-  const cancel = () => resolver.cancel();
-  signal.addEventListener("abort", cancel, { once: true });
-  let addresses: PublicAddress[] = [];
+  // The operating system's resolver, as browsers use. Node's own Resolver queries the configured DNS
+  // servers directly, and on machines whose list points at a local proxy that is not listening
+  // (127.0.0.1 on some VPN and security setups) it failed for every host while browsing worked.
+  let addresses: PublicAddress[];
   try {
-    const [ipv4Records, ipv6Records] = await Promise.allSettled([resolver.resolve4(host), resolver.resolve6(host)]);
+    addresses = (await awaitWithAbort(lookup(host, { all: true, verbatim: true }), signal))
+      .map(({ address, family }) => ({ address, family }));
+  } catch (error) {
     if (signal.aborted) throw new Error("Posting fetch exceeded its total request time limit.");
-    if (ipv4Records.status === "fulfilled") addresses.push(...ipv4Records.value.map((address) => ({ address, family: 4 })));
-    if (ipv6Records.status === "fulfilled") addresses.push(...ipv6Records.value.map((address) => ({ address, family: 6 })));
-    if (addresses.length === 0) {
-      const failures = [ipv4Records, ipv6Records].filter((record): record is PromiseRejectedResult => record.status === "rejected");
-      const detail = failures[0]?.reason instanceof Error ? failures[0].reason.message : "No DNS records were returned.";
-      throw new Error(`Posting host DNS resolution failed: ${detail}`);
-    }
-  } finally {
-    signal.removeEventListener("abort", cancel);
+    throw new Error(`Posting host DNS resolution failed: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (addresses.length === 0 || addresses.some((item) => !isPublicAddress(item.address, item.family))) {
     throw new UnsafePostingUrlError("Posting URL resolves to a private, reserved, or non-routable address.");

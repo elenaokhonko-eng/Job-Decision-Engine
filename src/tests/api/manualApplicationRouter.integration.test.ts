@@ -320,6 +320,17 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     }
   });
 
+  it("tells the candidate to paste LinkedIn postings instead of reporting a fetch failure", async () => {
+    const response = await fetch(`${baseUrl}/fetch-description`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://www.linkedin.com/jobs/view/1234567890/", title: "Product Lead", company: "Example Commodities" }),
+    });
+    const body = await response.json() as { code?: string; message?: string };
+    expect(response.status).toBe(422);
+    expect(body.message).toContain("LinkedIn job pages can't be fetched");
+    expect(body.message).toContain("paste it instead");
+  });
+
   it("checks download membership without a read-only transaction error", async () => {
     const response = await fetch(`${baseUrl}/${crypto.randomUUID()}/documents/CV/DOCX`);
     const body = await response.json() as { error?: { code?: string } | string };
