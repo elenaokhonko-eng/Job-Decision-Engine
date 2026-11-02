@@ -32,6 +32,8 @@ from streamlit_workspace_contracts import (
     validate_ranked_job_row,
     validate_track_row,
 )
+from streamlit_manual_application import render_manual_application_flow
+from streamlit_runtime import ensure_hosted_api_ready, open_api_json
 
 
 # Load environment variables from Streamlit secrets, .env, and .env.local
@@ -42,8 +44,9 @@ def load_dotenv():
             for key, val in st.secrets.items():
                 if isinstance(val, str):
                     os.environ.setdefault(key, val)
-    except Exception:
-        pass
+    except Exception as exc:
+        if exc.__class__.__name__ != "StreamlitSecretNotFoundError":
+            raise
 
     # Load from local .env and .env.local files
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -671,11 +674,10 @@ def api_request(method, path, params=None, body=None, timeout=30):
         data = json.dumps(body).encode("utf-8")
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        if response.status == 204:
-            return {}
-        raw = response.read().decode("utf-8")
-        return json.loads(raw) if raw else {}
+    return open_api_json(req, timeout)
+
+
+ensure_hosted_api_ready()
 
 def default_accessibility_settings():
     return {
@@ -2432,36 +2434,7 @@ with tab_dashboard:
             st.info("No evaluated jobs in view. Run the discovery & evaluation pipeline to populate AI_EVALUATED rows.")
 
 with tab_add_job:
-    st.subheader("➕ Import a New Job Advertisement")
-    st.write("Add raw jobs manually to the Postgres Vault. The daily evaluation cron job will automatically score and route them.")
-    if "manual_import_success" in st.session_state:
-        st.success(st.session_state["manual_import_success"])
-        del st.session_state["manual_import_success"]
-
-    with st.form("custom_job_form"):
-        title = st.text_input("Job Title", "Principal AI Architect")
-        company = st.text_input("Company Name", "Novartis Pharmaceuticals")
-        source = st.selectbox("Source Portal", ["LinkedIn", "MyCareersFuture", "eFinancialCareers", "Gmail"])
-        salary = st.text_input("Salary Range Indicator", "SGD 22,000 - SGD 26,000 / month")
-        location = st.text_input("Location", "Singapore (Remote)")
-        careers_url = st.text_input("Careers Portal Direct Link (Verification)", "https://www.novartis.com/careers")
-        desc = st.text_area("Job Description Raw text", "Paste raw details here...")
-        
-        submitted = st.form_submit_button("Import & Save to Postgres Vault")
-        if submitted:
-            new_job = {
-                "title": title,
-                "company": company,
-                "source": source,
-                "salaryRange": salary,
-                "location": location,
-                "careers_portal_url": careers_url if careers_url else f"https://www.{company.lower().replace(' ', '')}.com/careers",
-                "description": desc
-            }
-            if save_new_job_to_db(new_job):
-                st.session_state["manual_import_success"] = f"✅ Successfully added '{title}' to the Staging Vault! It is now pending evaluation. To evaluate it immediately, click the '🧠 2. Run LLM Evaluation & Processing' button in the sidebar."
-                st.rerun()
-
+    render_manual_application_flow(api_request)
 with tab_linkedin:
     st.subheader("🔗 Import Saved LinkedIn Jobs")
     st.write("Sync your saved LinkedIn jobs and stage them in your Postgres database for evaluation. Auto-unsave is disabled to keep ingestion read-only.")

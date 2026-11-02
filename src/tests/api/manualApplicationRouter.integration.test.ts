@@ -1,0 +1,216 @@
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import crypto from "node:crypto";
+import type { AddressInfo } from "node:net";
+import type { Server } from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import express from "express";
+import JSZip from "jszip";
+import pg from "pg";
+
+import {
+  createManualApplicationRouter,
+  loadManualProfileEvidence,
+  manualQuotedRequirementMode,
+} from "../../api/v2/manualApplicationRouter.js";
+import { runMigrations } from "../../db/migrate.js";
+import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { importLoadedProfile, type ProfileImportSummary } from "../../profile/importer.js";
+import { loadProfile } from "../../profile/loader.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
+
+const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
+const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
+const routerPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../api/v2/manualApplicationRouter.ts");
+const MODEL_KEY_ENV = ["GEMINI_API_KEY", "GEMINI_FLASH_API_KEY", "OPENAI_API_KEY", "REQUIREMENTS_ENABLE_QUOTED"] as const;
+
+// loadCurrentInputs is private, so its job query is read from the router source.
+function currentInputsJobQuery(): string {
+  const query = /const jobResult = await client\.query<JobRow>\(\s*`([\s\S]*?)`/.exec(readFileSync(routerPath, "utf8"))?.[1];
+  if (!query) throw new Error("manualApplicationRouter.ts current-inputs job query was not found.");
+  return query;
+}
+
+async function importFixtureProfile(pool: pg.Pool, context: WorkspaceContext): Promise<ProfileImportSummary> {
+  const profileDir = mkdtempSync(path.join(tmpdir(), "manual-router-profile-"));
+  const write = (name: string, body: object) =>
+    writeFileSync(path.join(profileDir, name), JSON.stringify({ schema_version: "2.0", profile_key: "manual_router_it", ...body }));
+  const engagement = (key: string, role: string, start: string, end: string | null) => ({
+    engagement_key: key, organization_legal_name: "Example Org", role_title: role, engagement_type: "EMPLOYEE",
+    experience_class: "PROFESSIONAL_PRODUCTION", start_date: start, ...(end ? { end_date: end } : {}), is_current: end === null,
+    summary: `${role} engagement summary.`, verification_status: "SELF_ATTESTED",
+  });
+  const fact = (key: string, engagementKey: string, statement: string, isCurrent: boolean) => ({
+    fact_key: key, engagement_key: engagementKey, fact_type: "ACHIEVEMENT", statement, evidence_tier: "PROFESSIONAL_PRODUCTION",
+    verification_status: "SELF_ATTESTED", is_current: isCurrent, confidentiality: "PUBLIC",
+  });
+  const contact = (key: string, kind: string, value: string) => ({
+    fact_key: key, fact_type: "CONTACT", statement: `Contact ${kind} for application documents.`,
+    structured_value: { kind, value }, evidence_tier: "KNOWLEDGE_ONLY",
+    verification_status: "SELF_ATTESTED", is_current: true, confidentiality: "PRIVATE_INTERNAL",
+  });
+  try {
+    write("profile.json", { profile_version: 1, display_name: "Evidence Candidate", status: "ACTIVE" });
+    write("engagements.json", { engagements: [
+      engagement("eng.current", "Current Architect", "2024-01-01", null),
+      engagement("eng.past", "Past Program Lead", "2015-03-01", "2019-06-30"),
+    ] });
+    write("facts.json", { facts: [
+      fact("fact.current.platform", "eng.current", "Designs the current agentic platform architecture in Python.", true),
+      fact("fact.past.derivatives", "eng.past", "Led the derivatives operating model programme for a $25B portfolio.", false),
+      contact("contact_full_name", "name", "Evidence Candidate"),
+      contact("contact_phone", "phone", "+65 6000 0000"),
+    ] });
+    write("credentials.json", { credentials: [] });
+    return await importLoadedProfile(await loadProfile(profileDir), [], pool, { context });
+  } finally {
+    rmSync(profileDir, { recursive: true, force: true });
+  }
+}
+
+let pool: pg.Pool | undefined;
+let server: Server | undefined;
+let baseUrl = "";
+let schemaName = "";
+let context: WorkspaceContext | undefined;
+let profile: ProfileImportSummary | undefined;
+
+describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
+  beforeAll(async () => {
+    schemaName = `manual_router_${crypto.randomUUID().replaceAll("-", "")}`;
+    pool = new pg.Pool({ ...pgConnectionConfig(databaseUrl), options: `-c search_path=${schemaName},public` });
+    await pool.query(`CREATE SCHEMA ${schemaName}`);
+    const client = await pool.connect();
+    try {
+      await runMigrations(client);
+      context = await resolveWorkspaceContext(client);
+    } finally {
+      client.release();
+    }
+    profile = await importFixtureProfile(pool, context);
+    const workspace = context;
+    const app = express();
+    app.use(express.json({ limit: "1mb" }));
+    app.use(createManualApplicationRouter({ pool, resolveContext: () => workspace }));
+    server = app.listen(0);
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    if (pool && schemaName) await pool.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
+    await pool?.end();
+    pool = undefined;
+  });
+
+  it("reads readiness columns from a view that exposes them", async () => {
+    if (!pool || !context) throw new Error("The manual router test pool is not initialized.");
+    const result = await pool.query(currentInputsJobQuery(), [
+      context.workspaceId,
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+      "a".repeat(64),
+    ]);
+    const columns = result.fields.map((field) => field.name);
+
+    expect(columns).toEqual(expect.arrayContaining(["readiness_status", "readiness_reason_codes", "recommendation_outcome"]));
+  });
+
+  it("offers past-role facts as evidence, linked to their engagement, with plain dates", async () => {
+    if (!pool || !context || !profile) throw new Error("The manual router test pool is not initialized.");
+    const evidence = await loadManualProfileEvidence(pool, context.workspaceId, profile.profileVersionId);
+    const pastRole = evidence.find((item) => item.evidence_type === "ENGAGEMENT" && item.label === "Past Program Lead at Example Org");
+    const pastFact = evidence.find((item) => item.statement === "Led the derivatives operating model programme for a $25B portfolio.");
+
+    expect(pastRole?.statement).toContain("(2015-03-01–2019-06-30)");
+    expect(pastFact).toMatchObject({ evidence_type: "FACT", engagement_id: pastRole?.id });
+    expect(evidence.some((item) => item.statement === "Designs the current agentic platform architecture in Python.")).toBe(true);
+    expect(evidence.some((item) => item.statement.includes("+65 6000 0000"))).toBe(false);
+  });
+
+  it("goes from a pasted job description to a tailored CV DOCX, warning when AI extraction did not run", async () => {
+    if (!profile) throw new Error("The manual router fixture profile is not imported.");
+    const candidateProfileId = profile.candidateProfileId;
+    const savedEnv = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
+    for (const key of MODEL_KEY_ENV) delete process.env[key];
+    try {
+      process.env.OPENAI_API_KEY = "configured-for-mode-check";
+      expect(manualQuotedRequirementMode()).toBe("with_quoted");
+      process.env.REQUIREMENTS_ENABLE_QUOTED = "false";
+      expect(manualQuotedRequirementMode()).toBe("deterministic_only");
+      for (const key of MODEL_KEY_ENV) delete process.env[key];
+      expect(manualQuotedRequirementMode()).toBe("deterministic_only");
+      const post = async (route: string, body: object, expectedStatus = 200) => {
+        const response = await fetch(`${baseUrl}${route}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const text = await response.text();
+        if (!text.startsWith("{")) throw new Error(`${route} -> ${response.status}: ${text.slice(0, 300)}`);
+        const json = JSON.parse(text) as Record<string, any>;
+        expect(response.status, JSON.stringify(json)).toBe(expectedStatus);
+        return json;
+      };
+      const posting = (url: string, description: string[]) => ({
+        schema_version: "manual_application_v1",
+        candidate_profile_id: candidateProfileId,
+        source_kind: "PASTED",
+        title: "Derivatives Operating Model Lead",
+        company: "Example Bank",
+        url,
+        location: "Singapore",
+        description: description.join("\n"),
+      });
+
+      // A description without recognisable sections is refused with guidance, not a 500.
+      const thin = await post("/compare", posting("https://careers.example.test/thin-posting", [
+        "Example Bank is hiring a Derivatives Operating Model Lead in Singapore to work on derivatives.",
+        "The successful candidate will join a growing function and partner with many stakeholders across the bank.",
+      ]), 422);
+      expect(thin.code).toBe("DESCRIPTION_INSUFFICIENT");
+      expect(thin.message).toContain("responsibilities");
+
+      const compared = await post("/compare", posting("https://careers.example.test/derivatives-lead", [
+        "About the role: Example Bank is hiring a Derivatives Operating Model Lead in Singapore.",
+        "Responsibilities: design target operating models and lead front office transformation programmes.",
+        "Requirements: at least 8 years of experience in derivatives operations or investment technology.",
+        "You must have a bachelor's degree in finance, economics or computer science.",
+        "Strong Python skills are preferred.",
+      ]));
+      expect(compared.document_contact_ready).toBe(true);
+      expect(compared.comparison.suitability_warnings.join(" ")).toContain("AI requirement extraction did not run");
+
+      const approved = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint });
+      const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+      expect(generated.preview.cv).toContain("### Past Program Lead at Example Org | Mar 2015 – Jun 2019");
+      expect(generated.preview.cv).toContain("Led the derivatives operating model programme for a $25B portfolio.");
+
+      const download = await fetch(`${baseUrl}/${compared.draft_id}/documents/cv/docx`);
+      expect(download.status).toBe(200);
+      const payload = await download.json() as { content_base64: string };
+      const documentXml = await (await JSZip.loadAsync(Buffer.from(payload.content_base64, "base64")))
+        .file("word/document.xml")?.async("string");
+      expect(documentXml).toContain("Past Program Lead at Example Org | Mar 2015 – Jun 2019");
+      // Each requirement the CV pairs with evidence is written in the job's own words.
+      const matched = (compared.comparison.rows as Array<{ requirement: string; evidence: unknown[] }>).filter((row) => row.evidence.length > 0);
+      for (const row of matched.slice(0, 8)) {
+        expect(documentXml).toContain(row.requirement.trim().replace(/[.;:]+$/, "").replace(/&/g, "&amp;").replace(/'/g, "&apos;"));
+      }
+    } finally {
+      for (const key of MODEL_KEY_ENV) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    }
+  });
+
+  it("checks download membership without a read-only transaction error", async () => {
+    const response = await fetch(`${baseUrl}/${crypto.randomUUID()}/documents/CV/DOCX`);
+    const body = await response.json() as { error?: { code?: string } | string };
+
+    expect(response.status).toBe(404);
+    expect(JSON.stringify(body)).toContain("NOT_FOUND");
+  });
+});

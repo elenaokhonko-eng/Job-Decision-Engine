@@ -1,0 +1,141 @@
+{
+  "$ref": "#/definitions/ManualPersistedFetchReceipt",
+  "definitions": {
+    "ManualPersistedFetchReceipt": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workspace_id": {
+          "$ref": "#/definitions/ManualPersistedFetchReceipt/properties/id"
+        },
+        "user_id": {
+          "$ref": "#/definitions/ManualPersistedFetchReceipt/properties/id"
+        },
+        "requested_url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048
+        },
+        "resolved_url": {
+          "$ref": "#/definitions/ManualPersistedFetchReceipt/properties/requested_url"
+        },
+        "canonical_url": {
+          "$ref": "#/definitions/ManualPersistedFetchReceipt/properties/requested_url"
+        },
+        "expected_title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 300
+        },
+        "expected_company": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "expected_requisition_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 160
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "content_hash": {
+          "$ref": "#/definitions/ManualPersistedFetchReceipt/properties/description_hash"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "ASHBY",
+            "GREENHOUSE",
+            "LEVER",
+            "EMPLOYER_WEBSITE"
+          ]
+        },
+        "source_evidence": {
+          "type": "object",
+          "properties": {
+            "requestedUrl": {
+              "$ref": "#/definitions/ManualPersistedFetchReceipt/properties/requested_url"
+            },
+            "resolvedUrl": {
+              "$ref": "#/definitions/ManualPersistedFetchReceipt/properties/requested_url"
+            },
+            "redirectHistory": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ManualPersistedFetchReceipt/properties/requested_url"
+              },
+              "maxItems": 5
+            },
+            "retrievedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "httpStatus": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 599
+            },
+            "contentType": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 255
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "responseHash": {
+              "$ref": "#/definitions/ManualPersistedFetchReceipt/properties/description_hash"
+            }
+          },
+          "required": [
+            "requestedUrl",
+            "resolvedUrl",
+            "redirectHistory",
+            "retrievedAt",
+            "httpStatus",
+            "contentType",
+            "responseHash"
+          ],
+          "additionalProperties": false
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "user_id",
+        "requested_url",
+        "resolved_url",
+        "canonical_url",
+        "expected_title",
+        "expected_company",
+        "expected_requisition_id",
+        "description_hash",
+        "content_hash",
+        "provider",
+        "source_evidence",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
