@@ -217,7 +217,9 @@ export async function runNormalization(
           if (checkUrl.rows.length > 0) {
             canonicalJobId = checkUrl.rows[0].id;
             isExistingJob = true;
-          } else if (!obs.derived_from_observation_id) {
+          } else {
+            // Retrieved postings keep this exact company+title+location match so a repost
+            // fetched from a new URL still joins its canonical job.
             const checkTitleLocation = await client.query(
               `SELECT id FROM canonical_jobs
                WHERE workspace_id = $1

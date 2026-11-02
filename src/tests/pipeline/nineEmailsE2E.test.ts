@@ -641,7 +641,9 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
               d.evidence
          FROM evaluation_budget_deferrals d
          JOIN canonical_jobs c ON c.id = d.canonical_job_id
+         -- Each fixture version also has its derived employer observation; report the Gmail fixture.
          JOIN raw_job_observations rjo ON rjo.job_version_id = d.job_version_id
+          AND rjo.source_name = 'GMAIL_ALERT'
         WHERE d.workspace_id = $1 AND d.budget_run_id = $2`,
       [getContext().workspaceId, budgetRunId]
     );
