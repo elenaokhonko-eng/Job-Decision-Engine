@@ -155,6 +155,7 @@ def _comparison_response(source_content_status="COMPLETE"):
                 "period": "Apr 2023 – Apr 2025",
                 "kind": "EMPLOYMENT",
                 "default_layout": "FULL",
+                "default_source": "AUTOMATIC",
             },
             {
                 "engagement_id": "eng-lab",
@@ -162,6 +163,7 @@ def _comparison_response(source_content_status="COMPLETE"):
                 "period": "May 2026 – Present",
                 "kind": "VENTURE",
                 "default_layout": "ONE_LINE",
+                "default_source": "PROFILE",
             },
         ],
     }

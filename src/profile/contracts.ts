@@ -358,6 +358,8 @@ export const EngagementJsonSchema = z.object({
       summary: z.string().min(10).max(1024),
       verification_status: VerificationStatusSchema,
       evidence_source_keys: z.string().array().optional(),
+      // How this role appears on application CVs unless chosen otherwise for one job.
+      document_layout: z.enum(['FULL', 'ONE_LINE', 'HIDDEN']).optional(),
     })
   ),
 });
@@ -413,6 +415,8 @@ export const CredentialJsonSchema = z.object({
       status: CredentialStatusSchema,
       verification_status: VerificationStatusSchema,
       evidence_source_key: z.string().optional(),
+      // List under Certifications in every document, regardless of relevance ranking.
+      always_include_in_documents: z.boolean().optional(),
     })
   ),
 });

@@ -21,6 +21,7 @@ import { importLoadedProfile, type ProfileImportSummary } from "../../profile/im
 import { loadProfile } from "../../profile/loader.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { SYSTEMATIC_TRADING_PRODUCT_LEAD_DESCRIPTION } from "../fixtures/systematicTradingProductLead.js";
+import { resetManualDocuments } from "../../../scripts/reset_manual_documents.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
@@ -91,9 +92,9 @@ async function importShapedProfile(pool: pg.Pool, context: WorkspaceContext): Pr
   try {
     write("profile.json", { profile_version: 1, display_name: "Shaped Candidate", status: "ACTIVE" });
     write("engagements.json", { engagements: [
-      engagement("eng.lab", "Neurodiversity Research Lab", "Founder", "RESEARCHER", "APPLIED_PROJECT", "2026-05-01", null),
+      { ...engagement("eng.lab", "Neurodiversity Research Lab", "Founder", "RESEARCHER", "APPLIED_PROJECT", "2026-05-01", null), document_layout: "ONE_LINE" },
       engagement("eng.campus", "City University", "Founder in Residence", "FOUNDER_OPERATOR", "PROFESSIONAL_PRODUCTION", "2026-01-01", null),
-      engagement("eng.venture", "Venture AI", "Founder and AI Architect", "FOUNDER_OPERATOR", "PROFESSIONAL_PRODUCTION", "2025-08-01", null),
+      { ...engagement("eng.venture", "Venture AI", "Founder and AI Architect", "FOUNDER_OPERATOR", "PROFESSIONAL_PRODUCTION", "2025-08-01", null), document_layout: "FULL" },
       engagement("eng.sprint", "Strategy Consultancy", "Certification Sprint", "RESEARCHER", "COURSE_PROJECT", "2025-07-01", "2025-08-31"),
       engagement("eng.aim", "Insurer Investment Management", "Program Lead", "EMPLOYEE", "PROFESSIONAL_PRODUCTION", "2023-04-01", "2025-04-30"),
       engagement("eng.import", "Trading House", "Coordinator", "EMPLOYEE", "PROFESSIONAL_PRODUCTION", "2000-01-01", "2002-12-31"),
@@ -113,6 +114,7 @@ async function importShapedProfile(pool: pg.Pool, context: WorkspaceContext): Pr
     write("credentials.json", { credentials: [
       { credential_key: "cred.msc", credential_name: "Master of Science in Finance", issuer: "Example University", credential_type: "DEGREE", status: "ACTIVE", verification_status: "SELF_ATTESTED" },
       { credential_key: "cred.cloud", credential_name: "Professional Cloud Architect", issuer: "Example Cloud", credential_type: "CERTIFICATION", status: "IN_PROGRESS", verification_status: "SELF_ATTESTED" },
+      { credential_key: "cred.cfa_level_1", credential_name: "Passed Level I of the CFA Program", issuer: "CFA Institute", credential_type: "COURSE", status: "ACTIVE", verification_status: "SELF_ATTESTED", always_include_in_documents: true },
     ] });
     return await importLoadedProfile(await loadProfile(profileDir), [], pool, { context });
   } finally {
@@ -281,10 +283,13 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       expect(JSON.stringify(compared.comparison.evidence)).not.toMatch(/Self-rating|not a target/i);
 
       // The review screen gets every role with its default layout; courses are not offered as roles.
-      const plan = compared.role_plan as Array<{ engagement_id: string; label: string; kind: string; default_layout: string }>;
+      const plan = compared.role_plan as Array<{ engagement_id: string; label: string; kind: string; default_layout: string; default_source: string }>;
       const role = (label: string) => plan.find((item) => item.label === label);
       expect(role("Program Lead at Insurer Investment Management")).toMatchObject({ kind: "EMPLOYMENT", default_layout: "FULL" });
-      expect(role("Founder at Neurodiversity Research Lab")).toMatchObject({ kind: "VENTURE", default_layout: "ONE_LINE" });
+      // Profile-level layouts are the defaults, labelled as coming from the profile.
+      expect(role("Founder at Neurodiversity Research Lab")).toMatchObject({ kind: "VENTURE", default_layout: "ONE_LINE", default_source: "PROFILE" });
+      expect(role("Founder and AI Architect at Venture AI")).toMatchObject({ default_layout: "FULL", default_source: "PROFILE" });
+      expect(role("Program Lead at Insurer Investment Management")?.default_source).toBe("AUTOMATIC");
       expect(role("Coordinator at Trading House")?.default_layout).toBe("SUMMARISED");
       expect(plan.some((item) => item.label.includes("Certification Sprint"))).toBe(false);
 
@@ -310,8 +315,27 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       expect(summary?.[1]).toBeTruthy();
       expect(cv).toMatch(/## Education\n- Master of Science in Finance(\n|$)/);
       expect(cv).not.toContain("Professional Cloud Architect");
+      // Pinned in the profile, so listed regardless of relevance to the job.
+      expect(cv).toMatch(/## Certifications\n(- .*\n)*- Passed Level I of the CFA Program/);
       // A course is never evidence that a job requirement is met.
       expect(cv).not.toContain("certification sprint");
+
+      // The test-database reset clears this draft's stored documents, so the same approval generates anew.
+      const runIds = async () => (await pool!.query<{ id: string }>(
+        "SELECT id FROM manual_application_document_runs WHERE approval_id = $1 ORDER BY id", [approved.approval_id])).rows.map((row) => row.id);
+      const before = await runIds();
+      const resetClient = await pool!.connect();
+      try {
+        expect(await resetManualDocuments(resetClient, context!, { draftId: compared.draft_id })).toMatchObject({ runs: 2, artifacts: 4 });
+      } finally {
+        resetClient.release();
+      }
+      expect(await runIds()).toEqual([]);
+      const regenerated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+      expect(regenerated.artifacts).toHaveLength(4);
+      const after = await runIds();
+      expect(after).toHaveLength(2);
+      expect(after.some((id) => before.includes(id))).toBe(false);
     } finally {
       for (const key of MODEL_KEY_ENV) {
         if (savedEnv[key] === undefined) delete process.env[key];

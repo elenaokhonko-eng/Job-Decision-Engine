@@ -61,6 +61,10 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
     )
     # Role choices are offered before generating; only changes from the default are sent.
     assert app.selectbox(key=f"manual_role_{fingerprint}_eng-major").value == "FULL"
+    # A default from the profile is labelled as such.
+    assert app.selectbox(key=f"manual_role_{fingerprint}_eng-lab").label.endswith(
+        "your profile default"
+    )
     app.selectbox(key=f"manual_role_{fingerprint}_eng-lab").set_value("HIDDEN").run(
         timeout=10
     )

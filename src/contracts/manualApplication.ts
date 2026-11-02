@@ -95,6 +95,9 @@ export const ManualEvidenceSchema = z.object({
   experience_class: z.string().min(1).optional(),
   start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  // Candidate preferences from the profile: a role's default CV layout, and a credential pinned to every document.
+  document_layout: z.enum(["FULL", "ONE_LINE", "HIDDEN"]).optional(),
+  always_include: z.boolean().optional(),
 }).strict();
 
 export const ManualComparisonRowSchema = z.object({
@@ -146,7 +149,8 @@ export const ManualRolePlanSchema = z.object({
   period: z.string().min(1).nullable(),
   kind: z.enum(["EMPLOYMENT", "VENTURE"]),
   // SUMMARISED: older than 20 years, folded into one shared earlier-career line.
-  default_layout: z.enum(["FULL", "ONE_LINE", "SUMMARISED"]),
+  default_layout: z.enum(["FULL", "ONE_LINE", "SUMMARISED", "HIDDEN"]),
+  default_source: z.enum(["PROFILE", "AUTOMATIC"]),
 }).strict();
 
 export const ManualCompareResponseSchema = z.object({

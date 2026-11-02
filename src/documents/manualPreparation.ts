@@ -23,6 +23,10 @@ export interface ManualEvidence {
   experience_class?: string;
   start_date?: string;
   end_date?: string;
+  /** The candidate's profile-level layout for this role; replaces the automatic choice. */
+  document_layout?: "FULL" | "ONE_LINE" | "HIDDEN";
+  /** The candidate pinned this credential to appear in every document. */
+  always_include?: boolean;
 }
 
 export interface ManualComparisonInput {
@@ -309,12 +313,15 @@ export interface RolePlan {
   period: string | null;
   kind: "EMPLOYMENT" | "VENTURE";
   default_layout: RoleLayout | "SUMMARISED";
+  /** PROFILE when the layout comes from the candidate's profile setting, AUTOMATIC otherwise. */
+  default_source: "PROFILE" | "AUTOMATIC";
 }
 
 /**
- * Default role layout, newest first: employment from the last 10 years gets a full entry; ventures
- * only when relevant to this job (at most two); older employment becomes one line, and anything
- * over 20 years old is summarised in one shared line. Courses are left out.
+ * Default role layout, newest first. A layout set on the role in the profile wins. Otherwise
+ * employment from the last 10 years gets a full entry; ventures only when relevant to this job (at
+ * most two); older employment becomes one line, and anything over 20 years old is summarised in
+ * one shared line. Courses are left out.
  */
 export function planRoles(comparison: Record<string, any>, options: Pick<ControlledDocumentOptions, "asOf"> = {}): RolePlan[] {
   const asOf = options.asOf ?? new Date();
@@ -328,7 +335,7 @@ export function planRoles(comparison: Record<string, any>, options: Pick<Control
   const fullEntryCutoff = yearsBefore(asOf, FULL_ENTRY_YEARS);
   const oneLineCutoff = yearsBefore(asOf, ONE_LINE_YEARS);
   const relevantVentures = new Set(engagements
-    .filter((item) => engagementKind(item) === "VENTURE" && roleScore(item) > 0)
+    .filter((item) => engagementKind(item) === "VENTURE" && !item.document_layout && roleScore(item) > 0)
     .sort((left, right) => roleScore(right) - roleScore(left))
     .slice(0, MAX_FULL_VENTURES)
     .map((item) => item.id));
@@ -338,10 +345,14 @@ export function planRoles(comparison: Record<string, any>, options: Pick<Control
     .map((engagement) => {
       const kind = engagementKind(engagement) as "EMPLOYMENT" | "VENTURE";
       const { start, end } = engagementDates(engagement);
-      const defaultLayout: RolePlan["default_layout"] = kind === "VENTURE"
+      const automatic: RolePlan["default_layout"] = kind === "VENTURE"
         ? (relevantVentures.has(engagement.id) ? "FULL" : "ONE_LINE")
         : !end || end >= fullEntryCutoff ? "FULL" : start && start >= oneLineCutoff ? "ONE_LINE" : "SUMMARISED";
-      return { engagement_id: engagement.id, label: engagement.label, period: engagementPeriod(engagement.statement), kind, default_layout: defaultLayout };
+      return {
+        engagement_id: engagement.id, label: engagement.label, period: engagementPeriod(engagement.statement), kind,
+        default_layout: engagement.document_layout ?? automatic,
+        default_source: engagement.document_layout ? "PROFILE" : "AUTOMATIC",
+      };
     });
 }
 
@@ -477,10 +488,18 @@ export function buildControlledDocuments(
     .sort((left, right) => credentialRelevance(right.item) - credentialRelevance(left.item)
       || (CERTIFICATION_ORDER[credentialType(left.item)] ?? 3) - (CERTIFICATION_ORDER[credentialType(right.item)] ?? 3)
       || left.order - right.order);
-  // Relevant ones only; when fewer than MIN_CERTIFICATIONS relate to the job, the next by type fill in.
-  const relevantCount = rankedCertifications.filter(({ item }) => credentialRelevance(item) > 0).length;
+  // Pinned credentials always appear and count toward the cap. The rest: relevant ones only, and when
+  // fewer than MIN_CERTIFICATIONS relate to the job, the next by type fill in. Output keeps rank order.
+  const pinned = rankedCertifications.filter(({ item }) => item.always_include);
+  const relevantCount = rankedCertifications.filter(({ item }) => credentialRelevance(item) > 0 || item.always_include).length;
+  const certificationLimit = Math.max(pinned.length, Math.min(MAX_CERTIFICATIONS, Math.max(relevantCount, MIN_CERTIFICATIONS)));
+  const chosenCertifications = new Set(pinned.map(({ item }) => item.id));
+  for (const { item } of rankedCertifications) {
+    if (chosenCertifications.size >= certificationLimit) break;
+    chosenCertifications.add(item.id);
+  }
   const certificationLines = rankedCertifications
-    .slice(0, Math.min(MAX_CERTIFICATIONS, Math.max(relevantCount, MIN_CERTIFICATIONS)))
+    .filter(({ item }) => chosenCertifications.has(item.id))
     .map(({ item }) => `- ${claim("Certifications", item.label, [item.id])}`);
 
   const header = documentHeader(contact);

@@ -7,7 +7,7 @@ import {
   postingRequirementLines,
   type StoredRequirementRow,
 } from "../../documents/manualDocumentPolicy.js";
-import { buildControlledDocuments, buildManualComparison, type ManualEvidence } from "../../documents/manualPreparation.js";
+import { buildControlledDocuments, buildManualComparison, planRoles, type ManualEvidence } from "../../documents/manualPreparation.js";
 import { SYSTEMATIC_TRADING_PRODUCT_LEAD_DESCRIPTION as JOB_DESCRIPTION } from "../fixtures/systematicTradingProductLead.js";
 
 // The deterministic extractor's rows when AI extraction fails: fixed labels, not the employer's words.
@@ -204,6 +204,32 @@ describe("manual document quality (baseline regression)", () => {
     expect(chosen.cv).not.toContain("Neurodiversity Research Lab");
     expect(chosen.cv).not.toContain("City University");
     expect(chosen.cv).toContain("- Regional CRM Architect at Consumer Goods Company (Feb 2012 – Sep 2017)");
+  });
+
+  it("uses the profile's role layouts and pinned credentials as defaults, which the picker can still override", () => {
+    const withPreferences = evidence.map((item): ManualEvidence => {
+      if (item.id === "eng-lab") return { ...item, document_layout: "FULL" };
+      if (item.id === "eng-venture") return { ...item, document_layout: "HIDDEN" };
+      if (item.id === "c-health") return { ...item, always_include: true };
+      return item;
+    });
+    const comparison = comparisonFor(requirements, withPreferences);
+    const plan = new Map(planRoles(comparison, { asOf: AS_OF }).map((role) => [role.engagement_id, role]));
+    expect(plan.get("eng-lab")).toMatchObject({ default_layout: "FULL", default_source: "PROFILE" });
+    expect(plan.get("eng-venture")).toMatchObject({ default_layout: "HIDDEN", default_source: "PROFILE" });
+    expect(plan.get("eng-aim")).toMatchObject({ default_layout: "FULL", default_source: "AUTOMATIC" });
+
+    const preferred = buildControlledDocuments(comparison, CONTACT, { asOf: AS_OF });
+    expect(preferred.cv).toContain("### Founder at Neurodiversity Research Lab | May 2026 – Present");
+    expect(preferred.cv).not.toContain("Venture AI");
+    // Pinned even though it is irrelevant to this job, and still within the six-item cap.
+    const certifications = section(preferred.cv, "Certifications").split("\n");
+    expect(certifications).toContain("- Health Insurance Certification");
+    expect(certifications.length).toBeLessThanOrEqual(6);
+
+    const overridden = buildControlledDocuments(comparison, CONTACT, { asOf: AS_OF, roleLayout: { "eng-lab": "ONE_LINE", "eng-venture": "FULL" } });
+    expect(overridden.cv).not.toContain("### Founder at Neurodiversity Research Lab");
+    expect(overridden.cv).toContain("### Founder and AI Architect at Venture AI");
   });
 
   it("reads requirement and responsibility lines from inline headings too", () => {

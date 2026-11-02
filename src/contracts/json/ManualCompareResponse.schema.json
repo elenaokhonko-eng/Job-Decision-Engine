@@ -370,6 +370,17 @@
                   "end_date": {
                     "type": "string",
                     "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                  },
+                  "document_layout": {
+                    "type": "string",
+                    "enum": [
+                      "FULL",
+                      "ONE_LINE",
+                      "HIDDEN"
+                    ]
+                  },
+                  "always_include": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -553,7 +564,15 @@
                 "enum": [
                   "FULL",
                   "ONE_LINE",
-                  "SUMMARISED"
+                  "SUMMARISED",
+                  "HIDDEN"
+                ]
+              },
+              "default_source": {
+                "type": "string",
+                "enum": [
+                  "PROFILE",
+                  "AUTOMATIC"
                 ]
               }
             },
@@ -562,7 +581,8 @@
               "label",
               "period",
               "kind",
-              "default_layout"
+              "default_layout",
+              "default_source"
             ],
             "additionalProperties": false
           }

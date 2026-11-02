@@ -354,17 +354,21 @@ export async function loadManualProfileEvidence(
        AND verification_status IN ('VERIFIED','SELF_ATTESTED')
        AND confidentiality IN ('PUBLIC','PRIVATE_REUSABLE') ORDER BY fact_key, id`,
     [workspaceId, profileVersionId]);
-  const credentialResult = await client.query<{ id: string; credential_name: string; issuer: string; credential_type: ManualEvidence["credential_type"] & string; level: string | null; status: string }>(
-    `SELECT id::text, credential_name, issuer, credential_type, level, status
+  const credentialResult = await client.query<{
+    id: string; credential_name: string; issuer: string; credential_type: ManualEvidence["credential_type"] & string; level: string | null; status: string;
+    always_include_in_documents: boolean;
+  }>(
+    `SELECT id::text, credential_name, issuer, credential_type, level, status, always_include_in_documents
      FROM profile_credentials WHERE workspace_id = $1 AND profile_version_id = $2
        AND status = 'ACTIVE' AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY credential_key, id`,
     [workspaceId, profileVersionId]);
   const engagementResult = await client.query<{
     id: string; organization_legal_name: string; role_title: string; start_date: string; end_date: string | null; is_current: boolean;
     summary: string; engagement_type: ManualEvidence["engagement_type"] & string; experience_class: string;
+    document_layout: ManualEvidence["document_layout"] | null;
   }>(
     `SELECT id::text, organization_legal_name, role_title, start_date::text AS start_date, end_date::text AS end_date, is_current, summary,
-            engagement_type, experience_class
+            engagement_type, experience_class, document_layout
      FROM profile_engagements WHERE workspace_id = $1 AND profile_version_id = $2
        AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY start_date DESC, engagement_key, id`,
     [workspaceId, profileVersionId]);
@@ -376,6 +380,7 @@ export async function loadManualProfileEvidence(
     })),
     ...credentialResult.rows.map((row) => ({
       id: row.id, evidence_type: "CREDENTIAL" as const, label: row.credential_name, credential_type: row.credential_type,
+      ...(row.always_include_in_documents ? { always_include: true } : {}),
       statement: `${row.credential_name}${row.level ? ` (${row.level})` : ""}, ${row.credential_type.toLowerCase()} issued by ${row.issuer}; status ${row.status}.`,
     })),
     ...engagementResult.rows.map((row) => ({
@@ -383,6 +388,7 @@ export async function loadManualProfileEvidence(
       statement: `${row.role_title} at ${row.organization_legal_name} (${row.start_date}${row.is_current ? "–present" : row.end_date ? `–${row.end_date}` : ""}). ${row.summary}`,
       engagement_id: row.id, engagement_type: row.engagement_type, experience_class: row.experience_class, start_date: row.start_date,
       ...(row.end_date && !row.is_current ? { end_date: row.end_date } : {}),
+      ...(row.document_layout ? { document_layout: row.document_layout } : {}),
     })),
   ];
 }

@@ -162,8 +162,13 @@ def _render_role_choices(role_plan, fingerprint, locked=False):
             if default == "SUMMARISED":
                 options = ["SUMMARISED", *options]
             period = f" ({role['period']})" if role.get("period") else ""
+            source = (
+                " · your profile default"
+                if role.get("default_source") == "PROFILE"
+                else ""
+            )
             chosen = st.selectbox(
-                f"{role.get('label', '')}{period}",
+                f"{role.get('label', '')}{period}{source}",
                 options,
                 index=options.index(default),
                 format_func=ROLE_LAYOUT_LABELS.get,
