@@ -5,6 +5,7 @@ import { z, ZodError } from "zod";
 import type { WorkspaceContext } from "../../workspace/context.js";
 import { runNormalization } from "../../pipeline/normalize.js";
 import { runRequirementsExtraction } from "../../pipeline/requirementsExtractor.js";
+import { checkModelRegistryPreflight } from "../../services/agent.js";
 import { loadProfileContactSnapshot, type DocumentContactInfo } from "../../documents/contactInfo.js";
 import {
   buildControlledDocuments,
@@ -304,6 +305,39 @@ interface ProfileRow {
   candidate_name: string;
 }
 
+/**
+ * AI-quoted requirement extraction (verbatim, validated quotes from the job text) runs when a model
+ * provider key is configured, unless REQUIREMENTS_ENABLE_QUOTED=false. Without it, requirements come
+ * only from deterministic rules and are often generic.
+ */
+export function manualQuotedRequirementMode(): "with_quoted" | "deterministic_only" {
+  if (process.env.REQUIREMENTS_ENABLE_QUOTED === "false") return "deterministic_only";
+  const preflight = checkModelRegistryPreflight();
+  return preflight.primaryAvailable || preflight.fallbackAvailable ? "with_quoted" : "deterministic_only";
+}
+
+/** Derived from the durable extraction audit so compare, approve and generate all see the same warning. */
+export async function quotedRequirementExtractionWarning(
+  client: pg.Pool | pg.PoolClient,
+  workspaceId: string,
+  jobVersionId: string,
+  requirementSetId: string,
+): Promise<string | null> {
+  const { rows } = await client.query<{ status: string; error_message: string | null }>(
+    `SELECT status, error_message FROM requirement_extraction_runs
+     WHERE workspace_id = $1 AND job_version_id = $2 AND requirement_set_id = $3 AND run_type = 'LLM_QUOTED'
+     ORDER BY started_at DESC, id DESC LIMIT 1`,
+    [workspaceId, jobVersionId, requirementSetId],
+  );
+  const run = rows[0];
+  if (run?.status === "COMPLETED") return null;
+  if (run?.status === "FAILED") {
+    return `AI requirement extraction failed (${(run.error_message ?? "no detail").slice(0, 200)}); requirements below come from deterministic rules only and may be generic.`;
+  }
+  if (run?.status === "STARTED") return "AI requirement extraction has not finished; requirements below come from deterministic rules only and may be generic.";
+  return "AI requirement extraction did not run (no model API key configured, or REQUIREMENTS_ENABLE_QUOTED=false); requirements below come from deterministic rules only and may be generic.";
+}
+
 /** Profile evidence a manual comparison may cite: facts, active credentials and engagements. */
 export async function loadManualProfileEvidence(
   client: pg.Pool | pg.PoolClient,
@@ -420,6 +454,8 @@ async function loadCurrentInputs(
     loadProfileContactSnapshot(client, ctx.workspaceId, profile.profile_version_id, profile.candidate_name),
   ]);
   const warnings: string[] = [];
+  const quotedWarning = await quotedRequirementExtractionWarning(client, ctx.workspaceId, job.job_version_id, job.active_requirement_set_id);
+  if (quotedWarning) warnings.push(quotedWarning);
   if (job.gate_status) warnings.push(`Automatic suitability gate: ${job.gate_status}${job.rejection_codes?.length ? ` (${job.rejection_codes.join(", ")})` : ""}.`);
   if (job.recommendation_outcome || job.recommendation_eligibility) {
     warnings.push(`Automatic recommendation remains ${job.recommendation_outcome ?? "unknown"} / ${job.recommendation_eligibility ?? "unknown"}. Manual preparation does not change it.`);
@@ -705,7 +741,23 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
       sourceObservationId: observation.id,
       contentHash: versionRow.content_hash,
     });
-    const requirementSummary = await runRequirementsExtraction(pool, { context: ctx, jobVersionIds: [jobVersionId], quotedMode: "deterministic_only" });
+    // Requirement extraction only runs on COMPLETE descriptions; say why instead of failing later
+    // with "no active requirement set".
+    const quality = await pool.query<{ description_quality_status: string | null; description_quality_reason: string | null }>(
+      `SELECT description_quality_status, description_quality_reason FROM canonical_jobs WHERE workspace_id = $1 AND id = $2`,
+      [ctx.workspaceId, canonicalJobId]);
+    if (quality.rows[0]?.description_quality_status !== "COMPLETE") {
+      sendApiError(res, 422, "DESCRIPTION_INSUFFICIENT",
+        `The job description looks incomplete (${quality.rows[0]?.description_quality_reason ?? "quality not assessed"}). ` +
+        "Paste the full posting, including the responsibilities and the requirements or qualifications sections. " +
+        "The posting you entered is kept on record.");
+      return;
+    }
+    // Quoted-extraction failures are non-blocking: deterministic requirements still complete the stage,
+    // and the failure surfaces as a comparison warning via quotedRequirementExtractionWarning.
+    const requirementSummary = await runRequirementsExtraction(pool, {
+      context: ctx, jobVersionIds: [jobVersionId], quotedMode: manualQuotedRequirementMode(), failFastOnQuotedProviderFailure: false,
+    });
     const reqDetail = requirementSummary.details.find((item) => item.jobVersionId === jobVersionId);
     if (reqDetail?.error) { sendApiError(res, 503, "DEPENDENCY_UNAVAILABLE", `Deterministic requirement extraction failed; the source observation remains durably staged. ${reqDetail.error}`); return; }
 
