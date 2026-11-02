@@ -642,6 +642,17 @@ export async function seedRecoverablePipelineTasks(
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
              AND ps.stage_status = 'COMPLETED'
          )
+         -- A version blocked on missing posting content is resumed when that content is
+         -- normalized; re-seeding it would only re-block it and repeat its error history.
+         AND NOT EXISTS (
+           SELECT 1
+           FROM pipeline_tasks blocked
+           WHERE blocked.workspace_id = c.workspace_id
+             AND blocked.task_type = 'EXTRACT_DETERMINISTIC_REQUIREMENTS'
+             AND blocked.status = 'BLOCKED_DEPENDENCY'
+             AND blocked.blocked_on = 'JOB_CONTENT'
+             AND blocked.payload->>'job_version_id' = jv.id::text
+         )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],

@@ -278,6 +278,15 @@ describe.skipIf(skipReal)('Requirements extraction integration (temporary schema
         maxSeedPerType: 10,
       });
       expect(seededRepair.byType.EXTRACT_DETERMINISTIC_REQUIREMENTS?.inserted).toBe(1);
+      // The sparse version stays blocked on its posting content instead of being re-seeded.
+      const sparseExtractionTasks = await client.query(
+        `SELECT status, blocked_on
+         FROM pipeline_tasks
+         WHERE task_type = 'EXTRACT_DETERMINISTIC_REQUIREMENTS'
+           AND payload->>'job_version_id' = $1`,
+        [sparseJobVersionId]
+      );
+      expect(sparseExtractionTasks.rows).toEqual([{ status: 'BLOCKED_DEPENDENCY', blocked_on: 'JOB_CONTENT' }]);
 
       const repairTask = await client.query(
         `SELECT payload
