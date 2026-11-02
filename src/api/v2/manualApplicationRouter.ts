@@ -1148,9 +1148,14 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
       // Not READ ONLY: hasWritableMembership locks the membership row FOR SHARE.
       await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
       if (!(await hasWritableMembership(client, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to download private documents.");
+      // The draft's most recent approval that produced documents.
       const approvalResult = await client.query<{ id: string }>(
-        `SELECT id FROM manual_application_preparation_approvals
-         WHERE workspace_id=$1 AND user_id=$2 AND draft_id=$3 AND approved IS TRUE LIMIT 1`,
+        `SELECT approval.id FROM manual_application_preparation_approvals approval
+         WHERE approval.workspace_id=$1 AND approval.user_id=$2 AND approval.draft_id=$3 AND approval.approved IS TRUE
+           AND EXISTS (SELECT 1 FROM manual_application_document_artifacts artifact
+                       WHERE artifact.workspace_id=approval.workspace_id AND artifact.user_id=approval.user_id
+                         AND artifact.approval_id=approval.id)
+         ORDER BY approval.approved_at DESC, approval.id DESC LIMIT 1`,
         [ctx.workspaceId, ctx.userId, draftId],
       );
       const approvalId = approvalResult.rows[0]?.id;
@@ -1177,9 +1182,8 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
       if (row.document_type !== type || row.format !== format || row.status !== "COMPLETED") {
         throw new ManualFlowError(500, "INTERNAL_ERROR", "Document artifact metadata does not match its validated pair.");
       }
-      const current = await loadCurrentInputs(client, ctx, selectedPostingFromApproval(selected.approval));
-      if (!current) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "The exact approved job version is no longer current.");
-      assertCurrentApproval(selected.approval, selected.comparison, current);
+      // Currentness guards compare, approve and generate. A stored artifact is the exact output of an
+      // approved version, so it stays downloadable after the posting, profile or requirements change.
       const content = Buffer.from(row.content);
       if (sha256Buffer(content) !== row.sha256) throw new ManualFlowError(500, "INTERNAL_ERROR", "Stored private artifact failed its SHA-256 integrity check.");
       const result = ManualDownloadResponseSchema.parse({
