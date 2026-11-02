@@ -33,7 +33,7 @@ from streamlit_workspace_contracts import (
     validate_track_row,
 )
 from streamlit_manual_application import render_manual_application_flow
-from streamlit_runtime import ensure_hosted_api_ready, open_api_json
+from streamlit_runtime import code_version, ensure_hosted_api_ready, open_api_json
 
 
 # Load environment variables from Streamlit secrets, .env, and .env.local
@@ -1692,6 +1692,7 @@ if api_base_url:
     st.sidebar.caption(f"🔌 Connected to Managed API (`{api_base_url}`)")
 else:
     st.sidebar.caption("📦 PostgreSQL Direct Read Model (Live)")
+st.sidebar.caption(f"Code version: `{code_version()}`")
 
 # Unpaginated counts come only from the authoritative V5 workspace read model.
 application_workspace_summary = {}
