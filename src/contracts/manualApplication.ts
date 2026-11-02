@@ -88,6 +88,13 @@ export const ManualEvidenceSchema = z.object({
   statement: z.string().min(1),
   // The profile engagement a fact belongs to (an ENGAGEMENT row carries its own id), for grouping CV experience.
   engagement_id: z.string().min(1).optional(),
+  // Profile attributes that decide where an item appears in a document; absent on older comparisons.
+  fact_type: z.string().min(1).optional(),
+  credential_type: z.enum(["CERTIFICATION", "DEGREE", "COURSE", "LICENSE"]).optional(),
+  engagement_type: z.enum(["EMPLOYEE", "FOUNDER_OPERATOR", "CONTRACTOR", "RESEARCHER"]).optional(),
+  experience_class: z.string().min(1).optional(),
+  start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 }).strict();
 
 export const ManualComparisonRowSchema = z.object({

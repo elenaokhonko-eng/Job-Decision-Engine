@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import { Document, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
+import { assertNoInternalAssessmentText, isInternalAssessmentStatement } from "./manualDocumentPolicy.js";
 
-export const MANUAL_COMPARATOR_VERSION = "literal-overlap-v1";
+export const MANUAL_COMPARATOR_VERSION = "literal-overlap-v2";
 
 export interface ManualRequirement {
   requirement_key: string;
@@ -16,6 +17,12 @@ export interface ManualEvidence {
   label: string;
   statement: string;
   engagement_id?: string;
+  fact_type?: string;
+  credential_type?: "CERTIFICATION" | "DEGREE" | "COURSE" | "LICENSE";
+  engagement_type?: "EMPLOYEE" | "FOUNDER_OPERATOR" | "CONTRACTOR" | "RESEARCHER";
+  experience_class?: string;
+  start_date?: string;
+  end_date?: string;
 }
 
 export interface ManualComparisonInput {
@@ -72,21 +79,63 @@ export function validateManualApprovalCurrentness(
   return { ok: true };
 }
 
-const TOKEN = /[a-z0-9+#.]{2,}/gi;
-const GENERIC = new Set(["with", "from", "that", "this", "will", "have", "your", "role", "work", "team", "years", "strong", "ability", "experience", "skills", "knowledge", "required", "preferred", "including"]);
+const TOKEN = /[a-z0-9+#]+/gi;
+// Words that carry no evidence on their own: function words, posting boilerplate and generic CV vocabulary.
+const GENERIC = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "for", "from", "has", "have", "in", "into", "is", "it",
+  "its", "of", "on", "or", "our", "such", "that", "the", "their", "this", "to", "up", "we", "who", "will", "with", "within", "you",
+  "your", "across", "all", "also", "any", "both", "other", "over", "per", "more", "most", "new", "well", "using", "use", "via",
+  "role", "roles", "type", "types", "domain", "domains", "target", "specific", "specifies", "specify", "include", "includes",
+  "including", "require", "requires", "required", "requirement", "requirements", "preferred", "plus", "ideally", "must", "should",
+  "work", "working", "team", "teams", "year", "years", "strong", "ability", "able", "experience", "experienced", "skill", "skills",
+  "knowledge", "understanding", "good", "excellent", "proven", "track", "record", "level", "minimum", "least", "relevant", "related",
+  "candidate", "position", "job", "company", "business", "help", "make", "ensure", "support", "deliver", "key", "high",
+  "management", "manage", "manag", "lead", "led",
+]);
+const MIN_MATCHING_TERMS = 2;
+// At equal overlap a specific fact is better evidence than a whole role summary.
+const EVIDENCE_TYPE_RANK: Record<ManualEvidence["evidence_type"], number> = { FACT: 0, CREDENTIAL: 1, ENGAGEMENT: 2 };
+// Facts that record work done; skill, domain and education statements describe the person instead.
+const EXPERIENCE_FACT_TYPES = new Set(["ACHIEVEMENT", "RESPONSIBILITY", "PROJECT", "PUBLICATION"]);
 
-function terms(value: string): Set<string> {
-  return new Set((value.match(TOKEN) ?? []).map((part) => part.toLowerCase()).filter((part) => !GENERIC.has(part)));
+/** Work done counts as one extra shared word when ranking evidence, so it outranks skill and study statements. */
+function isExperienceFact(evidence: ManualEvidence): boolean {
+  return evidence.evidence_type === "FACT" && (evidence.fact_type === undefined || EXPERIENCE_FACT_TYPES.has(evidence.fact_type));
 }
 
+function stem(word: string): string {
+  if (word.length > 5 && word.endsWith("ies")) return `${word.slice(0, -3)}y`;
+  if (word.length > 5 && word.endsWith("ing")) return word.slice(0, -3);
+  if (word.length > 4 && word.endsWith("ed")) return word.slice(0, -2);
+  if (word.length > 4 && word.endsWith("es") && !word.endsWith("ses")) return word.slice(0, -2);
+  if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+  return word;
+}
+
+function terms(value: string): Set<string> {
+  return new Set((value.match(TOKEN) ?? [])
+    .map((part) => part.toLowerCase())
+    .filter((part) => part.length >= 2 && !GENERIC.has(part) && !/^\d+$/.test(part))
+    .map(stem)
+    .filter((part) => !GENERIC.has(part)));
+}
+
+/**
+ * Pairs each requirement with up to three evidence items sharing at least two meaningful words with
+ * it. One shared word such as "employment" or "technical" is not a match, so a requirement with
+ * fewer than two meaningful words is left as a gap for the candidate to review.
+ */
 export function buildManualComparison(input: ManualComparisonInput): Record<string, unknown> {
+  const evidenceTerms = new Map(input.evidence.map((evidence) => [evidence.id, terms(evidence.statement)]));
   const rows = input.requirements.map((requirement) => {
-    const requirementTerms = terms(`${requirement.requirement_text} ${requirement.requirement_type}`);
+    const requirementTerms = terms(requirement.requirement_text);
     const matched = input.evidence.map((evidence) => {
-      const overlap = [...requirementTerms].filter((term) => terms(`${evidence.label} ${evidence.statement}`).has(term));
-      return { evidence, overlap };
-    }).filter((entry) => entry.overlap.length > 0)
-      .sort((left, right) => right.overlap.length - left.overlap.length || left.evidence.id.localeCompare(right.evidence.id))
+      const overlap = [...requirementTerms].filter((term) => evidenceTerms.get(evidence.id)?.has(term));
+      return { evidence, overlap, rank: overlap.length + (isExperienceFact(evidence) ? 1 : 0) };
+    }).filter((entry) => entry.overlap.length >= MIN_MATCHING_TERMS)
+      .sort((left, right) => right.rank - left.rank
+        || EVIDENCE_TYPE_RANK[left.evidence.evidence_type] - EVIDENCE_TYPE_RANK[right.evidence.evidence_type]
+        || left.evidence.id.localeCompare(right.evidence.id))
       .slice(0, 3);
     return {
       requirement_key: requirement.requirement_key,
@@ -164,13 +213,29 @@ export interface ControlledDocuments {
 const IMPORTANCE_WEIGHT: Record<string, number> = { MUST: 3, PREFERRED: 2, NICE_TO_HAVE: 1 };
 const MAX_REQUIREMENT_LINES = 8;
 const MAX_COVER_LETTER_POINTS = 3;
-const RECENT_ENGAGEMENTS = 4;
 const MAX_FACTS_PER_ENGAGEMENT = 5;
-const UNLINKED_FACTS_PER_RECENT_ENGAGEMENT = 2;
+const UNLINKED_FACTS_PER_FULL_ENGAGEMENT = 2;
+const MAX_SUMMARY_STATEMENTS = 3;
+const MAX_FULL_VENTURES = 2;
+const MAX_CERTIFICATIONS = 6;
+const MIN_CERTIFICATIONS = 3;
+const FULL_ENTRY_YEARS = 10;
+const ONE_LINE_YEARS = 20;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const CERTIFICATION_ORDER: Record<string, number> = { CERTIFICATION: 0, LICENSE: 1, COURSE: 2 };
 
 type ComparisonRow = { requirement_key: string; importance: string; requirement: string; evidence?: Array<{ id: string }> };
 type Claim = ControlledDocuments["claims"][number];
+
+/** How a role appears on the CV: a full entry with bullets, a single line, or not at all. */
+export type RoleLayout = "FULL" | "ONE_LINE" | "HIDDEN";
+
+export interface ControlledDocumentOptions {
+  /** The date the 10- and 20-year windows are measured from; defaults to today. */
+  asOf?: Date;
+  /** The candidate's per-role choice, keyed by engagement evidence id; overrides the default layout. */
+  roleLayout?: Record<string, RoleLayout>;
+}
 
 function formatMonth(isoDate: string): string {
   const [year, month] = isoDate.split("-");
@@ -185,8 +250,38 @@ export function engagementPeriod(statement: string): string | null {
   return end ? `${formatMonth(match[1])} – ${end}` : formatMonth(match[1]);
 }
 
+function engagementDates(engagement: ManualEvidence): { start: string | null; end: string | null } {
+  if (engagement.start_date) return { start: engagement.start_date, end: engagement.end_date ?? null };
+  const match = /\((\d{4}-\d{2}-\d{2})(?:–(present|\d{4}-\d{2}-\d{2}))?\)/.exec(engagement.statement);
+  return { start: match?.[1] ?? null, end: match?.[2] && match[2] !== "present" ? match[2] : null };
+}
+
 function withoutTrailingPeriod(text: string): string {
   return text.trim().replace(/[.;:]+$/, "");
+}
+
+function yearsBefore(asOf: Date, years: number): string {
+  const date = new Date(asOf);
+  date.setUTCFullYear(date.getUTCFullYear() - years);
+  return date.toISOString().slice(0, 10);
+}
+
+/** Courses and certification sprints are never jobs; founder, venture and current research work is listed apart from employment. */
+function engagementKind(engagement: ManualEvidence): "EMPLOYMENT" | "VENTURE" | "COURSE" {
+  if (engagement.experience_class === "COURSE_PROJECT") return "COURSE";
+  const current = !engagementDates(engagement).end;
+  if (engagement.engagement_type === "FOUNDER_OPERATOR" || engagement.experience_class === "APPLIED_PROJECT") return "VENTURE";
+  if (engagement.engagement_type === "RESEARCHER" && current) return "VENTURE";
+  return "EMPLOYMENT";
+}
+
+function organisationOf(engagement: ManualEvidence): string {
+  const index = engagement.label.lastIndexOf(" at ");
+  return index >= 0 ? engagement.label.slice(index + 4) : engagement.label;
+}
+
+function credentialType(item: ManualEvidence): string {
+  return item.credential_type ?? /, (certification|degree|course|license) issued by/i.exec(item.statement)?.[1].toUpperCase() ?? "CERTIFICATION";
 }
 
 /**
@@ -196,9 +291,15 @@ function withoutTrailingPeriod(text: string): string {
 export function buildControlledDocuments(
   comparison: Record<string, any>,
   contact: { full_name: string; location?: string; email?: string; phone?: string; linkedin?: string },
+  options: ControlledDocumentOptions = {},
 ): ControlledDocuments {
   if (!contact.phone?.trim()) throw new Error("The active private contact graph has no current phone fact; document preparation is blocked.");
-  const evidence = Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [];
+  const asOf = options.asOf ?? new Date();
+  const approvedEvidence = (Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [])
+    .filter((item) => !isInternalAssessmentStatement(item.statement));
+  // Courses are not jobs: neither they nor their facts are offered as evidence of meeting a job requirement.
+  const courseIds = new Set(approvedEvidence.filter((item) => item.evidence_type === "ENGAGEMENT" && engagementKind(item) === "COURSE").map((item) => item.id));
+  const evidence = approvedEvidence.filter((item) => !courseIds.has(item.id) && !(item.engagement_id && courseIds.has(item.engagement_id)));
   const rows = Array.isArray(comparison.rows) ? comparison.rows as ComparisonRow[] : [];
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
   const weight = (row: ComparisonRow) => IMPORTANCE_WEIGHT[row.importance] ?? 1;
@@ -212,6 +313,7 @@ export function buildControlledDocuments(
       requirementKeysById.set(id, [...(requirementKeysById.get(id) ?? []), row.requirement_key]);
     }
   }
+  const score = (id: string) => relevance.get(id) ?? 0;
   const claims: Claim[] = [];
   const claim = (section: string, text: string, evidenceIds: string[], requirementKeys?: string[]) => {
     claims.push({
@@ -221,58 +323,140 @@ export function buildControlledDocuments(
     return text;
   };
 
-  // Requirements the profile can evidence, most important first; each paired with its strongest fact.
+  // Requirements the profile can evidence, most important first; each paired with its strongest fact
+  // not already used for a more important requirement, so no statement is repeated.
+  const usedForRequirement = new Set<string>();
   const matchedRows = rows
-    .map((row, index) => {
-      const linked = (row.evidence ?? []).map(({ id }) => evidenceById.get(id)).filter((item): item is ManualEvidence => Boolean(item));
-      return { row, index, best: linked.find((item) => item.evidence_type === "FACT") ?? linked[0] };
+    .map((row, index) => ({
+      row, index,
+      linked: (row.evidence ?? []).map(({ id }) => evidenceById.get(id)).filter((item): item is ManualEvidence => Boolean(item))
+        .sort((left, right) => EVIDENCE_TYPE_RANK[left.evidence_type] - EVIDENCE_TYPE_RANK[right.evidence_type]),
+    }))
+    .sort((left, right) => weight(right.row) - weight(left.row) || left.index - right.index)
+    .map(({ row, index, linked }) => {
+      const best = linked.find((item) => !usedForRequirement.has(item.id));
+      if (best) usedForRequirement.add(best.id);
+      return { row, index, best };
     })
-    .filter((entry): entry is { row: ComparisonRow; index: number; best: ManualEvidence } => Boolean(entry.best))
-    .sort((left, right) => weight(right.row) - weight(left.row) || left.index - right.index);
+    .filter((entry): entry is { row: ComparisonRow; index: number; best: ManualEvidence } => Boolean(entry.best));
   const requirementLines = matchedRows.slice(0, MAX_REQUIREMENT_LINES).map(({ row, best }) =>
     `- ${claim("Role requirements", `${withoutTrailingPeriod(row.requirement)}: ${best.statement.trim()}`, [best.id], [row.requirement_key])}`);
 
-  // Tenure facts stay verbatim and separate; hands-on coding and architecture years are never combined.
+  // Summary: one paragraph of the most relevant profile-level statements, then tenure statements,
+  // each verbatim so hands-on coding and architecture years are never combined.
   const tenureFacts = evidence.filter((item) => item.evidence_type === "FACT" &&
     /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve)\s+years?\b/i.test(item.statement) &&
     /(coding|software development|hands-on|technical-functional|architecture)/i.test(item.statement));
   const tenureIds = new Set(tenureFacts.map((item) => item.id));
-  const summaryLines = tenureFacts.map((item) => `- ${claim("Summary", item.statement.trim(), [item.id])}`);
+  // Study and credential statements already appear under Education and Certifications, and
+  // "foundational knowledge" statements describe a learning level, not a strength to lead with.
+  const isStudyStatement = (item: ManualEvidence) => /^(completed|earned|passed|graduated|holds|foundational)\b/i.test(item.statement.trim());
+  const profileFacts = evidence.filter((item) => item.evidence_type === "FACT" && !item.engagement_id && !isStudyStatement(item));
+  const overviewFacts = profileFacts.filter((item) => !tenureIds.has(item.id) && /\b\d+\+?\s+years?\b/i.test(item.statement));
+  const relevantProfileFacts = profileFacts
+    .map((item, order) => ({ item, order }))
+    .filter(({ item }) => !tenureIds.has(item.id) && score(item.id) > 0)
+    .sort((left, right) => score(right.item.id) - score(left.item.id) || left.order - right.order)
+    .map(({ item }) => item);
+  const summaryStatements = [...new Set([...overviewFacts, ...relevantProfileFacts, ...tenureFacts])].slice(0, MAX_SUMMARY_STATEMENTS);
+  const summaryParagraph = summaryStatements.map((item) => claim("Summary", item.statement.trim(), [item.id])).join(" ");
 
-  // Experience: every engagement, newest first, with its facts ranked by relevance to this job.
-  const engagements = evidence.filter((item) => item.evidence_type === "ENGAGEMENT");
-  const experienceLines: string[] = [];
+  // Roles: employment from the last 10 years gets a full entry; ventures only when relevant to this
+  // job; older employment becomes one line, and anything over 20 years old is summarised in one line.
+  const engagements = evidence.filter((item) => item.evidence_type === "ENGAGEMENT" && engagementKind(item) !== "COURSE");
+  const factsFor = (engagement: ManualEvidence) => evidence
+    .map((item, order) => ({ item, order }))
+    .filter(({ item }) => item.evidence_type === "FACT" && item.engagement_id === engagement.id && !tenureIds.has(item.id));
+  const roleScore = (engagement: ManualEvidence) =>
+    score(engagement.id) + factsFor(engagement).reduce((total, { item }) => total + score(item.id), 0);
+  const fullEntryCutoff = yearsBefore(asOf, FULL_ENTRY_YEARS);
+  const oneLineCutoff = yearsBefore(asOf, ONE_LINE_YEARS);
+  const relevantVentures = new Set(engagements
+    .filter((item) => engagementKind(item) === "VENTURE" && roleScore(item) > 0)
+    .sort((left, right) => roleScore(right) - roleScore(left))
+    .slice(0, MAX_FULL_VENTURES)
+    .map((item) => item.id));
+  const defaultLayout = (engagement: ManualEvidence): RoleLayout | "SUMMARISED" => {
+    const { start, end } = engagementDates(engagement);
+    if (engagementKind(engagement) === "VENTURE") return relevantVentures.has(engagement.id) ? "FULL" : "ONE_LINE";
+    if (!end || end >= fullEntryCutoff) return "FULL";
+    return start && start >= oneLineCutoff ? "ONE_LINE" : "SUMMARISED";
+  };
+
+  const sections: Record<"EMPLOYMENT" | "VENTURE", string[]> = { EMPLOYMENT: [], VENTURE: [] };
+  const ventureOneLiners: ManualEvidence[] = [];
   const earlierLines: string[] = [];
-  engagements.forEach((engagement, index) => {
-    const facts = evidence
-      .map((item, order) => ({ item, order, score: relevance.get(item.id) ?? 0 }))
-      .filter(({ item }) => item.evidence_type === "FACT" && item.engagement_id === engagement.id && !tenureIds.has(item.id));
-    const linked = facts.filter((fact) => fact.score > 0).sort((left, right) => right.score - left.score || left.order - right.order);
-    const unlinked = index < RECENT_ENGAGEMENTS ? facts.filter((fact) => fact.score === 0).slice(0, UNLINKED_FACTS_PER_RECENT_ENGAGEMENT) : [];
-    const shown = [...linked, ...unlinked].slice(0, MAX_FACTS_PER_ENGAGEMENT);
+  const summarised: ManualEvidence[] = [];
+  const byNewest = [...engagements].sort((left, right) =>
+    (engagementDates(right).end ?? "9999").localeCompare(engagementDates(left).end ?? "9999")
+    || (engagementDates(right).start ?? "").localeCompare(engagementDates(left).start ?? ""));
+  for (const engagement of byNewest) {
+    const kind = engagementKind(engagement) as "EMPLOYMENT" | "VENTURE";
+    const layout = options.roleLayout?.[engagement.id] ?? defaultLayout(engagement);
+    if (layout === "HIDDEN") continue;
     const period = engagementPeriod(engagement.statement);
-    if (shown.length === 0) {
+    const facts = factsFor(engagement);
+    const linked = facts.filter(({ item }) => score(item.id) > 0)
+      .sort((left, right) => score(right.item.id) - score(left.item.id) || left.order - right.order);
+    // Unmatched bullets fill out a role only with work done, not skill or domain statements.
+    const unlinked = facts.filter(({ item }) => score(item.id) === 0 && isExperienceFact(item)).slice(0, UNLINKED_FACTS_PER_FULL_ENGAGEMENT);
+    const shown = [...linked, ...unlinked].slice(0, MAX_FACTS_PER_ENGAGEMENT);
+    if (layout === "FULL" && shown.length > 0) {
+      const section = kind === "VENTURE" ? "Ventures and research" : "Experience";
+      sections[kind].push(`### ${claim(section, `${engagement.label}${period ? ` | ${period}` : ""}`, [engagement.id])}`);
+      for (const { item } of shown) sections[kind].push(`- ${claim(section, item.statement.trim(), [item.id])}`);
+      sections[kind].push("");
+    } else if (layout === "SUMMARISED") {
+      summarised.push(engagement);
+    } else if (kind === "VENTURE") {
+      ventureOneLiners.push(engagement);
+    } else {
       earlierLines.push(`- ${claim("Earlier career", `${engagement.label}${period ? ` (${period})` : ""}`, [engagement.id])}`);
-      return;
     }
-    experienceLines.push(`### ${claim("Experience", `${engagement.label}${period ? ` | ${period}` : ""}`, [engagement.id])}`);
-    for (const { item } of shown) experienceLines.push(`- ${claim("Experience", item.statement.trim(), [item.id])}`);
-    experienceLines.push("");
-  });
+  }
+  if (ventureOneLiners.length > 0) {
+    sections.VENTURE.push(`- ${claim("Ventures and research", `Also: ${ventureOneLiners.map((item) => {
+      const period = engagementPeriod(item.statement);
+      return `${item.label}${period ? ` (${period})` : ""}`;
+    }).join("; ")}`, ventureOneLiners.map((item) => item.id))}`, "");
+  }
+  if (summarised.length > 0) {
+    const years = summarised.flatMap((item) => Object.values(engagementDates(item))).filter((date): date is string => Boolean(date)).map((date) => date.slice(0, 4)).sort();
+    const organisations = [...new Set(summarised.map(organisationOf))];
+    earlierLines.push(`- ${claim("Earlier career", `Earlier roles (${years[0]}–${years[years.length - 1]}): ${organisations.join("; ")}`, summarised.map((item) => item.id))}`);
+  }
 
-  const credentialLines = evidence.filter((item) => item.evidence_type === "CREDENTIAL")
-    .map((item) => `- ${claim("Credentials", item.label, [item.id])}`);
+  // Education lists every degree; certifications, licences and courses are ranked by relevance to this job.
+  const jobTerms = terms(`${comparison.title ?? ""} ${rows.map((row) => row.requirement).join(" ")}`);
+  const credentials = evidence.filter((item) => item.evidence_type === "CREDENTIAL");
+  const educationLines = credentials.filter((item) => credentialType(item) === "DEGREE")
+    .map((item) => `- ${claim("Education", item.label, [item.id])}`);
+  const credentialRelevance = (item: ManualEvidence) =>
+    score(item.id) * 10 + [...terms(item.statement)].filter((term) => jobTerms.has(term)).length;
+  const rankedCertifications = credentials
+    .map((item, order) => ({ item, order }))
+    .filter(({ item }) => credentialType(item) !== "DEGREE")
+    .sort((left, right) => credentialRelevance(right.item) - credentialRelevance(left.item)
+      || (CERTIFICATION_ORDER[credentialType(left.item)] ?? 3) - (CERTIFICATION_ORDER[credentialType(right.item)] ?? 3)
+      || left.order - right.order);
+  // Relevant ones only; when fewer than MIN_CERTIFICATIONS relate to the job, the next by type fill in.
+  const relevantCount = rankedCertifications.filter(({ item }) => credentialRelevance(item) > 0).length;
+  const certificationLines = rankedCertifications
+    .slice(0, Math.min(MAX_CERTIFICATIONS, Math.max(relevantCount, MIN_CERTIFICATIONS)))
+    .map(({ item }) => `- ${claim("Certifications", item.label, [item.id])}`);
 
-  const header = [`# ${contact.full_name}`, [contact.location, contact.email, contact.phone, contact.linkedin].filter(Boolean).join(" | "), ""];
+  const header = documentHeader(contact);
   const cv = [
     ...header,
     `## Target role: ${comparison.title} — ${comparison.company}`,
     "",
-    ...(summaryLines.length ? ["## Summary", ...summaryLines, ""] : []),
+    ...(summaryParagraph ? ["## Summary", summaryParagraph, ""] : []),
     ...(requirementLines.length ? ["## How my experience matches this role", ...requirementLines, ""] : []),
-    ...(experienceLines.length ? ["## Experience", ...experienceLines] : []),
+    ...(sections.EMPLOYMENT.length ? ["## Experience", ...sections.EMPLOYMENT] : []),
+    ...(sections.VENTURE.length ? ["## Ventures and research", ...sections.VENTURE] : []),
     ...(earlierLines.length ? ["## Earlier career", ...earlierLines, ""] : []),
-    ...(credentialLines.length ? ["## Credentials", ...credentialLines] : []),
+    ...(educationLines.length ? ["## Education", ...educationLines, ""] : []),
+    ...(certificationLines.length ? ["## Certifications", ...certificationLines] : []),
   ].join("\n").trimEnd();
 
   const letterPoints = matchedRows.slice(0, MAX_COVER_LETTER_POINTS).map(({ row, best }) =>
@@ -294,7 +478,14 @@ export function buildControlledDocuments(
     contact.full_name,
   ].join("\n");
 
+  assertNoInternalAssessmentText("The CV", cv);
+  assertNoInternalAssessmentText("The cover letter", coverLetter);
   return { cv, coverLetter, claims };
+}
+
+/** The name and contact lines shared by the CV and the cover letter. */
+export function documentHeader(contact: { full_name: string; location?: string; email?: string; phone?: string; linkedin?: string }): string[] {
+  return [`# ${contact.full_name}`, [contact.location, contact.email, contact.phone, contact.linkedin].filter(Boolean).join(" | "), ""];
 }
 
 export async function renderControlledDocx(markdown: string): Promise<Buffer> {

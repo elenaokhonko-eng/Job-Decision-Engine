@@ -22,6 +22,7 @@ import {
   type ManualEvidence,
   type ManualRequirement,
 } from "../../documents/manualPreparation.js";
+import { documentRequirements, isInternalAssessmentStatement, type StoredRequirementRow } from "../../documents/manualDocumentPolicy.js";
 import {
   ManualApiErrorSchema,
   ManualCandidateProfilesResponseSchema,
@@ -344,39 +345,43 @@ export async function loadManualProfileEvidence(
   workspaceId: string,
   profileVersionId: string,
 ): Promise<ManualEvidence[]> {
-  const [factResult, credentialResult, engagementResult] = await Promise.all([
-    // Past-role facts are is_current = FALSE but remain valid evidence; only CONTACT facts need currentness,
-    // and those are loaded separately by loadProfileContactSnapshot.
-    client.query<{ id: string; fact_key: string; statement: string; engagement_id: string | null }>(
-      `SELECT id::text, fact_key, statement, engagement_id::text AS engagement_id FROM profile_facts
-       WHERE workspace_id = $1 AND profile_version_id = $2 AND fact_type <> 'CONTACT'
-         AND verification_status IN ('VERIFIED','SELF_ATTESTED')
-         AND confidentiality IN ('PUBLIC','PRIVATE_REUSABLE') ORDER BY fact_key, id`,
-      [workspaceId, profileVersionId]),
-    client.query<{ id: string; credential_name: string; issuer: string; credential_type: string; level: string | null; status: string }>(
-      `SELECT id::text, credential_name, issuer, credential_type, level, status
-       FROM profile_credentials WHERE workspace_id = $1 AND profile_version_id = $2
-         AND status = 'ACTIVE' AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY credential_key, id`,
-      [workspaceId, profileVersionId]),
-    client.query<{ id: string; organization_legal_name: string; role_title: string; start_date: string; end_date: string | null; is_current: boolean; summary: string }>(
-      `SELECT id::text, organization_legal_name, role_title, start_date::text AS start_date, end_date::text AS end_date, is_current, summary
-       FROM profile_engagements WHERE workspace_id = $1 AND profile_version_id = $2
-         AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY start_date DESC, engagement_key, id`,
-      [workspaceId, profileVersionId]),
-  ]);
+  // Past-role facts are is_current = FALSE but remain valid evidence; only CONTACT facts need currentness,
+  // and those are loaded separately by loadProfileContactSnapshot.
+  const factResult = await client.query<{ id: string; fact_key: string; fact_type: string; statement: string; engagement_id: string | null }>(
+    `SELECT id::text, fact_key, fact_type, statement, engagement_id::text AS engagement_id FROM profile_facts
+     WHERE workspace_id = $1 AND profile_version_id = $2 AND fact_type <> 'CONTACT'
+       AND verification_status IN ('VERIFIED','SELF_ATTESTED')
+       AND confidentiality IN ('PUBLIC','PRIVATE_REUSABLE') ORDER BY fact_key, id`,
+    [workspaceId, profileVersionId]);
+  const credentialResult = await client.query<{ id: string; credential_name: string; issuer: string; credential_type: ManualEvidence["credential_type"] & string; level: string | null; status: string }>(
+    `SELECT id::text, credential_name, issuer, credential_type, level, status
+     FROM profile_credentials WHERE workspace_id = $1 AND profile_version_id = $2
+       AND status = 'ACTIVE' AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY credential_key, id`,
+    [workspaceId, profileVersionId]);
+  const engagementResult = await client.query<{
+    id: string; organization_legal_name: string; role_title: string; start_date: string; end_date: string | null; is_current: boolean;
+    summary: string; engagement_type: ManualEvidence["engagement_type"] & string; experience_class: string;
+  }>(
+    `SELECT id::text, organization_legal_name, role_title, start_date::text AS start_date, end_date::text AS end_date, is_current, summary,
+            engagement_type, experience_class
+     FROM profile_engagements WHERE workspace_id = $1 AND profile_version_id = $2
+       AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY start_date DESC, engagement_key, id`,
+    [workspaceId, profileVersionId]);
   return [
-    ...factResult.rows.map((row) => ({
-      id: row.id, evidence_type: "FACT" as const, label: row.fact_key, statement: row.statement,
+    // Self-ratings, preference and screening notes inform matching elsewhere but are never document evidence.
+    ...factResult.rows.filter((row) => !isInternalAssessmentStatement(row.statement)).map((row) => ({
+      id: row.id, evidence_type: "FACT" as const, label: row.fact_key, statement: row.statement, fact_type: row.fact_type,
       ...(row.engagement_id ? { engagement_id: row.engagement_id } : {}),
     })),
     ...credentialResult.rows.map((row) => ({
-      id: row.id, evidence_type: "CREDENTIAL" as const, label: row.credential_name,
+      id: row.id, evidence_type: "CREDENTIAL" as const, label: row.credential_name, credential_type: row.credential_type,
       statement: `${row.credential_name}${row.level ? ` (${row.level})` : ""}, ${row.credential_type.toLowerCase()} issued by ${row.issuer}; status ${row.status}.`,
     })),
     ...engagementResult.rows.map((row) => ({
       id: row.id, evidence_type: "ENGAGEMENT" as const, label: `${row.role_title} at ${row.organization_legal_name}`,
       statement: `${row.role_title} at ${row.organization_legal_name} (${row.start_date}${row.is_current ? "–present" : row.end_date ? `–${row.end_date}` : ""}). ${row.summary}`,
-      engagement_id: row.id,
+      engagement_id: row.id, engagement_type: row.engagement_type, experience_class: row.experience_class, start_date: row.start_date,
+      ...(row.end_date && !row.is_current ? { end_date: row.end_date } : {}),
     })),
   ];
 }
@@ -435,24 +440,27 @@ async function loadCurrentInputs(
   const profile = profileResult.rows[0];
   if (!profile) throw new ManualFlowError(409, "APPROVAL_STALE", "The selected candidate has no active profile version in this workspace. Select an active candidate and compare again.");
 
-  const [requirementResult, evidence, preferenceResult, contactSnapshot] = await Promise.all([
-    client.query<ManualRequirement>(
-      `SELECT requirement_key, requirement_type, importance, requirement_text
-       FROM job_requirements WHERE workspace_id = $1 AND canonical_job_id = $2 AND job_version_id = $3
-         AND requirement_set_id = $4 AND status <> 'REJECTED' ORDER BY requirement_key`,
-      [ctx.workspaceId, selected.canonicalJobId, selected.jobVersionId, job.active_requirement_set_id]),
-    loadManualProfileEvidence(client, ctx.workspaceId, profile.profile_version_id),
-    client.query<{ preference_domain: string; revision_id: string; preference_hash: string }>(
-      `SELECT active.preference_domain, active.revision_id, revision.preference_hash
-       FROM workspace_user_preference_active_versions active
-       JOIN workspace_user_preference_revisions revision
-         ON revision.workspace_id = active.workspace_id AND revision.user_id = active.user_id
-        AND revision.preference_domain = active.preference_domain AND revision.id = active.revision_id
-       WHERE active.workspace_id = $1 AND active.user_id = $2
-       ORDER BY active.preference_domain`,
-      [ctx.workspaceId, ctx.userId]),
-    loadProfileContactSnapshot(client, ctx.workspaceId, profile.profile_version_id, profile.candidate_name),
-  ]);
+  // Sequential: a PoolClient runs one query at a time, and queueing concurrent queries on it is deprecated in pg.
+  const requirementResult = await client.query<StoredRequirementRow>(
+    `SELECT requirement_key, requirement_type, importance, requirement_text, extractor_type, quote_text
+     FROM job_requirements WHERE workspace_id = $1 AND canonical_job_id = $2 AND job_version_id = $3
+       AND requirement_set_id = $4 AND status <> 'REJECTED' ORDER BY requirement_key`,
+    [ctx.workspaceId, selected.canonicalJobId, selected.jobVersionId, job.active_requirement_set_id]);
+  const descriptionResult = await client.query<{ description_text: string | null }>(
+    `SELECT description_text FROM job_versions WHERE workspace_id = $1 AND canonical_job_id = $2 AND id = $3`,
+    [ctx.workspaceId, selected.canonicalJobId, selected.jobVersionId]);
+  const evidence = await loadManualProfileEvidence(client, ctx.workspaceId, profile.profile_version_id);
+  const preferenceResult = await client.query<{ preference_domain: string; revision_id: string; preference_hash: string }>(
+    `SELECT active.preference_domain, active.revision_id, revision.preference_hash
+     FROM workspace_user_preference_active_versions active
+     JOIN workspace_user_preference_revisions revision
+       ON revision.workspace_id = active.workspace_id AND revision.user_id = active.user_id
+      AND revision.preference_domain = active.preference_domain AND revision.id = active.revision_id
+     WHERE active.workspace_id = $1 AND active.user_id = $2
+     ORDER BY active.preference_domain`,
+    [ctx.workspaceId, ctx.userId]);
+  const contactSnapshot = await loadProfileContactSnapshot(client, ctx.workspaceId, profile.profile_version_id, profile.candidate_name);
+  const requirements: ManualRequirement[] = documentRequirements(requirementResult.rows, descriptionResult.rows[0]?.description_text ?? null);
   const warnings: string[] = [];
   const quotedWarning = await quotedRequirementExtractionWarning(client, ctx.workspaceId, job.job_version_id, job.active_requirement_set_id);
   if (quotedWarning) warnings.push(quotedWarning);
@@ -477,7 +485,7 @@ async function loadCurrentInputs(
     profile_version_id: profile.profile_version_id,
     candidate_profile_id: profile.candidate_profile_id,
     requirement_set_id: job.active_requirement_set_id,
-    requirements: requirementResult.rows,
+    requirements,
     evidence,
     profile_contact_fact_ids: contactFactIds,
     profile_contact_fingerprint: contactSnapshot.fingerprint,

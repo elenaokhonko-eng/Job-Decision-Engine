@@ -1,0 +1,216 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  assertNoInternalAssessmentText,
+  documentRequirements,
+  isInternalAssessmentStatement,
+  postingRequirementLines,
+  type StoredRequirementRow,
+} from "../../documents/manualDocumentPolicy.js";
+import { buildControlledDocuments, buildManualComparison, type ManualEvidence } from "../../documents/manualPreparation.js";
+import { SYSTEMATIC_TRADING_PRODUCT_LEAD_DESCRIPTION as JOB_DESCRIPTION } from "../fixtures/systematicTradingProductLead.js";
+
+// The deterministic extractor's rows when AI extraction fails: fixed labels, not the employer's words.
+const PLACEHOLDER_ROWS: StoredRequirementRow[] = [
+  { requirement_key: "R-001", requirement_type: "EMPLOYMENT_TYPE", importance: "MUST", requirement_text: "Role specifies an employment type.", extractor_type: "DETERMINISTIC", quote_text: "Full-time" },
+  { requirement_key: "R-002", requirement_type: "DOMAIN", importance: "MUST", requirement_text: "Role includes a target technical domain requirement.", extractor_type: "DETERMINISTIC", quote_text: "data platforms" },
+];
+
+const engagement = (id: string, label: string, start: string, end: string | null, type: ManualEvidence["engagement_type"], experienceClass: string): ManualEvidence => ({
+  id, evidence_type: "ENGAGEMENT", label, engagement_id: id, engagement_type: type, experience_class: experienceClass, start_date: start,
+  ...(end ? { end_date: end } : {}), statement: `${label} (${start}–${end ?? "present"}). Role summary.`,
+});
+const fact = (id: string, statement: string, engagementId?: string, factType = "ACHIEVEMENT"): ManualEvidence => ({
+  id, evidence_type: "FACT", label: id, statement, fact_type: factType, ...(engagementId ? { engagement_id: engagementId } : {}),
+});
+const credential = (id: string, name: string, type: NonNullable<ManualEvidence["credential_type"]>): ManualEvidence => ({
+  id, evidence_type: "CREDENTIAL", label: name, credential_type: type, statement: `${name}, ${type.toLowerCase()} issued by Issuer; status ACTIVE.`,
+});
+
+// Shaped like the real profile: four concurrent recent ventures, a certification sprint, one major and
+// relevant past employment role, and older roles back to 1999.
+const PROFILE: ManualEvidence[] = [
+  engagement("eng-lab", "Founder at Neurodiversity Research Lab", "2026-05-01", null, "RESEARCHER", "APPLIED_PROJECT"),
+  engagement("eng-campus", "Founder in Residence at City University", "2026-01-01", null, "FOUNDER_OPERATOR", "PROFESSIONAL_PRODUCTION"),
+  engagement("eng-venture", "Founder and AI Architect at Venture AI", "2025-08-01", null, "FOUNDER_OPERATOR", "PROFESSIONAL_PRODUCTION"),
+  engagement("eng-accelerator", "Founder in Residence at Business School Lab", "2025-08-01", "2025-12-31", "FOUNDER_OPERATOR", "APPLIED_PROJECT"),
+  engagement("eng-sprint", "Certification Sprint at Strategy Consultancy", "2025-07-01", "2025-08-31", "RESEARCHER", "COURSE_PROJECT"),
+  engagement("eng-aim", "Enterprise Solution Architect and Program Lead at Insurer Investment Management", "2023-04-01", "2025-04-30", "EMPLOYEE", "PROFESSIONAL_PRODUCTION"),
+  engagement("eng-boutique", "Associate Director at Boutique Asset Manager", "2019-07-01", "2022-12-31", "EMPLOYEE", "PROFESSIONAL_PRODUCTION"),
+  engagement("eng-crm", "Regional CRM Architect at Consumer Goods Company", "2012-02-01", "2017-09-30", "EMPLOYEE", "PROFESSIONAL_PRODUCTION"),
+  engagement("eng-import", "Import-Export Coordinator at Trading House", "2000-01-01", "2002-12-31", "EMPLOYEE", "PROFESSIONAL_PRODUCTION"),
+  engagement("eng-tourism", "Tourism Management Intern at Tourism Agency", "1999-01-01", "2000-12-31", "CONTRACTOR", "PROFESSIONAL_PRODUCTION"),
+  fact("f-aim-front-office", "Led front office transformation of order management and trade lifecycle workflows for a multi-asset investment management platform.", "eng-aim"),
+  fact("f-aim-derivatives", "Designed the derivatives operating model and portfolio management data flows for a $25B investment portfolio.", "eng-aim"),
+  fact("f-aim-governance", "Defined data governance for market data and reference data used by investment and risk teams.", "eng-aim"),
+  fact("f-venture-agentic", "Architects agentic AI and machine learning tooling on a governed data platform for financial advisers.", "eng-venture"),
+  fact("f-lab-research", "Runs participatory research studies on neurodivergent learning.", "eng-lab"),
+  fact("f-campus-mentoring", "Mentors student founders on venture building.", "eng-campus"),
+  fact("f-accelerator-pitch", "Prepared an AI governance venture pitch for an accelerator cohort.", "eng-accelerator"),
+  fact("f-sprint-change", "Completed a digital transformation and change management certification sprint.", "eng-sprint"),
+  fact("f-boutique-portfolios", "Managed discretionary portfolio management workflows and order management for private clients.", "eng-boutique"),
+  fact("f-crm-rollout", "Led regional CRM and sales force automation rollouts across 16 markets.", "eng-crm"),
+  fact("f-tenure-architecture", "Has 12 years of technical-functional architecture experience.", undefined, "SKILL"),
+  fact("f-tenure-coding", "Has approximately two years of hands-on coding experience.", undefined, "SKILL"),
+  fact("f-python-sql", "Uses Python and SQL for data analysis and pipeline prototypes.", undefined, "TECHNOLOGY"),
+  fact("f-rating-markets", "Capital Markets domain expertise (Self-rating: 5/5): institutional trading, derivatives and market data.", undefined, "DOMAIN"),
+  fact("f-rating-sustainability", "Sustainability domain expertise (Self-rating: 1/5): emerging interest in climate data.", undefined, "DOMAIN"),
+  fact("f-not-target", "Pure public policy research: foundational knowledge; not a target work activity.", undefined, "SKILL"),
+  credential("c-msc", "Master of Science in Wealth Management", "DEGREE"),
+  credential("c-mba", "Master of Business Administration", "DEGREE"),
+  credential("c-aws", "AWS Certified AI Practitioner", "CERTIFICATION"),
+  credential("c-cfa", "Passed Level I of the CFA Program", "COURSE"),
+  credential("c-data-ai", "Advanced Professional Certificate in Data Science and AI", "COURSE"),
+  credential("c-prince2", "PRINCE2 Practitioner", "CERTIFICATION"),
+  credential("c-fund-rules", "Rules and Regulations for Fund Management", "LICENSE"),
+  credential("c-advisory", "Client Advisory Competency Standards", "LICENSE"),
+  credential("c-advisory-rules", "Rules and Regulations for Financial Advisory Services", "LICENSE"),
+  credential("c-health", "Health Insurance Certification", "CERTIFICATION"),
+];
+
+function comparisonFor(requirements: ReturnType<typeof documentRequirements>, evidence = PROFILE) {
+  return buildManualComparison({
+    canonical_job_id: "11111111-1111-4111-8111-111111111111",
+    job_version_id: "22222222-2222-4222-8222-222222222222",
+    source_observation_id: "33333333-3333-4333-8333-333333333333",
+    source_evidence_fingerprint: "f".repeat(64),
+    job_content_hash: "a".repeat(64),
+    title: "Product Lead - Systematic Commodity Trading",
+    company: "Example Commodities",
+    canonical_url: "https://example.test/role",
+    profile_version_id: "44444444-4444-4444-8444-444444444444",
+    candidate_profile_id: "55555555-5555-4555-8555-555555555555",
+    requirement_set_id: "66666666-6666-4666-8666-666666666666",
+    profile_contact_fact_ids: [],
+    profile_contact_fingerprint: "b".repeat(64),
+    preference_context_fingerprint: "c".repeat(64),
+    context_fingerprint: "d".repeat(64),
+    requirements,
+    evidence,
+    suitability_warnings: [],
+  });
+}
+
+const CONTACT = { full_name: "Candidate Example", phone: "+65 6000 0000" };
+const AS_OF = new Date("2026-11-02T00:00:00Z");
+
+function section(cv: string, heading: string): string {
+  const start = cv.indexOf(`## ${heading}\n`);
+  if (start < 0) return "";
+  const body = cv.slice(start + heading.length + 4);
+  const next = body.indexOf("\n## ");
+  return (next < 0 ? body : body.slice(0, next)).trim();
+}
+
+describe("manual document quality (baseline regression)", () => {
+  // The loader drops internal assessment facts before comparison; the builder filters them again.
+  const evidence = PROFILE.filter((item) => !isInternalAssessmentStatement(item.statement));
+  const requirements = documentRequirements(PLACEHOLDER_ROWS, JOB_DESCRIPTION);
+  const docs = buildControlledDocuments(comparisonFor(requirements, evidence), CONTACT, { asOf: AS_OF });
+
+  it("uses the posting's own lines instead of placeholder requirements when AI extraction failed", () => {
+    expect(requirements.map((row) => row.requirement_text)).toEqual([
+      "Product or program leadership for front office trading or investment management platforms.",
+      "Working knowledge of derivatives, portfolio management and trade lifecycle operations.",
+      "Experience delivering data platforms and agentic AI or machine learning tooling for investment teams.",
+      "Familiarity with Python and SQL is a plus.",
+      "Own the product roadmap for the systematic trading platform, from research tooling to execution.",
+      "Translate requirements from traders, quants and risk managers into delivery plans for engineering teams.",
+      "Lead front office transformation of order management, market data and position keeping workflows.",
+      "Define data governance for market data, reference data and trade data across the platform.",
+    ]);
+    expect(requirements.find((row) => row.requirement_text.startsWith("Familiarity with Python"))?.importance).toBe("PREFERRED");
+    for (const text of [docs.cv, docs.coverLetter]) {
+      expect(text).not.toMatch(/Role specifies|Role includes a target|Role requires/);
+      expect(text).not.toContain("Competitive compensation");
+    }
+  });
+
+  it("prefers AI-quoted requirements when they exist", () => {
+    const quoted = documentRequirements([...PLACEHOLDER_ROWS, {
+      requirement_key: "R-003", requirement_type: "SKILL", importance: "MUST", extractor_type: "LLM_QUOTED",
+      requirement_text: "Product leadership for systematic trading platforms", quote_text: "Product leadership for systematic trading platforms",
+    }], JOB_DESCRIPTION);
+    expect(quoted.map((row) => row.requirement_key)).toEqual(["R-003"]);
+  });
+
+  it("does not pair a fact with a requirement on one shared word", () => {
+    const rows = comparisonFor([
+      { requirement_key: "R-001", requirement_type: "EMPLOYMENT_TYPE", importance: "MUST", requirement_text: "Role specifies an employment type." },
+      { requirement_key: "R-002", requirement_type: "DOMAIN", importance: "MUST", requirement_text: "Role includes a target technical domain requirement." },
+    ], PROFILE).rows as Array<{ evidence: unknown[] }>;
+    expect(rows.every((row) => row.evidence.length === 0)).toBe(true);
+  });
+
+  it("never shows self-ratings, preference notes or other internal assessments", () => {
+    for (const text of [docs.cv, docs.coverLetter]) {
+      expect(text).not.toMatch(/Self-rating|\/5\b|not a target/i);
+    }
+    expect(() => assertNoInternalAssessmentText("The CV", "Capital Markets (Self-rating: 5/5)")).toThrow(/internal assessment/);
+    // The builder refuses to emit them even if a comparison still carries one.
+    const unfiltered = buildControlledDocuments(comparisonFor(requirements, PROFILE), CONTACT, { asOf: AS_OF });
+    expect(unfiltered.cv).not.toMatch(/Self-rating|not a target/i);
+  });
+
+  it("gives the major past employment role a full entry ahead of minor ventures, and never lists a course as a job", () => {
+    const major = docs.cv.indexOf("### Enterprise Solution Architect and Program Lead at Insurer Investment Management | Apr 2023 – Apr 2025");
+    expect(major).toBeGreaterThan(-1);
+    expect(docs.cv.indexOf("Designed the derivatives operating model", major)).toBeGreaterThan(major);
+    for (const minor of ["Neurodiversity Research Lab", "City University", "Business School Lab"]) {
+      expect(docs.cv.indexOf(minor)).toBeGreaterThan(major);
+      expect(docs.cv).not.toContain(`### Founder${minor === "Neurodiversity Research Lab" ? "" : " in Residence"} at ${minor}`);
+    }
+    // The relevant venture gets a full entry; the others share one line.
+    expect(section(docs.cv, "Ventures and research")).toContain("### Founder and AI Architect at Venture AI | Aug 2025 – Present");
+    expect(section(docs.cv, "Ventures and research")).toMatch(/^- Also: .*Neurodiversity Research Lab.*City University.*Business School Lab/m);
+    expect(docs.cv).not.toContain("Certification Sprint");
+    // Roles over 20 years old share one summary line; recent employment keeps full entries.
+    expect(section(docs.cv, "Earlier career")).toBe("- Earlier roles (1999–2002): Trading House; Tourism Agency");
+    expect(docs.cv).toContain("### Associate Director at Boutique Asset Manager | Jul 2019 – Dec 2022");
+  });
+
+  it("writes the summary as a single paragraph", () => {
+    const summary = section(docs.cv, "Summary");
+    expect(summary.length).toBeGreaterThan(0);
+    expect(summary).not.toContain("\n");
+    expect(summary).not.toMatch(/^- /);
+  });
+
+  it("separates education from at most six certifications, ranked by relevance", () => {
+    expect(section(docs.cv, "Education").split("\n")).toEqual([
+      "- Master of Science in Wealth Management",
+      "- Master of Business Administration",
+    ]);
+    const certifications = section(docs.cv, "Certifications").split("\n");
+    expect(certifications.length).toBeLessThanOrEqual(6);
+    expect(certifications).not.toContain("- Master of Business Administration");
+    expect(certifications[0]).toBe("- Advanced Professional Certificate in Data Science and AI");
+    expect(certifications).toContain("- Passed Level I of the CFA Program");
+    expect(certifications).not.toContain("- Health Insurance Certification");
+  });
+
+  it("uses each fact for at most one requirement line", () => {
+    const lines = section(docs.cv, "How my experience matches this role").split("\n");
+    const statements = lines.map((line) => line.slice(line.indexOf(": ") + 2));
+    expect(lines.length).toBeGreaterThanOrEqual(4);
+    expect(new Set(statements).size).toBe(statements.length);
+  });
+
+  it("lets the candidate's role choices override the defaults", () => {
+    const chosen = buildControlledDocuments(comparisonFor(requirements, evidence), CONTACT, {
+      asOf: AS_OF,
+      roleLayout: { "eng-lab": "HIDDEN", "eng-campus": "HIDDEN", "eng-accelerator": "HIDDEN", "eng-crm": "ONE_LINE" },
+    });
+    expect(chosen.cv).not.toContain("Neurodiversity Research Lab");
+    expect(chosen.cv).not.toContain("City University");
+    expect(chosen.cv).toContain("- Regional CRM Architect at Consumer Goods Company (Feb 2012 – Sep 2017)");
+  });
+
+  it("reads requirement and responsibility lines from inline headings too", () => {
+    expect(postingRequirementLines("Responsibilities: lead the platform roadmap with traders.\nRequirements: eight years in commodity trading technology.")
+      .map((row) => [row.requirement_type, row.requirement_text])).toEqual([
+      ["POSTING_REQUIREMENT", "eight years in commodity trading technology."],
+      ["POSTING_RESPONSIBILITY", "lead the platform roadmap with traders."],
+    ]);
+  });
+});
