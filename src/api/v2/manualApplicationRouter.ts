@@ -9,6 +9,7 @@ import { checkModelRegistryPreflight } from "../../services/agent.js";
 import { loadProfileContactSnapshot, type DocumentContactInfo } from "../../documents/contactInfo.js";
 import {
   buildControlledDocuments,
+  matchableEvidence,
   planRoles,
   buildManualComparison,
   fingerprintManualComparison,
@@ -24,6 +25,16 @@ import {
   type ManualRequirement,
 } from "../../documents/manualPreparation.js";
 import { documentRequirements, isInternalAssessmentStatement, type StoredRequirementRow } from "../../documents/manualDocumentPolicy.js";
+import {
+  manualPairingMode,
+  MANUAL_PAIRING_METHOD,
+  MANUAL_PAIRING_SCHEMA_VERSION,
+  pairEvidenceWithModel,
+  strongestPairs,
+  validatePairingPayload,
+  type EvidencePair,
+  type EvidencePairer,
+} from "../../documents/manualEvidencePairing.js";
 import {
   ManualApiErrorSchema,
   ManualCandidateProfilesResponseSchema,
@@ -480,6 +491,17 @@ async function loadCurrentInputs(
   }
   if (!job.gate_status) warnings.push("Automatic suitability was not completed for this manual comparison; workability warnings remain unresolved until the normal pipeline evaluates them.");
   if (job.processing_state) warnings.push(`Current pipeline state: ${job.processing_state}.`);
+  const pairingResult = await client.query<{ status: "COMPLETED" | "FAILED"; pairs: EvidencePair[]; error_message: string | null }>(
+    `SELECT status, pairs, error_message FROM manual_evidence_pairings
+     WHERE workspace_id = $1 AND job_version_id = $2 AND requirement_set_id = $3 AND profile_version_id = $4 AND method = $5`,
+    [ctx.workspaceId, job.job_version_id, job.active_requirement_set_id, profile.profile_version_id, MANUAL_PAIRING_METHOD]);
+  const storedPairing = pairingResult.rows[0];
+  const pairing = storedPairing?.status === "COMPLETED" ? { pairs: strongestPairs(storedPairing.pairs) } : null;
+  if (!storedPairing) {
+    warnings.push("AI evidence pairing has not run for this comparison (no model API key was configured, or MANUAL_EVIDENCE_PAIRING_AI=false); requirement pairs come from strict word matching and may be sparse.");
+  } else if (storedPairing.status === "FAILED") {
+    warnings.push(`AI evidence pairing failed (${(storedPairing.error_message ?? "no detail").slice(0, 200)}); requirement pairs come from strict word matching and may be sparse.`);
+  }
 
   const preferenceContextFingerprint = sha256(stableStringify(preferenceResult.rows));
   const contactFactIds = [...contactSnapshot.factIds];
@@ -506,6 +528,7 @@ async function loadCurrentInputs(
     title: job.title,
     company: job.company,
     canonical_url: job.canonical_url,
+    pairing,
   };
   return {
     input,
@@ -514,6 +537,50 @@ async function loadCurrentInputs(
     contactFingerprint: contactSnapshot.fingerprint,
     preferenceContextFingerprint,
   };
+}
+
+/**
+ * Runs the model pairing once per job version, requirement set and profile version and stores it, so
+ * approve and generate rebuild exactly the comparison the candidate reviewed. A completed pairing is
+ * reused; a failed one is retried on the next compare. Without a model key nothing is stored and the
+ * comparison uses strict word matching.
+ */
+export async function ensureManualEvidencePairing(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  input: ManualComparisonInput,
+  pairer: EvidencePairer,
+): Promise<void> {
+  if (manualPairingMode() === "lexical" || input.pairing) return;
+  const candidates = matchableEvidence(input.evidence);
+  const roleLabels = Object.fromEntries(input.evidence
+    .filter((item) => item.evidence_type === "ENGAGEMENT")
+    .map((item) => [item.id, item.label]));
+  const scope = [ctx.workspaceId, input.job_version_id, input.requirement_set_id, input.profile_version_id, MANUAL_PAIRING_METHOD];
+  const upsert = `INSERT INTO manual_evidence_pairings
+       (workspace_id, job_version_id, requirement_set_id, profile_version_id, method, status, provider, model, pairs, error_message)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+     ON CONFLICT (workspace_id, job_version_id, requirement_set_id, profile_version_id, method) DO UPDATE
+       SET status = EXCLUDED.status, provider = EXCLUDED.provider, model = EXCLUDED.model, pairs = EXCLUDED.pairs,
+           error_message = EXCLUDED.error_message, created_at = NOW()
+       WHERE manual_evidence_pairings.status <> 'COMPLETED'`;
+  try {
+    if (input.requirements.length === 0 || candidates.length === 0) {
+      await pool.query(upsert, [...scope, "COMPLETED", null, null, "[]", null]);
+      return;
+    }
+    const result = await pairer({
+      title: input.title, company: input.company, requirements: input.requirements, evidence: candidates, roleLabels,
+      clientOrPool: pool, context: ctx,
+    });
+    // Validated again here so the rules hold whichever pairer produced the result.
+    const validated = validatePairingPayload({ schema_version: MANUAL_PAIRING_SCHEMA_VERSION, pairs: result.pairs }, input.requirements, candidates);
+    if (!validated.valid) throw new Error(`Evidence pairing validation failed: ${validated.issues.join(" ")}`);
+    await pool.query(upsert, [...scope, "COMPLETED", result.provider, result.model, JSON.stringify(validated.pairs), null]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await pool.query(upsert, [...scope, "FAILED", null, null, "[]", message.slice(0, 2000)]);
+  }
 }
 
 async function hasWritableMembership(client: pg.Pool | pg.PoolClient, ctx: WorkspaceContext): Promise<boolean> {
@@ -527,9 +594,13 @@ async function hasWritableMembership(client: pg.Pool | pg.PoolClient, ctx: Works
 export interface ManualApplicationRouterDeps {
   pool: pg.Pool;
   resolveContext: (req: express.Request) => WorkspaceContext;
+  /** Proposes requirement-to-evidence pairs; defaults to the extraction model route. */
+  evidencePairer?: EvidencePairer;
 }
 
-export function createManualApplicationRouter({ pool, resolveContext }: ManualApplicationRouterDeps): express.Router {
+export function createManualApplicationRouter({
+  pool, resolveContext, evidencePairer = pairEvidenceWithModel,
+}: ManualApplicationRouterDeps): express.Router {
   const router = express.Router();
   const handler = (fn: (req: express.Request, res: express.Response) => Promise<void>): express.RequestHandler =>
     (req, res, next) => {
@@ -788,6 +859,8 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
       sourceObservationId: accepted.sourceObservationId,
       contentHash: accepted.contentHash,
     };
+    const preliminary = await loadCurrentInputs(pool, ctx, selectedIdentity);
+    if (preliminary) await ensureManualEvidencePairing(pool, ctx, preliminary.input, evidencePairer);
     const observedCurrent = await loadCurrentInputs(pool, ctx, selectedIdentity);
     if (!observedCurrent) { sendApiError(res, 409, "JOB_VERSION_CHANGED", "This posting version is no longer current. Compare the current posting again."); return; }
     const observedComparison = ManualComparisonSchema.parse(buildManualComparison(observedCurrent.input));

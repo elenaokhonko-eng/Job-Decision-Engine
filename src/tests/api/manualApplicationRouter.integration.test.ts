@@ -21,6 +21,7 @@ import { importLoadedProfile, type ProfileImportSummary } from "../../profile/im
 import { loadProfile } from "../../profile/loader.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { SYSTEMATIC_TRADING_PRODUCT_LEAD_DESCRIPTION } from "../fixtures/systematicTradingProductLead.js";
+import type { EvidencePairer, EvidencePairingInput } from "../../documents/manualEvidencePairing.js";
 import { resetManualDocuments } from "../../../scripts/reset_manual_documents.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
@@ -108,6 +109,7 @@ async function importShapedProfile(pool: pg.Pool, context: WorkspaceContext): Pr
       fact("fact.domain.capital_markets.5", null, "DOMAIN", "Capital Markets domain expertise (Self-rating: 5/5): institutional trading, derivatives and market data."),
       fact("fact.research.policy.not_target", null, "SKILL", "Pure public policy research: foundational knowledge; not a target work activity."),
       fact("fact.python_sql", null, "TECHNOLOGY", "Uses Python and SQL for data analysis and pipeline prototypes."),
+      fact("fact.overview.years", null, "SKILL", "Has 12 years of investment technology and transformation delivery experience."),
       contact("contact_full_name", "name", "Shaped Candidate"),
       contact("contact_phone", "phone", "+65 6000 0001"),
     ] });
@@ -128,6 +130,8 @@ let baseUrl = "";
 let schemaName = "";
 let context: WorkspaceContext | undefined;
 let profile: ProfileImportSummary | undefined;
+let pairerImpl: EvidencePairer | undefined;
+const pairerCalls: EvidencePairingInput[] = [];
 
 describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
   beforeAll(async () => {
@@ -145,7 +149,15 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     const workspace = context;
     const app = express();
     app.use(express.json({ limit: "1mb" }));
-    app.use(createManualApplicationRouter({ pool, resolveContext: () => workspace }));
+    app.use(createManualApplicationRouter({
+      pool,
+      resolveContext: () => workspace,
+      evidencePairer: async (input) => {
+        pairerCalls.push(input);
+        if (!pairerImpl) throw new Error("No evidence pairer is configured for this test.");
+        return pairerImpl(input);
+      },
+    }));
     server = app.listen(0);
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
@@ -400,6 +412,81 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       const regenerate = await post(`/${first.draft_id}/documents`, { approval_id: approved.approval_id }, 409);
       expect(JSON.stringify(regenerate)).toMatch(/JOB_VERSION_CHANGED|APPROVAL_STALE/);
     } finally {
+      for (const key of MODEL_KEY_ENV) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    }
+  });
+
+  it("stores one model pairing per comparison, reuses it through approve and generate, and records failures", async () => {
+    if (!pool || !profile) throw new Error("The manual router test pool is not initialized.");
+    const candidateProfileId = profile.candidateProfileId;
+    const savedEnv = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
+    for (const key of MODEL_KEY_ENV) delete process.env[key];
+    process.env.OPENAI_API_KEY = "configured-for-mode-check";
+    process.env.REQUIREMENTS_ENABLE_QUOTED = "false";
+    try {
+      const post = async (route: string, body: object, expectedStatus = 200) => {
+        const response = await fetch(`${baseUrl}${route}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const json = await response.json() as Record<string, any>;
+        expect(response.status, JSON.stringify(json)).toBe(expectedStatus);
+        return json;
+      };
+      const posting = (url: string, title: string) => ({
+        schema_version: "manual_application_v1", candidate_profile_id: candidateProfileId, source_kind: "PASTED",
+        title, company: "Example Bank", url, location: "Singapore",
+        description: [
+          "Responsibilities: lead the derivatives operating model for front office portfolios.",
+          "Requirements: hands-on experience operating Azure cloud infrastructure today.",
+          "Experience leading derivatives operating model programmes for large portfolios is required.",
+        ].join("\n"),
+      });
+
+      // The model pairs the derivatives programme with the operating-model requirement only.
+      pairerCalls.length = 0;
+      pairerImpl = async (input) => {
+        const derivatives = input.evidence.find((item) => item.statement.includes("derivatives operating model"));
+        const requirement = input.requirements.find((item) => item.requirement_text.includes("derivatives operating model programmes"));
+        const cloud = input.requirements.find((item) => item.requirement_text.includes("Azure"));
+        if (!derivatives || !requirement || !cloud) throw new Error("Expected requirement or evidence missing from the pairing input.");
+        return { provider: "test", model: "fixture-pairer", pairs: [
+          { requirement_key: requirement.requirement_key, evidence_id: derivatives.id, confidence: 0.92, justification: "Led a derivatives operating model programme." },
+          { requirement_key: cloud.requirement_key, evidence_id: derivatives.id, confidence: 0.3, justification: "Not cloud work." },
+        ] };
+      };
+      const compared = await post("/compare", posting("https://careers.example.test/pairing-ok", "Derivatives Operating Model Programme Lead"));
+      expect(pairerCalls).toHaveLength(1);
+      expect(pairerCalls[0].evidence.every((item) => item.evidence_type !== "ENGAGEMENT")).toBe(true);
+      const rows = compared.comparison.rows as Array<{ requirement: string; evidence: Array<{ statement: string; confidence?: number; justification?: string }>; comparison_method: string }>;
+      const derivativesRow = rows.find((row) => row.requirement.includes("derivatives operating model programmes"))!;
+      expect(derivativesRow.evidence[0]).toMatchObject({ confidence: 0.92, justification: "Led a derivatives operating model programme." });
+      expect(rows.find((row) => row.requirement.includes("Azure"))!.evidence).toEqual([]);
+      expect(rows.every((row) => row.comparison_method === "model-judged pairing; advisory evidence only")).toBe(true);
+      expect(compared.comparison.fit).toMatchObject({ verdict: expect.any(String), must_total: expect.any(Number) });
+      expect(compared.comparison.suitability_warnings.join(" ")).not.toContain("AI evidence pairing");
+      const stored = await pool.query("SELECT status, model, jsonb_array_length(pairs) AS pairs FROM manual_evidence_pairings WHERE job_version_id = $1",
+        [compared.comparison.job_version_id]);
+      expect(stored.rows).toEqual([{ status: "COMPLETED", model: "fixture-pairer", pairs: 1 }]);
+
+      // Approve and generate rebuild the same comparison from the stored pairs, without calling the model again.
+      const approved = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint });
+      const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+      expect(generated.preview.cv).toContain("Led the derivatives operating model programme for a $25B portfolio.");
+      expect(generated.preview.cv).not.toContain("Azure");
+      const again = await post("/compare", posting("https://careers.example.test/pairing-ok", "Derivatives Operating Model Programme Lead"));
+      expect(again.comparison_fingerprint).toBe(compared.comparison_fingerprint);
+      expect(pairerCalls).toHaveLength(1);
+
+      // A failed pairing is recorded, shown as a warning, and the comparison falls back to word matching.
+      pairerImpl = async () => { throw new Error("provider unavailable"); };
+      const failed = await post("/compare", posting("https://careers.example.test/pairing-failed", "Derivatives Operating Model Programme Lead Failed"));
+      expect(failed.comparison.suitability_warnings.join(" ")).toContain("AI evidence pairing failed (provider unavailable)");
+      expect((failed.comparison.rows as Array<{ comparison_method: string }>).every((row) => row.comparison_method === "distinctive-term overlap; potential evidence only")).toBe(true);
+      const failedRow = await pool.query("SELECT status, error_message FROM manual_evidence_pairings WHERE job_version_id = $1", [failed.comparison.job_version_id]);
+      expect(failedRow.rows[0]).toMatchObject({ status: "FAILED", error_message: "provider unavailable" });
+    } finally {
+      pairerImpl = undefined;
       for (const key of MODEL_KEY_ENV) {
         if (savedEnv[key] === undefined) delete process.env[key];
         else process.env[key] = savedEnv[key];

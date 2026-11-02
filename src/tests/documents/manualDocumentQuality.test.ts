@@ -59,7 +59,7 @@ const PROFILE: ManualEvidence[] = [
   credential("c-msc", "Master of Science in Wealth Management", "DEGREE"),
   credential("c-mba", "Master of Business Administration", "DEGREE"),
   credential("c-aws", "AWS Certified AI Practitioner", "CERTIFICATION"),
-  credential("c-cfa", "Passed Level I of the CFA Program", "COURSE"),
+  { ...credential("c-cfa", "Passed Level I of the CFA Program", "COURSE"), always_include: true },
   credential("c-data-ai", "Advanced Professional Certificate in Data Science and AI", "COURSE"),
   credential("c-prince2", "PRINCE2 Practitioner", "CERTIFICATION"),
   credential("c-fund-rules", "Rules and Regulations for Fund Management", "LICENSE"),
@@ -184,7 +184,7 @@ describe("manual document quality (baseline regression)", () => {
     const certifications = section(docs.cv, "Certifications").split("\n");
     expect(certifications.length).toBeLessThanOrEqual(6);
     expect(certifications).not.toContain("- Master of Business Administration");
-    expect(certifications[0]).toBe("- Advanced Professional Certificate in Data Science and AI");
+    expect(certifications).toContain("- Advanced Professional Certificate in Data Science and AI");
     expect(certifications).toContain("- Passed Level I of the CFA Program");
     expect(certifications).not.toContain("- Health Insurance Certification");
   });

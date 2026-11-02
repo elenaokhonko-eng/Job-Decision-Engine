@@ -136,12 +136,28 @@ def _comparison_response(source_content_status="COMPLETE"):
                             "type": "FACT",
                             "label": "data systems",
                             "statement": "Designed data systems.",
+                            "confidence": 0.9,
+                            "justification": "Designing data systems is the requirement.",
                         }
                     ],
                     "gap": None,
-                    "comparison_method": "literal-term overlap; potential evidence only",
+                    "comparison_method": "model-judged pairing; advisory evidence only",
                 }
             ],
+            "fit": {
+                "must_total": 3,
+                "must_covered": 1,
+                "uncovered_must": [
+                    {
+                        "requirement_key": "R-002",
+                        "requirement": "Operate Azure cloud infrastructure",
+                    },
+                    {"requirement_key": "R-003", "requirement": "Hold AZ-305"},
+                ],
+                "verdict": "FEWER_THAN_HALF_MUSTS_EVIDENCED",
+                "message": "Only 1 of 3 MUST requirements have direct evidence in your profile.",
+                "advisory": "Evidence coverage only, not a hiring or suitability decision.",
+            },
             "suitability_warnings": ["Automatic suitability gate: NEEDS_VERIFICATION."],
             "evidence_notice": "Potential matches are retrieval hints, not a suitability decision.",
         },

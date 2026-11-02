@@ -110,9 +110,26 @@ export const ManualComparisonRowSchema = z.object({
     type: z.enum(["FACT", "CREDENTIAL", "ENGAGEMENT"]),
     label: z.string().min(1),
     statement: z.string().min(1),
+    // Present when a model proposed the pair: its confidence (0-1) and one-line reason.
+    confidence: z.number().min(0).max(1).optional(),
+    justification: z.string().min(1).optional(),
   }).strict()),
   gap: z.string().nullable(),
-  comparison_method: z.literal("literal-term overlap; potential evidence only"),
+  comparison_method: z.enum([
+    "literal-term overlap; potential evidence only",
+    "distinctive-term overlap; potential evidence only",
+    "model-judged pairing; advisory evidence only",
+  ]),
+}).strict();
+
+// How many MUST requirements have direct evidence; advisory, never a suitability decision.
+export const ManualFitCheckSchema = z.object({
+  must_total: z.number().int().min(0),
+  must_covered: z.number().int().min(0),
+  uncovered_must: z.array(z.object({ requirement_key: z.string().min(1), requirement: z.string().min(1) }).strict()),
+  verdict: z.enum(["NO_MUST_REQUIREMENTS", "MOST_MUSTS_EVIDENCED", "FEWER_THAN_HALF_MUSTS_EVIDENCED"]),
+  message: z.string().min(1),
+  advisory: z.string().min(1),
 }).strict();
 
 export const ManualComparisonSchema = z.object({
@@ -136,6 +153,8 @@ export const ManualComparisonSchema = z.object({
   requirements: z.array(ManualRequirementSchema),
   evidence: z.array(ManualEvidenceSchema),
   rows: z.array(ManualComparisonRowSchema),
+  // Absent on comparisons made before the fit check existed.
+  fit: ManualFitCheckSchema.optional(),
   suitability_warnings: z.array(z.string()),
   evidence_notice: z.string().min(1),
 }).strict();
