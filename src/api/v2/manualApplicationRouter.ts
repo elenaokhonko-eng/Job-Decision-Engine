@@ -9,6 +9,7 @@ import { checkModelRegistryPreflight } from "../../services/agent.js";
 import { loadProfileContactSnapshot, type DocumentContactInfo } from "../../documents/contactInfo.js";
 import {
   buildControlledDocuments,
+  planRoles,
   buildManualComparison,
   fingerprintManualComparison,
   MANUAL_COMPARATOR_VERSION,
@@ -22,6 +23,7 @@ import {
   type ManualEvidence,
   type ManualRequirement,
 } from "../../documents/manualPreparation.js";
+import { documentRequirements, isInternalAssessmentStatement, type StoredRequirementRow } from "../../documents/manualDocumentPolicy.js";
 import {
   ManualApiErrorSchema,
   ManualCandidateProfilesResponseSchema,
@@ -344,39 +346,49 @@ export async function loadManualProfileEvidence(
   workspaceId: string,
   profileVersionId: string,
 ): Promise<ManualEvidence[]> {
-  const [factResult, credentialResult, engagementResult] = await Promise.all([
-    // Past-role facts are is_current = FALSE but remain valid evidence; only CONTACT facts need currentness,
-    // and those are loaded separately by loadProfileContactSnapshot.
-    client.query<{ id: string; fact_key: string; statement: string; engagement_id: string | null }>(
-      `SELECT id::text, fact_key, statement, engagement_id::text AS engagement_id FROM profile_facts
-       WHERE workspace_id = $1 AND profile_version_id = $2 AND fact_type <> 'CONTACT'
-         AND verification_status IN ('VERIFIED','SELF_ATTESTED')
-         AND confidentiality IN ('PUBLIC','PRIVATE_REUSABLE') ORDER BY fact_key, id`,
-      [workspaceId, profileVersionId]),
-    client.query<{ id: string; credential_name: string; issuer: string; credential_type: string; level: string | null; status: string }>(
-      `SELECT id::text, credential_name, issuer, credential_type, level, status
-       FROM profile_credentials WHERE workspace_id = $1 AND profile_version_id = $2
-         AND status = 'ACTIVE' AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY credential_key, id`,
-      [workspaceId, profileVersionId]),
-    client.query<{ id: string; organization_legal_name: string; role_title: string; start_date: string; end_date: string | null; is_current: boolean; summary: string }>(
-      `SELECT id::text, organization_legal_name, role_title, start_date::text AS start_date, end_date::text AS end_date, is_current, summary
-       FROM profile_engagements WHERE workspace_id = $1 AND profile_version_id = $2
-         AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY start_date DESC, engagement_key, id`,
-      [workspaceId, profileVersionId]),
-  ]);
+  // Past-role facts are is_current = FALSE but remain valid evidence; only CONTACT facts need currentness,
+  // and those are loaded separately by loadProfileContactSnapshot.
+  const factResult = await client.query<{ id: string; fact_key: string; fact_type: string; statement: string; engagement_id: string | null }>(
+    `SELECT id::text, fact_key, fact_type, statement, engagement_id::text AS engagement_id FROM profile_facts
+     WHERE workspace_id = $1 AND profile_version_id = $2 AND fact_type <> 'CONTACT'
+       AND verification_status IN ('VERIFIED','SELF_ATTESTED')
+       AND confidentiality IN ('PUBLIC','PRIVATE_REUSABLE') ORDER BY fact_key, id`,
+    [workspaceId, profileVersionId]);
+  const credentialResult = await client.query<{
+    id: string; credential_name: string; issuer: string; credential_type: ManualEvidence["credential_type"] & string; level: string | null; status: string;
+    always_include_in_documents: boolean;
+  }>(
+    `SELECT id::text, credential_name, issuer, credential_type, level, status, always_include_in_documents
+     FROM profile_credentials WHERE workspace_id = $1 AND profile_version_id = $2
+       AND status = 'ACTIVE' AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY credential_key, id`,
+    [workspaceId, profileVersionId]);
+  const engagementResult = await client.query<{
+    id: string; organization_legal_name: string; role_title: string; start_date: string; end_date: string | null; is_current: boolean;
+    summary: string; engagement_type: ManualEvidence["engagement_type"] & string; experience_class: string;
+    document_layout: ManualEvidence["document_layout"] | null;
+  }>(
+    `SELECT id::text, organization_legal_name, role_title, start_date::text AS start_date, end_date::text AS end_date, is_current, summary,
+            engagement_type, experience_class, document_layout
+     FROM profile_engagements WHERE workspace_id = $1 AND profile_version_id = $2
+       AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY start_date DESC, engagement_key, id`,
+    [workspaceId, profileVersionId]);
   return [
-    ...factResult.rows.map((row) => ({
-      id: row.id, evidence_type: "FACT" as const, label: row.fact_key, statement: row.statement,
+    // Self-ratings, preference and screening notes inform matching elsewhere but are never document evidence.
+    ...factResult.rows.filter((row) => !isInternalAssessmentStatement(row.statement)).map((row) => ({
+      id: row.id, evidence_type: "FACT" as const, label: row.fact_key, statement: row.statement, fact_type: row.fact_type,
       ...(row.engagement_id ? { engagement_id: row.engagement_id } : {}),
     })),
     ...credentialResult.rows.map((row) => ({
-      id: row.id, evidence_type: "CREDENTIAL" as const, label: row.credential_name,
+      id: row.id, evidence_type: "CREDENTIAL" as const, label: row.credential_name, credential_type: row.credential_type,
+      ...(row.always_include_in_documents ? { always_include: true } : {}),
       statement: `${row.credential_name}${row.level ? ` (${row.level})` : ""}, ${row.credential_type.toLowerCase()} issued by ${row.issuer}; status ${row.status}.`,
     })),
     ...engagementResult.rows.map((row) => ({
       id: row.id, evidence_type: "ENGAGEMENT" as const, label: `${row.role_title} at ${row.organization_legal_name}`,
       statement: `${row.role_title} at ${row.organization_legal_name} (${row.start_date}${row.is_current ? "–present" : row.end_date ? `–${row.end_date}` : ""}). ${row.summary}`,
-      engagement_id: row.id,
+      engagement_id: row.id, engagement_type: row.engagement_type, experience_class: row.experience_class, start_date: row.start_date,
+      ...(row.end_date && !row.is_current ? { end_date: row.end_date } : {}),
+      ...(row.document_layout ? { document_layout: row.document_layout } : {}),
     })),
   ];
 }
@@ -435,24 +447,27 @@ async function loadCurrentInputs(
   const profile = profileResult.rows[0];
   if (!profile) throw new ManualFlowError(409, "APPROVAL_STALE", "The selected candidate has no active profile version in this workspace. Select an active candidate and compare again.");
 
-  const [requirementResult, evidence, preferenceResult, contactSnapshot] = await Promise.all([
-    client.query<ManualRequirement>(
-      `SELECT requirement_key, requirement_type, importance, requirement_text
-       FROM job_requirements WHERE workspace_id = $1 AND canonical_job_id = $2 AND job_version_id = $3
-         AND requirement_set_id = $4 AND status <> 'REJECTED' ORDER BY requirement_key`,
-      [ctx.workspaceId, selected.canonicalJobId, selected.jobVersionId, job.active_requirement_set_id]),
-    loadManualProfileEvidence(client, ctx.workspaceId, profile.profile_version_id),
-    client.query<{ preference_domain: string; revision_id: string; preference_hash: string }>(
-      `SELECT active.preference_domain, active.revision_id, revision.preference_hash
-       FROM workspace_user_preference_active_versions active
-       JOIN workspace_user_preference_revisions revision
-         ON revision.workspace_id = active.workspace_id AND revision.user_id = active.user_id
-        AND revision.preference_domain = active.preference_domain AND revision.id = active.revision_id
-       WHERE active.workspace_id = $1 AND active.user_id = $2
-       ORDER BY active.preference_domain`,
-      [ctx.workspaceId, ctx.userId]),
-    loadProfileContactSnapshot(client, ctx.workspaceId, profile.profile_version_id, profile.candidate_name),
-  ]);
+  // Sequential: a PoolClient runs one query at a time, and queueing concurrent queries on it is deprecated in pg.
+  const requirementResult = await client.query<StoredRequirementRow>(
+    `SELECT requirement_key, requirement_type, importance, requirement_text, extractor_type, quote_text
+     FROM job_requirements WHERE workspace_id = $1 AND canonical_job_id = $2 AND job_version_id = $3
+       AND requirement_set_id = $4 AND status <> 'REJECTED' ORDER BY requirement_key`,
+    [ctx.workspaceId, selected.canonicalJobId, selected.jobVersionId, job.active_requirement_set_id]);
+  const descriptionResult = await client.query<{ description_text: string | null }>(
+    `SELECT description_text FROM job_versions WHERE workspace_id = $1 AND canonical_job_id = $2 AND id = $3`,
+    [ctx.workspaceId, selected.canonicalJobId, selected.jobVersionId]);
+  const evidence = await loadManualProfileEvidence(client, ctx.workspaceId, profile.profile_version_id);
+  const preferenceResult = await client.query<{ preference_domain: string; revision_id: string; preference_hash: string }>(
+    `SELECT active.preference_domain, active.revision_id, revision.preference_hash
+     FROM workspace_user_preference_active_versions active
+     JOIN workspace_user_preference_revisions revision
+       ON revision.workspace_id = active.workspace_id AND revision.user_id = active.user_id
+      AND revision.preference_domain = active.preference_domain AND revision.id = active.revision_id
+     WHERE active.workspace_id = $1 AND active.user_id = $2
+     ORDER BY active.preference_domain`,
+    [ctx.workspaceId, ctx.userId]);
+  const contactSnapshot = await loadProfileContactSnapshot(client, ctx.workspaceId, profile.profile_version_id, profile.candidate_name);
+  const requirements: ManualRequirement[] = documentRequirements(requirementResult.rows, descriptionResult.rows[0]?.description_text ?? null);
   const warnings: string[] = [];
   const quotedWarning = await quotedRequirementExtractionWarning(client, ctx.workspaceId, job.job_version_id, job.active_requirement_set_id);
   if (quotedWarning) warnings.push(quotedWarning);
@@ -477,7 +492,7 @@ async function loadCurrentInputs(
     profile_version_id: profile.profile_version_id,
     candidate_profile_id: profile.candidate_profile_id,
     requirement_set_id: job.active_requirement_set_id,
-    requirements: requirementResult.rows,
+    requirements,
     evidence,
     profile_contact_fact_ids: contactFactIds,
     profile_contact_fingerprint: contactSnapshot.fingerprint,
@@ -563,6 +578,11 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
     const parsed = ManualFetchDescriptionRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       sendApiError(res, 400, "INVALID_REQUEST", "Provide a public posting URL and the expected title and company.");
+      return;
+    }
+    // LinkedIn shows job descriptions only to signed-in browsers, so a fetch can never succeed.
+    if (/(^|\.)linkedin\.com$/i.test(new URL(parsed.data.url).hostname)) {
+      sendApiError(res, 422, "INVALID_REQUEST", "LinkedIn job pages can't be fetched because LinkedIn only shows them to signed-in browsers. Open the posting, copy the full description including the responsibilities and requirements, and paste it instead.");
       return;
     }
     let result: JobContentResult;
@@ -865,6 +885,7 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
       document_contact_ready: contactReady,
       missing_contact_fields: missingContactFields,
       requirements_extracted: requirementSummary.processed === 1,
+      role_plan: planRoles(comparison),
     });
     res.json(response);
   }));
@@ -1014,7 +1035,13 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
     if (!fullName || !phone) {
       throw new ManualFlowError(409, "APPROVAL_STALE", "The current private contact graph must contain a candidate name and phone before documents can be generated.");
     }
-    const docs = buildControlledDocuments(selected.comparison, { ...contact, full_name: fullName, phone });
+    const roleLayout = request.data.role_layout ?? {};
+    const plannedRoles = new Set(planRoles(selected.comparison).map((plan) => plan.engagement_id));
+    const unknownRoles = Object.keys(roleLayout).filter((id) => !plannedRoles.has(id));
+    if (unknownRoles.length > 0) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", `Role choices name roles that are not in the approved comparison: ${unknownRoles.join(", ")}.`);
+    }
+    const docs = buildControlledDocuments(selected.comparison, { ...contact, full_name: fullName, phone }, { roleLayout });
     const cvDocx = await renderControlledDocx(docs.cv);
     const cvPdf = renderControlledPdf(docs.cv);
     const letterDocx = await renderControlledDocx(docs.coverLetter);
@@ -1071,7 +1098,7 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
             locked.approval.context_fingerprint, currentFingerprint, type,
             JSON.stringify({ manual_preparation: true, draft_id: draftId, approval_id: approvalId,
               requirement_set_id: locked.approval.requirement_set_id, comparison_fingerprint: currentFingerprint,
-              factual_template: true, automatic_readiness_mutated: false })]);
+              factual_template: true, automatic_readiness_mutated: false, role_layout: roleLayout })]);
         runIds[type] = run.rows[0].id;
         for (const claim of claimSet) {
           await client.query(

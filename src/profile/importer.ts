@@ -208,9 +208,10 @@ export async function importLoadedProfile(
            first_external_user_date,
            hours_per_week_band,
            summary,
-           verification_status
+           verification_status,
+           document_layout
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
          RETURNING id`,
         [
           context.workspaceId,
@@ -230,6 +231,7 @@ export async function importLoadedProfile(
           engagement.hours_per_week_band ?? null,
           engagement.summary,
           engagement.verification_status,
+          engagement.document_layout ?? null,
         ]
       );
 
@@ -495,9 +497,10 @@ export async function importLoadedProfile(
            expires_on,
            status,
            verification_status,
-           evidence_source_id
+           evidence_source_id,
+           always_include_in_documents
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
         [
           context.workspaceId,
           profileVersionId,
@@ -511,6 +514,7 @@ export async function importLoadedProfile(
           credential.status,
           credential.verification_status,
           evidenceSourceId,
+          credential.always_include_in_documents ?? false,
         ]
       );
     }

@@ -7,6 +7,20 @@
         "approval_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "role_layout": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "FULL",
+              "ONE_LINE",
+              "HIDDEN"
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          }
         }
       },
       "required": [

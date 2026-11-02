@@ -139,7 +139,7 @@ describe("manual application preparation", () => {
       ],
     };
     const comparison = buildManualComparison(tailored);
-    const docs = buildControlledDocuments(comparison, { full_name: "Candidate Example", phone: "+65 6000 0000" });
+    const docs = buildControlledDocuments(comparison, { full_name: "Candidate Example", phone: "+65 6000 0000" }, { asOf: new Date("2026-11-02T00:00:00Z") });
 
     // The MUST requirement leads, in the job's own words, paired with its evidence.
     const mustLine = docs.cv.indexOf("- Lead derivatives operating model design: Designed the derivatives operating model");
@@ -151,8 +151,8 @@ describe("manual application preparation", () => {
     expect(aia).toBeGreaterThan(-1);
     expect(docs.cv.indexOf("Designed the derivatives operating model", aia)).toBeLessThan(docs.cv.indexOf("Aligned investment operations with IFRS 17", aia));
     expect(docs.cv).toContain("### CRM Architect at Mondelez | Feb 2012 – Sep 2017");
-    // A role with no facts is listed once under earlier career, not dropped.
-    expect(docs.cv).toContain("## Earlier career\n- Intern at Tourism Agency (Jan 1999 – Dec 2000)");
+    // A role over 20 years old is summarised in one earlier-career line, not dropped.
+    expect(docs.cv).toContain("## Earlier career\n- Earlier roles (1999–2000): Tourism Agency");
     expect(docs.cv).toContain("- Passed Level I of the CFA Program");
     expect(docs.coverLetter).toContain('On "Lead derivatives operating model design": Designed the derivatives operating model');
     // Every claim resolves to approved evidence.

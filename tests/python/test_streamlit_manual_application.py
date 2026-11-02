@@ -59,8 +59,26 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
     assert any(
         "approval is recorded" in success.value.lower() for success in app.success
     )
+    # Role choices are offered before generating; only changes from the default are sent.
+    assert app.selectbox(key=f"manual_role_{fingerprint}_eng-major").value == "FULL"
+    # A default from the profile is labelled as such.
+    assert app.selectbox(key=f"manual_role_{fingerprint}_eng-lab").label.endswith(
+        "your profile default"
+    )
+    app.selectbox(key=f"manual_role_{fingerprint}_eng-lab").set_value("HIDDEN").run(
+        timeout=10
+    )
     app.button(key="manual_generate").click().run(timeout=10)
     assert not app.exception, [(error.type, error.message) for error in app.exception]
+    documents_call = next(
+        call
+        for call in app.session_state["test_api_calls"]
+        if call[1].endswith("/documents")
+    )
+    assert documents_call[2]["role_layout"] == {"eng-lab": "HIDDEN"}
+    # Documents are fixed per approval, so the choices lock once they exist.
+    app.run(timeout=10)
+    assert app.selectbox(key=f"manual_role_{fingerprint}_eng-lab").disabled
     assert {button.label for button in app.download_button} == {
         "Download CV (DOCX)",
         "Download CV (PDF)",

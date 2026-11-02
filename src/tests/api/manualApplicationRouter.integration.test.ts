@@ -20,6 +20,8 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { importLoadedProfile, type ProfileImportSummary } from "../../profile/importer.js";
 import { loadProfile } from "../../profile/loader.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
+import { SYSTEMATIC_TRADING_PRODUCT_LEAD_DESCRIPTION } from "../fixtures/systematicTradingProductLead.js";
+import { resetManualDocuments } from "../../../scripts/reset_manual_documents.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
@@ -64,6 +66,56 @@ async function importFixtureProfile(pool: pg.Pool, context: WorkspaceContext): P
       contact("contact_phone", "phone", "+65 6000 0000"),
     ] });
     write("credentials.json", { credentials: [] });
+    return await importLoadedProfile(await loadProfile(profileDir), [], pool, { context });
+  } finally {
+    rmSync(profileDir, { recursive: true, force: true });
+  }
+}
+
+/** An anonymised profile shaped like the real one: concurrent recent ventures, a course, one major past role. */
+async function importShapedProfile(pool: pg.Pool, context: WorkspaceContext): Promise<ProfileImportSummary> {
+  const profileDir = mkdtempSync(path.join(tmpdir(), "manual-router-shaped-"));
+  const write = (name: string, body: object) =>
+    writeFileSync(path.join(profileDir, name), JSON.stringify({ schema_version: "2.0", profile_key: "manual_router_shaped", ...body }));
+  const engagement = (key: string, organization: string, role: string, type: string, experienceClass: string, start: string, end: string | null) => ({
+    engagement_key: key, organization_legal_name: organization, role_title: role, engagement_type: type, experience_class: experienceClass,
+    start_date: start, ...(end ? { end_date: end } : {}), is_current: end === null, summary: `${role} at ${organization}.`, verification_status: "SELF_ATTESTED",
+  });
+  const fact = (key: string, engagementKey: string | null, factType: string, statement: string) => ({
+    fact_key: key, ...(engagementKey ? { engagement_key: engagementKey } : {}), fact_type: factType, statement,
+    evidence_tier: "PROFESSIONAL_PRODUCTION", verification_status: "SELF_ATTESTED", is_current: true, confidentiality: "PUBLIC",
+  });
+  const contact = (key: string, kind: string, value: string) => ({
+    fact_key: key, fact_type: "CONTACT", statement: `Contact ${kind} for application documents.`, structured_value: { kind, value },
+    evidence_tier: "KNOWLEDGE_ONLY", verification_status: "SELF_ATTESTED", is_current: true, confidentiality: "PRIVATE_INTERNAL",
+  });
+  try {
+    write("profile.json", { profile_version: 1, display_name: "Shaped Candidate", status: "ACTIVE" });
+    write("engagements.json", { engagements: [
+      { ...engagement("eng.lab", "Neurodiversity Research Lab", "Founder", "RESEARCHER", "APPLIED_PROJECT", "2026-05-01", null), document_layout: "ONE_LINE" },
+      engagement("eng.campus", "City University", "Founder in Residence", "FOUNDER_OPERATOR", "PROFESSIONAL_PRODUCTION", "2026-01-01", null),
+      { ...engagement("eng.venture", "Venture AI", "Founder and AI Architect", "FOUNDER_OPERATOR", "PROFESSIONAL_PRODUCTION", "2025-08-01", null), document_layout: "FULL" },
+      engagement("eng.sprint", "Strategy Consultancy", "Certification Sprint", "RESEARCHER", "COURSE_PROJECT", "2025-07-01", "2025-08-31"),
+      engagement("eng.aim", "Insurer Investment Management", "Program Lead", "EMPLOYEE", "PROFESSIONAL_PRODUCTION", "2023-04-01", "2025-04-30"),
+      engagement("eng.import", "Trading House", "Coordinator", "EMPLOYEE", "PROFESSIONAL_PRODUCTION", "2000-01-01", "2002-12-31"),
+    ] });
+    write("facts.json", { facts: [
+      fact("fact.aim.front_office", "eng.aim", "ACHIEVEMENT", "Led front office transformation of order management and trade lifecycle workflows for a multi-asset investment management platform."),
+      fact("fact.aim.derivatives", "eng.aim", "ACHIEVEMENT", "Designed the derivatives operating model and portfolio management data flows for a $25B investment portfolio."),
+      fact("fact.venture.agentic", "eng.venture", "PROJECT", "Architects agentic AI and machine learning tooling on a governed data platform for financial advisers."),
+      fact("fact.lab.research", "eng.lab", "PROJECT", "Runs participatory research studies on neurodivergent learning."),
+      fact("fact.sprint.change", "eng.sprint", "PROJECT", "Completed a digital transformation and change management certification sprint."),
+      fact("fact.domain.capital_markets.5", null, "DOMAIN", "Capital Markets domain expertise (Self-rating: 5/5): institutional trading, derivatives and market data."),
+      fact("fact.research.policy.not_target", null, "SKILL", "Pure public policy research: foundational knowledge; not a target work activity."),
+      fact("fact.python_sql", null, "TECHNOLOGY", "Uses Python and SQL for data analysis and pipeline prototypes."),
+      contact("contact_full_name", "name", "Shaped Candidate"),
+      contact("contact_phone", "phone", "+65 6000 0001"),
+    ] });
+    write("credentials.json", { credentials: [
+      { credential_key: "cred.msc", credential_name: "Master of Science in Finance", issuer: "Example University", credential_type: "DEGREE", status: "ACTIVE", verification_status: "SELF_ATTESTED" },
+      { credential_key: "cred.cloud", credential_name: "Professional Cloud Architect", issuer: "Example Cloud", credential_type: "CERTIFICATION", status: "IN_PROGRESS", verification_status: "SELF_ATTESTED" },
+      { credential_key: "cred.cfa_level_1", credential_name: "Passed Level I of the CFA Program", issuer: "CFA Institute", credential_type: "COURSE", status: "ACTIVE", verification_status: "SELF_ATTESTED", always_include_in_documents: true },
+    ] });
     return await importLoadedProfile(await loadProfile(profileDir), [], pool, { context });
   } finally {
     rmSync(profileDir, { recursive: true, force: true });
@@ -204,6 +256,103 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
         else process.env[key] = savedEnv[key];
       }
     }
+  });
+
+  it("produces documents without placeholders or self-ratings, with the major past role ahead of minor ventures", async () => {
+    if (!pool || !context) throw new Error("The manual router test pool is not initialized.");
+    const shaped = await importShapedProfile(pool, context);
+    const savedEnv = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
+    // No model key: requirement extraction is deterministic only, as in the failed baseline run.
+    for (const key of MODEL_KEY_ENV) delete process.env[key];
+    try {
+      const post = async (route: string, body: object, expectedStatus = 200) => {
+        const response = await fetch(`${baseUrl}${route}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const json = await response.json() as Record<string, any>;
+        expect(response.status, JSON.stringify(json)).toBe(expectedStatus);
+        return json;
+      };
+      const compared = await post("/compare", {
+        schema_version: "manual_application_v1", candidate_profile_id: shaped.candidateProfileId, source_kind: "PASTED",
+        title: "Product Lead - Systematic Commodity Trading", company: "Example Commodities",
+        url: "https://careers.example.test/systematic-trading-product-lead", location: "Singapore",
+        description: SYSTEMATIC_TRADING_PRODUCT_LEAD_DESCRIPTION,
+      });
+      const requirementTexts = (compared.comparison.rows as Array<{ requirement: string }>).map((row) => row.requirement);
+      expect(requirementTexts).toContain("Working knowledge of derivatives, portfolio management and trade lifecycle operations.");
+      expect(requirementTexts.join(" ")).not.toMatch(/Role specifies|Role includes a target|Role requires/);
+      expect(JSON.stringify(compared.comparison.evidence)).not.toMatch(/Self-rating|not a target/i);
+
+      // The review screen gets every role with its default layout; courses are not offered as roles.
+      const plan = compared.role_plan as Array<{ engagement_id: string; label: string; kind: string; default_layout: string; default_source: string }>;
+      const role = (label: string) => plan.find((item) => item.label === label);
+      expect(role("Program Lead at Insurer Investment Management")).toMatchObject({ kind: "EMPLOYMENT", default_layout: "FULL" });
+      // Profile-level layouts are the defaults, labelled as coming from the profile.
+      expect(role("Founder at Neurodiversity Research Lab")).toMatchObject({ kind: "VENTURE", default_layout: "ONE_LINE", default_source: "PROFILE" });
+      expect(role("Founder and AI Architect at Venture AI")).toMatchObject({ default_layout: "FULL", default_source: "PROFILE" });
+      expect(role("Program Lead at Insurer Investment Management")?.default_source).toBe("AUTOMATIC");
+      expect(role("Coordinator at Trading House")?.default_layout).toBe("SUMMARISED");
+      expect(plan.some((item) => item.label.includes("Certification Sprint"))).toBe(false);
+
+      const approved = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint });
+      const unknownRole = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id, role_layout: { "not-a-role": "HIDDEN" } }, 400);
+      expect(JSON.stringify(unknownRole)).toContain("not in the approved comparison");
+      const generated = await post(`/${compared.draft_id}/documents`, {
+        approval_id: approved.approval_id,
+        role_layout: { [role("Founder at Neurodiversity Research Lab")!.engagement_id]: "HIDDEN", [role("Founder in Residence at City University")!.engagement_id]: "HIDDEN" },
+      });
+      const cv = generated.preview.cv as string;
+      for (const text of [cv, generated.preview.cover_letter as string]) {
+        expect(text).not.toMatch(/Role specifies|Role includes a target|Self-rating|\/5\b|not a target/i);
+      }
+      const major = cv.indexOf("### Program Lead at Insurer Investment Management | Apr 2023 – Apr 2025");
+      expect(major).toBeGreaterThan(-1);
+      expect(cv.indexOf("### Founder and AI Architect at Venture AI")).toBeGreaterThan(major);
+      // The candidate hid these two ventures.
+      expect(cv).not.toContain("Neurodiversity Research Lab");
+      expect(cv).not.toContain("City University");
+      expect(cv).not.toContain("Certification Sprint");
+      const summary = /## Summary\n([^\n]+)\n\n/.exec(cv);
+      expect(summary?.[1]).toBeTruthy();
+      expect(cv).toMatch(/## Education\n- Master of Science in Finance(\n|$)/);
+      expect(cv).not.toContain("Professional Cloud Architect");
+      // Pinned in the profile, so listed regardless of relevance to the job.
+      expect(cv).toMatch(/## Certifications\n(- .*\n)*- Passed Level I of the CFA Program/);
+      // A course is never evidence that a job requirement is met.
+      expect(cv).not.toContain("certification sprint");
+
+      // The test-database reset clears this draft's stored documents, so the same approval generates anew.
+      const runIds = async () => (await pool!.query<{ id: string }>(
+        "SELECT id FROM manual_application_document_runs WHERE approval_id = $1 ORDER BY id", [approved.approval_id])).rows.map((row) => row.id);
+      const before = await runIds();
+      const resetClient = await pool!.connect();
+      try {
+        expect(await resetManualDocuments(resetClient, context!, { draftId: compared.draft_id })).toMatchObject({ runs: 2, artifacts: 4 });
+      } finally {
+        resetClient.release();
+      }
+      expect(await runIds()).toEqual([]);
+      const regenerated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+      expect(regenerated.artifacts).toHaveLength(4);
+      const after = await runIds();
+      expect(after).toHaveLength(2);
+      expect(after.some((id) => before.includes(id))).toBe(false);
+    } finally {
+      for (const key of MODEL_KEY_ENV) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    }
+  });
+
+  it("tells the candidate to paste LinkedIn postings instead of reporting a fetch failure", async () => {
+    const response = await fetch(`${baseUrl}/fetch-description`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://www.linkedin.com/jobs/view/1234567890/", title: "Product Lead", company: "Example Commodities" }),
+    });
+    const body = await response.json() as { code?: string; message?: string };
+    expect(response.status).toBe(422);
+    expect(body.message).toContain("LinkedIn job pages can't be fetched");
+    expect(body.message).toContain("paste it instead");
   });
 
   it("keeps generated documents downloadable after the posting gets a new version, but not regenerable", async () => {

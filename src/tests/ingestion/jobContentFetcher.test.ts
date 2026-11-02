@@ -329,6 +329,20 @@ describe("fetchJobContent", () => {
     expect(redirectCalls).toHaveLength(1);
   });
 
+  it("resolves hosts with the operating system resolver and still blocks private results", async () => {
+    // localhost resolves from the hosts file with no network. Node's Resolver (direct DNS queries)
+    // has no record for it and fails, as it did for every host on a machine whose DNS list pointed
+    // at a local proxy that was not listening.
+    const called: string[] = [];
+    const result = await fetchJobContent(
+      "https://localhost/jobs/1",
+      { title: "Internal Job", companyName: "Internal" },
+      { fetchOnce: async (url) => { called.push(url.toString()); return response(url.toString(), 200, smbcHtml); } },
+    );
+    expect(result).toMatchObject({ kind: "BLOCKED", reason: "UNSAFE_REDIRECT" });
+    expect(called).toHaveLength(0);
+  });
+
   it("revalidates special-purpose IPv4 and IPv6 redirect destinations", async () => {
     const targets = ["127.0.0.1", "169.254.169.254", "[::1]", "[fd00::1]", "[fe80::1]", "[::ffff:127.0.0.1]", "[2001:db8::1]", "[3fff::1]"];
     for (const target of targets) {
