@@ -277,6 +277,17 @@ export const ManualArtifactSchema = z.object({
   mime_type: z.string().min(1),
 }).strict();
 
+/** How the cover letter was written, and the approved evidence behind each sentence, for review before download. */
+export const ManualCoverLetterReviewSchema = z.object({
+  mode: z.enum(["AI_WRITTEN", "DETERMINISTIC"]),
+  reason: z.string().min(1).max(2000).nullable(),
+  sentences: z.array(z.object({
+    text: z.string().min(1),
+    evidence: z.array(z.object({ id: z.string().min(1), label: z.string(), statement: z.string() }).strict()).min(1),
+    requirement_keys: z.array(z.string().min(1)),
+  }).strict()),
+}).strict();
+
 export const ManualDocumentsResponseSchema = z.object({
   schema_version: z.literal(MANUAL_APPLICATION_SCHEMA_VERSION),
   ok: z.literal(true),
@@ -285,6 +296,9 @@ export const ManualDocumentsResponseSchema = z.object({
   comparison_fingerprint: Sha256,
   preview: z.object({ cv: z.string().min(1), cover_letter: z.string().min(1) }).strict(),
   artifacts: z.array(ManualArtifactSchema).length(4),
+  cover_letter: ManualCoverLetterReviewSchema.optional(),
+  // How the CV summary was written, and the evidence behind each sentence; same shape as cover_letter.
+  summary: ManualCoverLetterReviewSchema.optional(),
 }).strict();
 
 export const ManualDownloadResponseSchema = z.object({

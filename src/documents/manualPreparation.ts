@@ -314,6 +314,8 @@ export interface ControlledDocumentOptions {
   asOf?: Date;
   /** The candidate's per-role choice, keyed by engagement evidence id; overrides the default layout. */
   roleLayout?: Record<string, RoleLayout>;
+  /** A validated, model-written summary; each sentence cites approved evidence. Replaces the plain summary. */
+  writtenSummary?: Array<{ text: string; evidence_ids: string[]; requirement_keys: string[] }>;
 }
 
 function formatMonth(isoDate: string): string {
@@ -512,7 +514,9 @@ export function buildControlledDocuments(
     .sort((left, right) => score(right.item.id) - score(left.item.id) || left.order - right.order)
     .map(({ item }) => item);
   const summaryStatements = [...new Set([...overviewFacts, ...relevantProfileFacts, ...tenureFacts])].slice(0, MAX_SUMMARY_STATEMENTS);
-  const summaryParagraph = summaryStatements.map((item) => claim("Summary", item.statement.trim(), [item.id])).join(" ");
+  const summaryParagraph = options.writtenSummary?.length
+    ? options.writtenSummary.map((sentence) => claim("Summary", sentence.text.trim(), [...sentence.evidence_ids], [...sentence.requirement_keys])).join(" ")
+    : summaryStatements.map((item) => claim("Summary", item.statement.trim(), [item.id])).join(" ");
 
   // Roles: the default layout comes from planRoles; the candidate's choice overrides it.
   const plans = new Map(planRoles(comparison, { asOf }).map((plan) => [plan.engagement_id, plan]));
