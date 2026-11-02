@@ -23,6 +23,8 @@ import {
   type ManualApprovalIdentity,
   type ManualEvidence,
   type ManualRequirement,
+  type ControlledDocuments,
+  type ControlledDocumentOptions,
 } from "../../documents/manualPreparation.js";
 import { documentRequirements, isInternalAssessmentStatement, type StoredRequirementRow } from "../../documents/manualDocumentPolicy.js";
 import {
@@ -36,6 +38,24 @@ import {
   type EvidencePairer,
 } from "../../documents/manualEvidencePairing.js";
 import {
+  allowedCoverLetterEvidence,
+  approvedCoverLetterPairs,
+  buildWrittenCoverLetter,
+  jobDescriptionExcerpt,
+  manualCoverLetterMode,
+  MANUAL_COVER_LETTER_GENERATOR_VERSION,
+  MANUAL_COVER_LETTER_SCHEMA_VERSION,
+  MANUAL_SUMMARY_GENERATOR_VERSION,
+  MANUAL_SUMMARY_SCHEMA_VERSION,
+  allowedSummaryEvidence,
+  validateCoverLetterPayload,
+  validateSummaryPayload,
+  writeCoverLetterWithModel,
+  writeSummaryWithModel,
+  type CoverLetterWriter,
+  type SummaryWriter,
+} from "../../documents/manualCoverLetter.js";
+import {
   ManualApiErrorSchema,
   ManualCandidateProfilesResponseSchema,
   ManualApprovalIdentitySchema,
@@ -43,6 +63,7 @@ import {
   ManualApprovalResponseSchema,
   ManualCompareResponseSchema,
   ManualComparisonSchema,
+  ManualCoverLetterReviewSchema,
   ManualDocumentsResponseSchema,
   ManualDownloadResponseSchema,
   ManualGenerateRequestSchema,
@@ -596,10 +617,153 @@ export interface ManualApplicationRouterDeps {
   resolveContext: (req: express.Request) => WorkspaceContext;
   /** Proposes requirement-to-evidence pairs; defaults to the extraction model route. */
   evidencePairer?: EvidencePairer;
+  /** Writes the cover letter body; defaults to the document model route. */
+  coverLetterWriter?: CoverLetterWriter;
+  /** Writes the CV summary; defaults to the document model route. */
+  summaryWriter?: SummaryWriter;
+}
+
+type ManualWrittenReview = z.infer<typeof ManualCoverLetterReviewSchema>;
+type DocumentContact = { full_name: string; location?: string; email?: string; phone?: string; linkedin?: string };
+
+/** How one written section (the CV summary or the cover letter) was produced, for the run manifest and review screen. */
+interface WrittenSectionOutcome {
+  review: ManualWrittenReview;
+  generatorVersion: string;
+  manifest: Record<string, unknown>;
+}
+
+interface WrittenSectionsOutcome {
+  docs: ControlledDocuments;
+  summary: WrittenSectionOutcome;
+  letter: WrittenSectionOutcome;
+}
+
+const MAX_FALLBACK_REASON_CHARS = 1500;
+
+function writtenReview(
+  mode: ManualWrittenReview["mode"],
+  reason: string | null,
+  section: "Summary" | "Cover letter",
+  claims: ControlledDocuments["claims"],
+  evidence: ManualEvidence[],
+): ManualWrittenReview {
+  const evidenceById = new Map(evidence.map((item) => [item.id, item]));
+  return ManualCoverLetterReviewSchema.parse({
+    mode,
+    reason: reason ? reason.slice(0, MAX_FALLBACK_REASON_CHARS) : null,
+    sentences: claims.filter((claim) => claim.section === section).map((claim) => ({
+      text: claim.text,
+      evidence: claim.evidenceIds.map((id) => evidenceById.get(id)).filter((item): item is ManualEvidence => Boolean(item))
+        .map(({ id, label, statement }) => ({ id, label, statement })),
+      requirement_keys: claim.requirementKeys,
+    })).filter((sentence) => sentence.evidence.length > 0),
+  });
+}
+
+/**
+ * Has the model write the CV summary and the cover letter body from the approved
+ * requirement-to-evidence pairs and the job description. Each section falls back to the plain,
+ * statement-built version on its own when no key is configured, the comparison has no pairs, the
+ * description is missing, the provider fails or the text fails validation; the reason is recorded.
+ */
+async function prepareWrittenSections(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  approval: { canonical_job_id: string; job_version_id: string },
+  comparison: Record<string, any>,
+  contact: DocumentContact,
+  writers: { summary: SummaryWriter; coverLetter: CoverLetterWriter },
+  documentOptions: ControlledDocumentOptions = {},
+): Promise<WrittenSectionsOutcome> {
+  const plain = buildControlledDocuments(comparison, contact, documentOptions);
+  const evidence = Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [];
+  const plainSummary = (reason: string, claims = plain.claims): WrittenSectionOutcome => ({
+    review: writtenReview("DETERMINISTIC", reason, "Summary", claims, evidence),
+    generatorVersion: "manual_preparation_v1",
+    manifest: { summary_mode: "DETERMINISTIC", summary_reason: reason.slice(0, MAX_FALLBACK_REASON_CHARS) },
+  });
+  const plainLetter = (reason: string, claims = plain.claims): WrittenSectionOutcome => ({
+    review: writtenReview("DETERMINISTIC", reason, "Cover letter", claims, evidence),
+    generatorVersion: "manual_preparation_v1",
+    manifest: { cover_letter_mode: "DETERMINISTIC", cover_letter_reason: reason.slice(0, MAX_FALLBACK_REASON_CHARS), factual_template: true },
+  });
+  const skipBoth = (reason: string): WrittenSectionsOutcome => ({
+    docs: plain,
+    summary: plainSummary(`${reason} The summary was built from your statements.`),
+    letter: plainLetter(`${reason} The letter was assembled from your statements.`),
+  });
+  if (manualCoverLetterMode() === "deterministic") {
+    return skipBoth("AI writing did not run (no model API key configured, or MANUAL_COVER_LETTER_AI=false).");
+  }
+  const pairs = approvedCoverLetterPairs(comparison);
+  if (pairs.length === 0) {
+    return skipBoth("No job requirement in the approved comparison is matched to your evidence, so there was nothing grounded for a model to write from.");
+  }
+  const description = await pool.query<{ description_text: string | null }>(
+    `SELECT description_text FROM job_versions WHERE workspace_id=$1 AND id=$2 AND canonical_job_id=$3`,
+    [ctx.workspaceId, approval.job_version_id, approval.canonical_job_id],
+  );
+  const descriptionText = description.rows[0]?.description_text?.trim();
+  if (!descriptionText) return skipBoth("The approved job version has no stored description text.");
+  const baseInput = {
+    title: String(comparison.title), company: String(comparison.company), pairs,
+    jobDescriptionExcerpt: jobDescriptionExcerpt(descriptionText), clientOrPool: pool, context: ctx,
+  };
+
+  // Summary first: the CV it produces is the one the letter is attached to.
+  let cvDocs = plain;
+  let summary: WrittenSectionOutcome;
+  try {
+    const allowedEvidence = allowedSummaryEvidence(comparison, pairs);
+    const written = await writers.summary({ ...baseInput, allowedEvidence });
+    // Validated again here so the evidence rule holds whichever writer produced the summary.
+    const validated = validateSummaryPayload({ schema_version: MANUAL_SUMMARY_SCHEMA_VERSION, sentences: written.sentences }, pairs, allowedEvidence);
+    if (!validated.valid) throw new Error(`Summary validation failed: ${validated.issues.join(" ")}`);
+    cvDocs = buildControlledDocuments(comparison, contact, { ...documentOptions, writtenSummary: validated.sentences });
+    summary = {
+      review: writtenReview("AI_WRITTEN", null, "Summary", cvDocs.claims, evidence),
+      generatorVersion: MANUAL_SUMMARY_GENERATOR_VERSION,
+      manifest: { summary_mode: "AI_WRITTEN", summary_provider: written.provider, summary_model: written.model,
+        summary_attempts: written.attempts, summary_fallback_used: written.fallbackUsed },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    summary = plainSummary(`The AI-written summary was not used because it failed or did not pass validation: ${message} The summary was built from your statements.`);
+  }
+
+  try {
+    const allowedEvidence = allowedCoverLetterEvidence(comparison, pairs);
+    const written = await writers.coverLetter({ ...baseInput, allowedEvidence });
+    // Validated again here so the evidence rule holds whichever writer produced the letter.
+    const validated = validateCoverLetterPayload(
+      { schema_version: MANUAL_COVER_LETTER_SCHEMA_VERSION, paragraphs: written.paragraphs.map((sentences) => ({ sentences })) },
+      pairs, allowedEvidence);
+    if (!validated.valid) throw new Error(`Cover letter validation failed: ${validated.issues.join(" ")}`);
+    const letter = buildWrittenCoverLetter(comparison, contact, validated.paragraphs);
+    return {
+      docs: { cv: cvDocs.cv, coverLetter: letter.coverLetter, claims: [...cvDocs.claims.filter((claim) => claim.section !== "Cover letter"), ...letter.claims] },
+      summary,
+      letter: {
+        review: writtenReview("AI_WRITTEN", null, "Cover letter", letter.claims, evidence),
+        generatorVersion: MANUAL_COVER_LETTER_GENERATOR_VERSION,
+        manifest: { cover_letter_mode: "AI_WRITTEN", factual_template: false, provider: written.provider, model: written.model,
+          attempts: written.attempts, fallback_used: written.fallbackUsed },
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      docs: cvDocs,
+      summary,
+      letter: plainLetter(`The AI-written cover letter was not used because it failed or did not pass validation: ${message} The letter was assembled from your statements.`, cvDocs.claims),
+    };
+  }
 }
 
 export function createManualApplicationRouter({
-  pool, resolveContext, evidencePairer = pairEvidenceWithModel,
+  pool, resolveContext, evidencePairer = pairEvidenceWithModel, coverLetterWriter = writeCoverLetterWithModel,
+  summaryWriter = writeSummaryWithModel,
 }: ManualApplicationRouterDeps): express.Router {
   const router = express.Router();
   const handler = (fn: (req: express.Request, res: express.Response) => Promise<void>): express.RequestHandler =>
@@ -1114,7 +1278,16 @@ export function createManualApplicationRouter({
     if (unknownRoles.length > 0) {
       throw new ManualFlowError(400, "INVALID_REQUEST", `Role choices name roles that are not in the approved comparison: ${unknownRoles.join(", ")}.`);
     }
-    const docs = buildControlledDocuments(selected.comparison, { ...contact, full_name: fullName, phone }, { roleLayout });
+    const documentContact = { ...contact, full_name: fullName, phone };
+    // Documents already generated for this approval are returned as stored, without calling the model again.
+    const alreadyGenerated = await pool.query(
+      `SELECT 1 FROM manual_application_document_artifacts WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 LIMIT 1`,
+      [ctx.workspaceId, ctx.userId, approvalId]);
+    const letter = alreadyGenerated.rows.length > 0
+      ? null
+      : await prepareWrittenSections(pool, ctx, selected.approval, selected.comparison, documentContact,
+        { summary: summaryWriter, coverLetter: coverLetterWriter }, { roleLayout });
+    const docs = letter?.docs ?? buildControlledDocuments(selected.comparison, documentContact, { roleLayout });
     const cvDocx = await renderControlledDocx(docs.cv);
     const cvPdf = renderControlledPdf(docs.cv);
     const letterDocx = await renderControlledDocx(docs.coverLetter);
@@ -1142,11 +1315,23 @@ export function createManualApplicationRouter({
       );
       if (existing.rows.length !== 0) {
         validateManualArtifactPair(existing.rows);
+        const storedRuns = await client.query<{ document_type: "CV" | "COVER_LETTER"; output_manifest: Record<string, any> }>(
+          `SELECT document_type,output_manifest FROM manual_application_document_runs WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`,
+          [ctx.workspaceId, ctx.userId, approvalId]);
         await client.query("COMMIT");
+        // Runs stored before preview_markdown existed were deterministic, so rebuilding them reproduces the same text.
+        const stored = (type: "CV" | "COVER_LETTER") => storedRuns.rows.find((run) => run.document_type === type)?.output_manifest ?? {};
+        const storedPreview = (type: "CV" | "COVER_LETTER", rebuilt: string) =>
+          typeof stored(type).preview_markdown === "string" ? stored(type).preview_markdown as string : rebuilt;
+        const storedReview = ManualCoverLetterReviewSchema.safeParse(stored("COVER_LETTER").cover_letter_review);
+        const storedSummaryReview = ManualCoverLetterReviewSchema.safeParse(stored("CV").summary_review);
         const response = ManualDocumentsResponseSchema.parse({
           schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, draft_id: draftId, approval_id: approvalId,
-          comparison_fingerprint: currentFingerprint, preview: { cv: docs.cv, cover_letter: docs.coverLetter },
+          comparison_fingerprint: currentFingerprint,
+          preview: { cv: storedPreview("CV", docs.cv), cover_letter: storedPreview("COVER_LETTER", docs.coverLetter) },
           artifacts: existing.rows.map(({ document_type, format, filename, mime_type }) => ({ type: document_type, format, filename, mime_type })),
+          ...(storedReview.success ? { cover_letter: storedReview.data } : {}),
+          ...(storedSummaryReview.success ? { summary: storedSummaryReview.data } : {}),
         });
         res.setHeader("Cache-Control", "private, no-store");
         res.json(response);
@@ -1155,14 +1340,15 @@ export function createManualApplicationRouter({
       const runIds: Record<string, string> = {};
       for (const type of ["CV", "COVER_LETTER"] as const) {
         const content = type === "CV" ? docs.cv : docs.coverLetter;
-        const claimSet = docs.claims.filter((claim) => type === "CV" || content.includes(claim.text));
+        const claimSet = docs.claims.filter((claim) => (claim.section === "Cover letter") === (type === "COVER_LETTER"));
+        const sectionRun = letter ? (type === "COVER_LETTER" ? letter.letter : letter.summary) : null;
         const run = await client.query<{ id: string }>(
           `INSERT INTO manual_application_document_runs (
             workspace_id,user_id,approval_id,canonical_job_id,job_version_id,source_observation_id,job_content_hash,
             candidate_profile_id,profile_version_id,profile_contact_fact_ids,profile_contact_fingerprint,
             preference_context_fingerprint,requirement_set_id,comparator_version,context_fingerprint,
             comparison_fingerprint,document_type,status,generator_version,output_manifest
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'COMPLETED','manual_preparation_v1',$18::jsonb)
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'COMPLETED',$19,$18::jsonb)
            RETURNING id`,
           [ctx.workspaceId, ctx.userId, approvalId, locked.approval.canonical_job_id, locked.approval.job_version_id,
             locked.approval.source_observation_id, locked.approval.job_content_hash, locked.approval.candidate_profile_id,
@@ -1171,7 +1357,9 @@ export function createManualApplicationRouter({
             locked.approval.context_fingerprint, currentFingerprint, type,
             JSON.stringify({ manual_preparation: true, draft_id: draftId, approval_id: approvalId,
               requirement_set_id: locked.approval.requirement_set_id, comparison_fingerprint: currentFingerprint,
-              factual_template: true, automatic_readiness_mutated: false, role_layout: roleLayout })]);
+              factual_template: true, automatic_readiness_mutated: false, role_layout: roleLayout, preview_markdown: content,
+              ...(sectionRun ? { ...sectionRun.manifest, [type === "COVER_LETTER" ? "cover_letter_review" : "summary_review"]: sectionRun.review } : {}) }),
+            sectionRun ? sectionRun.generatorVersion : "manual_preparation_v1"]);
         runIds[type] = run.rows[0].id;
         for (const claim of claimSet) {
           await client.query(
@@ -1203,6 +1391,7 @@ export function createManualApplicationRouter({
       schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, draft_id: draftId, approval_id: approvalId,
       comparison_fingerprint: currentFingerprint, preview: { cv: docs.cv, cover_letter: docs.coverLetter },
       artifacts: artifacts.map(({ type, format, filename, mime }) => ({ type, format, filename, mime_type: mime })),
+      ...(letter ? { cover_letter: letter.letter.review, summary: letter.summary.review } : {}),
     });
     res.setHeader("Cache-Control", "private, no-store");
     res.json(response);

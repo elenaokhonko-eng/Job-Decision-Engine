@@ -247,9 +247,31 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
             "comparison_fingerprint": FINGERPRINT,
             "preview": {
                 "cv": "# Candidate\n- Designed data systems.",
-                "cover_letter": "Dear team\n- Designed data systems.",
+                "cover_letter": "Dear team\n\nI designed data systems for regulated teams.",
             },
             "artifacts": artifacts,
+            "cover_letter": {
+                "mode": "AI_WRITTEN",
+                "reason": None,
+                "sentences": [
+                    {
+                        "text": "I designed data systems for regulated teams.",
+                        "evidence": [
+                            {
+                                "id": "fact-data",
+                                "label": "data architecture",
+                                "statement": "Designed data systems.",
+                            }
+                        ],
+                        "requirement_keys": ["R-001"],
+                    }
+                ],
+            },
+            "summary": {
+                "mode": "DETERMINISTIC",
+                "reason": "The AI-written summary was not used because it failed validation.",
+                "sentences": [],
+            },
         }
     if "/documents/" in path:
         _, _, item_type, format_name = path.rsplit("/", 3)

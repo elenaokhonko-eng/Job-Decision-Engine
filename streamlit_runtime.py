@@ -3,6 +3,7 @@
 import json
 import ipaddress
 import os
+import subprocess
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -148,3 +149,39 @@ def ensure_hosted_api_ready(environment=None, opener=None):
             f"Hosted Streamlit startup failed: authenticated API health check could not reach {base}/api/v2/health: {error}"
         ) from error
     return True
+
+
+def code_version(environment=None, run=None, repo_dir=None):
+    """Branch and short commit of the running code, for the sidebar, so a tester sees what they are testing.
+
+    Uses JDE_CODE_VERSION or the Render deploy variables when set, otherwise asks git in the app's
+    folder. Never raises: an unknown version must not stop the app from starting.
+    """
+    env = os.environ if environment is None else environment
+    if env.get("JDE_CODE_VERSION"):
+        return env["JDE_CODE_VERSION"]
+    if env.get("RENDER_GIT_COMMIT"):
+        branch = env.get("RENDER_GIT_BRANCH") or "unknown branch"
+        return f"{branch} @ {env['RENDER_GIT_COMMIT'][:7]}"
+    run_command = run or subprocess.run
+    folder = repo_dir or os.path.dirname(os.path.abspath(__file__))
+
+    def git(*args):
+        result = run_command(
+            ["git", *args],
+            cwd=folder,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    try:
+        branch = git("rev-parse", "--abbrev-ref", "HEAD")
+        commit = git("rev-parse", "--short", "HEAD")
+        dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    label = "detached HEAD" if branch == "HEAD" else branch
+    return f"{label} @ {commit}{' + local changes' if dirty else ''}"

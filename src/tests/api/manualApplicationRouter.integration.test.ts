@@ -15,6 +15,7 @@ import {
   loadManualProfileEvidence,
   manualQuotedRequirementMode,
 } from "../../api/v2/manualApplicationRouter.js";
+import type { CoverLetterWriter, CoverLetterWriterInput, SummaryWriter } from "../../documents/manualCoverLetter.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { importLoadedProfile, type ProfileImportSummary } from "../../profile/importer.js";
@@ -27,7 +28,14 @@ import { resetManualDocuments } from "../../../scripts/reset_manual_documents.js
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
 const routerPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../api/v2/manualApplicationRouter.ts");
-const MODEL_KEY_ENV = ["GEMINI_API_KEY", "GEMINI_FLASH_API_KEY", "OPENAI_API_KEY", "REQUIREMENTS_ENABLE_QUOTED"] as const;
+const MODEL_KEY_ENV = ["GEMINI_API_KEY", "GEMINI_FLASH_API_KEY", "OPENAI_API_KEY", "REQUIREMENTS_ENABLE_QUOTED", "MANUAL_COVER_LETTER_AI"] as const;
+const FULL_DESCRIPTION = [
+  "About the role: Example Bank is hiring a Derivatives Operating Model Lead in Singapore.",
+  "Responsibilities: design target operating models and lead front office transformation programmes.",
+  "Requirements: at least 8 years of experience in derivatives operations or investment technology.",
+  "You must have a bachelor's degree in finance, economics or computer science.",
+  "Strong Python skills are preferred.",
+];
 
 // loadCurrentInputs is private, so its job query is read from the router source.
 function currentInputsJobQuery(): string {
@@ -63,6 +71,7 @@ async function importFixtureProfile(pool: pg.Pool, context: WorkspaceContext): P
     write("facts.json", { facts: [
       fact("fact.current.platform", "eng.current", "Designs the current agentic platform architecture in Python.", true),
       fact("fact.past.derivatives", "eng.past", "Led the derivatives operating model programme for a $25B portfolio.", false),
+      fact("fact.past.degree", "eng.past", "Holds a bachelor's degree qualification in finance, completed in 2004.", false),
       contact("contact_full_name", "name", "Evidence Candidate"),
       contact("contact_phone", "phone", "+65 6000 0000"),
     ] });
@@ -132,6 +141,74 @@ let context: WorkspaceContext | undefined;
 let profile: ProfileImportSummary | undefined;
 let pairerImpl: EvidencePairer | undefined;
 const pairerCalls: EvidencePairingInput[] = [];
+let writerImpl: CoverLetterWriter | undefined;
+const writerCalls: CoverLetterWriterInput[] = [];
+let summaryImpl: SummaryWriter | undefined;
+const summaryCalls: CoverLetterWriterInput[] = [];
+
+async function withModelEnv<T>(env: Partial<Record<(typeof MODEL_KEY_ENV)[number], string>>, run: () => Promise<T>): Promise<T> {
+  const saved = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
+  for (const key of MODEL_KEY_ENV) delete process.env[key];
+  Object.assign(process.env, env);
+  try {
+    return await run();
+  } finally {
+    for (const key of MODEL_KEY_ENV) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+}
+
+async function post(route: string, body: object, expectedStatus = 200): Promise<Record<string, any>> {
+  const response = await fetch(`${baseUrl}${route}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  if (!text.startsWith("{")) throw new Error(`${route} -> ${response.status}: ${text.slice(0, 300)}`);
+  const json = JSON.parse(text) as Record<string, any>;
+  expect(response.status, JSON.stringify(json)).toBe(expectedStatus);
+  return json;
+}
+
+function posting(url: string, description: string[], title = "Derivatives Operating Model Lead") {
+  if (!profile) throw new Error("The manual router fixture profile is not imported.");
+  return {
+    schema_version: "manual_application_v1",
+    candidate_profile_id: profile.candidateProfileId,
+    source_kind: "PASTED",
+    title,
+    company: "Example Bank",
+    url,
+    location: "Singapore",
+    description: description.join("\n"),
+  };
+}
+
+async function compareApproveGenerate(url: string, title: string) {
+  const compared = await post("/compare", posting(url, FULL_DESCRIPTION, title));
+  const approved = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint });
+  const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+  return { compared, approved, generated };
+}
+
+async function documentXml(draftId: string, type: "cv" | "cover_letter"): Promise<string | undefined> {
+  const download = await fetch(`${baseUrl}/${draftId}/documents/${type}/docx`);
+  expect(download.status).toBe(200);
+  const payload = await download.json() as { content_base64: string };
+  return (await JSZip.loadAsync(Buffer.from(payload.content_base64, "base64"))).file("word/document.xml")?.async("string");
+}
+
+async function letterRun(approvalId: string) {
+  if (!pool) throw new Error("The manual router test pool is not initialized.");
+  const run = await pool.query<{ id: string; generator_version: string; output_manifest: Record<string, any> }>(
+    `SELECT id,generator_version,output_manifest FROM manual_application_document_runs WHERE approval_id=$1 AND document_type='COVER_LETTER'`,
+    [approvalId]);
+  const claims = await pool.query<{ claim_text: string; evidence_ids: string[]; requirement_keys: string[] }>(
+    `SELECT claim_text,evidence_ids,requirement_keys FROM manual_application_document_claims WHERE manual_document_run_id=$1`,
+    [run.rows[0].id]);
+  return { ...run.rows[0], claims: claims.rows };
+}
 
 describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
   beforeAll(async () => {
@@ -156,6 +233,16 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
         pairerCalls.push(input);
         if (!pairerImpl) throw new Error("No evidence pairer is configured for this test.");
         return pairerImpl(input);
+      },
+      summaryWriter: async (input) => {
+        summaryCalls.push(input);
+        if (!summaryImpl) throw new Error("No summary writer is configured for this test.");
+        return summaryImpl(input);
+      },
+      coverLetterWriter: async (input) => {
+        writerCalls.push(input);
+        if (!writerImpl) throw new Error("No cover letter writer is configured for this test.");
+        return writerImpl(input);
       },
     }));
     server = app.listen(0);
@@ -196,37 +283,13 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
   });
 
   it("goes from a pasted job description to a tailored CV DOCX, warning when AI extraction did not run", async () => {
-    if (!profile) throw new Error("The manual router fixture profile is not imported.");
-    const candidateProfileId = profile.candidateProfileId;
-    const savedEnv = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
-    for (const key of MODEL_KEY_ENV) delete process.env[key];
-    try {
+    await withModelEnv({}, async () => {
       process.env.OPENAI_API_KEY = "configured-for-mode-check";
       expect(manualQuotedRequirementMode()).toBe("with_quoted");
       process.env.REQUIREMENTS_ENABLE_QUOTED = "false";
       expect(manualQuotedRequirementMode()).toBe("deterministic_only");
       for (const key of MODEL_KEY_ENV) delete process.env[key];
       expect(manualQuotedRequirementMode()).toBe("deterministic_only");
-      const post = async (route: string, body: object, expectedStatus = 200) => {
-        const response = await fetch(`${baseUrl}${route}`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-        });
-        const text = await response.text();
-        if (!text.startsWith("{")) throw new Error(`${route} -> ${response.status}: ${text.slice(0, 300)}`);
-        const json = JSON.parse(text) as Record<string, any>;
-        expect(response.status, JSON.stringify(json)).toBe(expectedStatus);
-        return json;
-      };
-      const posting = (url: string, description: string[]) => ({
-        schema_version: "manual_application_v1",
-        candidate_profile_id: candidateProfileId,
-        source_kind: "PASTED",
-        title: "Derivatives Operating Model Lead",
-        company: "Example Bank",
-        url,
-        location: "Singapore",
-        description: description.join("\n"),
-      });
 
       // A description without recognisable sections is refused with guidance, not a 500.
       const thin = await post("/compare", posting("https://careers.example.test/thin-posting", [
@@ -236,38 +299,126 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       expect(thin.code).toBe("DESCRIPTION_INSUFFICIENT");
       expect(thin.message).toContain("responsibilities");
 
-      const compared = await post("/compare", posting("https://careers.example.test/derivatives-lead", [
-        "About the role: Example Bank is hiring a Derivatives Operating Model Lead in Singapore.",
-        "Responsibilities: design target operating models and lead front office transformation programmes.",
-        "Requirements: at least 8 years of experience in derivatives operations or investment technology.",
-        "You must have a bachelor's degree in finance, economics or computer science.",
-        "Strong Python skills are preferred.",
-      ]));
+      const { compared, generated } = await compareApproveGenerate("https://careers.example.test/derivatives-lead", "Derivatives Operating Model Lead");
       expect(compared.document_contact_ready).toBe(true);
       expect(compared.comparison.suitability_warnings.join(" ")).toContain("AI requirement extraction did not run");
-
-      const approved = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint });
-      const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
       expect(generated.preview.cv).toContain("### Past Program Lead at Example Org | Mar 2015 – Jun 2019");
       expect(generated.preview.cv).toContain("Led the derivatives operating model programme for a $25B portfolio.");
+      // Without a model key the letter is assembled from statements, and the response says so.
+      expect(generated.cover_letter).toMatchObject({ mode: "DETERMINISTIC" });
+      expect(generated.cover_letter.reason).toContain("did not run");
+      expect(writerCalls).toHaveLength(0);
 
-      const download = await fetch(`${baseUrl}/${compared.draft_id}/documents/cv/docx`);
-      expect(download.status).toBe(200);
-      const payload = await download.json() as { content_base64: string };
-      const documentXml = await (await JSZip.loadAsync(Buffer.from(payload.content_base64, "base64")))
-        .file("word/document.xml")?.async("string");
-      expect(documentXml).toContain("Past Program Lead at Example Org | Mar 2015 – Jun 2019");
+      const cvXml = await documentXml(compared.draft_id, "cv");
+      expect(cvXml).toContain("Past Program Lead at Example Org | Mar 2015 – Jun 2019");
       // Each requirement the CV pairs with evidence is written in the job's own words.
       const matched = (compared.comparison.rows as Array<{ requirement: string; evidence: unknown[] }>).filter((row) => row.evidence.length > 0);
+      expect(matched.length).toBeGreaterThan(0);
       for (const row of matched.slice(0, 8)) {
-        expect(documentXml).toContain(row.requirement.trim().replace(/[.;:]+$/, "").replace(/&/g, "&amp;").replace(/'/g, "&apos;"));
+        expect(cvXml).toContain(row.requirement.trim().replace(/[.;:]+$/, "").replace(/&/g, "&amp;").replace(/'/g, "&apos;"));
       }
-    } finally {
-      for (const key of MODEL_KEY_ENV) {
-        if (savedEnv[key] === undefined) delete process.env[key];
-        else process.env[key] = savedEnv[key];
+    });
+  });
+
+  it("uses an AI-written summary and cover letter whose every sentence cites approved evidence, and stores them for re-download", async () => {
+    await withModelEnv({ OPENAI_API_KEY: "configured-for-mode-check", REQUIREMENTS_ENABLE_QUOTED: "false" }, async () => {
+      writerCalls.length = 0;
+      summaryCalls.length = 0;
+      summaryImpl = async (input) => {
+        const fact = input.allowedEvidence.find((item) => item.statement.includes("degree qualification"));
+        const derivatives = input.allowedEvidence.find((item) => item.statement.includes("$25B"));
+        if (!fact) throw new Error("The degree fact was not offered to the summary writer.");
+        return {
+          provider: "test", model: "fixture-summary", attempts: 1, fallbackUsed: false,
+          sentences: [
+            { text: "Finance-trained programme lead with a bachelor's degree qualification in finance.", evidence_ids: [fact.id], requirement_keys: [] },
+            { text: "Brings operating model design experience to derivatives work.", evidence_ids: [derivatives?.id ?? fact.id], requirement_keys: [] },
+            { text: "Grounds delivery in documented finance training completed in 2004.", evidence_ids: [fact.id], requirement_keys: [] },
+          ],
+        };
+      };
+      writerImpl = async (input) => {
+        const fact = input.allowedEvidence.find((item) => item.statement.includes("degree qualification"));
+        const pair = input.pairs.find((candidate) => candidate.evidence.some((item) => item.id === fact?.id));
+        if (!fact || !pair) throw new Error("The degree fact was not offered to the writer as an approved pair.");
+        return {
+          provider: "test", model: "fixture-writer", attempts: 1, fallbackUsed: false,
+          paragraphs: [
+            [{ text: "I hold a bachelor's degree qualification in finance, completed in 2004.", evidence_ids: [fact.id], requirement_keys: [pair.requirement_key] }],
+            [{ text: "That finance grounding underpins the operating model work this role describes.", evidence_ids: [fact.id], requirement_keys: [] }],
+          ],
+        };
+      };
+      try {
+        const { compared, approved, generated } = await compareApproveGenerate("https://careers.example.test/derivatives-lead-ai", "Derivatives Operating Model Lead AI");
+        expect(writerCalls).toHaveLength(1);
+        expect(writerCalls[0].jobDescriptionExcerpt).toContain("Responsibilities: design target operating models");
+        expect(writerCalls[0].pairs.length).toBeGreaterThan(0);
+
+        // The summary is one written paragraph, each sentence traced to approved evidence.
+        expect(summaryCalls).toHaveLength(1);
+        expect(generated.summary).toMatchObject({ mode: "AI_WRITTEN", reason: null });
+        expect(generated.summary.sentences).toHaveLength(3);
+        expect(generated.preview.cv).toContain("## Summary\nFinance-trained programme lead with a bachelor's degree qualification in finance. Brings operating model");
+        const cvRun = await pool!.query<{ generator_version: string; output_manifest: Record<string, any> }>(
+          `SELECT generator_version, output_manifest FROM manual_application_document_runs WHERE approval_id=$1 AND document_type='CV'`, [approved.approval_id]);
+        expect(cvRun.rows[0]).toMatchObject({ generator_version: "manual_summary_ai_v1", output_manifest: { summary_mode: "AI_WRITTEN", summary_model: "fixture-summary" } });
+
+        expect(generated.cover_letter).toMatchObject({ mode: "AI_WRITTEN", reason: null });
+        expect(generated.cover_letter.sentences[0].evidence[0].statement).toBe("Holds a bachelor's degree qualification in finance, completed in 2004.");
+        expect(generated.preview.cover_letter).toContain("Dear Example Bank Hiring Team,\n\nI hold a bachelor's degree qualification in finance, completed in 2004.");
+
+        const evidenceIds = new Set((compared.comparison.evidence as Array<{ id: string }>).map((item) => item.id));
+        const run = await letterRun(approved.approval_id);
+        expect(run.generator_version).toBe("manual_cover_letter_ai_v1");
+        expect(run.output_manifest).toMatchObject({ cover_letter_mode: "AI_WRITTEN", factual_template: false, model: "fixture-writer" });
+        expect(run.claims.map((claim) => claim.claim_text).sort()).toEqual([
+          "I hold a bachelor's degree qualification in finance, completed in 2004.",
+          "That finance grounding underpins the operating model work this role describes.",
+        ]);
+        expect(run.claims.every((claim) => claim.evidence_ids.length > 0 && claim.evidence_ids.every((id) => evidenceIds.has(id)))).toBe(true);
+        expect(await documentXml(compared.draft_id, "cover_letter")).toContain("I hold a bachelor&apos;s degree qualification in finance, completed in 2004.");
+
+        // Asking again returns the stored letter without another model call.
+        const again = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+        expect(writerCalls).toHaveLength(1);
+        expect(summaryCalls).toHaveLength(1);
+        expect(again.preview.cover_letter).toBe(generated.preview.cover_letter);
+        expect(again.preview.cv).toBe(generated.preview.cv);
+        expect(again.cover_letter).toEqual(generated.cover_letter);
+        expect(again.summary).toEqual(generated.summary);
+      } finally {
+        writerImpl = undefined;
+        summaryImpl = undefined;
       }
-    }
+    });
+  });
+
+  it("falls back to the assembled letter, and records why, when a written sentence is not grounded", async () => {
+    await withModelEnv({ OPENAI_API_KEY: "configured-for-mode-check", REQUIREMENTS_ENABLE_QUOTED: "false" }, async () => {
+      writerImpl = async (input) => ({
+        provider: "test", model: "fixture-writer", attempts: 1, fallbackUsed: false,
+        paragraphs: [
+          [{ text: "I have 15 years of derivatives leadership.", evidence_ids: [input.allowedEvidence[0].id], requirement_keys: [] }],
+          [{ text: "I am a natural fit for this team.", evidence_ids: [input.allowedEvidence[0].id], requirement_keys: [] }],
+        ],
+      });
+      try {
+        const { approved, generated } = await compareApproveGenerate("https://careers.example.test/derivatives-lead-ungrounded", "Derivatives Operating Model Lead Ungrounded");
+        expect(generated.cover_letter.mode).toBe("DETERMINISTIC");
+        expect(generated.cover_letter.reason).toContain("numbers its cited evidence does not contain (15)");
+        // No summary writer is configured here: the summary falls back on its own, with its reason.
+        expect(generated.summary).toMatchObject({ mode: "DETERMINISTIC" });
+        expect(generated.summary.reason).toContain("No summary writer is configured");
+        expect(generated.preview.cover_letter).not.toContain("15 years");
+        expect(generated.artifacts).toHaveLength(4);
+        const run = await letterRun(approved.approval_id);
+        expect(run.generator_version).toBe("manual_preparation_v1");
+        expect(run.output_manifest.cover_letter_reason).toContain("(15)");
+      } finally {
+        writerImpl = undefined;
+      }
+    });
   });
 
   it("produces documents without placeholders or self-ratings, with the major past role ahead of minor ventures", async () => {

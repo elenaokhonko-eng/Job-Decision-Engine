@@ -203,6 +203,46 @@ def _render_fit_check(fit):
     return False
 
 
+WRITTEN_SECTION_TEXT = {
+    "summary": ("CV summary", "summary", "The summary was built from your statements."),
+    "cover_letter": (
+        "cover letter",
+        "letter",
+        "The letter was assembled from your statements.",
+    ),
+}
+
+
+def _render_written_review(review, section):
+    """Shows how a written section was produced and the approved evidence behind each sentence.
+
+    Model text and profile statements are untrusted, so they are shown with st.text, not markdown.
+    """
+    if not review:
+        return
+    name, short_name, fallback = WRITTEN_SECTION_TEXT[section]
+    if review.get("mode") == "AI_WRITTEN":
+        st.info(
+            f"The {name} was written by AI from your approved requirement-to-evidence pairs "
+            "and the job description. Check each sentence against its source before downloading."
+        )
+    else:
+        st.warning(f"AI {name} not used. {fallback}")
+        if review.get("reason"):
+            st.text(review["reason"])
+    sentences = review.get("sentences") or []
+    if not sentences:
+        return
+    with st.expander(
+        f"Sources for each {short_name} sentence",
+        expanded=review.get("mode") == "AI_WRITTEN",
+    ):
+        for index, sentence in enumerate(sentences, start=1):
+            st.text(f"{index}. {sentence.get('text', '')}")
+            for item in sentence.get("evidence") or []:
+                st.text(f"    Source: {item.get('statement', '')}")
+
+
 def render_manual_application_flow(api_request):
     st.subheader("Prepare documents for one manually selected role")
     st.caption(
@@ -584,6 +624,8 @@ def render_manual_application_flow(api_request):
             disabled=True,
             key="manual_cover_letter_preview",
         )
+    _render_written_review(generated.get("summary"), "summary")
+    _render_written_review(generated.get("cover_letter"), "cover_letter")
     st.caption(
         "Review both previews and download only the private artifacts you intend to use. No application status is recorded."
     )
