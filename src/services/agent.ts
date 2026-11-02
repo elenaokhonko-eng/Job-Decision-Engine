@@ -479,6 +479,29 @@ export async function runAgentWithFallback<T>(
   throw new Error(`All model providers failed: ${JSON.stringify(errors)}`);
 }
 
+/**
+ * The response schema as sent to Gemini. Gemini rejects schemas whose constraint state is too
+ * large with 400 INVALID_ARGUMENT; an array cap such as maxItems: 25 over items with enum fields is
+ * enough to trigger it. Array caps are therefore left out of the request; callers still enforce
+ * them when they validate the response locally.
+ */
+export function geminiResponseSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(geminiResponseSchema);
+  if (!schema || typeof schema !== "object") return schema;
+  return Object.fromEntries(
+    Object.entries(schema as Record<string, unknown>)
+      .filter(([key]) => key !== "maxItems")
+      .map(([key, value]) => {
+        if (key === "enum") return [key, value];
+        // Keys under "properties" are field names, so only their schemas are rewritten.
+        if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+          return [key, Object.fromEntries(Object.entries(value).map(([name, child]) => [name, geminiResponseSchema(child)]))];
+        }
+        return [key, geminiResponseSchema(value)];
+      })
+  );
+}
+
 async function tryGemini(geminiKey: string, options: any): Promise<string> {
   const ai = getGeminiClient();
   const maxRetries = modelRequestMaxRetries();
@@ -498,7 +521,7 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
           abortSignal: AbortSignal.timeout(timeoutMs),
           httpOptions: { timeout: timeoutMs },
           responseMimeType: options.responseMimeType as any,
-          responseSchema: options.responseSchema,
+          responseSchema: options.responseSchema ? geminiResponseSchema(options.responseSchema) as any : undefined,
           maxOutputTokens: options.maxOutputTokens ?? MODEL_MAX_OUTPUT_TOKENS,
           systemInstruction: options.systemInstruction
         }
