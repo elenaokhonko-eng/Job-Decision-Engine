@@ -263,10 +263,10 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     // No model key: requirement extraction is deterministic only, as in the failed baseline run.
     for (const key of MODEL_KEY_ENV) delete process.env[key];
     try {
-      const post = async (route: string, body: object) => {
+      const post = async (route: string, body: object, expectedStatus = 200) => {
         const response = await fetch(`${baseUrl}${route}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const json = await response.json() as Record<string, any>;
-        expect(response.status, JSON.stringify(json)).toBe(200);
+        expect(response.status, JSON.stringify(json)).toBe(expectedStatus);
         return json;
       };
       const compared = await post("/compare", {
@@ -280,15 +280,31 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       expect(requirementTexts.join(" ")).not.toMatch(/Role specifies|Role includes a target|Role requires/);
       expect(JSON.stringify(compared.comparison.evidence)).not.toMatch(/Self-rating|not a target/i);
 
+      // The review screen gets every role with its default layout; courses are not offered as roles.
+      const plan = compared.role_plan as Array<{ engagement_id: string; label: string; kind: string; default_layout: string }>;
+      const role = (label: string) => plan.find((item) => item.label === label);
+      expect(role("Program Lead at Insurer Investment Management")).toMatchObject({ kind: "EMPLOYMENT", default_layout: "FULL" });
+      expect(role("Founder at Neurodiversity Research Lab")).toMatchObject({ kind: "VENTURE", default_layout: "ONE_LINE" });
+      expect(role("Coordinator at Trading House")?.default_layout).toBe("SUMMARISED");
+      expect(plan.some((item) => item.label.includes("Certification Sprint"))).toBe(false);
+
       const approved = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint });
-      const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+      const unknownRole = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id, role_layout: { "not-a-role": "HIDDEN" } }, 400);
+      expect(JSON.stringify(unknownRole)).toContain("not in the approved comparison");
+      const generated = await post(`/${compared.draft_id}/documents`, {
+        approval_id: approved.approval_id,
+        role_layout: { [role("Founder at Neurodiversity Research Lab")!.engagement_id]: "HIDDEN", [role("Founder in Residence at City University")!.engagement_id]: "HIDDEN" },
+      });
       const cv = generated.preview.cv as string;
       for (const text of [cv, generated.preview.cover_letter as string]) {
         expect(text).not.toMatch(/Role specifies|Role includes a target|Self-rating|\/5\b|not a target/i);
       }
       const major = cv.indexOf("### Program Lead at Insurer Investment Management | Apr 2023 – Apr 2025");
       expect(major).toBeGreaterThan(-1);
-      expect(cv.indexOf("Neurodiversity Research Lab")).toBeGreaterThan(major);
+      expect(cv.indexOf("### Founder and AI Architect at Venture AI")).toBeGreaterThan(major);
+      // The candidate hid these two ventures.
+      expect(cv).not.toContain("Neurodiversity Research Lab");
+      expect(cv).not.toContain("City University");
       expect(cv).not.toContain("Certification Sprint");
       const summary = /## Summary\n([^\n]+)\n\n/.exec(cv);
       expect(summary?.[1]).toBeTruthy();

@@ -9,6 +9,7 @@ import { checkModelRegistryPreflight } from "../../services/agent.js";
 import { loadProfileContactSnapshot, type DocumentContactInfo } from "../../documents/contactInfo.js";
 import {
   buildControlledDocuments,
+  planRoles,
   buildManualComparison,
   fingerprintManualComparison,
   MANUAL_COMPARATOR_VERSION,
@@ -873,6 +874,7 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
       document_contact_ready: contactReady,
       missing_contact_fields: missingContactFields,
       requirements_extracted: requirementSummary.processed === 1,
+      role_plan: planRoles(comparison),
     });
     res.json(response);
   }));
@@ -1022,7 +1024,13 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
     if (!fullName || !phone) {
       throw new ManualFlowError(409, "APPROVAL_STALE", "The current private contact graph must contain a candidate name and phone before documents can be generated.");
     }
-    const docs = buildControlledDocuments(selected.comparison, { ...contact, full_name: fullName, phone });
+    const roleLayout = request.data.role_layout ?? {};
+    const plannedRoles = new Set(planRoles(selected.comparison).map((plan) => plan.engagement_id));
+    const unknownRoles = Object.keys(roleLayout).filter((id) => !plannedRoles.has(id));
+    if (unknownRoles.length > 0) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", `Role choices name roles that are not in the approved comparison: ${unknownRoles.join(", ")}.`);
+    }
+    const docs = buildControlledDocuments(selected.comparison, { ...contact, full_name: fullName, phone }, { roleLayout });
     const cvDocx = await renderControlledDocx(docs.cv);
     const cvPdf = renderControlledPdf(docs.cv);
     const letterDocx = await renderControlledDocx(docs.coverLetter);
@@ -1079,7 +1087,7 @@ export function createManualApplicationRouter({ pool, resolveContext }: ManualAp
             locked.approval.context_fingerprint, currentFingerprint, type,
             JSON.stringify({ manual_preparation: true, draft_id: draftId, approval_id: approvalId,
               requirement_set_id: locked.approval.requirement_set_id, comparison_fingerprint: currentFingerprint,
-              factual_template: true, automatic_readiness_mutated: false })]);
+              factual_template: true, automatic_readiness_mutated: false, role_layout: roleLayout })]);
         runIds[type] = run.rows[0].id;
         for (const claim of claimSet) {
           await client.query(

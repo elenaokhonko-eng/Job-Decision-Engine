@@ -284,6 +284,67 @@ function credentialType(item: ManualEvidence): string {
   return item.credential_type ?? /, (certification|degree|course|license) issued by/i.exec(item.statement)?.[1].toUpperCase() ?? "CERTIFICATION";
 }
 
+/** Approved evidence a document may use: no internal assessments, and no courses or their facts. */
+function documentEvidence(comparison: Record<string, any>): ManualEvidence[] {
+  const approved = (Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [])
+    .filter((item) => !isInternalAssessmentStatement(item.statement));
+  // Courses are not jobs: neither they nor their facts are offered as evidence of meeting a job requirement.
+  const courseIds = new Set(approved.filter((item) => item.evidence_type === "ENGAGEMENT" && engagementKind(item) === "COURSE").map((item) => item.id));
+  return approved.filter((item) => !courseIds.has(item.id) && !(item.engagement_id && courseIds.has(item.engagement_id)));
+}
+
+/** Relevance of each evidence item = summed importance of the requirements it supports. */
+function evidenceRelevance(rows: ComparisonRow[]): Map<string, number> {
+  const relevance = new Map<string, number>();
+  for (const row of rows) {
+    for (const { id } of row.evidence ?? []) relevance.set(id, (relevance.get(id) ?? 0) + (IMPORTANCE_WEIGHT[row.importance] ?? 1));
+  }
+  return relevance;
+}
+
+/** A role the CV can show, with the layout it gets unless the candidate chooses otherwise. */
+export interface RolePlan {
+  engagement_id: string;
+  label: string;
+  period: string | null;
+  kind: "EMPLOYMENT" | "VENTURE";
+  default_layout: RoleLayout | "SUMMARISED";
+}
+
+/**
+ * Default role layout, newest first: employment from the last 10 years gets a full entry; ventures
+ * only when relevant to this job (at most two); older employment becomes one line, and anything
+ * over 20 years old is summarised in one shared line. Courses are left out.
+ */
+export function planRoles(comparison: Record<string, any>, options: Pick<ControlledDocumentOptions, "asOf"> = {}): RolePlan[] {
+  const asOf = options.asOf ?? new Date();
+  const evidence = documentEvidence(comparison);
+  const relevance = evidenceRelevance(Array.isArray(comparison.rows) ? comparison.rows as ComparisonRow[] : []);
+  const score = (id: string) => relevance.get(id) ?? 0;
+  const engagements = evidence.filter((item) => item.evidence_type === "ENGAGEMENT");
+  const roleScore = (engagement: ManualEvidence) => score(engagement.id) + evidence
+    .filter((item) => item.evidence_type === "FACT" && item.engagement_id === engagement.id)
+    .reduce((total, item) => total + score(item.id), 0);
+  const fullEntryCutoff = yearsBefore(asOf, FULL_ENTRY_YEARS);
+  const oneLineCutoff = yearsBefore(asOf, ONE_LINE_YEARS);
+  const relevantVentures = new Set(engagements
+    .filter((item) => engagementKind(item) === "VENTURE" && roleScore(item) > 0)
+    .sort((left, right) => roleScore(right) - roleScore(left))
+    .slice(0, MAX_FULL_VENTURES)
+    .map((item) => item.id));
+  return [...engagements]
+    .sort((left, right) => (engagementDates(right).end ?? "9999").localeCompare(engagementDates(left).end ?? "9999")
+      || (engagementDates(right).start ?? "").localeCompare(engagementDates(left).start ?? ""))
+    .map((engagement) => {
+      const kind = engagementKind(engagement) as "EMPLOYMENT" | "VENTURE";
+      const { start, end } = engagementDates(engagement);
+      const defaultLayout: RolePlan["default_layout"] = kind === "VENTURE"
+        ? (relevantVentures.has(engagement.id) ? "FULL" : "ONE_LINE")
+        : !end || end >= fullEntryCutoff ? "FULL" : start && start >= oneLineCutoff ? "ONE_LINE" : "SUMMARISED";
+      return { engagement_id: engagement.id, label: engagement.label, period: engagementPeriod(engagement.statement), kind, default_layout: defaultLayout };
+    });
+}
+
 /**
  * Builds a CV and cover letter from the approved comparison only. Every line is a verbatim
  * profile statement or the job's own requirement text, so no claim exists outside the evidence.
@@ -295,23 +356,14 @@ export function buildControlledDocuments(
 ): ControlledDocuments {
   if (!contact.phone?.trim()) throw new Error("The active private contact graph has no current phone fact; document preparation is blocked.");
   const asOf = options.asOf ?? new Date();
-  const approvedEvidence = (Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [])
-    .filter((item) => !isInternalAssessmentStatement(item.statement));
-  // Courses are not jobs: neither they nor their facts are offered as evidence of meeting a job requirement.
-  const courseIds = new Set(approvedEvidence.filter((item) => item.evidence_type === "ENGAGEMENT" && engagementKind(item) === "COURSE").map((item) => item.id));
-  const evidence = approvedEvidence.filter((item) => !courseIds.has(item.id) && !(item.engagement_id && courseIds.has(item.engagement_id)));
+  const evidence = documentEvidence(comparison);
   const rows = Array.isArray(comparison.rows) ? comparison.rows as ComparisonRow[] : [];
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
   const weight = (row: ComparisonRow) => IMPORTANCE_WEIGHT[row.importance] ?? 1;
-
-  // Relevance of each evidence item = summed importance of the requirements it supports.
-  const relevance = new Map<string, number>();
+  const relevance = evidenceRelevance(rows);
   const requirementKeysById = new Map<string, string[]>();
   for (const row of rows) {
-    for (const { id } of row.evidence ?? []) {
-      relevance.set(id, (relevance.get(id) ?? 0) + weight(row));
-      requirementKeysById.set(id, [...(requirementKeysById.get(id) ?? []), row.requirement_key]);
-    }
+    for (const { id } of row.evidence ?? []) requirementKeysById.set(id, [...(requirementKeysById.get(id) ?? []), row.requirement_key]);
   }
   const score = (id: string) => relevance.get(id) ?? 0;
   const claims: Claim[] = [];
@@ -361,27 +413,13 @@ export function buildControlledDocuments(
   const summaryStatements = [...new Set([...overviewFacts, ...relevantProfileFacts, ...tenureFacts])].slice(0, MAX_SUMMARY_STATEMENTS);
   const summaryParagraph = summaryStatements.map((item) => claim("Summary", item.statement.trim(), [item.id])).join(" ");
 
-  // Roles: employment from the last 10 years gets a full entry; ventures only when relevant to this
-  // job; older employment becomes one line, and anything over 20 years old is summarised in one line.
-  const engagements = evidence.filter((item) => item.evidence_type === "ENGAGEMENT" && engagementKind(item) !== "COURSE");
+  // Roles: the default layout comes from planRoles; the candidate's choice overrides it.
+  const plans = new Map(planRoles(comparison, { asOf }).map((plan) => [plan.engagement_id, plan]));
+  const engagements = evidence.filter((item) => item.evidence_type === "ENGAGEMENT" && plans.has(item.id));
   const factsFor = (engagement: ManualEvidence) => evidence
     .map((item, order) => ({ item, order }))
     .filter(({ item }) => item.evidence_type === "FACT" && item.engagement_id === engagement.id && !tenureIds.has(item.id));
-  const roleScore = (engagement: ManualEvidence) =>
-    score(engagement.id) + factsFor(engagement).reduce((total, { item }) => total + score(item.id), 0);
-  const fullEntryCutoff = yearsBefore(asOf, FULL_ENTRY_YEARS);
-  const oneLineCutoff = yearsBefore(asOf, ONE_LINE_YEARS);
-  const relevantVentures = new Set(engagements
-    .filter((item) => engagementKind(item) === "VENTURE" && roleScore(item) > 0)
-    .sort((left, right) => roleScore(right) - roleScore(left))
-    .slice(0, MAX_FULL_VENTURES)
-    .map((item) => item.id));
-  const defaultLayout = (engagement: ManualEvidence): RoleLayout | "SUMMARISED" => {
-    const { start, end } = engagementDates(engagement);
-    if (engagementKind(engagement) === "VENTURE") return relevantVentures.has(engagement.id) ? "FULL" : "ONE_LINE";
-    if (!end || end >= fullEntryCutoff) return "FULL";
-    return start && start >= oneLineCutoff ? "ONE_LINE" : "SUMMARISED";
-  };
+  const defaultLayout = (engagement: ManualEvidence): RoleLayout | "SUMMARISED" => plans.get(engagement.id)?.default_layout ?? "ONE_LINE";
 
   const sections: Record<"EMPLOYMENT" | "VENTURE", string[]> = { EMPLOYMENT: [], VENTURE: [] };
   const ventureOneLiners: ManualEvidence[] = [];

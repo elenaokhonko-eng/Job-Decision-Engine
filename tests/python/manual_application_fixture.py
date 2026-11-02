@@ -148,6 +148,22 @@ def _comparison_response(source_content_status="COMPLETE"):
         "document_contact_ready": True,
         "missing_contact_fields": [],
         "requirements_extracted": True,
+        "role_plan": [
+            {
+                "engagement_id": "eng-major",
+                "label": "Program Lead at Example Investment Management",
+                "period": "Apr 2023 – Apr 2025",
+                "kind": "EMPLOYMENT",
+                "default_layout": "FULL",
+            },
+            {
+                "engagement_id": "eng-lab",
+                "label": "Founder at Example Lab",
+                "period": "May 2026 – Present",
+                "kind": "VENTURE",
+                "default_layout": "ONE_LINE",
+            },
+        ],
     }
 
 

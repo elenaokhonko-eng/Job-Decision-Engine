@@ -516,6 +516,56 @@
         },
         "requirements_extracted": {
           "type": "boolean"
+        },
+        "role_plan": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "engagement_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "period": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "EMPLOYMENT",
+                  "VENTURE"
+                ]
+              },
+              "default_layout": {
+                "type": "string",
+                "enum": [
+                  "FULL",
+                  "ONE_LINE",
+                  "SUMMARISED"
+                ]
+              }
+            },
+            "required": [
+              "engagement_id",
+              "label",
+              "period",
+              "kind",
+              "default_layout"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

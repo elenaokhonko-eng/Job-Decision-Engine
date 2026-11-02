@@ -135,6 +135,46 @@ def _download_bytes(api_request, draft_id, artifact):
     return content, filename
 
 
+ROLE_LAYOUT_LABELS = {
+    "FULL": "Full entry",
+    "ONE_LINE": "One line",
+    "SUMMARISED": "In the earlier-roles line",
+    "HIDDEN": "Hide",
+}
+
+
+def _render_role_choices(role_plan, fingerprint, locked=False):
+    """Lets the candidate choose how each role appears on the CV before generating.
+
+    Returns only the choices that differ from the default, keyed by engagement id.
+    """
+    if not role_plan:
+        return {}
+    choices = {}
+    with st.expander("Choose which roles appear on the CV", expanded=not locked):
+        if locked:
+            st.caption(
+                "Documents for this approval are generated. To change the roles, compare the posting again."
+            )
+        for role in role_plan:
+            default = role.get("default_layout", "ONE_LINE")
+            options = ["FULL", "ONE_LINE", "HIDDEN"]
+            if default == "SUMMARISED":
+                options = ["SUMMARISED", *options]
+            period = f" ({role['period']})" if role.get("period") else ""
+            chosen = st.selectbox(
+                f"{role.get('label', '')}{period}",
+                options,
+                index=options.index(default),
+                format_func=ROLE_LAYOUT_LABELS.get,
+                key=f"manual_role_{fingerprint}_{role.get('engagement_id')}",
+                disabled=locked,
+            )
+            if chosen != default:
+                choices[role["engagement_id"]] = chosen
+    return choices
+
+
 def render_manual_application_flow(api_request):
     st.subheader("Prepare documents for one manually selected role")
     st.caption(
@@ -458,14 +498,22 @@ def render_manual_application_flow(api_request):
     approval = st.session_state.get("manual_approval")
     if not approval or not draft_id:
         return
+    role_layout = _render_role_choices(
+        comparison.get("role_plan") or [],
+        fingerprint,
+        locked=bool(st.session_state.get("manual_generated_documents")),
+    )
     if st.button(
         "Generate customised CV and cover letter", type="primary", key="manual_generate"
     ):
         try:
+            body = {"approval_id": approval.get("approval_id")}
+            if role_layout:
+                body["role_layout"] = role_layout
             result = api_request(
                 "POST",
                 f"/api/v2/application-drafts/{draft_id}/documents",
-                body={"approval_id": approval.get("approval_id")},
+                body=body,
                 timeout=120,
             )
             _validate_payload("ManualDocumentsResponse", result)

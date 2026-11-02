@@ -138,6 +138,17 @@ export const ManualComparisonSchema = z.object({
 }).strict();
 export type ManualComparison = z.infer<typeof ManualComparisonSchema>;
 
+export const ManualRoleLayoutSchema = z.enum(["FULL", "ONE_LINE", "HIDDEN"]);
+
+export const ManualRolePlanSchema = z.object({
+  engagement_id: z.string().min(1),
+  label: z.string().min(1),
+  period: z.string().min(1).nullable(),
+  kind: z.enum(["EMPLOYMENT", "VENTURE"]),
+  // SUMMARISED: older than 20 years, folded into one shared earlier-career line.
+  default_layout: z.enum(["FULL", "ONE_LINE", "SUMMARISED"]),
+}).strict();
+
 export const ManualCompareResponseSchema = z.object({
   schema_version: z.literal(MANUAL_APPLICATION_SCHEMA_VERSION),
   ok: z.literal(true),
@@ -154,6 +165,8 @@ export const ManualCompareResponseSchema = z.object({
   document_contact_ready: z.boolean(),
   missing_contact_fields: z.array(z.enum(["full_name", "phone"])),
   requirements_extracted: z.boolean(),
+  // The CV's roles, newest first, with the layout each gets unless the candidate chooses otherwise.
+  role_plan: z.array(ManualRolePlanSchema).optional(),
 }).strict();
 
 export const ManualPersistedDraftSchema = z.object({
@@ -228,7 +241,11 @@ export const ManualPersistedApprovalSchema = z.object({
   approved: z.literal(true),
 }).strict();
 
-export const ManualGenerateRequestSchema = z.object({ approval_id: Uuid }).strict();
+export const ManualGenerateRequestSchema = z.object({
+  approval_id: Uuid,
+  // The candidate's per-role choice, keyed by engagement id from role_plan; unlisted roles keep their default.
+  role_layout: z.record(z.string().min(1), ManualRoleLayoutSchema).optional(),
+}).strict();
 
 export const ManualArtifactSchema = z.object({
   type: z.enum(["CV", "COVER_LETTER"]),
