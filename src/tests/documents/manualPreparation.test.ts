@@ -135,7 +135,7 @@ describe("manual application preparation", () => {
         { id: "fact-aia-ifrs", evidence_type: "FACT", label: "aia.ifrs", statement: "Aligned investment operations with IFRS 17 accounting standards.", engagement_id: "eng-aia" },
         { id: "fact-aia-tom", evidence_type: "FACT", label: "aia.tom", statement: "Designed the derivatives operating model for a $25B portfolio.", engagement_id: "eng-aia" },
         { id: "fact-mdlz-sfa", evidence_type: "FACT", label: "mdlz.sfa", statement: "Led Salesforce CRM rollouts for 1,300 users across 16 markets.", engagement_id: "eng-mdlz" },
-        { id: "cred-cfa", evidence_type: "CREDENTIAL", label: "Passed Level I of the CFA Program", statement: "Passed Level I of the CFA Program, course issued by CFA Institute; status ACTIVE." },
+        { id: "cred-cfa", evidence_type: "CREDENTIAL", label: "Passed Level I of the CFA Program", statement: "Passed Level I of the CFA Program, course issued by CFA Institute; status ACTIVE.", always_include: true },
       ],
     };
     const comparison = buildManualComparison(tailored);

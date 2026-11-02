@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 import { Document, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
-import { assertNoInternalAssessmentText, isInternalAssessmentStatement } from "./manualDocumentPolicy.js";
+import { assertNoInternalAssessmentText, isInternalAssessmentStatement, isSelfDescriptionStatement } from "./manualDocumentPolicy.js";
 
-export const MANUAL_COMPARATOR_VERSION = "literal-overlap-v2";
+export const MANUAL_COMPARATOR_VERSION = "evidence-pairing-v3";
 
 export interface ManualRequirement {
   requirement_key: string;
@@ -48,6 +48,8 @@ export interface ManualComparisonInput {
   requirements: ManualRequirement[];
   evidence: ManualEvidence[];
   suitability_warnings: string[];
+  /** The stored model pairing for this job version, requirement set and profile version, if one completed. */
+  pairing?: ManualEvidencePairing | null;
 }
 
 export interface ManualApprovalIdentity {
@@ -97,14 +99,30 @@ const GENERIC = new Set([
   "management", "manage", "manag", "lead", "led",
 ]);
 const MIN_MATCHING_TERMS = 2;
-// At equal overlap a specific fact is better evidence than a whole role summary.
+// A word shared by more than this share of the profile's matchable evidence ("workflows",
+// "portfolio", "architecture" in a long career) says nothing about any one requirement.
+const MAX_DISTINCTIVE_DOCUMENT_SHARE = 0.05;
+const MIN_DISTINCTIVE_DOCUMENT_COUNT = 2;
+// At equal overlap a specific fact is better evidence than a credential.
 const EVIDENCE_TYPE_RANK: Record<ManualEvidence["evidence_type"], number> = { FACT: 0, CREDENTIAL: 1, ENGAGEMENT: 2 };
 // Facts that record work done; skill, domain and education statements describe the person instead.
 const EXPERIENCE_FACT_TYPES = new Set(["ACHIEVEMENT", "RESPONSIBILITY", "PROJECT", "PUBLICATION"]);
+const MODEL_PAIRING_METHOD = "model-judged pairing; advisory evidence only";
+const LEXICAL_PAIRING_METHOD = "distinctive-term overlap; potential evidence only";
 
-/** Work done counts as one extra shared word when ranking evidence, so it outranks skill and study statements. */
+/** Work done: the only kind of fact a document prints as a claim. */
 function isExperienceFact(evidence: ManualEvidence): boolean {
   return evidence.evidence_type === "FACT" && (evidence.fact_type === undefined || EXPERIENCE_FACT_TYPES.has(evidence.fact_type));
+}
+
+/**
+ * Evidence a requirement may be paired with: work-done facts and credentials, minus internal
+ * assessments and self-descriptions. Role summaries and skill statements are not printed as
+ * evidence, so they are not offered for pairing either.
+ */
+export function matchableEvidence(evidence: ManualEvidence[]): ManualEvidence[] {
+  return evidence.filter((item) => (isExperienceFact(item) || item.evidence_type === "CREDENTIAL")
+    && !isInternalAssessmentStatement(item.statement) && !(item.evidence_type === "FACT" && isSelfDescriptionStatement(item.statement)));
 }
 
 function stem(word: string): string {
@@ -124,35 +142,85 @@ function terms(value: string): Set<string> {
     .filter((part) => !GENERIC.has(part)));
 }
 
+/** A stored, validated model pairing for this comparison (see manualEvidencePairing.ts). */
+export interface ManualEvidencePairing {
+  pairs: Array<{ requirement_key: string; evidence_id: string; confidence: number; justification: string }>;
+}
+
+type RowEvidence = { id: string; type: ManualEvidence["evidence_type"]; label: string; statement: string; confidence?: number; justification?: string };
+
 /**
- * Pairs each requirement with up to three evidence items sharing at least two meaningful words with
- * it. One shared word such as "employment" or "technical" is not a match, so a requirement with
- * fewer than two meaningful words is left as a gap for the candidate to review.
+ * Without a model pairing: up to three items sharing at least two distinctive words with the
+ * requirement. Words common across the profile do not count, so a long career's recurring
+ * vocabulary cannot pair unrelated work.
+ */
+function lexicalPairs(requirementText: string, candidates: ManualEvidence[], evidenceTerms: Map<string, Set<string>>, distinctive: (term: string) => boolean): RowEvidence[] {
+  const requirementTerms = [...terms(requirementText)].filter(distinctive);
+  return candidates
+    .map((evidence) => ({ evidence, overlap: requirementTerms.filter((term) => evidenceTerms.get(evidence.id)?.has(term)) }))
+    .filter((entry) => entry.overlap.length >= MIN_MATCHING_TERMS)
+    .sort((left, right) => right.overlap.length - left.overlap.length
+      || EVIDENCE_TYPE_RANK[left.evidence.evidence_type] - EVIDENCE_TYPE_RANK[right.evidence.evidence_type]
+      || left.evidence.id.localeCompare(right.evidence.id))
+    .slice(0, 3)
+    .map(({ evidence }) => ({ id: evidence.id, type: evidence.evidence_type, label: evidence.label, statement: evidence.statement }));
+}
+
+/**
+ * Pairs each requirement with evidence: the stored model pairing when there is one, otherwise strict
+ * distinctive-word overlap. A requirement with no pair is a gap, never filled with the nearest
+ * words. Also summarises how many MUST requirements have evidence, as an advisory fit check.
  */
 export function buildManualComparison(input: ManualComparisonInput): Record<string, unknown> {
-  const evidenceTerms = new Map(input.evidence.map((evidence) => [evidence.id, terms(evidence.statement)]));
+  const candidates = matchableEvidence(input.evidence);
+  const candidateById = new Map(candidates.map((item) => [item.id, item]));
+  const evidenceTerms = new Map(candidates.map((evidence) => [evidence.id, terms(evidence.statement)]));
+  const documentFrequency = new Map<string, number>();
+  for (const termSet of evidenceTerms.values()) for (const term of termSet) documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
+  const maxFrequency = Math.max(MIN_DISTINCTIVE_DOCUMENT_COUNT, Math.floor(candidates.length * MAX_DISTINCTIVE_DOCUMENT_SHARE));
+  const distinctive = (term: string) => (documentFrequency.get(term) ?? 0) <= maxFrequency;
+  const method = input.pairing ? MODEL_PAIRING_METHOD : LEXICAL_PAIRING_METHOD;
+
   const rows = input.requirements.map((requirement) => {
-    const requirementTerms = terms(requirement.requirement_text);
-    const matched = input.evidence.map((evidence) => {
-      const overlap = [...requirementTerms].filter((term) => evidenceTerms.get(evidence.id)?.has(term));
-      return { evidence, overlap, rank: overlap.length + (isExperienceFact(evidence) ? 1 : 0) };
-    }).filter((entry) => entry.overlap.length >= MIN_MATCHING_TERMS)
-      .sort((left, right) => right.rank - left.rank
-        || EVIDENCE_TYPE_RANK[left.evidence.evidence_type] - EVIDENCE_TYPE_RANK[right.evidence.evidence_type]
-        || left.evidence.id.localeCompare(right.evidence.id))
-      .slice(0, 3);
+    const evidence: RowEvidence[] = input.pairing
+      ? input.pairing.pairs
+        .filter((pair) => pair.requirement_key === requirement.requirement_key && candidateById.has(pair.evidence_id))
+        .sort((left, right) => right.confidence - left.confidence || left.evidence_id.localeCompare(right.evidence_id))
+        .slice(0, 3)
+        .map((pair) => {
+          const item = candidateById.get(pair.evidence_id)!;
+          return { id: item.id, type: item.evidence_type, label: item.label, statement: item.statement, confidence: pair.confidence, justification: pair.justification };
+        })
+      : lexicalPairs(requirement.requirement_text, candidates, evidenceTerms, distinctive);
     return {
       requirement_key: requirement.requirement_key,
       requirement_type: requirement.requirement_type,
       importance: requirement.importance,
       requirement: requirement.requirement_text,
-      evidence: matched.map(({ evidence }) => ({ id: evidence.id, type: evidence.evidence_type, label: evidence.label, statement: evidence.statement })),
-      gap: matched.length === 0
-        ? "No directly matching statement was found in the selected current profile evidence. Confirm this manually; absence is not proof of inability."
+      evidence,
+      gap: evidence.length === 0
+        ? "No direct evidence was found in your profile. It stays unmatched in your documents; absence is not proof of inability."
         : null,
-      comparison_method: "literal-term overlap; potential evidence only",
+      comparison_method: method,
     };
   });
+
+  const mustRows = rows.filter((row) => row.importance === "MUST");
+  const uncoveredMust = mustRows.filter((row) => row.evidence.length === 0);
+  const covered = mustRows.length - uncoveredMust.length;
+  const weak = mustRows.length > 0 && covered * 2 < mustRows.length;
+  const fit = {
+    must_total: mustRows.length,
+    must_covered: covered,
+    uncovered_must: uncoveredMust.map((row) => ({ requirement_key: row.requirement_key, requirement: row.requirement })),
+    verdict: mustRows.length === 0 ? "NO_MUST_REQUIREMENTS" : weak ? "FEWER_THAN_HALF_MUSTS_EVIDENCED" : "MOST_MUSTS_EVIDENCED",
+    message: mustRows.length === 0
+      ? "The posting states no MUST requirements, so there is no coverage check."
+      : weak
+        ? `Only ${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile. This looks like a poor fit; documents will not claim the uncovered requirements.`
+        : `${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile.`,
+    advisory: "Evidence coverage only, not a hiring or suitability decision.",
+  };
   return {
     schema_version: "manual_application_v1",
     comparator_version: MANUAL_COMPARATOR_VERSION,
@@ -174,8 +242,9 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
     requirements: input.requirements,
     evidence: input.evidence,
     rows,
+    fit,
     suitability_warnings: [...input.suitability_warnings],
-    evidence_notice: "Potential matches are literal-term retrieval hints, not a suitability decision. Review source statements and gaps yourself.",
+    evidence_notice: "Pairs are proposed evidence for your review, not a suitability decision. Check each source statement and every gap yourself.",
   };
 }
 
@@ -222,11 +291,17 @@ const UNLINKED_FACTS_PER_FULL_ENGAGEMENT = 2;
 const MAX_SUMMARY_STATEMENTS = 3;
 const MAX_FULL_VENTURES = 2;
 const MAX_CERTIFICATIONS = 6;
-const MIN_CERTIFICATIONS = 3;
 const FULL_ENTRY_YEARS = 10;
 const ONE_LINE_YEARS = 20;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const CERTIFICATION_ORDER: Record<string, number> = { CERTIFICATION: 0, LICENSE: 1, COURSE: 2 };
+const FACT_TYPE_IMPACT: Record<string, number> = { ACHIEVEMENT: 3, PROJECT: 2, PUBLICATION: 2, RESPONSIBILITY: 1 };
+// Employment shorter than this gets one line by default: a brief engagement should not outrank long tenure.
+const MIN_FULL_ENTRY_MONTHS = 12;
+// Credential words that say nothing about the subject ("Health Insurance Certification" is not about cloud).
+const CREDENTIAL_GENERIC = new Set(["certification", "certificate", "certified", "professional", "program", "programme", "course",
+  "level", "practitioner", "associate", "foundational", "advanced", "issued", "status", "active", "paper", "papers", "module", "rule",
+  "regulation", "standard"]);
 
 type ComparisonRow = { requirement_key: string; importance: string; requirement: string; evidence?: Array<{ id: string }> };
 type Claim = ControlledDocuments["claims"][number];
@@ -264,6 +339,12 @@ function withoutTrailingPeriod(text: string): string {
   return text.trim().replace(/[.;:]+$/, "");
 }
 
+function monthsBetween(start: string, end: string): number {
+  const [startYear, startMonth] = start.split("-").map(Number);
+  const [endYear, endMonth] = end.split("-").map(Number);
+  return (endYear - startYear) * 12 + (endMonth - startMonth) + 1;
+}
+
 function yearsBefore(asOf: Date, years: number): string {
   const date = new Date(asOf);
   date.setUTCFullYear(date.getUTCFullYear() - years);
@@ -288,10 +369,12 @@ function credentialType(item: ManualEvidence): string {
   return item.credential_type ?? /, (certification|degree|course|license) issued by/i.exec(item.statement)?.[1].toUpperCase() ?? "CERTIFICATION";
 }
 
-/** Approved evidence a document may use: no internal assessments, and no courses or their facts. */
+/** Approved evidence a document may use: work done, no internal assessments or self-descriptions, no courses. */
 function documentEvidence(comparison: Record<string, any>): ManualEvidence[] {
   const approved = (Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [])
-    .filter((item) => !isInternalAssessmentStatement(item.statement));
+    .filter((item) => !isInternalAssessmentStatement(item.statement) && !(item.evidence_type === "FACT" && isSelfDescriptionStatement(item.statement)))
+    // Facts are printed only when they record work done, or state tenure for the plain summary.
+    .filter((item) => item.evidence_type !== "FACT" || isExperienceFact(item) || (!item.engagement_id && /\b\d+\+?\s+years?\b/i.test(item.statement)));
   // Courses are not jobs: neither they nor their facts are offered as evidence of meeting a job requirement.
   const courseIds = new Set(approved.filter((item) => item.evidence_type === "ENGAGEMENT" && engagementKind(item) === "COURSE").map((item) => item.id));
   return approved.filter((item) => !courseIds.has(item.id) && !(item.engagement_id && courseIds.has(item.engagement_id)));
@@ -319,7 +402,8 @@ export interface RolePlan {
 
 /**
  * Default role layout, newest first. A layout set on the role in the profile wins. Otherwise
- * employment from the last 10 years gets a full entry; ventures only when relevant to this job (at
+ * employment from the last 10 years lasting a year or more gets a full entry (shorter engagements
+ * get one line); ventures only when relevant to this job (at
  * most two); older employment becomes one line, and anything over 20 years old is summarised in
  * one shared line. Courses are left out.
  */
@@ -345,9 +429,12 @@ export function planRoles(comparison: Record<string, any>, options: Pick<Control
     .map((engagement) => {
       const kind = engagementKind(engagement) as "EMPLOYMENT" | "VENTURE";
       const { start, end } = engagementDates(engagement);
+      const tenureMonths = start ? monthsBetween(start, end ?? asOf.toISOString().slice(0, 10)) : Infinity;
       const automatic: RolePlan["default_layout"] = kind === "VENTURE"
         ? (relevantVentures.has(engagement.id) ? "FULL" : "ONE_LINE")
-        : !end || end >= fullEntryCutoff ? "FULL" : start && start >= oneLineCutoff ? "ONE_LINE" : "SUMMARISED";
+        : !end || end >= fullEntryCutoff
+          ? (tenureMonths >= MIN_FULL_ENTRY_MONTHS ? "FULL" : "ONE_LINE")
+          : start && start >= oneLineCutoff ? "ONE_LINE" : "SUMMARISED";
       return {
         engagement_id: engagement.id, label: engagement.label, period: engagementPeriod(engagement.statement), kind,
         default_layout: engagement.document_layout ?? automatic,
@@ -377,6 +464,9 @@ export function buildControlledDocuments(
     for (const { id } of row.evidence ?? []) requirementKeysById.set(id, [...(requirementKeysById.get(id) ?? []), row.requirement_key]);
   }
   const score = (id: string) => relevance.get(id) ?? 0;
+  // Impact of a fact for picking unmatched bullets: quantified results first, then achievements over projects over duties.
+  const impact = (item: ManualEvidence) =>
+    (/\d|%|\$/.test(item.statement) ? 10 : 0) + (FACT_TYPE_IMPACT[item.fact_type ?? ""] ?? 0);
   const claims: Claim[] = [];
   const claim = (section: string, text: string, evidenceIds: string[], requirementKeys?: string[]) => {
     claims.push({
@@ -446,9 +536,11 @@ export function buildControlledDocuments(
     const period = engagementPeriod(engagement.statement);
     const facts = factsFor(engagement);
     const linked = facts.filter(({ item }) => score(item.id) > 0)
-      .sort((left, right) => score(right.item.id) - score(left.item.id) || left.order - right.order);
-    // Unmatched bullets fill out a role only with work done, not skill or domain statements.
-    const unlinked = facts.filter(({ item }) => score(item.id) === 0 && isExperienceFact(item)).slice(0, UNLINKED_FACTS_PER_FULL_ENGAGEMENT);
+      .sort((left, right) => score(right.item.id) - score(left.item.id) || impact(right.item) - impact(left.item) || left.order - right.order);
+    // Unmatched bullets fill out a role with its highest-impact work, not the first facts in file order.
+    const unlinked = facts.filter(({ item }) => score(item.id) === 0 && isExperienceFact(item))
+      .sort((left, right) => impact(right.item) - impact(left.item) || left.order - right.order)
+      .slice(0, UNLINKED_FACTS_PER_FULL_ENGAGEMENT);
     const shown = [...linked, ...unlinked].slice(0, MAX_FACTS_PER_ENGAGEMENT);
     if (layout === "FULL" && shown.length > 0) {
       const section = kind === "VENTURE" ? "Ventures and research" : "Experience";
@@ -481,22 +573,20 @@ export function buildControlledDocuments(
   const educationLines = credentials.filter((item) => credentialType(item) === "DEGREE")
     .map((item) => `- ${claim("Education", item.label, [item.id])}`);
   const credentialRelevance = (item: ManualEvidence) =>
-    score(item.id) * 10 + [...terms(item.statement)].filter((term) => jobTerms.has(term)).length;
+    score(item.id) * 10 + [...terms(item.label)].filter((term) => !CREDENTIAL_GENERIC.has(term) && jobTerms.has(term)).length;
   const rankedCertifications = credentials
     .map((item, order) => ({ item, order }))
     .filter(({ item }) => credentialType(item) !== "DEGREE")
     .sort((left, right) => credentialRelevance(right.item) - credentialRelevance(left.item)
       || (CERTIFICATION_ORDER[credentialType(left.item)] ?? 3) - (CERTIFICATION_ORDER[credentialType(right.item)] ?? 3)
       || left.order - right.order);
-  // Pinned credentials always appear and count toward the cap. The rest: relevant ones only, and when
-  // fewer than MIN_CERTIFICATIONS relate to the job, the next by type fill in. Output keeps rank order.
+  // Pinned credentials always appear and count toward the cap; the rest only when relevant to this
+  // job (paired with a requirement, or naming its subject). Output keeps rank order.
   const pinned = rankedCertifications.filter(({ item }) => item.always_include);
-  const relevantCount = rankedCertifications.filter(({ item }) => credentialRelevance(item) > 0 || item.always_include).length;
-  const certificationLimit = Math.max(pinned.length, Math.min(MAX_CERTIFICATIONS, Math.max(relevantCount, MIN_CERTIFICATIONS)));
   const chosenCertifications = new Set(pinned.map(({ item }) => item.id));
   for (const { item } of rankedCertifications) {
-    if (chosenCertifications.size >= certificationLimit) break;
-    chosenCertifications.add(item.id);
+    if (chosenCertifications.size >= Math.max(MAX_CERTIFICATIONS, pinned.length)) break;
+    if (credentialRelevance(item) > 0) chosenCertifications.add(item.id);
   }
   const certificationLines = rankedCertifications
     .filter(({ item }) => chosenCertifications.has(item.id))

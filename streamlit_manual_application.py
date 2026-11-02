@@ -180,6 +180,29 @@ def _render_role_choices(role_plan, fingerprint, locked=False):
     return choices
 
 
+def _evidence_cell(item):
+    """One evidence line for the review table, with the model's confidence and reason when it proposed the pair."""
+    statement = item.get("statement", "")
+    if item.get("confidence") is None:
+        return statement
+    reason = f" Why: {item['justification']}" if item.get("justification") else ""
+    return f"{statement} (confidence {item['confidence']:.2f}.{reason})"
+
+
+def _render_fit_check(fit):
+    """Shows MUST-requirement coverage before approval. Returns True when fewer than half have evidence."""
+    if not fit:
+        return False
+    if fit.get("verdict") == "FEWER_THAN_HALF_MUSTS_EVIDENCED":
+        st.warning(fit.get("message", ""))
+        for item in fit.get("uncovered_must") or []:
+            st.text(f"No evidence: {item.get('requirement', '')}")
+        st.caption(fit.get("advisory", ""))
+        return True
+    st.info(fit.get("message", ""))
+    return False
+
+
 def render_manual_application_flow(api_request):
     st.subheader("Prepare documents for one manually selected role")
     st.caption(
@@ -447,9 +470,9 @@ def render_manual_application_flow(api_request):
                 "Requirement": row.get("requirement", ""),
                 "Importance": row.get("importance", ""),
                 "Potential profile evidence": "\n\n".join(
-                    item.get("statement", "") for item in evidence
+                    _evidence_cell(item) for item in evidence
                 )
-                or "No direct statement found",
+                or "No direct evidence",
                 "Gap / review": row.get("gap")
                 or "Review whether the potential evidence actually meets this requirement.",
             }
@@ -473,12 +496,23 @@ def render_manual_application_flow(api_request):
 
     draft_id = comparison.get("draft_id")
     fingerprint = comparison.get("comparison_fingerprint")
+    poor_fit = _render_fit_check(payload.get("fit"))
     approval_key = f"manual_approval_checked_{fingerprint}"
+    poor_fit_key = f"manual_poor_fit_acknowledged_{fingerprint}"
     st.checkbox("I screened this role and want to prepare documents", key=approval_key)
+    if poor_fit:
+        st.checkbox(
+            "I understand most MUST requirements have no evidence and still want documents",
+            key=poor_fit_key,
+        )
     if st.button("Approve document preparation", key="manual_approve"):
         if not st.session_state.get(approval_key):
             st.error(
                 "Check the explicit approval box after reviewing the job and evidence table."
+            )
+        elif poor_fit and not st.session_state.get(poor_fit_key):
+            st.error(
+                "Fewer than half of the MUST requirements have evidence. Confirm you still want documents for this role."
             )
         else:
             try:
