@@ -100,6 +100,10 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
         "Download Cover Letter (PDF)",
     }
     assert app.text_area(key="manual_cv_preview").value.startswith("# Candidate")
+    assert any("written by AI" in info.value for info in app.info)
+    shown = [text.value.strip() for text in app.text]
+    assert "1. I designed data systems for regulated teams." in shown
+    assert "Source: Designed data systems." in shown
     assert len(app.session_state["test_api_calls"]) >= 7
 
     app.text_input(key="manual_job_title").set_value("Changed role title").run(

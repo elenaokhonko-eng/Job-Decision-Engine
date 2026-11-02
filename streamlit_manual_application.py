@@ -203,6 +203,37 @@ def _render_fit_check(fit):
     return False
 
 
+def _render_cover_letter_review(review):
+    """Shows how the letter was written and the approved evidence behind each sentence.
+
+    Model text and profile statements are untrusted, so they are shown with st.text, not markdown.
+    """
+    if not review:
+        return
+    if review.get("mode") == "AI_WRITTEN":
+        st.info(
+            "The cover letter was written by AI from your approved requirement-to-evidence pairs "
+            "and the job description. Check each sentence against its source before downloading."
+        )
+    else:
+        st.warning(
+            "AI cover letter not used. The letter was assembled from your statements."
+        )
+        if review.get("reason"):
+            st.text(review["reason"])
+    sentences = review.get("sentences") or []
+    if not sentences:
+        return
+    with st.expander(
+        "Sources for each cover letter sentence",
+        expanded=review.get("mode") == "AI_WRITTEN",
+    ):
+        for index, sentence in enumerate(sentences, start=1):
+            st.text(f"{index}. {sentence.get('text', '')}")
+            for item in sentence.get("evidence") or []:
+                st.text(f"    Source: {item.get('statement', '')}")
+
+
 def render_manual_application_flow(api_request):
     st.subheader("Prepare documents for one manually selected role")
     st.caption(
@@ -584,6 +615,7 @@ def render_manual_application_flow(api_request):
             disabled=True,
             key="manual_cover_letter_preview",
         )
+    _render_cover_letter_review(generated.get("cover_letter"))
     st.caption(
         "Review both previews and download only the private artifacts you intend to use. No application status is recorded."
     )
