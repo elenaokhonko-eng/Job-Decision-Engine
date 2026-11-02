@@ -102,7 +102,7 @@ describe("manual application preparation", () => {
   it("renders a valid private DOCX and parseable PDF payload", async () => {
     const docs = buildControlledDocuments(buildManualComparison(input()), { full_name: "Candidate Example", phone: "+65 6000 0000" });
     const docx = await renderControlledDocx(docs.cv);
-    const pdf = renderControlledPdf(docs.coverLetter);
+    const pdf = renderControlledPdf(docs.cv);
     expect(docx.subarray(0, 2).toString("ascii")).toBe("PK");
     const wordPackage = await JSZip.loadAsync(docx);
     const documentXml = await wordPackage.file("word/document.xml")?.async("string");
@@ -119,5 +119,48 @@ describe("manual application preparation", () => {
     } finally {
       await parser.destroy();
     }
+  });
+
+  it("tailors the CV to the job's own requirement wording and ranks each role's facts by relevance", async () => {
+    const tailored: ManualComparisonInput = {
+      ...input(),
+      requirements: [
+        { requirement_key: "R-001", requirement_type: "FUNCTION", importance: "PREFERRED", requirement_text: "Experience with Salesforce CRM rollouts." },
+        { requirement_key: "R-002", requirement_type: "FUNCTION", importance: "MUST", requirement_text: "Lead derivatives operating model design." },
+      ],
+      evidence: [
+        { id: "eng-aia", evidence_type: "ENGAGEMENT", label: "Program Lead at AIA", statement: "Program Lead at AIA (2023-04-01–2025-04-30). Front office transformation.", engagement_id: "eng-aia" },
+        { id: "eng-mdlz", evidence_type: "ENGAGEMENT", label: "CRM Architect at Mondelez", statement: "CRM Architect at Mondelez (2012-02-01–2017-09-30). Regional CRM.", engagement_id: "eng-mdlz" },
+        { id: "eng-tour", evidence_type: "ENGAGEMENT", label: "Intern at Tourism Agency", statement: "Intern at Tourism Agency (1999-01-01–2000-12-31). Tour logistics.", engagement_id: "eng-tour" },
+        { id: "fact-aia-ifrs", evidence_type: "FACT", label: "aia.ifrs", statement: "Aligned investment operations with IFRS 17 accounting standards.", engagement_id: "eng-aia" },
+        { id: "fact-aia-tom", evidence_type: "FACT", label: "aia.tom", statement: "Designed the derivatives operating model for a $25B portfolio.", engagement_id: "eng-aia" },
+        { id: "fact-mdlz-sfa", evidence_type: "FACT", label: "mdlz.sfa", statement: "Led Salesforce CRM rollouts for 1,300 users across 16 markets.", engagement_id: "eng-mdlz" },
+        { id: "cred-cfa", evidence_type: "CREDENTIAL", label: "Passed Level I of the CFA Program", statement: "Passed Level I of the CFA Program, course issued by CFA Institute; status ACTIVE." },
+      ],
+    };
+    const comparison = buildManualComparison(tailored);
+    const docs = buildControlledDocuments(comparison, { full_name: "Candidate Example", phone: "+65 6000 0000" });
+
+    // The MUST requirement leads, in the job's own words, paired with its evidence.
+    const mustLine = docs.cv.indexOf("- Lead derivatives operating model design: Designed the derivatives operating model");
+    const preferredLine = docs.cv.indexOf("- Experience with Salesforce CRM rollouts: Led Salesforce CRM rollouts");
+    expect(mustLine).toBeGreaterThan(-1);
+    expect(preferredLine).toBeGreaterThan(mustLine);
+    // Past-role facts appear under their role, with the relevant fact ranked first.
+    const aia = docs.cv.indexOf("### Program Lead at AIA | Apr 2023 – Apr 2025");
+    expect(aia).toBeGreaterThan(-1);
+    expect(docs.cv.indexOf("Designed the derivatives operating model", aia)).toBeLessThan(docs.cv.indexOf("Aligned investment operations with IFRS 17", aia));
+    expect(docs.cv).toContain("### CRM Architect at Mondelez | Feb 2012 – Sep 2017");
+    // A role with no facts is listed once under earlier career, not dropped.
+    expect(docs.cv).toContain("## Earlier career\n- Intern at Tourism Agency (Jan 1999 – Dec 2000)");
+    expect(docs.cv).toContain("- Passed Level I of the CFA Program");
+    expect(docs.coverLetter).toContain('On "Lead derivatives operating model design": Designed the derivatives operating model');
+    // Every claim resolves to approved evidence.
+    const evidenceIds = new Set(tailored.evidence.map((item) => item.id));
+    expect(docs.claims.every((item) => item.evidenceIds.length > 0 && item.evidenceIds.every((id) => evidenceIds.has(id)))).toBe(true);
+
+    const documentXml = await (await JSZip.loadAsync(await renderControlledDocx(docs.cv))).file("word/document.xml")?.async("string");
+    expect(documentXml).toContain("Lead derivatives operating model design: Designed the derivatives operating model");
+    expect(documentXml).toContain("Program Lead at AIA | Apr 2023 – Apr 2025");
   });
 });

@@ -86,6 +86,8 @@ export const ManualEvidenceSchema = z.object({
   evidence_type: z.enum(["FACT", "CREDENTIAL", "ENGAGEMENT"]),
   label: z.string().min(1),
   statement: z.string().min(1),
+  // The profile engagement a fact belongs to (an ENGAGEMENT row carries its own id), for grouping CV experience.
+  engagement_id: z.string().min(1).optional(),
 }).strict();
 
 export const ManualComparisonRowSchema = z.object({

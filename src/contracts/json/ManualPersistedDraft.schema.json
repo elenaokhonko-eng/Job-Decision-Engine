@@ -190,6 +190,10 @@
                   "statement": {
                     "type": "string",
                     "minLength": 1
+                  },
+                  "engagement_id": {
+                    "type": "string",
+                    "minLength": 1
                   }
                 },
                 "required": [
