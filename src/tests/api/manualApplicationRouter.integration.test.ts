@@ -15,7 +15,7 @@ import {
   loadManualProfileEvidence,
   manualQuotedRequirementMode,
 } from "../../api/v2/manualApplicationRouter.js";
-import type { CoverLetterWriter, CoverLetterWriterInput } from "../../documents/manualCoverLetter.js";
+import type { CoverLetterWriter, CoverLetterWriterInput, SummaryWriter } from "../../documents/manualCoverLetter.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { importLoadedProfile, type ProfileImportSummary } from "../../profile/importer.js";
@@ -143,6 +143,8 @@ let pairerImpl: EvidencePairer | undefined;
 const pairerCalls: EvidencePairingInput[] = [];
 let writerImpl: CoverLetterWriter | undefined;
 const writerCalls: CoverLetterWriterInput[] = [];
+let summaryImpl: SummaryWriter | undefined;
+const summaryCalls: CoverLetterWriterInput[] = [];
 
 async function withModelEnv<T>(env: Partial<Record<(typeof MODEL_KEY_ENV)[number], string>>, run: () => Promise<T>): Promise<T> {
   const saved = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
@@ -232,6 +234,11 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
         if (!pairerImpl) throw new Error("No evidence pairer is configured for this test.");
         return pairerImpl(input);
       },
+      summaryWriter: async (input) => {
+        summaryCalls.push(input);
+        if (!summaryImpl) throw new Error("No summary writer is configured for this test.");
+        return summaryImpl(input);
+      },
       coverLetterWriter: async (input) => {
         writerCalls.push(input);
         if (!writerImpl) throw new Error("No cover letter writer is configured for this test.");
@@ -313,9 +320,23 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     });
   });
 
-  it("uses an AI-written cover letter whose every sentence cites approved evidence, and stores it for re-download", async () => {
+  it("uses an AI-written summary and cover letter whose every sentence cites approved evidence, and stores them for re-download", async () => {
     await withModelEnv({ OPENAI_API_KEY: "configured-for-mode-check", REQUIREMENTS_ENABLE_QUOTED: "false" }, async () => {
       writerCalls.length = 0;
+      summaryCalls.length = 0;
+      summaryImpl = async (input) => {
+        const fact = input.allowedEvidence.find((item) => item.statement.includes("degree qualification"));
+        const derivatives = input.allowedEvidence.find((item) => item.statement.includes("$25B"));
+        if (!fact) throw new Error("The degree fact was not offered to the summary writer.");
+        return {
+          provider: "test", model: "fixture-summary", attempts: 1, fallbackUsed: false,
+          sentences: [
+            { text: "Finance-trained programme lead with a bachelor's degree qualification in finance.", evidence_ids: [fact.id], requirement_keys: [] },
+            { text: "Brings operating model design experience to derivatives work.", evidence_ids: [derivatives?.id ?? fact.id], requirement_keys: [] },
+            { text: "Grounds delivery in documented finance training completed in 2004.", evidence_ids: [fact.id], requirement_keys: [] },
+          ],
+        };
+      };
       writerImpl = async (input) => {
         const fact = input.allowedEvidence.find((item) => item.statement.includes("degree qualification"));
         const pair = input.pairs.find((candidate) => candidate.evidence.some((item) => item.id === fact?.id));
@@ -333,6 +354,15 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
         expect(writerCalls).toHaveLength(1);
         expect(writerCalls[0].jobDescriptionExcerpt).toContain("Responsibilities: design target operating models");
         expect(writerCalls[0].pairs.length).toBeGreaterThan(0);
+
+        // The summary is one written paragraph, each sentence traced to approved evidence.
+        expect(summaryCalls).toHaveLength(1);
+        expect(generated.summary).toMatchObject({ mode: "AI_WRITTEN", reason: null });
+        expect(generated.summary.sentences).toHaveLength(3);
+        expect(generated.preview.cv).toContain("## Summary\nFinance-trained programme lead with a bachelor's degree qualification in finance. Brings operating model");
+        const cvRun = await pool!.query<{ generator_version: string; output_manifest: Record<string, any> }>(
+          `SELECT generator_version, output_manifest FROM manual_application_document_runs WHERE approval_id=$1 AND document_type='CV'`, [approved.approval_id]);
+        expect(cvRun.rows[0]).toMatchObject({ generator_version: "manual_summary_ai_v1", output_manifest: { summary_mode: "AI_WRITTEN", summary_model: "fixture-summary" } });
 
         expect(generated.cover_letter).toMatchObject({ mode: "AI_WRITTEN", reason: null });
         expect(generated.cover_letter.sentences[0].evidence[0].statement).toBe("Holds a bachelor's degree qualification in finance, completed in 2004.");
@@ -352,10 +382,14 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
         // Asking again returns the stored letter without another model call.
         const again = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
         expect(writerCalls).toHaveLength(1);
+        expect(summaryCalls).toHaveLength(1);
         expect(again.preview.cover_letter).toBe(generated.preview.cover_letter);
+        expect(again.preview.cv).toBe(generated.preview.cv);
         expect(again.cover_letter).toEqual(generated.cover_letter);
+        expect(again.summary).toEqual(generated.summary);
       } finally {
         writerImpl = undefined;
+        summaryImpl = undefined;
       }
     });
   });
@@ -373,6 +407,9 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
         const { approved, generated } = await compareApproveGenerate("https://careers.example.test/derivatives-lead-ungrounded", "Derivatives Operating Model Lead Ungrounded");
         expect(generated.cover_letter.mode).toBe("DETERMINISTIC");
         expect(generated.cover_letter.reason).toContain("numbers its cited evidence does not contain (15)");
+        // No summary writer is configured here: the summary falls back on its own, with its reason.
+        expect(generated.summary).toMatchObject({ mode: "DETERMINISTIC" });
+        expect(generated.summary.reason).toContain("No summary writer is configured");
         expect(generated.preview.cover_letter).not.toContain("15 years");
         expect(generated.artifacts).toHaveLength(4);
         const run = await letterRun(approved.approval_id);

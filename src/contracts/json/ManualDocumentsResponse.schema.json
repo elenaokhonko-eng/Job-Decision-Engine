@@ -160,6 +160,9 @@
             "sentences"
           ],
           "additionalProperties": false
+        },
+        "summary": {
+          "$ref": "#/definitions/ManualDocumentsResponse/properties/cover_letter"
         }
       },
       "required": [

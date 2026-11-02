@@ -267,6 +267,11 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
                     }
                 ],
             },
+            "summary": {
+                "mode": "DETERMINISTIC",
+                "reason": "The AI-written summary was not used because it failed validation.",
+                "sentences": [],
+            },
         }
     if "/documents/" in path:
         _, _, item_type, format_name = path.rsplit("/", 3)

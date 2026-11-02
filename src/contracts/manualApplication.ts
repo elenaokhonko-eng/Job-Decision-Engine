@@ -297,6 +297,8 @@ export const ManualDocumentsResponseSchema = z.object({
   preview: z.object({ cv: z.string().min(1), cover_letter: z.string().min(1) }).strict(),
   artifacts: z.array(ManualArtifactSchema).length(4),
   cover_letter: ManualCoverLetterReviewSchema.optional(),
+  // How the CV summary was written, and the evidence behind each sentence; same shape as cover_letter.
+  summary: ManualCoverLetterReviewSchema.optional(),
 }).strict();
 
 export const ManualDownloadResponseSchema = z.object({
