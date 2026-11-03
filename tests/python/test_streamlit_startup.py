@@ -179,7 +179,9 @@ def test_database_outage_reports_the_api_database_failure_once():
         }
     )
     message = database_outage(
-        "http://127.0.0.1:3000", _api_get(_http_error_opener(503, body)), _no_direct_probe
+        "http://127.0.0.1:3000",
+        _api_get(_http_error_opener(503, body)),
+        _no_direct_probe,
     )
     assert message.startswith("The database at ep-example.neon.tech could not be used")
     assert "HTTP 503" not in message
@@ -211,10 +213,15 @@ def test_database_outage_without_an_api_tries_a_direct_connection_and_hides_cred
     )
     assert "s3cret" not in message
     assert database_outage("", None, refused, "") is None
-    assert database_outage("", None, lambda: None, "postgresql://db.example.test/app") is None
+    assert (
+        database_outage("", None, lambda: None, "postgresql://db.example.test/app")
+        is None
+    )
 
 
-def test_streamlit_shows_one_database_error_and_stops_when_the_database_is_unreachable(monkeypatch):
+def test_streamlit_shows_one_database_error_and_stops_when_the_database_is_unreachable(
+    monkeypatch,
+):
     monkeypatch.setenv("JDEC_RUNTIME_MODE", "local")
     monkeypatch.setenv("JDEC_API_BASE_URL", "")
     monkeypatch.setenv("API_BASE_URL", "")

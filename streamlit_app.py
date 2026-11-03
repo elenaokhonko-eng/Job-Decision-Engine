@@ -1455,7 +1455,14 @@ def save_application_status(job, status, application=None):
 @st.cache_data(ttl=15, show_spinner=False)
 def _database_outage(api_url, database_url):
     def probe_direct():
-        _open_read_only_connection().close()
+        try:
+            from psycopg2 import Error as DriverError
+        except ImportError:
+            DriverError = RuntimeError
+        try:
+            _open_read_only_connection().close()
+        except DriverError as error:
+            raise RuntimeError(str(error)) from error
 
     return database_outage(
         api_url,

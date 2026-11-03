@@ -196,7 +196,8 @@ def database_outage(api_url, api_get, probe_direct, database_url=""):
     With an API configured, its workspace health check speaks for the database: only its
     DATABASE_UNAVAILABLE answer is an outage. An unreachable API is not, because the read-only
     fallback handles that. Without an API, a direct read-only connection is tried when
-    DATABASE_URL is set. The message names the host, never the connection string.
+    DATABASE_URL is set; probe_direct raises RuntimeError or OSError when it fails. The
+    message names the host, never the connection string.
     """
     if api_url:
         try:
@@ -210,7 +211,7 @@ def database_outage(api_url, api_get, probe_direct, database_url=""):
         return None
     try:
         probe_direct()
-    except Exception as error:  # any driver failure means the database cannot be used
+    except (RuntimeError, OSError) as error:
         host = urlsplit(database_url).hostname or "the configured host"
         lines = str(error).strip().splitlines()
         detail = lines[0][:240] if lines else type(error).__name__

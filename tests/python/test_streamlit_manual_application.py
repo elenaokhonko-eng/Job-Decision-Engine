@@ -97,7 +97,10 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
     assert documents_call[2]["include_gap_note"] is False
     texts = [text.value for text in app.text]
     assert "Gap note (left out): I do not yet hold AZ-305." in texts
-    assert any(text.startswith("Opening: I am applying for the Data Architect role") for text in texts)
+    assert any(
+        text.startswith("Opening: I am applying for the Data Architect role")
+        for text in texts
+    )
     # Documents are fixed per approval, so the choices lock once they exist.
     app.run(timeout=10)
     assert app.selectbox(key=f"manual_role_{fingerprint}_eng-lab").disabled
