@@ -108,7 +108,7 @@ describe('model id preflight', () => {
     });
     expect(result.skipped).toEqual(['gemini']);
     expect(result.checked).toEqual(['openai']);
-    expect(fetchMock.mock.calls.every(([url]) => String(url).includes('api.openai.com'))).toBe(true);
+    expect(fetchMock.mock.calls.every(([url]) => new URL(String(url)).hostname === 'api.openai.com')).toBe(true);
   });
 
   it('degrades a network failure or auth error to a key-free warning instead of throwing', async () => {
