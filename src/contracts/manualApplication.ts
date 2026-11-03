@@ -268,6 +268,8 @@ export const ManualGenerateRequestSchema = z.object({
   approval_id: Uuid,
   // The candidate's per-role choice, keyed by engagement id from role_plan; unlisted roles keep their default.
   role_layout: z.record(z.string().min(1), ManualRoleLayoutSchema).optional(),
+  // Whether the AI letter may include its one candid sentence on a MUST requirement without evidence; default true.
+  include_gap_note: z.boolean().optional(),
 }).strict();
 
 export const ManualArtifactSchema = z.object({
@@ -286,6 +288,13 @@ export const ManualCoverLetterReviewSchema = z.object({
     evidence: z.array(z.object({ id: z.string().min(1), label: z.string(), statement: z.string() }).strict()).min(1),
     requirement_keys: z.array(z.string().min(1)),
   }).strict()),
+  // Letter sentences that make no claim (opening, candid gap note, closing), so they cite no evidence.
+  framing: z.array(z.object({
+    kind: z.enum(["OPENING", "GAP_NOTE", "CLOSING"]),
+    text: z.string().min(1),
+    requirement_keys: z.array(z.string().min(1)),
+    included: z.boolean(),
+  }).strict()).optional(),
 }).strict();
 
 export const ManualDocumentsResponseSchema = z.object({

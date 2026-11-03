@@ -82,6 +82,10 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
     app.selectbox(key=f"manual_role_{fingerprint}_eng-lab").set_value("HIDDEN").run(
         timeout=10
     )
+    # Two MUST requirements lack evidence, so the candid gap note is offered, on by default.
+    gap_note = app.checkbox(key=f"manual_gap_note_{fingerprint}")
+    assert gap_note.value is True
+    gap_note.uncheck().run(timeout=10)
     app.button(key="manual_generate").click().run(timeout=10)
     assert not app.exception, [(error.type, error.message) for error in app.exception]
     documents_call = next(
@@ -90,9 +94,14 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
         if call[1].endswith("/documents")
     )
     assert documents_call[2]["role_layout"] == {"eng-lab": "HIDDEN"}
+    assert documents_call[2]["include_gap_note"] is False
+    texts = [text.value for text in app.text]
+    assert "Gap note (left out): I do not yet hold AZ-305." in texts
+    assert any(text.startswith("Opening: I am applying for the Data Architect role") for text in texts)
     # Documents are fixed per approval, so the choices lock once they exist.
     app.run(timeout=10)
     assert app.selectbox(key=f"manual_role_{fingerprint}_eng-lab").disabled
+    assert app.checkbox(key=f"manual_gap_note_{fingerprint}").disabled
     assert {button.label for button in app.download_button} == {
         "Download CV (DOCX)",
         "Download CV (PDF)",

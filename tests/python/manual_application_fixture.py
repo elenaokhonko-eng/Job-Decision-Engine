@@ -266,6 +266,26 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
                         "requirement_keys": ["R-001"],
                     }
                 ],
+                "framing": [
+                    {
+                        "kind": "OPENING",
+                        "text": "I am applying for the Data Architect role at Example. Its data platform focus appeals to me.",
+                        "requirement_keys": ["R-001"],
+                        "included": True,
+                    },
+                    {
+                        "kind": "GAP_NOTE",
+                        "text": "I do not yet hold AZ-305.",
+                        "requirement_keys": ["R-003"],
+                        "included": False,
+                    },
+                    {
+                        "kind": "CLOSING",
+                        "text": "Thank you for your time and consideration.",
+                        "requirement_keys": [],
+                        "included": True,
+                    },
+                ],
             },
             "summary": {
                 "mode": "DETERMINISTIC",

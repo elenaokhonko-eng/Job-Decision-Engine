@@ -111,8 +111,9 @@ function proseRequirementSentences(descriptionText: string): Array<{ text: strin
   return descriptionText.replace(/\s+/g, " ").split(/(?<=[.!?])\s+(?=[A-Z])/)
     .map((sentence) => sentence.trim())
     .filter((sentence) => sentence.length >= MIN_POSTING_LINE_CHARS && sentence.length <= MAX_POSTING_LINE_CHARS)
-    .flatMap((text) => PROSE_REQUIREMENT_CUE.test(text) ? [{ text, section: "REQUIREMENT" as const }]
-      : PROSE_RESPONSIBILITY_CUE.test(text) ? [{ text, section: "RESPONSIBILITY" as const }] : []);
+    .flatMap((text): Array<{ text: string; section: "REQUIREMENT" | "RESPONSIBILITY" }> =>
+      PROSE_REQUIREMENT_CUE.test(text) ? [{ text, section: "REQUIREMENT" }]
+        : PROSE_RESPONSIBILITY_CUE.test(text) ? [{ text, section: "RESPONSIBILITY" }] : []);
 }
 
 const INTERNAL_ASSESSMENT = /self[- ]?rat(?:ing|ed)|self[- ]?assess|\b\d(?:\.\d)?\s*\/\s*5\b|\bnot a target\b|career[- ]preference|preference note|application[- ]screening purposes/i;

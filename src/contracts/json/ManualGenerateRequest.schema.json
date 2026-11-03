@@ -21,6 +21,9 @@
           "propertyNames": {
             "minLength": 1
           }
+        },
+        "include_gap_note": {
+          "type": "boolean"
         }
       },
       "required": [

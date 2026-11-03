@@ -152,6 +152,43 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "framing": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "OPENING",
+                      "GAP_NOTE",
+                      "CLOSING"
+                    ]
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "requirement_keys": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "included": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text",
+                  "requirement_keys",
+                  "included"
+                ],
+                "additionalProperties": false
+              }
             }
           },
           "required": [
