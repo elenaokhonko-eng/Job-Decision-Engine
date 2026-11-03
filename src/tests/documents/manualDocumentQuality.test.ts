@@ -126,12 +126,62 @@ describe("manual document quality (baseline regression)", () => {
     }
   });
 
-  it("prefers AI-quoted requirements when they exist", () => {
+  it("puts AI-quoted requirements first and does not repeat the posting lines they quote", () => {
     const quoted = documentRequirements([...PLACEHOLDER_ROWS, {
-      requirement_key: "R-003", requirement_type: "SKILL", importance: "MUST", extractor_type: "LLM_QUOTED",
-      requirement_text: "Product leadership for systematic trading platforms", quote_text: "Product leadership for systematic trading platforms",
+      requirement_key: "R-003", requirement_type: "FUNCTION", importance: "MUST", extractor_type: "LLM_QUOTED",
+      requirement_text: "Product or program leadership for front office trading platforms",
+      quote_text: "Product or program leadership for front office trading or investment management platforms",
     }], JOB_DESCRIPTION);
-    expect(quoted.map((row) => row.requirement_key)).toEqual(["R-003"]);
+    expect(quoted[0].requirement_key).toBe("R-003");
+    expect(quoted.map((row) => row.requirement_text)).not.toContain(
+      "Product or program leadership for front office trading or investment management platforms.");
+    expect(quoted).toHaveLength(8);
+    expect(quoted.some((row) => row.requirement_type === "EMPLOYMENT_TYPE")).toBe(false);
+  });
+
+  it("keeps every requirement bullet when the model quotes only a few of them", () => {
+    const background = [
+      "Experience delivering or integrating trading platforms such as OMS, EMS or PMS.",
+      "Ability to translate investment requirements into technology deliverables.",
+      "Stakeholder management across investment, technology and data teams.",
+      "Product ownership for front office investment technology.",
+      "Knowledge of derivatives and the trade lifecycle.",
+      "Experience with market data and reference data platforms.",
+    ];
+    const responsibilities = [
+      "Own the roadmap for the portfolio management platform.",
+      "Run delivery with engineering teams in two-week increments.",
+      "Define controls for trade and position data.",
+      "Coordinate vendors for order and execution management.",
+      "Report delivery progress to the investment committee.",
+      "Lead adoption of the platform across portfolio teams.",
+    ];
+    const description = [
+      "Investment Technology Product Lead",
+      "Key Responsibilities",
+      ...responsibilities.map((line) => `- ${line}`),
+      "Your Background",
+      ...background.map((line) => `- ${line}`),
+      "Benefits",
+      "- Hybrid working and an annual bonus.",
+    ].join("\n");
+    // The model quoted three bullets, as in the baseline run that dropped the strongest matches.
+    const modelRows: StoredRequirementRow[] = [background[3], background[4], background[5]].map((line, index) => ({
+      requirement_key: `R-00${index + 1}`, requirement_type: "FUNCTION", importance: "MUST", requirement_text: line,
+      extractor_type: "LLM_QUOTED", quote_text: line.replace(/\.$/, ""),
+    }));
+
+    const requirements = documentRequirements(modelRows, description);
+    const texts = requirements.map((row) => row.requirement_text);
+    expect(requirements.length).toBeGreaterThanOrEqual(background.length + responsibilities.length);
+    for (const line of [...background, ...responsibilities]) {
+      expect(texts.filter((text) => text.replace(/\.$/, "") === line.replace(/\.$/, ""))).toHaveLength(1);
+    }
+    const byText = new Map(requirements.map((row) => [row.requirement_text, row]));
+    expect(byText.get(background[0])?.importance).toBe("MUST");
+    expect(byText.get(responsibilities[0])?.importance).toBe("PREFERRED");
+    expect(texts).not.toContain("Hybrid working and an annual bonus.");
+    expect(new Set(requirements.map((row) => row.requirement_key)).size).toBe(requirements.length);
   });
 
   it("does not pair a fact with a requirement on one shared word", () => {
