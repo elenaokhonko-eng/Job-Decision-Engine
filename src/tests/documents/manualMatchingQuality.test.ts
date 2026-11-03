@@ -10,6 +10,7 @@ import {
   type StoredRequirementRow,
 } from "../../documents/manualDocumentPolicy.js";
 import {
+  buildControlledDocuments,
   buildManualComparison,
   evidenceAgeYears,
   matchableEvidence,
@@ -201,6 +202,24 @@ describe("manual matching quality", () => {
     // With nothing else to write from, the degree is used after all.
     const onlyDegree = comparison([requirement("R-1", "Academic background in finance")], [pair("R-1", "c-mba", 0.9)], evidence);
     expect(approvedCoverLetterPairs(onlyDegree).map((item) => item.requirement_key)).toEqual(["R-1"]);
+  });
+
+  it("builds the plain fallback summary as one sentence from the tenure facts, not a list of 'Has' lines", () => {
+    const evidence: ManualEvidence[] = [
+      ...PROFILE,
+      { id: "f-years-arch", evidence_type: "FACT", label: "f-years-arch", fact_type: "TECHNOLOGY",
+        statement: "Has 15 years of professional software-industry experience across enterprise architecture and data platforms." },
+      { id: "f-years-code", evidence_type: "FACT", label: "f-years-code", fact_type: "TECHNOLOGY",
+        statement: "Has 2 years of direct AI and software coding experience, including Python and TypeScript." },
+    ];
+    const docs = buildControlledDocuments(comparison([requirement("R-1", "Master data and data governance")], [pair("R-1", "f-golden", 0.9)], evidence),
+      { full_name: "Candidate Example", phone: "+65 6000 0000" }, { asOf: new Date("2026-11-02T00:00:00Z") });
+    const summary = docs.cv.split("## Summary\n")[1].split("\n")[0];
+    expect(summary).toBe("Brings 15 years of professional software-industry experience across enterprise architecture and data platforms; "
+      + "and 2 years of direct AI and software coding experience, including Python and TypeScript.");
+    expect(docs.claims.filter((claim) => claim.section === "Summary")).toEqual([
+      expect.objectContaining({ evidenceIds: ["f-years-arch", "f-years-code"] }),
+    ]);
   });
 
   it("prints apostrophes, dashes, bullets and accents in the PDF instead of hyphens", () => {

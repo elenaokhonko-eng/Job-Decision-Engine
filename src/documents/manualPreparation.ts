@@ -539,6 +539,20 @@ export function planRoles(
 }
 
 /**
+ * The summary without a model: tenure statements ("Has 15 years of ...", "Has 2 years of ...") are
+ * joined into one sentence ("Brings 15 years of ...; and 2 years of ..."), so the summary reads as
+ * a profile rather than a list of "Has" lines. Each statement keeps its own words; any statement not
+ * in the "Has ..." form stays a sentence of its own.
+ */
+function plainSummary(statements: ManualEvidence[]): Array<{ text: string; ids: string[] }> {
+  const tenure = statements.filter((item) => /^has\s+\S/i.test(item.statement.trim()));
+  const parts = tenure.map((item) => withoutTrailingPeriod(item.statement.trim().replace(/^has\s+/i, "")));
+  const joined = parts.length === 0 ? []
+    : [{ text: `Brings ${parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join("; ")}; and ${parts[parts.length - 1]}`}.`, ids: tenure.map((item) => item.id) }];
+  return [...joined, ...statements.filter((item) => !tenure.includes(item)).map((item) => ({ text: item.statement.trim(), ids: [item.id] }))];
+}
+
+/**
  * Builds a CV and cover letter from the approved comparison only. Every line is a verbatim
  * profile statement or the job's own requirement text, so no claim exists outside the evidence.
  */
@@ -609,7 +623,7 @@ export function buildControlledDocuments(
   const summaryStatements = [...new Set([...overviewFacts, ...relevantProfileFacts, ...tenureFacts])].slice(0, MAX_SUMMARY_STATEMENTS);
   const summaryParagraph = options.writtenSummary?.length
     ? options.writtenSummary.map((sentence) => claim("Summary", sentence.text.trim(), [...sentence.evidence_ids], [...sentence.requirement_keys])).join(" ")
-    : summaryStatements.map((item) => claim("Summary", item.statement.trim(), [item.id])).join(" ");
+    : plainSummary(summaryStatements).map(({ text, ids }) => claim("Summary", text, ids)).join(" ");
 
   // Roles: the default layout comes from planRoles; the candidate's choice overrides it.
   const summaryEvidenceIds = (options.writtenSummary ?? []).flatMap((sentence) => sentence.evidence_ids);
