@@ -944,7 +944,7 @@ describe("stageTaskWorker", () => {
       if (sql.includes("FROM job_version_pipeline_state ps") && sql.includes("requirement_extraction_runs rer")) {
         return { rows: [{ exists: true }], rowCount: 1 };
       }
-      if (sql.includes("WITH active_spaces AS")) {
+      if (sql.includes("WITH configured_spaces AS")) {
         return {
           rows: [{
             has_active_space: true,
@@ -975,7 +975,7 @@ describe("stageTaskWorker", () => {
     );
 
     expect(stateReads).toBeGreaterThanOrEqual(2);
-    const profileEmbeddingCheck = calls.find((call) => call.sql.includes("WITH active_spaces AS"));
+    const profileEmbeddingCheck = calls.find((call) => call.sql.includes("WITH configured_spaces AS"));
     expect(profileEmbeddingCheck?.sql).toContain("fact.fact_type <> 'CONTACT'");
     expect(profileEmbeddingCheck?.sql).toContain("fact.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')");
     expect(summary).toMatchObject({ completed: 0, blocked: 1, failed: 0, deadLettered: 0 });
