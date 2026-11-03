@@ -54,7 +54,8 @@
     "test": "vitest run",
     "eval:golden": "tsx scripts/run_evals.ts",
     "lint": "tsc --noEmit",
-    "gemini:models": "tsx scripts/list_gemini_models.ts"
+    "gemini:models": "tsx scripts/list_gemini_models.ts",
+    "models:check": "tsx scripts/check_model_ids.ts"
   },
   "build": {
     "appId": "com.jobdecisionengine.desktop",

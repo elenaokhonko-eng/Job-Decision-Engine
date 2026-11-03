@@ -365,9 +365,26 @@ function parseCoverLetterResponse(input: CoverLetterWriterInput, rawText: string
   return { opening: validated.opening, paragraphs: validated.paragraphs, gapNote: validated.gapNote };
 }
 
+/** A per-call model timeout from `envName`, clamped to 5..300 s; `fallbackMs` when unset or invalid. */
+function manualModelTimeoutMs(envName: string, fallbackMs: number): number {
+  const parsed = Number.parseInt(String(process.env[envName] ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallbackMs;
+  return Math.max(5000, Math.min(300000, parsed));
+}
+
+/** Per-call model settings for the manual document writers: own timeout, 2 attempts, a secondary Gemini model. */
+function manualDocumentModelOptions(timeoutEnvName: string, defaultTimeoutMs: number) {
+  return {
+    timeoutMs: manualModelTimeoutMs(timeoutEnvName, defaultTimeoutMs),
+    maxRetries: 2,
+    secondaryGeminiModel: process.env.DOCUMENT_SECONDARY_GEMINI_MODEL || MODEL_REGISTRY.EXTRACTION_GEMINI_MODEL,
+  };
+}
+
 /** Calls the document model route; throws unless the response passes validateCoverLetterPayload. */
 export const writeCoverLetterWithModel: CoverLetterWriter = async (input) => {
   const response = await generateContentAudited({
+    ...manualDocumentModelOptions("MANUAL_COVER_LETTER_TIMEOUT_MS", 90000),
     purpose: "DOCUMENT",
     routeKey: "manual_cover_letter",
     model: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
@@ -591,6 +608,7 @@ function parseSummaryResponse(input: CoverLetterWriterInput, rawText: string): C
 /** Calls the document model route; throws unless the response passes validateSummaryPayload. */
 export const writeSummaryWithModel: SummaryWriter = async (input) => {
   const response = await generateContentAudited({
+    ...manualDocumentModelOptions("MANUAL_SUMMARY_TIMEOUT_MS", 45000),
     purpose: "DOCUMENT",
     routeKey: "manual_cv_summary",
     model: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
