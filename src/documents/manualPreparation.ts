@@ -409,8 +409,12 @@ export interface RolePlan {
  * most two); older employment becomes one line, and anything over 20 years old is summarised in
  * one shared line. Courses are left out.
  */
-export function planRoles(comparison: Record<string, any>, options: Pick<ControlledDocumentOptions, "asOf"> = {}): RolePlan[] {
+export function planRoles(
+  comparison: Record<string, any>,
+  options: Pick<ControlledDocumentOptions, "asOf"> & { citedEvidenceIds?: Iterable<string> } = {},
+): RolePlan[] {
   const asOf = options.asOf ?? new Date();
+  const cited = new Set(options.citedEvidenceIds ?? []);
   const evidence = documentEvidence(comparison);
   const relevance = evidenceRelevance(Array.isArray(comparison.rows) ? comparison.rows as ComparisonRow[] : []);
   const score = (id: string) => relevance.get(id) ?? 0;
@@ -425,6 +429,12 @@ export function planRoles(comparison: Record<string, any>, options: Pick<Control
     .sort((left, right) => roleScore(right) - roleScore(left))
     .slice(0, MAX_FULL_VENTURES)
     .map((item) => item.id));
+  // A role whose work backs a requirement pair or a summary sentence is a full entry, whatever its
+  // age or tenure: a recruiter must find the role behind every claim.
+  // Ventures keep their cap on relevance-only promotion, but one the summary cites is shown in full.
+  const summaryCited = (engagement: ManualEvidence) => cited.has(engagement.id)
+    || evidence.some((item) => item.engagement_id === engagement.id && cited.has(item.id));
+  const isCited = (engagement: ManualEvidence) => roleScore(engagement) > 0 || summaryCited(engagement);
   return [...engagements]
     .sort((left, right) => (engagementDates(right).end ?? "9999").localeCompare(engagementDates(left).end ?? "9999")
       || (engagementDates(right).start ?? "").localeCompare(engagementDates(left).start ?? ""))
@@ -432,8 +442,9 @@ export function planRoles(comparison: Record<string, any>, options: Pick<Control
       const kind = engagementKind(engagement) as "EMPLOYMENT" | "VENTURE";
       const { start, end } = engagementDates(engagement);
       const tenureMonths = start ? monthsBetween(start, end ?? asOf.toISOString().slice(0, 10)) : Infinity;
-      const automatic: RolePlan["default_layout"] = kind === "VENTURE"
-        ? (relevantVentures.has(engagement.id) ? "FULL" : "ONE_LINE")
+      const automatic: RolePlan["default_layout"] = kind === "EMPLOYMENT" && isCited(engagement) ? "FULL"
+        : kind === "VENTURE"
+        ? (relevantVentures.has(engagement.id) || summaryCited(engagement) ? "FULL" : "ONE_LINE")
         : !end || end >= fullEntryCutoff
           ? (tenureMonths >= MIN_FULL_ENTRY_MONTHS ? "FULL" : "ONE_LINE")
           : start && start >= oneLineCutoff ? "ONE_LINE" : "SUMMARISED";
@@ -519,7 +530,8 @@ export function buildControlledDocuments(
     : summaryStatements.map((item) => claim("Summary", item.statement.trim(), [item.id])).join(" ");
 
   // Roles: the default layout comes from planRoles; the candidate's choice overrides it.
-  const plans = new Map(planRoles(comparison, { asOf }).map((plan) => [plan.engagement_id, plan]));
+  const summaryEvidenceIds = (options.writtenSummary ?? []).flatMap((sentence) => sentence.evidence_ids);
+  const plans = new Map(planRoles(comparison, { asOf, citedEvidenceIds: summaryEvidenceIds }).map((plan) => [plan.engagement_id, plan]));
   const engagements = evidence.filter((item) => item.evidence_type === "ENGAGEMENT" && plans.has(item.id));
   const factsFor = (engagement: ManualEvidence) => evidence
     .map((item, order) => ({ item, order }))
