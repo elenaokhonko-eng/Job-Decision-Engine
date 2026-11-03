@@ -14,9 +14,10 @@ import type { ManualEvidence, ManualRequirement } from "./manualPreparation.js";
  */
 
 export const MANUAL_PAIRING_SCHEMA_VERSION = "manual_evidence_pairing_v1";
-export const MANUAL_PAIRING_METHOD = "model_pairing_v2";
+export const MANUAL_PAIRING_METHOD = "model_pairing_v3";
 export const PAIRING_CONFIDENCE_THRESHOLD = 0.6;
-export const MAX_PAIRS_PER_REQUIREMENT = 3;
+// More than the three a row shows, so a requirement still has evidence once a fact reaches its reuse cap.
+export const MAX_PAIRS_PER_REQUIREMENT = 5;
 const MAX_PAIRING_RESPONSE_BYTES = 128 * 1024;
 const MAX_JUSTIFICATION_CHARS = 240;
 
@@ -102,7 +103,7 @@ export function validatePairingPayload(payload: unknown, requirements: ManualReq
   return { valid: true, pairs: strongestPairs(parsed.data.pairs) };
 }
 
-/** Per requirement: pairs at or above the threshold, strongest first, one per evidence item, at most three. */
+/** Per requirement: pairs at or above the threshold, strongest first, one per evidence item, at most five. */
 export function strongestPairs(pairs: EvidencePair[]): EvidencePair[] {
   const byRequirement = new Map<string, EvidencePair[]>();
   for (const pair of pairs) {
@@ -127,7 +128,8 @@ export function buildPairingPrompt(input: EvidencePairingInput): string {
     "- confidence: 0.9+ the evidence plainly demonstrates the requirement; 0.6-0.8 clearly related and relevant; below 0.6 a stretch.",
     "- Leave a requirement without pairs when nothing directly demonstrates it. An honest gap is better than a stretched match.",
     "- justification: one short sentence saying why the evidence demonstrates the requirement.",
-    "- At most 3 pairs per requirement.",
+    "- At most 5 pairs per requirement, strongest first. Prefer evidence from different roles, and recent work over old work of the same strength.",
+    "- Use any one evidence item for at most 2 requirements; find the next-best direct evidence for the others.",
     "",
     "Requirements:",
     ...input.requirements.map((requirement) => `- [${requirement.requirement_key}] (${requirement.importance}) ${requirement.requirement_text}`),
