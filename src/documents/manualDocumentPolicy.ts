@@ -20,14 +20,18 @@ export interface DocumentRequirement {
   requirement_text: string;
 }
 
-export const MAX_POSTING_REQUIREMENT_LINES = 20;
+export const MAX_POSTING_REQUIREMENT_LINES = 30;
 const MIN_POSTING_LINE_CHARS = 15;
 const MAX_POSTING_LINE_CHARS = 300;
 
-const REQUIREMENT_HEADING = /^(requirements?|qualifications?|minimum qualifications|basic qualifications|preferred qualifications|what you(?:'|’)ll bring|what you bring|what we(?:'|’)re looking for|who you are|about you|you have|you will have|(?:your )?background|your (?:experience|profile|skills)|(?:the )?ideal candidate|skills(?: and experience)?|experience|must[- ]haves?|nice[- ]to[- ]haves?)\b/i;
+const REQUIREMENT_HEADING = /^(requirements?|qualifications?|minimum qualifications|basic qualifications|preferred qualifications|what you(?:'|’)ll bring|what you bring|what we(?:'|’)re looking for|what we are looking for|who you are|about you|you have|you will have|(?:your )?background|your (?:experience|profile|skills)|(?:the )?ideal candidate|skills(?: and experience)?|experience|must[- ]haves?|nice[- ]to[- ]haves?)\b/i;
 const RESPONSIBILITY_HEADING = /^(responsibilities|key responsibilities|your responsibilities|(?:key )?accountabilities|what you(?:'|’)ll do|what you will do|what you(?:'|’)ll be doing|the role|your role|your mission|role overview|duties|day[- ]to[- ]day|in this role)\b/i;
-const OTHER_HEADING = /^(about (?:us|the company|the team)|benefits|what we offer|perks|compensation|salary|how to apply|equal opportunity|our culture|why join)\b/i;
-const PREFERRED_CUE = /\b(preferred|nice[- ]to[- ]have|a plus|is a bonus|desirable|advantageous|ideally)\b/i;
+// Checked after the requirement heading, so "About you" still opens requirements.
+const OTHER_HEADING = /^(about|why|benefits|what we offer|our offer|perks|package|compensation|salary|location|how to apply|equal opportunity|our (?:culture|values|team)|the opportunity|life at|who we are|diversity)\b/i;
+const PREFERRED_CUE = /\b(preferred|nice[- ]to[- ]have|a (?:strong |big |definite |real |significant )?(?:plus|bonus)|desirable|advantageous|ideally)\b/i;
+// Sentences in an unstructured posting that state a requirement, or a duty of the role.
+const PROSE_REQUIREMENT_CUE = /\b(\d+\+?\s+years|experience (?:in|with|of|across)|knowledge of|proficien\w*|familiar\w* with|degree in|you (?:have|bring)|must have|required)\b/i;
+const PROSE_RESPONSIBILITY_CUE = /\b(you will|you'll|responsible for|your role)\b/i;
 
 /**
  * Requirements the documents may match against. AI-quoted requirements are the job's own words, so
@@ -56,11 +60,16 @@ function comparableText(text: string): string {
   return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
-/** Lines under the posting's responsibility and requirement headings, in the posting's own words. */
+/**
+ * Lines under the posting's responsibility and requirement headings, in the posting's own words.
+ * Text copied from job sites often loses its line breaks and keeps runs of spaces instead, so those
+ * runs also separate lines. A posting with no recognised headings falls back to its sentences that
+ * state a requirement or a duty.
+ */
 export function postingRequirementLines(descriptionText: string): DocumentRequirement[] {
   const lines: Array<{ text: string; section: "REQUIREMENT" | "RESPONSIBILITY" }> = [];
   let section: "REQUIREMENT" | "RESPONSIBILITY" | null = null;
-  for (const rawLine of descriptionText.split(/\r?\n/)) {
+  for (const rawLine of descriptionText.split(/\r?\n|[ \t ]{3,}/)) {
     const line = rawLine.replace(/^[\s\-–—*•·●▪◦>]+|^\d+[.)]\s+/u, "").trim();
     if (!line) continue;
     const heading = /^([^:]{2,60}):\s*(.*)$/.exec(line);
@@ -76,8 +85,8 @@ export function postingRequirementLines(descriptionText: string): DocumentRequir
       section = null;
       continue;
     } else if (isHeadingOnly && /^[A-Z][^.]*$/.test(line) && line.split(/\s+/).length <= 6) {
-      // An unrecognised short heading ends the current section.
-      section = null;
+      // An unrecognised short heading inside a section is a sub-heading ("Stakeholder Management");
+      // sections end only at a recognised heading.
       continue;
     }
     if (!section) continue;
@@ -85,6 +94,7 @@ export function postingRequirementLines(descriptionText: string): DocumentRequir
     if (content.length < MIN_POSTING_LINE_CHARS || content.length > MAX_POSTING_LINE_CHARS) continue;
     lines.push({ text: content, section });
   }
+  if (lines.length === 0) lines.push(...proseRequirementSentences(descriptionText));
   const unique = lines.filter((line, index) => lines.findIndex((other) => other.text === line.text) === index);
   // Requirements first, then responsibilities, each in posting order.
   const ordered = [...unique.filter((line) => line.section === "REQUIREMENT"), ...unique.filter((line) => line.section === "RESPONSIBILITY")]
@@ -95,6 +105,15 @@ export function postingRequirementLines(descriptionText: string): DocumentRequir
     importance: PREFERRED_CUE.test(line.text) || line.section === "RESPONSIBILITY" ? "PREFERRED" : "MUST",
     requirement_text: line.text,
   }));
+}
+
+function proseRequirementSentences(descriptionText: string): Array<{ text: string; section: "REQUIREMENT" | "RESPONSIBILITY" }> {
+  return descriptionText.replace(/\s+/g, " ").split(/(?<=[.!?])\s+(?=[A-Z])/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length >= MIN_POSTING_LINE_CHARS && sentence.length <= MAX_POSTING_LINE_CHARS)
+    .flatMap((text): Array<{ text: string; section: "REQUIREMENT" | "RESPONSIBILITY" }> =>
+      PROSE_REQUIREMENT_CUE.test(text) ? [{ text, section: "REQUIREMENT" }]
+        : PROSE_RESPONSIBILITY_CUE.test(text) ? [{ text, section: "RESPONSIBILITY" }] : []);
 }
 
 const INTERNAL_ASSESSMENT = /self[- ]?rat(?:ing|ed)|self[- ]?assess|\b\d(?:\.\d)?\s*\/\s*5\b|\bnot a target\b|career[- ]preference|preference note|application[- ]screening purposes/i;

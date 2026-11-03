@@ -9,6 +9,11 @@ import {
 } from "../../documents/manualDocumentPolicy.js";
 import { buildControlledDocuments, buildManualComparison, planRoles, type ManualEvidence } from "../../documents/manualPreparation.js";
 import { SYSTEMATIC_TRADING_PRODUCT_LEAD_DESCRIPTION as JOB_DESCRIPTION } from "../fixtures/systematicTradingProductLead.js";
+import {
+  EXCHANGE_DERIVATIVES_PRODUCT_OWNER_DESCRIPTION as EXCHANGE_DESCRIPTION,
+  EXCHANGE_DERIVATIVES_PRODUCT_OWNER_REQUIREMENTS as EXCHANGE_REQUIREMENTS,
+  EXCHANGE_DERIVATIVES_PRODUCT_OWNER_RESPONSIBILITIES as EXCHANGE_RESPONSIBILITIES,
+} from "../fixtures/exchangeDerivativesProductOwnerLead.js";
 
 // The deterministic extractor's rows when AI extraction fails: fixed labels, not the employer's words.
 const PLACEHOLDER_ROWS: StoredRequirementRow[] = [
@@ -280,6 +285,65 @@ describe("manual document quality (baseline regression)", () => {
     const overridden = buildControlledDocuments(comparison, CONTACT, { asOf: AS_OF, roleLayout: { "eng-lab": "ONE_LINE", "eng-venture": "FULL" } });
     expect(overridden.cv).not.toContain("### Founder at Neurodiversity Research Lab");
     expect(overridden.cv).toContain("### Founder and AI Architect at Venture AI");
+  });
+
+  it("gives a full entry to every role whose work is cited, however old", () => {
+    const withOldRoles = [
+      ...evidence,
+      engagement("eng-broker", "Delivery Architect at Old Brokerage", "2004-01-01", "2006-06-30", "EMPLOYEE", "PROFESSIONAL_PRODUCTION"),
+      fact("f-broker-oms", "Integrated an order management system across 3 custodians for a brokerage.", "eng-broker"),
+      fact("f-import-ledger", "Rebuilt the trade documentation ledger for import and export shipments.", "eng-import"),
+    ];
+    const base = comparisonFor([{ requirement_key: "R-001", requirement_type: "FUNCTION", importance: "MUST",
+      requirement_text: "Experience integrating trading platforms such as OMS, EMS or PMS." }], withOldRoles);
+    // The model paired the requirement with the 2004 role's fact.
+    const comparison = { ...base, rows: (base.rows as Array<Record<string, unknown>>).map((row) => ({ ...row,
+      evidence: [{ id: "f-broker-oms", evidence_type: "FACT", label: "f-broker-oms", statement: "Integrated an order management system across 3 custodians for a brokerage." }] })) };
+    const plan = new Map(planRoles(comparison, { asOf: AS_OF }).map((role) => [role.engagement_id, role]));
+    // Ended more than 20 years ago, so without the citation it would be folded into "Earlier roles".
+    expect(plan.get("eng-broker")?.default_layout).toBe("FULL");
+    expect(plan.get("eng-import")?.default_layout).toBe("SUMMARISED");
+
+    const docs = buildControlledDocuments(comparison, CONTACT, { asOf: AS_OF, writtenSummary: [
+      { text: "Rebuilt the trade documentation ledger for import and export shipments.", evidence_ids: ["f-import-ledger"], requirement_keys: [] },
+    ] });
+    const experience = section(docs.cv, "Experience");
+    expect(experience).toContain("### Delivery Architect at Old Brokerage | Jan 2004 – Jun 2006");
+    expect(experience).toContain("- Integrated an order management system across 3 custodians for a brokerage.");
+    // Cited only by the summary, the import role is promoted too.
+    expect(experience).toContain("### Import-Export Coordinator at Trading House");
+    expect(section(docs.cv, "Earlier career")).not.toMatch(/Old Brokerage|Trading House/);
+    // The candidate's choice still wins.
+    const hidden = buildControlledDocuments(comparison, CONTACT, { asOf: AS_OF, roleLayout: { "eng-broker": "ONE_LINE" } });
+    expect(section(hidden.cv, "Experience")).not.toContain("Old Brokerage");
+  });
+
+  it("reads a posting pasted from a job site: run-on paragraphs, sub-headings and 'Label. Sentence' bullets", () => {
+    // The model quoted two lines, as in the baseline run (quoted_inserted=2).
+    const modelRows: StoredRequirementRow[] = [EXCHANGE_REQUIREMENTS[0], EXCHANGE_REQUIREMENTS[3]].map((line, index) => ({
+      requirement_key: `R-00${index + 1}`, requirement_type: "FUNCTION", importance: "MUST", requirement_text: line,
+      extractor_type: "LLM_QUOTED", quote_text: line,
+    }));
+    const requirements = documentRequirements(modelRows, EXCHANGE_DESCRIPTION);
+    const texts = requirements.map((row) => row.requirement_text);
+    expect(requirements.length).toBe(EXCHANGE_REQUIREMENTS.length + EXCHANGE_RESPONSIBILITIES.length);
+    for (const line of [...EXCHANGE_REQUIREMENTS, ...EXCHANGE_RESPONSIBILITIES]) expect(texts).toContain(line);
+    const importance = (line: string) => requirements.find((row) => row.requirement_text === line)?.importance;
+    expect(EXCHANGE_REQUIREMENTS.filter((line) => importance(line) === "MUST")).toHaveLength(7);
+    expect(importance(EXCHANGE_REQUIREMENTS[2])).toBe("PREFERRED"); // "is a strong plus"
+    expect(importance(EXCHANGE_REQUIREMENTS[8])).toBe("PREFERRED"); // "is a plus"
+    expect(EXCHANGE_RESPONSIBILITIES.every((line) => importance(line) === "PREFERRED")).toBe(true);
+    // Sub-headings, the opening paragraphs and the closing "Why this role matters" section are not requirements.
+    expect(texts.some((text) => /Stakeholder Management|Why this role|critical market infrastructure|WE RUN MARKETS|partnership role/.test(text))).toBe(false);
+  });
+
+  it("falls back to requirement and duty sentences when a posting has no headings", () => {
+    const prose = "We are a growing analytics firm in the city. You will lead the data platform team and own its roadmap. "
+      + "You have 8+ years of experience in data engineering and cloud platforms. Our office has great coffee and a rooftop.";
+    expect(postingRequirementLines(prose).map((row) => [row.requirement_type, row.requirement_text])).toEqual([
+      ["POSTING_REQUIREMENT", "You have 8+ years of experience in data engineering and cloud platforms."],
+      ["POSTING_RESPONSIBILITY", "You will lead the data platform team and own its roadmap."],
+    ]);
   });
 
   it("reads requirement and responsibility lines from inline headings too", () => {

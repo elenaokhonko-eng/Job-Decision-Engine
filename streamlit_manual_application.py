@@ -213,6 +213,27 @@ WRITTEN_SECTION_TEXT = {
 }
 
 
+FRAMING_LABELS = {"OPENING": "Opening", "GAP_NOTE": "Gap note", "CLOSING": "Closing"}
+
+
+def _render_gap_note_choice(fit, fingerprint, locked=False):
+    """Asks whether the AI letter may admit one MUST requirement without evidence.
+
+    Shown only when the fit check found such a requirement. Returns the choice, or None when
+    there is nothing to ask.
+    """
+    if not (fit or {}).get("uncovered_must"):
+        return None
+    return st.checkbox(
+        "Let the AI letter include one candid sentence about a MUST requirement I have no evidence for",
+        value=True,
+        key=f"manual_gap_note_{fingerprint}",
+        disabled=locked,
+        help="The sentence says plainly that the requirement is not yet met and claims nothing to offset it. "
+        "You will see it in the review either way, marked if it was left out.",
+    )
+
+
 def _render_written_review(review, section):
     """Shows how a written section was produced and the approved evidence behind each sentence.
 
@@ -241,6 +262,16 @@ def _render_written_review(review, section):
             st.text(f"{index}. {sentence.get('text', '')}")
             for item in sentence.get("evidence") or []:
                 st.text(f"    Source: {item.get('statement', '')}")
+        framing = review.get("framing") or []
+        if framing:
+            st.caption(
+                "Opening, closing and gap note: these state no achievement, so they cite no source."
+            )
+            for item in framing:
+                label = FRAMING_LABELS.get(item.get("kind"), "Framing")
+                if not item.get("included", True):
+                    label += " (left out)"
+                st.text(f"{label}: {item.get('text', '')}")
 
 
 def render_manual_application_flow(api_request):
@@ -577,10 +608,12 @@ def render_manual_application_flow(api_request):
     approval = st.session_state.get("manual_approval")
     if not approval or not draft_id:
         return
+    locked = bool(st.session_state.get("manual_generated_documents"))
     role_layout = _render_role_choices(
-        comparison.get("role_plan") or [],
-        fingerprint,
-        locked=bool(st.session_state.get("manual_generated_documents")),
+        comparison.get("role_plan") or [], fingerprint, locked=locked
+    )
+    include_gap_note = _render_gap_note_choice(
+        payload.get("fit"), fingerprint, locked=locked
     )
     if st.button(
         "Generate customised CV and cover letter", type="primary", key="manual_generate"
@@ -589,6 +622,8 @@ def render_manual_application_flow(api_request):
             body = {"approval_id": approval.get("approval_id")}
             if role_layout:
                 body["role_layout"] = role_layout
+            if include_gap_note is not None:
+                body["include_gap_note"] = include_gap_note
             result = api_request(
                 "POST",
                 f"/api/v2/application-drafts/{draft_id}/documents",

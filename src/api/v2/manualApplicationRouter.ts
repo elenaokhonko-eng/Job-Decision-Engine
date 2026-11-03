@@ -53,6 +53,8 @@ import {
   writeCoverLetterWithModel,
   writeSummaryWithModel,
   type CoverLetterWriter,
+  type JobRequirementRef,
+  type LetterFraming,
   type SummaryWriter,
 } from "../../documents/manualCoverLetter.js";
 import {
@@ -647,10 +649,12 @@ function writtenReview(
   section: "Summary" | "Cover letter",
   claims: ControlledDocuments["claims"],
   evidence: ManualEvidence[],
+  framing?: LetterFraming[],
 ): ManualWrittenReview {
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
   return ManualCoverLetterReviewSchema.parse({
     mode,
+    ...(framing ? { framing } : {}),
     reason: reason ? reason.slice(0, MAX_FALLBACK_REASON_CHARS) : null,
     sentences: claims.filter((claim) => claim.section === section).map((claim) => ({
       text: claim.text,
@@ -675,6 +679,7 @@ async function prepareWrittenSections(
   contact: DocumentContact,
   writers: { summary: SummaryWriter; coverLetter: CoverLetterWriter },
   documentOptions: ControlledDocumentOptions = {},
+  letterOptions: { includeGapNote?: boolean } = {},
 ): Promise<WrittenSectionsOutcome> {
   const plain = buildControlledDocuments(comparison, contact, documentOptions);
   const evidence = Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [];
@@ -706,8 +711,14 @@ async function prepareWrittenSections(
   );
   const descriptionText = description.rows[0]?.description_text?.trim();
   if (!descriptionText) return skipBoth("The approved job version has no stored description text.");
+  const requirementRows = Array.isArray(comparison.rows) ? comparison.rows as Array<Record<string, unknown>> : [];
+  const requirements: JobRequirementRef[] = requirementRows.map((row) => ({
+    requirement_key: String(row.requirement_key), importance: String(row.importance), requirement: String(row.requirement),
+  }));
+  const uncoveredKeys = new Set<string>((comparison.fit?.uncovered_must ?? []).map((item: { requirement_key: string }) => item.requirement_key));
   const baseInput = {
-    title: String(comparison.title), company: String(comparison.company), pairs,
+    title: String(comparison.title), company: String(comparison.company), pairs, requirements,
+    uncoveredMust: requirements.filter((item) => uncoveredKeys.has(item.requirement_key)),
     jobDescriptionExcerpt: jobDescriptionExcerpt(descriptionText), clientOrPool: pool, context: ctx,
   };
 
@@ -737,18 +748,21 @@ async function prepareWrittenSections(
     const written = await writers.coverLetter({ ...baseInput, allowedEvidence });
     // Validated again here so the evidence rule holds whichever writer produced the letter.
     const validated = validateCoverLetterPayload(
-      { schema_version: MANUAL_COVER_LETTER_SCHEMA_VERSION, paragraphs: written.paragraphs.map((sentences) => ({ sentences })) },
-      pairs, allowedEvidence);
+      {
+        schema_version: MANUAL_COVER_LETTER_SCHEMA_VERSION, opening: written.opening,
+        paragraphs: written.paragraphs.map((sentences) => ({ sentences })), gap_note: written.gapNote,
+      },
+      pairs, allowedEvidence, baseInput.requirements, baseInput.uncoveredMust);
     if (!validated.valid) throw new Error(`Cover letter validation failed: ${validated.issues.join(" ")}`);
-    const letter = buildWrittenCoverLetter(comparison, contact, validated.paragraphs);
+    const letter = buildWrittenCoverLetter(comparison, contact, validated, letterOptions);
     return {
       docs: { cv: cvDocs.cv, coverLetter: letter.coverLetter, claims: [...cvDocs.claims.filter((claim) => claim.section !== "Cover letter"), ...letter.claims] },
       summary,
       letter: {
-        review: writtenReview("AI_WRITTEN", null, "Cover letter", letter.claims, evidence),
+        review: writtenReview("AI_WRITTEN", null, "Cover letter", letter.claims, evidence, letter.framing),
         generatorVersion: MANUAL_COVER_LETTER_GENERATOR_VERSION,
         manifest: { cover_letter_mode: "AI_WRITTEN", factual_template: false, provider: written.provider, model: written.model,
-          attempts: written.attempts, fallback_used: written.fallbackUsed },
+          attempts: written.attempts, fallback_used: written.fallbackUsed, include_gap_note: letterOptions.includeGapNote !== false },
       },
     };
   } catch (error) {
@@ -1286,7 +1300,7 @@ export function createManualApplicationRouter({
     const letter = alreadyGenerated.rows.length > 0
       ? null
       : await prepareWrittenSections(pool, ctx, selected.approval, selected.comparison, documentContact,
-        { summary: summaryWriter, coverLetter: coverLetterWriter }, { roleLayout });
+        { summary: summaryWriter, coverLetter: coverLetterWriter }, { roleLayout }, { includeGapNote: request.data.include_gap_note });
     const docs = letter?.docs ?? buildControlledDocuments(selected.comparison, documentContact, { roleLayout });
     const cvDocx = await renderControlledDocx(docs.cv);
     const cvPdf = renderControlledPdf(docs.cv);

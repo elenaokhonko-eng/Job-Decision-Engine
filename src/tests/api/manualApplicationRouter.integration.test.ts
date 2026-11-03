@@ -15,7 +15,7 @@ import {
   loadManualProfileEvidence,
   manualQuotedRequirementMode,
 } from "../../api/v2/manualApplicationRouter.js";
-import type { CoverLetterWriter, CoverLetterWriterInput, SummaryWriter } from "../../documents/manualCoverLetter.js";
+import { COVER_LETTER_CLOSING, type CoverLetterWriter, type CoverLetterWriterInput, type SummaryWriter } from "../../documents/manualCoverLetter.js";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { importLoadedProfile, type ProfileImportSummary } from "../../profile/importer.js";
@@ -185,10 +185,10 @@ function posting(url: string, description: string[], title = "Derivatives Operat
   };
 }
 
-async function compareApproveGenerate(url: string, title: string) {
+async function compareApproveGenerate(url: string, title: string, generateOptions: Record<string, unknown> = {}) {
   const compared = await post("/compare", posting(url, FULL_DESCRIPTION, title));
   const approved = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint });
-  const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+  const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id, ...generateOptions });
   return { compared, approved, generated };
 }
 
@@ -327,13 +327,15 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       summaryImpl = async (input) => {
         const fact = input.allowedEvidence.find((item) => item.statement.includes("degree qualification"));
         const derivatives = input.allowedEvidence.find((item) => item.statement.includes("$25B"));
-        if (!fact) throw new Error("The degree fact was not offered to the summary writer.");
+        const pair = input.pairs.find((candidate) => candidate.evidence.some((item) => item.id === fact?.id));
+        if (!fact || !pair) throw new Error("The degree fact was not offered to the summary writer as an approved pair.");
+        // Identity, proof, then fit: the last sentence names the requirement it addresses.
         return {
           provider: "test", model: "fixture-summary", attempts: 1, fallbackUsed: false,
           sentences: [
             { text: "Finance-trained programme lead with a bachelor's degree qualification in finance.", evidence_ids: [fact.id], requirement_keys: [] },
             { text: "Brings operating model design experience to derivatives work.", evidence_ids: [derivatives?.id ?? fact.id], requirement_keys: [] },
-            { text: "Grounds delivery in documented finance training completed in 2004.", evidence_ids: [fact.id], requirement_keys: [] },
+            { text: "Grounds delivery in documented finance training completed in 2004.", evidence_ids: [fact.id], requirement_keys: [pair.requirement_key] },
           ],
         };
       };
@@ -341,8 +343,11 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
         const fact = input.allowedEvidence.find((item) => item.statement.includes("degree qualification"));
         const pair = input.pairs.find((candidate) => candidate.evidence.some((item) => item.id === fact?.id));
         if (!fact || !pair) throw new Error("The degree fact was not offered to the writer as an approved pair.");
+        const gap = input.uncoveredMust?.[0];
         return {
           provider: "test", model: "fixture-writer", attempts: 1, fallbackUsed: false,
+          opening: { text: "Its focus on operating model design is the work I most want to do next.", requirement_keys: [pair.requirement_key] },
+          gapNote: gap ? { text: "One stated requirement is not yet something I have done directly.", requirement_keys: [gap.requirement_key] } : null,
           paragraphs: [
             [{ text: "I hold a bachelor's degree qualification in finance, completed in 2004.", evidence_ids: [fact.id], requirement_keys: [pair.requirement_key] }],
             [{ text: "That finance grounding underpins the operating model work this role describes.", evidence_ids: [fact.id], requirement_keys: [] }],
@@ -350,8 +355,11 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
         };
       };
       try {
-        const { compared, approved, generated } = await compareApproveGenerate("https://careers.example.test/derivatives-lead-ai", "Derivatives Operating Model Lead AI");
+        // The candidate chose to leave the candid gap note out.
+        const { compared, approved, generated } = await compareApproveGenerate(
+          "https://careers.example.test/derivatives-lead-ai", "Derivatives Operating Model Lead AI", { include_gap_note: false });
         expect(writerCalls).toHaveLength(1);
+        expect(writerCalls[0].uncoveredMust?.length ?? 0).toBeGreaterThan(0);
         expect(writerCalls[0].jobDescriptionExcerpt).toContain("Responsibilities: design target operating models");
         expect(writerCalls[0].pairs.length).toBeGreaterThan(0);
 
@@ -362,16 +370,25 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
         expect(generated.preview.cv).toContain("## Summary\nFinance-trained programme lead with a bachelor's degree qualification in finance. Brings operating model");
         const cvRun = await pool!.query<{ generator_version: string; output_manifest: Record<string, any> }>(
           `SELECT generator_version, output_manifest FROM manual_application_document_runs WHERE approval_id=$1 AND document_type='CV'`, [approved.approval_id]);
-        expect(cvRun.rows[0]).toMatchObject({ generator_version: "manual_summary_ai_v1", output_manifest: { summary_mode: "AI_WRITTEN", summary_model: "fixture-summary" } });
+        expect(cvRun.rows[0]).toMatchObject({ generator_version: "manual_summary_ai_v2", output_manifest: { summary_mode: "AI_WRITTEN", summary_model: "fixture-summary" } });
 
         expect(generated.cover_letter).toMatchObject({ mode: "AI_WRITTEN", reason: null });
         expect(generated.cover_letter.sentences[0].evidence[0].statement).toBe("Holds a bachelor's degree qualification in finance, completed in 2004.");
-        expect(generated.preview.cover_letter).toContain("Dear Example Bank Hiring Team,\n\nI hold a bachelor's degree qualification in finance, completed in 2004.");
+        expect(generated.preview.cover_letter).toContain([
+          "Dear Example Bank Hiring Team,", "",
+          "I am applying for the Derivatives Operating Model Lead AI role at Example Bank. Its focus on operating model design is the work I most want to do next.", "",
+          "I hold a bachelor's degree qualification in finance, completed in 2004.",
+        ].join("\n"));
+        expect(generated.preview.cover_letter).toContain(`${COVER_LETTER_CLOSING}\n\nSincerely,`);
+        expect(generated.preview.cover_letter).not.toContain("not yet something I have done");
+        // The review lists the framing sentences, which cite no evidence, and marks the gap note as left out.
+        expect((generated.cover_letter.framing as Array<{ kind: string; included: boolean }>).map((item) => [item.kind, item.included]))
+          .toEqual([["OPENING", true], ["GAP_NOTE", false], ["CLOSING", true]]);
 
         const evidenceIds = new Set((compared.comparison.evidence as Array<{ id: string }>).map((item) => item.id));
         const run = await letterRun(approved.approval_id);
-        expect(run.generator_version).toBe("manual_cover_letter_ai_v1");
-        expect(run.output_manifest).toMatchObject({ cover_letter_mode: "AI_WRITTEN", factual_template: false, model: "fixture-writer" });
+        expect(run.generator_version).toBe("manual_cover_letter_ai_v2");
+        expect(run.output_manifest).toMatchObject({ cover_letter_mode: "AI_WRITTEN", factual_template: false, model: "fixture-writer", include_gap_note: false });
         expect(run.claims.map((claim) => claim.claim_text).sort()).toEqual([
           "I hold a bachelor's degree qualification in finance, completed in 2004.",
           "That finance grounding underpins the operating model work this role describes.",
@@ -398,6 +415,8 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     await withModelEnv({ OPENAI_API_KEY: "configured-for-mode-check", REQUIREMENTS_ENABLE_QUOTED: "false" }, async () => {
       writerImpl = async (input) => ({
         provider: "test", model: "fixture-writer", attempts: 1, fallbackUsed: false,
+        opening: { text: "The role is the one I most want to do next.", requirement_keys: [input.pairs[0].requirement_key] },
+        gapNote: null,
         paragraphs: [
           [{ text: "I have 15 years of derivatives leadership.", evidence_ids: [input.allowedEvidence[0].id], requirement_keys: [] }],
           [{ text: "I am a natural fit for this team.", evidence_ids: [input.allowedEvidence[0].id], requirement_keys: [] }],

@@ -33,7 +33,7 @@ from streamlit_workspace_contracts import (
     validate_track_row,
 )
 from streamlit_manual_application import render_manual_application_flow
-from streamlit_runtime import code_version, ensure_hosted_api_ready, open_api_json
+from streamlit_runtime import code_version, database_outage, ensure_hosted_api_ready, open_api_json
 
 
 # Load environment variables from Streamlit secrets, .env, and .env.local
@@ -1451,6 +1451,36 @@ def save_application_status(job, status, application=None):
     st.success(f"Application tracker updated to {status}.")
     st.rerun()
 
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _database_outage(api_url, database_url):
+    def probe_direct():
+        try:
+            from psycopg2 import Error as DriverError
+        except ImportError:
+            DriverError = RuntimeError
+        try:
+            _open_read_only_connection().close()
+        except DriverError as error:
+            raise RuntimeError(str(error)) from error
+
+    return database_outage(
+        api_url,
+        lambda path: api_request("GET", path, timeout=20),
+        probe_direct,
+        database_url,
+    )
+
+
+# Every panel reads the database, so an unusable database is reported once, before the first read,
+# instead of by each panel.
+database_problem = _database_outage(
+    get_api_base_url(), (os.environ.get("DATABASE_URL") or "").strip()
+)
+if database_problem:
+    st.sidebar.caption(f"Code version: `{code_version()}`")
+    st.error(database_problem)
+    st.stop()
 
 # Fetch data
 jobs_list = fetch_jobs_from_db()
