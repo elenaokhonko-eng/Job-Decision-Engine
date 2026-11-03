@@ -9,6 +9,8 @@ import { checkModelRegistryPreflight } from "../../services/agent.js";
 import { loadProfileContactSnapshot, type DocumentContactInfo } from "../../documents/contactInfo.js";
 import {
   buildControlledDocuments,
+  candidateGapNotes,
+  engagementPeriod,
   matchableEvidence,
   planRoles,
   buildManualComparison,
@@ -27,6 +29,7 @@ import {
   type ControlledDocumentOptions,
 } from "../../documents/manualPreparation.js";
 import { documentRequirements, isInternalAssessmentStatement, type StoredRequirementRow } from "../../documents/manualDocumentPolicy.js";
+import { applyManualCorrections, correctionsFingerprint, ManualCorrectionError, normaliseCorrections } from "../../documents/manualCorrections.js";
 import {
   manualPairingMode,
   MANUAL_PAIRING_METHOD,
@@ -237,7 +240,8 @@ async function loadPersistedApproval(
             approval.canonical_job_id,approval.job_version_id,approval.source_observation_id,approval.job_content_hash,
             approval.profile_version_id,approval.profile_contact_fact_ids,approval.profile_contact_fingerprint,
             approval.preference_context_fingerprint,approval.requirement_set_id,approval.comparator_version,
-            approval.context_fingerprint,approval.comparison_fingerprint,approval.approved,draft.comparison_payload
+            approval.context_fingerprint,approval.comparison_fingerprint,approval.approved,
+            approval.corrections,approval.corrections_fingerprint,approval.revision,draft.comparison_payload
      FROM manual_application_preparation_approvals approval
      JOIN manual_application_drafts draft ON draft.id=approval.draft_id AND draft.workspace_id=approval.workspace_id
        AND draft.user_id=approval.user_id AND draft.comparison_fingerprint=approval.comparison_fingerprint
@@ -266,9 +270,13 @@ async function loadPersistedApproval(
     context_fingerprint: row.context_fingerprint,
     comparison_fingerprint: row.comparison_fingerprint,
     approved: row.approved,
+    corrections: row.corrections,
+    corrections_fingerprint: row.corrections_fingerprint,
+    revision: row.revision,
   });
   const comparison = ManualComparisonSchema.parse(row.comparison_payload);
   if (fingerprintManualComparison(comparison) !== approval.comparison_fingerprint ||
+      correctionsFingerprint(approval.corrections) !== approval.corrections_fingerprint ||
       comparison.canonical_job_id !== approval.canonical_job_id ||
       comparison.job_version_id !== approval.job_version_id ||
       comparison.source_observation_id !== approval.source_observation_id ||
@@ -642,6 +650,81 @@ interface WrittenSectionsOutcome {
 }
 
 const MAX_FALLBACK_REASON_CHARS = 1500;
+// Letter manifest keys carried over when a later revision keeps an earlier AI-written letter.
+const REUSABLE_LETTER_MANIFEST_KEYS = ["cover_letter_mode", "factual_template", "provider", "model", "attempts", "fallback_used", "include_gap_note"];
+
+/** An AI-written letter from an earlier revision, kept so only the summary is written again. */
+interface ReusedCoverLetter {
+  coverLetter: string;
+  claims: ControlledDocuments["claims"];
+  outcome: WrittenSectionOutcome;
+}
+
+function evidenceOf(comparison: Record<string, any>): ManualEvidence[] {
+  return Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [];
+}
+
+/** Every fact or credential the candidate may choose as evidence on the review screen, with its role and dates. */
+function selectableEvidence(comparison: Record<string, any>) {
+  const evidence = evidenceOf(comparison);
+  const roles = new Map(evidence.filter((item) => item.evidence_type === "ENGAGEMENT").map((item) => [item.id, item]));
+  return matchableEvidence(evidence).map((item) => {
+    const role = item.engagement_id ? roles.get(item.engagement_id) : undefined;
+    return {
+      id: item.id, evidence_type: item.evidence_type as "FACT" | "CREDENTIAL", statement: item.statement,
+      role: role?.label ?? null, period: role ? engagementPeriod(role.statement) : null,
+    };
+  });
+}
+
+/**
+ * The AI-written letter of an earlier revision of the same approval: same draft, comparison and
+ * corrections, a lower revision, and a stored AI_WRITTEN letter with its claims. Anything else is a
+ * request error, so a retried summary never pairs with a letter built from different inputs.
+ */
+async function loadReusableCoverLetter(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  draftId: string,
+  priorApprovalId: string,
+  approval: ReturnType<typeof ManualPersistedApprovalSchema.parse>,
+  evidence: ManualEvidence[],
+): Promise<ReusedCoverLetter> {
+  const prior = await loadPersistedApproval(pool, ctx, draftId, priorApprovalId);
+  if (!prior || prior.approval.comparison_fingerprint !== approval.comparison_fingerprint
+      || prior.approval.corrections_fingerprint !== approval.corrections_fingerprint || prior.approval.revision >= approval.revision) {
+    throw new ManualFlowError(400, "INVALID_REQUEST", "The letter to keep must come from an earlier revision of the same approved comparison and corrections.");
+  }
+  const run = await pool.query<{ id: string; generator_version: string; output_manifest: Record<string, any> }>(
+    `SELECT id,generator_version,output_manifest FROM manual_application_document_runs
+     WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 AND document_type='COVER_LETTER'`,
+    [ctx.workspaceId, ctx.userId, priorApprovalId]);
+  const manifest = run.rows[0]?.output_manifest ?? {};
+  const review = ManualCoverLetterReviewSchema.safeParse(manifest.cover_letter_review);
+  if (!run.rows[0] || manifest.cover_letter_mode !== "AI_WRITTEN" || typeof manifest.preview_markdown !== "string" || !review.success) {
+    throw new ManualFlowError(409, "APPROVAL_STALE", "The earlier revision has no AI-written cover letter to keep; generate both documents again.");
+  }
+  const claims = await pool.query<{ section_label: string; claim_text: string; evidence_ids: string[]; requirement_keys: string[] }>(
+    `SELECT section_label,claim_text,evidence_ids,requirement_keys FROM manual_application_document_claims
+     WHERE workspace_id=$1 AND manual_document_run_id=$2 ORDER BY created_at, id`,
+    [ctx.workspaceId, run.rows[0].id]);
+  const known = new Set(evidence.map((item) => item.id));
+  if (claims.rows.some((claim) => claim.evidence_ids.some((id) => !known.has(id)))) {
+    throw new ManualFlowError(409, "APPROVAL_STALE", "The earlier letter cites evidence that is not in this comparison; generate both documents again.");
+  }
+  return {
+    coverLetter: manifest.preview_markdown,
+    claims: claims.rows.map((claim) => ({ section: claim.section_label, text: claim.claim_text, evidenceIds: claim.evidence_ids, requirementKeys: claim.requirement_keys })),
+    outcome: {
+      review: review.data,
+      generatorVersion: run.rows[0].generator_version,
+      manifest: {
+        ...Object.fromEntries(REUSABLE_LETTER_MANIFEST_KEYS.filter((key) => key in manifest).map((key) => [key, manifest[key]])),
+        reused_cover_letter_from: priorApprovalId,
+      },
+    },
+  };
+}
 
 function writtenReview(
   mode: ManualWrittenReview["mode"],
@@ -680,6 +763,7 @@ async function prepareWrittenSections(
   writers: { summary: SummaryWriter; coverLetter: CoverLetterWriter },
   documentOptions: ControlledDocumentOptions = {},
   letterOptions: { includeGapNote?: boolean } = {},
+  reusedLetter?: ReusedCoverLetter,
 ): Promise<WrittenSectionsOutcome> {
   const plain = buildControlledDocuments(comparison, contact, documentOptions);
   const evidence = Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [];
@@ -715,7 +799,11 @@ async function prepareWrittenSections(
   const requirements: JobRequirementRef[] = requirementRows.map((row) => ({
     requirement_key: String(row.requirement_key), importance: String(row.importance), requirement: String(row.requirement),
   }));
-  const uncoveredKeys = new Set<string>((comparison.fit?.uncovered_must ?? []).map((item: { requirement_key: string }) => item.requirement_key));
+  // A requirement the candidate wrote their own gap sentence for gets no model-written one.
+  const candidateNoteKeys = new Set(candidateGapNotes(comparison).flatMap((note) => note.requirement_keys));
+  const uncoveredKeys = new Set<string>((comparison.fit?.uncovered_must ?? [])
+    .map((item: { requirement_key: string }) => item.requirement_key)
+    .filter((key: string) => !candidateNoteKeys.has(key)));
   const baseInput = {
     title: String(comparison.title), company: String(comparison.company), pairs, requirements,
     uncoveredMust: requirements.filter((item) => uncoveredKeys.has(item.requirement_key)),
@@ -741,6 +829,14 @@ async function prepareWrittenSections(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     summary = plainSummary(`The AI-written summary was not used because it failed or did not pass validation: ${message} The summary was built from your statements.`);
+  }
+
+  if (reusedLetter) {
+    return {
+      docs: { cv: cvDocs.cv, coverLetter: reusedLetter.coverLetter, claims: [...cvDocs.claims.filter((claim) => claim.section !== "Cover letter"), ...reusedLetter.claims] },
+      summary,
+      letter: reusedLetter.outcome,
+    };
   }
 
   try {
@@ -1137,6 +1233,7 @@ export function createManualApplicationRouter({
       missing_contact_fields: missingContactFields,
       requirements_extracted: requirementSummary.processed === 1,
       role_plan: planRoles(comparison),
+      selectable_evidence: selectableEvidence(comparison),
     });
     res.json(response);
   }));
@@ -1201,29 +1298,52 @@ export function createManualApplicationRouter({
       if (!currentness.ok) {
         throw new ManualFlowError(409, "APPROVAL_STALE", "Job, source, profile, contact, preferences, requirements or comparison changed. Compare again before approving.");
       }
-      await client.query(
-        "INSERT INTO manual_application_preparation_approvals (\n" +
-        "workspace_id,user_id,draft_id,candidate_profile_id,canonical_job_id,job_version_id,\n" +
-        "source_observation_id,job_content_hash,profile_version_id,profile_contact_fact_ids,\n" +
-        "profile_contact_fingerprint,preference_context_fingerprint,requirement_set_id,\n" +
-        "comparator_version,context_fingerprint,comparison_fingerprint,approved\n" +
-        ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,TRUE)\n" +
-        "ON CONFLICT (workspace_id,user_id,draft_id,comparison_fingerprint) DO NOTHING",
-        [draft.workspace_id, draft.user_id, draft.id, draft.candidate_profile_id, draft.canonical_job_id,
-          draft.job_version_id, draft.source_observation_id, draft.job_content_hash, draft.profile_version_id,
-          draft.profile_contact_fact_ids, draft.profile_contact_fingerprint, draft.preference_context_fingerprint,
-          draft.requirement_set_id, draft.comparator_version, draft.context_fingerprint, draft.comparison_fingerprint],
+      // The candidate's corrections must name rows of this comparison and document-eligible evidence.
+      const corrections = normaliseCorrections(request.data.corrections ?? []);
+      try {
+        applyManualCorrections(storedComparison, corrections);
+      } catch (error) {
+        if (error instanceof ManualCorrectionError) throw new ManualFlowError(400, "INVALID_REQUEST", error.message);
+        throw error;
+      }
+      const reviewFingerprint = correctionsFingerprint(corrections);
+      // The same comparison and corrections approve once; new_revision approves them again for fresh documents.
+      const latest = await client.query<{ revision: number }>(
+        `SELECT revision FROM manual_application_preparation_approvals
+         WHERE workspace_id=$1 AND user_id=$2 AND draft_id=$3 AND comparison_fingerprint=$4 AND corrections_fingerprint=$5
+         ORDER BY revision DESC LIMIT 1`,
+        [draft.workspace_id, draft.user_id, draft.id, draft.comparison_fingerprint, reviewFingerprint],
       );
+      const latestRevision = latest.rows[0]?.revision ?? 0;
+      const revision = request.data.new_revision || latestRevision === 0 ? latestRevision + 1 : latestRevision;
+      if (revision > latestRevision) {
+        await client.query(
+          "INSERT INTO manual_application_preparation_approvals (\n" +
+          "workspace_id,user_id,draft_id,candidate_profile_id,canonical_job_id,job_version_id,\n" +
+          "source_observation_id,job_content_hash,profile_version_id,profile_contact_fact_ids,\n" +
+          "profile_contact_fingerprint,preference_context_fingerprint,requirement_set_id,\n" +
+          "comparator_version,context_fingerprint,comparison_fingerprint,approved,corrections,corrections_fingerprint,revision\n" +
+          ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,TRUE,$17::jsonb,$18,$19)",
+          [draft.workspace_id, draft.user_id, draft.id, draft.candidate_profile_id, draft.canonical_job_id,
+            draft.job_version_id, draft.source_observation_id, draft.job_content_hash, draft.profile_version_id,
+            draft.profile_contact_fact_ids, draft.profile_contact_fingerprint, draft.preference_context_fingerprint,
+            draft.requirement_set_id, draft.comparator_version, draft.context_fingerprint, draft.comparison_fingerprint,
+            JSON.stringify(corrections), reviewFingerprint, revision],
+        );
+      }
       const approvalResult = await client.query(
         "SELECT id,workspace_id,user_id,draft_id,candidate_profile_id,canonical_job_id,job_version_id,\n" +
         "source_observation_id,job_content_hash,profile_version_id,profile_contact_fact_ids,\n" +
         "profile_contact_fingerprint,preference_context_fingerprint,requirement_set_id,\n" +
-        "comparator_version,context_fingerprint,comparison_fingerprint,approved\n" +
+        "comparator_version,context_fingerprint,comparison_fingerprint,approved,corrections,corrections_fingerprint,revision\n" +
         "FROM manual_application_preparation_approvals\n" +
-        "WHERE workspace_id=$1 AND user_id=$2 AND draft_id=$3 AND comparison_fingerprint=$4",
-        [draft.workspace_id, draft.user_id, draft.id, draft.comparison_fingerprint],
+        "WHERE workspace_id=$1 AND user_id=$2 AND draft_id=$3 AND comparison_fingerprint=$4 AND corrections_fingerprint=$5 AND revision=$6",
+        [draft.workspace_id, draft.user_id, draft.id, draft.comparison_fingerprint, reviewFingerprint, revision],
       );
       const approval = ManualPersistedApprovalSchema.parse(approvalResult.rows[0]);
+      if (correctionsFingerprint(approval.corrections) !== reviewFingerprint) {
+        throw new ManualFlowError(500, "INTERNAL_ERROR", "The approval record did not preserve the review corrections.");
+      }
       await client.query(
         `INSERT INTO manual_application_approval_contact_facts (workspace_id,user_id,approval_id,draft_id,profile_version_id,profile_contact_fact_id)
          SELECT workspace_id,user_id,$3,draft_id,profile_version_id,profile_contact_fact_id
@@ -1258,6 +1378,8 @@ export function createManualApplicationRouter({
         approval_id: approval.id,
         approved: true,
         comparison_fingerprint: approval.comparison_fingerprint,
+        corrections_fingerprint: approval.corrections_fingerprint,
+        revision: approval.revision,
       }));
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -1286,22 +1408,28 @@ export function createManualApplicationRouter({
     if (!fullName || !phone) {
       throw new ManualFlowError(409, "APPROVAL_STALE", "The current private contact graph must contain a candidate name and phone before documents can be generated.");
     }
+    // Documents are built from the comparison as the candidate corrected it when approving.
+    const reviewed = applyManualCorrections(selected.comparison, selected.approval.corrections);
     const roleLayout = request.data.role_layout ?? {};
-    const plannedRoles = new Set(planRoles(selected.comparison).map((plan) => plan.engagement_id));
+    const plannedRoles = new Set(planRoles(reviewed).map((plan) => plan.engagement_id));
     const unknownRoles = Object.keys(roleLayout).filter((id) => !plannedRoles.has(id));
     if (unknownRoles.length > 0) {
       throw new ManualFlowError(400, "INVALID_REQUEST", `Role choices name roles that are not in the approved comparison: ${unknownRoles.join(", ")}.`);
     }
     const documentContact = { ...contact, full_name: fullName, phone };
+    const documentOptions: ControlledDocumentOptions = { roleLayout, includeGapNotes: request.data.include_gap_note !== false };
     // Documents already generated for this approval are returned as stored, without calling the model again.
     const alreadyGenerated = await pool.query(
       `SELECT 1 FROM manual_application_document_artifacts WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 LIMIT 1`,
       [ctx.workspaceId, ctx.userId, approvalId]);
+    const reusedLetter = alreadyGenerated.rows.length === 0 && request.data.reuse_cover_letter_from
+      ? await loadReusableCoverLetter(pool, ctx, draftId, request.data.reuse_cover_letter_from, selected.approval, evidenceOf(reviewed))
+      : undefined;
     const letter = alreadyGenerated.rows.length > 0
       ? null
-      : await prepareWrittenSections(pool, ctx, selected.approval, selected.comparison, documentContact,
-        { summary: summaryWriter, coverLetter: coverLetterWriter }, { roleLayout }, { includeGapNote: request.data.include_gap_note });
-    const docs = letter?.docs ?? buildControlledDocuments(selected.comparison, documentContact, { roleLayout });
+      : await prepareWrittenSections(pool, ctx, selected.approval, reviewed, documentContact,
+        { summary: summaryWriter, coverLetter: coverLetterWriter }, documentOptions, { includeGapNote: request.data.include_gap_note }, reusedLetter);
+    const docs = letter?.docs ?? buildControlledDocuments(reviewed, documentContact, documentOptions);
     const cvDocx = await renderControlledDocx(docs.cv);
     const cvPdf = renderControlledPdf(docs.cv);
     const letterDocx = await renderControlledDocx(docs.coverLetter);
@@ -1346,6 +1474,7 @@ export function createManualApplicationRouter({
           artifacts: existing.rows.map(({ document_type, format, filename, mime_type }) => ({ type: document_type, format, filename, mime_type })),
           ...(storedReview.success ? { cover_letter: storedReview.data } : {}),
           ...(storedSummaryReview.success ? { summary: storedSummaryReview.data } : {}),
+          revision: locked.approval.revision, corrections_applied: locked.approval.corrections.length,
         });
         res.setHeader("Cache-Control", "private, no-store");
         res.json(response);
@@ -1372,6 +1501,8 @@ export function createManualApplicationRouter({
             JSON.stringify({ manual_preparation: true, draft_id: draftId, approval_id: approvalId,
               requirement_set_id: locked.approval.requirement_set_id, comparison_fingerprint: currentFingerprint,
               factual_template: true, automatic_readiness_mutated: false, role_layout: roleLayout, preview_markdown: content,
+              revision: locked.approval.revision, corrections: locked.approval.corrections,
+              corrections_fingerprint: locked.approval.corrections_fingerprint,
               ...(sectionRun ? { ...sectionRun.manifest, [type === "COVER_LETTER" ? "cover_letter_review" : "summary_review"]: sectionRun.review } : {}) }),
             sectionRun ? sectionRun.generatorVersion : "manual_preparation_v1"]);
         runIds[type] = run.rows[0].id;
@@ -1406,6 +1537,7 @@ export function createManualApplicationRouter({
       comparison_fingerprint: currentFingerprint, preview: { cv: docs.cv, cover_letter: docs.coverLetter },
       artifacts: artifacts.map(({ type, format, filename, mime }) => ({ type, format, filename, mime_type: mime })),
       ...(letter ? { cover_letter: letter.letter.review, summary: letter.summary.review } : {}),
+      revision: selected.approval.revision, corrections_applied: selected.approval.corrections.length,
     });
     res.setHeader("Cache-Control", "private, no-store");
     res.json(response);

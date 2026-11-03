@@ -182,6 +182,22 @@ def _comparison_response(source_content_status="COMPLETE"):
                 "default_source": "PROFILE",
             },
         ],
+        "selectable_evidence": [
+            {
+                "id": "fact-1",
+                "evidence_type": "FACT",
+                "statement": "Designed data systems.",
+                "role": "Program Lead at Example Investment Management",
+                "period": "Apr 2023 – Apr 2025",
+            },
+            {
+                "id": "fact-2",
+                "evidence_type": "FACT",
+                "statement": "Established golden-record master data governance across CRM and ERP.",
+                "role": "Regional CRM Architect at Example Consumer Goods",
+                "period": "Feb 2012 – Sep 2017",
+            },
+        ],
     }
 
 

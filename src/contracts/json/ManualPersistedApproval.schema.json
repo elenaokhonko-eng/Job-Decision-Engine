@@ -67,6 +67,70 @@
         "approved": {
           "type": "boolean",
           "const": true
+        },
+        "corrections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "requirement_key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "ACCEPTED",
+                  "NOT_APPLICABLE",
+                  "GAP",
+                  "PARTIAL"
+                ]
+              },
+              "evidence_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "maxItems": 3
+              },
+              "gap_sentence": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 400
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "requirement_key",
+              "status",
+              "evidence_ids"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "corrections_fingerprint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ManualPersistedApproval/properties/profile_contact_fingerprint"
+            },
+            {
+              "type": "string",
+              "const": ""
+            }
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "required": [
@@ -87,7 +151,10 @@
         "comparator_version",
         "context_fingerprint",
         "comparison_fingerprint",
-        "approved"
+        "approved",
+        "corrections",
+        "corrections_fingerprint",
+        "revision"
       ],
       "additionalProperties": false
     }

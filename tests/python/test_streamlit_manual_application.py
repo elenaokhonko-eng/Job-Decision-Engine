@@ -132,6 +132,81 @@ def test_manual_application_requires_comparison_then_explicit_approval_and_downl
     assert not app.download_button
 
 
+def _compared_app():
+    app = AppTest.from_file(
+        str(PROJECT_ROOT / "tests/python/manual_application_fixture.py")
+    ).run(timeout=10)
+    app.text_input(key="manual_job_url").set_value("https://example.test/job")
+    app.text_input(key="manual_job_title").set_value("Data Architect")
+    app.text_input(key="manual_job_company").set_value("Example")
+    app.button(key="manual_fetch_description").click().run(timeout=10)
+    app.button(key="manual_compare").click().run(timeout=10)
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    fingerprint = app.session_state["manual_comparison"]["comparison_fingerprint"]
+    app.checkbox(key=f"manual_approval_checked_{fingerprint}").check()
+    app.checkbox(key=f"manual_poor_fit_acknowledged_{fingerprint}").check()
+    return app, fingerprint
+
+
+def _calls(app, suffix):
+    return [
+        call for call in app.session_state["test_api_calls"] if call[1].endswith(suffix)
+    ]
+
+
+def test_review_corrections_are_sent_with_the_approval_and_a_failed_summary_can_be_retried():
+    app, fingerprint = _compared_app()
+    evidence_key = f"manual_review_evidence_{fingerprint}_R-001"
+    evidence = app.multiselect(key=evidence_key)
+    # The picker searches every selectable fact and shows its role and dates.
+    assert any(
+        "golden-record" in option and "Regional CRM Architect" in option
+        for option in evidence.options
+    )
+    assert evidence.value == ["fact-1"]
+    # Unchanged rows send no corrections.
+    app.button(key="manual_approve").click().run(timeout=10)
+    assert "corrections" not in _calls(app, "/approve")[-1][2]
+
+    # Choose a different fact, then approve: the change travels with the approval.
+    app.multiselect(key=evidence_key).set_value(["fact-2"]).run(timeout=10)
+    assert any("Approve again" in warning.value for warning in app.warning)
+    assert not any(button.key == "manual_generate" for button in app.button)
+    app.button(key="manual_approve").click().run(timeout=10)
+    assert _calls(app, "/approve")[-1][2]["corrections"] == [
+        {"requirement_key": "R-001", "status": "ACCEPTED", "evidence_ids": ["fact-2"]}
+    ]
+
+    # Marking a row partly met asks for the candidate's own gap sentence.
+    decision = app.selectbox(key=f"manual_review_decision_{fingerprint}_R-001")
+    decision.set_value("PARTIAL").run(timeout=10)
+    app.text_input(key=f"manual_review_gap_{fingerprint}_R-001").set_value(
+        "I have led data governance, but not for vendor market data."
+    ).run(timeout=10)
+    app.button(key="manual_approve").click().run(timeout=10)
+    assert _calls(app, "/approve")[-1][2]["corrections"] == [
+        {
+            "requirement_key": "R-001",
+            "status": "PARTIAL",
+            "evidence_ids": ["fact-2"],
+            "gap_sentence": "I have led data governance, but not for vendor market data.",
+        }
+    ]
+
+    app.button(key="manual_generate").click().run(timeout=10)
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    # The summary fell back, so it can be retried: a new revision that keeps the AI letter.
+    app.button(key="manual_retry_summary").click().run(timeout=10)
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    retry_approval = _calls(app, "/approve")[-1][2]
+    assert retry_approval["new_revision"] is True
+    assert retry_approval["corrections"][0]["status"] == "PARTIAL"
+    retry_documents = _calls(app, "/documents")[-1][2]
+    assert retry_documents["reuse_cover_letter_from"] == retry_approval.get(
+        "approval_id", app.session_state["manual_approval"]["approval_id"]
+    )
+
+
 def test_fetched_source_edits_are_clearly_marked_for_user_review():
     app = AppTest.from_file(
         str(PROJECT_ROOT / "tests/python/manual_application_fixture.py")

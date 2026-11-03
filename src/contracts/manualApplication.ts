@@ -190,6 +190,14 @@ export const ManualCompareResponseSchema = z.object({
   requirements_extracted: z.boolean(),
   // The CV's roles, newest first, with the layout each gets unless the candidate chooses otherwise.
   role_plan: z.array(ManualRolePlanSchema).optional(),
+  // Every document-eligible fact or credential, for choosing different evidence on the review screen.
+  selectable_evidence: z.array(z.object({
+    id: z.string().min(1),
+    evidence_type: z.enum(["FACT", "CREDENTIAL"]),
+    statement: z.string().min(1),
+    role: z.string().min(1).nullable(),
+    period: z.string().min(1).nullable(),
+  }).strict()).optional(),
 }).strict();
 
 export const ManualPersistedDraftSchema = z.object({
@@ -213,9 +221,40 @@ export const ManualPersistedDraftSchema = z.object({
   suitability_warnings: z.array(z.string()),
 }).strict();
 
+/**
+ * The candidate's decision on one requirement row, made on the review screen before approving.
+ * ACCEPTED: the documents use exactly evidence_ids (the proposed pairs, fewer, or others chosen).
+ * NOT_APPLICABLE: the requirement leaves the documents. GAP: no evidence; PARTIAL: some evidence;
+ * either may carry the candidate's own gap sentence for the letter.
+ */
+export const ManualRowCorrectionSchema = z.object({
+  requirement_key: z.string().min(1).max(80),
+  status: z.enum(["ACCEPTED", "NOT_APPLICABLE", "GAP", "PARTIAL"]),
+  evidence_ids: z.array(z.string().min(1).max(80)).max(3),
+  gap_sentence: z.string().trim().min(10).max(400).nullable().optional(),
+}).strict().superRefine((row, ctx) => {
+  if ((row.status === "NOT_APPLICABLE" || row.status === "GAP") && row.evidence_ids.length > 0) {
+    ctx.addIssue({ code: "custom", path: ["evidence_ids"], message: `${row.status} rows cite no evidence.` });
+  }
+  if (row.status === "ACCEPTED" && row.evidence_ids.length === 0) {
+    ctx.addIssue({ code: "custom", path: ["evidence_ids"], message: "An ACCEPTED row needs at least one evidence item; mark it GAP instead." });
+  }
+  if (row.gap_sentence && row.status !== "GAP" && row.status !== "PARTIAL") {
+    ctx.addIssue({ code: "custom", path: ["gap_sentence"], message: "Only GAP and PARTIAL rows carry a gap sentence." });
+  }
+  if (new Set(row.evidence_ids).size !== row.evidence_ids.length) {
+    ctx.addIssue({ code: "custom", path: ["evidence_ids"], message: "Evidence ids must be distinct." });
+  }
+});
+export type ManualRowCorrection = z.infer<typeof ManualRowCorrectionSchema>;
+
 export const ManualApprovalRequestSchema = z.object({
   approved: z.literal(true),
   comparison_fingerprint: Sha256,
+  // Only the rows the candidate changed; every other row keeps its proposed evidence.
+  corrections: z.array(ManualRowCorrectionSchema).max(80).optional(),
+  // Approve the same comparison and corrections again as a new revision, to generate fresh documents.
+  new_revision: z.boolean().optional(),
 }).strict();
 
 export const ManualApprovalResponseSchema = z.object({
@@ -224,6 +263,9 @@ export const ManualApprovalResponseSchema = z.object({
   approval_id: Uuid,
   approved: z.literal(true),
   comparison_fingerprint: Sha256,
+  // sha256 of the normalised corrections; "" when the candidate changed nothing.
+  corrections_fingerprint: z.union([Sha256, z.literal("")]).optional(),
+  revision: z.number().int().min(1).optional(),
 }).strict();
 
 /** In-memory identity used to compare persisted approval with current inputs. */
@@ -262,14 +304,19 @@ export const ManualPersistedApprovalSchema = z.object({
   context_fingerprint: Sha256,
   comparison_fingerprint: Sha256,
   approved: z.literal(true),
+  corrections: z.array(ManualRowCorrectionSchema),
+  corrections_fingerprint: z.union([Sha256, z.literal("")]),
+  revision: z.number().int().min(1),
 }).strict();
 
 export const ManualGenerateRequestSchema = z.object({
   approval_id: Uuid,
   // The candidate's per-role choice, keyed by engagement id from role_plan; unlisted roles keep their default.
   role_layout: z.record(z.string().min(1), ManualRoleLayoutSchema).optional(),
-  // Whether the AI letter may include its one candid sentence on a MUST requirement without evidence; default true.
+  // Whether the letter may include its candid sentences on requirements without evidence; default true.
   include_gap_note: z.boolean().optional(),
+  // An earlier revision of the same approval whose AI-written letter is kept, so only the summary is rewritten.
+  reuse_cover_letter_from: Uuid.optional(),
 }).strict();
 
 export const ManualArtifactSchema = z.object({
@@ -289,8 +336,9 @@ export const ManualCoverLetterReviewSchema = z.object({
     requirement_keys: z.array(z.string().min(1)),
   }).strict()),
   // Letter sentences that make no claim (opening, candid gap note, closing), so they cite no evidence.
+  // CANDIDATE_GAP_NOTE: a gap sentence the candidate wrote on the review screen, in their own words.
   framing: z.array(z.object({
-    kind: z.enum(["OPENING", "GAP_NOTE", "CLOSING"]),
+    kind: z.enum(["OPENING", "GAP_NOTE", "CANDIDATE_GAP_NOTE", "CLOSING"]),
     text: z.string().min(1),
     requirement_keys: z.array(z.string().min(1)),
     included: z.boolean(),
@@ -308,6 +356,9 @@ export const ManualDocumentsResponseSchema = z.object({
   cover_letter: ManualCoverLetterReviewSchema.optional(),
   // How the CV summary was written, and the evidence behind each sentence; same shape as cover_letter.
   summary: ManualCoverLetterReviewSchema.optional(),
+  // The approval revision these documents belong to, and how many review corrections they applied.
+  revision: z.number().int().min(1).optional(),
+  corrections_applied: z.number().int().min(0).optional(),
 }).strict();
 
 export const ManualDownloadResponseSchema = z.object({

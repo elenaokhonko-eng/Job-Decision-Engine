@@ -4,7 +4,7 @@ import { z } from "zod";
 import { checkModelRegistryPreflight, generateContentAudited, MODEL_REGISTRY } from "../services/agent.js";
 import type { WorkspaceContext } from "../workspace/context.js";
 import { containsSelfDescription } from "./manualDocumentPolicy.js";
-import { documentHeader, evidenceAgeYears, type ControlledDocuments, type ManualEvidence } from "./manualPreparation.js";
+import { candidateGapNotes, documentHeader, evidenceAgeYears, type ControlledDocuments, type ManualEvidence } from "./manualPreparation.js";
 
 export const MANUAL_COVER_LETTER_SCHEMA_VERSION = "manual_cover_letter_v2";
 export const MANUAL_COVER_LETTER_GENERATOR_VERSION = "manual_cover_letter_ai_v2";
@@ -396,7 +396,7 @@ export function manualCoverLetterMode(): "ai" | "deterministic" {
 
 /** A sentence of the letter that is not a claim, shown in the review with whether it was included. */
 export interface LetterFraming {
-  kind: "OPENING" | "GAP_NOTE" | "CLOSING";
+  kind: "OPENING" | "GAP_NOTE" | "CANDIDATE_GAP_NOTE" | "CLOSING";
   text: string;
   requirement_keys: string[];
   included: boolean;
@@ -405,8 +405,8 @@ export interface LetterFraming {
 /**
  * Frames a validated model-written body with the deterministic header, greeting, opening line,
  * closing and sign-off. Each body sentence becomes a claim carrying its evidence IDs and requirement
- * keys; the opening, gap note and closing are framing, listed separately. The gap note is included
- * only when the candidate chose it.
+ * keys; the opening, gap notes and closing are framing, listed separately. Gap notes (the model's,
+ * and any the candidate wrote on the review screen) are included only when the candidate chose them.
  */
 export function buildWrittenCoverLetter(
   comparison: Record<string, any>,
@@ -417,11 +417,17 @@ export function buildWrittenCoverLetter(
   const claims: ControlledDocuments["claims"] = letter.paragraphs.flat().map((sentence) => ({
     section: "Cover letter", text: sentence.text, evidenceIds: [...sentence.evidence_ids], requirementKeys: [...sentence.requirement_keys],
   }));
-  const includeGapNote = Boolean(letter.gapNote) && options.includeGapNote !== false;
+  const gapNotesWanted = options.includeGapNote !== false;
+  const candidateNotes = candidateGapNotes(comparison);
+  const candidateKeys = new Set(candidateNotes.flatMap((note) => note.requirement_keys));
+  // The candidate's own sentence on a requirement replaces the model's.
+  const modelGapNote = letter.gapNote && !letter.gapNote.requirement_keys.some((key) => candidateKeys.has(key)) ? letter.gapNote : null;
+  const includeGapNote = Boolean(modelGapNote) && gapNotesWanted;
   const openingText = `I am applying for the ${comparison.title} role at ${comparison.company}. ${letter.opening.text}`;
   const framing: LetterFraming[] = [
     { kind: "OPENING", text: openingText, requirement_keys: [...letter.opening.requirement_keys], included: true },
-    ...(letter.gapNote ? [{ kind: "GAP_NOTE" as const, text: letter.gapNote.text, requirement_keys: [...letter.gapNote.requirement_keys], included: includeGapNote }] : []),
+    ...(modelGapNote ? [{ kind: "GAP_NOTE" as const, text: modelGapNote.text, requirement_keys: [...modelGapNote.requirement_keys], included: includeGapNote }] : []),
+    ...candidateNotes.map((note) => ({ kind: "CANDIDATE_GAP_NOTE" as const, text: note.text, requirement_keys: note.requirement_keys, included: gapNotesWanted })),
     { kind: "CLOSING", text: COVER_LETTER_CLOSING, requirement_keys: [], included: true },
   ];
   const coverLetter = [
@@ -433,7 +439,8 @@ export function buildWrittenCoverLetter(
     openingText,
     "",
     ...letter.paragraphs.flatMap((sentences) => [sentences.map((sentence) => sentence.text).join(" "), ""]),
-    ...(includeGapNote && letter.gapNote ? [letter.gapNote.text, ""] : []),
+    ...(includeGapNote && modelGapNote ? [modelGapNote.text, ""] : []),
+    ...(gapNotesWanted && candidateNotes.length > 0 ? [candidateNotes.map((note) => note.text).join(" "), ""] : []),
     COVER_LETTER_CLOSING,
     "",
     "Sincerely,",

@@ -24,6 +24,9 @@
         },
         "include_gap_note": {
           "type": "boolean"
+        },
+        "reuse_cover_letter_from": {
+          "$ref": "#/definitions/ManualGenerateRequest/properties/approval_id"
         }
       },
       "required": [

@@ -287,22 +287,7 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
     };
   });
 
-  const mustRows = rows.filter((row) => row.importance === "MUST");
-  const uncoveredMust = mustRows.filter((row) => row.evidence.length === 0);
-  const covered = mustRows.length - uncoveredMust.length;
-  const weak = mustRows.length > 0 && covered * 2 < mustRows.length;
-  const fit = {
-    must_total: mustRows.length,
-    must_covered: covered,
-    uncovered_must: uncoveredMust.map((row) => ({ requirement_key: row.requirement_key, requirement: row.requirement })),
-    verdict: mustRows.length === 0 ? "NO_MUST_REQUIREMENTS" : weak ? "FEWER_THAN_HALF_MUSTS_EVIDENCED" : "MOST_MUSTS_EVIDENCED",
-    message: mustRows.length === 0
-      ? "The posting states no MUST requirements, so there is no coverage check."
-      : weak
-        ? `Only ${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile. This looks like a poor fit; documents will not claim the uncovered requirements.`
-        : `${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile.`,
-    advisory: "Evidence coverage only, not a hiring or suitability decision.",
-  };
+  const fit = manualFitCheck(rows);
   return {
     schema_version: "manual_application_v1",
     comparator_version: MANUAL_COMPARATOR_VERSION,
@@ -327,6 +312,33 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
     fit,
     suitability_warnings: [...input.suitability_warnings],
     evidence_notice: "Pairs are proposed evidence for your review, not a suitability decision. Check each source statement and every gap yourself.",
+  };
+}
+
+/** Gap sentences the candidate wrote on the review screen, in row order: framing for the letter, never claims. */
+export function candidateGapNotes(comparison: Record<string, any>): Array<{ text: string; requirement_keys: string[] }> {
+  const rows = Array.isArray(comparison.rows) ? comparison.rows as Array<Record<string, any>> : [];
+  return rows.filter((row) => typeof row.candidate_gap_note === "string" && row.candidate_gap_note.trim())
+    .map((row) => ({ text: String(row.candidate_gap_note).trim(), requirement_keys: [String(row.requirement_key)] }));
+}
+
+/** How many MUST requirements have evidence: an advisory coverage check, never a suitability decision. */
+export function manualFitCheck(rows: Array<{ requirement_key: string; importance: string; requirement: string; evidence: unknown[] }>) {
+  const mustRows = rows.filter((row) => row.importance === "MUST");
+  const uncoveredMust = mustRows.filter((row) => row.evidence.length === 0);
+  const covered = mustRows.length - uncoveredMust.length;
+  const weak = mustRows.length > 0 && covered * 2 < mustRows.length;
+  return {
+    must_total: mustRows.length,
+    must_covered: covered,
+    uncovered_must: uncoveredMust.map((row) => ({ requirement_key: row.requirement_key, requirement: row.requirement })),
+    verdict: mustRows.length === 0 ? "NO_MUST_REQUIREMENTS" : weak ? "FEWER_THAN_HALF_MUSTS_EVIDENCED" : "MOST_MUSTS_EVIDENCED",
+    message: mustRows.length === 0
+      ? "The posting states no MUST requirements, so there is no coverage check."
+      : weak
+        ? `Only ${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile. This looks like a poor fit; documents will not claim the uncovered requirements.`
+        : `${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile.`,
+    advisory: "Evidence coverage only, not a hiring or suitability decision.",
   };
 }
 
@@ -398,6 +410,8 @@ export interface ControlledDocumentOptions {
   roleLayout?: Record<string, RoleLayout>;
   /** A validated, model-written summary; each sentence cites approved evidence. Replaces the plain summary. */
   writtenSummary?: Array<{ text: string; evidence_ids: string[]; requirement_keys: string[] }>;
+  /** Whether the letter includes the candidate's own gap sentences from the review; default true. */
+  includeGapNotes?: boolean;
 }
 
 function formatMonth(isoDate: string): string {
@@ -729,6 +743,8 @@ export function buildControlledDocuments(
     `I am applying for the ${comparison.title} role at ${comparison.company}. Below, I set the role's main requirements against what I have done.`,
     "",
     ...letterPoints.flatMap((point) => [point, ""]),
+    ...(options.includeGapNotes !== false && candidateGapNotes(comparison).length > 0
+      ? [candidateGapNotes(comparison).map((note) => note.text).join(" "), ""] : []),
     "Everything above comes from my recorded experience. Where the role asks for something not covered here, I would be glad to discuss it directly.",
     "",
     "I would welcome the opportunity to talk about the role.",
