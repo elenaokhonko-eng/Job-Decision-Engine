@@ -20,28 +20,40 @@ export interface DocumentRequirement {
   requirement_text: string;
 }
 
-export const MAX_POSTING_REQUIREMENT_LINES = 14;
+export const MAX_POSTING_REQUIREMENT_LINES = 20;
 const MIN_POSTING_LINE_CHARS = 15;
 const MAX_POSTING_LINE_CHARS = 300;
 
-const REQUIREMENT_HEADING = /^(requirements?|qualifications?|minimum qualifications|basic qualifications|preferred qualifications|what you(?:'|’)ll bring|what we(?:'|’)re looking for|who you are|about you|you have|you will have|skills(?: and experience)?|experience|must[- ]haves?|nice[- ]to[- ]haves?)\b/i;
-const RESPONSIBILITY_HEADING = /^(responsibilities|key responsibilities|what you(?:'|’)ll do|what you will do|the role|your role|role overview|duties|day[- ]to[- ]day|in this role)\b/i;
+const REQUIREMENT_HEADING = /^(requirements?|qualifications?|minimum qualifications|basic qualifications|preferred qualifications|what you(?:'|’)ll bring|what you bring|what we(?:'|’)re looking for|who you are|about you|you have|you will have|(?:your )?background|your (?:experience|profile|skills)|(?:the )?ideal candidate|skills(?: and experience)?|experience|must[- ]haves?|nice[- ]to[- ]haves?)\b/i;
+const RESPONSIBILITY_HEADING = /^(responsibilities|key responsibilities|your responsibilities|(?:key )?accountabilities|what you(?:'|’)ll do|what you will do|what you(?:'|’)ll be doing|the role|your role|your mission|role overview|duties|day[- ]to[- ]day|in this role)\b/i;
 const OTHER_HEADING = /^(about (?:us|the company|the team)|benefits|what we offer|perks|compensation|salary|how to apply|equal opportunity|our culture|why join)\b/i;
 const PREFERRED_CUE = /\b(preferred|nice[- ]to[- ]have|a plus|is a bonus|desirable|advantageous|ideally)\b/i;
 
 /**
  * Requirements the documents may match against. AI-quoted requirements are the job's own words, so
- * they are used when present. Deterministic rows carry fixed labels ("Role specifies an employment
- * type.") meant for gating, not for documents, so without quoted rows the posting's own
- * responsibility and requirement lines are used instead.
+ * they come first. The model may quote only a few of the posting's bullets, so every requirement or
+ * responsibility line no quote covers is added too, in the posting's words. Deterministic rows carry
+ * fixed labels ("Role specifies an employment type.") meant for gating, not for documents, so they
+ * are never used here.
  */
 export function documentRequirements(rows: StoredRequirementRow[], descriptionText: string | null): DocumentRequirement[] {
+  const posting = postingRequirementLines(descriptionText ?? "");
   const quoted = rows.filter((row) => row.extractor_type === "LLM_QUOTED");
-  if (quoted.length > 0) {
-    return quoted.map(({ requirement_key, requirement_type, importance, requirement_text }) =>
-      ({ requirement_key, requirement_type, importance, requirement_text }));
-  }
-  return postingRequirementLines(descriptionText ?? "");
+  if (quoted.length === 0) return posting;
+  const quotes = quoted.map((row) => comparableText(row.quote_text ?? row.requirement_text)).filter((quote) => quote.length > 0);
+  const uncovered = posting.filter((line) => {
+    const text = comparableText(line.requirement_text);
+    return !quotes.some((quote) => text.includes(quote) || quote.includes(text));
+  });
+  return [
+    ...quoted.map(({ requirement_key, requirement_type, importance, requirement_text }) =>
+      ({ requirement_key, requirement_type, importance, requirement_text })),
+    ...uncovered,
+  ];
+}
+
+function comparableText(text: string): string {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
 /** Lines under the posting's responsibility and requirement headings, in the posting's own words. */

@@ -14,7 +14,7 @@ import type { ManualEvidence, ManualRequirement } from "./manualPreparation.js";
  */
 
 export const MANUAL_PAIRING_SCHEMA_VERSION = "manual_evidence_pairing_v1";
-export const MANUAL_PAIRING_METHOD = "model_pairing_v1";
+export const MANUAL_PAIRING_METHOD = "model_pairing_v2";
 export const PAIRING_CONFIDENCE_THRESHOLD = 0.6;
 export const MAX_PAIRS_PER_REQUIREMENT = 3;
 const MAX_PAIRING_RESPONSE_BYTES = 128 * 1024;

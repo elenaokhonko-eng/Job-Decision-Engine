@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { Document, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
 import { assertNoInternalAssessmentText, isInternalAssessmentStatement, isSelfDescriptionStatement } from "./manualDocumentPolicy.js";
 
-export const MANUAL_COMPARATOR_VERSION = "evidence-pairing-v3";
+export const MANUAL_COMPARATOR_VERSION = "evidence-pairing-v4";
 
 export interface ManualRequirement {
   requirement_key: string;
