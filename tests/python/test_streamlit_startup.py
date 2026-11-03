@@ -11,6 +11,7 @@ from streamlit.testing.v1 import AppTest
 
 from streamlit_runtime import (
     code_version,
+    database_outage,
     is_hosted_runtime,
     open_api_json,
     validate_api_health,
@@ -155,3 +156,79 @@ def test_code_version_prefers_deploy_variables_and_never_raises():
         raise FileNotFoundError("git")
 
     assert code_version({}, run=missing_git) == "unknown"
+
+
+def _api_get(opener):
+    def get(path):
+        request = urllib.request.Request(f"http://127.0.0.1:3000{path}")
+        return open_api_json(request, 5, opener=opener)
+
+    return get
+
+
+def _no_direct_probe():
+    raise AssertionError("The API answered, so no direct connection should be tried.")
+
+
+def test_database_outage_reports_the_api_database_failure_once():
+    body = json.dumps(
+        {
+            "ok": False,
+            "error": "DATABASE_UNAVAILABLE",
+            "message": "The database at ep-example.neon.tech could not be used: endpoint not found. Check DATABASE_URL (and DATABASE_URL_UNPOOLED) in .env.local, then restart the API.",
+        }
+    )
+    message = database_outage(
+        "http://127.0.0.1:3000", _api_get(_http_error_opener(503, body)), _no_direct_probe
+    )
+    assert message.startswith("The database at ep-example.neon.tech could not be used")
+    assert "HTTP 503" not in message
+
+    # A healthy API, an unreachable API, or a different error is not a database outage.
+    healthy = database_outage(
+        "http://127.0.0.1:3000", lambda path: {"ok": True}, _no_direct_probe
+    )
+    assert healthy is None
+    other = _http_error_opener(403, '{"ok": false, "error": "FORBIDDEN"}')
+    assert (
+        database_outage("http://127.0.0.1:3000", _api_get(other), _no_direct_probe)
+        is None
+    )
+
+
+def test_database_outage_without_an_api_tries_a_direct_connection_and_hides_credentials():
+    def refused():
+        raise RuntimeError(
+            'connection to server at "db.example.test" (10.0.0.5), port 5432 failed: Connection refused\n\tIs the server running?'
+        )
+
+    message = database_outage(
+        "", None, refused, "postgresql://user:s3cret@db.example.test:5432/app"
+    )
+    assert message == (
+        'The database at db.example.test could not be used: connection to server at "db.example.test" (10.0.0.5), port 5432 failed: Connection refused. '
+        "Check DATABASE_URL in .env.local, then restart both windows."
+    )
+    assert "s3cret" not in message
+    assert database_outage("", None, refused, "") is None
+    assert database_outage("", None, lambda: None, "postgresql://db.example.test/app") is None
+
+
+def test_streamlit_shows_one_database_error_and_stops_when_the_database_is_unreachable(monkeypatch):
+    monkeypatch.setenv("JDEC_RUNTIME_MODE", "local")
+    monkeypatch.setenv("JDEC_API_BASE_URL", "")
+    monkeypatch.setenv("API_BASE_URL", "")
+    # Nothing listens on port 1, so the direct read-only connection fails at once.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:s3cret@127.0.0.1:1/missing")
+    monkeypatch.setenv("STREAMLIT_E2E_ALLOW_LOCAL_POSTGRES", "true")
+    monkeypatch.setenv("WORKSPACE_KEY", "test-workspace")
+    monkeypatch.setenv("WORKSPACE_USER_KEY", "test-user")
+
+    app = AppTest.from_file(str(PROJECT_ROOT / "streamlit_app.py")).run(timeout=20)
+
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    errors = [error.value for error in app.error]
+    assert len(errors) == 1, errors
+    assert errors[0].startswith("The database at 127.0.0.1 could not be used")
+    assert "s3cret" not in errors[0]
+    assert not app.tabs

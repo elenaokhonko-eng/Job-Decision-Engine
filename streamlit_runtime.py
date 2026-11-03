@@ -185,3 +185,37 @@ def code_version(environment=None, run=None, repo_dir=None):
         return "unknown"
     label = "detached HEAD" if branch == "HEAD" else branch
     return f"{label} @ {commit}{' + local changes' if dirty else ''}"
+
+
+DATABASE_UNAVAILABLE_CODE = "DATABASE_UNAVAILABLE"
+
+
+def database_outage(api_url, api_get, probe_direct, database_url=""):
+    """One message when the app's database cannot be used, else None.
+
+    With an API configured, its workspace health check speaks for the database: only its
+    DATABASE_UNAVAILABLE answer is an outage. An unreachable API is not, because the read-only
+    fallback handles that. Without an API, a direct read-only connection is tried when
+    DATABASE_URL is set. The message names the host, never the connection string.
+    """
+    if api_url:
+        try:
+            api_get("/api/v2/health")
+        except RuntimeError as error:
+            marker = f"{DATABASE_UNAVAILABLE_CODE}: "
+            text = str(error)
+            return text.split(marker, 1)[1] if marker in text else None
+        return None
+    if not database_url:
+        return None
+    try:
+        probe_direct()
+    except Exception as error:  # any driver failure means the database cannot be used
+        host = urlsplit(database_url).hostname or "the configured host"
+        lines = str(error).strip().splitlines()
+        detail = lines[0][:240] if lines else type(error).__name__
+        return (
+            f"The database at {host} could not be used: {detail}. "
+            "Check DATABASE_URL in .env.local, then restart both windows."
+        )
+    return None

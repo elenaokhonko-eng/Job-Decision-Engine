@@ -27,6 +27,7 @@ import {
 } from "../../services/currentApplicationReadiness.js";
 import { RejectedJobRowSchema, ShortlistRowV2Schema } from "../../readModels/contracts.js";
 import { createManualApplicationRouter } from "./manualApplicationRouter.js";
+import { describeDatabaseFailure } from "./databaseFailure.js";
 
 type QueryClient = {
   query: pg.PoolClient["query"];
@@ -197,11 +198,8 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         (req as any).workspaceContext = ctx;
         next();
       } catch (err: any) {
-        res.status(503).json({
-          ok: false,
-          error: "DATABASE_NOT_INITIALIZED",
-          message: "Database schema is not initialized yet. Complete the desktop setup wizard to install the schema.",
-        });
+        // Only a missing schema is a setup problem; an unreachable host or a rejected password is reported as such.
+        res.status(503).json(describeDatabaseFailure(err, process.env.DATABASE_URL));
       }
     })
   );
