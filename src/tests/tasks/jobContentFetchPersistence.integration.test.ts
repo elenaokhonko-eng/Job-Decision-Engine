@@ -414,6 +414,20 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
       posting: { title: postingTitle, publishedAt: "2025-08-01T12:00:00.000Z" },
     });
     expect(source.rows[0]?.normalized_evidence).not.toBeNull();
+    const availability = source.rows[0]?.normalized_evidence?.availability as {
+      status: string;
+      verification_method: string;
+      reason_code: string;
+      verified_at: string;
+      expires_at: string;
+    };
+    expect(availability).toMatchObject({
+      status: "OPEN",
+      verification_method: "VERIFIED_POSTING_RETRIEVAL",
+      reason_code: "FULL_POSTING_RETRIEVED",
+    });
+    expect(Date.parse(availability.expires_at) - Date.parse(availability.verified_at))
+      .toBe(7 * 24 * 60 * 60 * 1000);
 
     const original = await getClient().query<{ description_raw: string; processing_status: string; job_version_id: string | null }>(
       `SELECT description_raw, processing_status, job_version_id::text AS job_version_id FROM raw_job_observations

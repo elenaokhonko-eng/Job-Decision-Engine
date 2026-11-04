@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-export const JOB_SOURCE_EVIDENCE_SCHEMA_VERSION = "job_source_evidence_v1" as const;
+export const JOB_SOURCE_EVIDENCE_SCHEMA_VERSION = "job_source_evidence_v2" as const;
+export const SUPPORTED_JOB_SOURCE_EVIDENCE_SCHEMA_VERSIONS = [
+  "job_source_evidence_v1",
+  JOB_SOURCE_EVIDENCE_SCHEMA_VERSION,
+] as const;
 
 export const JobEvidenceStatusSchema = z.enum(["SUPPORTED", "UNKNOWN", "CONFLICTING", "INVALID"]);
 export type JobEvidenceStatus = z.infer<typeof JobEvidenceStatusSchema>;
@@ -63,7 +67,7 @@ export const AvailabilityEvidenceSchema = z.object({
   status: z.enum(["OPEN", "CLOSED", "UNKNOWN"]),
   verified_at: z.string().datetime().nullable(),
   expires_at: z.string().datetime().nullable(),
-  verification_method: z.enum(["EMPLOYER_ATS_LISTING", "EXPLICIT_SOURCE_STATUS", "EMPLOYER_APPLICATION_PAGE", "USER_SUPPLIED", "NONE"]),
+  verification_method: z.enum(["EMPLOYER_ATS_LISTING", "EXPLICIT_SOURCE_STATUS", "EMPLOYER_APPLICATION_PAGE", "VERIFIED_POSTING_RETRIEVAL", "USER_SUPPLIED", "NONE"]),
   reason_code: z.string().min(1),
   evidence: z.array(JobEvidenceSpanSchema).default([]),
 });
@@ -145,7 +149,7 @@ export const RoleShapeEvidenceSchema = z.object({
 export type RoleShapeEvidence = z.infer<typeof RoleShapeEvidenceSchema>;
 
 export const JobSourceEvidenceSchema = z.object({
-  schema_version: z.literal(JOB_SOURCE_EVIDENCE_SCHEMA_VERSION),
+  schema_version: z.enum(SUPPORTED_JOB_SOURCE_EVIDENCE_SCHEMA_VERSIONS),
   normalizer_version: z.string().min(1),
   source_name: z.string().min(1),
   source_plugin_key: z.string().min(1).nullable(),

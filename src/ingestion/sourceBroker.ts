@@ -5,11 +5,11 @@ import crypto from "crypto";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
-import { getActiveSourcePluginRevision, upsertSourcePluginRevision } from "./sourcePluginRegistry.js";
+import { getActiveSourcePluginRevision, getSourcePluginRevisionById, upsertSourcePluginRevision } from "./sourcePluginRegistry.js";
 import type { SourcePlugin } from "../contracts/sourcePlugin.js";
 import { ObservationPersistenceSchema, SCHEMA_VERSION } from "../contracts/index.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
-import { buildJobSourceEvidence } from "./jobSourceEvidence.js";
+import { buildJobSourceEvidence, hasCompleteFetchedPostingReceipt } from "./jobSourceEvidence.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -45,6 +45,7 @@ export class SourceBroker {
   private executor: pg.Pool | pg.PoolClient;
   private context: WorkspaceContext | null = null;
   private sourcePluginRevisionCache = new Map<string, string | null>();
+  private sourcePluginContentCache = new Map<string, SourcePlugin | null>();
   private sourcePluginIdCache = new Map<string, string>();
   private sourcePluginColumnsAvailable: boolean | null = null;
   private sourceEvidenceColumnsAvailable: boolean | null = null;
@@ -84,6 +85,21 @@ export class SourceBroker {
       }
       throw err;
     }
+  }
+
+  async loadSourcePluginRevision(
+    sourcePluginRevisionId: string | null,
+    executor: pg.Pool | pg.PoolClient = this.executor,
+    context?: WorkspaceContext,
+  ): Promise<SourcePlugin | null> {
+    if (!sourcePluginRevisionId) return null;
+    if (this.sourcePluginContentCache.has(sourcePluginRevisionId)) {
+      return this.sourcePluginContentCache.get(sourcePluginRevisionId) ?? null;
+    }
+    const ctx = context ?? await this.ensureContext();
+    const content = await getSourcePluginRevisionById(sourcePluginRevisionId, executor, { context: ctx });
+    this.sourcePluginContentCache.set(sourcePluginRevisionId, content);
+    return content;
   }
 
   private async resolveSourcePluginId(sourcePluginKey: string, ctx: WorkspaceContext): Promise<string> {
@@ -281,6 +297,27 @@ export class SourceBroker {
       let normalizedEvidence: JobSourceEvidence | null = null;
       let normalizedEvidenceError: string | null = null;
       try {
+        const sourcePlugin = await this.loadSourcePluginRevision(sourcePluginRevisionId, executor, ctx);
+        const fetchedPostingReceiptIsValid = hasCompleteFetchedPostingReceipt(persistenceInput.raw_payload);
+        const parentObservation = fetchedPostingReceiptIsValid && obs.derivedFromObservationId
+          ? await executor.query<{ source_url: string | null }>(
+              `SELECT source_url
+               FROM raw_job_observations
+               WHERE workspace_id = $1 AND id = $2::uuid AND source_name = 'GMAIL_ALERT'
+               LIMIT 1`,
+              [ctx.workspaceId, obs.derivedFromObservationId],
+            ).then((result) => result.rows[0] ?? null)
+          : null;
+        const fetchedPostingLineage = parentObservation !== null && typeof obs.derivedFromObservationId === "string"
+          ? {
+            discoveryObservationId: obs.derivedFromObservationId,
+            discoverySourceUrl: parentObservation.source_url,
+            postingSourceUrl: persistenceInput.source_url,
+            companyName: persistenceInput.company_name_raw,
+            title: persistenceInput.title_raw,
+            description: persistenceInput.description_text,
+          }
+          : undefined;
         normalizedEvidence = buildJobSourceEvidence({
           sourceName: persistenceInput.source_type,
           sourcePluginKey: persistenceInput.source_plugin_key,
@@ -291,6 +328,10 @@ export class SourceBroker {
           retrievedAt: persistenceInput.retrieved_at,
           rawPayloadHash: persistenceInput.raw_payload_hash,
           rawPayload: persistenceInput.raw_payload,
+          fullPostingHosts: sourcePlugin?.source_key === persistenceInput.source_plugin_key
+            ? sourcePlugin.availability?.full_posting_hosts
+            : undefined,
+          fetchedPostingLineage,
           companyName: persistenceInput.company_name_raw,
           title: persistenceInput.title_raw,
           locationRaw: persistenceInput.location_raw,
