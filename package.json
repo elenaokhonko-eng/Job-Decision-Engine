@@ -49,7 +49,7 @@
     "pipeline:status": "tsx scripts/report_pipeline_status.ts",
     "rankings:materialize": "tsx scripts/materialize_application_rankings.ts",
     "source:enrich-incomplete": "tsx scripts/enrich_incomplete_descriptions.ts",
-    "e2e:retest-gate": "tsx scripts/check_desktop_e2e_gate.ts",
+    "e2e:retest-gate": "tsx scripts/check_e2e_retest_gate.ts",
     "decisions:replay": "tsx scripts/replay_deterministic_decisions.ts",
     "test": "vitest run",
     "eval:golden": "tsx scripts/run_evals.ts",
