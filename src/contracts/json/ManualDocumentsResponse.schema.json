@@ -163,6 +163,7 @@
                     "enum": [
                       "OPENING",
                       "GAP_NOTE",
+                      "CANDIDATE_GAP_NOTE",
                       "CLOSING"
                     ]
                   },
@@ -200,6 +201,14 @@
         },
         "summary": {
           "$ref": "#/definitions/ManualDocumentsResponse/properties/cover_letter"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "corrections_applied": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [

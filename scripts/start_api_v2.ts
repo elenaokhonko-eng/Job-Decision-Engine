@@ -2,6 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 
 import { createApiV2Router } from "../src/api/v2/router.js";
+import { logModelIdPreflight } from "../src/services/modelIdPreflight.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -36,6 +37,10 @@ async function start(): Promise<void> {
   });
 
   console.log(`API v2 server listening on http://${host}:${port}`);
+
+  // Check configured model ids against the provider accounts in the background: a typo in
+  // .env.local is reported now instead of as a failed generation later. Never blocks startup.
+  void logModelIdPreflight();
 }
 
 start().catch((err) => {

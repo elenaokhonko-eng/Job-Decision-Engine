@@ -213,7 +213,104 @@ WRITTEN_SECTION_TEXT = {
 }
 
 
-FRAMING_LABELS = {"OPENING": "Opening", "GAP_NOTE": "Gap note", "CLOSING": "Closing"}
+FRAMING_LABELS = {
+    "OPENING": "Opening",
+    "GAP_NOTE": "Gap note",
+    "CANDIDATE_GAP_NOTE": "Your gap sentence",
+    "CLOSING": "Closing",
+}
+
+REVIEW_DECISIONS = {
+    "ACCEPTED": "Use the evidence chosen below",
+    "PARTIAL": "Partly met: some evidence, plus a gap sentence",
+    "GAP": "Not met: no evidence (gap)",
+    "NOT_APPLICABLE": "Not applicable: leave it out of the documents",
+}
+MAX_EVIDENCE_PER_ROW = 3
+
+
+def _evidence_option_label(item):
+    """How one selectable fact reads in the evidence picker: the statement, then its role and dates."""
+    where = item.get("role") or (
+        "Credential" if item.get("evidence_type") == "CREDENTIAL" else "Profile"
+    )
+    period = f", {item['period']}" if item.get("period") else ""
+    return f"{item.get('statement', '')} [{where}{period}]"
+
+
+def _render_review_corrections(rows, selectable, fingerprint, locked=False):
+    """Per-requirement controls to correct the proposed matches before approving.
+
+    Returns (corrections, problem): only the rows the candidate changed, in the API's shape, and a
+    message when a choice cannot be approved as it stands.
+    """
+    if not rows:
+        return [], None
+    labels = {item["id"]: _evidence_option_label(item) for item in selectable or []}
+    corrections, problems = [], []
+    with st.expander("Correct the matches before approving", expanded=not locked):
+        st.caption(
+            "For each requirement: keep or change the evidence (type to search your facts), mark it "
+            "partly met or not met with your own gap sentence, or leave it out as not applicable "
+            "(for example location or language). Documents use only what you approve here."
+        )
+        for row in rows:
+            key = row.get("requirement_key", "")
+            proposed = [
+                item["id"] for item in row.get("evidence") or [] if item.get("id")
+            ]
+            # The proposed evidence is always offered, even if the picker list lacks it.
+            for item in row.get("evidence") or []:
+                labels.setdefault(item.get("id"), item.get("statement", ""))
+            default_decision = "ACCEPTED" if proposed else "GAP"
+            st.text(f"{row.get('importance', '')} · {row.get('requirement', '')}")
+            decision = st.selectbox(
+                "Decision",
+                list(REVIEW_DECISIONS),
+                index=list(REVIEW_DECISIONS).index(default_decision),
+                format_func=REVIEW_DECISIONS.get,
+                key=f"manual_review_decision_{fingerprint}_{key}",
+                disabled=locked,
+            )
+            chosen = st.multiselect(
+                "Evidence",
+                list(labels),
+                default=[item for item in proposed if item in labels],
+                format_func=lambda item: labels.get(item, item),
+                max_selections=MAX_EVIDENCE_PER_ROW,
+                key=f"manual_review_evidence_{fingerprint}_{key}",
+                disabled=locked or decision in ("GAP", "NOT_APPLICABLE"),
+            )
+            gap_sentence = ""
+            if decision in ("GAP", "PARTIAL"):
+                gap_sentence = st.text_input(
+                    "Gap sentence for the letter (optional, your own words)",
+                    key=f"manual_review_gap_{fingerprint}_{key}",
+                    disabled=locked,
+                ).strip()
+            evidence_ids = [] if decision in ("GAP", "NOT_APPLICABLE") else chosen
+            if decision == "ACCEPTED" and not evidence_ids:
+                problems.append(
+                    f"Choose evidence for “{row.get('requirement', '')}”, or mark it not met."
+                )
+            if gap_sentence and len(gap_sentence) < 10:
+                problems.append("A gap sentence needs at least 10 characters.")
+            unchanged = (
+                decision == default_decision
+                and evidence_ids == proposed
+                and not gap_sentence
+            )
+            if not unchanged:
+                correction = {
+                    "requirement_key": key,
+                    "status": decision,
+                    "evidence_ids": evidence_ids,
+                }
+                if gap_sentence:
+                    correction["gap_sentence"] = gap_sentence
+                corrections.append(correction)
+            st.divider()
+    return corrections, (" ".join(problems) or None)
 
 
 def _render_gap_note_choice(fit, fingerprint, locked=False):
@@ -272,6 +369,58 @@ def _render_written_review(review, section):
                 if not item.get("included", True):
                     label += " (left out)"
                 st.text(f"{label}: {item.get('text', '')}")
+
+
+def _generate_documents(api_request, draft_id, body):
+    """Generates (or returns the stored) document pair for one approval, validated against the contract."""
+    result = api_request(
+        "POST",
+        f"/api/v2/application-drafts/{draft_id}/documents",
+        body=body,
+        timeout=180,
+    )
+    _validate_payload("ManualDocumentsResponse", result)
+    _validate_document_pair(result.get("artifacts") or [])
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error") or "Document generation failed.")
+    return result
+
+
+def _retry_summary(api_request, draft_id, fingerprint, approval, generated):
+    """Approves the same review again as a new revision and regenerates, keeping an AI-written letter.
+
+    Only the summary call runs again when the letter was AI-written; the earlier revision's
+    documents stay downloadable.
+    """
+    try:
+        body = {
+            "approved": True,
+            "comparison_fingerprint": fingerprint,
+            "new_revision": True,
+        }
+        corrections = st.session_state.get("manual_approved_corrections") or []
+        if corrections:
+            body["corrections"] = corrections
+        revision = api_request(
+            "POST",
+            f"/api/v2/application-drafts/{draft_id}/approve",
+            body=body,
+            timeout=60,
+        )
+        _validate_payload("ManualApprovalResponse", revision)
+        generate = {
+            "approval_id": revision.get("approval_id"),
+            **(st.session_state.get("manual_generate_options") or {}),
+        }
+        if (generated.get("cover_letter") or {}).get("mode") == "AI_WRITTEN":
+            generate["reuse_cover_letter_from"] = approval.get("approval_id")
+        result = _generate_documents(api_request, draft_id, generate)
+        st.session_state["manual_approval"] = revision
+        st.session_state["manual_generated_documents"] = result
+        if (result.get("summary") or {}).get("mode") == "AI_WRITTEN":
+            st.success("The AI summary is in place; the cover letter is unchanged.")
+    except API_CALL_ERRORS as error:
+        st.error(f"Could not retry the AI summary: {error}")
 
 
 def render_manual_application_flow(api_request):
@@ -567,6 +716,12 @@ def render_manual_application_flow(api_request):
 
     draft_id = comparison.get("draft_id")
     fingerprint = comparison.get("comparison_fingerprint")
+    corrections, correction_problem = _render_review_corrections(
+        payload.get("rows", []),
+        comparison.get("selectable_evidence") or [],
+        fingerprint,
+        locked=bool(st.session_state.get("manual_generated_documents")),
+    )
     poor_fit = _render_fit_check(payload.get("fit"))
     approval_key = f"manual_approval_checked_{fingerprint}"
     poor_fit_key = f"manual_poor_fit_acknowledged_{fingerprint}"
@@ -585,12 +740,17 @@ def render_manual_application_flow(api_request):
             st.error(
                 "Fewer than half of the MUST requirements have evidence. Confirm you still want documents for this role."
             )
+        elif correction_problem:
+            st.error(correction_problem)
         else:
             try:
+                body = {"approved": True, "comparison_fingerprint": fingerprint}
+                if corrections:
+                    body["corrections"] = corrections
                 result = api_request(
                     "POST",
                     f"/api/v2/application-drafts/{draft_id}/approve",
-                    body={"approved": True, "comparison_fingerprint": fingerprint},
+                    body=body,
                     timeout=60,
                 )
                 _validate_payload("ManualApprovalResponse", result)
@@ -599,8 +759,15 @@ def render_manual_application_flow(api_request):
                         result.get("error") or "Approval was not recorded."
                     )
                 st.session_state["manual_approval"] = result
+                st.session_state["manual_approved_corrections"] = corrections
+                st.session_state.pop("manual_generated_documents", None)
                 st.success(
-                    "Your approval is recorded for this exact job version, profile version, requirement set and comparison."
+                    "Your approval is recorded for this exact job version, profile version, requirement set, comparison"
+                    + (
+                        f" and your {len(corrections)} correction(s)."
+                        if corrections
+                        else "."
+                    )
                 )
             except API_CALL_ERRORS as error:
                 st.error(f"Could not record approval: {error}")
@@ -609,6 +776,13 @@ def render_manual_application_flow(api_request):
     if not approval or not draft_id:
         return
     locked = bool(st.session_state.get("manual_generated_documents"))
+    if not locked and corrections != st.session_state.get(
+        "manual_approved_corrections", []
+    ):
+        st.warning(
+            "You changed the corrections after approving. Approve again to use them."
+        )
+        return
     role_layout = _render_role_choices(
         comparison.get("role_plan") or [], fingerprint, locked=locked
     )
@@ -624,23 +798,23 @@ def render_manual_application_flow(api_request):
                 body["role_layout"] = role_layout
             if include_gap_note is not None:
                 body["include_gap_note"] = include_gap_note
-            result = api_request(
-                "POST",
-                f"/api/v2/application-drafts/{draft_id}/documents",
-                body=body,
-                timeout=120,
+            st.session_state["manual_generate_options"] = {
+                key: value for key, value in body.items() if key != "approval_id"
+            }
+            st.session_state["manual_generated_documents"] = _generate_documents(
+                api_request, draft_id, body
             )
-            _validate_payload("ManualDocumentsResponse", result)
-            _validate_document_pair(result.get("artifacts") or [])
-            if not result.get("ok"):
-                raise RuntimeError(result.get("error") or "Document generation failed.")
-            st.session_state["manual_generated_documents"] = result
         except API_CALL_ERRORS as error:
             st.error(f"Could not generate the document pair: {error}")
 
     generated = st.session_state.get("manual_generated_documents")
     if not generated:
         return
+    if (generated.get("summary") or {}).get("mode") == "DETERMINISTIC" and st.button(
+        "Retry AI summary", key="manual_retry_summary"
+    ):
+        _retry_summary(api_request, draft_id, fingerprint, approval, generated)
+        generated = st.session_state.get("manual_generated_documents")
     st.markdown("### Review before downloading")
     preview_col, letter_col = st.columns(2)
     with preview_col:

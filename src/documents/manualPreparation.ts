@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { Document, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
 import { assertNoInternalAssessmentText, isInternalAssessmentStatement, isSelfDescriptionStatement } from "./manualDocumentPolicy.js";
 
-export const MANUAL_COMPARATOR_VERSION = "evidence-pairing-v4";
+export const MANUAL_COMPARATOR_VERSION = "evidence-pairing-v5";
 
 export interface ManualRequirement {
   requirement_key: string;
@@ -110,10 +110,83 @@ const EXPERIENCE_FACT_TYPES = new Set(["ACHIEVEMENT", "RESPONSIBILITY", "PROJECT
 const MODEL_PAIRING_METHOD = "model-judged pairing; advisory evidence only";
 const LEXICAL_PAIRING_METHOD = "distinctive-term overlap; potential evidence only";
 
+// A technology fact tied to a role that opens with what was done ("Architected a master data
+// layer ...") records work, unlike "Python: independently usable ...".
+const WORK_RECORD_OPENING = /^(?:[A-Z][a-z]+ed|Built|Led|Ran|Wrote|Set up|Made|Drove|Grew|Won|Taught|Brought|Took)\b/;
+
 /** Work done: the only kind of fact a document prints as a claim. */
 function isExperienceFact(evidence: ManualEvidence): boolean {
-  return evidence.evidence_type === "FACT" && (evidence.fact_type === undefined || EXPERIENCE_FACT_TYPES.has(evidence.fact_type));
+  if (evidence.evidence_type !== "FACT") return false;
+  if (evidence.fact_type === undefined || EXPERIENCE_FACT_TYPES.has(evidence.fact_type)) return true;
+  return evidence.fact_type === "TECHNOLOGY" && Boolean(evidence.engagement_id) && WORK_RECORD_OPENING.test(evidence.statement.trim());
 }
+
+// A fact may back at most this many requirements, so one strong result cannot answer the whole posting.
+export const MAX_REQUIREMENTS_PER_EVIDENCE = 2;
+const MAX_EVIDENCE_PER_REQUIREMENT = 3;
+// Evidence this many years older than the profile's newest work starts losing rank, a little per year.
+const RECENCY_GRACE_YEARS = 5;
+const RECENCY_PENALTY_PER_YEAR = 0.01;
+const MAX_RECENCY_PENALTY = 0.15;
+
+function evidenceYear(date: string | undefined | null): number | null {
+  const year = date ? Number(date.slice(0, 4)) : NaN;
+  return Number.isFinite(year) ? year : null;
+}
+
+/**
+ * Years between each item's role and the profile's newest work: 0 for current roles and for items
+ * without a role. Measured from the profile, not today, so the same profile version always yields
+ * the same comparison (and the same approval fingerprint).
+ */
+export function evidenceAgeYears(evidence: ManualEvidence[]): Map<string, number> {
+  const engagements = evidence.filter((item) => item.evidence_type === "ENGAGEMENT");
+  const lastYear = new Map(engagements.map((item) => [item.id, item.end_date ? evidenceYear(item.end_date) : null]));
+  const newest = Math.max(...engagements.map((item) => evidenceYear(item.end_date ?? item.start_date) ?? -Infinity), -Infinity);
+  const ages = new Map<string, number>();
+  for (const item of evidence) {
+    const engagementId = item.evidence_type === "ENGAGEMENT" ? item.id : item.engagement_id;
+    const year = engagementId ? lastYear.get(engagementId) : null;
+    ages.set(item.id, year != null && Number.isFinite(newest) ? Math.max(0, newest - year) : 0);
+  }
+  return ages;
+}
+
+function recencyPenalty(ageYears: number): number {
+  return Math.min(MAX_RECENCY_PENALTY, Math.max(0, ageYears - RECENCY_GRACE_YEARS) * RECENCY_PENALTY_PER_YEAR);
+}
+
+/**
+ * Chooses each requirement's evidence from its ranked candidates, MUST requirements first: at most
+ * three items, different roles before a second item from the same role, and no item backing more
+ * than MAX_REQUIREMENTS_PER_EVIDENCE requirements.
+ */
+function allocateEvidence<T extends { id: string }>(
+  rows: Array<{ importance: string; candidates: T[] }>,
+  engagementOf: (id: string) => string,
+): T[][] {
+  const uses = new Map<string, number>();
+  const chosen: T[][] = rows.map(() => []);
+  const order = rows.map((row, index) => ({ row, index }))
+    .sort((left, right) => (IMPORTANCE_RANK[left.row.importance] ?? 3) - (IMPORTANCE_RANK[right.row.importance] ?? 3) || left.index - right.index);
+  for (const { row, index } of order) {
+    const available = row.candidates.filter((item) => (uses.get(item.id) ?? 0) < MAX_REQUIREMENTS_PER_EVIDENCE);
+    const picked: T[] = [];
+    const roles = new Set<string>();
+    for (const item of available) {
+      if (picked.length < MAX_EVIDENCE_PER_REQUIREMENT && !roles.has(engagementOf(item.id))) { picked.push(item); roles.add(engagementOf(item.id)); }
+    }
+    for (const item of available) {
+      if (picked.length < MAX_EVIDENCE_PER_REQUIREMENT && !picked.includes(item)) picked.push(item);
+    }
+    const ranked = available.filter((item) => picked.includes(item));
+    for (const item of ranked) uses.set(item.id, (uses.get(item.id) ?? 0) + 1);
+    chosen[index] = ranked;
+  }
+  return chosen;
+}
+
+const IMPORTANCE_RANK: Record<string, number> = { MUST: 0, PREFERRED: 1, NICE_TO_HAVE: 2 };
 
 /**
  * Evidence a requirement may be paired with: work-done facts and credentials, minus internal
@@ -154,22 +227,24 @@ type RowEvidence = { id: string; type: ManualEvidence["evidence_type"]; label: s
  * requirement. Words common across the profile do not count, so a long career's recurring
  * vocabulary cannot pair unrelated work.
  */
-function lexicalPairs(requirementText: string, candidates: ManualEvidence[], evidenceTerms: Map<string, Set<string>>, distinctive: (term: string) => boolean): RowEvidence[] {
+function lexicalPairs(requirementText: string, candidates: ManualEvidence[], evidenceTerms: Map<string, Set<string>>, distinctive: (term: string) => boolean, ages: Map<string, number>): RowEvidence[] {
   const requirementTerms = [...terms(requirementText)].filter(distinctive);
   return candidates
     .map((evidence) => ({ evidence, overlap: requirementTerms.filter((term) => evidenceTerms.get(evidence.id)?.has(term)) }))
     .filter((entry) => entry.overlap.length >= MIN_MATCHING_TERMS)
     .sort((left, right) => right.overlap.length - left.overlap.length
       || EVIDENCE_TYPE_RANK[left.evidence.evidence_type] - EVIDENCE_TYPE_RANK[right.evidence.evidence_type]
+      || (ages.get(left.evidence.id) ?? 0) - (ages.get(right.evidence.id) ?? 0)
       || left.evidence.id.localeCompare(right.evidence.id))
-    .slice(0, 3)
     .map(({ evidence }) => ({ id: evidence.id, type: evidence.evidence_type, label: evidence.label, statement: evidence.statement }));
 }
 
 /**
  * Pairs each requirement with evidence: the stored model pairing when there is one, otherwise strict
  * distinctive-word overlap. A requirement with no pair is a gap, never filled with the nearest
- * words. Also summarises how many MUST requirements have evidence, as an advisory fit check.
+ * words. Model pairs are ranked by confidence less a small penalty for old work, then allocated so
+ * no fact backs more than two requirements. Also summarises how many MUST requirements have
+ * evidence, as an advisory fit check.
  */
 export function buildManualComparison(input: ManualComparisonInput): Record<string, unknown> {
   const candidates = matchableEvidence(input.evidence);
@@ -180,18 +255,25 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
   const maxFrequency = Math.max(MIN_DISTINCTIVE_DOCUMENT_COUNT, Math.floor(candidates.length * MAX_DISTINCTIVE_DOCUMENT_SHARE));
   const distinctive = (term: string) => (documentFrequency.get(term) ?? 0) <= maxFrequency;
   const method = input.pairing ? MODEL_PAIRING_METHOD : LEXICAL_PAIRING_METHOD;
+  const ages = evidenceAgeYears(input.evidence);
 
-  const rows = input.requirements.map((requirement) => {
-    const evidence: RowEvidence[] = input.pairing
+  const ranked = input.requirements.map((requirement): { importance: string; candidates: RowEvidence[] } => ({
+    importance: requirement.importance,
+    candidates: input.pairing
       ? input.pairing.pairs
         .filter((pair) => pair.requirement_key === requirement.requirement_key && candidateById.has(pair.evidence_id))
-        .sort((left, right) => right.confidence - left.confidence || left.evidence_id.localeCompare(right.evidence_id))
-        .slice(0, 3)
-        .map((pair) => {
+        .map((pair) => ({ pair, rank: pair.confidence - recencyPenalty(ages.get(pair.evidence_id) ?? 0) }))
+        .sort((left, right) => right.rank - left.rank || left.pair.evidence_id.localeCompare(right.pair.evidence_id))
+        .map(({ pair }) => {
           const item = candidateById.get(pair.evidence_id)!;
           return { id: item.id, type: item.evidence_type, label: item.label, statement: item.statement, confidence: pair.confidence, justification: pair.justification };
         })
-      : lexicalPairs(requirement.requirement_text, candidates, evidenceTerms, distinctive);
+      : lexicalPairs(requirement.requirement_text, candidates, evidenceTerms, distinctive, ages),
+  }));
+  const allocated = allocateEvidence(ranked, (id) => candidateById.get(id)?.engagement_id ?? id);
+
+  const rows = input.requirements.map((requirement, index) => {
+    const evidence = allocated[index];
     return {
       requirement_key: requirement.requirement_key,
       requirement_type: requirement.requirement_type,
@@ -205,22 +287,7 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
     };
   });
 
-  const mustRows = rows.filter((row) => row.importance === "MUST");
-  const uncoveredMust = mustRows.filter((row) => row.evidence.length === 0);
-  const covered = mustRows.length - uncoveredMust.length;
-  const weak = mustRows.length > 0 && covered * 2 < mustRows.length;
-  const fit = {
-    must_total: mustRows.length,
-    must_covered: covered,
-    uncovered_must: uncoveredMust.map((row) => ({ requirement_key: row.requirement_key, requirement: row.requirement })),
-    verdict: mustRows.length === 0 ? "NO_MUST_REQUIREMENTS" : weak ? "FEWER_THAN_HALF_MUSTS_EVIDENCED" : "MOST_MUSTS_EVIDENCED",
-    message: mustRows.length === 0
-      ? "The posting states no MUST requirements, so there is no coverage check."
-      : weak
-        ? `Only ${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile. This looks like a poor fit; documents will not claim the uncovered requirements.`
-        : `${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile.`,
-    advisory: "Evidence coverage only, not a hiring or suitability decision.",
-  };
+  const fit = manualFitCheck(rows);
   return {
     schema_version: "manual_application_v1",
     comparator_version: MANUAL_COMPARATOR_VERSION,
@@ -245,6 +312,33 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
     fit,
     suitability_warnings: [...input.suitability_warnings],
     evidence_notice: "Pairs are proposed evidence for your review, not a suitability decision. Check each source statement and every gap yourself.",
+  };
+}
+
+/** Gap sentences the candidate wrote on the review screen, in row order: framing for the letter, never claims. */
+export function candidateGapNotes(comparison: Record<string, any>): Array<{ text: string; requirement_keys: string[] }> {
+  const rows = Array.isArray(comparison.rows) ? comparison.rows as Array<Record<string, any>> : [];
+  return rows.filter((row) => typeof row.candidate_gap_note === "string" && row.candidate_gap_note.trim())
+    .map((row) => ({ text: String(row.candidate_gap_note).trim(), requirement_keys: [String(row.requirement_key)] }));
+}
+
+/** How many MUST requirements have evidence: an advisory coverage check, never a suitability decision. */
+export function manualFitCheck(rows: Array<{ requirement_key: string; importance: string; requirement: string; evidence: unknown[] }>) {
+  const mustRows = rows.filter((row) => row.importance === "MUST");
+  const uncoveredMust = mustRows.filter((row) => row.evidence.length === 0);
+  const covered = mustRows.length - uncoveredMust.length;
+  const weak = mustRows.length > 0 && covered * 2 < mustRows.length;
+  return {
+    must_total: mustRows.length,
+    must_covered: covered,
+    uncovered_must: uncoveredMust.map((row) => ({ requirement_key: row.requirement_key, requirement: row.requirement })),
+    verdict: mustRows.length === 0 ? "NO_MUST_REQUIREMENTS" : weak ? "FEWER_THAN_HALF_MUSTS_EVIDENCED" : "MOST_MUSTS_EVIDENCED",
+    message: mustRows.length === 0
+      ? "The posting states no MUST requirements, so there is no coverage check."
+      : weak
+        ? `Only ${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile. This looks like a poor fit; documents will not claim the uncovered requirements.`
+        : `${covered} of ${mustRows.length} MUST requirements have direct evidence in your profile.`,
+    advisory: "Evidence coverage only, not a hiring or suitability decision.",
   };
 }
 
@@ -316,6 +410,8 @@ export interface ControlledDocumentOptions {
   roleLayout?: Record<string, RoleLayout>;
   /** A validated, model-written summary; each sentence cites approved evidence. Replaces the plain summary. */
   writtenSummary?: Array<{ text: string; evidence_ids: string[]; requirement_keys: string[] }>;
+  /** Whether the letter includes the candidate's own gap sentences from the review; default true. */
+  includeGapNotes?: boolean;
 }
 
 function formatMonth(isoDate: string): string {
@@ -457,6 +553,20 @@ export function planRoles(
 }
 
 /**
+ * The summary without a model: tenure statements ("Has 15 years of ...", "Has 2 years of ...") are
+ * joined into one sentence ("Brings 15 years of ...; and 2 years of ..."), so the summary reads as
+ * a profile rather than a list of "Has" lines. Each statement keeps its own words; any statement not
+ * in the "Has ..." form stays a sentence of its own.
+ */
+function plainSummary(statements: ManualEvidence[]): Array<{ text: string; ids: string[] }> {
+  const tenure = statements.filter((item) => /^has\s+\S/i.test(item.statement.trim()));
+  const parts = tenure.map((item) => withoutTrailingPeriod(item.statement.trim().replace(/^has\s+/i, "")));
+  const joined = parts.length === 0 ? []
+    : [{ text: `Brings ${parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join("; ")}; and ${parts[parts.length - 1]}`}.`, ids: tenure.map((item) => item.id) }];
+  return [...joined, ...statements.filter((item) => !tenure.includes(item)).map((item) => ({ text: item.statement.trim(), ids: [item.id] }))];
+}
+
+/**
  * Builds a CV and cover letter from the approved comparison only. Every line is a verbatim
  * profile statement or the job's own requirement text, so no claim exists outside the evidence.
  */
@@ -527,7 +637,7 @@ export function buildControlledDocuments(
   const summaryStatements = [...new Set([...overviewFacts, ...relevantProfileFacts, ...tenureFacts])].slice(0, MAX_SUMMARY_STATEMENTS);
   const summaryParagraph = options.writtenSummary?.length
     ? options.writtenSummary.map((sentence) => claim("Summary", sentence.text.trim(), [...sentence.evidence_ids], [...sentence.requirement_keys])).join(" ")
-    : summaryStatements.map((item) => claim("Summary", item.statement.trim(), [item.id])).join(" ");
+    : plainSummary(summaryStatements).map(({ text, ids }) => claim("Summary", text, ids)).join(" ");
 
   // Roles: the default layout comes from planRoles; the candidate's choice overrides it.
   const summaryEvidenceIds = (options.writtenSummary ?? []).flatMap((sentence) => sentence.evidence_ids);
@@ -633,6 +743,8 @@ export function buildControlledDocuments(
     `I am applying for the ${comparison.title} role at ${comparison.company}. Below, I set the role's main requirements against what I have done.`,
     "",
     ...letterPoints.flatMap((point) => [point, ""]),
+    ...(options.includeGapNotes !== false && candidateGapNotes(comparison).length > 0
+      ? [candidateGapNotes(comparison).map((note) => note.text).join(" "), ""] : []),
     "Everything above comes from my recorded experience. Where the role asks for something not covered here, I would be glad to discuss it directly.",
     "",
     "I would welcome the opportunity to talk about the role.",
@@ -683,9 +795,36 @@ export async function renderControlledDocx(markdown: string): Promise<Buffer> {
   return Packer.toBuffer(document);
 }
 
-function asciiPdfText(value: string): string {
-  return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\x20-\x7e]/g, "-")
-    .replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
+// The Windows-1252 positions 0x80-0x9F that WinAnsiEncoding assigns to typographic characters.
+const WIN_ANSI_EXTRAS: Record<string, number> = {
+  "\u20ac": 0x80, "\u201a": 0x82, "\u0192": 0x83, "\u201e": 0x84, "\u2026": 0x85, "\u2020": 0x86, "\u2021": 0x87, "\u02c6": 0x88, "\u2030": 0x89, "\u0160": 0x8a, "\u2039": 0x8b,
+  "\u0152": 0x8c, "\u017d": 0x8e, "\u2018": 0x91, "\u2019": 0x92, "\u201c": 0x93, "\u201d": 0x94, "\u2022": 0x95, "\u2013": 0x96, "\u2014": 0x97, "\u02dc": 0x98, "\u2122": 0x99,
+  "\u0161": 0x9a, "\u203a": 0x9b, "\u0153": 0x9c, "\u017e": 0x9e, "\u0178": 0x9f,
+};
+
+function winAnsiByte(character: string): number | null {
+  const code = character.codePointAt(0)!;
+  if ((code >= 0x20 && code <= 0x7e) || (code >= 0xa0 && code <= 0xff)) return code;
+  return WIN_ANSI_EXTRAS[character] ?? null;
+}
+
+/**
+ * PDF string text in the fonts' WinAnsiEncoding, one byte per character: apostrophes, quotes,
+ * dashes, bullets and Latin accents print as written. Anything else loses its accent ("\u0113" \u2192 "e"),
+ * or becomes "?" when it has no Latin form.
+ */
+export function winAnsiPdfText(value: string): string {
+  let encoded = "";
+  for (const character of value) {
+    let code = winAnsiByte(character);
+    if (code === null) {
+      const base = character.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+      code = base.length === 1 ? winAnsiByte(base) : null;
+    }
+    const byte = String.fromCharCode(code ?? 0x3f);
+    encoded += byte === "\\" || byte === "(" || byte === ")" ? `\\${byte}` : byte;
+  }
+  return encoded;
 }
 
 export function renderControlledPdf(markdown: string): Buffer {
@@ -739,24 +878,24 @@ export function renderControlledPdf(markdown: string): Buffer {
       const height = title ? 30 : heading ? 23 : subheading ? 18 : contact ? 16 : 15;
       const font = title || heading || subheading ? "F2" : "F1";
       const color = title || heading ? "0.09 0.27 0.39 rg" : contact ? "0.34 0.39 0.45 rg" : "0.13 0.16 0.20 rg";
-      const command = `${color}\n/${font} ${size} Tf\n1 0 0 1 50 ${y} Tm\n(${asciiPdfText(line.text)}) Tj`;
+      const command = `${color}\n/${font} ${size} Tf\n1 0 0 1 50 ${y} Tm\n(${winAnsiPdfText(line.text)}) Tj`;
       y -= height;
       return [command];
     });
     const content = ["BT", ...commands, "ET"].join("\n");
     objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 ${regularFontObject} 0 R /F2 ${boldFontObject} 0 R >> >> /Contents ${contentObject} 0 R >>`);
-    objects.push(`<< /Length ${Buffer.byteLength(content, "ascii")} >>\nstream\n${content}\nendstream`);
+    objects.push(`<< /Length ${Buffer.byteLength(content, "latin1")} >>\nstream\n${content}\nendstream`);
   });
-  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
-  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
+  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
   let pdf = "%PDF-1.4\n";
   const offsets = [0];
-  objects.forEach((object, index) => { offsets.push(Buffer.byteLength(pdf, "ascii")); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; });
-  const xrefOffset = Buffer.byteLength(pdf, "ascii");
+  objects.forEach((object, index) => { offsets.push(Buffer.byteLength(pdf, "latin1")); pdf += `${index + 1} 0 obj\n${object}\nendobj\n`; });
+  const xrefOffset = Buffer.byteLength(pdf, "latin1");
   pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
   for (const offset of offsets.slice(1)) pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
   pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
-  return Buffer.from(pdf, "ascii");
+  return Buffer.from(pdf, "latin1");
 }
 
 export function sha256Buffer(buffer: Buffer): string {

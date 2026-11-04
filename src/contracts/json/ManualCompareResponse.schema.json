@@ -658,6 +658,59 @@
             ],
             "additionalProperties": false
           }
+        },
+        "selectable_evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence_type": {
+                "type": "string",
+                "enum": [
+                  "FACT",
+                  "CREDENTIAL"
+                ]
+              },
+              "statement": {
+                "type": "string",
+                "minLength": 1
+              },
+              "role": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "period": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "evidence_type",
+              "statement",
+              "role",
+              "period"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

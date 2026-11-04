@@ -11,6 +11,59 @@
         "comparison_fingerprint": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
+        },
+        "corrections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "requirement_key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "ACCEPTED",
+                  "NOT_APPLICABLE",
+                  "GAP",
+                  "PARTIAL"
+                ]
+              },
+              "evidence_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "maxItems": 3
+              },
+              "gap_sentence": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 10,
+                    "maxLength": 400
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "requirement_key",
+              "status",
+              "evidence_ids"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 80
+        },
+        "new_revision": {
+          "type": "boolean"
         }
       },
       "required": [

@@ -411,6 +411,141 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     });
   });
 
+  it("applies the candidate's review corrections: reject a pair, choose another fact, drop a row, write a gap sentence", async () => {
+    await withModelEnv({ REQUIREMENTS_ENABLE_QUOTED: "false" }, async () => {
+      const compared = await post("/compare", posting("https://careers.example.test/derivatives-lead-review", FULL_DESCRIPTION, "Derivatives Operating Model Lead Review"));
+      const rows = compared.comparison.rows as Array<{ requirement_key: string; requirement: string; evidence: Array<{ id: string; statement: string }> }>;
+      const evidence = compared.comparison.evidence as Array<{ id: string; evidence_type: string; fact_type?: string; statement: string }>;
+      const reviewed = rows.find((row) => row.evidence.length > 0)!;
+      const rejected = reviewed.evidence[0];
+      const others = rows.filter((row) => row !== reviewed);
+      expect(others.length).toBeGreaterThanOrEqual(2);
+      const [dropped, gap] = others;
+      const replacement = evidence.find((item) => item.evidence_type === "FACT" && ["ACHIEVEMENT", "PROJECT", "RESPONSIBILITY"].includes(item.fact_type ?? "")
+        && !reviewed.evidence.some((linked) => linked.id === item.id))!;
+      expect(replacement).toBeDefined();
+      const engagement = evidence.find((item) => item.evidence_type === "ENGAGEMENT")!;
+      const gapSentence = "I have not yet run a derivatives desk myself, though I designed its operating model.";
+      const corrections = [
+        { requirement_key: reviewed.requirement_key, status: "ACCEPTED", evidence_ids: [replacement.id] },
+        { requirement_key: dropped.requirement_key, status: "NOT_APPLICABLE", evidence_ids: [] },
+        { requirement_key: gap.requirement_key, status: "GAP", evidence_ids: [], gap_sentence: gapSentence },
+      ];
+
+      // Corrections must name this comparison's rows and document-eligible evidence.
+      const unknownRow = await post(`/${compared.draft_id}/approve`, {
+        approved: true, comparison_fingerprint: compared.comparison_fingerprint,
+        corrections: [{ requirement_key: "P-999", status: "GAP", evidence_ids: [] }],
+      }, 400);
+      expect(unknownRow.message).toContain("P-999 is not a requirement in this comparison");
+      const roleAsEvidence = await post(`/${compared.draft_id}/approve`, {
+        approved: true, comparison_fingerprint: compared.comparison_fingerprint,
+        corrections: [{ requirement_key: reviewed.requirement_key, status: "ACCEPTED", evidence_ids: [engagement.id] }],
+      }, 400);
+      expect(roleAsEvidence.message).toContain("not a document-eligible fact or credential");
+
+      const approved = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint, corrections });
+      expect(approved.corrections_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(approved.revision).toBe(1);
+      // The same review approves once; a plain approval of the same comparison is a different approval.
+      const again = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint, corrections: [...corrections].reverse() });
+      expect(again.approval_id).toBe(approved.approval_id);
+      const uncorrected = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint });
+      expect(uncorrected.approval_id).not.toBe(approved.approval_id);
+      expect(uncorrected.corrections_fingerprint).toBe("");
+
+      const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+      expect(generated).toMatchObject({ revision: 1, corrections_applied: 3 });
+      const matchSection = generated.preview.cv.split("## How my experience matches this role\n")[1]?.split("\n## ")[0] ?? "";
+      const requirementLabel = reviewed.requirement.replace(/[.;:]+$/, "");
+      expect(matchSection).toContain(`${requirementLabel}: ${replacement.statement}`);
+      expect(matchSection).not.toContain(`${requirementLabel}: ${rejected.statement}`);
+      // The row marked not applicable leaves both documents; the gap sentence is the candidate's own words.
+      expect(generated.preview.cv).not.toContain(dropped.requirement.replace(/[.;:]+$/, ""));
+      expect(generated.preview.cover_letter).not.toContain(dropped.requirement.replace(/[.;:]+$/, ""));
+      expect(generated.preview.cover_letter).toContain(gapSentence);
+
+      const stored = await pool!.query<{ corrections: unknown; corrections_fingerprint: string; revision: number }>(
+        `SELECT corrections, corrections_fingerprint, revision FROM manual_application_preparation_approvals WHERE id=$1`, [approved.approval_id]);
+      expect(stored.rows[0]).toMatchObject({ corrections_fingerprint: approved.corrections_fingerprint, revision: 1 });
+      expect((stored.rows[0].corrections as Array<{ requirement_key: string }>).map((row) => row.requirement_key))
+        .toEqual([reviewed.requirement_key, dropped.requirement_key, gap.requirement_key].sort());
+      const cvRun = await pool!.query<{ id: string; output_manifest: Record<string, any> }>(
+        `SELECT id, output_manifest FROM manual_application_document_runs WHERE approval_id=$1 AND document_type='CV'`, [approved.approval_id]);
+      expect(cvRun.rows[0].output_manifest).toMatchObject({ revision: 1, corrections_fingerprint: approved.corrections_fingerprint });
+      const claims = await pool!.query<{ claim_text: string; evidence_ids: string[]; requirement_keys: string[] }>(
+        `SELECT claim_text, evidence_ids, requirement_keys FROM manual_application_document_claims WHERE manual_document_run_id=$1 AND section_label='Role requirements'`,
+        [cvRun.rows[0].id]);
+      expect(claims.rows.find((claim) => claim.requirement_keys.includes(reviewed.requirement_key))?.evidence_ids).toEqual([replacement.id]);
+    });
+  });
+
+  it("retries only the AI summary in a new revision, keeping the stored AI letter", async () => {
+    await withModelEnv({ OPENAI_API_KEY: "configured-for-mode-check", REQUIREMENTS_ENABLE_QUOTED: "false" }, async () => {
+      writerCalls.length = 0;
+      summaryCalls.length = 0;
+      let summaryFails = true;
+      summaryImpl = async (input) => {
+        if (summaryFails) throw new Error("All model API calls failed: gemini 504 DEADLINE_EXCEEDED");
+        const fact = input.allowedEvidence.find((item) => item.statement.includes("degree qualification"))!;
+        const pair = input.pairs.find((candidate) => candidate.evidence.some((item) => item.id === fact.id))!;
+        return {
+          provider: "test", model: "fixture-summary", attempts: 1, fallbackUsed: false,
+          sentences: [
+            { text: "Finance-trained programme lead with a bachelor's degree qualification in finance.", evidence_ids: [fact.id], requirement_keys: [] },
+            { text: "Brings documented finance training to operating model work.", evidence_ids: [fact.id], requirement_keys: [] },
+            { text: "Grounds this role's delivery in that finance training.", evidence_ids: [fact.id], requirement_keys: [pair.requirement_key] },
+          ],
+        };
+      };
+      writerImpl = async (input) => {
+        const fact = input.allowedEvidence.find((item) => item.statement.includes("degree qualification"))!;
+        const pair = input.pairs.find((candidate) => candidate.evidence.some((item) => item.id === fact.id))!;
+        return {
+          provider: "test", model: "fixture-writer", attempts: 1, fallbackUsed: false,
+          opening: { text: "Its focus on operating model design is the work I most want to do next.", requirement_keys: [pair.requirement_key] },
+          gapNote: null,
+          paragraphs: [
+            [{ text: "I hold a bachelor's degree qualification in finance, completed in 2004.", evidence_ids: [fact.id], requirement_keys: [pair.requirement_key] }],
+            [{ text: "That finance grounding underpins the operating model work this role describes.", evidence_ids: [fact.id], requirement_keys: [] }],
+          ],
+        };
+      };
+      try {
+        const { compared, approved, generated } = await compareApproveGenerate("https://careers.example.test/derivatives-lead-retry", "Derivatives Operating Model Lead Retry");
+        expect(generated.summary.mode).toBe("DETERMINISTIC");
+        expect(generated.summary.reason).toContain("504 DEADLINE_EXCEEDED");
+        expect(generated.cover_letter.mode).toBe("AI_WRITTEN");
+
+        summaryFails = false;
+        const retried = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint, new_revision: true });
+        expect(retried.revision).toBe(2);
+        expect(retried.approval_id).not.toBe(approved.approval_id);
+        const regenerated = await post(`/${compared.draft_id}/documents`, { approval_id: retried.approval_id, reuse_cover_letter_from: approved.approval_id });
+        expect(summaryCalls).toHaveLength(2);
+        expect(writerCalls).toHaveLength(1);
+        expect(regenerated.summary.mode).toBe("AI_WRITTEN");
+        expect(regenerated.preview.cv).toContain("Finance-trained programme lead");
+        expect(regenerated.preview.cover_letter).toBe(generated.preview.cover_letter);
+        expect(regenerated.cover_letter).toEqual(generated.cover_letter);
+        const run = await letterRun(retried.approval_id);
+        expect(run.output_manifest).toMatchObject({ cover_letter_mode: "AI_WRITTEN", reused_cover_letter_from: approved.approval_id, revision: 2 });
+        expect(run.claims).toHaveLength(2);
+        // The first revision's documents stay as they were.
+        const first = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+        expect(first.summary.mode).toBe("DETERMINISTIC");
+
+        // A letter can only be kept from an earlier revision of the same comparison and corrections.
+        const other = await compareApproveGenerate("https://careers.example.test/derivatives-lead-retry-other", "Derivatives Operating Model Lead Other");
+        const otherRetry = await post(`/${other.compared.draft_id}/approve`, { approved: true, comparison_fingerprint: other.compared.comparison_fingerprint, new_revision: true });
+        await post(`/${other.compared.draft_id}/documents`, { approval_id: otherRetry.approval_id, reuse_cover_letter_from: approved.approval_id }, 400);
+      } finally {
+        writerImpl = undefined;
+        summaryImpl = undefined;
+      }
+    });
+  });
+
   it("falls back to the assembled letter, and records why, when a written sentence is not grounded", async () => {
     await withModelEnv({ OPENAI_API_KEY: "configured-for-mode-check", REQUIREMENTS_ENABLE_QUOTED: "false" }, async () => {
       writerImpl = async (input) => ({

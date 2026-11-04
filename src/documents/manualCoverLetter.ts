@@ -3,7 +3,8 @@ import { z } from "zod";
 
 import { checkModelRegistryPreflight, generateContentAudited, MODEL_REGISTRY } from "../services/agent.js";
 import type { WorkspaceContext } from "../workspace/context.js";
-import { documentHeader, type ControlledDocuments, type ManualEvidence } from "./manualPreparation.js";
+import { containsSelfDescription } from "./manualDocumentPolicy.js";
+import { candidateGapNotes, documentHeader, evidenceAgeYears, type ControlledDocuments, type ManualEvidence } from "./manualPreparation.js";
 
 export const MANUAL_COVER_LETTER_SCHEMA_VERSION = "manual_cover_letter_v2";
 export const MANUAL_COVER_LETTER_GENERATOR_VERSION = "manual_cover_letter_ai_v2";
@@ -14,6 +15,13 @@ export const MAX_COVER_LETTER_PAIRS = 6;
 const MAX_COVER_LETTER_RESPONSE_BYTES = 64 * 1024;
 const MAX_LETTER_BODY_CHARS = 3500;
 const IMPORTANCE_ORDER: Record<string, number> = { MUST: 0, PREFERRED: 1, NICE_TO_HAVE: 2 };
+// Work this many years older than the profile's newest is used only when nothing newer matches.
+export const MAX_LETTER_EVIDENCE_AGE_YEARS = 15;
+const MIN_LETTER_PAIRS = 2;
+// "Master's" and "master of", never "master data".
+const ACADEMIC_REQUIREMENT = /\b(?:degree|bachelor\w*|master(?:'|’)?s\b|master of|ph\.?d|doctorate|academic|university|graduate|diploma|education)\b/i;
+// Results outrank projects and duties; a credential is the weakest proof of doing the work.
+const EVIDENCE_STRENGTH: Record<string, number> = { ACHIEVEMENT: 0.1, PROJECT: 0.05, PUBLICATION: 0.05, RESPONSIBILITY: 0 };
 
 /** One approved requirement-to-evidence pair from the comparison the candidate approved. */
 export interface CoverLetterPair {
@@ -132,27 +140,42 @@ export const coverLetterProviderSchema = {
   },
 } as const;
 
-/** The approved pairs, most important first: only requirements the comparison linked to evidence. */
+/**
+ * The approved pairs the letter is written from, in the order its paragraphs should follow: most
+ * important requirement first, then strongest evidence (model confidence, results over duties).
+ * Evidence more than MAX_LETTER_EVIDENCE_AGE_YEARS older than the profile's newest work is dropped
+ * when the requirement has newer evidence, and requirements answered only by old work or by
+ * academic credentials are used only when too few others remain.
+ */
 export function approvedCoverLetterPairs(comparison: Record<string, any>): CoverLetterPair[] {
   const evidence = Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [];
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
+  const ages = evidenceAgeYears(evidence);
+  const isOld = (item: ManualEvidence) => (ages.get(item.id) ?? 0) > MAX_LETTER_EVIDENCE_AGE_YEARS;
   const rows = Array.isArray(comparison.rows) ? comparison.rows as Array<Record<string, any>> : [];
-  return rows
-    .map((row, index) => ({
-      index,
-      pair: {
-        requirement_key: String(row.requirement_key),
-        importance: String(row.importance),
-        requirement: String(row.requirement),
-        evidence: (Array.isArray(row.evidence) ? row.evidence : [])
-          .map((item: { id: string }) => evidenceById.get(item.id))
-          .filter((item: ManualEvidence | undefined): item is ManualEvidence => Boolean(item)),
-      },
-    }))
+  const candidates = rows
+    .map((row, index) => {
+      const linked = (Array.isArray(row.evidence) ? row.evidence : []) as Array<{ id: string; confidence?: number }>;
+      const items = linked.map((item) => evidenceById.get(item.id)).filter((item): item is ManualEvidence => Boolean(item));
+      const recent = items.filter((item) => !isOld(item));
+      const chosen = recent.length > 0 ? recent : items;
+      const strength = Math.max(-1, ...linked.filter((item) => chosen.some((kept) => kept.id === item.id)).map((item) => {
+        const kept = evidenceById.get(item.id)!;
+        return (item.confidence ?? 0.7) + (kept.evidence_type === "CREDENTIAL" ? -0.2 : EVIDENCE_STRENGTH[kept.fact_type ?? ""] ?? 0);
+      }));
+      const academic = ACADEMIC_REQUIREMENT.test(String(row.requirement))
+        || (chosen.length > 0 && chosen.every((item) => item.evidence_type === "CREDENTIAL"));
+      return {
+        index, strength, secondary: academic || recent.length === 0,
+        pair: { requirement_key: String(row.requirement_key), importance: String(row.importance), requirement: String(row.requirement), evidence: chosen },
+      };
+    })
     .filter(({ pair }) => pair.evidence.length > 0)
-    .sort((left, right) => (IMPORTANCE_ORDER[left.pair.importance] ?? 3) - (IMPORTANCE_ORDER[right.pair.importance] ?? 3) || left.index - right.index)
-    .slice(0, MAX_COVER_LETTER_PAIRS)
-    .map(({ pair }) => pair);
+    .sort((left, right) => (IMPORTANCE_ORDER[left.pair.importance] ?? 3) - (IMPORTANCE_ORDER[right.pair.importance] ?? 3)
+      || right.strength - left.strength || left.index - right.index);
+  const primary = candidates.filter((candidate) => !candidate.secondary);
+  const chosen = primary.length >= MIN_LETTER_PAIRS ? primary : [...primary, ...candidates.filter((candidate) => candidate.secondary)];
+  return chosen.slice(0, MAX_COVER_LETTER_PAIRS).map(({ pair }) => pair);
 }
 
 /** Pair evidence plus the engagements those facts belong to, so the letter can name the role. */
@@ -198,6 +221,7 @@ function sentenceIssues(where: string, sentence: CoverLetterSentence, pairs: Cov
   const sourceNumbers = new Set(cited.flatMap((item) => numberTokens(`${item.label} ${item.statement}`)));
   const unsourced = numberTokens(sentence.text).filter((token) => !sourceNumbers.has(token));
   if (unsourced.length > 0) issues.push(`${where}: states numbers its cited evidence does not contain (${unsourced.join(", ")}).`);
+  if (containsSelfDescription(sentence.text)) issues.push(`${where}: rates the candidate ("expert in", "proven capability"); state the work instead.`);
   return issues;
 }
 
@@ -293,7 +317,8 @@ export function buildCoverLetterPrompt(input: CoverLetterWriterInput): string {
     "Rules:",
     `- schema_version must be "${MANUAL_COVER_LETTER_SCHEMA_VERSION}".`,
     `- opening: one sentence on why this role at ${input.company} appeals, naming in requirement_keys the requirements it refers to. It follows "I am applying for the ${input.title} role at ${input.company}.", which is added for you. It must not state anything the candidate has done or is ("I have", "I led", "my experience"); the body does that with evidence.`,
-    "- paragraphs: 2 to 4 short paragraphs of evidence. Do not write a greeting, a closing, a sign-off or the candidate's name; those are added separately.",
+    "- paragraphs: 2 to 4 short paragraphs of evidence, in the order the pairs are listed below (most important and best evidenced first). Do not write a greeting, a closing, a sign-off or the candidate's name; those are added separately.",
+    "- Do not rate the candidate (\"expert in\", \"proven capability\", \"strong ability\"); state the work the evidence records.",
     "- Every sentence must list in evidence_ids the IDs of the evidence it relies on, and in requirement_keys the requirements it addresses.",
     "- Use only the evidence listed below. Do not add employers, job titles, dates, numbers, tools, credentials or achievements that the cited evidence does not state.",
     "- Any number you write must appear in the evidence that sentence cites. Do not restate numbers from the job description.",
@@ -307,7 +332,7 @@ export function buildCoverLetterPrompt(input: CoverLetterWriterInput): string {
     "Job requirements the opening may refer to:",
     ...requirementLines,
     "",
-    "Approved requirement-to-evidence pairs (most important first):",
+    "Approved requirement-to-evidence pairs (most important and best evidenced first):",
     ...pairLines,
     "",
     ...(uncovered.length > 0 ? ["MUST requirements with no evidence (for gap_note only):", ...uncovered.map((item) => `- [${item.requirement_key}] ${item.requirement}`), ""] : []),
@@ -340,9 +365,26 @@ function parseCoverLetterResponse(input: CoverLetterWriterInput, rawText: string
   return { opening: validated.opening, paragraphs: validated.paragraphs, gapNote: validated.gapNote };
 }
 
+/** A per-call model timeout from `envName`, clamped to 5..300 s; `fallbackMs` when unset or invalid. */
+function manualModelTimeoutMs(envName: string, fallbackMs: number): number {
+  const parsed = Number.parseInt(String(process.env[envName] ?? ""), 10);
+  if (!Number.isFinite(parsed)) return fallbackMs;
+  return Math.max(5000, Math.min(300000, parsed));
+}
+
+/** Per-call model settings for the manual document writers: own timeout, 2 attempts, a secondary Gemini model. */
+function manualDocumentModelOptions(timeoutEnvName: string, defaultTimeoutMs: number) {
+  return {
+    timeoutMs: manualModelTimeoutMs(timeoutEnvName, defaultTimeoutMs),
+    maxRetries: 2,
+    secondaryGeminiModel: process.env.DOCUMENT_SECONDARY_GEMINI_MODEL || MODEL_REGISTRY.EXTRACTION_GEMINI_MODEL,
+  };
+}
+
 /** Calls the document model route; throws unless the response passes validateCoverLetterPayload. */
 export const writeCoverLetterWithModel: CoverLetterWriter = async (input) => {
   const response = await generateContentAudited({
+    ...manualDocumentModelOptions("MANUAL_COVER_LETTER_TIMEOUT_MS", 90000),
     purpose: "DOCUMENT",
     routeKey: "manual_cover_letter",
     model: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
@@ -371,7 +413,7 @@ export function manualCoverLetterMode(): "ai" | "deterministic" {
 
 /** A sentence of the letter that is not a claim, shown in the review with whether it was included. */
 export interface LetterFraming {
-  kind: "OPENING" | "GAP_NOTE" | "CLOSING";
+  kind: "OPENING" | "GAP_NOTE" | "CANDIDATE_GAP_NOTE" | "CLOSING";
   text: string;
   requirement_keys: string[];
   included: boolean;
@@ -380,8 +422,8 @@ export interface LetterFraming {
 /**
  * Frames a validated model-written body with the deterministic header, greeting, opening line,
  * closing and sign-off. Each body sentence becomes a claim carrying its evidence IDs and requirement
- * keys; the opening, gap note and closing are framing, listed separately. The gap note is included
- * only when the candidate chose it.
+ * keys; the opening, gap notes and closing are framing, listed separately. Gap notes (the model's,
+ * and any the candidate wrote on the review screen) are included only when the candidate chose them.
  */
 export function buildWrittenCoverLetter(
   comparison: Record<string, any>,
@@ -392,11 +434,17 @@ export function buildWrittenCoverLetter(
   const claims: ControlledDocuments["claims"] = letter.paragraphs.flat().map((sentence) => ({
     section: "Cover letter", text: sentence.text, evidenceIds: [...sentence.evidence_ids], requirementKeys: [...sentence.requirement_keys],
   }));
-  const includeGapNote = Boolean(letter.gapNote) && options.includeGapNote !== false;
+  const gapNotesWanted = options.includeGapNote !== false;
+  const candidateNotes = candidateGapNotes(comparison);
+  const candidateKeys = new Set(candidateNotes.flatMap((note) => note.requirement_keys));
+  // The candidate's own sentence on a requirement replaces the model's.
+  const modelGapNote = letter.gapNote && !letter.gapNote.requirement_keys.some((key) => candidateKeys.has(key)) ? letter.gapNote : null;
+  const includeGapNote = Boolean(modelGapNote) && gapNotesWanted;
   const openingText = `I am applying for the ${comparison.title} role at ${comparison.company}. ${letter.opening.text}`;
   const framing: LetterFraming[] = [
     { kind: "OPENING", text: openingText, requirement_keys: [...letter.opening.requirement_keys], included: true },
-    ...(letter.gapNote ? [{ kind: "GAP_NOTE" as const, text: letter.gapNote.text, requirement_keys: [...letter.gapNote.requirement_keys], included: includeGapNote }] : []),
+    ...(modelGapNote ? [{ kind: "GAP_NOTE" as const, text: modelGapNote.text, requirement_keys: [...modelGapNote.requirement_keys], included: includeGapNote }] : []),
+    ...candidateNotes.map((note) => ({ kind: "CANDIDATE_GAP_NOTE" as const, text: note.text, requirement_keys: note.requirement_keys, included: gapNotesWanted })),
     { kind: "CLOSING", text: COVER_LETTER_CLOSING, requirement_keys: [], included: true },
   ];
   const coverLetter = [
@@ -408,7 +456,8 @@ export function buildWrittenCoverLetter(
     openingText,
     "",
     ...letter.paragraphs.flatMap((sentences) => [sentences.map((sentence) => sentence.text).join(" "), ""]),
-    ...(includeGapNote && letter.gapNote ? [letter.gapNote.text, ""] : []),
+    ...(includeGapNote && modelGapNote ? [modelGapNote.text, ""] : []),
+    ...(gapNotesWanted && candidateNotes.length > 0 ? [candidateNotes.map((note) => note.text).join(" "), ""] : []),
     COVER_LETTER_CLOSING,
     "",
     "Sincerely,",
@@ -559,6 +608,7 @@ function parseSummaryResponse(input: CoverLetterWriterInput, rawText: string): C
 /** Calls the document model route; throws unless the response passes validateSummaryPayload. */
 export const writeSummaryWithModel: SummaryWriter = async (input) => {
   const response = await generateContentAudited({
+    ...manualDocumentModelOptions("MANUAL_SUMMARY_TIMEOUT_MS", 45000),
     purpose: "DOCUMENT",
     routeKey: "manual_cv_summary",
     model: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,

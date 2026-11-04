@@ -23,6 +23,21 @@
         "comparison_fingerprint": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
+        },
+        "corrections_fingerprint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ManualApprovalResponse/properties/comparison_fingerprint"
+            },
+            {
+              "type": "string",
+              "const": ""
+            }
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "required": [
