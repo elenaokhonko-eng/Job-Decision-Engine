@@ -24,6 +24,10 @@ const STAGES = [
 
 type PipelineStage = (typeof STAGES)[number];
 
+export function isWorkflowKillSwitchOn(value = process.env.WORKFLOW_KILL_SWITCH): boolean {
+  return (value || "").trim().toLowerCase() === "true";
+}
+
 interface CountRow {
   key: string;
   count: number;
@@ -146,12 +150,16 @@ function toMarkdown(report: Record<string, unknown>): string {
   const routingRows = report.routing_disposition_counts as CountRow[];
   const retryReasons = report.retry_wait_reasons as CountRow[];
   const blockedReasons = report.blocked_dependency_reasons as CountRow[];
+  const killSwitchWarning = report.workflow_kill_switch_on === true
+    ? ["⚠️ **WORKFLOW_KILL_SWITCH is ON: all pipeline processing is paused.**", ""]
+    : [];
   const formatCounts = (rows: readonly CountRow[]) => rows
     .map((row) => `${markdownText(row.key)}=${row.count}`)
     .join(", ") || "none";
   const lines = [
     "## Pipeline status",
     "",
+    ...killSwitchWarning,
     "| Stage | Status | Pending | Retry | Blocked | Dead letter total | Actionable dead letter | Stale historical dead letter | Oldest pending (s) | Oldest retry (s) | Oldest dead letter (s) |",
     "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ...stages.map((stage) =>
@@ -191,6 +199,10 @@ function toMarkdown(report: Record<string, unknown>): string {
 }
 
 async function run(): Promise<void> {
+  const workflowKillSwitchOn = isWorkflowKillSwitchOn();
+  if (workflowKillSwitchOn) {
+    console.error("!!! WORKFLOW_KILL_SWITCH IS ON — ALL PIPELINE PROCESSING IS PAUSED !!!");
+  }
   const databaseUrl = String(process.env.DATABASE_URL || "").trim();
   if (!databaseUrl) throw new Error("DATABASE_URL is required for pipeline status reporting.");
 
@@ -356,6 +368,7 @@ async function run(): Promise<void> {
     const report = {
       generated_at: new Date().toISOString(),
       workspace_id: context.workspaceId,
+      workflow_kill_switch_on: workflowKillSwitchOn,
       max_pending_age_seconds: maxPendingAgeSeconds,
       stages,
       source_runs_by_connector: sources.rows,

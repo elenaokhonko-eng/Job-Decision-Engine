@@ -29,6 +29,7 @@ jobs:
       - name: Validate ref and scoped pilot inputs
         env:
           WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
+          PILOT_MODE: ${{ vars.PILOT_MODE }}
           REQUESTED_REF: ${{ github.ref }}
           INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
           INPUT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
@@ -40,13 +41,25 @@ jobs:
             echo "Production queue workflows may only run reviewed code from main." >&2
             exit 1
           fi
+          case "$WORKFLOW_KILL_SWITCH" in
+            ""|true|false) ;;
+            *) echo "WORKFLOW_KILL_SWITCH must be exactly true, false, or unset." >&2; exit 1 ;;
+          esac
+          case "$PILOT_MODE" in
+            ""|true|false) ;;
+            *) echo "PILOT_MODE must be exactly true, false, or unset." >&2; exit 1 ;;
+          esac
           if [[ "$WORKFLOW_KILL_SWITCH" == "true" ]]; then
+            echo "WORKFLOW_KILL_SWITCH=true pauses all processing, including scoped pilots." >&2
+            exit 1
+          fi
+          if [[ "$PILOT_MODE" == "true" ]]; then
             if [[ ! "$INPUT_CANONICAL_JOB_ID" =~ $uuid_re || ! "$INPUT_JOB_VERSION_ID" =~ $uuid_re ]]; then
-              echo "With the workflow kill switch enabled, valid canonical_job_id and job_version_id inputs are required." >&2
+              echo "PILOT_MODE=true requires valid canonical_job_id and job_version_id inputs." >&2
               exit 1
             fi
           elif [[ -n "$INPUT_CANONICAL_JOB_ID" || -n "$INPUT_JOB_VERSION_ID" ]]; then
-            echo "Scoped pilot dispatches require WORKFLOW_KILL_SWITCH=true." >&2
+            echo "Scoped pilot dispatches require PILOT_MODE=true." >&2
             exit 1
           fi
 
@@ -54,7 +67,7 @@ jobs:
     name: Process Pending & Retrying Evaluations
     needs: validate-manual-dispatch
     runs-on: ubuntu-latest
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.validate-manual-dispatch.result == 'success') && github.ref == 'refs/heads/main' && vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.validate-manual-dispatch.result == 'success') && github.ref == 'refs/heads/main' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && (vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false') }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -103,7 +116,7 @@ jobs:
     name: Run one-job production pilot
     needs: validate-manual-dispatch
     runs-on: ubuntu-latest
-    if: ${{ always() && needs.validate-manual-dispatch.result == 'success' && vars.WORKFLOW_KILL_SWITCH == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.canonical_job_id != '' && inputs.job_version_id != '' }}
+    if: ${{ always() && needs.validate-manual-dispatch.result == 'success' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && vars.PILOT_MODE == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.canonical_job_id != '' && inputs.job_version_id != '' }}
     timeout-minutes: 45
     steps:
       - name: Checkout repository code
@@ -131,6 +144,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
           WORKFLOW_KILL_SWITCH: ${{ vars.WORKFLOW_KILL_SWITCH }}
+          PILOT_MODE: ${{ vars.PILOT_MODE }}
           PILOT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}
           PILOT_JOB_VERSION_ID: ${{ inputs.job_version_id }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
