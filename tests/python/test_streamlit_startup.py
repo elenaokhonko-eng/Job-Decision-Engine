@@ -219,11 +219,33 @@ def test_database_outage_without_an_api_tries_a_direct_connection_and_hides_cred
     )
 
 
+def test_database_outage_checks_the_database_directly_when_the_api_is_not_running():
+    # A real refused connection: nothing listens on port 1.
+    def api_get(path):
+        request = urllib.request.Request(f"http://127.0.0.1:1{path}")
+        return open_api_json(request, 5)
+
+    def refused():
+        raise RuntimeError('connection to server at "db.example.test" failed')
+
+    database_url = "postgresql://user:s3cret@db.example.test:5432/app"
+    assert (
+        database_outage("http://127.0.0.1:1", api_get, lambda: None, database_url)
+        is None
+    )
+    message = database_outage("http://127.0.0.1:1", api_get, refused, database_url)
+    assert message.startswith("The database at db.example.test could not be used")
+    assert database_outage("http://127.0.0.1:1", api_get, refused, "") is None
+
+
+@pytest.mark.parametrize(
+    "api_url", ["", "http://127.0.0.1:1"], ids=["no-api", "api-not-running"]
+)
 def test_streamlit_shows_one_database_error_and_stops_when_the_database_is_unreachable(
-    monkeypatch,
+    monkeypatch, api_url
 ):
     monkeypatch.setenv("JDEC_RUNTIME_MODE", "local")
-    monkeypatch.setenv("JDEC_API_BASE_URL", "")
+    monkeypatch.setenv("JDEC_API_BASE_URL", api_url)
     monkeypatch.setenv("API_BASE_URL", "")
     # Nothing listens on port 1, so the direct read-only connection fails at once.
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:s3cret@127.0.0.1:1/missing")

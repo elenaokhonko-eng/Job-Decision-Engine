@@ -194,8 +194,9 @@ def database_outage(api_url, api_get, probe_direct, database_url=""):
     """One message when the app's database cannot be used, else None.
 
     With an API configured, its workspace health check speaks for the database: only its
-    DATABASE_UNAVAILABLE answer is an outage. An unreachable API is not, because the read-only
-    fallback handles that. Without an API, a direct read-only connection is tried when
+    DATABASE_UNAVAILABLE answer is an outage. When the API does not answer at all (nothing
+    listening, a timeout), the panels fall back to a direct read-only connection, so that
+    connection is checked instead, as it is without an API. The direct check runs only when
     DATABASE_URL is set; probe_direct raises RuntimeError or OSError when it fails. The
     message names the host, never the connection string.
     """
@@ -206,7 +207,11 @@ def database_outage(api_url, api_get, probe_direct, database_url=""):
             marker = f"{DATABASE_UNAVAILABLE_CODE}: "
             text = str(error)
             return text.split(marker, 1)[1] if marker in text else None
-        return None
+        except OSError:
+            # URLError, refused connections and timeouts: the API is not running.
+            pass
+        else:
+            return None
     if not database_url:
         return None
     try:
