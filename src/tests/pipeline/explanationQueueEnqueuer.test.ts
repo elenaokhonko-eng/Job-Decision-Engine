@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
+import { loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import pg from "pg";
 import type { WorkspaceContext } from "../../workspace/context.js";
+
+vi.mock("../../pipeline/laneConfigLoader.js", () => ({
+  loadWorkspaceLanesConfig: vi.fn(),
+}));
 
 vi.mock("pg", () => {
   const mPool: any = {
@@ -38,10 +43,26 @@ describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
     };
     const budgetRunId = "11111111-1111-4111-8111-111111111111";
 
+    (loadWorkspaceLanesConfig as any).mockResolvedValue({
+      source: "FILES",
+      config: {
+        version: "fixture-lanes-v1",
+        description: "fixture lane config",
+        lanes: {
+          CORE_AI_DATA: { maximum_ai_interpretations_per_run: 3 },
+        },
+        unclassified_policy: {
+          label: "UNCLASSIFIED",
+          fallback_behavior: "DEFER_ROUTING",
+          min_similarity_floor: 0.25,
+        },
+      },
+    });
+
     (mPool.query as any).mockResolvedValue({ rows: [] });
-    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // BEGIN
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // BEGIN REPEATABLE READ
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // stale queue reconciliation
-    (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // budget run
+    (mPool.query as any).mockResolvedValueOnce({ rows: [{ id: budgetRunId }] }); // pinned budget run
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // lane usage
     (mPool.query as any).mockResolvedValueOnce({ rows: [] }); // row locks
     (mPool.query as any).mockResolvedValueOnce({
@@ -82,6 +103,14 @@ describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
       limit: 1,
     });
     expect(summary).toEqual({ enqueued: 1, updated: 1, deferred: 2 });
+    expect(loadWorkspaceLanesConfig).toHaveBeenNthCalledWith(1, mPool, {
+      context,
+      seedIfEmpty: true,
+    });
+    expect(loadWorkspaceLanesConfig).toHaveBeenNthCalledWith(2, mPool, {
+      context,
+      seedIfEmpty: false,
+    });
 
     const calls = (mPool.query as any).mock.calls as Array<[string, unknown[]?]>;
     const mainQuery = calls.find(([sql]) => sql.includes("INSERT INTO evaluation_queue"));
@@ -96,6 +125,35 @@ describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
     expect(mainQuery?.[1]?.[0]).toBe(context.workspaceId);
     expect(mainQuery?.[1]?.[1]).toBe(budgetRunId);
     expect(mainQuery?.[1]?.[3]).toBe(1);
+    expect(JSON.parse(String(mainQuery?.[1]?.[2])).CORE_AI_DATA).toMatchObject({
+      budget_limit: 3,
+      lane_revision_id: null,
+      lane_config_source: "FILES",
+      lane_config_version: "fixture-lanes-v1",
+    });
+    expect(mainQuery?.[0]).toContain("WHEN lb.lane IS NULL THEN COALESCE(");
+    expect(mainQuery?.[0]).toContain("lane_revision_matches IS NOT TRUE");
+    expect(mainQuery?.[1]).toHaveLength(6);
+    expect(mainQuery?.[1]?.[4]).toBe("FILES");
+    expect(mainQuery?.[1]?.[5]).toBe("fixture-lanes-v1");
+    const beginCallIndex = calls.findIndex(([sql]) => sql.startsWith("BEGIN ISOLATION LEVEL REPEATABLE READ"));
+    const queryInvocationOrder = (mPool.query as any).mock.invocationCallOrder as number[];
+    const loaderInvocationOrder = (loadWorkspaceLanesConfig as any).mock.invocationCallOrder as number[];
+    expect(loaderInvocationOrder[0]).toBeLessThan(queryInvocationOrder[beginCallIndex]);
+    expect(loaderInvocationOrder[1]).toBeGreaterThan(queryInvocationOrder[beginCallIndex]);
+    const runSnapshotInsert = calls.find(([sql]) => sql.includes("INSERT INTO ai_evaluation_budget_runs"));
+    expect(runSnapshotInsert?.[0]).toContain("lane_config_snapshot");
+    expect(JSON.parse(String(runSnapshotInsert?.[1]?.[5]))).toMatchObject({
+      source: "FILES",
+      version: "fixture-lanes-v1",
+      budgets: {
+        CORE_AI_DATA: {
+          budget_limit: 3,
+          lane_config_source: "FILES",
+          lane_config_version: "fixture-lanes-v1",
+        },
+      },
+    });
     expect(calls.some(([sql]) => sql.includes("UPDATE ai_evaluation_budget_usage"))).toBe(true);
     expect(calls.some(([sql]) => sql === "COMMIT")).toBe(true);
   });

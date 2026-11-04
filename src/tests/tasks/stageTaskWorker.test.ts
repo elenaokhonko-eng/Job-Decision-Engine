@@ -2386,7 +2386,7 @@ describe("stageTaskWorker", () => {
     });
   });
 
-  it("passes one explicit budget run identity to explanation enqueue tasks", async () => {
+  it("uses one explicit budget run identity for explanation tasks in a worker invocation", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("WITH claimable AS")) {
         return {
@@ -2433,7 +2433,7 @@ describe("stageTaskWorker", () => {
         claimBatchSize: 1,
         heartbeatSeconds: 0,
         claimedBy: "worker:test",
-        budgetRunId: "budget-run-1",
+        budgetRunId: "22222222-2222-4222-8222-222222222222",
       },
       deps
     );
@@ -2443,7 +2443,7 @@ describe("stageTaskWorker", () => {
       context: ctx,
       jobVersionIds: ["version-1"],
       limit: 1,
-      budgetRunId: "budget-run-1",
+      budgetRunId: "22222222-2222-4222-8222-222222222222",
     });
   });
 
