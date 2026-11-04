@@ -6,6 +6,7 @@ import type { WorkspaceContext } from "../../workspace/context.js";
 
 vi.mock("../../ingestion/jobSourceEvidence.js", () => ({
   buildJobSourceEvidence: vi.fn(),
+  hasCompleteFetchedPostingReceipt: vi.fn(() => false),
 }));
 
 const context: WorkspaceContext = {

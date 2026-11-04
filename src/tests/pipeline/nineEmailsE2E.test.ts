@@ -14,7 +14,7 @@ import { fileURLToPath } from "url";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
-import { buildEvidenceRevisionHash } from "../../ingestion/jobSourceEvidence.js";
+import { buildEvidenceRevisionHash, buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
 import { htmlToPlainText } from "../../ingestion/emailAlertExtractor.js";
 import { SourceBroker } from "../../ingestion/sourceBroker.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../../contracts/jobSourceEvidence.js";
@@ -768,12 +768,21 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         companyName: "Readiness Evidence Fixture Labs",
         salary: "SGD250,000",
         expectedStatus: "READY",
+        sourceKind: "ATS",
       },
       {
         externalId: `readiness-below-floor-${crypto.randomUUID()}`,
         companyName: "Readiness Below Floor Fixture Labs",
         salary: "SGD200,000",
         expectedStatus: "BLOCKED",
+        sourceKind: "ATS",
+      },
+      {
+        externalId: `readiness-gmail-fetched-${crypto.randomUUID()}`,
+        companyName: "Readiness Gmail Fetched Fixture Labs",
+        salary: "SGD250,000",
+        expectedStatus: "READY",
+        sourceKind: "GMAIL_FETCHED",
       },
     ] as const;
     const retrievedAt = new Date().toISOString();
@@ -782,7 +791,9 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     await broker.startRun("READINESS_COMPENSATION_POSTGRES_E2E");
     const observationIds: string[] = [];
     for (const posting of postings) {
-      const postingUrl = `https://boards.greenhouse.io/readiness-fixture/jobs/${posting.externalId}`;
+      const postingUrl = posting.sourceKind === "ATS"
+        ? `https://boards.greenhouse.io/readiness-fixture/jobs/${posting.externalId}`
+        : `https://careers.example.test/jobs/${posting.externalId}`;
       const description = [
         "<h1>Principal AI Systems Architect</h1>",
         `<h2>About the role</h2><p>${posting.companyName} builds production AI platforms for enterprise data teams.</p>`,
@@ -791,20 +802,59 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         `<h2>Compensation</h2><p>${posting.salary} gross base salary per year.</p>`,
         "<p>This position is fully remote. Candidates must be authorized to work in Singapore or Australia. No travel is required.</p>",
       ].join("");
-      const rawPayload = {
-        id: posting.externalId,
-        title: "Principal AI Systems Architect",
-        status: "active",
-        publishedAt,
-        location: "Singapore",
-        workplaceType: "REMOTE",
-        employmentType: "PERMANENT",
-        organizationType: "commercial",
-        description,
-      };
+      let derivedFromObservationId: string | undefined;
+      let rawPayload: Record<string, unknown>;
+      if (posting.sourceKind === "GMAIL_FETCHED") {
+        derivedFromObservationId = crypto.randomUUID();
+        const emailPayload = { message_id: `readiness-${posting.externalId}`, body_text: "A role is available; open the link to view the posting." };
+        const emailPayloadHash = crypto.createHash("sha256").update(JSON.stringify(emailPayload)).digest("hex");
+        await q(
+          `INSERT INTO raw_job_observations (
+             id, workspace_id, source_name, source_external_id, source_url, retrieved_at,
+             company_name, title, description_raw, raw_payload, raw_payload_hash, processing_status
+           ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, $5, $6, $7, 'A role is available; open the link to view the posting.', $8::jsonb, $9, 'FETCH_COMPLETE')`,
+          [derivedFromObservationId, getContext().workspaceId, `gmail-${posting.externalId}`, postingUrl,
+            retrievedAt, posting.companyName, "Principal AI Systems Architect", JSON.stringify(emailPayload), emailPayloadHash],
+        );
+        const responseHash = crypto.createHash("sha256").update(description).digest("hex");
+        rawPayload = {
+          source_content_status: "COMPLETE",
+          discovery_observation_id: derivedFromObservationId,
+          source_provider: "EMPLOYER_WEBSITE",
+          requested_url: postingUrl,
+          canonical_url: postingUrl,
+          retrieved_at: retrievedAt,
+          source_evidence: {
+            requestedUrl: postingUrl,
+            resolvedUrl: postingUrl,
+            redirectHistory: [],
+            retrievedAt,
+            httpStatus: 200,
+            contentType: "text/html",
+            responseHash,
+          },
+          posting: { title: "Principal AI Systems Architect", companyName: posting.companyName, description, canonicalUrl: postingUrl },
+          content_hash: responseHash,
+        };
+      } else {
+        rawPayload = {
+          id: posting.externalId,
+          title: "Principal AI Systems Architect",
+          status: "active",
+          publishedAt,
+          location: "Singapore",
+          workplaceType: "REMOTE",
+          employmentType: "PERMANENT",
+          organizationType: "commercial",
+          description,
+        };
+      }
+      const sourceName = posting.sourceKind === "ATS"
+        ? "GREENHOUSE"
+        : "EMPLOYER_WEBSITE";
       const staged = await broker.processObservation({
-        sourceName: "GREENHOUSE",
-        sourcePluginKey: "greenhouse",
+        sourceName,
+        sourcePluginKey: sourceName.toLowerCase(),
         sourceExternalId: posting.externalId,
         sourceUrl: postingUrl,
         canonicalApplyUrl: postingUrl,
@@ -818,21 +868,32 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         compensationRaw: "UNKNOWN",
         sourceLane: "CORE_AI_DATA",
         searchPlanVersion: "readiness-compensation-v1",
+        ...(derivedFromObservationId ? { derivedFromObservationId } : {}),
         rawPayload,
       }, rawPayload);
       expect(staged.observationId).toBeTruthy();
-      expect(staged.normalizedEvidence?.description.completeness_status).toBe("COMPLETE");
-      expect(staged.normalizedEvidence?.availability.status).toBe("OPEN");
-      expect(staged.normalizedEvidence?.workability.hiring_territories).toMatchObject({
+      const normalizedEvidence = staged.normalizedEvidence;
+      if (!normalizedEvidence) throw new Error("Readiness fixture source evidence was not normalized.");
+      expect(normalizedEvidence.description.completeness_status).toBe("COMPLETE");
+      expect(normalizedEvidence.availability.status).toBe("OPEN");
+      if (posting.sourceKind === "GMAIL_FETCHED") {
+        expect(normalizedEvidence.availability).toMatchObject({
+          reason_code: "FULL_POSTING_RETRIEVED",
+          verification_method: "VERIFIED_POSTING_RETRIEVAL",
+        });
+        expect(Date.parse(normalizedEvidence.availability.expires_at!) - Date.parse(normalizedEvidence.availability.verified_at!))
+          .toBe(7 * 24 * 60 * 60 * 1000);
+      }
+      expect(normalizedEvidence.workability.hiring_territories).toMatchObject({
         status: "SUPPORTED",
         operator: "ANY",
         countries: ["SINGAPORE", "AUSTRALIA"],
       });
-      expect(staged.normalizedEvidence?.opportunity_category).toMatchObject({
+      expect(normalizedEvidence.opportunity_category).toMatchObject({
         status: "SUPPORTED",
         value: "COMMERCIAL",
       });
-      expect(staged.normalizedEvidence?.compensation.components[0]).toMatchObject({
+      expect(normalizedEvidence.compensation.components[0]).toMatchObject({
         component_type: "BASE_CASH",
         amount_min: Number(posting.salary.replace(/[^0-9]/g, "")),
         currency: "SGD",
@@ -928,7 +989,10 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       expect(readiness.status).toBe(posting.expectedStatus);
       expect(readiness.checks.find((check: { key: string }) => check.key === "MANDATORY_QUALIFICATIONS").status).toBe("MET");
       expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").status)
-        .toBe(posting.expectedStatus === "READY" ? "MET" : "BLOCKED");
+        .toBe(posting.expectedStatus === "BLOCKED" ? "BLOCKED" : "MET");
+      if (posting.sourceKind === "GMAIL_FETCHED") {
+        expect(readiness.checks.find((check: { key: string }) => check.key === "AVAILABILITY").status).toBe("MET");
+      }
       if (posting.expectedStatus === "BLOCKED") {
         expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").reason_code)
           .toBe("COMPENSATION_BELOW_USER_FLOOR");
@@ -1092,6 +1156,67 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(reassessedDecision?.context_fingerprint).not.toBe(expiredDecision?.context_fingerprint);
     expect(reassessedDecision?.readiness_fingerprint).not.toBe(expiredDecision?.readiness_fingerprint);
     expect(reassessedDecision?.evidence_revision_hash).toBe(buildEvidenceRevisionHash(freshEvidence));
+
+    const alertOnlyPayload = {
+      message_id: `alert-only-${positivePosting.externalId}`,
+      body_text: originalEvidence.description.normalized_text,
+    };
+    const alertOnlyRetrievedAt = new Date().toISOString();
+    const alertOnlyUrl = `https://careers.example.test/alerts/${positivePosting.externalId}`;
+    const alertOnlyPayloadHash = crypto.createHash("sha256").update(JSON.stringify(alertOnlyPayload)).digest("hex");
+    const alertOnlyEvidence = buildJobSourceEvidence({
+      sourceName: "GMAIL_ALERT",
+      sourcePluginKey: "gmail_alert",
+      sourcePluginRevisionId: null,
+      sourceExternalId: `gmail-${positivePosting.externalId}`,
+      sourceUrl: alertOnlyUrl,
+      canonicalApplyUrl: alertOnlyUrl,
+      retrievedAt: alertOnlyRetrievedAt,
+      rawPayloadHash: alertOnlyPayloadHash,
+      rawPayload: alertOnlyPayload,
+      companyName: positivePosting.companyName,
+      title: "Principal AI Systems Architect",
+      locationRaw: "Singapore",
+      workplaceTypeRaw: "REMOTE",
+      employmentTypeRaw: "PERMANENT",
+      compensationRaw: "UNKNOWN",
+      descriptionText: originalEvidence.description.normalized_text,
+    });
+    expect(alertOnlyEvidence.availability).toMatchObject({
+      status: "UNKNOWN",
+      verification_method: "NONE",
+      reason_code: "AVAILABILITY_NOT_VERIFIED",
+    });
+    await q(
+      `UPDATE raw_job_observations
+       SET source_name = 'GMAIL_ALERT', source_plugin_key = 'gmail_alert', source_plugin_revision_id = NULL,
+           source_external_id = $3, source_url = $4, canonical_apply_url = $4,
+           retrieved_at = $5, raw_payload = $6::jsonb, raw_payload_hash = $7,
+           normalized_evidence = $8::jsonb, evidence_schema_version = $9
+       WHERE workspace_id = $1 AND id = $2::uuid AND job_version_id = $10::uuid`,
+      [getContext().workspaceId, originalObservation.id, `gmail-${positivePosting.externalId}`, alertOnlyUrl,
+        alertOnlyRetrievedAt, JSON.stringify(alertOnlyPayload), alertOnlyPayloadHash,
+        JSON.stringify(alertOnlyEvidence), alertOnlyEvidence.schema_version, positiveVersion.job_version_id],
+    );
+    await q(
+      `UPDATE job_versions
+       SET availability_status = 'UNKNOWN', availability_evidence = $3::jsonb,
+           availability_verified_at = NULL, availability_recheck_at = NULL,
+           evidence_revision_hash = $4, source_posting_identity_hash = $5
+       WHERE workspace_id = $1 AND id = $2::uuid`,
+      [getContext().workspaceId, positiveVersion.job_version_id, JSON.stringify(alertOnlyEvidence.availability),
+        buildEvidenceRevisionHash(alertOnlyEvidence), alertOnlyEvidence.source_identity_hash],
+    );
+    const alertOnlyRun = await runRecommendationDecider(getClient(), {
+      context: getContext(),
+      jobVersionIds: [positiveVersion.job_version_id],
+    });
+    expect(alertOnlyRun.errors).toBe(0);
+    expect(alertOnlyRun.decisionsInserted).toBe(1);
+    const alertOnlyDecision = await decisionForPositive();
+    expect(alertOnlyDecision?.readiness_json.status).toBe("NEEDS_VERIFICATION");
+    expect(alertOnlyDecision?.readiness_json.checks.find((check: { key: string }) => check.key === "AVAILABILITY"))
+      .toMatchObject({ status: "NEEDS_VERIFICATION", reason_code: "AVAILABILITY_NOT_VERIFIED" });
   });
   it("Conservation — no observation, canonical job, or version disappears", async () => {
     const conservation = await q(
@@ -1108,7 +1233,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(Number(conservation.rows[0].observation_count)).toBe(9);
     expect(Number(conservation.rows[0].observed_version_count)).toBe(9);
     expect(Number(conservation.rows[0].canonical_count)).toBe(8);
-    expect(versionCount).toBe(11); // Nine email fixture versions plus positive and below-floor readiness jobs.
+    expect(versionCount).toBe(12); // Nine email fixture versions plus three readiness jobs.
   });
 
   it("Integrity — every fixture observation maps to a live canonical job version", async () => {

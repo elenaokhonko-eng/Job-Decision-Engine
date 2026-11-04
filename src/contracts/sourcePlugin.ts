@@ -96,6 +96,15 @@ const SourcePluginMappingSchema = z.object({
   updated_at: z.string().nullable().optional(),
 });
 
+const SourcePluginAvailabilitySchema = z.object({
+  // Exact URL hostnames whose source responses are allowed to establish that
+  // a complete posting is currently available. Wildcards are intentionally
+  // unsupported so a manifest cannot implicitly trust arbitrary subdomains.
+  full_posting_hosts: z.array(z.string().min(1).max(253).regex(
+    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/i,
+  )).max(20).default([]),
+});
+
 export const SourcePluginSchema = z.object({
   schema_version: SchemaVersionSchema,
   source_key: SourceKeySchema,
@@ -107,6 +116,7 @@ export const SourcePluginSchema = z.object({
   schedule: SourcePluginScheduleSchema,
   request: SourcePluginRequestSchema,
   mapping: SourcePluginMappingSchema,
+  availability: SourcePluginAvailabilitySchema.optional(),
 });
 
 export type SourcePlugin = z.infer<typeof SourcePluginSchema>;

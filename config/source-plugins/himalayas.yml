@@ -1,4 +1,4 @@
-schema_version: "2.2.0"
+schema_version: "2.3.0"
 source_key: himalayas
 display_name: Himalayas jobs feed
 kind: json_api
@@ -54,4 +54,9 @@ mapping:
   employment_type: $.employmentType
   posted_at: null
   updated_at: null
+
+availability:
+  full_posting_hosts:
+    - himalayas.app
+    - www.himalayas.app
 
