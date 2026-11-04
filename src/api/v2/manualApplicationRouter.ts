@@ -103,7 +103,7 @@ function sendApiError(res: express.Response, status: number, code: Parameters<ty
   res.status(status).json(errorPayload(code, message, retryAfter));
 }
 
-class ManualFlowError extends Error {
+export class ManualFlowError extends Error {
   constructor(readonly status: number, readonly code: Parameters<typeof errorPayload>[0], message: string) {
     super(message);
   }
@@ -622,6 +622,214 @@ async function hasWritableMembership(client: pg.Pool | pg.PoolClient, ctx: Works
   );
   return rows[0]?.role === "OWNER" || rows[0]?.role === "MEMBER";
 }
+
+/** A comparison draft ready for the review, approve and generate screens. */
+export interface StagedManualComparison {
+  draftId: string;
+  comparisonFingerprint: string;
+  comparison: ReturnType<typeof ManualComparisonSchema.parse>;
+  /** True when an identical comparison already existed and its draft was returned unchanged. */
+  reused: boolean;
+  requirementsExtracted: boolean;
+  documentContactReady: boolean;
+  missingContactFields: Array<"full_name" | "phone">;
+  rolePlan: ReturnType<typeof planRoles>;
+  selectableEvidence: ReturnType<typeof selectableEvidence>;
+}
+
+/**
+ * Everything /compare does once a posting exists as an exact job version: requirement extraction,
+ * evidence pairing, the comparison and its fingerprint, and the write-once draft. Shared by the
+ * manual route and by prepareComparisonForExistingJobVersion so both produce the same draft.
+ */
+async function stageComparisonDraft(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  evidencePairer: EvidencePairer,
+  selected: SelectedPostingIdentity,
+  postingKeptNote: string,
+): Promise<StagedManualComparison> {
+  // Requirement extraction only runs on COMPLETE descriptions; say why instead of failing later
+  // with "no active requirement set".
+  const quality = await pool.query<{ description_quality_status: string | null; description_quality_reason: string | null }>(
+    `SELECT description_quality_status, description_quality_reason FROM canonical_jobs WHERE workspace_id = $1 AND id = $2`,
+    [ctx.workspaceId, selected.canonicalJobId]);
+  if (quality.rows[0]?.description_quality_status !== "COMPLETE") {
+    throw new ManualFlowError(422, "DESCRIPTION_INSUFFICIENT",
+      `The job description looks incomplete (${quality.rows[0]?.description_quality_reason ?? "quality not assessed"}). ` +
+      "Paste the full posting, including the responsibilities and the requirements or qualifications sections. " +
+      postingKeptNote);
+  }
+  // Quoted-extraction failures are non-blocking: deterministic requirements still complete the stage,
+  // and the failure surfaces as a comparison warning via quotedRequirementExtractionWarning.
+  const requirementSummary = await runRequirementsExtraction(pool, {
+    context: ctx, jobVersionIds: [selected.jobVersionId], quotedMode: manualQuotedRequirementMode(), failFastOnQuotedProviderFailure: false,
+  });
+  const reqDetail = requirementSummary.details.find((item) => item.jobVersionId === selected.jobVersionId);
+  if (reqDetail?.error) {
+    throw new ManualFlowError(503, "DEPENDENCY_UNAVAILABLE", `Deterministic requirement extraction failed; the source observation remains durably staged. ${reqDetail.error}`);
+  }
+
+  const preliminary = await loadCurrentInputs(pool, ctx, selected);
+  if (preliminary) await ensureManualEvidencePairing(pool, ctx, preliminary.input, evidencePairer);
+  const observedCurrent = await loadCurrentInputs(pool, ctx, selected);
+  if (!observedCurrent) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "This posting version is no longer current. Compare the current posting again.");
+  const observedComparison = ManualComparisonSchema.parse(buildManualComparison(observedCurrent.input));
+  const comparisonFingerprint = fingerprintManualComparison(observedComparison);
+  const draftClient = await pool.connect();
+  let current: CurrentManualInputs;
+  let comparison: ReturnType<typeof ManualComparisonSchema.parse>;
+  let draftId: string;
+  let reused = false;
+  try {
+    await draftClient.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    if (!(await hasWritableMembership(draftClient, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "Workspace membership no longer permits comparison staging.");
+    const latest = await loadCurrentInputs(draftClient, ctx, selected);
+    if (!latest) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "This posting version is no longer current. Compare the current posting again.");
+    comparison = ManualComparisonSchema.parse(buildManualComparison(latest.input));
+    if (fingerprintManualComparison(comparison) !== comparisonFingerprint) {
+      throw new ManualFlowError(409, "APPROVAL_STALE", "The selected job or profile inputs changed while this comparison was being created. Compare again.");
+    }
+    current = latest;
+    const draftResult = await draftClient.query<{ id: string }>(
+      `INSERT INTO manual_application_drafts (
+         workspace_id,user_id,candidate_profile_id,canonical_job_id,job_version_id,source_observation_id,
+         job_content_hash,profile_version_id,profile_contact_fact_ids,profile_contact_fingerprint,
+         preference_context_fingerprint,requirement_set_id,comparator_version,context_fingerprint,
+         comparison_fingerprint,comparison_payload,suitability_warnings
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17::jsonb)
+       ON CONFLICT (workspace_id,user_id,comparison_fingerprint,profile_contact_fact_ids) DO NOTHING RETURNING id`,
+      [ctx.workspaceId, ctx.userId, comparison.candidate_profile_id, selected.canonicalJobId, selected.jobVersionId,
+        selected.sourceObservationId, selected.contentHash, comparison.profile_version_id, current.contactFactIds,
+        current.contactFingerprint, current.preferenceContextFingerprint, comparison.requirement_set_id,
+        comparison.comparator_version, comparison.context_fingerprint, comparisonFingerprint,
+        JSON.stringify(comparison), JSON.stringify(comparison.suitability_warnings)],
+    );
+    draftId = draftResult.rows[0]?.id;
+    if (!draftId) {
+      const existing = await draftClient.query(
+        `SELECT id,workspace_id,user_id,candidate_profile_id,canonical_job_id,job_version_id,
+                source_observation_id,job_content_hash,profile_version_id,profile_contact_fact_ids,
+                profile_contact_fingerprint,preference_context_fingerprint,requirement_set_id,
+                comparator_version,context_fingerprint,comparison_fingerprint,comparison_payload,suitability_warnings
+         FROM manual_application_drafts
+         WHERE workspace_id=$1 AND user_id=$2 AND comparison_fingerprint=$3 AND profile_contact_fact_ids=$4
+         FOR UPDATE`,
+        [ctx.workspaceId, ctx.userId, comparisonFingerprint, current.contactFactIds],
+      );
+      const persistedDraft = ManualPersistedDraftSchema.parse(existing.rows[0]);
+      if (fingerprintManualComparison(persistedDraft.comparison_payload) !== comparisonFingerprint
+          || stableStringify(persistedDraft.comparison_payload) !== stableStringify(comparison)) {
+        throw new ManualFlowError(409, "APPROVAL_STALE", "An existing comparison with this fingerprint has different persisted content. Compare again.");
+      }
+      draftId = persistedDraft.id;
+      reused = true;
+    }
+    if (!draftId) throw new Error("Manual comparison draft was not durably staged.");
+    await draftClient.query(
+      `INSERT INTO manual_application_draft_contact_facts (workspace_id,user_id,draft_id,profile_version_id,profile_contact_fact_id)
+       SELECT $1,$2,$3,$4,contact_fact_id FROM unnest($5::uuid[]) AS contact_fact_id
+       ON CONFLICT DO NOTHING`,
+      [ctx.workspaceId, ctx.userId, draftId, comparison.profile_version_id, current.contactFactIds],
+    );
+    await draftClient.query("COMMIT");
+  } catch (error) {
+    await draftClient.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally { draftClient.release(); }
+  return {
+    draftId,
+    comparisonFingerprint,
+    comparison,
+    reused,
+    requirementsExtracted: requirementSummary.processed === 1,
+    documentContactReady: Boolean(current.contact.full_name && current.contact.phone),
+    missingContactFields: [
+      !current.contact.full_name && "full_name",
+      !current.contact.phone && "phone",
+    ].filter((field): field is "full_name" | "phone" => Boolean(field)),
+    rolePlan: planRoles(comparison),
+    selectableEvidence: selectableEvidence(comparison),
+  };
+}
+
+export interface ExistingJobComparisonRequest {
+  canonicalJobId: string;
+  jobVersionId: string;
+  /** Required only when the workspace has more than one candidate with an active profile. */
+  candidateProfileId?: string;
+}
+
+export interface ExistingJobComparison extends StagedManualComparison {
+  /** The draft id; pass it to the approve and generate routes as :draftId. */
+  comparisonId: string;
+  canonicalJobId: string;
+  jobVersionId: string;
+  sourceObservationId: string;
+  candidateProfileId: string;
+}
+
+/**
+ * Prepares a manual comparison for a job the pipeline already holds, without staging new posting
+ * content. Applies the same membership, currentness and description-quality checks as /compare and
+ * returns the same draft /compare would for these inputs, so calling it again is a no-op.
+ * Throws ManualFlowError (status, code, message) for every refusal.
+ */
+export async function prepareComparisonForExistingJobVersion(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  request: ExistingJobComparisonRequest,
+  options: { evidencePairer?: EvidencePairer } = {},
+): Promise<ExistingJobComparison> {
+  if (!(await hasWritableMembership(pool, ctx))) {
+    throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to prepare application documents.");
+  }
+  // The version's first observation, so the comparison (whose fingerprint covers the source
+  // observation) does not change when the same posting is seen again later.
+  const { rows } = await pool.query<{ content_hash: string; source_observation_id: string | null }>(
+    `SELECT version.content_hash, (
+       SELECT observation.id FROM raw_job_observations observation
+       WHERE observation.workspace_id = version.workspace_id AND observation.job_version_id = version.id
+       ORDER BY observation.retrieved_at ASC, observation.id ASC LIMIT 1
+     ) AS source_observation_id
+     FROM job_versions version
+     WHERE version.workspace_id = $1 AND version.canonical_job_id = $2 AND version.id = $3`,
+    [ctx.workspaceId, request.canonicalJobId, request.jobVersionId]);
+  const version = rows[0];
+  if (!version) throw new ManualFlowError(404, "NOT_FOUND", "This job version does not exist in this workspace.");
+  if (!version.source_observation_id) {
+    throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "This job version has no source observation to cite; it cannot be compared.");
+  }
+  const candidateProfileId = request.candidateProfileId ?? await soleActiveCandidate(pool, ctx);
+  const selected: SelectedPostingIdentity = {
+    candidateProfileId,
+    canonicalJobId: request.canonicalJobId,
+    jobVersionId: request.jobVersionId,
+    sourceObservationId: version.source_observation_id,
+    contentHash: version.content_hash,
+  };
+  const staged = await stageComparisonDraft(pool, ctx, options.evidencePairer ?? pairEvidenceWithModel, selected,
+    "The job remains in the pipeline unchanged.");
+  return {
+    ...staged,
+    comparisonId: staged.draftId,
+    canonicalJobId: selected.canonicalJobId,
+    jobVersionId: selected.jobVersionId,
+    sourceObservationId: selected.sourceObservationId,
+    candidateProfileId,
+  };
+}
+
+async function soleActiveCandidate(pool: pg.Pool, ctx: WorkspaceContext): Promise<string> {
+  const { rows } = await pool.query<{ candidate_profile_id: string }>(
+    `SELECT DISTINCT profile.candidate_profile_id::text AS candidate_profile_id FROM profile_versions profile
+     WHERE profile.workspace_id = $1 AND profile.status = 'ACTIVE' LIMIT 2`,
+    [ctx.workspaceId]);
+  if (rows.length === 1) return rows[0].candidate_profile_id;
+  if (rows.length === 0) throw new ManualFlowError(409, "APPROVAL_STALE", "No candidate in this workspace has an active profile version.");
+  throw new ManualFlowError(400, "INVALID_REQUEST", "This workspace has more than one candidate with an active profile; pass candidateProfileId.");
+}
+
 export interface ManualApplicationRouterDeps {
   pool: pg.Pool;
   resolveContext: (req: express.Request) => WorkspaceContext;
@@ -1106,103 +1314,14 @@ export function createManualApplicationRouter({
       sourceObservationId: observation.id,
       contentHash: versionRow.content_hash,
     });
-    // Requirement extraction only runs on COMPLETE descriptions; say why instead of failing later
-    // with "no active requirement set".
-    const quality = await pool.query<{ description_quality_status: string | null; description_quality_reason: string | null }>(
-      `SELECT description_quality_status, description_quality_reason FROM canonical_jobs WHERE workspace_id = $1 AND id = $2`,
-      [ctx.workspaceId, canonicalJobId]);
-    if (quality.rows[0]?.description_quality_status !== "COMPLETE") {
-      sendApiError(res, 422, "DESCRIPTION_INSUFFICIENT",
-        `The job description looks incomplete (${quality.rows[0]?.description_quality_reason ?? "quality not assessed"}). ` +
-        "Paste the full posting, including the responsibilities and the requirements or qualifications sections. " +
-        "The posting you entered is kept on record.");
-      return;
-    }
-    // Quoted-extraction failures are non-blocking: deterministic requirements still complete the stage,
-    // and the failure surfaces as a comparison warning via quotedRequirementExtractionWarning.
-    const requirementSummary = await runRequirementsExtraction(pool, {
-      context: ctx, jobVersionIds: [jobVersionId], quotedMode: manualQuotedRequirementMode(), failFastOnQuotedProviderFailure: false,
-    });
-    const reqDetail = requirementSummary.details.find((item) => item.jobVersionId === jobVersionId);
-    if (reqDetail?.error) { sendApiError(res, 503, "DEPENDENCY_UNAVAILABLE", `Deterministic requirement extraction failed; the source observation remains durably staged. ${reqDetail.error}`); return; }
-
-    const selectedIdentity: SelectedPostingIdentity = {
+    const staged = await stageComparisonDraft(pool, ctx, evidencePairer, {
       candidateProfileId: inputJob.candidate_profile_id,
       canonicalJobId: accepted.canonicalJobId,
       jobVersionId: accepted.jobVersionId,
       sourceObservationId: accepted.sourceObservationId,
       contentHash: accepted.contentHash,
-    };
-    const preliminary = await loadCurrentInputs(pool, ctx, selectedIdentity);
-    if (preliminary) await ensureManualEvidencePairing(pool, ctx, preliminary.input, evidencePairer);
-    const observedCurrent = await loadCurrentInputs(pool, ctx, selectedIdentity);
-    if (!observedCurrent) { sendApiError(res, 409, "JOB_VERSION_CHANGED", "This posting version is no longer current. Compare the current posting again."); return; }
-    const observedComparison = ManualComparisonSchema.parse(buildManualComparison(observedCurrent.input));
-    const comparisonFingerprint = fingerprintManualComparison(observedComparison);
-    const draftClient = await pool.connect();
-    let current: CurrentManualInputs;
-    let comparison: ReturnType<typeof ManualComparisonSchema.parse>;
-    let draftId: string;
-    try {
-      await draftClient.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
-      if (!(await hasWritableMembership(draftClient, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "Workspace membership no longer permits comparison staging.");
-      const latest = await loadCurrentInputs(draftClient, ctx, selectedIdentity);
-      if (!latest) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "This posting version is no longer current. Compare the current posting again.");
-      comparison = ManualComparisonSchema.parse(buildManualComparison(latest.input));
-      if (fingerprintManualComparison(comparison) !== comparisonFingerprint) {
-        throw new ManualFlowError(409, "APPROVAL_STALE", "The selected job or profile inputs changed while this comparison was being created. Compare again.");
-      }
-      current = latest;
-      const draftResult = await draftClient.query<{ id: string }>(
-        `INSERT INTO manual_application_drafts (
-           workspace_id,user_id,candidate_profile_id,canonical_job_id,job_version_id,source_observation_id,
-           job_content_hash,profile_version_id,profile_contact_fact_ids,profile_contact_fingerprint,
-           preference_context_fingerprint,requirement_set_id,comparator_version,context_fingerprint,
-           comparison_fingerprint,comparison_payload,suitability_warnings
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17::jsonb)
-         ON CONFLICT (workspace_id,user_id,comparison_fingerprint,profile_contact_fact_ids) DO NOTHING RETURNING id`,
-        [ctx.workspaceId, ctx.userId, comparison.candidate_profile_id, accepted.canonicalJobId, accepted.jobVersionId,
-          accepted.sourceObservationId, accepted.contentHash, comparison.profile_version_id, current.contactFactIds,
-          current.contactFingerprint, current.preferenceContextFingerprint, comparison.requirement_set_id,
-          comparison.comparator_version, comparison.context_fingerprint, comparisonFingerprint,
-          JSON.stringify(comparison), JSON.stringify(comparison.suitability_warnings)],
-      );
-      draftId = draftResult.rows[0]?.id;
-      if (!draftId) {
-        const existing = await draftClient.query(
-          `SELECT id,workspace_id,user_id,candidate_profile_id,canonical_job_id,job_version_id,
-                  source_observation_id,job_content_hash,profile_version_id,profile_contact_fact_ids,
-                  profile_contact_fingerprint,preference_context_fingerprint,requirement_set_id,
-                  comparator_version,context_fingerprint,comparison_fingerprint,comparison_payload,suitability_warnings
-           FROM manual_application_drafts
-           WHERE workspace_id=$1 AND user_id=$2 AND comparison_fingerprint=$3 AND profile_contact_fact_ids=$4
-           FOR UPDATE`,
-          [ctx.workspaceId, ctx.userId, comparisonFingerprint, current.contactFactIds],
-        );
-        const persistedDraft = ManualPersistedDraftSchema.parse(existing.rows[0]);
-        if (fingerprintManualComparison(persistedDraft.comparison_payload) !== comparisonFingerprint
-            || stableStringify(persistedDraft.comparison_payload) !== stableStringify(comparison)) {
-          throw new ManualFlowError(409, "APPROVAL_STALE", "An existing comparison with this fingerprint has different persisted content. Compare again.");
-        }
-        draftId = persistedDraft.id;
-      }
-      if (!draftId) throw new Error("Manual comparison draft was not durably staged.");
-      await draftClient.query(
-        `INSERT INTO manual_application_draft_contact_facts (workspace_id,user_id,draft_id,profile_version_id,profile_contact_fact_id)
-         SELECT $1,$2,$3,$4,contact_fact_id FROM unnest($5::uuid[]) AS contact_fact_id
-         ON CONFLICT DO NOTHING`,
-        [ctx.workspaceId, ctx.userId, draftId, comparison.profile_version_id, current.contactFactIds],
-      );
-      await draftClient.query("COMMIT");
-    } catch (error) {
-      await draftClient.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally { draftClient.release(); }
-    const contactReady = Boolean(current.contact.full_name && current.contact.phone);
-    const missingContactFields = [
-      !current.contact.full_name && "full_name",
-      !current.contact.phone && "phone",
-    ].filter((field): field is "full_name" | "phone" => Boolean(field));
+    }, "The posting you entered is kept on record.");
+    const { comparison, draftId, comparisonFingerprint } = staged;
     const response = ManualCompareResponseSchema.parse({
       schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
       ok: true,
@@ -1229,11 +1348,11 @@ export function createManualApplicationRouter({
         },
       },
       comparison,
-      document_contact_ready: contactReady,
-      missing_contact_fields: missingContactFields,
-      requirements_extracted: requirementSummary.processed === 1,
-      role_plan: planRoles(comparison),
-      selectable_evidence: selectableEvidence(comparison),
+      document_contact_ready: staged.documentContactReady,
+      missing_contact_fields: staged.missingContactFields,
+      requirements_extracted: staged.requirementsExtracted,
+      role_plan: staged.rolePlan,
+      selectable_evidence: staged.selectableEvidence,
     });
     res.json(response);
   }));
