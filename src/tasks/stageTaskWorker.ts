@@ -169,7 +169,7 @@ export interface PipelineStageWorkerOptions {
   wallClockMs?: number;
   minTimeToStartTaskMs?: number;
   claimedBy?: string;
-  /** Reuse one durable AI budget identity across all explanation tasks in this worker run. */
+  /** Share one AI budget run across all explanation tasks handled in this worker invocation. */
   budgetRunId?: string;
   abortSignal?: AbortSignal;
 }
@@ -515,7 +515,6 @@ export async function seedRecoverablePipelineTasks(
     includeRoutingDeferred?: boolean;
     includeTestFixtures?: boolean;
     routingDeferredReplayVersion?: string;
-    budgetRunId?: string;
     timeBudgetMs?: number;
   } = {}
 ): Promise<SeedPipelineTasksSummary> {
@@ -1222,7 +1221,6 @@ export async function seedRecoverablePipelineTasks(
         payload: {
           canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
           job_version_id: requiredSeedValue(row, "job_version_id"),
-          ...(options.budgetRunId ? { queue_budget_run_id: options.budgetRunId } : {}),
         },
       }),
       enabledTypes,
@@ -2857,7 +2855,6 @@ export async function runPipelineStageTaskWorker(
         includeRoutingDeferred: options.includeRoutingDeferred,
         includeTestFixtures: options.includeTestFixtures,
         routingDeferredReplayVersion: options.routingDeferredReplayVersion,
-        budgetRunId,
         maxSeedPerType: options.maxSeedPerType,
         timeBudgetMs: seedTimeBudgetMs,
       });
