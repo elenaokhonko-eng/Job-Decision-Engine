@@ -1,4 +1,4 @@
--- Migration 085: accept version 2 of normalized job source evidence.
+-- Migration 087: accept version 2 of normalized job source evidence.
 --
 -- This changes only the schema-version checks. Existing v1 JSON and version values are
 -- untouched; the equality check continues to require the JSON version to match its column.
@@ -17,7 +17,7 @@
 --        WHERE evidence_schema_version = 'job_source_evidence_v2'
 --           OR normalized_evidence->>'schema_version' = 'job_source_evidence_v2'
 --      ) THEN
---     RAISE EXCEPTION 'Cannot roll back migration 085 while v2 evidence exists';
+--     RAISE EXCEPTION 'Cannot roll back migration 087 while v2 evidence exists';
 --   END IF;
 -- END;
 -- $rollback$;

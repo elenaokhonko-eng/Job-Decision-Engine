@@ -833,7 +833,13 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
             contentType: "text/html",
             responseHash,
           },
-          posting: { title: "Principal AI Systems Architect", companyName: posting.companyName, description, canonicalUrl: postingUrl },
+          posting: {
+            title: "Principal AI Systems Architect",
+            companyName: posting.companyName,
+            organizationType: "commercial",
+            description,
+            canonicalUrl: postingUrl,
+          },
           content_hash: responseHash,
         };
       } else {
