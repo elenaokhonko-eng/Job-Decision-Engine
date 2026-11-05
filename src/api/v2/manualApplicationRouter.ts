@@ -662,6 +662,7 @@ async function stageComparisonDraft(
   evidencePairer: EvidencePairer,
   selected: SelectedPostingIdentity,
   postingKeptNote: string,
+  requirementMode: "with_quoted" | "deterministic_only",
 ): Promise<StagedManualComparison> {
   // Requirement extraction only runs on COMPLETE descriptions; say why instead of failing later
   // with "no active requirement set".
@@ -677,7 +678,7 @@ async function stageComparisonDraft(
   // Quoted-extraction failures are non-blocking: deterministic requirements still complete the stage,
   // and the failure surfaces as a comparison warning via quotedRequirementExtractionWarning.
   const requirementSummary = await runRequirementsExtraction(pool, {
-    context: ctx, jobVersionIds: [selected.jobVersionId], quotedMode: manualQuotedRequirementMode(), failFastOnQuotedProviderFailure: false,
+    context: ctx, jobVersionIds: [selected.jobVersionId], quotedMode: requirementMode, failFastOnQuotedProviderFailure: false,
   });
   const reqDetail = requirementSummary.details.find((item) => item.jobVersionId === selected.jobVersionId);
   if (reqDetail?.error) {
@@ -822,8 +823,11 @@ export async function prepareComparisonForExistingJobVersion(
     sourceObservationId: version.source_observation_id,
     contentHash: version.content_hash,
   };
+  // The pipeline's own requirement set only. A quoted run here would make the version's requirement
+  // set newer than its match, dropping the job from Apply Now with no successor task queued; quoted
+  // enrichment stays with the pipeline's EXTRACT_QUOTED_REQUIREMENTS task, which re-matches after it.
   const staged = await stageComparisonDraft(pool, ctx, options.evidencePairer ?? pairEvidenceWithModel, selected,
-    "The job remains in the pipeline unchanged.");
+    "The job remains in the pipeline unchanged.", "deterministic_only");
   return {
     ...staged,
     comparisonId: staged.draftId,
@@ -1334,7 +1338,7 @@ export function createManualApplicationRouter({
       jobVersionId: accepted.jobVersionId,
       sourceObservationId: accepted.sourceObservationId,
       contentHash: accepted.contentHash,
-    }, "The posting you entered is kept on record.");
+    }, "The posting you entered is kept on record.", manualQuotedRequirementMode());
     const { comparison, draftId, comparisonFingerprint } = staged;
     const response = ManualCompareResponseSchema.parse({
       schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,

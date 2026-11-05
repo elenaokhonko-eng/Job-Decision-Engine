@@ -26,6 +26,7 @@ import type { EvidencePairer, EvidencePairingInput } from "../../documents/manua
 import { resetManualDocuments } from "../../../scripts/reset_manual_documents.js";
 import { ManualFlowError, prepareComparisonForExistingJobVersion } from "../../documents/manualExistingJobComparison.js";
 import { runNormalization } from "../../pipeline/normalize.js";
+import { runRequirementsExtraction } from "../../pipeline/requirementsExtractor.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
@@ -885,6 +886,48 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       const newer = await ingest([...description, "Experience with regulatory reporting is a plus."]);
       expect(newer.canonicalJobId).toBe(job.canonicalJobId);
       expect(await refusal({ ...job, candidateProfileId })).toMatchObject({ status: 409, code: "JOB_VERSION_CHANGED" });
+    } finally {
+      for (const key of MODEL_KEY_ENV) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    }
+  });
+
+  it("opening a pipeline job keeps the requirement set its match was built on, even when AI extraction is available", async () => {
+    if (!pool || !context || !profile) throw new Error("The manual router test pool is not initialized.");
+    const job = await ingestPipelineJob(pool, context, "pipeline-requirements-1",
+      "https://careers.example.test/pipeline/market-data-lead", "Market Data Lead", [
+        "About the role: Example Bank is hiring a Market Data Lead in Singapore.",
+        "Responsibilities: lead market and reference data programmes across trading and risk.",
+        "Requirements: at least 8 years of experience in market data or investment technology.",
+        "You must have a bachelor's degree in finance, economics or computer science.",
+      ]);
+    // The pipeline's deterministic stage, which its match and Apply Now currentness are tied to.
+    await runRequirementsExtraction(pool, { context, jobVersionIds: [job.jobVersionId], quotedMode: "deterministic_only" });
+    const requirementState = async () => (await pool!.query<{ active_requirement_set_id: string; quoted_runs: string }>(
+      `SELECT version.active_requirement_set_id,
+              (SELECT count(*) FROM requirement_extraction_runs run
+               WHERE run.workspace_id = version.workspace_id AND run.job_version_id = version.id AND run.run_type = 'LLM_QUOTED') AS quoted_runs
+       FROM job_versions version WHERE version.workspace_id = $1 AND version.id = $2`,
+      [context!.workspaceId, job.jobVersionId])).rows[0];
+    const before = await requirementState();
+    expect(before.active_requirement_set_id).toBeTruthy();
+
+    const savedEnv = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
+    for (const key of MODEL_KEY_ENV) delete process.env[key];
+    // A key the manual route would use for quoted extraction; no request may reach a provider.
+    process.env.GEMINI_API_KEY = "test-key-never-sent";
+    try {
+      expect(manualQuotedRequirementMode()).toBe("with_quoted");
+      const opened = await post("/compare-existing", {
+        schema_version: "manual_application_v1",
+        canonical_job_id: job.canonicalJobId,
+        job_version_id: job.jobVersionId,
+        candidate_profile_id: profile.candidateProfileId,
+      });
+      expect(opened.comparison.requirement_set_id).toBe(before.active_requirement_set_id);
+      expect(await requirementState()).toEqual({ active_requirement_set_id: before.active_requirement_set_id, quoted_runs: "0" });
     } finally {
       for (const key of MODEL_KEY_ENV) {
         if (savedEnv[key] === undefined) delete process.env[key];
