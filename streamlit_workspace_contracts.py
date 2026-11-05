@@ -314,13 +314,20 @@ def validate_verify_then_apply_row(
         raise ValueError("Verify-then-apply rows require an unresolved gate decision.")
     if row.get("processing_state") != "MATCHED":
         raise ValueError("Verify-then-apply rows require a completed current profile match.")
-    if row.get("recommendation_eligibility") != "VERIFY" or row.get("recommendation_outcome") != "REVIEW":
-        raise ValueError("Verify-then-apply rows require a REVIEW decision with VERIFY eligibility.")
+    if (
+        row.get("recommendation_eligibility") != "VERIFY"
+        or row.get("recommendation_outcome") != "REVIEW"
+    ):
+        raise ValueError(
+            "Verify-then-apply rows require a REVIEW decision with VERIFY eligibility."
+        )
     if row.get("readiness_status") != "NEEDS_VERIFICATION":
         raise ValueError("Verify-then-apply rows must remain blocked from READY until verification.")
     for field in ("rejection_codes", "gate_evidence_quotes", "readiness_reason_codes"):
         value = row.get(field)
-        if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        if not isinstance(value, (list, tuple)) or not all(
+            isinstance(item, str) for item in value
+        ):
             raise TypeError(f"Read-model field {field} must be a string array.")
     _optional_score(row, "deterministic_match_score")
 

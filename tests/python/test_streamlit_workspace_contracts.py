@@ -139,18 +139,26 @@ def test_verify_then_apply_contract_requires_matched_review_and_unresolved_readi
     validate_verify_then_apply_row(row, WORKSPACE_ID)
 
     try:
-        validate_verify_then_apply_row(row | {"readiness_status": "READY"}, WORKSPACE_ID)
+        validate_verify_then_apply_row(
+            row | {"readiness_status": "READY"}, WORKSPACE_ID
+        )
     except ValueError:
         pass
     else:
-        raise AssertionError("Verify-then-apply contract accepted a READY row")
+        raise AssertionError(
+            "Verify-then-apply contract accepted a READY row"
+        )
 
     try:
-        validate_verify_then_apply_row(row | {"processing_state": "NEEDS_VERIFICATION"}, WORKSPACE_ID)
+        validate_verify_then_apply_row(
+            row | {"processing_state": "NEEDS_VERIFICATION"}, WORKSPACE_ID
+        )
     except ValueError:
         pass
     else:
-        raise AssertionError("Verify-then-apply contract accepted a row without a completed match")
+        raise AssertionError(
+            "Verify-then-apply contract accepted a row without a completed match"
+        )
 
 
 def test_top_ten_contract_requires_all_current_artifacts_and_no_recheck():
