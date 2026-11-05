@@ -1129,7 +1129,12 @@ export async function generateContentAudited(options: {
     }
   }
 
-  const attemptedErrors: Array<{ provider: string; model: string; error: string }> = [];
+  const attemptedErrors: Array<{
+    provider: string;
+    model: string;
+    error: string;
+    publicError?: string;
+  }> = [];
   const providers: Array<"gemini" | "openai"> = [
     routeContent.primary_provider,
     routeContent.fallback_provider,
@@ -1198,7 +1203,12 @@ export async function generateContentAudited(options: {
         if (round >= correctionRounds) throw err;
         const message = err?.message || String(err);
         console.warn(`[model:${provider}] model=${model} response failed validation; asking it to correct once.`);
-        attemptedErrors.push({ provider, model, error: publicErrorSummary(err, provider) });
+        attemptedErrors.push({
+          provider,
+          model,
+          error: message,
+          publicError: publicErrorSummary(err, provider),
+        });
         contents = validationCorrectionContents(options.contents, message, text);
       }
     }
@@ -1213,7 +1223,12 @@ export async function generateContentAudited(options: {
 
     if (provider === "gemini") {
       if (!geminiKey) {
-        attemptedErrors.push({ provider, model: modelForProvider, error: "GEMINI_API_KEY not configured" });
+        attemptedErrors.push({
+          provider,
+          model: modelForProvider,
+          error: "GEMINI_API_KEY not configured",
+          publicError: "GEMINI_API_KEY not configured",
+        });
         continue;
       }
       // The route's Gemini model first; then, when configured and different, one secondary
@@ -1236,9 +1251,15 @@ export async function generateContentAudited(options: {
           successModel = geminiModel;
           break;
         } catch (err: any) {
-          const message = publicErrorSummary(err, "gemini");
-          console.warn(`Gemini model request failed: ${message}.`);
-          attemptedErrors.push({ provider, model: geminiModel, error: message });
+          const message = err?.message || String(err);
+          const safeMessage = publicErrorSummary(err, "gemini");
+          console.warn(`Gemini model request failed: ${safeMessage}.`);
+          attemptedErrors.push({
+            provider,
+            model: geminiModel,
+            error: message,
+            publicError: safeMessage,
+          });
         }
       }
       if (successText !== null) break;
@@ -1246,7 +1267,12 @@ export async function generateContentAudited(options: {
 
     if (provider === "openai") {
       if (!openaiKey) {
-        attemptedErrors.push({ provider, model: modelForProvider, error: "OPENAI_API_KEY not configured" });
+        attemptedErrors.push({
+          provider,
+          model: modelForProvider,
+          error: "OPENAI_API_KEY not configured",
+          publicError: "OPENAI_API_KEY not configured",
+        });
         continue;
       }
       try {
@@ -1262,9 +1288,15 @@ export async function generateContentAudited(options: {
         successModel = modelForProvider;
         break;
       } catch (err: any) {
-        const message = publicErrorSummary(err, "openai");
-        console.warn(`OpenAI model request failed: ${message}.`);
-        attemptedErrors.push({ provider, model: modelForProvider, error: message });
+        const message = err?.message || String(err);
+        const safeMessage = publicErrorSummary(err, "openai");
+        console.warn(`OpenAI model request failed: ${safeMessage}.`);
+        attemptedErrors.push({
+          provider,
+          model: modelForProvider,
+          error: message,
+          publicError: safeMessage,
+        });
       }
     }
 
@@ -1281,9 +1313,17 @@ export async function generateContentAudited(options: {
     (successProvider !== routeContent.primary_provider || successModel !== routeContent.primary_model);
   const successfulUsage = summarizeSuccessfulUsage(providerAttemptTelemetry, successProvider, successModel);
   const costUsd = estimateCostUsd(successProvider, successModel, successfulUsage);
+  const safeAttemptedErrors = attemptedErrors.map(({ provider, model, error, publicError }) => ({
+    provider,
+    model,
+    error: publicError ?? publicErrorSummary(error, provider),
+  }));
 
   if (successText === null) {
     const errorMessage = `All model API calls failed. Purpose=${purpose}, route=${routeKey}, errors=${attemptedErrors
+      .map((e) => `${e.provider}:${e.model}:${e.error}`)
+      .join(" | ")}`;
+    const safeErrorMessage = `All model API calls failed. Purpose=${purpose}, route=${routeKey}, errors=${safeAttemptedErrors
       .map((e) => `${e.provider}:${e.model}:${e.error}`)
       .join(" | ")}`;
 
@@ -1300,7 +1340,7 @@ export async function generateContentAudited(options: {
           requestHash,
           requestMetadata,
           responseMetadata: {
-            errors: attemptedErrors,
+            errors: safeAttemptedErrors,
             provider_attempts: providerAttemptTelemetry,
             internal_http_attempts: providerAttemptTelemetry.length,
           },
@@ -1309,7 +1349,7 @@ export async function generateContentAudited(options: {
           tokensCompletion: successfulUsage?.completionTokens ?? null,
           tokensTotal: successfulUsage?.totalTokens ?? null,
           costUsd,
-          errorMessage,
+          errorMessage: safeErrorMessage,
         },
         options.clientOrPool,
         { context: options.context }
@@ -1335,7 +1375,7 @@ export async function generateContentAudited(options: {
         responseMetadata: {
           response_length: successText.length,
           validated_payload: successValidatedPayload !== undefined,
-          errors: attemptedErrors,
+          errors: safeAttemptedErrors,
           provider_attempts: providerAttemptTelemetry,
           internal_http_attempts: providerAttemptTelemetry.length,
         },
@@ -1356,7 +1396,7 @@ export async function generateContentAudited(options: {
     model: successModel,
     fallbackUsed,
     attempts,
-    errors: attemptedErrors,
+    errors: attemptedErrors.map(({ provider, model, error }) => ({ provider, model, error })),
     latencyMs,
     routeKey,
     routeRevisionId: routeRevisionId ?? undefined,

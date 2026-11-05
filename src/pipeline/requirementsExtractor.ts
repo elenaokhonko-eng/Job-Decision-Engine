@@ -882,7 +882,7 @@ export async function runRequirementsExtraction(
                   summary.quotedFailed += 1;
                   summary.metrics.quotedValidationFailures += 1;
                   bucket.validationFailures += 1;
-                  warning = publicErrorSummary(new Error("quoted response schema validation failed"), quotedResult.provider);
+                  warning = validated.issues.map((issue) => `${issue.requirement_key}: ${issue.message}`).join("; ");
                   console.warn(
                     `${progress} quoted validation failed issues=${validated.issues.length} provider=${quotedResult.provider} model=${quotedResult.model}`
                   );
