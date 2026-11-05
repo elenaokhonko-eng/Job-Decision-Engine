@@ -193,6 +193,7 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
     || (/\b(?:technical|technology)\s+product\s+(?:owner|lead)\b/i.test(t) && /\bdata\b/i.test(t))
     || (/\bproduct\s+(?:owner|lead)\b/i.test(t) && /\bdata\b/i.test(t));
   const isProductLeadershipTitle = /\bproduct\s+(?:manager|owner|lead|director)\b/i.test(t);
+  const technicalProductLeadershipTitle = /\b(?:technical|technology)\s+product\s+(?:manager|owner|lead|director|head)\b/i.test(t);
   const productTitleEvidence = isProductLeadershipTitle
     ? d.replace(/\b(?:ai|ml|genai|machine learning|generative ai)\s+product\s+(?:manager|owner|lead|director)\b/gi, " ")
     : d;
@@ -234,7 +235,7 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
       || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(productTitleEvidence));
   const isTechnical = requiresTechnicalDataOwnership
     ? technicalDataOwnership
-    : isTechnicalTitle || hasTechnicalLeadershipTitle || hasTechnicalProgramTitle || hasBuildingEvidence;
+    : isTechnicalTitle || hasTechnicalLeadershipTitle || hasTechnicalProgramTitle || technicalProductLeadershipTitle || hasBuildingEvidence;
 
   return {
     isTechnical,
