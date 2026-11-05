@@ -1,0 +1,20 @@
+{
+  "$ref": "#/definitions/ArchiveRestoreRequest",
+  "definitions": {
+    "ArchiveRestoreRequest": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

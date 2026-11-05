@@ -56,6 +56,9 @@ describe('Pipeline Stage: Normalization', () => {
     });
 
     (mPool.query as any).mockImplementation((sql: string) => {
+      if (sql.includes('SELECT archived_at, archive_reference_at')) {
+        return { rows: [{ archived_at: null, archive_reference_at: null }] };
+      }
       if (sql.includes('INSERT INTO canonical_jobs')) return { rows: [{ id: 'canon-uuid-1' }] };
       if (sql.includes('INSERT INTO job_versions')) return { rows: [{ id: 'ver-uuid-1' }] };
       return { rows: [] };
@@ -147,7 +150,9 @@ describe('Pipeline Stage: Normalization', () => {
     (mPool.query as any)
       .mockResolvedValueOnce({ rows: [] }) // BEGIN
       .mockResolvedValueOnce({ rows: [{ canonical_job_id: 'canon-uuid-2' }] }) // source/external-id lookup
+      .mockResolvedValueOnce({ rows: [{ archived_at: null, archive_reference_at: null }] }) // archive state lock
       .mockResolvedValueOnce({ rows: [{ id: 'existing-version-uuid' }] }) // content hash lookup
+      .mockResolvedValueOnce({ rows: [] }) // existing version freshness update
       .mockResolvedValueOnce({ rows: [] }) // observation mapping update
       .mockResolvedValueOnce({ rows: [] }); // COMMIT
 
@@ -199,6 +204,7 @@ describe('Pipeline Stage: Normalization', () => {
       if (sql.includes('FROM job_versions version') && sql.includes('source_posting_identity_hash IS NULL')) return { rows: [] };
       if (sql.includes('SELECT id FROM job_versions')) return { rows: [] };
       if (sql.includes('INSERT INTO job_versions')) return { rows: [{ id: 'complete-version-id' }] };
+      if (sql.includes('SELECT archived_at, archive_reference_at')) return { rows: [{ archived_at: null, archive_reference_at: null }] };
       if (sql.includes('SELECT c.latest_job_version_id')) {
         return { rows: [{
           latest_job_version_id: 'stub-version-id',

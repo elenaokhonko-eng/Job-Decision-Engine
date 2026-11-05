@@ -806,6 +806,7 @@ export async function runHardGates(
         LIMIT 1
       ) AS source_observation ON TRUE
       WHERE c.workspace_id = $1
+        AND c.archived_at IS NULL
         AND jv.workspace_id = $1
         AND (
           COALESCE(c.processing_state, c.processing_status) = 'RAW_STAGED'
@@ -987,7 +988,7 @@ export async function runHardGates(
         }
 
         // Update canonical job with gate outcome + structured workability facts + evidence
-        await client.query(
+        const canonicalUpdate = await client.query(
           `UPDATE canonical_jobs
            SET gate_decision      = $1::varchar,
                processing_state   = $2,
@@ -1014,7 +1015,8 @@ export async function runHardGates(
                recommendation_decided_at = CASE WHEN $8::boolean THEN NULL ELSE recommendation_decided_at END,
                updated_at         = NOW()
            WHERE workspace_id = $6
-             AND id = $7`,
+             AND id = $7
+             AND archived_at IS NULL`,
           [
             gateResult.status,
             processingStatus,
@@ -1026,6 +1028,10 @@ export async function runHardGates(
             reprocess
           ]
         );
+        if (canonicalUpdate.rowCount !== 1) {
+          await client.query("ROLLBACK");
+          continue;
+        }
 
         // Validate the complete audit envelope before writing the immutable row.
         const persistedGateDecision = PersistedGateDecisionSchema.parse({

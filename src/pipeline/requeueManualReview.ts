@@ -53,6 +53,7 @@ export async function findCultureQuoteManualReviewCandidates(
        ON c.id = eq.canonical_job_id
       AND c.workspace_id = eq.workspace_id
      WHERE eq.workspace_id = $1
+       AND c.archived_at IS NULL
        AND eq.status = 'NEEDS_MANUAL_REVIEW'
        AND (
          eq.last_error ILIKE '%culture evidence quote%'

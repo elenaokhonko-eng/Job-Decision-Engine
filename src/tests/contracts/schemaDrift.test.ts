@@ -15,6 +15,16 @@ import {
   PersistedGateDecisionSchema,
   PersistedLaneDecisionSchema,
   PersistedEvaluationQueueItemSchema,
+  ArchiveAgeBasisSchema,
+  ArchiveJobRowSchema,
+  ArchiveHoldSchema,
+  ArchiveHoldCreateRequestSchema,
+  ArchiveHoldReleaseRequestSchema,
+  ArchiveRestoreRequestSchema,
+  ArchiveCandidateSchema,
+  ArchiveRunReportSchema,
+  ArchiveOperationsStatusSchema,
+  ARCHIVE_CONTRACT_SCHEMA_VERSION,
   SCHEMA_VERSION
 } from "../../contracts/index.js";
 import {
@@ -41,7 +51,15 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
       "LaneDecision",
       "EvaluationQueueItem",
       "EvaluationResult",
-      "ShortlistRow"
+      "ShortlistRow",
+      "ArchiveJobRow",
+      "ArchiveHold",
+      "ArchiveHoldCreateRequest",
+      "ArchiveHoldReleaseRequest",
+      "ArchiveRestoreRequest",
+      "ArchiveCandidate",
+      "ArchiveRunReport",
+      "ArchiveOperationsStatus"
     ];
 
     for (const name of expectedNames) {
@@ -62,6 +80,107 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
     expect(() => EvaluationQueueItemSchema.parse(samplePendingQueueItem)).not.toThrow();
     expect(() => EvaluationQueueItemSchema.parse(sampleFailedThenRetriedQueueItem)).not.toThrow();
     expect(() => ShortlistRowSchema.parse(sampleEvaluatedShortlistRow)).not.toThrow();
+  });
+
+  it("validates archive lifecycle, run reports, and non-failure queue skips", () => {
+    const timestamp = "2026-10-01T00:00:00.000Z";
+    const archiveJob = {
+      schema_version: ARCHIVE_CONTRACT_SCHEMA_VERSION,
+      workspace_id: "12121212-1212-4121-8121-121212121212",
+      canonical_job_id: "99999999-9999-4999-8999-999999999999",
+      job_version_id: "88888888-8888-4888-8888-888888888888",
+      title: "Archived role",
+      company: "Example Corp",
+      canonical_url: "https://jobs.example.test/role",
+      description: null,
+      source: "GREENHOUSE",
+      location: "Singapore",
+      workplace_type: "REMOTE",
+      processing_state: "MATCHED",
+      recommendation_outcome: null,
+      archived_at: timestamp,
+      archive_reason: "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS",
+      archive_age_basis: "OBSERVED_AGE_PUBLICATION_UNKNOWN",
+      archive_reference_at: "2026-06-01T00:00:00.000Z",
+      application_status: "CLOSED",
+      active_hold_until: null,
+    };
+    expect(() => ArchiveJobRowSchema.parse(archiveJob)).not.toThrow();
+    expect(() => ArchiveAgeBasisSchema.parse("UNKNOWN")).toThrow();
+    expect(() => ArchiveHoldCreateRequestSchema.parse({
+      canonical_job_id: archiveJob.canonical_job_id,
+      hold_reason: "Protect the pilot job",
+      hold_type: "AGENT2_PILOT",
+      expires_at: timestamp,
+    })).not.toThrow();
+    expect(() => ArchiveHoldReleaseRequestSchema.parse({ reason: "Pilot completed" })).not.toThrow();
+    expect(() => ArchiveRestoreRequestSchema.parse({ reason: "Reassess a genuine repost" })).not.toThrow();
+    expect(() => ArchiveHoldSchema.parse({
+      schema_version: ARCHIVE_CONTRACT_SCHEMA_VERSION,
+      id: "77777777-7777-4777-8777-777777777777",
+      workspace_id: archiveJob.workspace_id,
+      canonical_job_id: archiveJob.canonical_job_id,
+      hold_reason: "Protect the pilot job",
+      hold_type: "AGENT2_PILOT",
+      created_by: "user:test",
+      created_at: timestamp,
+      expires_at: "2026-11-01T00:00:00.000Z",
+      released_at: null,
+      release_reason: null,
+    })).not.toThrow();
+    expect(() => ArchiveCandidateSchema.parse({
+      canonical_job_id: archiveJob.canonical_job_id,
+      workspace_id: archiveJob.workspace_id,
+      title: archiveJob.title,
+      company: archiveJob.company,
+      reference_at: archiveJob.archive_reference_at,
+      age_basis: "OBSERVED_AGE_PUBLICATION_UNKNOWN",
+      archive_reason: "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS",
+      publication_date_unknown: true,
+    })).not.toThrow();
+    expect(() => ArchiveRunReportSchema.parse({
+      schema_version: ARCHIVE_CONTRACT_SCHEMA_VERSION,
+      run_id: null,
+      mode: "DRY_RUN",
+      workspace_id: null,
+      run_status: "DRY_RUN",
+      completed_at: timestamp,
+      archive_schema_ready: true,
+      run_started_at: "2026-10-27T19:15:00.000Z",
+      cutoff_at: "2026-07-27T19:15:00.000Z",
+      scanned_count: 1,
+      eligible_count: 1,
+      archived_count: 0,
+      protected_count: 0,
+      invalid_date_count: 0,
+      failed_count: 0,
+      deferred_count: 0,
+      observed_age_publication_unknown_count: 1,
+      candidates: [],
+      invalid_date_jobs: [],
+      failed_jobs: [],
+    })).not.toThrow();
+    expect(() => ArchiveOperationsStatusSchema.parse({
+      schema_version: ARCHIVE_CONTRACT_SCHEMA_VERSION,
+      last_success_at: timestamp,
+      latest_run_id: null,
+      latest_run_status: "SUCCEEDED",
+      latest_run_mode: "DRY_RUN",
+      latest_run_started_at: timestamp,
+      latest_run_scanned_count: 1,
+      latest_run_eligible_count: 1,
+      latest_run_archived_count: 0,
+      latest_run_protected_count: 0,
+      latest_run_invalid_date_count: 0,
+      latest_run_failed_count: 0,
+      latest_run_observed_age_publication_unknown_count: 1,
+    })).not.toThrow();
+    expect(() => EvaluationQueueItemSchema.parse({
+      ...samplePendingQueueItem,
+      status: "SKIPPED_ARCHIVED",
+      skipped_at: timestamp,
+      skip_reason_code: "JOB_ARCHIVED",
+    })).not.toThrow();
   });
 
   it.each(["readiness_fingerprint", "evidence_revision_hash"] as const)(

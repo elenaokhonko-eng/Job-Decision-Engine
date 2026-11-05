@@ -434,6 +434,7 @@ export async function answerVerificationQuestion(
                updated_at = NOW()
            WHERE workspace_id = $1
              AND id = ANY($2::uuid[])
+             AND archived_at IS NULL
              AND COALESCE(processing_state, processing_status) = 'NEEDS_VERIFICATION'`,
           [ctx.workspaceId, linkedIds]
         );
@@ -452,7 +453,8 @@ export async function answerVerificationQuestion(
                   )) AS job_version_id
            FROM canonical_jobs c
            WHERE c.workspace_id = $1
-             AND c.id = ANY($2::uuid[])`,
+             AND c.id = ANY($2::uuid[])
+             AND c.archived_at IS NULL`,
           [ctx.workspaceId, linkedIds]
         );
 

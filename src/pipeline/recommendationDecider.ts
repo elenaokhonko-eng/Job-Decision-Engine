@@ -393,6 +393,7 @@ export async function runRecommendationDecider(
         LIMIT 1
       ) AS source_evidence ON TRUE
       WHERE c.workspace_id = $1
+        AND c.archived_at IS NULL
         AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
         AND c.description_quality_status = 'COMPLETE'
         AND ${sourceContentEvidencePredicate("c.workspace_id", "lv.id")}
@@ -1014,6 +1015,7 @@ export async function runRecommendationDecider(
               updated_at = NOW()
           WHERE c.workspace_id = $1
             AND c.id = $8
+            AND c.archived_at IS NULL
             AND c.latest_job_version_id = $9
             AND (
               c.recommendation_eligibility IS DISTINCT FROM $2

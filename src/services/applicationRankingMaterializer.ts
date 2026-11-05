@@ -133,6 +133,7 @@ const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
   JOIN canonical_jobs AS job
     ON job.workspace_id = shortlist.workspace_id
    AND job.id = shortlist.canonical_job_id
+   AND job.archived_at IS NULL
    AND job.latest_job_version_id = shortlist.job_version_id::uuid
   JOIN job_versions AS job_version
     ON job_version.workspace_id = job.workspace_id

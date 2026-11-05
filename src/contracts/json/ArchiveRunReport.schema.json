@@ -1,0 +1,226 @@
+{
+  "$ref": "#/definitions/ArchiveRunReport",
+  "definitions": {
+    "ArchiveRunReport": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "job_archive_v1"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "DRY_RUN",
+            "APPLY"
+          ]
+        },
+        "workspace_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_status": {
+          "type": "string",
+          "enum": [
+            "DRY_RUN",
+            "RUNNING",
+            "SUCCEEDED",
+            "FAILED"
+          ]
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archive_schema_ready": {
+          "type": "boolean"
+        },
+        "run_started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "cutoff_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "scanned_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eligible_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "archived_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "protected_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "invalid_date_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deferred_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observed_age_publication_unknown_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "canonical_job_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "workspace_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "company": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reference_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "age_basis": {
+                "type": "string",
+                "enum": [
+                  "GENUINE_REPOST_DATE",
+                  "AUTHORITATIVE_PUBLICATION_DATE",
+                  "OBSERVED_AGE_PUBLICATION_UNKNOWN"
+                ]
+              },
+              "archive_reason": {
+                "type": "string",
+                "const": "JOB_OLDER_THAN_THREE_CALENDAR_MONTHS"
+              },
+              "publication_date_unknown": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "canonical_job_id",
+              "workspace_id",
+              "title",
+              "company",
+              "reference_at",
+              "age_basis",
+              "archive_reason",
+              "publication_date_unknown"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "invalid_date_jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "canonical_job_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "reason_code": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "canonical_job_id",
+              "reason_code"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "failed_jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "canonical_job_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "canonical_job_id",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "run_id",
+        "mode",
+        "workspace_id",
+        "run_status",
+        "completed_at",
+        "archive_schema_ready",
+        "run_started_at",
+        "cutoff_at",
+        "scanned_count",
+        "eligible_count",
+        "archived_count",
+        "protected_count",
+        "invalid_date_count",
+        "failed_count",
+        "deferred_count",
+        "observed_age_publication_unknown_count",
+        "candidates",
+        "invalid_date_jobs",
+        "failed_jobs"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

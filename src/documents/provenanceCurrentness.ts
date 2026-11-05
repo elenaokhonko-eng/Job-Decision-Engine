@@ -23,7 +23,8 @@ export async function validatePersistedDocumentCurrentness(
 ): Promise<PersistedDocumentCurrentnessResult> {
   const { rows } = await client.query(
     `SELECT
-       COALESCE(job.latest_job_version_id, current_job_version.id) AS current_job_version_id,
+      job.archived_at,
+      COALESCE(job.latest_job_version_id, current_job_version.id) AS current_job_version_id,
        job.latest_match_run_id,
        job.latest_deterministic_decision_id,
        profile.id AS active_profile_version_id,
@@ -83,6 +84,9 @@ export async function validatePersistedDocumentCurrentness(
   );
   const current = rows[0];
   if (!current) return { current: false, reason: "JOB_NOT_AVAILABLE" };
+  if (current.archived_at !== null && current.archived_at !== undefined) {
+    return { current: false, reason: "JOB_ARCHIVED" };
+  }
 
   const readiness = await loadCurrentApplicationReadiness(
     client,
