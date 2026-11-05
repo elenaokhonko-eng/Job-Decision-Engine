@@ -111,11 +111,28 @@ def extract_uploaded_description(uploaded_file):
 
 
 def _download_bytes(api_request, draft_id, artifact):
-    response = api_request(
-        "GET",
+    return _fetch_artifact(
+        api_request,
         f"/api/v2/application-drafts/{draft_id}/documents/{artifact['type'].lower()}/{artifact['format'].lower()}",
-        timeout=60,
+        artifact["format"],
     )
+
+
+def _download_selected_bytes(api_request, selection, document_type, format_name):
+    """The exact file chosen for an application, checked against the hash pinned at selection."""
+    return _fetch_artifact(
+        api_request,
+        f"/api/v2/application-drafts/selections/{selection['selection_id']}/documents/"
+        f"{document_type.lower()}/{format_name.lower()}",
+        format_name,
+        expected_sha256=selection[
+            f"{document_type.lower()}_{format_name.lower()}_sha256"
+        ],
+    )
+
+
+def _fetch_artifact(api_request, path, format_name, expected_sha256=None):
+    response = api_request("GET", path, timeout=60)
     _validate_payload("ManualDownloadResponse", response)
     if not response.get("ok") or not response.get("content_base64"):
         raise RuntimeError(
@@ -126,6 +143,10 @@ def _download_bytes(api_request, draft_id, artifact):
         raise ValueError(
             "The downloaded private artifact failed its SHA-256 integrity check."
         )
+    if expected_sha256 is not None and response["sha256"] != expected_sha256:
+        raise ValueError(
+            "The downloaded file is not the version chosen for this application."
+        )
     expected_mime = {
         "PDF": ("application/pdf", b"%PDF-"),
         "DOCX": (
@@ -133,7 +154,7 @@ def _download_bytes(api_request, draft_id, artifact):
             b"PK\x03\x04",
         ),
     }
-    mime, signature = expected_mime[artifact["format"]]
+    mime, signature = expected_mime[format_name]
     if response["mime_type"] != mime or not content.startswith(signature):
         raise ValueError(
             "The downloaded file type does not match its validated artifact metadata."
@@ -558,6 +579,39 @@ def render_pipeline_review_action(api_request, job, key_prefix):
         st.warning(f"Documents can't be prepared for this posting version: {message}")
     else:
         st.error(f"Could not open this job for review: {message} Try again.")
+
+
+def render_selected_documents(api_request, selection):
+    """The CV and cover letter chosen for an application, exactly as they were chosen."""
+    if not selection:
+        st.caption(
+            "No documents chosen yet. Prepare them from a job card, then choose "
+            "“Use these documents for my application”."
+        )
+        return
+    st.caption(f"Documents chosen for this application on {selection['selected_at']}.")
+    if selection["pipeline_readiness"] == "USER_SELECTED":
+        st.info(
+            "Added by you: the job was not a current Apply Now decision when you chose these documents."
+        )
+    for document_type, document_name in (
+        ("CV", "CV"),
+        ("COVER_LETTER", "Cover letter"),
+    ):
+        for format_name in ("DOCX", "PDF"):
+            try:
+                content, filename = _download_selected_bytes(
+                    api_request, selection, document_type, format_name
+                )
+            except API_CALL_ERRORS as error:
+                st.error(f"{document_name} ({format_name}) is unavailable: {error}")
+                continue
+            st.download_button(
+                f"Download {document_name} ({format_name})",
+                content,
+                file_name=filename,
+                key=f"tracker_download_{selection['selection_id']}_{document_type}_{format_name}",
+            )
 
 
 def render_manual_application_flow(api_request):
@@ -1014,3 +1068,41 @@ def render_manual_application_flow(api_request):
             )
         except API_CALL_ERRORS as error:
             st.error(f"Private download is unavailable: {error}")
+    _render_use_for_application(api_request, draft_id, generated)
+
+
+def _render_use_for_application(api_request, draft_id, generated):
+    """Links this exact document pair to the application tracker, only when the user asks."""
+    approval_id = generated.get("approval_id")
+    linked = st.session_state.setdefault("manual_linked_selections", {})
+    if approval_id not in linked and st.button(
+        "Use these documents for my application", key=f"manual_use_{approval_id}"
+    ):
+        try:
+            response = api_request(
+                "POST",
+                f"/api/v2/application-drafts/{draft_id}/use-for-application",
+                body={
+                    "schema_version": MANUAL_SCHEMA_VERSION,
+                    "approval_id": approval_id,
+                },
+                timeout=30,
+            )
+            _validate_payload("ManualUseForApplicationResponse", response)
+            linked[approval_id] = response
+        except API_CALL_ERRORS as error:
+            st.error(f"Could not link these documents to your application: {error}")
+    response = linked.get(approval_id)
+    if not response:
+        st.caption(
+            "Nothing is recorded until you choose these documents for your application."
+        )
+        return
+    st.success(
+        "These exact files are linked to your application in the tracker. "
+        f"Its status stays {response['application_status']}: nothing was submitted or sent."
+    )
+    if response["selection"]["pipeline_readiness"] == "USER_SELECTED":
+        st.info(
+            "Added by you: this job is not a current Apply Now decision in the pipeline."
+        )

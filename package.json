@@ -29,8 +29,6 @@
     "manual:reset-documents": "tsx scripts/reset_manual_documents.ts",
     "profile:stage1": "tsx scripts/stage1_capability_profile.ts",
     "preferences:seed": "tsx scripts/seed_workspace_preferences.ts",
-    "docs:cv": "tsx scripts/generate_cv.ts",
-    "docs:cover-letter": "tsx scripts/generate_cover_letter.ts",
     "docs:compliance": "tsx scripts/generate_source_compliance_matrix.ts",
     "cutover:audit": "tsx scripts/backfill_cutover.ts",
     "backfill:v22": "tsx scripts/v22_backfill.ts",

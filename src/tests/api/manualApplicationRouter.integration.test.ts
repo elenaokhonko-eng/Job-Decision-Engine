@@ -997,6 +997,104 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     }
   });
 
+  it("links documents to the tracker only on request, pinned by run and hash, append-only, never as a submission", async () => {
+    if (!pool || !context) throw new Error("The manual router test pool is not initialized.");
+    const db = pool;
+    const ctx = context;
+    await withModelEnv({ REQUIREMENTS_ENABLE_QUOTED: "false" }, async () => {
+      const { compared, approved, generated } = await compareApproveGenerate(
+        "https://careers.example.test/derivatives-lead-tracker", "Derivatives Operating Model Lead Tracker");
+      const job = compared.selected_job;
+      const applications = async () => (await db.query<{ id: string; status: string; submitted_at: string | null }>(
+        `SELECT id, status, submitted_at FROM application_records WHERE workspace_id=$1 AND canonical_job_id=$2 AND job_version_id=$3`,
+        [ctx.workspaceId, job.canonicalJobId, job.jobVersionId])).rows;
+      // Generating documents links nothing by itself.
+      expect(generated.ok).toBe(true);
+      expect(await applications()).toEqual([]);
+
+      const use = (approvalId: string, expected = 200) =>
+        post(`/${compared.draft_id}/use-for-application`, { schema_version: "manual_application_v1", approval_id: approvalId }, expected);
+      const first = await use(approved.approval_id);
+      // The hashes of the stored file bytes for this approval.
+      const stored = await db.query<{ key: string; sha256: string }>(
+        `SELECT document_type || ':' || format AS key, encode(sha256(content), 'hex') AS sha256
+         FROM manual_application_document_artifacts WHERE workspace_id=$1 AND approval_id=$2`,
+        [ctx.workspaceId, approved.approval_id]);
+      const artifactHashes = Object.fromEntries(stored.rows.map((row) => [row.key, row.sha256]));
+      expect(Object.keys(artifactHashes).sort()).toEqual(["COVER_LETTER:DOCX", "COVER_LETTER:PDF", "CV:DOCX", "CV:PDF"]);
+      expect(first).toMatchObject({
+        application_created: true, already_selected: false, application_status: "INTENT",
+        selection: {
+          approval_id: approved.approval_id,
+          // A pasted posting is never a pipeline Apply Now decision, so the link is flagged as the user's own choice.
+          pipeline_readiness: "USER_SELECTED",
+          cv_docx_sha256: artifactHashes["CV:DOCX"], cv_pdf_sha256: artifactHashes["CV:PDF"],
+          cover_letter_docx_sha256: artifactHashes["COVER_LETTER:DOCX"], cover_letter_pdf_sha256: artifactHashes["COVER_LETTER:PDF"],
+        },
+      });
+      const [application] = await applications();
+      expect(application).toMatchObject({ id: first.selection.application_record_id, status: "INTENT", submitted_at: null });
+
+      // Choosing the same pair again records nothing new.
+      expect(await use(approved.approval_id)).toMatchObject({ already_selected: true, application_created: false,
+        selection: { selection_id: first.selection.selection_id } });
+
+      // A corrected review is a new approval and a new version of the documents; linking it adds a row.
+      const rows = compared.comparison.rows as Array<{ requirement_key: string }>;
+      const corrected = await post(`/${compared.draft_id}/approve`, {
+        approved: true, comparison_fingerprint: compared.comparison_fingerprint,
+        corrections: [{ requirement_key: rows[rows.length - 1].requirement_key, status: "NOT_APPLICABLE", evidence_ids: [] }],
+      });
+      expect(corrected.approval_id).not.toBe(approved.approval_id);
+      await post(`/${compared.draft_id}/documents`, { approval_id: corrected.approval_id });
+      const second = await use(corrected.approval_id);
+      expect(second).toMatchObject({ application_created: false, already_selected: false, selection: { approval_id: corrected.approval_id } });
+      const history = await db.query<{ approval_id: string }>(
+        `SELECT approval_id FROM application_document_selections WHERE workspace_id=$1 AND application_record_id=$2 ORDER BY selected_at, id`,
+        [ctx.workspaceId, application.id]);
+      expect(history.rows.map((row) => row.approval_id)).toEqual([approved.approval_id, corrected.approval_id]);
+      const current = await db.query(`SELECT selection_id FROM v_application_document_selection_current WHERE workspace_id=$1 AND application_record_id=$2`,
+        [ctx.workspaceId, application.id]);
+      expect(current.rows).toEqual([{ selection_id: second.selection.selection_id }]);
+
+      // The first choice still opens exactly the files chosen then.
+      const download = await fetch(`${baseUrl}/selections/${first.selection.selection_id}/documents/cv/docx`);
+      expect(download.status).toBe(200);
+      const file = await download.json() as { sha256: string; content_base64: string };
+      expect(file.sha256).toBe(artifactHashes["CV:DOCX"]);
+      expect(crypto.createHash("sha256").update(Buffer.from(file.content_base64, "base64")).digest("hex")).toBe(artifactHashes["CV:DOCX"]);
+
+      // History: created once, linked twice, never submitted; the status is untouched.
+      const events = await db.query<{ event_type: string; to_status: string | null }>(
+        `SELECT event_type, to_status FROM application_events WHERE workspace_id=$1 AND application_record_id=$2 ORDER BY created_at, id`,
+        [ctx.workspaceId, application.id]);
+      expect(events.rows.map((row) => row.event_type).sort()).toEqual(["CREATED", "DOCUMENT_LINKED", "DOCUMENT_LINKED"]);
+      expect((await applications())[0]).toMatchObject({ status: "INTENT", submitted_at: null });
+
+      // Rows are append-only, and a row must pin the chosen approval's exact stored files.
+      await expect(db.query(`UPDATE application_document_selections SET pipeline_readiness='APPLY_NOW_READY' WHERE id=$1`,
+        [first.selection.selection_id])).rejects.toThrow(/append-only/);
+      await expect(db.query(`DELETE FROM application_document_selections WHERE id=$1`, [first.selection.selection_id]))
+        .rejects.toThrow(/append-only/);
+      await expect(db.query(
+        `INSERT INTO application_document_selections (workspace_id, user_id, application_record_id, canonical_job_id, job_version_id,
+           approval_id, cv_document_run_id, cover_letter_document_run_id, cv_docx_sha256, cv_pdf_sha256,
+           cover_letter_docx_sha256, cover_letter_pdf_sha256, pipeline_readiness)
+         SELECT workspace_id, user_id, application_record_id, canonical_job_id, job_version_id, approval_id, cv_document_run_id,
+                cover_letter_document_run_id, $2, cv_pdf_sha256, cover_letter_docx_sha256, cover_letter_pdf_sha256, pipeline_readiness
+         FROM application_document_selections WHERE id=$1`,
+        [first.selection.selection_id, "0".repeat(64)])).rejects.toThrow(/hashes do not match/);
+
+      // Refusals: an unknown approval, and documents not generated yet.
+      expect(await use(crypto.randomUUID(), 404)).toMatchObject({ code: "NOT_FOUND" });
+      const ungenerated = await post(`/${compared.draft_id}/approve`, {
+        approved: true, comparison_fingerprint: compared.comparison_fingerprint,
+        corrections: [{ requirement_key: rows[0].requirement_key, status: "NOT_APPLICABLE", evidence_ids: [] }],
+      });
+      expect(await use(ungenerated.approval_id, 409)).toMatchObject({ code: "APPROVAL_STALE" });
+    });
+  });
+
   it("refuses an existing job whose stored description is too thin, leaving the job untouched", async () => {
     if (!pool || !context || !profile) throw new Error("The manual router test pool is not initialized.");
     const run = await pool.query<{ id: string }>(

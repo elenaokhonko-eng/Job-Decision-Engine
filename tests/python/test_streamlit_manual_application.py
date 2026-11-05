@@ -360,6 +360,72 @@ def test_an_unavailable_dependency_leaves_the_button_for_another_try():
     )
 
 
+def test_documents_are_linked_to_the_tracker_only_when_the_user_chooses_them():
+    app, _ = _compared_app()
+    app.button(key="manual_approve").click().run(timeout=10)
+    app.button(key="manual_generate").click().run(timeout=10)
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    # Generating links nothing.
+    assert _calls(app, "/use-for-application") == []
+    assert any("Nothing is recorded until you choose" in c.value for c in app.caption)
+
+    approval_id = app.session_state["manual_generated_documents"]["approval_id"]
+    app.button(key=f"manual_use_{approval_id}").click().run(timeout=10)
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    assert len(_calls(app, "/use-for-application")) == 1
+    assert any(
+        "Its status stays INTENT: nothing was submitted or sent." in s.value
+        for s in app.success
+    )
+    assert any("Added by you" in info.value for info in app.info)
+    # Once linked, the choice is not offered again for the same documents.
+    app.run(timeout=10)
+    assert not any(button.key == f"manual_use_{approval_id}" for button in app.button)
+
+
+def _tracker_app(choice):
+    app = AppTest.from_file(
+        str(PROJECT_ROOT / "tests/python/manual_application_fixture.py")
+    )
+    app.session_state["test_tracker_selection"] = choice
+    return app.run(timeout=10)
+
+
+def test_the_tracker_opens_exactly_the_documents_chosen_for_the_application():
+    app = _tracker_app("CHOSEN")
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    assert {button.label for button in app.download_button} == {
+        "Download CV (DOCX)",
+        "Download CV (PDF)",
+        "Download Cover letter (DOCX)",
+        "Download Cover letter (PDF)",
+    }
+    downloads = [call[1] for call in app.session_state["test_api_calls"]]
+    assert all(
+        path.startswith(
+            "/api/v2/application-drafts/selections/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/documents/"
+        )
+        for path in downloads
+    )
+    assert any("Added by you" in info.value for info in app.info)
+
+
+def test_the_tracker_refuses_a_file_that_is_not_the_chosen_version():
+    app = _tracker_app("TAMPERED")
+    assert any(
+        "CV (DOCX) is unavailable: The downloaded file is not the version chosen"
+        in error.value
+        for error in app.error
+    )
+    assert "Download CV (DOCX)" not in {b.label for b in app.download_button}
+
+
+def test_the_tracker_says_when_no_documents_are_chosen_yet():
+    app = _tracker_app(None)
+    assert any("No documents chosen yet" in c.value for c in app.caption)
+    assert not app.download_button
+
+
 def test_manual_upload_reader_accepts_text_files_without_rewriting_content():
     class Uploaded:
         name = "role.txt"

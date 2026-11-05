@@ -82,8 +82,11 @@ import {
   ManualPersistedApprovalSchema,
   ManualPersistedDraftSchema,
   ManualStagedPostingIdentitySchema,
+  ManualUseForApplicationRequestSchema,
+  ManualUseForApplicationResponseSchema,
   MANUAL_APPLICATION_SCHEMA_VERSION,
 } from "../../contracts/manualApplication.js";
+import { isCurrentReadyApplicationReadiness, loadCurrentApplicationReadiness } from "../../services/currentApplicationReadiness.js";
 import { fetchJobContent, type JobContentResult } from "../../ingestion/jobContentFetcher.js";
 
 function errorPayload(code: "INVALID_REQUEST" | "DESCRIPTION_INSUFFICIENT" | "FORBIDDEN" | "NOT_FOUND" | "JOB_VERSION_CHANGED" | "IDENTITY_CONFLICT" | "APPROVAL_STALE" | "DEPENDENCY_UNAVAILABLE" | "INTERNAL_ERROR" | "CONCURRENT_UPDATE", message: string, retryAfter?: string) {
@@ -836,6 +839,24 @@ export async function prepareComparisonForExistingJobVersion(
     sourceObservationId: selected.sourceObservationId,
     candidateProfileId,
   };
+}
+
+/** The same test POST /applications uses for an Apply Now handoff: current artifacts, READY, gate PASS, PRIORITY or REVIEW. */
+async function isApplyNowReady(client: pg.PoolClient, workspaceId: string, canonicalJobId: string, jobVersionId: string): Promise<boolean> {
+  const shortlist = (await client.query<{
+    current_artifact_status: string | null; gate_status: string | null;
+    recommendation_eligibility: string | null; recommendation_outcome: string | null;
+  }>(
+    `SELECT current_artifact_status, gate_status, recommendation_eligibility, recommendation_outcome
+     FROM v_canonical_shortlist_scoped WHERE workspace_id=$1 AND canonical_job_id=$2 AND job_version_id=$3`,
+    [workspaceId, canonicalJobId, jobVersionId])).rows[0];
+  if (!shortlist
+      || !["CURRENT_OR_NOT_APPLICABLE", "EVALUATION_MISSING", "EVALUATION_STALE"].includes(shortlist.current_artifact_status ?? "")
+      || shortlist.gate_status !== "PASS" || shortlist.recommendation_eligibility !== "ELIGIBLE"
+      || !["PRIORITY", "REVIEW"].includes(shortlist.recommendation_outcome ?? "")) {
+    return false;
+  }
+  return isCurrentReadyApplicationReadiness(await loadCurrentApplicationReadiness(client, workspaceId, canonicalJobId, jobVersionId));
 }
 
 async function soleActiveCandidate(pool: pg.Pool, ctx: WorkspaceContext): Promise<string> {
@@ -1742,6 +1763,156 @@ export function createManualApplicationRouter({
     });
     res.setHeader("Cache-Control", "private, no-store");
     res.json(response);
+  }));
+
+  // "Use these documents for my application": only on the user's explicit request. Pins the chosen
+  // approval's two runs and four file hashes to the job's application record (created as INTENT when
+  // missing), adds a DOCUMENT_LINKED event, and never changes the application's status.
+  router.post("/:draftId/use-for-application", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const draftId = String(req.params.draftId || "");
+    const request = ManualUseForApplicationRequestSchema.safeParse(req.body);
+    if (!z.string().uuid().safeParse(draftId).success || !request.success) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", "An approved document pair (approval_id) is required.");
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      if (!(await hasWritableMembership(client, ctx))) {
+        throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to link documents to an application.");
+      }
+      const approval = (await client.query<{ canonical_job_id: string; job_version_id: string }>(
+        `SELECT canonical_job_id, job_version_id FROM manual_application_preparation_approvals
+         WHERE workspace_id=$1 AND user_id=$2 AND id=$3 AND draft_id=$4 AND approved IS TRUE`,
+        [ctx.workspaceId, ctx.userId, request.data.approval_id, draftId])).rows[0];
+      if (!approval) throw new ManualFlowError(404, "NOT_FOUND", "The approved document pair was not found.");
+      const artifacts = (await client.query<{ document_type: "CV" | "COVER_LETTER"; format: "DOCX" | "PDF"; document_run_id: string; sha256: string }>(
+        `SELECT document_type, format, document_run_id, sha256 FROM manual_application_document_artifacts
+         WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`,
+        [ctx.workspaceId, ctx.userId, request.data.approval_id])).rows;
+      if (artifacts.length === 0) throw new ManualFlowError(409, "APPROVAL_STALE", "Generate the documents for this approval before linking them.");
+      validateManualArtifactPair(artifacts);
+      const hash = (type: string, format: string) => artifacts.find((item) => item.document_type === type && item.format === format)!.sha256;
+      const pinned = {
+        approval_id: request.data.approval_id,
+        cv_document_run_id: artifacts.find((item) => item.document_type === "CV")!.document_run_id,
+        cover_letter_document_run_id: artifacts.find((item) => item.document_type === "COVER_LETTER")!.document_run_id,
+        cv_docx_sha256: hash("CV", "DOCX"),
+        cv_pdf_sha256: hash("CV", "PDF"),
+        cover_letter_docx_sha256: hash("COVER_LETTER", "DOCX"),
+        cover_letter_pdf_sha256: hash("COVER_LETTER", "PDF"),
+      };
+      const pipelineReadiness = await isApplyNowReady(client, ctx.workspaceId, approval.canonical_job_id, approval.job_version_id)
+        ? "APPLY_NOW_READY" : "USER_SELECTED";
+
+      const inserted = await client.query<{ id: string; status: string }>(
+        `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status)
+         VALUES ($1,$2,$3,$4,'INTENT')
+         ON CONFLICT (workspace_id, user_id, canonical_job_id, job_version_id) DO NOTHING RETURNING id, status`,
+        [ctx.workspaceId, ctx.userId, approval.canonical_job_id, approval.job_version_id]);
+      const applicationCreated = inserted.rows.length === 1;
+      const application = inserted.rows[0] ?? (await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM application_records WHERE workspace_id=$1 AND user_id=$2 AND canonical_job_id=$3 AND job_version_id=$4`,
+        [ctx.workspaceId, ctx.userId, approval.canonical_job_id, approval.job_version_id])).rows[0];
+      if (applicationCreated) {
+        await client.query(
+          `INSERT INTO application_events (workspace_id, application_record_id, event_type, to_status, event_payload, created_by_user_id)
+           VALUES ($1,$2,'CREATED','INTENT',$3::jsonb,$4)`,
+          [ctx.workspaceId, application.id, JSON.stringify({ source: "MANUAL_DOCUMENT_SELECTION", pipeline_readiness: pipelineReadiness }), ctx.userId]);
+      }
+
+      const current = (await client.query(
+        `SELECT selection_id, application_record_id, approval_id, cv_document_run_id, cover_letter_document_run_id,
+                cv_docx_sha256, cv_pdf_sha256, cover_letter_docx_sha256, cover_letter_pdf_sha256, pipeline_readiness,
+                to_char(selected_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS selected_at
+         FROM v_application_document_selection_current WHERE workspace_id=$1 AND application_record_id=$2`,
+        [ctx.workspaceId, application.id])).rows[0];
+      const alreadySelected = Boolean(current) && Object.entries(pinned).every(([key, value]) => current[key] === value);
+      let selection = current;
+      if (!alreadySelected) {
+        selection = (await client.query(
+          `INSERT INTO application_document_selections (
+             workspace_id, user_id, application_record_id, canonical_job_id, job_version_id, approval_id,
+             cv_document_run_id, cover_letter_document_run_id, cv_docx_sha256, cv_pdf_sha256,
+             cover_letter_docx_sha256, cover_letter_pdf_sha256, pipeline_readiness
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           RETURNING id AS selection_id, application_record_id, approval_id, cv_document_run_id, cover_letter_document_run_id,
+                     cv_docx_sha256, cv_pdf_sha256, cover_letter_docx_sha256, cover_letter_pdf_sha256, pipeline_readiness,
+                     to_char(selected_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS selected_at`,
+          [ctx.workspaceId, ctx.userId, application.id, approval.canonical_job_id, approval.job_version_id,
+            pinned.approval_id, pinned.cv_document_run_id, pinned.cover_letter_document_run_id, pinned.cv_docx_sha256,
+            pinned.cv_pdf_sha256, pinned.cover_letter_docx_sha256, pinned.cover_letter_pdf_sha256, pipelineReadiness])).rows[0];
+        await client.query(
+          `INSERT INTO application_events (workspace_id, application_record_id, event_type, event_payload, created_by_user_id)
+           VALUES ($1,$2,'DOCUMENT_LINKED',$3::jsonb,$4)`,
+          [ctx.workspaceId, application.id, JSON.stringify({ source: "MANUAL_DOCUMENT_SELECTION", selection_id: selection.selection_id,
+            ...pinned, pipeline_readiness: pipelineReadiness }), ctx.userId]);
+      }
+      const response = ManualUseForApplicationResponseSchema.parse({
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+        ok: true,
+        selection,
+        application_status: application.status,
+        application_created: applicationCreated,
+        already_selected: alreadySelected,
+      });
+      await client.query("COMMIT");
+      res.json(response);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      if (isConcurrentWriteConflict(error)) {
+        sendApiError(res, 409, "CONCURRENT_UPDATE", "These documents are already being linked in another request. Try again in a moment.",
+          new Date(Date.now() + CONCURRENT_RETRY_AFTER_MS).toISOString());
+        return;
+      }
+      throw error;
+    } finally { client.release(); }
+  }));
+
+  // The exact files of a document choice in the tracker, checked against the hashes pinned at selection.
+  router.get("/selections/:selectionId/documents/:documentType/:format", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const selectionId = String(req.params.selectionId || "");
+    const type = String(req.params.documentType || "").toUpperCase();
+    const format = String(req.params.format || "").toUpperCase();
+    if (!z.string().uuid().safeParse(selectionId).success || !["CV", "COVER_LETTER"].includes(type) || !["DOCX", "PDF"].includes(format)) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", "Invalid document request.");
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      if (!(await hasWritableMembership(client, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to download private documents.");
+      const row = (await client.query<{ filename: string; mime_type: string; content: Buffer; sha256: string; pinned_sha256: string }>(
+        `SELECT artifact.filename, artifact.mime_type, artifact.content, artifact.sha256,
+                CASE $4 || ':' || $5
+                  WHEN 'CV:DOCX' THEN selection.cv_docx_sha256 WHEN 'CV:PDF' THEN selection.cv_pdf_sha256
+                  WHEN 'COVER_LETTER:DOCX' THEN selection.cover_letter_docx_sha256 ELSE selection.cover_letter_pdf_sha256
+                END AS pinned_sha256
+         FROM application_document_selections selection
+         JOIN manual_application_document_artifacts artifact
+           ON artifact.workspace_id = selection.workspace_id AND artifact.user_id = selection.user_id
+          AND artifact.approval_id = selection.approval_id
+          AND artifact.document_run_id = CASE $4 WHEN 'CV' THEN selection.cv_document_run_id ELSE selection.cover_letter_document_run_id END
+          AND artifact.document_type = $4 AND artifact.format = $5
+         WHERE selection.workspace_id=$1 AND selection.user_id=$2 AND selection.id=$3`,
+        [ctx.workspaceId, ctx.userId, selectionId, type, format])).rows[0];
+      if (!row) throw new ManualFlowError(404, "NOT_FOUND", "The chosen document was not found.");
+      const content = Buffer.from(row.content);
+      if (sha256Buffer(content) !== row.sha256 || row.sha256 !== row.pinned_sha256) {
+        throw new ManualFlowError(500, "INTERNAL_ERROR", "The stored document does not match the version chosen for this application.");
+      }
+      const result = ManualDownloadResponseSchema.parse({
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, filename: row.filename,
+        mime_type: row.mime_type, sha256: row.sha256, content_base64: content.toString("base64"),
+      });
+      await client.query("COMMIT");
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.json(result);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
   }));
 
   router.get("/:draftId/documents/:documentType/:format", handler(async (req, res) => {
