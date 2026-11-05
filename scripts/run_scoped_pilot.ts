@@ -2,6 +2,7 @@ import pg from "pg";
 import dotenv from "dotenv";
 
 import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
+import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 import { isCurrentReadyApplicationReadiness, loadCurrentApplicationReadiness } from "../src/services/currentApplicationReadiness.js";
 import { readDeadLetterTaskHealth } from "../src/tasks/deadLetterPolicy.js";
 import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
@@ -771,7 +772,7 @@ if (process.argv[1] && process.argv[1].includes("run_scoped_pilot")) {
       console.log(JSON.stringify(report, null, 2));
       if (report.operationalError) process.exitCode = 1;
     } catch (error: unknown) {
-      console.error("Scoped pilot failed:", error instanceof Error ? error.message : String(error));
+      console.error("Scoped pilot failed:", publicErrorSummary(error, "evaluation"));
       process.exitCode = 1;
     }
   })();
