@@ -407,6 +407,40 @@ export const ManualDownloadResponseSchema = z.object({
   content_base64: z.string().min(1),
 }).strict();
 
+// "Use these documents for my application": the user's explicit choice of one approved pair.
+export const ManualUseForApplicationRequestSchema = z.object({
+  schema_version: z.literal(MANUAL_APPLICATION_SCHEMA_VERSION),
+  approval_id: Uuid,
+}).strict();
+
+const ManualPipelineReadinessSchema = z.enum(["APPLY_NOW_READY", "USER_SELECTED"]);
+
+export const ManualDocumentSelectionSchema = z.object({
+  selection_id: Uuid,
+  application_record_id: Uuid,
+  approval_id: Uuid,
+  cv_document_run_id: Uuid,
+  cover_letter_document_run_id: Uuid,
+  cv_docx_sha256: Sha256,
+  cv_pdf_sha256: Sha256,
+  cover_letter_docx_sha256: Sha256,
+  cover_letter_pdf_sha256: Sha256,
+  // USER_SELECTED: linked by the user although the job was not a current READY Apply Now decision.
+  pipeline_readiness: ManualPipelineReadinessSchema,
+  selected_at: z.string().datetime(),
+}).strict();
+
+export const ManualUseForApplicationResponseSchema = z.object({
+  schema_version: z.literal(MANUAL_APPLICATION_SCHEMA_VERSION),
+  ok: z.literal(true),
+  selection: ManualDocumentSelectionSchema,
+  // The application status is never changed by linking; no submission is recorded.
+  application_status: z.string().min(1),
+  application_created: z.boolean(),
+  // True when this pair was already the application's current choice; nothing new was recorded.
+  already_selected: z.boolean(),
+}).strict();
+
 export const ManualApiErrorSchema = z.object({
   schema_version: z.literal(MANUAL_APPLICATION_SCHEMA_VERSION),
   ok: z.literal(false),

@@ -5,6 +5,7 @@ from streamlit_workspace_contracts import (
     validate_company_culture_coverage_summary,
     validate_company_culture_evidence_row,
     validate_company_culture_row,
+    validate_document_selection_row,
     validate_profile_coverage_row,
     validate_profile_evidence_row,
     validate_ranked_job_row,
@@ -309,3 +310,35 @@ def test_profile_evidence_and_coverage_contracts_require_workspace_scope():
         raise AssertionError(
             "Profile coverage contract accepted a string version number"
         )
+
+
+def _document_selection(**overrides):
+    row = {
+        "workspace_id": WORKSPACE_ID,
+        "user_id": "user-1",
+        "selection_id": "selection-1",
+        "application_record_id": "application-1",
+        "approval_id": "approval-1",
+        "cv_docx_sha256": "a" * 64,
+        "cv_pdf_sha256": "b" * 64,
+        "cover_letter_docx_sha256": "c" * 64,
+        "cover_letter_pdf_sha256": "d" * 64,
+        "pipeline_readiness": "USER_SELECTED",
+        "selected_at": "2026-11-05 10:00 UTC",
+    }
+    return row | overrides
+
+
+def test_document_selection_rows_are_scoped_hashed_and_flagged():
+    validate_document_selection_row(_document_selection(), WORKSPACE_ID, "user-1")
+    for row, user_id in (
+        (_document_selection(), "user-2"),
+        (_document_selection(workspace_id="workspace-2"), "user-1"),
+        (_document_selection(cv_pdf_sha256="not-a-hash"), "user-1"),
+        (_document_selection(pipeline_readiness="SUBMITTED"), "user-1"),
+    ):
+        try:
+            validate_document_selection_row(row, WORKSPACE_ID, user_id)
+        except ValueError:
+            continue
+        raise AssertionError(f"Document selection contract accepted {row}")

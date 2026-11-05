@@ -12,17 +12,14 @@ from fpdf import FPDF
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
-    validate_document_output_manifest,
-    parse_application_document_pair_status,
-    render_document_run_downloads,
     salary_disclosure_message,
 )
-from streamlit_application_review import render_document_pair_review_checkbox
 from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
 from streamlit_workspace_contracts import (
     validate_application_row,
     validate_application_workspace_summary,
+    validate_document_selection_row,
     validate_apply_now_row,
     validate_company_culture_coverage_summary,
     validate_company_culture_evidence_row,
@@ -33,7 +30,11 @@ from streamlit_workspace_contracts import (
     validate_track_row,
     validate_verify_then_apply_row,
 )
-from streamlit_manual_application import render_manual_application_flow, render_pipeline_review_action
+from streamlit_manual_application import (
+    render_manual_application_flow,
+    render_pipeline_review_action,
+    render_selected_documents,
+)
 from streamlit_runtime import code_version, database_outage, ensure_hosted_api_ready, open_api_json
 
 
@@ -417,6 +418,15 @@ APPLICATIONS_READ_MODEL_QUERY = """
     LIMIT %s
 """
 
+DOCUMENT_SELECTION_READ_MODEL_QUERY = """
+    SELECT workspace_id::text, user_id::text, selection_id::text, application_record_id::text,
+           approval_id::text, cv_docx_sha256, cv_pdf_sha256, cover_letter_docx_sha256,
+           cover_letter_pdf_sha256, pipeline_readiness,
+           to_char(selected_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI "UTC"') AS selected_at
+    FROM v_application_document_selection_current
+    WHERE workspace_id = %s AND user_id = %s AND application_record_id = %s
+"""
+
 PROFILE_EVIDENCE_READ_MODEL_QUERY = """
     SELECT workspace_id, canonical_job_id, job_version_id, profile_version_id,
            match_run_id, requirement_id, requirement_key, requirement_type,
@@ -601,6 +611,21 @@ def fetch_applications_from_read_model(limit=250):
         connection.close()
     rows = _read_model_query(APPLICATIONS_READ_MODEL_QUERY, (workspace_id, user_id, limit))
     return _validate_workspace_rows(rows, workspace_id, validate_application_row, user_id)
+
+
+def fetch_document_selection(application_record_id):
+    """The current user-chosen document pair of one application, or None."""
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+        user_id = _read_model_user_id(connection, workspace_id)
+    finally:
+        connection.close()
+    rows = _read_model_query(
+        DOCUMENT_SELECTION_READ_MODEL_QUERY, (workspace_id, user_id, application_record_id)
+    )
+    _validate_workspace_rows(rows, workspace_id, validate_document_selection_row, user_id)
+    return rows[0] if rows else None
 
 
 def fetch_job_profile_evidence(canonical_job_id, job_version_id):
@@ -953,173 +978,6 @@ def run_checked_command(command_args, step_label, extra_env=None):
     if result.stderr:
         st.warning(f"{step_label} stderr:\n{result.stderr}")
     return result
-
-def ensure_draft_application(job):
-    application_key = f"{job['canonical_job_id']}:{job['job_version_id']}"
-    cached = st.session_state.setdefault("pilot_application_ids", {}).get(application_key)
-    if cached:
-        return cached
-
-    response = api_request(
-        "POST",
-        "/api/v2/applications",
-        body={
-            "canonical_job_id": job["canonical_job_id"],
-            "job_version_id": job["job_version_id"],
-            "status": "INTENT",
-            "submission_url": job.get("canonical_url"),
-        },
-    )
-    application = response.get("application") if isinstance(response, dict) else None
-    application_id = application.get("application_record_id") if isinstance(application, dict) else None
-    if not isinstance(response, dict) or not response.get("ok") or not application_id:
-        raise RuntimeError("The API did not confirm creation of a draft application.")
-    st.session_state["pilot_application_ids"][application_key] = application_id
-    return application_id
-
-
-def parse_document_run(result, expected_type, job, application_id):
-    for line in reversed(result.stdout.splitlines()):
-        try:
-            manifest = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(manifest, dict) or manifest.get("event") != "DOCUMENT_GENERATION_COMPLETED":
-            continue
-        if (
-            manifest.get("documentType") != expected_type
-            or manifest.get("applicationRecordId") != application_id
-            or manifest.get("canonicalJobId") != job["canonical_job_id"]
-            or manifest.get("jobVersionId") != job["job_version_id"]
-            or not manifest.get("profileVersionId")
-            or not manifest.get("deterministicDecisionId")
-            or not manifest.get("contextFingerprint")
-            or not manifest.get("documentRunId")
-            or not isinstance(manifest.get("outputs"), dict)
-            or not isinstance(manifest["outputs"].get("docx"), dict)
-            or not manifest["outputs"]["docx"].get("path")
-            or not manifest["outputs"]["docx"].get("sha256")
-        ):
-            raise RuntimeError("Generated document run does not match the selected application and job version.")
-        try:
-            manifest["outputManifest"] = validate_document_output_manifest(
-                manifest.get("outputManifest"), manifest["outputs"]
-            )
-        except (TypeError, ValueError) as error:
-            raise RuntimeError("Generated document output manifest is invalid.") from error
-        return manifest
-    raise RuntimeError("The document command did not return an exact document-run manifest.")
-
-
-def show_document_run_downloads(manifest, key_prefix):
-    render_document_run_downloads(st, manifest, key_prefix)
-
-
-def render_job_document_actions(job, key_prefix):
-    pair_key = f"{job['canonical_job_id']}:{job['job_version_id']}"
-    pairs = st.session_state.setdefault("application_document_pairs", {})
-    pair = pairs.setdefault(pair_key, {})
-    cv_col, letter_col = st.columns(2)
-    with cv_col:
-        if st.button("Generate CV", key=f"{key_prefix}_cv", width="stretch"):
-            with st.spinner("Generating a current, evidence-grounded CV... "):
-                application_id = ensure_draft_application(job)
-                result = run_checked_command(
-                    ["npx", "tsx", "scripts/generate_cv.ts", str(job["canonical_job_id"]), str(job["job_version_id"])],
-                    "generate_cv",
-                    {"JDEC_APPLICATION_RECORD_ID": application_id},
-                )
-                pair["cv"] = parse_document_run(result, "CV", job, application_id)
-    with letter_col:
-        if st.button("Generate cover letter", key=f"{key_prefix}_letter", width="stretch"):
-            with st.spinner("Generating a current, evidence-grounded cover letter... "):
-                application_id = ensure_draft_application(job)
-                result = run_checked_command(
-                    ["npx", "tsx", "scripts/generate_cover_letter.ts", str(job["canonical_job_id"]), str(job["job_version_id"])],
-                    "generate_cover_letter",
-                    {"JDEC_APPLICATION_RECORD_ID": application_id},
-                )
-                pair["cover_letter"] = parse_document_run(result, "COVER_LETTER", job, application_id)
-
-    cv = pair.get("cv")
-    letter = pair.get("cover_letter")
-    if not cv or not letter:
-        for document_type, manifest in (("cv", cv), ("cover_letter", letter)):
-            if manifest:
-                show_document_run_downloads(manifest, f"{key_prefix}_{document_type}_download")
-        st.info("Generate both customised documents for this exact job version to complete the application document pair.")
-        return
-
-    matching_context = all(
-        cv.get(field) == letter.get(field)
-        for field in (
-            "applicationRecordId",
-            "canonicalJobId",
-            "jobVersionId",
-            "profileVersionId",
-            "deterministicDecisionId",
-            "contextFingerprint",
-        )
-    )
-    if not matching_context:
-        st.warning("The CV and cover letter use different application context. Regenerate the stale document before review.")
-        show_document_run_downloads(cv, f"{key_prefix}_cv_historical")
-        show_document_run_downloads(letter, f"{key_prefix}_letter_historical")
-        return
-
-    verification = run_checked_command(
-        [
-            "npx",
-            "tsx",
-            "scripts/validate_application_document_pair.ts",
-            cv["applicationRecordId"],
-            cv["documentRunId"],
-            letter["documentRunId"],
-        ],
-        "validate_document_pair",
-    )
-    application_status = parse_application_document_pair_status(
-        verification.stdout,
-        application_record_id=cv["applicationRecordId"],
-        cv_document_run_id=cv["documentRunId"],
-        cover_letter_document_run_id=letter["documentRunId"],
-    )
-    if not application_status.get("pairCurrent"):
-        st.warning("This document pair is no longer current or attached to this draft application. Regenerate before marking it ready.")
-        show_document_run_downloads(cv, f"{key_prefix}_cv_stale")
-        show_document_run_downloads(letter, f"{key_prefix}_letter_stale")
-        return
-
-    show_document_run_downloads(cv, f"{key_prefix}_cv_download")
-    show_document_run_downloads(letter, f"{key_prefix}_letter_download")
-    review_key = f"{key_prefix}_pair_reviewed_{cv['documentRunId']}_{letter['documentRunId']}"
-    already_reviewed = bool(application_status.get("reviewedAt"))
-
-    def persist_pair_review() -> None:
-        review_response = api_request(
-            "PATCH",
-            f"/api/v2/applications/{cv['applicationRecordId']}",
-            body={
-                "event_payload": {
-                    "event": "DOCUMENT_PAIR_REVIEWED",
-                    "cv_document_run_id": cv["documentRunId"],
-                    "cover_letter_document_run_id": letter["documentRunId"],
-                    "cv_sha256": cv["outputs"]["docx"]["sha256"],
-                    "cover_letter_sha256": letter["outputs"]["docx"]["sha256"],
-                },
-            },
-        )
-        if not isinstance(review_response, dict) or not review_response.get("ok"):
-            raise RuntimeError("The API did not persist the document review event.")
-        st.success("Document review recorded on the draft application.")
-
-    reviewed = render_document_pair_review_checkbox(
-        review_key=review_key,
-        already_reviewed=already_reviewed,
-        on_review=persist_pair_review,
-    )
-    if application_status.get("documentReady") or reviewed:
-        st.success("Document pair reviewed. The application remains a draft; no employer submission was recorded.")
 
 def validate_shortlist_row_shape(row):
     required = [
@@ -2027,17 +1885,8 @@ with tab_dashboard:
                         st.success("Applied")
                 with action_columns[2]:
                     current_status = application_record.get("application_status") if application_record else "Not tracked"
-                    cv_status = application_record.get("cv_document_status") if application_record else "NOT_GENERATED"
-                    letter_status = application_record.get("cover_letter_document_status") if application_record else "NOT_GENERATED"
-                    st.caption(f"Application: {current_status} · CV: {cv_status} · Cover letter: {letter_status}")
-                try:
-                    render_job_document_actions(ranked_job, f"top_{rank_position}")
-                except subprocess.CalledProcessError as exc:
-                    st.error(f"Document generation failed with exit code {exc.returncode}.")
-                    if exc.stderr:
-                        st.code(exc.stderr, language="text")
-                except Exception as exc:
-                    st.error(f"Document generation failed: {exc}")
+                    st.caption(f"Application: {current_status}")
+                render_pipeline_review_action(api_request, ranked_job, f"top_{rank_position}")
 
     evidence_options = {}
     if top_ten_ready_jobs is not None:
@@ -2416,14 +2265,6 @@ with tab_dashboard:
                                         save_application_status(job, "APPLIED", application_record)
                                     except Exception as exc:
                                         st.error(f"Could not update the application tracker: {exc}")
-                            try:
-                                render_job_document_actions(job, f"active_{job.get('canonical_job_id')}")
-                            except subprocess.CalledProcessError as exc:
-                                st.error(f"Document generation failed with exit code {exc.returncode}.")
-                                if exc.stderr:
-                                    st.code(exc.stderr, language="text")
-                            except Exception as exc:
-                                st.error(f"Document generation failed: {exc}")
                         
                         if st.button("🗑️ Delete Listing", key=f"active_del_{job.get('canonical_job_id') or idx}"):
                             if delete_job_from_db(job.get("canonical_job_id")):
@@ -2843,7 +2684,13 @@ with tab_applications:
                 save_application_status({}, next_status, selected_tracker_record)
             except Exception as exc:
                 st.error(f"Application status update failed: {exc}")
-        st.caption(f"CV linked: {'yes' if selected_tracker_record.get('cv_document_run_id') else 'not generated'} · Cover letter linked: {'yes' if selected_tracker_record.get('cover_letter_document_run_id') else 'not generated'}")
+        st.markdown("#### Documents for this application")
+        try:
+            render_selected_documents(
+                api_request, fetch_document_selection(selected_tracker_record["application_record_id"])
+            )
+        except Exception as exc:
+            st.error(f"The documents chosen for this application are unavailable: {exc}")
         if get_api_base_url():
             try:
                 event_response = api_request(
@@ -3070,7 +2917,7 @@ with tab_cv:
             else:
                 st.text_area("Description", str(description), height=220, disabled=True)
 
-        render_job_document_actions(selected_job, f"selected_{selected_job['canonical_job_id']}")
+        render_pipeline_review_action(api_request, selected_job, f"selected_{selected_job['job_version_id']}")
 
 # Footer section
 st.markdown("---")

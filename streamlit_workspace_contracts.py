@@ -10,8 +10,11 @@ Example:
 from collections.abc import Mapping
 from decimal import Decimal
 import math
+import re
 
 from streamlit_application_workflow import has_current_ready_assessment
+
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 APPLICATION_STATUSES = frozenset(
@@ -444,6 +447,54 @@ def validate_application_row(
         "STALE",
     }:
         raise ValueError("Cover-letter document status is invalid.")
+
+
+def validate_document_selection_row(
+    row: Mapping[str, object], workspace_id: object, user_id: object
+) -> None:
+    """Validate the current user-chosen document pair of one application.
+
+    Args:
+        row: A row from v_application_document_selection_current.
+        workspace_id: The workspace requested by the caller.
+        user_id: The authenticated workspace member identifier.
+
+    Raises:
+        ValueError: If scope, a pinned hash, or the readiness flag is invalid.
+        TypeError: If identity fields have invalid types.
+    """
+    hash_fields = (
+        "cv_docx_sha256",
+        "cv_pdf_sha256",
+        "cover_letter_docx_sha256",
+        "cover_letter_pdf_sha256",
+    )
+    _require_fields(
+        row,
+        (
+            "workspace_id",
+            "user_id",
+            "selection_id",
+            "application_record_id",
+            "approval_id",
+            "pipeline_readiness",
+            "selected_at",
+            *hash_fields,
+        ),
+    )
+    _require_scope(row, workspace_id)
+    if str(row.get("user_id")) != str(user_id):
+        raise ValueError(
+            "Document selection user does not match the authenticated workspace member."
+        )
+    for field in ("selection_id", "application_record_id", "approval_id"):
+        _require_string(row, field)
+    for field in hash_fields:
+        value = row.get(field)
+        if not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value):
+            raise ValueError(f"Document selection {field} is not a SHA-256 hash.")
+    if row.get("pipeline_readiness") not in {"APPLY_NOW_READY", "USER_SELECTED"}:
+        raise ValueError("Document selection readiness flag is invalid.")
 
 
 def validate_company_culture_row(

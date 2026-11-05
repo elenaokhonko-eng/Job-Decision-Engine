@@ -1,0 +1,97 @@
+{
+  "$ref": "#/definitions/ManualUseForApplicationResponse",
+  "definitions": {
+    "ManualUseForApplicationResponse": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "manual_application_v1"
+        },
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "selection": {
+          "type": "object",
+          "properties": {
+            "selection_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "application_record_id": {
+              "$ref": "#/definitions/ManualUseForApplicationResponse/properties/selection/properties/selection_id"
+            },
+            "approval_id": {
+              "$ref": "#/definitions/ManualUseForApplicationResponse/properties/selection/properties/selection_id"
+            },
+            "cv_document_run_id": {
+              "$ref": "#/definitions/ManualUseForApplicationResponse/properties/selection/properties/selection_id"
+            },
+            "cover_letter_document_run_id": {
+              "$ref": "#/definitions/ManualUseForApplicationResponse/properties/selection/properties/selection_id"
+            },
+            "cv_docx_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "cv_pdf_sha256": {
+              "$ref": "#/definitions/ManualUseForApplicationResponse/properties/selection/properties/cv_docx_sha256"
+            },
+            "cover_letter_docx_sha256": {
+              "$ref": "#/definitions/ManualUseForApplicationResponse/properties/selection/properties/cv_docx_sha256"
+            },
+            "cover_letter_pdf_sha256": {
+              "$ref": "#/definitions/ManualUseForApplicationResponse/properties/selection/properties/cv_docx_sha256"
+            },
+            "pipeline_readiness": {
+              "type": "string",
+              "enum": [
+                "APPLY_NOW_READY",
+                "USER_SELECTED"
+              ]
+            },
+            "selected_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "selection_id",
+            "application_record_id",
+            "approval_id",
+            "cv_document_run_id",
+            "cover_letter_document_run_id",
+            "cv_docx_sha256",
+            "cv_pdf_sha256",
+            "cover_letter_docx_sha256",
+            "cover_letter_pdf_sha256",
+            "pipeline_readiness",
+            "selected_at"
+          ],
+          "additionalProperties": false
+        },
+        "application_status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "application_created": {
+          "type": "boolean"
+        },
+        "already_selected": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "selection",
+        "application_status",
+        "application_created",
+        "already_selected"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

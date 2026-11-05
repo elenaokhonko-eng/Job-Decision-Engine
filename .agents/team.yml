@@ -84,8 +84,8 @@ roles:
     card: .agents/documents-evidence-engineer/AGENT.md
     focus: "Factual candidate evidence ledger, customized CV & Cover Letter DOCX/PDF generation, zero-hallucination validation"
     owned_paths:
-      - "scripts/generate_cv.ts"
-      - "scripts/generate_cover_letter.ts"
+      - "src/api/v2/manualApplicationRouter.ts"
+      - "src/documents/manual*.ts"
       - "src/services/renderers/"
       - "scripts/schemas/cover_letter_schema.json"
       - "my_profile.md"

@@ -9,6 +9,7 @@ import streamlit_manual_application
 from streamlit_manual_application import (
     render_manual_application_flow,
     render_pipeline_review_action,
+    render_selected_documents,
 )
 
 # The automatic retry after CONCURRENT_UPDATE need not wait in tests.
@@ -25,6 +26,10 @@ REQUIREMENT_SET_ID = "66666666-6666-4666-8666-666666666666"
 DRAFT_ID = "77777777-7777-4777-8777-777777777777"
 APPROVAL_ID = "88888888-8888-4888-8888-888888888888"
 FETCH_RECEIPT_ID = "99999999-9999-4999-8999-999999999999"
+SELECTION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+APPLICATION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+CV_RUN_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+COVER_LETTER_RUN_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 FINGERPRINT = "a" * 64
 CONTACT_FINGERPRINT = "b" * 64
 PREFERENCE_FINGERPRINT = "c" * 64
@@ -45,7 +50,28 @@ def _docx_bytes():
 def _artifact_bytes(format_name):
     if format_name == "PDF":
         return b"%PDF-1.4\nmanual application test\n%%EOF\n"
-    return _docx_bytes()
+    # Zip entries carry the write time, so keep one DOCX per session for stable hashes.
+    return st.session_state.setdefault("test_docx_bytes", _docx_bytes())
+
+
+def _artifact_sha256(format_name):
+    return hashlib.sha256(_artifact_bytes(format_name)).hexdigest()
+
+
+def _selection(tampered=False):
+    return {
+        "selection_id": SELECTION_ID,
+        "application_record_id": APPLICATION_ID,
+        "approval_id": APPROVAL_ID,
+        "cv_document_run_id": CV_RUN_ID,
+        "cover_letter_document_run_id": COVER_LETTER_RUN_ID,
+        "cv_docx_sha256": "0" * 64 if tampered else _artifact_sha256("DOCX"),
+        "cv_pdf_sha256": _artifact_sha256("PDF"),
+        "cover_letter_docx_sha256": _artifact_sha256("DOCX"),
+        "cover_letter_pdf_sha256": _artifact_sha256("PDF"),
+        "pipeline_readiness": "USER_SELECTED",
+        "selected_at": "2026-11-05T10:00:00.000Z",
+    }
 
 
 def _artifact(item_type, format_name):
@@ -310,6 +336,16 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
             "COMPLETE" if body["description"] == DESCRIPTION.strip() else "USER_EDITED"
         )
         return _comparison_response(source_content_status)
+    if path.endswith("/use-for-application"):
+        assert body == {"schema_version": SCHEMA_VERSION, "approval_id": APPROVAL_ID}
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "selection": _selection(),
+            "application_status": "INTENT",
+            "application_created": True,
+            "already_selected": False,
+        }
     if path.endswith("/approve"):
         return {
             "schema_version": SCHEMA_VERSION,
@@ -401,4 +437,12 @@ st.title("Manual Application Test")
 pipeline_job = st.session_state.get("test_pipeline_job")
 if pipeline_job:
     render_pipeline_review_action(fake_api_request, pipeline_job, "test_pipeline")
-render_manual_application_flow(fake_api_request)
+# The tracker's view of an application's chosen documents, when a test asks for it.
+if "test_tracker_selection" in st.session_state:
+    choice = st.session_state["test_tracker_selection"]
+    render_selected_documents(
+        fake_api_request,
+        None if choice is None else _selection(tampered=choice == "TAMPERED"),
+    )
+else:
+    render_manual_application_flow(fake_api_request)
