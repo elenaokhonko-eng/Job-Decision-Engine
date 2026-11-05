@@ -1,4 +1,5 @@
 import { appendFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import dotenv from "dotenv";
 import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
@@ -10,6 +11,7 @@ import {
 } from "../src/tasks/stageTaskWorker.js";
 import type { PipelineTaskReconciliationSummary } from "../src/tasks/pipelineTaskCurrentness.js";
 import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
+import { recordPipelineWorkerProgressSnapshot } from "../src/tasks/pipelineWorkerProgress.js";
 import {
   DEAD_LETTER_CLASSIFICATION_SQL,
   DEAD_LETTER_LINEAGE_JOINS_SQL,
@@ -63,21 +65,6 @@ function parseBooleanEnv(name: string, fallback: boolean): boolean {
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
-function pipelineStageStartOffset(taskTypeCount: number): number {
-  if (taskTypeCount <= 0) return 0;
-  const configuredOffset = process.env.PIPELINE_TASK_WORKER_STAGE_START_OFFSET?.trim();
-  if (configuredOffset) {
-    const parsedOffset = Number.parseInt(configuredOffset, 10);
-    return Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset % taskTypeCount : 0;
-  }
-
-  const runId = Number.parseInt(process.env.GITHUB_RUN_ID ?? "0", 10);
-  const runAttempt = Number.parseInt(process.env.GITHUB_RUN_ATTEMPT ?? "1", 10);
-  const runOffset = Number.isFinite(runId) && runId >= 0 ? runId : 0;
-  const attemptOffset = Number.isFinite(runAttempt) && runAttempt > 1 ? runAttempt - 1 : 0;
-  return (runOffset + attemptOffset) % taskTypeCount;
-}
-
 interface QueueHealthRow {
   task_type: string;
   status: string;
@@ -95,6 +82,13 @@ interface QueueHealth {
   oldestPendingAgeSeconds: number;
   oldestRetryWaitAgeSeconds: number;
   byType: QueueHealthRow[];
+}
+
+interface OldestPendingTask {
+  id: string;
+  taskType: string;
+  createdAt: string;
+  ageSeconds: number;
 }
 
 interface PipelineDeadLetterHealthReport {
@@ -287,6 +281,52 @@ async function readQueueHealth(
   }
 }
 
+async function readOldestPendingTask(
+  pool: pg.Pool,
+  workspaceId: string,
+  taskTypes: readonly string[],
+  scope?: QueueHealthScope,
+): Promise<OldestPendingTask | null> {
+  const client = await pool.connect();
+  try {
+    const jobVersionIds = scope?.jobVersionIds ?? null;
+    const observationIds = scope?.observationIds ?? null;
+    const params: unknown[] = scope
+      ? [workspaceId, [...taskTypes], jobVersionIds, observationIds]
+      : [workspaceId, [...taskTypes]];
+    const targetClause = scope ? scopedTaskTargetClause(3, 4) : "";
+    const { rows } = await client.query<{
+      id: string;
+      task_type: string;
+      created_at: Date;
+      age_seconds: number;
+    }>(
+      `SELECT task.id::text AS id,
+              task.task_type,
+              task.created_at,
+              EXTRACT(EPOCH FROM NOW() - task.created_at)::INTEGER AS age_seconds
+       FROM pipeline_tasks AS task
+       WHERE task.workspace_id = $1
+         AND task.status = 'PENDING'
+         AND task.task_type = ANY($2::text[])
+         ${targetClause}
+       ORDER BY task.created_at ASC, task.id ASC
+       LIMIT 1`,
+      params,
+    );
+    const oldest = rows[0];
+    if (!oldest) return null;
+    return {
+      id: oldest.id,
+      taskType: oldest.task_type,
+      createdAt: oldest.created_at.toISOString(),
+      ageSeconds: Number(oldest.age_seconds ?? 0),
+    };
+  } finally {
+    client.release();
+  }
+}
+
 function requestShutdown(signal: NodeJS.Signals): void {
   if (shutdownController.signal.aborted) return;
 
@@ -438,13 +478,10 @@ export async function processPipelineTasks(): Promise<void> {
       .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
     reconciliationReport.activePendingBefore = activePendingBefore;
     reconciliationReport.oldestActivePendingAgeSecondsBefore = oldestActivePendingAgeBefore;
-    const stageStartOffset = pipelineStageStartOffset(activeTaskTypes.length);
-    console.log("Pipeline stage start offset:", stageStartOffset);
     const summary = await runPipelineStageTaskWorker(pool, {
       taskTypes: activeTaskTypes,
       jobVersionIds,
       observationIds,
-      stageStartOffset,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
       includeRoutingDeferred: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED", true),
       includeTestFixtures: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES", false),
@@ -499,6 +536,41 @@ export async function processPipelineTasks(): Promise<void> {
     const oldestActivePendingAgeSeconds = activeQueueRows
       .filter((row) => row.status === "PENDING")
       .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+    const oldestPendingTask = await readOldestPendingTask(
+      pool,
+      context.workspaceId,
+      activeTaskTypes,
+      queueHealthScope,
+    );
+    console.log("Oldest active pending stage:", JSON.stringify(oldestPendingTask
+      ? { task_type: oldestPendingTask.taskType, age_seconds: oldestPendingTask.ageSeconds }
+      : { task_type: null, age_seconds: 0 }));
+    const pendingAgeTrendRunCount = parsePositiveIntEnv(
+      "PIPELINE_TASK_WORKER_PENDING_AGE_TREND_RUNS",
+      3,
+      20,
+    );
+    const progressClient = await pool.connect();
+    let consecutiveOldestTaskRuns: number;
+    try {
+      const runId = process.env.GITHUB_RUN_ID?.trim();
+      const runKey = runId ? `github:${runId}` : `local:${randomUUID()}`;
+      ({ consecutiveOldestTaskRuns } = await recordPipelineWorkerProgressSnapshot(progressClient, {
+        workspaceId: context.workspaceId,
+        runKey,
+        activePendingCount: activePending,
+        oldestPendingTaskId: oldestPendingTask?.id ?? null,
+        oldestPendingTaskType: oldestPendingTask?.taskType ?? null,
+        oldestPendingCreatedAt: oldestPendingTask?.createdAt ?? null,
+        oldestPendingAgeSeconds: oldestPendingTask?.ageSeconds ?? 0,
+      }, pendingAgeTrendRunCount));
+    } finally {
+      progressClient.release();
+    }
+    console.log("Oldest pending task consecutive run trend:", JSON.stringify({
+      same_oldest_task_runs: consecutiveOldestTaskRuns,
+      threshold_runs: pendingAgeTrendRunCount,
+    }));
     reconciliationReport.activePendingAfter = activePending;
     reconciliationReport.netActivePendingDelta = activePending - activePendingBefore;
     reconciliationReport.oldestActivePendingAgeSecondsAfter = oldestActivePendingAgeSeconds;
@@ -509,6 +581,8 @@ export async function processPipelineTasks(): Promise<void> {
         `net_active_pending_delta=${activePending - activePendingBefore}`,
         `oldest_active_pending_age_seconds_before=${oldestActivePendingAgeBefore}`,
         `oldest_active_pending_age_seconds_after=${oldestActivePendingAgeSeconds}`,
+        `oldest_active_pending_task_type=${oldestPendingTask?.taskType ?? "none"}`,
+        `oldest_pending_same_task_runs=${consecutiveOldestTaskRuns}`,
       ].join("\n") + "\n", "utf8");
     }
     console.log("Pipeline task queue health:", JSON.stringify(queueHealth, null, 2));
@@ -527,6 +601,8 @@ export async function processPipelineTasks(): Promise<void> {
       net_active_pending_delta: activePending - activePendingBefore,
       oldest_active_pending_age_seconds_before: oldestActivePendingAgeBefore,
       oldest_active_pending_age_seconds_after: oldestActivePendingAgeSeconds,
+      oldest_active_pending_task_type: oldestPendingTask?.taskType ?? null,
+      oldest_pending_same_task_runs: consecutiveOldestTaskRuns,
       tasks_completed_this_run: summary.completed,
       successor_tasks_created_this_run: summary.successorTasksCreated,
       stale_pending_reconciled: summary.stalePendingReconciliation.reconciled,
@@ -540,6 +616,9 @@ export async function processPipelineTasks(): Promise<void> {
       seed_time_budget_exceeded: summary.seeded?.timeBudgetExceeded ?? false,
       remaining_pending: queueHealth.pending,
       duration_ms: summary.durationMs,
+      seconds_per_claimed_task: summary.claimed > 0
+        ? Math.round((summary.durationMs / summary.claimed) / 10) / 100
+        : null,
     }, null, 2));
     if (queueHealth.retryWait > 0) {
       console.warn(`Pipeline has ${queueHealth.retryWait} RETRY_WAIT task(s); automatic recovery remains scheduled.`);
@@ -567,6 +646,11 @@ export async function processPipelineTasks(): Promise<void> {
     const maxRetryWaitCount = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT", 500, 100000);
     const maxRetryWaitAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_AGE_SECONDS", 21600, 604800);
     const maxPendingAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS", 7200, 604800);
+    const pendingAgeTrendRuns = parsePositiveIntEnv(
+      "PIPELINE_TASK_WORKER_PENDING_AGE_TREND_RUNS",
+      3,
+      20,
+    );
     const noProgressPendingThreshold = parsePositiveIntEnv(
       "PIPELINE_TASK_WORKER_NO_FORWARD_PROGRESS_PENDING_THRESHOLD",
       1,
@@ -587,6 +671,9 @@ export async function processPipelineTasks(): Promise<void> {
       activePendingCount: activePending,
       oldestActivePendingAgeSecondsBefore: oldestActivePendingAgeBefore,
       oldestActivePendingAgeSeconds,
+      oldestActivePendingTaskType: oldestPendingTask?.taskType ?? null,
+      oldestPendingTaskSameRuns: consecutiveOldestTaskRuns,
+      pendingAgeTrendRuns,
       failOnRetryWait,
       maxRetryWaitCount,
       maxRetryWaitAgeSeconds,
