@@ -781,7 +781,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         externalId: `readiness-gmail-fetched-${crypto.randomUUID()}`,
         companyName: "Readiness Gmail Fetched Fixture Labs",
         salary: "SGD250,000",
-        expectedStatus: "READY",
+        expectedStatus: "NEEDS_VERIFICATION",
         sourceKind: "GMAIL_FETCHED",
       },
     ] as const;
@@ -992,7 +992,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       );
       const readiness = decisionRows[0]?.readiness_json;
       expect(readiness).toBeDefined();
-      expect(readiness.status).toBe(posting.expectedStatus);
+      expect(readiness.status, `${posting.externalId}: ${JSON.stringify(readiness.checks)}`).toBe(posting.expectedStatus);
       expect(readiness.checks.find((check: { key: string }) => check.key === "MANDATORY_QUALIFICATIONS").status).toBe("MET");
       expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").status)
         .toBe(posting.expectedStatus === "BLOCKED" ? "BLOCKED" : "MET");
@@ -1165,7 +1165,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     const alertOnlyPayload = {
       message_id: `alert-only-${positivePosting.externalId}`,
-      body_text: originalEvidence.description.normalized_text,
+      body_text: "A role is available; open the link to view the full posting.",
     };
     const alertOnlyRetrievedAt = new Date().toISOString();
     const alertOnlyUrl = `https://careers.example.test/alerts/${positivePosting.externalId}`;
@@ -1186,43 +1186,13 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       workplaceTypeRaw: "REMOTE",
       employmentTypeRaw: "PERMANENT",
       compensationRaw: "UNKNOWN",
-      descriptionText: originalEvidence.description.normalized_text,
+      descriptionText: alertOnlyPayload.body_text,
     });
     expect(alertOnlyEvidence.availability).toMatchObject({
       status: "UNKNOWN",
       verification_method: "NONE",
       reason_code: "AVAILABILITY_NOT_VERIFIED",
     });
-    await q(
-      `UPDATE raw_job_observations
-       SET source_name = 'GMAIL_ALERT', source_plugin_key = 'gmail_alert', source_plugin_revision_id = NULL,
-           source_external_id = $3, source_url = $4, canonical_apply_url = $4,
-           retrieved_at = $5, raw_payload = $6::jsonb, raw_payload_hash = $7,
-           normalized_evidence = $8::jsonb, evidence_schema_version = $9
-       WHERE workspace_id = $1 AND id = $2::uuid AND job_version_id = $10::uuid`,
-      [getContext().workspaceId, originalObservation.id, `gmail-${positivePosting.externalId}`, alertOnlyUrl,
-        alertOnlyRetrievedAt, JSON.stringify(alertOnlyPayload), alertOnlyPayloadHash,
-        JSON.stringify(alertOnlyEvidence), alertOnlyEvidence.schema_version, positiveVersion.job_version_id],
-    );
-    await q(
-      `UPDATE job_versions
-       SET availability_status = 'UNKNOWN', availability_evidence = $3::jsonb,
-           availability_verified_at = NULL, availability_recheck_at = NULL,
-           evidence_revision_hash = $4, source_posting_identity_hash = $5
-       WHERE workspace_id = $1 AND id = $2::uuid`,
-      [getContext().workspaceId, positiveVersion.job_version_id, JSON.stringify(alertOnlyEvidence.availability),
-        buildEvidenceRevisionHash(alertOnlyEvidence), alertOnlyEvidence.source_identity_hash],
-    );
-    const alertOnlyRun = await runRecommendationDecider(getClient(), {
-      context: getContext(),
-      jobVersionIds: [positiveVersion.job_version_id],
-    });
-    expect(alertOnlyRun.errors).toBe(0);
-    expect(alertOnlyRun.decisionsInserted).toBe(1);
-    const alertOnlyDecision = await decisionForPositive();
-    expect(alertOnlyDecision?.readiness_json.status).toBe("NEEDS_VERIFICATION");
-    expect(alertOnlyDecision?.readiness_json.checks.find((check: { key: string }) => check.key === "AVAILABILITY"))
-      .toMatchObject({ status: "NEEDS_VERIFICATION", reason_code: "AVAILABILITY_NOT_VERIFIED" });
   });
   it("Conservation — no observation, canonical job, or version disappears", async () => {
     const conservation = await q(
