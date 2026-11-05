@@ -13,7 +13,18 @@ import {
   validateSummaryPayload,
   type CoverLetterPair,
 } from "../../documents/manualCoverLetter.js";
-import { buildManualComparison, matchableEvidence, rowAttention, tenureStatements, type ManualEvidence } from "../../documents/manualPreparation.js";
+import {
+  buildControlledDocuments,
+  buildManualComparison,
+  cvStatement,
+  matchableEvidence,
+  MAX_CV_STATEMENT_WORDS,
+  pdfPageCount,
+  renderControlledPdf,
+  rowAttention,
+  tenureStatements,
+  type ManualEvidence,
+} from "../../documents/manualPreparation.js";
 import {
   INVESTMENT_DATA_SCIENTIST_DESCRIPTION,
   INVESTMENT_DATA_SCIENTIST_NARRATIVE,
@@ -164,5 +175,62 @@ describe("summary and letter grounding", () => {
       gap_note: null,
     }, pairs, allowed);
     expect(letter.valid ? "" : letter.issues.join(" ")).toContain("passive voice");
+  });
+});
+
+describe("CV shape", () => {
+  const longFact = fact("fact-rag", "Designed and built the LLM and retrieval-augmented generation layer that turns a user's uploaded evidence (bank statements, chat logs, contracts, employment records) into structured, evidence-linked claim packs for dispute forums. PostgreSQL is the system of record, with row-level security enforced and tested in CI.", "eng-venture");
+
+  it("prints a short form of long facts: the candidate's own, else the first sentence without asides", () => {
+    const short = cvStatement(longFact);
+    expect(short.split(/\s+/).length).toBeLessThanOrEqual(MAX_CV_STATEMENT_WORDS);
+    expect(short).toBe("Designed and built the LLM and retrieval-augmented generation layer that turns a user's uploaded evidence into structured, evidence-linked claim packs for dispute forums.");
+    expect(cvStatement({ ...longFact, cv_statement: "Built the LLM and RAG layer that turns uploaded evidence into dispute claim packs." }))
+      .toBe("Built the LLM and RAG layer that turns uploaded evidence into dispute claim packs.");
+    expect(cvStatement(api)).toBe(api.statement);
+  });
+
+  const comparisonWith = (evidence: ManualEvidence[], rows: Array<Record<string, unknown>> = []) => ({
+    title: "Data Scientist", company: "Example Fund", evidence, rows, requirements: [],
+  });
+  const venture: ManualEvidence = {
+    id: "eng-venture", evidence_type: "ENGAGEMENT", label: "Founder and Principal AI Architect at Example AI SG Pte Ltd",
+    statement: "Founder and Principal AI Architect at Example AI SG Pte Ltd (2025-08-01–present). Dispute AI.", engagement_id: "eng-venture",
+    engagement_type: "FOUNDER_OPERATOR", experience_class: "PROFESSIONAL_PRODUCTION", start_date: "2025-08-01", document_layout: "FULL",
+  };
+  const lab: ManualEvidence = {
+    id: "eng-lab2", evidence_type: "ENGAGEMENT", label: "Founder in Residence at Venture Lab", statement: "Founder in Residence at Venture Lab (2025-08-01–2025-12-31).",
+    engagement_id: "eng-lab2", engagement_type: "FOUNDER_OPERATOR", experience_class: "APPLIED_PROJECT", start_date: "2025-08-01", end_date: "2025-12-31",
+  };
+  const aim: ManualEvidence = {
+    id: "eng-aim", evidence_type: "ENGAGEMENT", label: "Program Lead at Insurer Investment Management", statement: "Program Lead at Insurer Investment Management (2023-04-01–2025-04-30).",
+    engagement_id: "eng-aim", engagement_type: "EMPLOYEE", experience_class: "PROFESSIONAL_PRODUCTION", start_date: "2023-04-01", end_date: "2025-04-30",
+  };
+  const degree: ManualEvidence = {
+    id: "cred-msc", evidence_type: "CREDENTIAL", label: "Master of Science in Wealth Management", credential_type: "DEGREE",
+    statement: "Master of Science in Wealth Management, degree issued by Example University; status ACTIVE.", issuer: "Example University", issued_on: "2015-06-30",
+  };
+  const contact = { full_name: "Candidate Example", phone: "+65 6000 0000" };
+
+  it("lists a founder role at a registered company under Experience, in date order, and a venture lab apart", () => {
+    const docs = buildControlledDocuments(comparisonWith([venture, lab, aim, longFact, calypso, degree]), contact, { asOf: new Date("2026-11-05T00:00:00Z") });
+    const experience = docs.cv.split("## Experience\n")[1]?.split("\n## ")[0] ?? "";
+    expect(experience.indexOf("Example AI SG Pte Ltd")).toBeGreaterThan(-1);
+    expect(experience.indexOf("Example AI SG Pte Ltd")).toBeLessThan(experience.indexOf("Insurer Investment Management"));
+    expect(experience).not.toContain("Venture Lab");
+    // The long fact is printed in its short form, once.
+    expect(docs.cv.split(cvStatement(longFact)).length - 1).toBe(1);
+    expect(docs.cv).not.toContain("row-level security");
+    expect(docs.cv).toContain("## Education\n- Master of Science in Wealth Management, Example University, 2015");
+  });
+
+  it("leaves out the requirement-matching section unless asked, and counts PDF pages", () => {
+    const rows = [{ requirement_key: "R-1", importance: "MUST", requirement: "Integration architecture", evidence: [{ id: "fact-calypso" }] }];
+    const plain = buildControlledDocuments(comparisonWith([aim, calypso], rows), contact, { asOf: new Date("2026-11-05T00:00:00Z") });
+    expect(plain.cv).not.toContain("How my experience matches this role");
+    const withSection = buildControlledDocuments(comparisonWith([aim, calypso], rows), contact, { asOf: new Date("2026-11-05T00:00:00Z"), includeMatchSection: true });
+    expect(withSection.cv).toContain("## How my experience matches this role\n- Integration architecture: ");
+    expect(pdfPageCount(renderControlledPdf(plain.cv))).toBe(1);
+    expect(pdfPageCount(renderControlledPdf(Array.from({ length: 200 }, (_, index) => `- Line ${index}`).join("\n")))).toBeGreaterThan(1);
   });
 });

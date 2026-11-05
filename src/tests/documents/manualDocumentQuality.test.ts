@@ -112,7 +112,7 @@ describe("manual document quality (baseline regression)", () => {
   // The loader drops internal assessment facts before comparison; the builder filters them again.
   const evidence = PROFILE.filter((item) => !isInternalAssessmentStatement(item.statement));
   const requirements = documentRequirements(PLACEHOLDER_ROWS, JOB_DESCRIPTION);
-  const docs = buildControlledDocuments(comparisonFor(requirements, evidence), CONTACT, { asOf: AS_OF });
+  const docs = buildControlledDocuments(comparisonFor(requirements, evidence), CONTACT, { asOf: AS_OF, includeMatchSection: true });
 
   it("uses the posting's own lines instead of placeholder requirements when AI extraction failed", () => {
     expect(requirements.map((row) => row.requirement_text)).toEqual([
@@ -315,9 +315,10 @@ describe("manual document quality (baseline regression)", () => {
     const experience = section(docs.cv, "Experience");
     expect(experience).toContain("### Delivery Architect at Old Brokerage | Jan 2004 – Jun 2006");
     expect(experience).toContain("- Integrated an order management system across 3 custodians for a brokerage.");
-    // Cited only by the summary, the import role is promoted too.
-    expect(experience).toContain("### Import-Export Coordinator at Trading House");
-    expect(section(docs.cv, "Earlier career")).not.toMatch(/Old Brokerage|Trading House/);
+    // Cited only by the summary, the 2002 import role is shown as one line: findable, not promoted.
+    expect(experience).not.toContain("Trading House");
+    expect(section(docs.cv, "Earlier career")).toContain("Import-Export Coordinator at Trading House");
+    expect(section(docs.cv, "Earlier career")).not.toContain("Old Brokerage");
     // The candidate's choice still wins.
     const hidden = buildControlledDocuments(comparison, CONTACT, { asOf: AS_OF, roleLayout: { "eng-broker": "ONE_LINE" } });
     expect(section(hidden.cv, "Experience")).not.toContain("Old Brokerage");

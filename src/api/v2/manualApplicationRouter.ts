@@ -17,6 +17,7 @@ import {
   fingerprintManualComparison,
   MANUAL_COMPARATOR_VERSION,
   renderControlledDocx,
+  pdfPageCount,
   renderControlledPdf,
   sha256Buffer,
   validateManualApprovalCurrentness,
@@ -390,17 +391,18 @@ export async function loadManualProfileEvidence(
 ): Promise<ManualEvidence[]> {
   // Past-role facts are is_current = FALSE but remain valid evidence; only CONTACT facts need currentness,
   // and those are loaded separately by loadProfileContactSnapshot.
-  const factResult = await client.query<{ id: string; fact_key: string; fact_type: string; statement: string; engagement_id: string | null }>(
-    `SELECT id::text, fact_key, fact_type, statement, engagement_id::text AS engagement_id FROM profile_facts
+  const factResult = await client.query<{ id: string; fact_key: string; fact_type: string; statement: string; engagement_id: string | null; cv_statement: string | null }>(
+    `SELECT id::text, fact_key, fact_type, statement, engagement_id::text AS engagement_id,
+            NULLIF(btrim(structured_value->>'cv_statement'), '') AS cv_statement FROM profile_facts
      WHERE workspace_id = $1 AND profile_version_id = $2 AND fact_type <> 'CONTACT'
        AND verification_status IN ('VERIFIED','SELF_ATTESTED')
        AND confidentiality IN ('PUBLIC','PRIVATE_REUSABLE') ORDER BY fact_key, id`,
     [workspaceId, profileVersionId]);
   const credentialResult = await client.query<{
     id: string; credential_name: string; issuer: string; credential_type: ManualEvidence["credential_type"] & string; level: string | null; status: string;
-    always_include_in_documents: boolean;
+    always_include_in_documents: boolean; issued_on: string | null;
   }>(
-    `SELECT id::text, credential_name, issuer, credential_type, level, status, always_include_in_documents
+    `SELECT id::text, credential_name, issuer, credential_type, level, status, always_include_in_documents, issued_on::text AS issued_on
      FROM profile_credentials WHERE workspace_id = $1 AND profile_version_id = $2
        AND status = 'ACTIVE' AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY credential_key, id`,
     [workspaceId, profileVersionId]);
@@ -419,10 +421,13 @@ export async function loadManualProfileEvidence(
     ...factResult.rows.filter((row) => !isInternalAssessmentStatement(row.statement)).map((row) => ({
       id: row.id, evidence_type: "FACT" as const, label: row.fact_key, statement: row.statement, fact_type: row.fact_type,
       ...(row.engagement_id ? { engagement_id: row.engagement_id } : {}),
+      ...(row.cv_statement ? { cv_statement: row.cv_statement.slice(0, 400) } : {}),
     })),
     ...credentialResult.rows.map((row) => ({
       id: row.id, evidence_type: "CREDENTIAL" as const, label: row.credential_name, credential_type: row.credential_type,
       ...(row.always_include_in_documents ? { always_include: true } : {}),
+      issuer: row.issuer,
+      ...(row.issued_on ? { issued_on: row.issued_on } : {}),
       statement: `${row.credential_name}${row.level ? ` (${row.level})` : ""}, ${row.credential_type.toLowerCase()} issued by ${row.issuer}; status ${row.status}.`,
     })),
     ...engagementResult.rows.map((row) => ({
@@ -1536,7 +1541,9 @@ export function createManualApplicationRouter({
       throw new ManualFlowError(400, "INVALID_REQUEST", `Role choices name roles that are not in the approved comparison: ${unknownRoles.join(", ")}.`);
     }
     const documentContact = { ...contact, full_name: fullName, phone };
-    const documentOptions: ControlledDocumentOptions = { roleLayout, includeGapNotes: request.data.include_gap_note !== false };
+    const documentOptions: ControlledDocumentOptions = {
+      roleLayout, includeGapNotes: request.data.include_gap_note !== false, includeMatchSection: request.data.include_match_section === true,
+    };
     // Documents already generated for this approval are returned as stored, without calling the model again.
     const alreadyGenerated = await pool.query(
       `SELECT 1 FROM manual_application_document_artifacts WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 LIMIT 1`,
@@ -1657,6 +1664,7 @@ export function createManualApplicationRouter({
       artifacts: artifacts.map(({ type, format, filename, mime }) => ({ type, format, filename, mime_type: mime })),
       ...(letter ? { cover_letter: letter.letter.review, summary: letter.summary.review } : {}),
       revision: selected.approval.revision, corrections_applied: selected.approval.corrections.length,
+      cv_pages: pdfPageCount(cvPdf),
     });
     res.setHeader("Cache-Control", "private, no-store");
     res.json(response);

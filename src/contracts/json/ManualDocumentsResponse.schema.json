@@ -209,6 +209,10 @@
         "corrections_applied": {
           "type": "integer",
           "minimum": 0
+        },
+        "cv_pages": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "required": [

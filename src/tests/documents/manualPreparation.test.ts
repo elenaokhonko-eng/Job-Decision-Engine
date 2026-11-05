@@ -139,7 +139,7 @@ describe("manual application preparation", () => {
       ],
     };
     const comparison = buildManualComparison(tailored);
-    const docs = buildControlledDocuments(comparison, { full_name: "Candidate Example", phone: "+65 6000 0000" }, { asOf: new Date("2026-11-02T00:00:00Z") });
+    const docs = buildControlledDocuments(comparison, { full_name: "Candidate Example", phone: "+65 6000 0000" }, { asOf: new Date("2026-11-02T00:00:00Z"), includeMatchSection: true });
 
     // The MUST requirement leads, in the job's own words, paired with its evidence.
     const mustLine = docs.cv.indexOf("- Lead derivatives operating model design: Designed the derivatives operating model");

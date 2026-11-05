@@ -227,6 +227,7 @@ REVIEW_DECISIONS = {
     "NOT_APPLICABLE": "Not applicable: leave it out of the documents",
 }
 MAX_EVIDENCE_PER_ROW = 3
+MAX_CV_PAGES = 2
 
 
 def _evidence_option_label(item):
@@ -238,8 +239,85 @@ def _evidence_option_label(item):
     return f"{item.get('statement', '')} [{where}{period}]"
 
 
+def _row_widget_keys(fingerprint, key):
+    return [
+        f"manual_review_{part}_{fingerprint}_{key}"
+        for part in ("decision", "evidence", "gap")
+    ]
+
+
+def _default_decision(row, proposed):
+    """Keep the proposed evidence, or partly met when the comparison found the record falls short."""
+    if not proposed:
+        return "GAP"
+    return "PARTIAL" if row.get("suggested_status") == "PARTIAL" else "ACCEPTED"
+
+
+def _render_review_row(row, labels, fingerprint, locked, corrections, problems):
+    """Controls for one requirement; appends its correction (if changed) and any problem."""
+    key = row.get("requirement_key", "")
+    proposed = [item["id"] for item in row.get("evidence") or [] if item.get("id")]
+    # The proposed evidence is always offered, even if the picker list lacks it.
+    for item in row.get("evidence") or []:
+        labels.setdefault(item.get("id"), item.get("statement", ""))
+    default_decision = _default_decision(row, proposed)
+    decision_key, evidence_key, gap_key = _row_widget_keys(fingerprint, key)
+    st.text(f"{row.get('importance', '')} · {row.get('requirement', '')}")
+    for item in row.get("attention") or []:
+        st.warning(f"Check: {item.get('detail', '')}")
+    decision = st.selectbox(
+        "Decision",
+        list(REVIEW_DECISIONS),
+        index=list(REVIEW_DECISIONS).index(default_decision),
+        format_func=REVIEW_DECISIONS.get,
+        key=decision_key,
+        disabled=locked,
+    )
+    chosen = st.multiselect(
+        "Evidence",
+        list(labels),
+        default=[item for item in proposed if item in labels],
+        format_func=lambda item: labels.get(item, item),
+        max_selections=MAX_EVIDENCE_PER_ROW,
+        key=evidence_key,
+        disabled=locked or decision in ("GAP", "NOT_APPLICABLE"),
+    )
+    gap_sentence = ""
+    if decision in ("GAP", "PARTIAL"):
+        gap_sentence = st.text_input(
+            "Gap sentence for the letter (optional, your own words)",
+            key=gap_key,
+            disabled=locked,
+        ).strip()
+    evidence_ids = [] if decision in ("GAP", "NOT_APPLICABLE") else chosen
+    if decision == "ACCEPTED" and not evidence_ids:
+        problems.append(
+            f"Choose evidence for “{row.get('requirement', '')}”, or mark it not met."
+        )
+    if gap_sentence and len(gap_sentence) < 10:
+        problems.append("A gap sentence needs at least 10 characters.")
+    unchanged = (
+        decision == default_decision and evidence_ids == proposed and not gap_sentence
+    )
+    if not unchanged:
+        correction = {
+            "requirement_key": key,
+            "status": decision,
+            "evidence_ids": evidence_ids,
+        }
+        if gap_sentence:
+            correction["gap_sentence"] = gap_sentence
+        corrections.append(correction)
+    st.divider()
+
+
 def _render_review_corrections(rows, selectable, fingerprint, locked=False):
     """Per-requirement controls to correct the proposed matches before approving.
+
+    MUST requirements are shown open; optional ones (mostly the posting's duties) are collapsed,
+    with one button to accept every suggestion. Rows the comparison flags (a market or product the
+    evidence does not name, a years threshold, a named certification) say why, and start as partly
+    met when the record visibly falls short.
 
     Returns (corrections, problem): only the rows the candidate changed, in the API's shape, and a
     message when a choice cannot be approved as it stands.
@@ -248,68 +326,40 @@ def _render_review_corrections(rows, selectable, fingerprint, locked=False):
         return [], None
     labels = {item["id"]: _evidence_option_label(item) for item in selectable or []}
     corrections, problems = [], []
-    with st.expander("Correct the matches before approving", expanded=not locked):
+    must_rows = [row for row in rows if row.get("importance") == "MUST"]
+    optional_rows = [row for row in rows if row.get("importance") != "MUST"]
+    flagged = sum(1 for row in rows if row.get("attention"))
+    with st.expander(
+        f"Check the MUST requirements ({len(must_rows)})", expanded=not locked
+    ):
         st.caption(
             "For each requirement: keep or change the evidence (type to search your facts), mark it "
-            "partly met or not met with your own gap sentence, or leave it out as not applicable "
-            "(for example location or language). Documents use only what you approve here."
+            "partly met or not met with your own gap sentence, or leave it out as not applicable. "
+            "Documents use only what you approve here. A high confidence score is not proof: "
+            "check every row marked “Check”."
+            + (f" {flagged} row(s) need a look." if flagged else "")
         )
-        for row in rows:
-            key = row.get("requirement_key", "")
-            proposed = [
-                item["id"] for item in row.get("evidence") or [] if item.get("id")
-            ]
-            # The proposed evidence is always offered, even if the picker list lacks it.
-            for item in row.get("evidence") or []:
-                labels.setdefault(item.get("id"), item.get("statement", ""))
-            default_decision = "ACCEPTED" if proposed else "GAP"
-            st.text(f"{row.get('importance', '')} · {row.get('requirement', '')}")
-            decision = st.selectbox(
-                "Decision",
-                list(REVIEW_DECISIONS),
-                index=list(REVIEW_DECISIONS).index(default_decision),
-                format_func=REVIEW_DECISIONS.get,
-                key=f"manual_review_decision_{fingerprint}_{key}",
-                disabled=locked,
-            )
-            chosen = st.multiselect(
-                "Evidence",
-                list(labels),
-                default=[item for item in proposed if item in labels],
-                format_func=lambda item: labels.get(item, item),
-                max_selections=MAX_EVIDENCE_PER_ROW,
-                key=f"manual_review_evidence_{fingerprint}_{key}",
-                disabled=locked or decision in ("GAP", "NOT_APPLICABLE"),
-            )
-            gap_sentence = ""
-            if decision in ("GAP", "PARTIAL"):
-                gap_sentence = st.text_input(
-                    "Gap sentence for the letter (optional, your own words)",
-                    key=f"manual_review_gap_{fingerprint}_{key}",
-                    disabled=locked,
-                ).strip()
-            evidence_ids = [] if decision in ("GAP", "NOT_APPLICABLE") else chosen
-            if decision == "ACCEPTED" and not evidence_ids:
-                problems.append(
-                    f"Choose evidence for “{row.get('requirement', '')}”, or mark it not met."
+        for row in must_rows:
+            _render_review_row(row, labels, fingerprint, locked, corrections, problems)
+    if optional_rows:
+        with st.expander(
+            f"Optional requirements ({len(optional_rows)}): suggested matches",
+            expanded=False,
+        ):
+            if not locked and st.button(
+                "Accept all suggested",
+                key=f"manual_review_accept_optional_{fingerprint}",
+            ):
+                for row in optional_rows:
+                    for widget_key in _row_widget_keys(
+                        fingerprint, row.get("requirement_key", "")
+                    ):
+                        st.session_state.pop(widget_key, None)
+                st.rerun()
+            for row in optional_rows:
+                _render_review_row(
+                    row, labels, fingerprint, locked, corrections, problems
                 )
-            if gap_sentence and len(gap_sentence) < 10:
-                problems.append("A gap sentence needs at least 10 characters.")
-            unchanged = (
-                decision == default_decision
-                and evidence_ids == proposed
-                and not gap_sentence
-            )
-            if not unchanged:
-                correction = {
-                    "requirement_key": key,
-                    "status": decision,
-                    "evidence_ids": evidence_ids,
-                }
-                if gap_sentence:
-                    correction["gap_sentence"] = gap_sentence
-                corrections.append(correction)
-            st.divider()
     return corrections, (" ".join(problems) or None)
 
 
@@ -695,6 +745,9 @@ def render_manual_application_flow(api_request):
                 or "No direct evidence",
                 "Gap / review": row.get("gap")
                 or "Review whether the potential evidence actually meets this requirement.",
+                "Needs a look": " ".join(
+                    item.get("detail", "") for item in row.get("attention") or []
+                ),
             }
         )
     st.markdown("### Requirement, evidence and gap review")
@@ -789,6 +842,14 @@ def render_manual_application_flow(api_request):
     include_gap_note = _render_gap_note_choice(
         payload.get("fit"), fingerprint, locked=locked
     )
+    include_match_section = st.checkbox(
+        "Add a “How my experience matches this role” section to the CV",
+        value=False,
+        key=f"manual_match_section_{fingerprint}",
+        disabled=locked,
+        help="Off by default: the cover letter already maps your record to the requirements, "
+        "and the section repeats your Experience bullets.",
+    )
     if st.button(
         "Generate customised CV and cover letter", type="primary", key="manual_generate"
     ):
@@ -798,6 +859,8 @@ def render_manual_application_flow(api_request):
                 body["role_layout"] = role_layout
             if include_gap_note is not None:
                 body["include_gap_note"] = include_gap_note
+            if include_match_section:
+                body["include_match_section"] = True
             st.session_state["manual_generate_options"] = {
                 key: value for key, value in body.items() if key != "approval_id"
             }
@@ -816,6 +879,14 @@ def render_manual_application_flow(api_request):
         _retry_summary(api_request, draft_id, fingerprint, approval, generated)
         generated = st.session_state.get("manual_generated_documents")
     st.markdown("### Review before downloading")
+    cv_pages = generated.get("cv_pages")
+    if cv_pages and cv_pages > MAX_CV_PAGES:
+        st.warning(
+            f"The CV runs to {cv_pages} pages. For a VP role aim for {MAX_CV_PAGES}: set older roles "
+            "to one line or hide them in “Choose which roles appear on the CV”, then compare again."
+        )
+    elif cv_pages:
+        st.caption(f"CV length: {cv_pages} page(s).")
     preview_col, letter_col = st.columns(2)
     with preview_col:
         st.text_area(
