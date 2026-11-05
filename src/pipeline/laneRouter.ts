@@ -22,6 +22,7 @@ import { PersistedLaneDecisionSchema, SCHEMA_VERSION } from "../contracts/index.
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
 import { SixLaneKeySchema, type LaneIntentPreferences, type LanePreferenceTaxonomy } from "../policy/laneIntentContracts.js";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
+import { routableWorkabilityVerificationSql } from "./verificationRouting.js";
 
 export { loadGlobalLanesConfig, loadLanesConfig };
 export type { GlobalLanesConfig, LaneDefinition };
@@ -871,9 +872,12 @@ export async function runLaneRouter(
     ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])`
     : "";
   const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
+  const routableVerificationFilter = routableWorkabilityVerificationSql("c");
   const replayableStateFilter = reprocessExisting
-    ? `COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED', 'UNMATCHED', 'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED')`
-    : `COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+    ? `(COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED', 'UNMATCHED', 'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED')
+        OR ${routableVerificationFilter})`
+    : `(COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+           OR ${routableVerificationFilter}
            OR (
              COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')
              AND (
@@ -891,7 +895,7 @@ export async function runLaneRouter(
                  )
                `}
              )
-           )`;
+           ))`;
   const replayExistingDecisionFilter = reprocessExisting
     ? `AND (
          c.latest_lane_decision_id IS NULL
