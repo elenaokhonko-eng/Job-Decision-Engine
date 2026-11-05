@@ -1,6 +1,6 @@
 /**
  * User-run staging-only evaluation smoke. Dry-runs by default and limits
- * provider calls to the active profile-v6 queue cohort selected below.
+ * provider calls to a bounded cohort for the current ACTIVE profile version.
  */
 import dotenv from 'dotenv';
 import pg from 'pg';
@@ -8,8 +8,8 @@ import pg from 'pg';
 import { isPooledPostgresConnectionString, pgPoolConfig } from '../src/db/pgSsl.js';
 import {
   createStagingDatabaseIdentityDiagnostic,
+  expectationsForSuppliedStagingBranch,
   isApprovedStagingDatabaseIdentity,
-  STAGE1_3_STAGING_IDENTITY_EXPECTATIONS,
 } from '../src/db/stagingDatabaseIdentity.js';
 import {
   selectEligibleEvaluationQueueRows,
@@ -24,8 +24,6 @@ import { resolveWorkspaceContext, type WorkspaceContext } from '../src/workspace
 dotenv.config();
 dotenv.config({ path: '.env.local' });
 
-const EXPECTED_STAGING_BRANCH_ID = STAGE1_3_STAGING_IDENTITY_EXPECTATIONS.expectedBranchId;
-const EXPECTED_PROFILE_VERSION = 6;
 const MAX_SMOKE_JOBS = 500;
 const MAX_RETRY_WAIT_SECONDS = 1800;
 
@@ -131,7 +129,7 @@ async function readReadModelCounts(
     [context.workspaceId, context.userKey, [...jobVersionIds]]
   );
   const result = rows[0];
-  if (!result) throw new Error('Could not read the current profile-v6 Streamlit summary row.');
+  if (!result) throw new Error('Could not read the current active-profile Streamlit summary row.');
   return result;
 }
 
@@ -202,6 +200,9 @@ async function main(): Promise<void> {
   const apply = process.argv.includes('--apply');
   const limit = parseLimit();
   const retryPasses = parseRetryPasses();
+  const stagingExpectations = expectationsForSuppliedStagingBranch(
+    process.env.STAGE1_3_SMOKE_EXPECTED_BRANCH_ID,
+  );
   const databaseUrl = process.env.STAGE3_STAGING_DATABASE_URL;
   if (!databaseUrl) throw new Error('STAGE3_STAGING_DATABASE_URL is required.');
   if (isPooledPostgresConnectionString(databaseUrl)) {
@@ -221,14 +222,14 @@ async function main(): Promise<void> {
       databaseIdentity
         ? { databaseName: databaseIdentity.database_name, branchId: databaseIdentity.branch_id }
         : null,
-      STAGE1_3_STAGING_IDENTITY_EXPECTATIONS,
+      stagingExpectations,
     );
     console.log(identityDiagnostic);
     if (!isApprovedStagingDatabaseIdentity({
       databaseName: databaseIdentity?.database_name,
       branchId: databaseIdentity?.branch_id,
       hostname: identityDiagnostic.connectionHost,
-    }, STAGE1_3_STAGING_IDENTITY_EXPECTATIONS)) {
+    }, stagingExpectations)) {
       throw new Error('Refusing evaluation smoke: connected database is not the approved staging branch.');
     }
 
@@ -242,8 +243,8 @@ async function main(): Promise<void> {
       [context.workspaceId]
     );
     const activeProfile = profileResult.rows[0];
-    if (!activeProfile || activeProfile.version_number !== EXPECTED_PROFILE_VERSION) {
-      throw new Error('Evaluation smoke requires active profile v6 on staging.');
+    if (!activeProfile || !Number.isInteger(activeProfile.version_number) || activeProfile.version_number < 1) {
+      throw new Error('Evaluation smoke requires a current ACTIVE profile version on the staging branch.');
     }
 
     const preferenceResult = await client.query<{ preference_domain: string }>(
@@ -289,7 +290,7 @@ async function main(): Promise<void> {
     }
     console.log(JSON.stringify({
       mode: apply ? 'STAGING_EVALUATION_SMOKE_APPLY' : 'DRY_RUN',
-      branchId: EXPECTED_STAGING_BRANCH_ID,
+      branchId: stagingExpectations.expectedBranchId,
       activeProfileVersion: activeProfile.version_number,
       eligibleQueueItems: candidates.length,
       uniqueJobVersions: jobVersionIds.length,
@@ -320,7 +321,7 @@ async function main(): Promise<void> {
           unchangedInheritedDebtIsInformational: true,
         },
       }, null, 2));
-      throw new Error(`No current profile-v6 queue item was eligible; ${supersededQueueRows} stale row(s) were superseded and no provider call was made.`);
+      throw new Error(`No current active-profile queue item was eligible; ${supersededQueueRows} stale row(s) were superseded and no provider call was made.`);
     }
 
     process.env.DATABASE_URL = databaseUrl;

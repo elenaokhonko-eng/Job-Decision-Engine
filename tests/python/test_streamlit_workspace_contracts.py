@@ -9,6 +9,7 @@ from streamlit_workspace_contracts import (
     validate_profile_evidence_row,
     validate_ranked_job_row,
     validate_track_row,
+    validate_verify_then_apply_row,
 )
 
 
@@ -116,6 +117,46 @@ def test_apply_now_contract_requires_deterministic_apply_eligibility():
         pass
     else:
         raise AssertionError("Apply Now contract accepted unresolved readiness")
+
+
+def test_verify_then_apply_contract_requires_matched_review_and_unresolved_readiness():
+    row = {
+        "workspace_id": WORKSPACE_ID,
+        "canonical_job_id": "job-1",
+        "job_version_id": "version-1",
+        "title": "Director, AI Solution Architect",
+        "company": "Example AI",
+        "gate_status": "NEEDS_VERIFICATION",
+        "rejection_codes": ["GATE_UNKNOWN_WORK_MODE", "NEEDS_VERIFICATION"],
+        "gate_evidence_quotes": ["Workplace model is unspecified."],
+        "processing_state": "MATCHED",
+        "recommendation_eligibility": "VERIFY",
+        "recommendation_outcome": "REVIEW",
+        "deterministic_match_score": 82.0,
+        "readiness_status": "NEEDS_VERIFICATION",
+        "readiness_reason_codes": ["POLICY_FACT_UNRESOLVED"],
+    }
+    validate_verify_then_apply_row(row, WORKSPACE_ID)
+
+    try:
+        validate_verify_then_apply_row(
+            row | {"readiness_status": "READY"}, WORKSPACE_ID
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Verify-then-apply contract accepted a READY row")
+
+    try:
+        validate_verify_then_apply_row(
+            row | {"processing_state": "NEEDS_VERIFICATION"}, WORKSPACE_ID
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            "Verify-then-apply contract accepted a row without a completed match"
+        )
 
 
 def test_top_ten_contract_requires_all_current_artifacts_and_no_recheck():

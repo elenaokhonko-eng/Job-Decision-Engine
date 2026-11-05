@@ -272,6 +272,7 @@ export const GateDecisionSchema = z.object({
   job_version_id: z.string().min(1),
   pipeline_run_id: z.string().uuid(),
   gate_version: z.string().min(1),
+  workability_policy_hash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   status: z.enum(["PASS", "NEEDS_VERIFICATION", "HARD_REJECT"]),
   rejection_codes: z.array(z.string()).default([]),
   evidence_quotes: z.array(z.string()).default([]),
@@ -283,6 +284,7 @@ export type GateDecision = z.infer<typeof GateDecisionSchema>;
 /** Strict persistence variant: schema_version must be supplied by the writer. */
 export const PersistedGateDecisionSchema = GateDecisionSchema.extend({
   schema_version: SchemaVersionSchema,
+  workability_policy_hash: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
 /**

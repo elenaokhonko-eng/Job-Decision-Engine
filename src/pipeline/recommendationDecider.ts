@@ -715,15 +715,15 @@ export async function runRecommendationDecider(
         ));
 
         const employmentType = String(workabilityFacts["employment_type"] ?? job.employment_type ?? "UNKNOWN").toUpperCase();
-        const employmentStatus = employmentType === "CONTRACT" && !workabilityPolicyResolution.policy.contractAllowed
-          ? "BLOCKED"
-          : employmentType === "PERMANENT" || employmentType === "CONTRACT" ? "MET" : "NEEDS_VERIFICATION";
+        const employmentStatus = employmentType === "PERMANENT" || employmentType === "CONTRACT"
+          ? "MET"
+          : "NEEDS_VERIFICATION";
         readinessChecks.push(readinessCheck(
           "EMPLOYMENT_ROUTE",
           employmentStatus,
-          employmentStatus === "MET" ? `Employment type ${employmentType} is permitted by the active preference.` : employmentStatus === "BLOCKED" ? "Contract employment conflicts with the active employment preference." : "Employment type or hiring route is unknown.",
+          employmentStatus === "MET" ? `Employment type ${employmentType} is permitted under the direct-employer fixed-term policy.` : "Employment type or hiring route is unknown.",
           readinessAssessedAt,
-          { reasonCode: employmentStatus === "BLOCKED" ? "CONTRACT_EMPLOYMENT_NOT_ALLOWED" : employmentStatus === "NEEDS_VERIFICATION" ? "EMPLOYMENT_ROUTE_UNKNOWN" : null },
+          { reasonCode: employmentStatus === "NEEDS_VERIFICATION" ? "EMPLOYMENT_ROUTE_UNKNOWN" : null },
         ));
 
         let mandatoryQualificationCheck: MaterialReadinessCheck;
