@@ -25,6 +25,20 @@ describe("workspace workability policy", () => {
     expect(inferTerritoryOperator("Must be based in Singapore and collaborate with US customer teams.")).toBe("UNKNOWN");
   });
 
+  it("keeps unknown work mode in verification despite legacy policy overrides", () => {
+    expect(loadWorkabilityPolicy().unknownWorkModeDisposition).toBe("NEEDS_VERIFICATION");
+    expect(mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+      workability: { unknown_work_mode_policy: "HARD_REJECT" },
+    }).unknownWorkModeDisposition).toBe("NEEDS_VERIFICATION");
+  });
+
+  it("uses the owner-approved contract and client-interaction policy defaults", () => {
+    const policy = loadWorkabilityPolicy();
+    expect(policy.contractAllowed).toBe(true);
+    expect(policy.maximumInteractionPct).toBe(60);
+    expect(policy.externalClientPrimaryAllowed).toBe(false);
+  });
+
   it("distinguishes worker territory restrictions from employer/company locations", () => {
     expect(hasExplicitTerritoryRestriction("Must be authorized to work in the United States", "UNITED_STATES")).toBe(true);
     expect(hasExplicitTerritoryRestriction("Candidates must reside in Canada", "CANADA")).toBe(true);
@@ -146,6 +160,8 @@ describe("workspace workability policy", () => {
 
     expect(result.source).toBe("FILE");
     expect(result.modeKey).toBeNull();
-    expect(result.policy.contractAllowed).toBe(false);
+    expect(result.policy.contractAllowed).toBe(true);
+    expect(result.policy.maximumInteractionPct).toBe(60);
+    expect(result.policy.externalClientPrimaryAllowed).toBe(false);
   });
 });

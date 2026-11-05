@@ -1299,7 +1299,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(currentIndex?.indexdef).toContain("context_fingerprint");
   });
 
-  it("gate_decisions audit table and pipeline run identity exist", async () => {
+  it("gate_decisions audit table preserves run identity and the effective policy hash", async () => {
     const { rows } = await realPool.query(`
       SELECT table_name
       FROM information_schema.tables
@@ -1311,10 +1311,13 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       SELECT column_name
       FROM information_schema.columns
       WHERE table_name = 'gate_decisions'
-        AND column_name = 'pipeline_run_id'
+        AND column_name IN ('pipeline_run_id', 'workability_policy_hash')
         AND table_schema = 'public'
     `);
-    expect(columns).toHaveLength(1);
+    expect(columns.map((row) => row.column_name)).toEqual(
+      expect.arrayContaining(['pipeline_run_id', 'workability_policy_hash'])
+    );
+    expect(columns).toHaveLength(2);
   });
 
   it("rejected-job audit read models exist for base and workspace-scoped consumers", async () => {

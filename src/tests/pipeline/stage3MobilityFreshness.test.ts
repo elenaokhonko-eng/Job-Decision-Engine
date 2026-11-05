@@ -630,6 +630,56 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     expect(result.rejection_codes).not.toContain('COMPENSATION_BELOW_USER_FLOOR');
   });
 
+  it.each([
+    {
+      requirement_type: 'FUNCTION',
+      requirement_text: 'Own data lineage and implement data quality controls for investment products.',
+      quote_text: 'Own data lineage and implement data quality controls for investment products.',
+    },
+    {
+      requirement_type: 'DOMAIN',
+      requirement_text: 'Design and maintain reference data models and market data standards.',
+      quote_text: 'Design and maintain reference data models and market data standards.',
+    },
+  ] as const)('uses persisted $requirement_type requirements as technical ownership evidence', (requirement) => {
+    const job = {
+      title: 'Data Governance Lead',
+      company_name: 'Investment Data Co',
+      workplace_type: 'REMOTE',
+      location: 'Singapore',
+      employment_type: 'PERMANENT',
+      posted_at: new Date().toISOString(),
+      description: 'Coordinate governance meetings and publish status updates.',
+    };
+    const persistedRequirement = {
+      requirement_key: `P11-${requirement.requirement_type}`,
+      requirement_type: requirement.requirement_type,
+      importance: 'REQUIRED',
+      requirement_text: requirement.requirement_text,
+      quote_text: requirement.quote_text,
+      structured_value: null,
+    };
+
+    const withoutPersistedEvidence = applyPersistedRequirementGates(
+      job,
+      [],
+      undefined,
+      null,
+      approvedStage3Preferences,
+    );
+    const withPersistedEvidence = applyPersistedRequirementGates(
+      job,
+      [persistedRequirement],
+      undefined,
+      null,
+      approvedStage3Preferences,
+    );
+
+    expect(withoutPersistedEvidence.rejection_codes).toContain('NON_TECHNICAL_FUNCTION');
+    expect(withPersistedEvidence.status).toBe('PASS');
+    expect(withPersistedEvidence.rejection_codes).not.toContain('NON_TECHNICAL_FUNCTION');
+  });
+
   // Hard gate integration test for excluded employer
   it('applies employer exclusions directly within applyPersistedRequirementGates', () => {
     const excludedJob = {

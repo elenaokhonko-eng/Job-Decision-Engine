@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
+import { isOccurrenceNegated } from "../requirements/clauseAnalysis.js";
 
 export { normalizeWorkMode };
 import {
@@ -64,17 +65,146 @@ export const TECHNICAL_FUNCTION_KEYWORDS: RegExp[] = [
   /\b(regtech|legaltech|compliance automation|contract analytics|knowledge engineer(ing)?|llm|agents?|rag|nlp|foundation models?|data pipeline)\b/i,
 ];
 
+const DATA_DOMAIN_ROLE_TITLE = /\b(?:data governance|reference data|master data|knowledge graph|ontolog(?:y|ies)|data product)\b/i;
+const TECHNICAL_DATA_ASSET = /\b(?:reference data|master data|metadata|knowledge graph|ontolog(?:y|ies)|taxonomy|data lineage|data quality|data model|data platform|data architecture|data pipeline|market data|data catalog|data contracts?|data controls|data standards|data schema|data integration|data warehouse|lakehouse|analytics platform|application programming interface|\bapi\b)\b/i;
+const TECHNICAL_OWNERSHIP_ACTION = /\b(?:own(?:s|ed|ing|ership)?|design(?:s|ed|ing)?|architect(?:s|ed|ing)?|build(?:s|ing|built)?|implement(?:s|ed|ing|ation)?|develop(?:s|ed|ing)?|maintain(?:s|ed|ing)?|govern(?:s|ed|ing|ance)?|define(?:s|d|ing)?|lead(?:s|ing)?|deliver(?:s|ed|ing)?|manage(?:s|d|ment|ing)?|oversee|steward(?:s|ship|ing)?|establish(?:es|ed|ing)?|set(?:s|ting)?|accountable for|responsible for)\b/i;
+const PRODUCT_TECHNICAL_ACTION = /\b(?:experiment(?:s|ed|ing)?|prototype(?:s|d|ing)?|evaluat(?:e|es|ed|ing)|integrat(?:e|es|ed|ing)|design(?:s|ed|ing)?|build(?:s|ing|built)?|develop(?:s|ed|ing)?|implement(?:s|ed|ing|ation)?|deploy(?:s|ed|ing|ment)?|test(?:s|ed|ing)?|validat(?:e|es|ed|ing)|benchmark(?:s|ed|ing)?|fine[- ]tun(?:e|es|ed|ing)|train(?:s|ed|ing)?|optimiz(?:e|es|ed|ing)|improv(?:e|es|ed|ing)|monitor(?:s|ed|ing)?|engineer(?:s|ed|ing)?|configure(?:s|d|ing)?|code(?:s|d|ing)?)\b/i;
+// Require evidence about implementation or measurable technical behavior. Generic
+// AI/ML, model/API mentions, and market research alone do not establish ownership.
+const PRODUCT_TECHNICAL_ASSET = /\b(?:api integrations?|inference|latency|model performance|model reliability|training data|data pipelines?|software code|technical architecture)\b/i;
+
+function hasProductTechnicalDutyEvidence(text: string): boolean {
+  return String(text || "")
+    .split(/(?<=[.!?])\s+|[\n;•]+/)
+    .some((sentence) => hasNonNegatedMatch(PRODUCT_TECHNICAL_ACTION, sentence)
+      && hasNonNegatedMatch(PRODUCT_TECHNICAL_ASSET, sentence));
+}
+
+function hasNearbyNonNegatedActionAssetPair(action: RegExp, asset: RegExp, sentence: string): boolean {
+  const findMatches = (pattern: RegExp): Array<{ start: number; end: number }> => {
+    const globalPattern = new RegExp(pattern.source, `${pattern.flags.replace(/[gy]/g, "")}g`);
+    const matches: Array<{ start: number; end: number }> = [];
+    for (const match of sentence.matchAll(globalPattern)) {
+      if (match.index === undefined) continue;
+      const prefix = sentence.slice(0, match.index);
+      const coordinatedNegation = /(?:^|[\s,;:(])(?:no|not|never|without|zero|doesn't|does\s+not|don't|do\s+not|won't|will\s+not|isn't|is\s+not|aren't|are\s+not)(?:\s+[\w'-]+){0,8}\s*$/i.test(prefix);
+      if (!coordinatedNegation && !isOccurrenceNegated(sentence, match.index, match[0].length)) {
+        matches.push({ start: match.index, end: match.index + match[0].length });
+      }
+    }
+    return matches;
+  };
+  const actionMatches = findMatches(action);
+  const assetMatches = findMatches(asset);
+  const allowedGapWords = new Set([
+    "a", "an", "the", "and", "new", "modern", "scalable", "secure", "reliable",
+    "high-performance", "highly", "technical", "custom", "enterprise", "production", "robust", "innovative",
+  ]);
+  return actionMatches.some((actionMatch) => assetMatches.some((assetMatch) => {
+    if (assetMatch.start < actionMatch.end) return false;
+    const gap = sentence.slice(actionMatch.end, assetMatch.start);
+    const interveningWords = gap.trim()
+      ? gap.trim().split(/\s+/).map((word) => word.replace(/^[^\w-]+|[^\w-]+$/g, "").toLowerCase())
+      : [];
+    return interveningWords.length <= 3 && interveningWords.every((word) => allowedGapWords.has(word));
+  }));
+}
+
+function hasTechnicalArchitectureDutyEvidence(text: string): boolean {
+  const implementationAction = /\b(?:build(?:s|ing|built)?|implement(?:s|ed|ing|ation)?|deploy(?:s|ed|ing|ment)?|integrat(?:e|es|ed|ing)|prototype(?:s|d|ing)?|test(?:s|ed|ing)?|configure(?:s|d|ing)?|code(?:s|d|ing)?|engineer(?:s|ed|ing)?|deliver(?:s|ed|ing)?)\b/i;
+  const implementationAsset = /\b(?:llms?|large language models?|(?:ai|ml|machine learning|foundation) models?|apis?|software systems?|applications?|software code|data platforms?|data pipelines?|cloud systems?|technical solutions?|ai systems?|ml systems?|infrastructure|technical architecture|solution architecture)\b/i;
+  const designAction = /\b(?:design(?:s|ed|ing)?|develop(?:s|ed|ing)?|architect(?:s|ed|ing)?)\b/i;
+  const commercialMessagingPhrases = [
+    /\b(?:go[- ]to[- ]market|market research|customer demand|customer\s+(?:enablement|onboarding|education|success|training)|sales\s+(?:presentations?|messaging)|(?:value\s+propositions?|buyer\s+messaging))\b/i,
+    /\b(?:pitch|sales|marketing|customer|product|solution)\s+(?:materials?|decks?|collateral|content|copy|brochures?|one[- ]pagers?|sell sheets?|battlecards?|whitepapers?)\b/i,
+    /\b(?:customer|client|sales)\s+(?:case\s+studies|success\s+stories|testimonials?)\b/i,
+    /\b(?:faqs?|support articles?|help articles?|customer guides?|user guides?|tutorials?|walkthroughs?|knowledge base articles?)\b/i,
+    /\b(?:roi|return on investment|business case|commercial case)(?:\s+(?:analysis|analyses|assessment|model|models|proposal|proposals))?\b/i,
+    /\b(?:business|operating|commercial|pricing|licensing|subscription|revenue|monetization)\s+models?\b/i,
+    /\bunit[- ]economics\b/i,
+    /\b(?:deliver|provide|conduct|lead|run|teach|train|facilitate)\s+(?:technical\s+)?(?:customer\s+)?(?:training|education|enablement|onboarding)\b/i,
+    /\b(?:deliver|provide|conduct|lead|run|host|facilitate)\s+(?:(?:technical|customer|product|solution)\s+)*(?:llms?\s+)?(?:product\s+)?(?:demos?|demonstrations?|workshops?)\b/i,
+    /\b(?:design|develop|create|write|build)\s+(?:(?:technical|customer|product|solution|sales)\s+)*(?:llms?\s+)?(?:product\s+)?(?:demo(?:nstration)?\s+scripts?|demo(?:nstration)?\s+materials?|presentation\s+(?:materials?|decks?)|sales\s+decks?)\b/i,
+    /\b(?:onboarding|enablement|training|education)\s+(?:materials|content|campaigns?|program(?:me)?s?|curricul(?:um|a)|courses?|coursework|guides?|documentation)\b/i,
+    /\b(?:customer\s+)?adoption\s+(?:program(?:me)?s?|initiatives?|campaigns?|workstreams?|frameworks?|methodologies|blueprints?|architectures?|strategy|plan|roadmap|playbook)\b/i,
+    /\b(?:market|customer adoption|market entry|launch|product|business|commercial)\s+(?:strategy|plan|roadmap|playbook)|\b(?:strategy|plan|roadmap|playbook|positioning)\b/i,
+  ];
+  const handsOnImplementationAction = /\b(?:implement(?:s|ed|ing|ation)?|deploy(?:s|ed|ing|ment)?|integrat(?:e|es|ed|ing)|prototype(?:s|d|ing)?|test(?:s|ed|ing)?|configure(?:s|d|ing)?|code(?:s|d|ing)?|engineer(?:s|ed|ing)?)\b/i;
+  // Broad technical nouns such as "AI systems" are insufficient when paired
+  // with design/develop, which can describe go-to-market or product strategy.
+  const designAsset = /\b(?:llms?|large language models?|(?:ai|ml|machine learning|foundation) models?|api integrations?|software systems?|applications?|software code|data platforms?|data pipelines?|cloud systems?|infrastructure|technical architecture|solution architecture)\b/i;
+  return String(text || "")
+    .split(/(?<=[.!?])\s+|[\n;•]+/)
+    .some((sentence) => {
+      const hasTechnicalHandsOnPair = hasNearbyNonNegatedActionAssetPair(
+        handsOnImplementationAction, implementationAsset, sentence,
+      );
+      const strategyOnly = commercialMessagingPhrases.some((phrase) => hasNonNegatedMatch(phrase, sentence))
+        && !hasTechnicalHandsOnPair;
+      if (strategyOnly) return false;
+      return hasNearbyNonNegatedActionAssetPair(implementationAction, implementationAsset, sentence)
+        || hasNearbyNonNegatedActionAssetPair(designAction, designAsset, sentence);
+    });
+}
+
+function maximumMatchedPercentage(text: string, patterns: RegExp[]): { percentage: number; evidence: string } | null {
+  let result: { percentage: number; evidence: string } | null = null;
+  for (const pattern of patterns) {
+    const globalPattern = new RegExp(pattern.source, `${pattern.flags.replace(/[gy]/g, "")}g`);
+    for (const match of text.matchAll(globalPattern)) {
+      const percentage = Number(match[1]);
+      if (!Number.isFinite(percentage)) continue;
+      if (!result || percentage > result.percentage) {
+        result = { percentage, evidence: match[0] };
+      }
+    }
+  }
+  return result;
+}
+
+function hasTechnicalDataOwnershipEvidence(text: string): boolean {
+  return String(text || "").toLowerCase()
+    .split(/(?<=[.!?])\s+|[\n;•]+/)
+    .some((sentence) => hasNonNegatedMatch(TECHNICAL_OWNERSHIP_ACTION, sentence)
+      && hasNonNegatedMatch(TECHNICAL_DATA_ASSET, sentence));
+}
+
+function hasNonNegatedMatch(pattern: RegExp, text: string): boolean {
+  const globalPattern = new RegExp(pattern.source, `${pattern.flags.replace(/g/g, "")}g`);
+  for (const match of text.matchAll(globalPattern)) {
+    if (match.index === undefined) continue;
+    const prefix = text.slice(0, match.index);
+    const coordinatedNegation = /(?:^|[\s,;:(])(?:no|not|never|without|zero|doesn't|does\s+not|don't|do\s+not|won't|will\s+not|isn't|is\s+not|aren't|are\s+not)(?:\s+[\w'-]+){0,8}\s*$/i.test(prefix);
+    if (!coordinatedNegation && !isOccurrenceNegated(text, match.index, match[0].length)) return true;
+  }
+  return false;
+}
+
 /**
  * Unified Technical Role Recognition (Axis 1)
  */
 export function isTechnicalRole(title: string, description: string): { isTechnical: boolean; hasBuildingEvidence: boolean; reason?: string } {
   const t = (title || "").toLowerCase();
   const d = (description || "").toLowerCase();
+  const dataDomainRole = DATA_DOMAIN_ROLE_TITLE.test(t);
+  const technicalDataOwnership = hasTechnicalDataOwnershipEvidence(description || "");
+  const dataProductLeadershipTitle =
+    /\bdata[-\s]+product\s+(?:owner|lead)\b/i.test(t)
+    || (/\b(?:technical|technology)\s+product\s+(?:owner|lead)\b/i.test(t) && /\bdata\b/i.test(t))
+    || (/\bproduct\s+(?:owner|lead)\b/i.test(t) && /\bdata\b/i.test(t));
+  const isProductLeadershipTitle = /\bproduct\s+(?:manager|owner|lead|director)\b/i.test(t);
+  const productTitleEvidence = isProductLeadershipTitle
+    ? d.replace(/\b(?:ai|ml|genai|machine learning|generative ai)\s+product\s+(?:manager|owner|lead|director)\b/gi, " ")
+    : d;
 
   // Lane-aware technical title families, including technical leadership and delivery roles.
-  const isTechnicalTitle = /\b(engineer|engineering|developer|architect|data scientist|data analyst|analytics engineer|business intelligence|machine learning|applied scientist|research scientist|research associate|research fellow|applied researcher|scientist|quantitative researcher|quant researcher|quant developer|quantitative developer|quantitative engineer|ai researcher|software engineer|data engineer|ml platform|systems engineer|systems analyst|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?|test automation|automation engineer|qa automation|technical consultant|technology consultant|solutions? consultant|ai consultant|data consultant)\b/i.test(t);
-  const hasTechnicalLeadershipTitle = /\b(manager|director|lead|head|officer|vp|vice president)\b/i.test(t) && /\b(engineer(?:ing)?|technology|technical|software|data|analytics?|ai|ml|machine learning|platform|cloud|systems?|digital|transformation|research|scientific|science)\b/i.test(t);
-  const hasTechnicalProgramTitle = /\b(technical|technology|engineering|software|data|ai|ml|digital|transformation)\s+(program|programme|project|product|portfolio|delivery|transformation)\s+(manager|director|lead|head|officer|vp|vice president|owner)\b/i.test(t);
+  const isTechnicalTitle = !isProductLeadershipTitle && /\b(engineer|engineering|developer|architect|data scientist|data analyst|analytics engineer|business intelligence|machine learning|applied scientist|research scientist|research associate|research fellow|applied researcher|scientist|quantitative researcher|quant researcher|quant developer|quantitative developer|quantitative engineer|ai researcher|software engineer|data engineer|ml platform|systems engineer|systems analyst|programmer|statistician|bioinformatician|bioinformatics scientist|bioinformatics|computational biolog(y|ist)|scientific ml|legal ai|regtech|compliance automation|contract analytics|knowledge engineer(ing)?|test automation|automation engineer|qa automation|technical consultant|technology consultant|solutions? consultant|ai consultant|data consultant)\b/i.test(t);
+  const requiresTechnicalDataOwnership = dataDomainRole || dataProductLeadershipTitle;
+  const hasTechnicalLeadershipTitle = !isProductLeadershipTitle && !dataDomainRole
+    && /\b(manager|director|lead|head|officer|vp|vice president)\b/i.test(t)
+    && /\b(engineer(?:ing)?|technology|technical|software|data|analytics?|ai|ml|machine learning|platform|cloud|systems?|digital|transformation|research|scientific|science)\b/i.test(t);
+  const hasTechnicalProgramTitle = !isProductLeadershipTitle && !dataDomainRole
+    && /\b(technical|technology|engineering|software|data|ai|ml|digital|transformation)\s+(program|programme|project|product|portfolio|delivery|transformation)\s+(manager|director|lead|head|officer|vp|vice president|owner)\b/i.test(t);
 
   // Technical building / engineering / data / modeling keywords
   const buildingKeywords = [
@@ -85,7 +215,7 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
     "model training", "fine-tuning", "rag", "agents", "agentic", "llm", "nlp", "prompt engineering",
     "bioinformatics", "genomics", "cheminformatics", "computational biology", "drug discovery",
     "regtech", "legaltech", "compliance automation", "contract analytics", "document intelligence",
-    "knowledge graphs", "time-series", "portfolio analytics", "algorithmic trading", "market microstructure",
+    "time-series", "portfolio analytics", "algorithmic trading", "market microstructure",
     "architecture", "software engineering", "software development", "software delivery", "application development", "technology transformation", "digital transformation", "data transformation", "technical delivery", "engineering delivery", "engineering program", "technical roadmap", "product development", "systems design", "release management", "cloud platform", "platform engineering", "software development lifecycle", "sdlc", "mlops", "ci/cd"
   ];
 
@@ -98,8 +228,13 @@ export function isTechnicalRole(title: string, description: string): { isTechnic
     return text.includes(kw);
   };
 
-  const hasBuildingEvidence = buildingKeywords.some(kw => hasKeyword(t, kw) || hasKeyword(d, kw)) || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(d));
-  const isTechnical = isTechnicalTitle || hasTechnicalLeadershipTitle || hasTechnicalProgramTitle || hasBuildingEvidence;
+  const hasBuildingEvidence = isProductLeadershipTitle
+    ? hasProductTechnicalDutyEvidence(productTitleEvidence)
+    : buildingKeywords.some(kw => hasKeyword(t, kw) || hasKeyword(productTitleEvidence, kw))
+      || TECHNICAL_FUNCTION_KEYWORDS.some(p => p.test(t) || p.test(productTitleEvidence));
+  const isTechnical = requiresTechnicalDataOwnership
+    ? technicalDataOwnership
+    : isTechnicalTitle || hasTechnicalLeadershipTitle || hasTechnicalProgramTitle || hasBuildingEvidence;
 
   return {
     isTechnical,
@@ -251,15 +386,13 @@ export function evaluateWorkability(
       office_days_max: assumedHybrid ? 3 : null,
       attendance_basis: assumedHybrid ? "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE" : "UNKNOWN",
     };
-    switch (effectivePolicy.unknownWorkModeDisposition) {
-      case "PASS":
-        return { workable: true, needsVerify: false, reason: "Workplace model unspecified; accepted by configured policy", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
-      case "NEEDS_VERIFICATION":
-        return { workable: true, needsVerify: true, reason: "Workplace model unspecified; needs manual verification", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
-      case "HARD_REJECT":
-      default:
-        return { workable: false, needsVerify: false, reason: "Workplace model unspecified and remains unknown after evidence review", reasonCode: "GATE_UNKNOWN_WORK_MODE", facts };
-    }
+    return {
+      workable: true,
+      needsVerify: true,
+      reason: "Workplace model is unspecified; employer evidence needs verification",
+      reasonCode: "GATE_UNKNOWN_WORK_MODE",
+      facts,
+    };
   };
 
   // Structured or strongly indicated contract employment is deterministic.
@@ -277,13 +410,7 @@ export function evaluateWorkability(
   const isAssumedHybrid = String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID";
   if (isAssumedHybrid) {
     if (!effectivePolicy.allowedWorkModes.includes("HYBRID")) {
-      return {
-        workable: false,
-        needsVerify: false,
-        reason: "Hybrid is not permitted by the active work-mode preference, and the inferred mode cannot override it",
-        reasonCode: "GATE_UNKNOWN_WORK_MODE",
-        facts: { ...baseFacts, office_days_min: 3, office_days_max: 3, attendance_basis: "OWNER_POLICY_DEFAULT_SG_UNKNOWN_WORK_MODE" },
-      };
+      return unknownWorkModeOutcome(true);
     }
     return unknownWorkModeOutcome(true);
   }
@@ -626,8 +753,6 @@ export function extractDescriptionText(job: RawJob): string {
   return "";
 }
 
-import { isOccurrenceNegated } from "../requirements/clauseAnalysis.js";
-
 /** Find the first matching snippet from the description text for an evidence quote. */
 function findEvidence(d: string, keywords: string[]): string[] {
   const quotes: string[] = [];
@@ -696,7 +821,7 @@ export function applyGlobalGates(
   const loc = (job.location || "").toLowerCase();
   const wp = (job.workplace_type || "").toUpperCase();
   const emp = (job.employment_type || "").toUpperCase();
-  let pendingVerification: { reason: string; facts?: Partial<GateResult["workability_facts"]> } | null = null;
+  let pendingVerification: { reason: string; reasonCode?: string; facts?: Partial<GateResult["workability_facts"]> } | null = null;
 
   // ── 0. Global Title Exclusions ──
   for (const pattern of GLOBAL_TITLE_EXCLUSIONS) {
@@ -723,19 +848,24 @@ export function applyGlobalGates(
   // ── 0a. Workability Check (location / workplace / employment type) ──
   const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d, job.employment_type || "", effectivePolicy, answerContext);
   if (!workability.workable) {
-    if (workability.reasonCode === "GATE_CONTRACT_ROLE") {
-      return makeReject(["GATE_CONTRACT_ROLE"], [workability.reason || "Contract role is not eligible"], workability.facts);
-    }
-    if (workability.reasonCode === "GATE_LOCATION_RESTRICTED") {
-      return makeReject(["GATE_LOCATION_RESTRICTED"], [workability.reason || "Geographic restriction detected"], workability.facts);
-    }
-    if (workability.reasonCode === "WORK_AUTHORIZATION_INCOMPATIBLE") {
-      return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [workability.reason || "Explicit work-authorization restriction detected"], workability.facts);
-    }
     if (workability.reasonCode === "GATE_UNKNOWN_WORK_MODE") {
-      return makeReject(["GATE_UNKNOWN_WORK_MODE"], [workability.reason || "Workplace model is unspecified"], workability.facts);
+      pendingVerification = {
+        reason: workability.reason || "Workplace model is unspecified; needs manual verification",
+        reasonCode: workability.reasonCode,
+        facts: workability.facts,
+      };
+    } else {
+      if (workability.reasonCode === "GATE_CONTRACT_ROLE") {
+        return makeReject(["GATE_CONTRACT_ROLE"], [workability.reason || "Contract role is not eligible"], workability.facts);
+      }
+      if (workability.reasonCode === "GATE_LOCATION_RESTRICTED") {
+        return makeReject(["GATE_LOCATION_RESTRICTED"], [workability.reason || "Geographic restriction detected"], workability.facts);
+      }
+      if (workability.reasonCode === "WORK_AUTHORIZATION_INCOMPATIBLE") {
+        return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [workability.reason || "Explicit work-authorization restriction detected"], workability.facts);
+      }
+      return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], [workability.reason || "Unworkable location/workplace model"], workability.facts);
     }
-    return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], [workability.reason || "Unworkable location/workplace model"], workability.facts);
   }
 
   // ── 0c. Unified Technical Function Check (Axis 1) ──
@@ -747,6 +877,7 @@ export function applyGlobalGates(
   if (workability.needsVerify) {
     pendingVerification = {
       reason: workability.reason || "Workplace model unspecified; needs manual verification",
+      reasonCode: workability.reasonCode,
       facts: workability.facts,
     };
   }
@@ -760,10 +891,13 @@ export function applyGlobalGates(
   const buildingPct = buildingPctBefore ? Number(buildingPctBefore[1]) : (buildingPctAfter ? Number(buildingPctAfter[1]) : null);
   const buildingSnippet = buildingPctBefore?.[0] ?? buildingPctAfter?.[0] ?? null;
 
-  const interactionPctBefore = d.match(/(\d+(?:\.\d+)?)\s*%\s*(?:of\s+)?(?:time\s+)?(?:spent\s+on\s+)?(?:in\s+)?(?:interaction|stakeholder|client-facing|client facing)/i);
-  const interactionPctAfter = d.match(/(?:interaction|stakeholder|client-facing|client facing)\s*(?:is|:|accounts\s+for|\()\s*(\d+(?:\.\d+)?)\s*%/i);
-  const interactionPct = interactionPctBefore ? Number(interactionPctBefore[1]) : (interactionPctAfter ? Number(interactionPctAfter[1]) : null);
-  const interactionSnippet = interactionPctBefore?.[0] ?? interactionPctAfter?.[0] ?? null;
+  const interactionShare = maximumMatchedPercentage(d, [
+    /(\d+(?:\.\d+)?)\s*%\s*(?:of\s+)?(?:time\s+)?(?:spent\s+on\s+)?(?:in\s+)?(?:customer\s+interaction|interaction|stakeholder|client-facing|client facing|customer-facing|customer facing)/i,
+    /(\d+(?:\.\d+)?)\s*%\s+of\s+(?:the\s+)?(?:role|time)\s+(?:is\s+)?(?:spent\s+)?(?:customer-facing|customer facing|client-facing|client facing)/i,
+    /(?:customer\s+interaction|interaction|stakeholder|client-facing|client facing|customer-facing|customer facing)(?:\s+work)?\s*(?:is|:|accounts\s+for|\()\s*(\d+(?:\.\d+)?)\s*%/i,
+  ]);
+  const interactionPct = interactionShare?.percentage ?? null;
+  const interactionSnippet = interactionShare?.evidence ?? null;
 
   const isBuildingFailed = buildingPct !== null && buildingPct < effectivePolicy.minimumBuildingResearchPct;
   const isInteractionFailed = interactionPct !== null && interactionPct > effectivePolicy.maximumInteractionPct;
@@ -1001,10 +1135,23 @@ export function applyGlobalGates(
 
   // ── 6. Sales / Client-facing ──
   const highInteractionKw = ["sales engineering", "presales", "pre-sales", "client relationship management", "manage large teams", "escalations manager"];
+  const targetTechnicalClientRole = isTechnicalRole(job.title || "", d).isTechnical
+    && /\barchitect\b/i.test(t)
+    && /\b(?:ai|ml|genai|machine learning|data|bioinformatics|genomics|regtech|legaltech|quant|fintech|trading|market data|software|cloud|technology)\b/i.test(`${t}\n${d}`)
+    && hasTechnicalArchitectureDutyEvidence(d);
   for (const kw of highInteractionKw) {
     if (d.includes(kw) && !effectivePolicy.externalClientPrimaryAllowed) {
       const evidence = findNonNegatedEvidence(d, [kw]);
       if (evidence.length === 0) continue;
+      if (targetTechnicalClientRole && interactionPct !== null && interactionPct <= effectivePolicy.maximumInteractionPct) {
+        continue;
+      }
+      if (targetTechnicalClientRole && interactionPct === null) {
+        // Owner-reviewed exception: substantive AI/data architects may advance
+        // when a posting omits an interaction percentage. An explicit share over
+        // the configured cap is still rejected by the earlier ratio gate.
+        continue;
+      }
       return makeReject(["GATE_HIGH_INTERACTION"], evidence);
     }
   }
@@ -1030,41 +1177,21 @@ export function applyGlobalGates(
     return makeReject(["GATE_OUT_OF_SCOPE_DOMAIN"], [titleMatch ? `FDE title: "${titleMatch[0]}"` : `FDE role identity detected in description for "${job.title}"`]);
   }
 
-  // ── 9. Consulting firms ──
-  const consultingFirms = ["accenture", "kpmg", "bcg", "mckinsey", "bain", "deloitte", "pwc", "ernst & young", "pricewaterhousecoopers", "boston consulting group"];
-  for (const firm of consultingFirms) {
-    if (c.includes(firm)) {
-      return makeReject(["GATE_CONSULTING_FIRM"], [`Company name: "${firm}"`]);
-    }
-  }
-  if (c === "ey" || c === "ey pte ltd" || c.startsWith("ey ") || c.endsWith(" ey") || c.includes(" ey ")) {
-    return makeReject(["GATE_CONSULTING_FIRM"], [`Company name matches EY`]);
-  }
+  // Employer category alone is not a career conflict. Generic advisory roles
+  // remain excluded by isConsultancyRole; technical target roles are judged by
+  // their function, domain, and explicit workability evidence.
 
-  // ── 10. IT Outsourcing ──
+  // ── 9. IT Outsourcing ──
   const outsourcingKw = ["deployed to client", "work for our clients", "hired resource"];
   if (c.includes("red hat") || outsourcingKw.some(k => d.includes(k))) {
     const found = c.includes("red hat") ? [`Company: "red hat"`] : findEvidence(d, outsourcingKw.filter(k => d.includes(k)));
     return makeReject(["GATE_OUTSOURCING"], found);
   }
 
-  // ── 11. Contract / Agency ──
-  const contractKw = ["contract", "contractor", "temp", "temporary", "freelance"];
-  const agencyKw = ["recruitment", "recruiting", "staffing", "talent acquisition", "hays", "randstad", "pagegroup", "michael page", "adecco", "charterhouse", "huxley", "robert half", "robert walters", "kelly services", "monroe consulting", "recruit"];
-  const isAgency = agencyKw.some(kw => c.includes(kw)) || d.includes("on behalf of our client") || d.includes("our client is looking for") || d.includes("hiring for our client");
-  if (isAgency) {
-    const isContract = contractKw.some(kw => t.includes(kw) || d.includes(kw)) || d.includes("renewable");
-    if (isContract) {
-      return makeReject(["GATE_CONTRACT_ROLE"], [`Agency posting with contract terms`]);
-    }
-  }
-  for (const kw of contractKw) {
-    if (t.includes(kw) && !t.includes("permanent contract") && !d.includes("permanent contract")) {
-      return makeReject(["GATE_CONTRACT_ROLE"], [`Title contains: "${kw}"`]);
-    }
-  }
+  // Contract status is governed by the workability policy. A title or recruiter
+  // mention alone is not a career rejection.
 
-  // ── 12. Heavy management / Kitchen-sink ──
+  // ── 11. Heavy management / Kitchen-sink ──
   const mgmtKw = ["manage large teams", "manage client teams", "manage client expectations", "client relationship management"];
   for (const kw of mgmtKw) {
     if (d.includes(kw) && !effectivePolicy.peopleManagementPrimaryAllowed) {
@@ -1111,17 +1238,21 @@ export function applyGlobalGates(
     "cheminformatics", "genomics", "drug discovery", "clinical trial", "regtech",
     "legaltech", "fraud detection", "kyc", "aml", "compliance automation",
     "contract analytics", "digital trust", "deep learning", "agentic", "market data",
+    "data governance", "reference data", "master data", "knowledge graph", "knowledge graphs", "ontology", "ontologies", "data product", "data contract", "data model", "data quality", "data lineage", "data controls", "metadata", "transaction platform",
     "trading infrastructure", "software development", "software platform", "data science", "data analytics", "business intelligence", "data platform", "data architecture", "technology transformation", "digital transformation", "data transformation", "technical program", "technical project",
     "cloud", "cloud infrastructure", "cloud architecture", "solutions architect", "enterprise architect", "cloud architect", "microservices", "software architecture", "technical delivery", "techno-functional", "devops", "platform engineering", "engineering delivery", "systems architecture", "hands-on architecture", "technical discovery", "hands-on engineering",
     "technical transformation", "engineering transformation", "devops modernization", "cloud migration", "technical deployment", "technical client deployment", "systems engineering", "systems engineer", "data engineer", "data scientist", "data platform", "lakehouse", "ai engineer", "ml engineer", "machine learning engineer", "high-throughput", "core infrastructure"
   ];
   const hasDomainRelevance = aiDataShortRegex.test(t) || aiDataShortRegex.test(d) ||
-    targetDomainPhrases.some(kw => t.includes(kw) || d.includes(kw));
+    targetDomainPhrases.some(kw => t.includes(kw) || d.includes(kw)) ||
+    (/\bproduct\s+(?:manager|owner|lead|director)\b/i.test(t)
+      && hasProductTechnicalDutyEvidence(d)
+      && /\b(?:ai|ml|genai|machine learning|generative ai|llm|large language model|data|analytics?)\b/i.test(`${t}\n${d}`));
 
   if (!hasDomainRelevance) {
     if (pendingVerification) {
       return makeVerification(
-        ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+        getPendingVerificationCodes(pendingVerification.reasonCode),
         [pendingVerification.reason],
         pendingVerification.facts
       );
@@ -1132,13 +1263,19 @@ export function applyGlobalGates(
   // ── All deterministic gates passed ──
   if (pendingVerification) {
     return makeVerification(
-      ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"],
+      getPendingVerificationCodes(pendingVerification.reasonCode),
       [pendingVerification.reason],
       pendingVerification.facts
     );
   }
 
   return makePass(workability.facts);
+}
+
+function getPendingVerificationCodes(reasonCode?: string): string[] {
+  if (reasonCode === "GATE_UNKNOWN_WORK_MODE") return ["GATE_UNKNOWN_WORK_MODE", "NEEDS_VERIFICATION"];
+  if (reasonCode === "GATE_HIGH_INTERACTION") return ["GATE_HIGH_INTERACTION", "NEEDS_VERIFICATION"];
+  return ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"];
 }
 
 export const MULTI_LANE_SCORECARDS = {

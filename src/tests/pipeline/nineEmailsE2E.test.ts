@@ -59,7 +59,7 @@ type FixtureLane =
   | "UNCLASSIFIED";
 type FixtureAction = "PRIORITY_APPLY" | "APPLY_AFTER_VERIFICATION" | "HARD_REJECT";
 type RecommendationOutcome = "PRIORITY" | "REVIEW" | "TRACK" | "SKIP";
-type LifecycleStatus = "QUEUED_FOR_AI" | "MATCHED" | "HARD_REJECTED";
+type LifecycleStatus = "QUEUED_FOR_AI" | "MATCHED" | "NEEDS_VERIFICATION" | "HARD_REJECTED";
 
 interface NineEmailFixture {
   readonly id: string;
@@ -478,12 +478,12 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(Number(conservation.rows[0].canonical_count)).toBe(8);
   });
 
-  it("Stage 2 — hard gates produce 3 HARD_REJECTED, 0 NEEDS_VERIFICATION, 5 PREQUALIFIED", async () => {
+  it("Stage 2 — hard gates preserve one unknown work mode for verification", async () => {
     const { runHardGates } = await import("../../pipeline/hardGate.js");
     const result = await runHardGates(getClient(), { context: getContext() });
 
-    expect(result.hardRejected).toBe(3);
-    expect(result.needsVerification).toBe(0);
+    expect(result.hardRejected).toBe(2);
+    expect(result.needsVerification).toBe(1);
     expect(result.passed).toBe(5);
 
     const gated = await countWhere(
@@ -523,8 +523,8 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     const embeddings = await runEmbeddingBatchWithFallback(200, getClient(), { context: getContext() });
 
-    // The fixture includes five PREQUALIFIED jobs; all three unknown or
-    // unworkable workplace cases are HARD_REJECTED before this stage.
+    // Five jobs are PREQUALIFIED and one with an unknown work mode remains in
+    // verification while still receiving deterministic requirements.
     const requirementTargetCount = await countWhere(
       "canonical_jobs",
       `COALESCE(processing_state, processing_status) IN (
@@ -534,7 +534,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
        )`
     );
 
-    expect(requirementTargetCount).toBe(5);
+    expect(requirementTargetCount).toBe(6);
     expect(requirements.errors).toBe(0);
     expect(requirements.processed).toBe(requirementTargetCount);
     expect(requirements.deterministicInserted).toBeGreaterThan(0);
@@ -723,7 +723,11 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       expect(row.processing_state).toBe(fixture.expected_status);
       expect(row.processing_status).toBe(fixture.expected_status);
       expect(row.recommendation_eligibility).toBe(
-        fixture.expected_gate === "HARD_REJECT" ? "INELIGIBLE" : "ELIGIBLE"
+        fixture.expected_gate === "HARD_REJECT"
+          ? "INELIGIBLE"
+          : fixture.expected_gate === "NEEDS_VERIFICATION"
+            ? "VERIFY"
+            : "ELIGIBLE"
       );
       expect(row.version_count).toBe(fixture.expected_version);
 

@@ -177,12 +177,13 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
         policy
       );
 
-      expect(workability.workable).toBe(false);
+      expect(workability.workable).toBe(true);
+      expect(workability.needsVerify).toBe(true);
       expect(workability.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
       expect(workability.facts?.workplace_type).toBeUndefined();
     });
 
-    it("rejects foreign roles when work mode is unknown", () => {
+    it("keeps work mode unresolved for foreign roles when evidence is missing", () => {
       const workability = evaluateWorkability(
         "Unknown",
         "UNKNOWN",
@@ -191,7 +192,8 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
         policy
       );
 
-      expect(workability.workable).toBe(false);
+      expect(workability.workable).toBe(true);
+      expect(workability.needsVerify).toBe(true);
       expect(workability.reasonCode).toBe("GATE_UNKNOWN_WORK_MODE");
     });
 

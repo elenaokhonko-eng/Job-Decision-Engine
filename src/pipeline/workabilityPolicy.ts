@@ -68,10 +68,8 @@ export interface VerificationAnswerContextIdentity {
 }
 
 const defaults: WorkabilityPolicy = {
-  // Funnel V3 treats an unestablished workplace model as a deterministic
-  // conflict. It must not be held for manual verification or inferred as
-  // onsite from a non-empty location label.
-  unknownWorkModeDisposition: "HARD_REJECT",
+  // Missing employer evidence remains unresolved; it is not a deterministic conflict.
+  unknownWorkModeDisposition: "NEEDS_VERIFICATION",
   allowedWorkModes: ["REMOTE", "HYBRID"],
   onsiteOnlyAllowed: false,
   maxOfficeDaysPerWeek: 3,
@@ -83,9 +81,9 @@ const defaults: WorkabilityPolicy = {
   unknownWorkAuthorizationNeedsVerification: false,
   maxTravelPct: 20,
   minimalTravelAllowed: true,
-  contractAllowed: false,
+  contractAllowed: true,
   minimumBuildingResearchPct: 60,
-  maximumInteractionPct: 40,
+  maximumInteractionPct: 60,
   preferredBuildingResearchPct: 85,
   preferredInteractionPct: 15,
   regularOnCallAllowed: false,
@@ -667,12 +665,10 @@ function normalizeHardFailDays(maxOfficeDays: number, hardFailDays: number): num
   return Math.min(5, Math.max(maxOfficeDays + 1, hardFailDays));
 }
 
-function normalizeUnknownWorkModeDisposition(value: unknown): WorkabilityPolicy["unknownWorkModeDisposition"] {
-  const normalized = String(value ?? "").trim().toUpperCase().replace(/[\s-]+/g, "_");
-  if (normalized === "PASS" || normalized === "HARD_REJECT" || normalized === "NEEDS_VERIFICATION") {
-    return normalized;
-  }
-  return defaults.unknownWorkModeDisposition;
+function normalizeUnknownWorkModeDisposition(_value: unknown): WorkabilityPolicy["unknownWorkModeDisposition"] {
+  // Read legacy settings for compatibility, but never allow UNKNOWN to be
+  // configured as a pass or a career rejection.
+  return "NEEDS_VERIFICATION";
 }
 
 export function loadWorkabilityPolicy(): WorkabilityPolicy {
