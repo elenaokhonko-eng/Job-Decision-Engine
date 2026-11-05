@@ -1225,9 +1225,37 @@ describe("stageTaskWorker", () => {
     );
     expect(routeSeed?.sql).toContain("$2::boolean");
     expect(routeSeed?.sql).toContain("COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'");
+    expect(routeSeed?.sql).toContain("c.gate_decision = 'NEEDS_VERIFICATION'");
+    expect(routeSeed?.sql).toContain("NEEDS_VERIFICATION_TRAVEL");
+    expect(routeSeed?.sql).not.toContain("NEEDS_VERIFICATION_WORK_AUTHORIZATION");
     expect(routeSeed?.params?.[1]).toBe(true);
     expect(routeSeed?.params?.[2]).toBe("lanes_2.2.0");
     expect(routeSeed?.params?.[3]).toBe(103);
+  });
+
+  it("seeds embeddings for previously gated workability-verification jobs", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [], rowCount: 0 };
+    });
+
+    await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["PUBLISH_EMBEDDING"],
+      maxSeedPerType: 1,
+    });
+
+    const verificationSeed = calls.find((call) =>
+      call.sql.includes("COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'") &&
+      call.sql.includes("FROM embedding_inputs ei") &&
+      call.sql.includes("NOT EXISTS") &&
+      call.sql.includes("c.gate_decision = 'NEEDS_VERIFICATION'")
+    );
+    expect(verificationSeed).toBeDefined();
+    expect(verificationSeed?.sql).toContain("GATE_UNKNOWN_WORK_MODE");
+    expect(verificationSeed?.sql).toContain("NEEDS_VERIFICATION_TRAVEL");
+    expect(verificationSeed?.sql).not.toContain("NEEDS_VERIFICATION_WORK_AUTHORIZATION");
   });
 
   it("resolves advisory policy rechecks only after a deterministic hard-gate rerun completes", async () => {
@@ -1417,6 +1445,92 @@ describe("stageTaskWorker", () => {
       verificationAnswerRevisionId: "answer-revision-1",
       verificationJobVersionId: "version-1",
     });
+  });
+
+  it("sends a workability verification gate through embeddings and routing", async () => {
+    const insertedTaskTypes: string[] = [];
+    const states = [
+      {
+        canonical_job_id: "job-unknown-mode",
+        processing_state: "RAW_STAGED",
+        gate_decision: null,
+        gate_rejection_reason: null,
+        latest_job_version_id: "version-unknown-mode",
+      },
+      {
+        canonical_job_id: "job-unknown-mode",
+        processing_state: "NEEDS_VERIFICATION",
+        gate_decision: "NEEDS_VERIFICATION",
+        gate_rejection_reason: "GATE_UNKNOWN_WORK_MODE",
+        latest_job_version_id: "version-unknown-mode",
+      },
+      {
+        canonical_job_id: "job-unknown-mode",
+        processing_state: "NEEDS_VERIFICATION",
+        gate_decision: "NEEDS_VERIFICATION",
+        gate_rejection_reason: "GATE_UNKNOWN_WORK_MODE",
+        latest_job_version_id: "version-unknown-mode",
+      },
+    ];
+    const task = {
+      id: "task-unknown-mode-gate",
+      workspace_id: ctx.workspaceId,
+      task_type: "APPLY_HARD_GATES",
+      task_key: "APPLY_HARD_GATES:version-unknown-mode:hard_gate_v1",
+      payload: { canonical_job_id: "job-unknown-mode", job_version_id: "version-unknown-mode" },
+      status: "RUNNING",
+      available_at: new Date().toISOString(),
+      lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+      heartbeat_at: new Date().toISOString(),
+      claimed_by: "worker:test",
+      attempt_count: 1,
+      max_attempts: 8,
+      last_error: null,
+      dead_letter_reason: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      completed_at: null,
+    };
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) return { rows: [task], rowCount: 1 };
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return { rows: [states.shift()], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        insertedTaskTypes.push(String(params?.[1]));
+        return { rows: [{ id: "task-embedding-successor" }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts") ||
+          sql.includes("UPDATE pipeline_task_attempts") ||
+          sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: task.id }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["APPLY_HARD_GATES"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps,
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(deps.runHardGates).toHaveBeenCalled();
+    expect(insertedTaskTypes).toContain("PUBLISH_EMBEDDING");
+    expect(insertedTaskTypes).not.toContain("DECIDE_RECOMMENDATION");
   });
 
   it("does not attach an answer revision to a repair/replay gate task", async () => {

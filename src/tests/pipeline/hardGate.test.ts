@@ -128,7 +128,9 @@ describe('Pipeline Stage: Hard Gates', () => {
 
     const insertCall = (mPool.query as any).mock.calls[7];
     expect(insertCall[0]).toContain('pipeline_run_id');
+    expect(insertCall[0]).toContain('workability_policy_hash');
     expect(insertCall[1][3]).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(insertCall[1][5]).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it('gates via applyGlobalGates when no persisted requirements exist', async () => {
