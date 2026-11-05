@@ -656,7 +656,8 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
   const isExplicitOpen = /^(open|active|published|live)$/.test(explicitStatus)
     || firstValue(records, ["isOpen", "active"]) === true;
   const completePostingRetrieved = quality.status === "COMPLETE"
-    && ((input.fetchedPostingLineage !== undefined
+    && (directAts
+      || (input.fetchedPostingLineage !== undefined
       && isFetchedPostingReceiptBoundToObservation(input.availabilityReceiptPayload ?? input.rawPayload, input.fetchedPostingLineage))
       || sourceHostIsAllowed(input.sourceUrl, input.fullPostingHosts));
   const availabilityStatus = isClosed
