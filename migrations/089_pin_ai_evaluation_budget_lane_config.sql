@@ -1,4 +1,4 @@
--- Migration 086: pin the lane registry snapshot used by each AI budget run.
+-- Migration 089: pin the lane registry snapshot used by each AI budget run.
 --
 -- A worker invocation shares one budget-run identity across its explanation
 -- tasks. Persisting the exact lane source, aggregate version, hash, and per-lane
