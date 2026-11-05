@@ -489,9 +489,14 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
     const routedDbOnlyRevision = await database.query<{ lane_revision_id: string }>(
       `SELECT revision.value->>'lane_revision_id' AS lane_revision_id
        FROM lane_decisions ld
+       JOIN canonical_jobs c
+         ON c.workspace_id = ld.workspace_id
+        AND c.id = ld.canonical_job_id
+        AND c.latest_lane_decision_id = ld.id
        CROSS JOIN LATERAL jsonb_array_elements(ld.lane_snapshot->'active_lane_revisions') revision(value)
        WHERE ld.workspace_id = $1
          AND ld.decision_json->>'primary_lane' = 'DB_ONLY_BUDGET_TEST'
+         AND revision.value->>'lane_key' = 'DB_ONLY_BUDGET_TEST'
        ORDER BY ld.created_at ASC
        LIMIT 1`,
       [workspace.workspaceId]
