@@ -499,7 +499,7 @@ export interface ControlledDocumentOptions {
 }
 
 export const MAX_CV_STATEMENT_WORDS = 30;
-const MIN_CV_CLAUSE_WORDS = 12;
+const MIN_CV_CLAUSE_WORDS = 8;
 
 function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
@@ -507,9 +507,10 @@ function wordCount(text: string): number {
 
 /**
  * A fact as a CV bullet: the candidate's own short form when the profile has one, otherwise the
- * statement's first sentence without parenthetical asides, cut back to its last clause boundary
- * when still longer than MAX_CV_STATEMENT_WORDS. Never invents words: every bullet is a prefix
- * of the statement's own text, less asides.
+ * statement's first sentence without parenthetical asides, cut back to its last colon, semicolon or
+ * dash when still longer than MAX_CV_STATEMENT_WORDS. A comma is not a safe cut ("moving a highly
+ * manual."), so without one of those the whole first sentence stays. Never invents words: every
+ * bullet is a prefix of the statement's own text, less asides.
  */
 export function cvStatement(item: ManualEvidence): string {
   const own = item.cv_statement?.trim();
@@ -520,7 +521,8 @@ export function cvStatement(item: ManualEvidence): string {
   if (wordCount(firstSentence) <= MAX_CV_STATEMENT_WORDS) return firstSentence;
   const words = firstSentence.split(" ");
   for (let end = MAX_CV_STATEMENT_WORDS; end >= MIN_CV_CLAUSE_WORDS; end--) {
-    if (/[,;:]$/.test(words[end - 1])) return `${words.slice(0, end).join(" ").replace(/[,;:]$/, "")}.`;
+    if (/[;:]$/.test(words[end - 1])) return `${words.slice(0, end).join(" ").replace(/[;:]$/, "")}.`;
+    if (/^[–—]$/.test(words[end] ?? "")) return `${words.slice(0, end).join(" ")}.`;
   }
   return firstSentence;
 }

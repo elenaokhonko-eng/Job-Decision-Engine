@@ -188,6 +188,11 @@ describe("CV shape", () => {
     expect(cvStatement({ ...longFact, cv_statement: "Built the LLM and RAG layer that turns uploaded evidence into dispute claim packs." }))
       .toBe("Built the LLM and RAG layer that turns uploaded evidence into dispute claim packs.");
     expect(cvStatement(api)).toBe(api.statement);
+    // Cut at a colon, never at a comma that would leave "moving a highly manual."
+    expect(cvStatement(fact("f-eval", "Built the evaluation and safety controls for AI-generated guidance: contract tests against each forum's procedural requirements, readiness checks before release, data-quality gates on ingestion, and CI release gates covering type checks and migrations.")))
+      .toBe("Built the evaluation and safety controls for AI-generated guidance.");
+    const noSafeCut = fact("f-pine", "Took a derivatives and collateral programme that had been failing for 2 to 3 years to group sign-off in under 6 months, moving a highly manual, Excel-based process onto a vendor platform with requirements and design confirmed with the vendor team.");
+    expect(cvStatement(noSafeCut)).toBe(noSafeCut.statement);
   });
 
   const comparisonWith = (evidence: ManualEvidence[], rows: Array<Record<string, unknown>> = []) => ({
