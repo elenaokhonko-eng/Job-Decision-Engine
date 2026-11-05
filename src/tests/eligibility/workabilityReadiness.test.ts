@@ -16,6 +16,8 @@ const policy: WorkabilityPolicy = {
   maxTravelPct: 20,
   minimalTravelAllowed: true,
   contractAllowed: false,
+  rejectAgencyContractPlacements: true,
+  employmentAgencyCompanyNames: ["randstad"],
   minimumBuildingResearchPct: 60,
   maximumInteractionPct: 40,
   regularOnCallAllowed: false,

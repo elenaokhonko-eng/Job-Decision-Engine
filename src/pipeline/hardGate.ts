@@ -317,33 +317,19 @@ export function applyPersistedRequirementGates(
     (r) => r.requirement_type === "DOMAIN"
   );
 
-  const hasSemanticSignals = functionRequirements.length > 0 || domainRequirements.length > 0;
   const semanticCorpus = [...functionRequirements, ...domainRequirements]
     .map((r) => quoteOrText(r).toLowerCase())
     .concat(job.description ? [job.description.toLowerCase()] : [])
     .join(" \n");
 
-  let hasTechnicalEvidence = false;
-  if (hasSemanticSignals) {
-    hasTechnicalEvidence = /(engineer|architect|developer|scientist|machine learning|artificial intelligence|ai\b|llm|nlp|data|bioinformatics|genomics|regtech|legaltech|quant|fintech|trading)/i.test(
-      semanticCorpus
-    );
-  } else {
-    const textCorpus = deterministicRequirements
-      .map((r) => quoteOrText(r).toLowerCase())
-      .concat(job.description ? [job.description.toLowerCase()] : [])
-      .join(" \n");
-    const techCheck = isTechnicalRole(title, textCorpus);
-    hasTechnicalEvidence = techCheck.isTechnical;
-  }
+  const techCheck = isTechnicalRole(title, semanticCorpus);
+  const hasTechnicalEvidence = techCheck.isTechnical;
 
   if (!hasTechnicalEvidence) {
     return makeReject(
       ["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"],
       [
-        hasSemanticSignals
-          ? "Persisted FUNCTION/DOMAIN requirements indicate non-technical scope"
-          : "Axis 1 Failed: Role lacks evidence of technical function",
+        "Axis 1 Failed: Role lacks evidence of technical function",
       ]
     );
   }
@@ -392,14 +378,6 @@ export function applyPersistedRequirementGates(
     : /\b(permanent|full[-_ ]?time|fte)\b/i.test(normalizedEmployment)
       ? "PERMANENT" as const
       : "UNKNOWN" as const;
-  if (employmentType === "CONTRACT" && !effectivePolicy.contractAllowed) {
-    return makeReject(
-      ["GATE_CONTRACT_ROLE"],
-      [employmentReq ? quoteOrText(employmentReq) : "Structured employment_type is CONTRACT"],
-      { employment_type: "CONTRACT" }
-    );
-  }
-
   const officeRequirements = deterministicRequirements.filter((r) => r.requirement_type === "OFFICE_DAYS");
   const officeReq = officeRequirements[0];
   for (const requirement of officeRequirements) {
@@ -1055,6 +1033,7 @@ export async function runHardGates(
           job_version_id: job.job_version_id,
           pipeline_run_id: pipelineRunId,
           gate_version: GATE_VERSION,
+          workability_policy_hash: policyResolution.policyHash,
           status: gateResult.status,
           rejection_codes: gateResult.rejection_codes,
           evidence_quotes: gateResult.evidence_quotes,
@@ -1066,16 +1045,17 @@ export async function runHardGates(
         await client.query(
           `INSERT INTO gate_decisions (
              workspace_id,
-             canonical_job_id, job_version_id, pipeline_run_id, gate_version,
+             canonical_job_id, job_version_id, pipeline_run_id, gate_version, workability_policy_hash,
              decision, rejection_codes, evidence_quotes, workability_facts,
              preference_user_id, preference_context_id
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
           [
             ctx.workspaceId,
             persistedGateDecision.canonical_job_id,
             persistedGateDecision.job_version_id,
             persistedGateDecision.pipeline_run_id,
             persistedGateDecision.gate_version,
+            persistedGateDecision.workability_policy_hash,
             persistedGateDecision.status,
             JSON.stringify(persistedGateDecision.rejection_codes),
             JSON.stringify(persistedGateDecision.evidence_quotes),

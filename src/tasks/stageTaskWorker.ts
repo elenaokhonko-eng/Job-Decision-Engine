@@ -17,6 +17,7 @@ import { runRecommendationDecider as defaultRunRecommendationDecider } from "../
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
 import { classifyDescriptionQuality, completeRetrievedPostingPredicate, sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { applicationReadinessViewAvailable } from "../services/currentApplicationReadiness.js";
+import { isRoutableWorkabilityVerification, routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
 import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
 import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
@@ -57,6 +58,7 @@ export const PIPELINE_STAGE_TASK_TYPES = [
 ] as const;
 
 const SEMANTIC_MATCH_REPAIR_GENERATION = "semantic_match_repair_v2";
+const ROUTABLE_VERIFICATION_SQL = routableWorkabilityVerificationSql("c");
 
 export type PipelineStageTaskType = (typeof PIPELINE_STAGE_TASK_TYPES)[number];
 
@@ -854,6 +856,7 @@ export async function seedRecoverablePipelineTasks(
        WHERE c.workspace_id = $1
           AND (
             COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+            OR ${ROUTABLE_VERIFICATION_SQL}
             OR (
               COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
               AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'
@@ -926,6 +929,7 @@ export async function seedRecoverablePipelineTasks(
        WHERE c.workspace_id = $1
          AND (
            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+           OR ${ROUTABLE_VERIFICATION_SQL}
            OR (
             $2::boolean
              AND (
@@ -1331,6 +1335,7 @@ async function lookupJobState(
   recommendationEligibility: string | null;
   recommendationOutcome: string | null;
   gateDecision: string | null;
+  gateRejectionCodes: string[];
   latestJobVersionId: string | null;
 }> {
   const { rows } = await (clientOrPool as QueryClient).query<{
@@ -1341,6 +1346,7 @@ async function lookupJobState(
     routing_disposition: string | null;
     profile_match_status: string | null;
     gate_decision: string | null;
+    gate_rejection_reason: string | null;
     recommendation_eligibility: string | null;
     recommendation_outcome: string | null;
     latest_job_version_id: string | null;
@@ -1352,6 +1358,7 @@ async function lookupJobState(
             c.routing_disposition,
             c.profile_match_status,
             c.gate_decision,
+            c.rejection_reason AS gate_rejection_reason,
             c.recommendation_eligibility,
             c.recommendation_outcome,
             c.latest_job_version_id
@@ -1373,6 +1380,9 @@ async function lookupJobState(
     routingDisposition: row?.routing_disposition ?? null,
     profileMatchStatus: row?.profile_match_status ?? null,
     gateDecision: row?.gate_decision ?? null,
+    gateRejectionCodes: typeof row?.gate_rejection_reason === "string"
+      ? row.gate_rejection_reason.split(",").map((code) => code.trim()).filter(Boolean)
+      : [],
     recommendationEligibility: row?.recommendation_eligibility ?? null,
     recommendationOutcome: row?.recommendation_outcome ?? null,
     latestJobVersionId: row?.latest_job_version_id ?? null,
@@ -2072,7 +2082,10 @@ async function maybeEnqueueAfterTask(
   };
 
   if (taskType === "APPLY_HARD_GATES") {
-    if (state.processingState === "PREQUALIFIED") {
+    if (
+      state.processingState === "PREQUALIFIED" ||
+      isRoutableWorkabilityVerification(state.gateDecision, state.gateRejectionCodes)
+    ) {
       // Quoted requirements are advisory enrichment and must be explicitly
       // drained after the mandatory pipeline. Publish deterministic
       // requirement embeddings immediately so quote-provider latency/failure
