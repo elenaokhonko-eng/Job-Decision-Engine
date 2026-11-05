@@ -25,6 +25,9 @@
         "include_gap_note": {
           "type": "boolean"
         },
+        "include_match_section": {
+          "type": "boolean"
+        },
         "reuse_cover_letter_from": {
           "$ref": "#/definitions/ManualGenerateRequest/properties/approval_id"
         }

@@ -207,6 +207,43 @@ def test_review_corrections_are_sent_with_the_approval_and_a_failed_summary_can_
     )
 
 
+def test_review_flags_risky_rows_collapses_optional_ones_and_reports_cv_length():
+    app, fingerprint = _compared_app()
+    # A flagged MUST row says why and starts as partly met; leaving it so sends nothing extra.
+    assert any(
+        "none of the proposed evidence" in warning.value for warning in app.warning
+    )
+    assert (
+        app.selectbox(key=f"manual_review_decision_{fingerprint}_R-004").value
+        == "PARTIAL"
+    )
+    assert [
+        expander.label for expander in app.expander if "requirements" in expander.label
+    ] == [
+        "Check the MUST requirements (2)",
+        "Optional requirements (1): suggested matches",
+    ]
+    app.button(key="manual_approve").click().run(timeout=10)
+    assert "corrections" not in _calls(app, "/approve")[-1][2]
+
+    # "Accept all suggested" puts every optional row back to its suggestion.
+    optional = f"manual_review_decision_{fingerprint}_R-005"
+    app.selectbox(key=optional).set_value("GAP").run(timeout=10)
+    assert app.selectbox(key=optional).value == "GAP"
+    app.button(key=f"manual_review_accept_optional_{fingerprint}").click().run(
+        timeout=10
+    )
+    assert app.selectbox(key=optional).value == "ACCEPTED"
+
+    # The requirement-matching section is opt-in, and a long CV is called out.
+    app.button(key="manual_approve").click().run(timeout=10)
+    app.checkbox(key=f"manual_match_section_{fingerprint}").check()
+    app.button(key="manual_generate").click().run(timeout=10)
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    assert _calls(app, "/documents")[-1][2]["include_match_section"] is True
+    assert any("runs to 3 pages" in warning.value for warning in app.warning)
+
+
 def test_fetched_source_edits_are_clearly_marked_for_user_review():
     app = AppTest.from_file(
         str(PROJECT_ROOT / "tests/python/manual_application_fixture.py")

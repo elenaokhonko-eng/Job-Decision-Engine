@@ -8,8 +8,10 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { buildPipelineTaskContextFingerprint } from "../../pipeline/artifactContext.js";
 import { GATE_VERSION } from "../../contracts/version.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
+import { recordPipelineWorkerProgressSnapshot } from "../../tasks/pipelineWorkerProgress.js";
 import { reconcileStalePendingPipelineTasks } from "../../tasks/pipelineTaskCurrentness.js";
 import {
+  PIPELINE_STAGE_TASK_TYPES,
   runPipelineStageTaskWorker,
   seedRecoverablePipelineTasks,
   type PipelineStageWorkerDependencies,
@@ -177,6 +179,92 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       client.release();
     }
     await pool?.end();
+  });
+
+  it("claims downstream route, match, decision, and explanation work before new intake", async () => {
+    const versions = await insertJobVersions();
+    await getClient().query(
+      `UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE workspace_id = $1 AND id = $2`,
+      [getContext().workspaceId, versions.canonicalJobId],
+    );
+
+    const taskIdsByType = new Map<string, string>();
+    for (const taskType of PIPELINE_STAGE_TASK_TYPES) {
+      const taskId = await insertPendingTask({
+        taskType,
+        taskKey: `${taskType}:${versions.latestVersionId}:stage-priority-test`,
+        payload: {
+          canonical_job_id: versions.canonicalJobId,
+          job_version_id: versions.latestVersionId,
+          observation_id: crypto.randomUUID(),
+        },
+        fingerprintTaskType: taskType,
+        fingerprintTaskVersion: "stage-priority-test-v1",
+      });
+      taskIdsByType.set(taskType, taskId);
+    }
+
+    const summary = await runPipelineStageTaskWorker(getClient(), {
+      context: getContext(),
+      seed: false,
+      reconcileStalePending: false,
+      taskTypes: [...PIPELINE_STAGE_TASK_TYPES],
+      jobVersionIds: [versions.latestVersionId],
+      maxTasks: 4,
+      stageQuantum: 1,
+      claimBatchSize: 1,
+      wallClockMs: 10_000,
+      minTimeToStartTaskMs: 0,
+    });
+
+    const downstreamFirst = [
+      "ENQUEUE_EXPLANATION",
+      "DECIDE_RECOMMENDATION",
+      "MATCH_PROFILE_EVIDENCE",
+      "ROUTE_LANE",
+    ];
+    for (const taskType of downstreamFirst) {
+      expect(summary.byType[taskType]?.claimed).toBe(1);
+      expect(summary.byType[taskType]?.completed).toBe(1);
+    }
+
+    const taskStatuses = await getClient().query<{ id: string; task_type: string; status: string }>(
+      `SELECT id::text, task_type, status
+       FROM pipeline_tasks
+       WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+      [getContext().workspaceId, [...taskIdsByType.values()]],
+    );
+    const statusByType = new Map(taskStatuses.rows.map((row) => [row.task_type, row.status]));
+    for (const taskType of downstreamFirst) expect(statusByType.get(taskType)).toBe("COMPLETED");
+    for (const taskType of PIPELINE_STAGE_TASK_TYPES.filter((type) => !downstreamFirst.includes(type))) {
+      expect(statusByType.get(taskType)).toBe("PENDING");
+    }
+    await getClient().query(
+      `DELETE FROM pipeline_tasks WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+      [getContext().workspaceId, [...taskIdsByType.values()]],
+    );
+  });
+
+  it("records the oldest pending task across worker runs for age-trend enforcement", async () => {
+    const oldestPendingTaskId = crypto.randomUUID();
+    const oldestPendingCreatedAt = new Date(Date.now() - 100_000).toISOString();
+    const runStreaks: number[] = [];
+
+    for (let runNumber = 1; runNumber <= 3; runNumber += 1) {
+      const snapshot = await recordPipelineWorkerProgressSnapshot(getClient(), {
+        workspaceId: getContext().workspaceId,
+        runKey: `progress-trend-test:${crypto.randomUUID()}`,
+        activePendingCount: 100 - runNumber,
+        oldestPendingTaskId,
+        oldestPendingTaskType: "DECIDE_RECOMMENDATION",
+        oldestPendingCreatedAt,
+        oldestPendingAgeSeconds: 100_000 + runNumber,
+      }, 3);
+      runStreaks.push(snapshot.consecutiveOldestTaskRuns);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+
+    expect(runStreaks).toEqual([1, 2, 3]);
   });
 
   it("reassesses an already-decided job when current readiness evidence is missing", async ({ skip }) => {
@@ -1073,13 +1161,11 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       runExplanationQueueEnqueuer: vi.fn(async () => ({ enqueued: 0, updated: 0, deferred: 0 })),
     } as PipelineStageWorkerDependencies;
 
-    const taskTypes = ["PUBLISH_EMBEDDING", "NORMALIZE_OBSERVATION", "DECIDE_RECOMMENDATION"] as const;
     const slowEmbeddingRun = await runPipelineStageTaskWorker(getClient(), {
       context: getContext(),
       seed: false,
-      taskTypes: [...taskTypes],
+      taskTypes: ["PUBLISH_EMBEDDING"],
       jobVersionIds: [normalizationJob.latestVersionId, recommendationJob.latestVersionId],
-      stageStartOffset: 0,
       stageQuantum: 1,
       maxTasks: 100,
       claimBatchSize: 1,
@@ -1090,7 +1176,6 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     expect(slowEmbeddingRun.claimed).toBe(1);
     expect(slowEmbeddingRun.exitReason).toBe("WALL_CLOCK_BUDGET_REACHED");
     expect(slowEmbeddingRun.byType.PUBLISH_EMBEDDING?.claimed).toBe(1);
-    expect(slowEmbeddingRun.stalePendingReconciliation.stalePendingReconciledThisRun).toBe(1);
     const afterSlowEmbedding = await getClient().query<{ id: string; status: string }>(
       `SELECT id, status FROM pipeline_tasks WHERE id = ANY($1::uuid[])`,
       [[embeddingTaskId, firstNormalizationTaskId, currentDecisionTaskId]],
@@ -1104,9 +1189,8 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const normalizationRun = await runPipelineStageTaskWorker(getClient(), {
       context: getContext(),
       seed: false,
-      taskTypes: [...taskTypes],
+      taskTypes: ["NORMALIZE_OBSERVATION"],
       jobVersionIds: [normalizationJob.latestVersionId, recommendationJob.latestVersionId],
-      stageStartOffset: 1,
       stageQuantum: 1,
       maxTasks: 1,
       claimBatchSize: 1,
@@ -1127,9 +1211,8 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const recommendationRun = await runPipelineStageTaskWorker(getClient(), {
       context: getContext(),
       seed: false,
-      taskTypes: [...taskTypes],
+      taskTypes: ["DECIDE_RECOMMENDATION"],
       jobVersionIds: [normalizationJob.latestVersionId, recommendationJob.latestVersionId],
-      stageStartOffset: 2,
       stageQuantum: 1,
       maxTasks: 1,
       claimBatchSize: 1,

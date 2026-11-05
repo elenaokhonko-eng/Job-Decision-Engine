@@ -75,6 +75,38 @@ describe("pipeline worker exit policy", () => {
     })).not.toThrow();
   });
 
+  it("keeps the age SLO active when the same oldest task survives the configured number of runs", () => {
+    expect(() => enforcePipelineWorkerExitPolicy({
+      ...healthyInput,
+      claimedThisRun: 12,
+      completedThisRun: 12,
+      activePendingCountBefore: 100,
+      activePendingCount: 90,
+      oldestActivePendingAgeSecondsBefore: 100000,
+      oldestActivePendingAgeSeconds: 101000,
+      oldestActivePendingTaskType: "DECIDE_RECOMMENDATION",
+      oldestPendingTaskSameRuns: 3,
+      pendingAgeTrendRuns: 3,
+      exitReason: "WALL_CLOCK_BUDGET_REACHED",
+    })).toThrow("Oldest pending stage: DECIDE_RECOMMENDATION");
+  });
+
+  it("tolerates an old queue while the repeated-oldest-task trend is still below its threshold", () => {
+    expect(() => enforcePipelineWorkerExitPolicy({
+      ...healthyInput,
+      claimedThisRun: 12,
+      completedThisRun: 12,
+      activePendingCountBefore: 100,
+      activePendingCount: 90,
+      oldestActivePendingAgeSecondsBefore: 100000,
+      oldestActivePendingAgeSeconds: 101000,
+      oldestActivePendingTaskType: "DECIDE_RECOMMENDATION",
+      oldestPendingTaskSameRuns: 2,
+      pendingAgeTrendRuns: 3,
+      exitReason: "WALL_CLOCK_BUDGET_REACHED",
+    })).not.toThrow();
+  });
+
   it.each([
     { completedThisRun: 0, failedThisRun: 0 },
     { completedThisRun: 1, failedThisRun: 1 },

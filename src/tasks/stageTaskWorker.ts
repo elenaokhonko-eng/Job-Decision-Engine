@@ -9,6 +9,7 @@ import { runNormalization as defaultRunNormalization } from "../pipeline/normali
 import { runRequirementsExtraction as defaultRunRequirementsExtraction } from "../pipeline/requirementsExtractor.js";
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
 import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback } from "../embeddings/batchCoordinator.js";
+import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
 import { runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
@@ -135,7 +136,15 @@ export interface PipelineStageWorkerSummary {
   deadLettered: number;
   exitReason: PipelineWorkerExitReason;
   durationMs: number;
-  byType: Record<string, { claimed: number; completed: number; blocked: number; failed: number; deadLettered: number }>;
+  byType: Record<string, {
+    claimed: number;
+    completed: number;
+    blocked: number;
+    failed: number;
+    deadLettered: number;
+    executionDurationMs: number;
+    secondsPerClaimedTask: number | null;
+  }>;
   errors: Array<{ taskType: string; taskKey: string; error: string }>;
 }
 
@@ -157,8 +166,6 @@ export interface PipelineStageWorkerOptions {
   seedTimeBudgetMs?: number;
   /** Tasks claimed per stage on each round-robin pass. */
   stageQuantum?: number;
-  /** First stage index for this run; bounded by the stage count. */
-  stageStartOffset?: number;
   /** Defaults to true; set false only when reconciliation is exercised separately. */
   reconcileStalePending?: boolean;
   maxStalePendingReconciliation?: number;
@@ -220,7 +227,15 @@ function incrementWorker(
   taskType: string,
   field: "claimed" | "completed" | "blocked" | "failed" | "deadLettered"
 ): void {
-  summary.byType[taskType] ??= { claimed: 0, completed: 0, blocked: 0, failed: 0, deadLettered: 0 };
+  summary.byType[taskType] ??= {
+    claimed: 0,
+    completed: 0,
+    blocked: 0,
+    failed: 0,
+    deadLettered: 0,
+    executionDurationMs: 0,
+    secondsPerClaimedTask: null,
+  };
   summary.byType[taskType][field] += 1;
 }
 
@@ -297,14 +312,20 @@ async function resolveActiveProfileVersionId(
      WHERE pv.workspace_id = $1
        AND pv.status = 'ACTIVE'
      ORDER BY pv.created_at DESC
-     LIMIT 1`,
+     LIMIT 2`,
     [ctx.workspaceId]
   );
-  const profileVersionId = rows[0]?.id;
-  if (!profileVersionId) {
-    throw new Error(`No ACTIVE profile version found for workspace_id=${ctx.workspaceId}.`);
+  if (rows.length !== 1) {
+    const detail = rows.length === 0
+      ? `No ACTIVE profile version found for workspace_id=${ctx.workspaceId}.`
+      : `Found multiple ACTIVE profile versions for workspace_id=${ctx.workspaceId}; exactly one is required.`;
+    throw new PipelineTaskDependencyBlockedError(
+      "PROFILE_VERSION_ACTIVE",
+      "IMPORT_OR_ACTIVATE_PROFILE_AND_REPAIR_EMBEDDINGS",
+      detail,
+    );
   }
-  return profileVersionId;
+  return rows[0].id;
 }
 
 async function enqueueStageTask(
@@ -1494,16 +1515,37 @@ async function classifySemanticMatchDependency(
   ctx: WorkspaceContext,
   jobVersionId: string,
 ): Promise<AutomaticDependency> {
+  const configuration = getEmbeddingSpaceRegistryConfiguration();
   const { rows } = await (clientOrPool as QueryClient).query<{
     has_active_space: boolean;
     requirements_complete: boolean;
     profile_facts_complete: boolean;
     complete_cohort: boolean;
   }>(
-    `WITH active_spaces AS (
-       SELECT id
+    `WITH configured_spaces AS (
+       SELECT id,
+              COUNT(*) OVER (PARTITION BY is_fallback_space) AS matching_space_count
        FROM embedding_spaces
-       WHERE workspace_id = $1 AND active = TRUE
+       WHERE workspace_id = $1
+         AND active = TRUE
+         AND normalization = $6
+         AND distance_metric = $7
+         AND (
+           (is_fallback_space = FALSE
+             AND LOWER(provider) = LOWER($3)
+             AND model = $4
+             AND dimensions = $5)
+           OR
+           (is_fallback_space = TRUE
+             AND LOWER(provider) = LOWER($8)
+             AND model = $9
+             AND dimensions = $10)
+         )
+     ),
+     active_spaces AS (
+       SELECT id
+       FROM configured_spaces
+       WHERE matching_space_count = 1
      ),
      requirements AS (
        SELECT requirement.id::text AS node_id
@@ -1588,7 +1630,18 @@ async function classifySemanticMatchDependency(
            )
          )
        ) AS complete_cohort`,
-    [ctx.workspaceId, jobVersionId],
+    [
+      ctx.workspaceId,
+      jobVersionId,
+      configuration.primary.provider,
+      configuration.primary.model,
+      configuration.primary.dimensions,
+      configuration.normalization,
+      configuration.distanceMetric,
+      configuration.fallback.provider,
+      configuration.fallback.model,
+      configuration.fallback.dimensions,
+    ],
   );
   const result = rows[0];
   if (!result?.has_active_space || result.complete_cohort) {
@@ -2801,8 +2854,6 @@ export async function runPipelineStageTaskWorker(
   const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
   const budgetRunId = options.budgetRunId?.trim() || crypto.randomUUID();
   const claimedByType: Partial<Record<PipelineStageTaskType, number>> = {};
-  const stageStartOffset = Math.max(0, Math.floor(options.stageStartOffset ?? 0));
-  let stageRound = 0;
   const startedAt = Date.now();
   const deadlineAt = startedAt + wallClockMs;
   const preparationReserveMs = Math.min(wallClockMs, Math.max(minTimeToStartTaskMs, 1_000));
@@ -2893,11 +2944,7 @@ export async function runPipelineStageTaskWorker(
         options.maxTasksByType ?? {},
         maxTasks,
         maxTasks - summary.claimed,
-        stageRound === 0 || taskTypes.length === 0
-          ? stageStartOffset
-          : (stageStartOffset + stageRound) % taskTypes.length,
       );
-      stageRound += 1;
       for (const { taskType, claimLimit: stagePassLimit } of roundPlan) {
         const stageLimit = Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks));
         let claimedThisPass = 0;
@@ -2936,6 +2983,7 @@ export async function runPipelineStageTaskWorker(
             claimedByType[taskType] = (claimedByType[taskType] ?? 0) + 1;
             incrementWorker(summary, task.taskType, "claimed");
             const taskMetrics: PipelineTaskRunMetrics = { successorTasksCreated: 0, rerouted: false };
+            const taskStartedAt = Date.now();
             try {
               // Keep the cancellation check inside the lease-release catch:
               // aborting immediately after claim must never strand a RUNNING
@@ -3017,6 +3065,7 @@ export async function runPipelineStageTaskWorker(
               summary.errors.push({ taskType: task.taskType, taskKey: task.taskKey, error: message });
             } finally {
               summary.successorTasksCreated += taskMetrics.successorTasksCreated;
+              summary.byType[task.taskType].executionDurationMs += Date.now() - taskStartedAt;
             }
           }
         }
@@ -3030,6 +3079,11 @@ export async function runPipelineStageTaskWorker(
     }
 
     const durationMs = Date.now() - startedAt;
+    for (const stageSummary of Object.values(summary.byType)) {
+      stageSummary.secondsPerClaimedTask = stageSummary.claimed > 0
+        ? Math.round((stageSummary.executionDurationMs / stageSummary.claimed) / 10) / 100
+        : null;
+    }
     const stageLimitsReached = taskTypes.every((taskType) =>
       (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
     );

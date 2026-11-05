@@ -562,6 +562,49 @@ export function geminiResponseSchema(schema: unknown): unknown {
   );
 }
 
+// OpenAI strict structured outputs reject string length bounds; callers still enforce them when
+// they validate the response locally. Array bounds, number ranges, pattern and enum are supported.
+const OPENAI_STRICT_UNSUPPORTED_KEYWORDS = new Set(["minLength", "maxLength"]);
+
+function nullableSchema(schema: unknown): unknown {
+  const record = schema && typeof schema === "object" && !Array.isArray(schema) ? schema as Record<string, unknown> : null;
+  if (record && Array.isArray(record.anyOf)) {
+    const hasNull = record.anyOf.some((option) => (option as Record<string, unknown> | null)?.type === "null");
+    return hasNull ? record : { ...record, anyOf: [...record.anyOf, { type: "null" }] };
+  }
+  return { anyOf: [schema, { type: "null" }] };
+}
+
+/**
+ * The response schema as sent to OpenAI with strict: true. Strict mode requires every object to
+ * list all of its properties in `required` and to forbid additional properties, so a property the
+ * caller left optional is sent as required-but-nullable, and unsupported keywords are dropped.
+ */
+export function openAiStrictSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(openAiStrictSchema);
+  if (!schema || typeof schema !== "object") return schema;
+  const source = schema as Record<string, unknown>;
+  const converted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (OPENAI_STRICT_UNSUPPORTED_KEYWORDS.has(key) || key === "required" || key === "properties" || key === "additionalProperties") continue;
+    converted[key] = key === "enum" ? value : openAiStrictSchema(value);
+  }
+  const properties = source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
+    ? source.properties as Record<string, unknown>
+    : null;
+  if (properties || source.type === "object") {
+    const required = new Set(Array.isArray(source.required) ? source.required as string[] : []);
+    // Keys under "properties" are field names, so only their schemas are rewritten.
+    converted.properties = Object.fromEntries(Object.entries(properties ?? {}).map(([name, child]) => {
+      const strictChild = openAiStrictSchema(child);
+      return [name, required.has(name) ? strictChild : nullableSchema(strictChild)];
+    }));
+    converted.required = Object.keys(properties ?? {});
+    converted.additionalProperties = false;
+  }
+  return converted;
+}
+
 async function tryGemini(geminiKey: string, options: any): Promise<string> {
   const ai = getGeminiClient();
   const maxRetries = effectiveMaxRetries(options.maxRetries);
@@ -663,7 +706,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
           temperature: 1,
           max_completion_tokens: options.maxOutputTokens ?? MODEL_MAX_OUTPUT_TOKENS,
           response_format: options.responseSchema && !isKimi
-            ? { type: "json_schema", json_schema: { name: "extraction", strict: true, schema: options.responseSchema } }
+            ? { type: "json_schema", json_schema: { name: "extraction", strict: true, schema: openAiStrictSchema(options.responseSchema) } }
             : (options.responseMimeType === "application/json" ? { type: "json_object" } : undefined)
         }),
         signal: AbortSignal.timeout(timeoutMs)
@@ -965,6 +1008,24 @@ function cleanJsonResponseText(rawText: string): string {
   return cleaned;
 }
 
+const MAX_CORRECTION_REASON_CHARS = 4000;
+const MAX_CORRECTION_PREVIOUS_ANSWER_CHARS = 20000;
+
+/** The original request plus why its answer was rejected and the answer itself, for one correction round. */
+export function validationCorrectionContents(original: string, reasons: string, previousAnswer: string): string {
+  return [
+    original,
+    "",
+    "Your previous answer was rejected for these reasons:",
+    reasons.slice(0, MAX_CORRECTION_REASON_CHARS),
+    "",
+    "Your previous answer:",
+    previousAnswer.slice(0, MAX_CORRECTION_PREVIOUS_ANSWER_CHARS),
+    "",
+    "Return a corrected answer that fixes every reason and follows every rule above.",
+  ].join("\n");
+}
+
 async function validateGeneratedResponseText(
   text: string,
   context: GenerateContentResponseValidationContext,
@@ -995,6 +1056,11 @@ export async function generateContentAudited(options: {
   timeoutMs?: number;
   /** Per-call attempts per model; overrides MODEL_REQUEST_MAX_RETRIES for this call only. */
   maxRetries?: number;
+  /**
+   * When a response fails validateResponseText, ask the same model once more with the validator's
+   * reasons before moving on. Only for string contents; provider errors never trigger it.
+   */
+  correctOnValidationFailure?: boolean;
   /** A second Gemini model tried once when the route's Gemini model fails, before the next provider. */
   secondaryGeminiModel?: string;
 }): Promise<GenerateContentAuditedResult> {
@@ -1099,6 +1165,39 @@ export async function generateContentAudited(options: {
   let successModel = options.model;
   let attempts = 0;
   const providerAttemptTelemetry: ModelProviderAttemptTelemetry[] = [];
+  const correctionRounds =
+    options.correctOnValidationFailure && options.validateResponseText && typeof options.contents === "string" ? 1 : 0;
+  if (correctionRounds > 0) {
+    requestMetadata.correct_on_validation_failure = true;
+  }
+
+  // One model: call it, validate, and on a validation failure (never a provider error) ask the same
+  // model to correct its answer, up to correctionRounds times. The last failure is thrown.
+  const callAndValidate = async (
+    provider: "gemini" | "openai",
+    model: string,
+    call: (contents: any) => Promise<string>
+  ): Promise<{ text: string; validatedPayload: unknown }> => {
+    let contents = options.contents;
+    for (let round = 0; ; round++) {
+      attempts++;
+      const text = await call(contents);
+      try {
+        const validatedPayload = await validateGeneratedResponseText(
+          text,
+          { provider, model, purpose, routeKey },
+          options.validateResponseText
+        );
+        return { text, validatedPayload };
+      } catch (err: any) {
+        if (round >= correctionRounds) throw err;
+        const message = err?.message || String(err);
+        console.warn(`[model:${provider}] model=${model} response failed validation; asking it to correct once (${message.slice(0, 300)}).`);
+        attemptedErrors.push({ provider, model, error: message });
+        contents = validationCorrectionContents(options.contents, message, text);
+      }
+    }
+  };
 
   for (const provider of providers) {
     const isFallbackAttempt = provider !== routeContent.primary_provider;
@@ -1120,17 +1219,12 @@ export async function generateContentAudited(options: {
       }
       for (const geminiModel of geminiModels) {
         try {
-          attempts++;
-          const text = await tryGemini(geminiKey, {
+          const { text, validatedPayload } = await callAndValidate(provider, geminiModel, (contents) => tryGemini(geminiKey, {
             ...options,
+            contents,
             model: geminiModel,
             __providerAttemptTelemetry: providerAttemptTelemetry,
-          });
-          const validatedPayload = await validateGeneratedResponseText(
-            text,
-            { provider, model: geminiModel, purpose, routeKey },
-            options.validateResponseText
-          );
+          }));
           successText = text;
           successValidatedPayload = validatedPayload;
           successProvider = "gemini";
@@ -1151,17 +1245,12 @@ export async function generateContentAudited(options: {
         continue;
       }
       try {
-        attempts++;
-        const text = await tryOpenAI(openaiKey, {
+        const { text, validatedPayload } = await callAndValidate(provider, modelForProvider, (contents) => tryOpenAI(openaiKey, {
           ...options,
+          contents,
           model: modelForProvider,
           __providerAttemptTelemetry: providerAttemptTelemetry,
-        });
-        const validatedPayload = await validateGeneratedResponseText(
-          text,
-          { provider, model: modelForProvider, purpose, routeKey },
-          options.validateResponseText
-        );
+        }));
         successText = text;
         successValidatedPayload = validatedPayload;
         successProvider = "openai";

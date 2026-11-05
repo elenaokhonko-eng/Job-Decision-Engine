@@ -142,7 +142,48 @@ def _comparison_response(source_content_status="COMPLETE"):
                     ],
                     "gap": None,
                     "comparison_method": "model-judged pairing; advisory evidence only",
-                }
+                },
+                {
+                    "requirement_key": "R-004",
+                    "requirement_type": "FUNCTION",
+                    "importance": "MUST",
+                    "requirement": "Commodity derivatives and futures curves",
+                    "evidence": [
+                        {
+                            "id": "fact-2",
+                            "type": "FACT",
+                            "label": "governance",
+                            "statement": "Established golden-record master data governance across CRM and ERP.",
+                            "confidence": 0.9,
+                            "justification": "Derivatives programme.",
+                        }
+                    ],
+                    "gap": None,
+                    "comparison_method": "model-judged pairing; advisory evidence only",
+                    "attention": [
+                        {
+                            "code": "DOMAIN_QUALIFIER",
+                            "detail": "The requirement names commodities, futures; none of the proposed evidence does.",
+                        }
+                    ],
+                    "suggested_status": "PARTIAL",
+                },
+                {
+                    "requirement_key": "R-005",
+                    "requirement_type": "POSTING_RESPONSIBILITY",
+                    "importance": "PREFERRED",
+                    "requirement": "Run delivery with engineering teams",
+                    "evidence": [
+                        {
+                            "id": "fact-1",
+                            "type": "FACT",
+                            "label": "data systems",
+                            "statement": "Designed data systems.",
+                        }
+                    ],
+                    "gap": None,
+                    "comparison_method": "model-judged pairing; advisory evidence only",
+                },
             ],
             "fit": {
                 "must_total": 3,
@@ -266,6 +307,7 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
                 "cover_letter": "Dear team\n\nI designed data systems for regulated teams.",
             },
             "artifacts": artifacts,
+            "cv_pages": 3,
             "cover_letter": {
                 "mode": "AI_WRITTEN",
                 "reason": None,

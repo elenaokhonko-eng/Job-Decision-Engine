@@ -133,7 +133,7 @@ describe("manual evidence pairing", () => {
     const comparison = comparisonWith({ pairs: strongestPairs(MODEL_PAIRS) });
     expect(comparison.fit).toMatchObject({ must_total: 3, must_covered: 1, verdict: "FEWER_THAN_HALF_MUSTS_EVIDENCED" });
     expect(comparison.fit.uncovered_must.map((item: any) => item.requirement_key)).toEqual(["R-001", "R-003"]);
-    const docs = buildControlledDocuments(comparison, CONTACT, { asOf: AS_OF });
+    const docs = buildControlledDocuments(comparison, CONTACT, { asOf: AS_OF, includeMatchSection: true });
     expect(docs.cv).toContain("- Delivered portfolio management systems for an asset manager or hedge fund: Designed the target operating model");
     for (const text of [docs.cv, docs.coverLetter]) {
       expect(text).not.toContain("systematic trading workflows");
