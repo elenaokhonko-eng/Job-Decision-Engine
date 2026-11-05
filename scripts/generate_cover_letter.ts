@@ -42,6 +42,7 @@ import {
   selectCoverLetterClaimPlan,
 } from "../src/documents/claimSelector.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -470,7 +471,6 @@ ${JSON.stringify(coverLetterSchema)}`;
       finalCl = JSON.parse(cleanJsonResponse(rawResponse));
     } catch (parseErr) {
       console.error("❌ ERROR: AI returned invalid JSON for cover letter. Aborting.");
-      console.error("Raw response:", rawResponse.substring(0, 500));
       process.exit(1);
     }
 
@@ -591,8 +591,7 @@ ${JSON.stringify(coverLetterSchema)}`;
     }));
 
   } catch (error: any) {
-    console.error("❌ ERROR during Cover Letter generation:", error.message || error);
-    if (error.stack) console.error(error.stack);
+    console.error("❌ ERROR during Cover Letter generation:", publicErrorSummary(error, "evaluation"));
     process.exit(1);
   } finally {
     await pool.end();

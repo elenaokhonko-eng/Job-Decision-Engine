@@ -20,6 +20,7 @@ import {
 } from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { inspectProfileEmbeddingReadiness } from "../src/embeddings/profileEmbeddingRepair.js";
+import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -705,7 +706,7 @@ export async function processPipelineTasks(): Promise<void> {
 
   } catch (err: any) {
     workerError = err instanceof Error ? err : new Error(String(err));
-    console.error("Pipeline task worker failed:", workerError.message);
+    console.error("Pipeline task worker failed:", publicErrorSummary(workerError, "pipeline"));
   } finally {
     if (deadLetterReport.actionableDeadLetters === null && workspaceId !== null) {
       try {
@@ -714,22 +715,22 @@ export async function processPipelineTasks(): Promise<void> {
         deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetter;
         deadLetterReport.staleHistoricalDeadLetters = queueHealth.staleHistoricalDeadLetter;
       } catch (error: unknown) {
-        deadLetterReport.error = error instanceof Error ? error.message : String(error);
+        deadLetterReport.error = publicErrorSummary(error, "pipeline");
       }
     }
     deadLetterReport.staleHistoricalDeadLettersReconciled = staleHistoricalDeadLettersReconciled;
     deadLetterReport.staleHistoricalDeadLetters ??= staleHistoricalDeadLettersReconciled;
     deadLetterReport.reportGeneratedAt = new Date().toISOString();
-    deadLetterReport.error ??= workerError?.message ?? null;
+    deadLetterReport.error ??= workerError ? publicErrorSummary(workerError, "pipeline") : null;
     try {
       await writeFile(deadLetterReportPath, `${JSON.stringify(deadLetterReport, null, 2)}\n`, "utf8");
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = publicErrorSummary(error, "pipeline");
       console.error("Failed to write pipeline dead-letter health report:", message);
       workerError ??= new Error(`Could not write pipeline dead-letter health report: ${message}`);
     }
     reconciliationReport.reportGeneratedAt = new Date().toISOString();
-    reconciliationReport.error ??= workerError?.message ?? null;
+    reconciliationReport.error ??= workerError ? publicErrorSummary(workerError, "pipeline") : null;
     const reconciliationArtifact = {
       stale_pending_reconciliation: reconciliationReport.stalePendingReconciliation,
       stale_pending_reconciled_this_run: reconciliationReport.stalePendingReconciledThisRun,
@@ -749,7 +750,7 @@ export async function processPipelineTasks(): Promise<void> {
     try {
       await writeFile(reconciliationReportPath, `${JSON.stringify(reconciliationArtifact, null, 2)}\n`, "utf8");
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = publicErrorSummary(error, "pipeline");
       console.error("Failed to write pipeline task reconciliation report:", message);
       workerError ??= new Error(`Could not write pipeline task reconciliation report: ${message}`);
     }
