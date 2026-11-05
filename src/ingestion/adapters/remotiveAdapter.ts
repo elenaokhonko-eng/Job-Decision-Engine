@@ -34,9 +34,10 @@ export class RemotiveAdapter extends BaseSourceAdapter {
       if (response.status === 429) return this.errorResult("429 Rate limited", { isRateLimited: true });
       if (!response.ok) return this.errorResult(`HTTP ${response.status}: ${response.statusText}`);
 
-      const payload: unknown = await response.json();
+      const payload = await this.readJsonResponse(response);
       const payloadRecord = asRecord(payload);
       const rawJobs: unknown[] = Array.isArray(payloadRecord?.jobs) ? payloadRecord.jobs : [];
+      this.assertRecordCount(rawJobs, requestLimit);
       const page = snapshotPage(rawJobs, limit, options.cursor, options.page, stableAdapterIdentity);
       const jobs: ExtractedJob[] = [];
       let quarantined = 0;

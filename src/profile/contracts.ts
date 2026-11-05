@@ -18,6 +18,7 @@ import {
   ResearchGeographyPreferencesSchema,
 } from '../policy/stage3Contracts.js';
 import { LaneIntentPreferencesSchema } from '../policy/laneIntentContracts.js';
+import { ContactFactRevisionSchema } from './contactFactContract.js';
 
 export const SCHEMA_VERSION = CONTRACT_SCHEMA_VERSION;
 
@@ -73,6 +74,7 @@ export const FactTypeSchema = z.enum([
   'TECHNOLOGY',
   'PUBLICATION',
   'OPEN_SOURCE',
+  'CONTACT',
 ]);
 
 export const CredentialTypeSchema = z.enum([
@@ -259,6 +261,14 @@ export const ProfileFactSchema = z.object({
   is_current: z.boolean(),
   confidentiality: ConfidentialitySchema,
   created_at: z.date(),
+}).superRefine((fact, context) => {
+  if (fact.fact_type !== 'CONTACT') return;
+  const contactFact = ContactFactRevisionSchema.safeParse(fact);
+  if (!contactFact.success) {
+    for (const issue of contactFact.error.issues) {
+      context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
+    }
+  }
 });
 
 export const ProfileFactConceptSchema = z.object({
@@ -348,6 +358,8 @@ export const EngagementJsonSchema = z.object({
       summary: z.string().min(10).max(1024),
       verification_status: VerificationStatusSchema,
       evidence_source_keys: z.string().array().optional(),
+      // How this role appears on application CVs unless chosen otherwise for one job.
+      document_layout: z.enum(['FULL', 'ONE_LINE', 'HIDDEN']).optional(),
     })
   ),
 });
@@ -372,6 +384,20 @@ export const FactJsonSchema = z.object({
       evidence_source_keys: z.string().array().optional(),
     })
   ),
+}).superRefine((profile, context) => {
+  profile.facts.forEach((fact, index) => {
+    if (fact.fact_type !== 'CONTACT') return;
+    const contactFact = ContactFactRevisionSchema.safeParse(fact);
+    if (!contactFact.success) {
+      for (const issue of contactFact.error.issues) {
+        context.addIssue({
+          code: 'custom',
+          path: ['facts', index, ...issue.path],
+          message: issue.message,
+        });
+      }
+    }
+  });
 });
 
 export const CredentialJsonSchema = z.object({
@@ -389,6 +415,8 @@ export const CredentialJsonSchema = z.object({
       status: CredentialStatusSchema,
       verification_status: VerificationStatusSchema,
       evidence_source_key: z.string().optional(),
+      // List under Certifications in every document, regardless of relevance ranking.
+      always_include_in_documents: z.boolean().optional(),
     })
   ),
 });

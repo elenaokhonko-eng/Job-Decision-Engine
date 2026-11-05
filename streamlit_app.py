@@ -1,4 +1,3 @@
-import hashlib
 import html
 import json
 import os
@@ -12,12 +11,10 @@ import docx
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
-
-from streamlit_application_review import render_document_pair_review_checkbox
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
-    parse_application_document_pair_status,
+    salary_disclosure_message,
 )
 from streamlit_archive import render_archive_hold_form, render_archive_jobs
 from streamlit_database import read_only_database_ssl_options
@@ -25,6 +22,7 @@ from streamlit_formatters import as_number, format_percent, format_score, format
 from streamlit_workspace_contracts import (
     validate_application_row,
     validate_application_workspace_summary,
+    validate_document_selection_row,
     validate_apply_now_row,
     validate_archive_job_row,
     validate_company_culture_coverage_summary,
@@ -34,7 +32,14 @@ from streamlit_workspace_contracts import (
     validate_profile_evidence_row,
     validate_ranked_job_row,
     validate_track_row,
+    validate_verify_then_apply_row,
 )
+from streamlit_manual_application import (
+    render_manual_application_flow,
+    render_pipeline_review_action,
+    render_selected_documents,
+)
+from streamlit_runtime import code_version, database_outage, ensure_hosted_api_ready, open_api_json
 
 
 # Load environment variables from Streamlit secrets, .env, and .env.local
@@ -45,8 +50,9 @@ def load_dotenv():
             for key, val in st.secrets.items():
                 if isinstance(val, str):
                     os.environ.setdefault(key, val)
-    except Exception:
-        pass
+    except Exception as exc:
+        if exc.__class__.__name__ != "StreamlitSecretNotFoundError":
+            raise
 
     # Load from local .env and .env.local files
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -200,6 +206,7 @@ SHORTLIST_READ_MODEL_QUERY = """
       s.document_ready,
       s.current_artifact_status,
       s.current_artifact_reason,
+      readiness.application_readiness,
       readiness.readiness_status,
       readiness.readiness_fingerprint,
       readiness.readiness_expires_at,
@@ -322,12 +329,13 @@ TOP_TEN_READY_QUERY = """
            employment_verifiability_score, stage3_preference_context_id,
            ranking_component_availability, ranking_component_provenance,
            current_artifact_status, version_mismatch,
-           current_readiness.readiness_status, current_readiness.readiness_fingerprint,
+           current_readiness.application_readiness, current_readiness.readiness_status,
+           current_readiness.readiness_fingerprint,
            current_readiness.readiness_expires_at, current_readiness.readiness_reason_codes,
            current_readiness.availability_status, current_readiness.availability_recheck_at
     FROM v_top_ten_ready_jobs_stage3_scoped AS jobs
     LEFT JOIN LATERAL (
-      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+      SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
              readiness_reason_codes, availability_status, availability_recheck_at
       FROM v_application_readiness_current readiness
       WHERE readiness.workspace_id = jobs.workspace_id
@@ -360,13 +368,14 @@ APPLY_NOW_JOBS_QUERY = """
            country_flexibility_score, office_requirement_score,
            timezone_compatibility_score, employment_verifiability_score,
            stage3_preference_context_id, ranking_component_availability,
-           ranking_component_provenance, current_readiness.readiness_status,
+           ranking_component_provenance, current_readiness.application_readiness,
+           current_readiness.readiness_status,
            current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
            current_readiness.availability_recheck_at
     FROM v_apply_now_jobs_stage3_scoped AS jobs
     LEFT JOIN LATERAL (
-      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+      SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
              readiness_reason_codes, availability_status, availability_recheck_at
       FROM v_application_readiness_current readiness
       WHERE readiness.workspace_id = jobs.workspace_id
@@ -382,6 +391,41 @@ APPLY_NOW_JOBS_QUERY = """
     LIMIT 5000
 """
 
+VERIFY_THEN_APPLY_JOBS_QUERY = """
+    SELECT jobs.workspace_id, jobs.canonical_job_id, jobs.job_version_id,
+           jobs.title, jobs.company, jobs.canonical_url, jobs.source,
+           jobs.location, jobs.workplace_type, jobs.employment_type,
+           jobs.description, jobs.gate_status, jobs.rejection_codes,
+           jobs.gate_evidence_quotes, jobs.primary_lane, jobs.secondary_lanes,
+           jobs.lane_confidence, jobs.deterministic_match_score,
+           jobs.deterministic_match_coverage, jobs.processing_state,
+           jobs.recommendation_eligibility, jobs.recommendation_outcome,
+           jobs.recommendation_requirement_score,
+           jobs.recommendation_coverage_score,
+           jobs.recommendation_evidence_completeness,
+           jobs.recommendation_decided_at, jobs.observed_at,
+           jobs.current_artifact_status, jobs.current_artifact_reason,
+           current_readiness.readiness_status,
+           current_readiness.readiness_reason_codes
+    FROM v_canonical_shortlist_scoped AS jobs
+    JOIN v_application_readiness_current AS current_readiness
+      ON current_readiness.workspace_id = jobs.workspace_id
+     AND current_readiness.canonical_job_id = jobs.canonical_job_id
+     AND current_readiness.job_version_id::text = jobs.job_version_id::text
+    WHERE jobs.workspace_id = %s
+      AND jobs.gate_status = 'NEEDS_VERIFICATION'
+      AND jobs.processing_state = 'MATCHED'
+      AND jobs.recommendation_eligibility = 'VERIFY'
+      AND jobs.recommendation_outcome = 'REVIEW'
+      AND current_readiness.readiness_status = 'NEEDS_VERIFICATION'
+    ORDER BY jobs.deterministic_match_score DESC NULLS LAST,
+             jobs.recommendation_requirement_score DESC NULLS LAST,
+             jobs.recommendation_coverage_score DESC NULLS LAST,
+             jobs.lane_confidence DESC NULLS LAST,
+             jobs.observed_at DESC NULLS LAST
+    LIMIT 5000
+"""
+
 TRACK_JOBS_QUERY = """
     SELECT workspace_id, canonical_job_id, job_version_id, title, company,
            canonical_url, source, location, workplace_type, employment_type,
@@ -390,13 +434,14 @@ TRACK_JOBS_QUERY = """
            recommendation_eligibility, recommendation_outcome, version_mismatch,
            current_artifact_status, current_artifact_reason, blocked_task_count,
            deterministic_decision_id, deterministic_context_fingerprint,
-           deterministic_trace_notes, current_readiness.readiness_status,
+           deterministic_trace_notes, current_readiness.application_readiness,
+           current_readiness.readiness_status,
            current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
            current_readiness.availability_recheck_at
     FROM v_track_jobs_scoped AS jobs
     LEFT JOIN LATERAL (
-      SELECT readiness_status, readiness_fingerprint, readiness_expires_at,
+      SELECT application_readiness, readiness_status, readiness_fingerprint, readiness_expires_at,
              readiness_reason_codes, availability_status, availability_recheck_at
       FROM v_application_readiness_current readiness
       WHERE readiness.workspace_id = jobs.workspace_id
@@ -421,6 +466,15 @@ APPLICATIONS_READ_MODEL_QUERY = """
     WHERE workspace_id = %s AND user_id = %s
     ORDER BY updated_at DESC, application_record_id DESC
     LIMIT %s
+"""
+
+DOCUMENT_SELECTION_READ_MODEL_QUERY = """
+    SELECT workspace_id::text, user_id::text, selection_id::text, application_record_id::text,
+           approval_id::text, cv_docx_sha256, cv_pdf_sha256, cover_letter_docx_sha256,
+           cover_letter_pdf_sha256, pipeline_readiness,
+           to_char(selected_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI "UTC"') AS selected_at
+    FROM v_application_document_selection_current
+    WHERE workspace_id = %s AND user_id = %s AND application_record_id = %s
 """
 
 PROFILE_EVIDENCE_READ_MODEL_QUERY = """
@@ -562,6 +616,32 @@ def fetch_apply_now_jobs():
     return _validate_workspace_rows(rows, workspace_id, validate_apply_now_row)
 
 
+def fetch_verify_then_apply_jobs():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(VERIFY_THEN_APPLY_JOBS_QUERY, (workspace_id,))
+    return _validate_workspace_rows(rows, workspace_id, validate_verify_then_apply_row)
+
+
+def verification_question_for_job(job):
+    codes = set(job.get("rejection_codes") or [])
+    questions = []
+    if "GATE_UNKNOWN_WORK_MODE" in codes:
+        questions.append("Ask whether the role is remote, hybrid, or on-site.")
+    if "NEEDS_VERIFICATION_LOCATION_DETAIL" in codes:
+        questions.append("Confirm the work location and any residency requirement.")
+    if "NEEDS_VERIFICATION_OFFICE_DAYS" in codes:
+        questions.append("Confirm how many days per week are required in the office.")
+    if "NEEDS_VERIFICATION_TRAVEL" in codes:
+        questions.append("Confirm the expected travel percentage and frequency.")
+    if questions:
+        return " ".join(questions)
+    return "Confirm the unresolved workability detail shown in the gate evidence."
+
+
 def fetch_track_jobs():
     connection = _open_read_only_connection()
     try:
@@ -581,6 +661,21 @@ def fetch_applications_from_read_model(limit=250):
         connection.close()
     rows = _read_model_query(APPLICATIONS_READ_MODEL_QUERY, (workspace_id, user_id, limit))
     return _validate_workspace_rows(rows, workspace_id, validate_application_row, user_id)
+
+
+def fetch_document_selection(application_record_id):
+    """The current user-chosen document pair of one application, or None."""
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+        user_id = _read_model_user_id(connection, workspace_id)
+    finally:
+        connection.close()
+    rows = _read_model_query(
+        DOCUMENT_SELECTION_READ_MODEL_QUERY, (workspace_id, user_id, application_record_id)
+    )
+    _validate_workspace_rows(rows, workspace_id, validate_document_selection_row, user_id)
+    return rows[0] if rows else None
 
 
 def fetch_job_profile_evidence(canonical_job_id, job_version_id):
@@ -716,11 +811,10 @@ def api_request(method, path, params=None, body=None, timeout=30):
         data = json.dumps(body).encode("utf-8")
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        if response.status == 204:
-            return {}
-        raw = response.read().decode("utf-8")
-        return json.loads(raw) if raw else {}
+    return open_api_json(req, timeout)
+
+
+ensure_hosted_api_ready()
 
 def fetch_archive_job_count():
     """Return the number of archived jobs visible to the active workspace.
@@ -1057,200 +1151,6 @@ def run_checked_command(command_args, step_label, extra_env=None):
     if result.stderr:
         st.warning(f"{step_label} stderr:\n{result.stderr}")
     return result
-
-def ensure_draft_application(job):
-    application_key = f"{job['canonical_job_id']}:{job['job_version_id']}"
-    cached = st.session_state.setdefault("pilot_application_ids", {}).get(application_key)
-    if cached:
-        return cached
-
-    response = api_request(
-        "POST",
-        "/api/v2/applications",
-        body={
-            "canonical_job_id": job["canonical_job_id"],
-            "job_version_id": job["job_version_id"],
-            "status": "INTENT",
-            "submission_url": job.get("canonical_url"),
-        },
-    )
-    application = response.get("application") if isinstance(response, dict) else None
-    application_id = application.get("application_record_id") if isinstance(application, dict) else None
-    if not isinstance(response, dict) or not response.get("ok") or not application_id:
-        raise RuntimeError("The API did not confirm creation of a draft application.")
-    st.session_state["pilot_application_ids"][application_key] = application_id
-    return application_id
-
-
-def parse_document_run(result, expected_type, job, application_id):
-    for line in reversed(result.stdout.splitlines()):
-        try:
-            manifest = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(manifest, dict) or manifest.get("event") != "DOCUMENT_GENERATION_COMPLETED":
-            continue
-        if (
-            manifest.get("documentType") != expected_type
-            or manifest.get("applicationRecordId") != application_id
-            or manifest.get("canonicalJobId") != job["canonical_job_id"]
-            or manifest.get("jobVersionId") != job["job_version_id"]
-            or not manifest.get("profileVersionId")
-            or not manifest.get("deterministicDecisionId")
-            or not manifest.get("contextFingerprint")
-            or not manifest.get("documentRunId")
-            or not isinstance(manifest.get("outputs"), dict)
-            or not isinstance(manifest["outputs"].get("docx"), dict)
-            or not manifest["outputs"]["docx"].get("path")
-            or not manifest["outputs"]["docx"].get("sha256")
-        ):
-            raise RuntimeError("Generated document run does not match the selected application and job version.")
-        return manifest
-    raise RuntimeError("The document command did not return an exact document-run manifest.")
-
-
-def verified_document_bytes(output):
-    path = output.get("path") if isinstance(output, dict) else None
-    expected_hash = output.get("sha256") if isinstance(output, dict) else None
-    if not isinstance(path, str) or not isinstance(expected_hash, str):
-        raise TypeError("The document manifest does not contain a path and SHA-256 hash.")
-    export_root = os.path.realpath(os.path.join("scripts", "exports"))
-    artifact_path = os.path.realpath(path)
-    try:
-        within_exports = os.path.commonpath([export_root, artifact_path]) == export_root
-    except ValueError:
-        within_exports = False
-    if not within_exports or not os.path.isfile(artifact_path):
-        raise RuntimeError("The document manifest points outside the local exports directory or to a missing file.")
-    with open(artifact_path, "rb") as artifact:
-        content = artifact.read()
-    if hashlib.sha256(content).hexdigest() != expected_hash:
-        raise RuntimeError("The document file hash does not match its persisted run manifest.")
-    return os.path.basename(artifact_path), content
-
-
-def show_document_run_downloads(manifest, key_prefix):
-    st.caption(f"Document run: {manifest['documentRunId']}")
-    outputs = manifest.get("outputs") or {}
-    for output_type in ("docx", "pdf"):
-        output = outputs.get(output_type)
-        if output is None:
-            continue
-        filename, content = verified_document_bytes(output)
-        st.download_button(
-            label=f"Download {output_type.upper()}: {filename}",
-            data=content,
-            file_name=filename,
-            mime=output.get("mimeType", "application/octet-stream"),
-            key=f"{key_prefix}_{manifest['documentRunId']}_{output_type}",
-        )
-
-
-def render_job_document_actions(job, key_prefix):
-    pair_key = f"{job['canonical_job_id']}:{job['job_version_id']}"
-    pairs = st.session_state.setdefault("application_document_pairs", {})
-    pair = pairs.setdefault(pair_key, {})
-    cv_col, letter_col = st.columns(2)
-    with cv_col:
-        if st.button("Generate CV", key=f"{key_prefix}_cv", width="stretch"):
-            with st.spinner("Generating a current, evidence-grounded CV... "):
-                application_id = ensure_draft_application(job)
-                result = run_checked_command(
-                    ["npx", "tsx", "scripts/generate_cv.ts", str(job["canonical_job_id"]), str(job["job_version_id"])],
-                    "generate_cv",
-                    {"JDEC_APPLICATION_RECORD_ID": application_id},
-                )
-                pair["cv"] = parse_document_run(result, "CV", job, application_id)
-    with letter_col:
-        if st.button("Generate cover letter", key=f"{key_prefix}_letter", width="stretch"):
-            with st.spinner("Generating a current, evidence-grounded cover letter... "):
-                application_id = ensure_draft_application(job)
-                result = run_checked_command(
-                    ["npx", "tsx", "scripts/generate_cover_letter.ts", str(job["canonical_job_id"]), str(job["job_version_id"])],
-                    "generate_cover_letter",
-                    {"JDEC_APPLICATION_RECORD_ID": application_id},
-                )
-                pair["cover_letter"] = parse_document_run(result, "COVER_LETTER", job, application_id)
-
-    cv = pair.get("cv")
-    letter = pair.get("cover_letter")
-    if not cv or not letter:
-        for document_type, manifest in (("cv", cv), ("cover_letter", letter)):
-            if manifest:
-                show_document_run_downloads(manifest, f"{key_prefix}_{document_type}_download")
-        st.info("Generate both customised documents for this exact job version to complete the application document pair.")
-        return
-
-    matching_context = all(
-        cv.get(field) == letter.get(field)
-        for field in (
-            "applicationRecordId",
-            "canonicalJobId",
-            "jobVersionId",
-            "profileVersionId",
-            "deterministicDecisionId",
-            "contextFingerprint",
-        )
-    )
-    if not matching_context:
-        st.warning("The CV and cover letter use different application context. Regenerate the stale document before review.")
-        show_document_run_downloads(cv, f"{key_prefix}_cv_historical")
-        show_document_run_downloads(letter, f"{key_prefix}_letter_historical")
-        return
-
-    verification = run_checked_command(
-        [
-            "npx",
-            "tsx",
-            "scripts/validate_application_document_pair.ts",
-            cv["applicationRecordId"],
-            cv["documentRunId"],
-            letter["documentRunId"],
-        ],
-        "validate_document_pair",
-    )
-    application_status = parse_application_document_pair_status(
-        verification.stdout,
-        application_record_id=cv["applicationRecordId"],
-        cv_document_run_id=cv["documentRunId"],
-        cover_letter_document_run_id=letter["documentRunId"],
-    )
-    if not application_status.get("pairCurrent"):
-        st.warning("This document pair is no longer current or attached to this draft application. Regenerate before marking it ready.")
-        show_document_run_downloads(cv, f"{key_prefix}_cv_stale")
-        show_document_run_downloads(letter, f"{key_prefix}_letter_stale")
-        return
-
-    show_document_run_downloads(cv, f"{key_prefix}_cv_download")
-    show_document_run_downloads(letter, f"{key_prefix}_letter_download")
-    review_key = f"{key_prefix}_pair_reviewed_{cv['documentRunId']}_{letter['documentRunId']}"
-    already_reviewed = bool(application_status.get("reviewedAt"))
-
-    def persist_pair_review() -> None:
-        review_response = api_request(
-            "PATCH",
-            f"/api/v2/applications/{cv['applicationRecordId']}",
-            body={
-                "event_payload": {
-                    "event": "DOCUMENT_PAIR_REVIEWED",
-                    "cv_document_run_id": cv["documentRunId"],
-                    "cover_letter_document_run_id": letter["documentRunId"],
-                    "cv_sha256": cv["outputs"]["docx"]["sha256"],
-                    "cover_letter_sha256": letter["outputs"]["docx"]["sha256"],
-                },
-            },
-        )
-        if not isinstance(review_response, dict) or not review_response.get("ok"):
-            raise RuntimeError("The API did not persist the document review event.")
-        st.success("Document review recorded on the draft application.")
-
-    reviewed = render_document_pair_review_checkbox(
-        review_key=review_key,
-        already_reviewed=already_reviewed,
-        on_review=persist_pair_review,
-    )
-    if application_status.get("documentReady") or reviewed:
-        st.success("Document pair reviewed. The application remains a draft; no employer submission was recorded.")
 
 def validate_shortlist_row_shape(row):
     required = [
@@ -1645,6 +1545,36 @@ def save_application_status(job, status, application=None):
     st.rerun()
 
 
+@st.cache_data(ttl=15, show_spinner=False)
+def _database_outage(api_url, database_url):
+    def probe_direct():
+        try:
+            from psycopg2 import Error as DriverError
+        except ImportError:
+            DriverError = RuntimeError
+        try:
+            _open_read_only_connection().close()
+        except DriverError as error:
+            raise RuntimeError(str(error)) from error
+
+    return database_outage(
+        api_url,
+        lambda path: api_request("GET", path, timeout=20),
+        probe_direct,
+        database_url,
+    )
+
+
+# Every panel reads the database, so an unusable database is reported once, before the first read,
+# instead of by each panel.
+database_problem = _database_outage(
+    get_api_base_url(), (os.environ.get("DATABASE_URL") or "").strip()
+)
+if database_problem:
+    st.sidebar.caption(f"Code version: `{code_version()}`")
+    st.error(database_problem)
+    st.stop()
+
 # Fetch data
 jobs_list = fetch_jobs_from_db()
 rejected_jobs_audit = fetch_rejected_jobs_from_db()
@@ -1885,6 +1815,7 @@ if api_base_url:
     st.sidebar.caption(f"🔌 Connected to Managed API (`{api_base_url}`)")
 else:
     st.sidebar.caption("📦 PostgreSQL Direct Read Model (Live)")
+st.sidebar.caption(f"Code version: `{code_version()}`")
 
 # Unpaginated counts come only from the authoritative V5 workspace read model.
 application_workspace_summary = {}
@@ -1942,8 +1873,8 @@ if application_records is not None:
 st.sidebar.markdown("---")
 st.sidebar.subheader("📅 Automated Schedules")
 st.sidebar.info("""
-* **Daily Ingestion & Evaluation**: Runs daily at **10:00 AM SGT** (02:00 UTC) via GitHub Actions.
-* **Weekly LinkedIn Auto-Sync**: Runs every **Sunday at 10:00 AM SGT** (02:00 UTC) via GitHub Actions.
+* **Daily ingestion**: Runs at **10:00 AM SGT** (02:00 UTC) via GitHub Actions.
+* **Hourly processing**: Backlog and queue-worker workflows run hourly.
 """)
 
 st.sidebar.subheader("⚡ Pipeline Action Controls")
@@ -2072,6 +2003,9 @@ with tab_dashboard:
             with st.container(border=True):
                 st.subheader(f"#{rank_position} {title}")
                 st.caption(f"{company} · {ranked_job.get('location') or 'Location unknown'} · {ranked_job.get('primary_lane') or 'Lane unknown'}")
+                salary_note = salary_disclosure_message(ranked_job)
+                if salary_note:
+                    st.caption(salary_note)
                 score_columns = st.columns(4)
                 score_columns[0].metric("Overall rank", format_score(ranked_job.get("overall_rank_score")))
                 score_columns[1].metric("Ranking confidence", format_percent(ranked_job.get("ranking_confidence")))
@@ -2124,17 +2058,8 @@ with tab_dashboard:
                         st.success("Applied")
                 with action_columns[2]:
                     current_status = application_record.get("application_status") if application_record else "Not tracked"
-                    cv_status = application_record.get("cv_document_status") if application_record else "NOT_GENERATED"
-                    letter_status = application_record.get("cover_letter_document_status") if application_record else "NOT_GENERATED"
-                    st.caption(f"Application: {current_status} · CV: {cv_status} · Cover letter: {letter_status}")
-                try:
-                    render_job_document_actions(ranked_job, f"top_{rank_position}")
-                except subprocess.CalledProcessError as exc:
-                    st.error(f"Document generation failed with exit code {exc.returncode}.")
-                    if exc.stderr:
-                        st.code(exc.stderr, language="text")
-                except Exception as exc:
-                    st.error(f"Document generation failed: {exc}")
+                    st.caption(f"Application: {current_status}")
+                render_pipeline_review_action(api_request, ranked_job, f"top_{rank_position}")
 
     evidence_options = {}
     if top_ten_ready_jobs is not None:
@@ -2182,11 +2107,18 @@ with tab_dashboard:
             except Exception as exc:
                 st.error(f"Current profile evidence could not be loaded: {exc}")
 
-    category_options = ["Top 10", "Apply Now", "Track", "Processing", "Applied", "Skip", "Rejected / Unmatched", "Archive", "All"]
+    category_options = ["Top 10", "Apply Now", "Verify, then apply", "Track", "Processing", "Applied", "Skip", "Rejected / Unmatched", "Archive", "All"]
     workspace_category = st.selectbox("Opportunity category", category_options, index=1, key="application_workspace_category")
+    verification_jobs = None
+    if workspace_category == "Verify, then apply":
+        try:
+            verification_jobs = fetch_verify_then_apply_jobs()
+        except Exception as exc:
+            st.error(f"Verification opportunities are unavailable from the canonical read model: {exc}")
     category_counts = {
         "Top 10": application_workspace_summary.get("top_ten_ready_count"),
         "Apply Now": application_workspace_summary.get("apply_now_count"),
+        "Verify, then apply": len(verification_jobs) if verification_jobs is not None else None,
         "Track": application_workspace_summary.get("track_count"),
         "Processing": application_workspace_summary.get("processing_count"),
         "Applied": application_workspace_summary.get("applied_count"),
@@ -2220,6 +2152,8 @@ with tab_dashboard:
             category_rows = fetch_top_ten_ready_jobs()
         elif workspace_category == "Apply Now":
             category_rows = fetch_apply_now_jobs()
+        elif workspace_category == "Verify, then apply":
+            category_rows = verification_jobs
         elif workspace_category == "Track":
             category_rows = fetch_track_jobs()
         elif workspace_category == "Applied":
@@ -2250,7 +2184,19 @@ with tab_dashboard:
         archive_rows = category_rows
         filtered_jobs = []
     else:
-        if workspace_category not in ("Applied", "Rejected / Unmatched"):
+        if workspace_category == "Verify, then apply":
+            category_rows = [
+                job for job in category_rows
+                if (lane_filter in (None, "All Lanes") or job.get("primary_lane") == lane_filter)
+                and (status_filter in (None, "All Statuses") or job.get("processing_state") == status_filter)
+                and (board_filter == "All Sources" or (job.get("source") or "UNKNOWN") == board_filter)
+                and (
+                    track_filter in (None, "All Tracks")
+                    or (track_filter == "Unassigned" and not job.get("primary_lane"))
+                    or job.get("primary_lane") == track_filter
+                )
+            ]
+        elif workspace_category not in ("Applied", "Rejected / Unmatched"):
             for category_job in category_rows:
                 category_job["decision_eligibility"] = category_job.get("recommendation_eligibility")
                 category_job["decision_outcome"] = category_job.get("recommendation_outcome")
@@ -2361,7 +2307,19 @@ with tab_dashboard:
 
             return (rank_missing, rank_sort, outcome_rank, eligibility_rank, status_rank, match_sort, priority_sort)
 
-        sorted_filtered_jobs = sorted(filtered_jobs, key=status_sort_key)
+        if workspace_category == "Verify, then apply":
+            sorted_filtered_jobs = sorted(
+                filtered_jobs,
+                key=lambda job: (
+                    as_number(job.get("deterministic_match_score")) is None,
+                    -(as_number(job.get("deterministic_match_score")) or 0),
+                    -(as_number(job.get("recommendation_requirement_score")) or 0),
+                    -(as_number(job.get("recommendation_coverage_score")) or 0),
+                    job.get("observed_at") or "",
+                ),
+            )
+        else:
+            sorted_filtered_jobs = sorted(filtered_jobs, key=status_sort_key)
         listing_page_size = 25
         listing_page_count = max(1, (len(sorted_filtered_jobs) + listing_page_size - 1) // listing_page_size)
         listing_page = st.number_input(
@@ -2374,7 +2332,7 @@ with tab_dashboard:
         )
         start_index = (int(listing_page) - 1) * listing_page_size
         active_jobs = sorted_filtered_jobs[start_index:start_index + listing_page_size]
-        rejected_jobs = [] if workspace_category in ("Rejected / Unmatched", "Archive") else rejected_jobs_audit
+        rejected_jobs = [] if workspace_category in ("Rejected / Unmatched", "Verify, then apply", "Archive") else rejected_jobs_audit
 
         if workspace_category == "Archive":
             st.subheader("Archived jobs")
@@ -2400,8 +2358,13 @@ with tab_dashboard:
             )
         else:
             st.subheader(f"{workspace_category} opportunities")
-            if not active_jobs and not rejected_jobs:
-                st.info("No matching jobs in the current Postgres database.")
+            if workspace_category == "Verify, then apply":
+                st.caption("Sorted by deterministic profile-match score. These jobs have a current match and decision, but stay out of READY and document generation until the open workability question is resolved.")
+        if workspace_category == "Archive":
+            pass
+        elif not active_jobs and not rejected_jobs:
+            st.info("No matching jobs in the current Postgres database.")
+        else:
             # Render Active (Green & Orange) Jobs
             if active_jobs:
                 st.write(f"Showing {len(active_jobs)} listings:")
@@ -2427,6 +2390,8 @@ with tab_dashboard:
                     
                     with st.expander(f"{badge_style} {title} — {company} ({status})"):
                         st.markdown(f"**Decision:** `{outcome}` ({eligibility}) | **Gate:** `{gate_status}`")
+                        if workspace_category == "Verify, then apply":
+                            st.text(f"Open question: {verification_question_for_job(job)}")
                         artifact_status = job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN"
                         artifact_reason = job.get("current_artifact_reason")
                         blocked_count = job.get("blocked_task_count") or 0
@@ -2439,6 +2404,9 @@ with tab_dashboard:
                         st.markdown(f"**Source:** `{job.get('source') or 'UNKNOWN'}`")
                         st.markdown(f"**Lane:** `{job.get('primary_lane') or 'UNCLASSIFIED'}` | **Lane confidence:** `{job.get('lane_confidence') or 'None'}`")
                         st.markdown(f"**Location:** {job.get('location') or 'Unknown'} ({job.get('workplace_type') or 'UNKNOWN'}) | **Employment:** `{job.get('employment_type') or 'UNKNOWN'}`")
+                        salary_note = salary_disclosure_message(job)
+                        if salary_note:
+                            st.caption(salary_note)
 
                         url = safe_http_url(job.get("canonical_url"))
                         if url:
@@ -2487,6 +2455,12 @@ with tab_dashboard:
                                 pass
                         st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"active_desc_{idx}")
 
+                        verify_first = workspace_category == "Verify, then apply"
+                        if verify_first or is_document_generation_eligible(job):
+                            if verify_first:
+                                st.caption("Settle the open question with the employer before you send these documents.")
+                            render_pipeline_review_action(api_request, job, f"active_{job.get('job_version_id')}")
+
                         if is_document_generation_eligible(job):
                             application_key = (job.get("canonical_job_id"), job.get("job_version_id"))
                             application_record = application_by_job.get(application_key) if application_by_job is not None else None
@@ -2504,14 +2478,6 @@ with tab_dashboard:
                                         save_application_status(job, "APPLIED", application_record)
                                     except Exception as exc:
                                         st.error(f"Could not update the application tracker: {exc}")
-                            try:
-                                render_job_document_actions(job, f"active_{job.get('canonical_job_id')}")
-                            except subprocess.CalledProcessError as exc:
-                                st.error(f"Document generation failed with exit code {exc.returncode}.")
-                                if exc.stderr:
-                                    st.code(exc.stderr, language="text")
-                            except Exception as exc:
-                                st.error(f"Document generation failed: {exc}")
                         
                         if st.button("🗑️ Delete Listing", key=f"active_del_{job.get('canonical_job_id') or idx}"):
                             if delete_job_from_db(job.get("canonical_job_id")):
@@ -2658,36 +2624,7 @@ with tab_dashboard:
             st.info("No evaluated jobs in view. Run the discovery & evaluation pipeline to populate AI_EVALUATED rows.")
 
 with tab_add_job:
-    st.subheader("➕ Import a New Job Advertisement")
-    st.write("Add raw jobs manually to the Postgres Vault. The daily evaluation cron job will automatically score and route them.")
-    if "manual_import_success" in st.session_state:
-        st.success(st.session_state["manual_import_success"])
-        del st.session_state["manual_import_success"]
-
-    with st.form("custom_job_form"):
-        title = st.text_input("Job Title", "Principal AI Architect")
-        company = st.text_input("Company Name", "Novartis Pharmaceuticals")
-        source = st.selectbox("Source Portal", ["LinkedIn", "MyCareersFuture", "eFinancialCareers", "Gmail"])
-        salary = st.text_input("Salary Range Indicator", "SGD 22,000 - SGD 26,000 / month")
-        location = st.text_input("Location", "Singapore (Remote)")
-        careers_url = st.text_input("Careers Portal Direct Link (Verification)", "https://www.novartis.com/careers")
-        desc = st.text_area("Job Description Raw text", "Paste raw details here...")
-        
-        submitted = st.form_submit_button("Import & Save to Postgres Vault")
-        if submitted:
-            new_job = {
-                "title": title,
-                "company": company,
-                "source": source,
-                "salaryRange": salary,
-                "location": location,
-                "careers_portal_url": careers_url if careers_url else f"https://www.{company.lower().replace(' ', '')}.com/careers",
-                "description": desc
-            }
-            if save_new_job_to_db(new_job):
-                st.session_state["manual_import_success"] = f"✅ Successfully added '{title}' to the Staging Vault! It is now pending evaluation. To evaluate it immediately, click the '🧠 2. Run LLM Evaluation & Processing' button in the sidebar."
-                st.rerun()
-
+    render_manual_application_flow(api_request)
 with tab_linkedin:
     st.subheader("🔗 Import Saved LinkedIn Jobs")
     st.write("Sync your saved LinkedIn jobs and stage them in your Postgres database for evaluation. Auto-unsave is disabled to keep ingestion read-only.")
@@ -2960,7 +2897,13 @@ with tab_applications:
                 save_application_status({}, next_status, selected_tracker_record)
             except Exception as exc:
                 st.error(f"Application status update failed: {exc}")
-        st.caption(f"CV linked: {'yes' if selected_tracker_record.get('cv_document_run_id') else 'not generated'} · Cover letter linked: {'yes' if selected_tracker_record.get('cover_letter_document_run_id') else 'not generated'}")
+        st.markdown("#### Documents for this application")
+        try:
+            render_selected_documents(
+                api_request, fetch_document_selection(selected_tracker_record["application_record_id"])
+            )
+        except Exception as exc:
+            st.error(f"The documents chosen for this application are unavailable: {exc}")
         if get_api_base_url():
             try:
                 event_response = api_request(
@@ -3187,7 +3130,7 @@ with tab_cv:
             else:
                 st.text_area("Description", str(description), height=220, disabled=True)
 
-        render_job_document_actions(selected_job, f"selected_{selected_job['canonical_job_id']}")
+        render_pipeline_review_action(api_request, selected_job, f"selected_{selected_job['job_version_id']}")
 
 # Footer section
 st.markdown("---")

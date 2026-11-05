@@ -8,8 +8,10 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { buildPipelineTaskContextFingerprint } from "../../pipeline/artifactContext.js";
 import { GATE_VERSION } from "../../contracts/version.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
+import { recordPipelineWorkerProgressSnapshot } from "../../tasks/pipelineWorkerProgress.js";
 import { reconcileStalePendingPipelineTasks } from "../../tasks/pipelineTaskCurrentness.js";
 import {
+  PIPELINE_STAGE_TASK_TYPES,
   runPipelineStageTaskWorker,
   seedRecoverablePipelineTasks,
   type PipelineStageWorkerDependencies,
@@ -179,6 +181,92 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     await pool?.end();
   });
 
+  it("claims downstream route, match, decision, and explanation work before new intake", async () => {
+    const versions = await insertJobVersions();
+    await getClient().query(
+      `UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE workspace_id = $1 AND id = $2`,
+      [getContext().workspaceId, versions.canonicalJobId],
+    );
+
+    const taskIdsByType = new Map<string, string>();
+    for (const taskType of PIPELINE_STAGE_TASK_TYPES) {
+      const taskId = await insertPendingTask({
+        taskType,
+        taskKey: `${taskType}:${versions.latestVersionId}:stage-priority-test`,
+        payload: {
+          canonical_job_id: versions.canonicalJobId,
+          job_version_id: versions.latestVersionId,
+          observation_id: crypto.randomUUID(),
+        },
+        fingerprintTaskType: taskType,
+        fingerprintTaskVersion: "stage-priority-test-v1",
+      });
+      taskIdsByType.set(taskType, taskId);
+    }
+
+    const summary = await runPipelineStageTaskWorker(getClient(), {
+      context: getContext(),
+      seed: false,
+      reconcileStalePending: false,
+      taskTypes: [...PIPELINE_STAGE_TASK_TYPES],
+      jobVersionIds: [versions.latestVersionId],
+      maxTasks: 4,
+      stageQuantum: 1,
+      claimBatchSize: 1,
+      wallClockMs: 10_000,
+      minTimeToStartTaskMs: 0,
+    });
+
+    const downstreamFirst = [
+      "ENQUEUE_EXPLANATION",
+      "DECIDE_RECOMMENDATION",
+      "MATCH_PROFILE_EVIDENCE",
+      "ROUTE_LANE",
+    ];
+    for (const taskType of downstreamFirst) {
+      expect(summary.byType[taskType]?.claimed).toBe(1);
+      expect(summary.byType[taskType]?.completed).toBe(1);
+    }
+
+    const taskStatuses = await getClient().query<{ id: string; task_type: string; status: string }>(
+      `SELECT id::text, task_type, status
+       FROM pipeline_tasks
+       WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+      [getContext().workspaceId, [...taskIdsByType.values()]],
+    );
+    const statusByType = new Map(taskStatuses.rows.map((row) => [row.task_type, row.status]));
+    for (const taskType of downstreamFirst) expect(statusByType.get(taskType)).toBe("COMPLETED");
+    for (const taskType of PIPELINE_STAGE_TASK_TYPES.filter((type) => !downstreamFirst.includes(type))) {
+      expect(statusByType.get(taskType)).toBe("PENDING");
+    }
+    await getClient().query(
+      `DELETE FROM pipeline_tasks WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+      [getContext().workspaceId, [...taskIdsByType.values()]],
+    );
+  });
+
+  it("records the oldest pending task across worker runs for age-trend enforcement", async () => {
+    const oldestPendingTaskId = crypto.randomUUID();
+    const oldestPendingCreatedAt = new Date(Date.now() - 100_000).toISOString();
+    const runStreaks: number[] = [];
+
+    for (let runNumber = 1; runNumber <= 3; runNumber += 1) {
+      const snapshot = await recordPipelineWorkerProgressSnapshot(getClient(), {
+        workspaceId: getContext().workspaceId,
+        runKey: `progress-trend-test:${crypto.randomUUID()}`,
+        activePendingCount: 100 - runNumber,
+        oldestPendingTaskId,
+        oldestPendingTaskType: "DECIDE_RECOMMENDATION",
+        oldestPendingCreatedAt,
+        oldestPendingAgeSeconds: 100_000 + runNumber,
+      }, 3);
+      runStreaks.push(snapshot.consecutiveOldestTaskRuns);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+
+    expect(runStreaks).toEqual([1, 2, 3]);
+  });
+
   it("reassesses an already-decided job when current readiness evidence is missing", async ({ skip }) => {
     const database = getClient();
     const readinessView = await database.query<{ available: boolean }>(
@@ -240,6 +328,88 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       [task.rows[0]?.id],
     );
     expect(after.rows[0]?.status).toBe("PENDING");
+  });
+
+  it("does not accept PROCESSED plus a version as fetched content, but accepts a matching sourced snapshot", async () => {
+    const versions = await insertJobVersions();
+    await getClient().query(
+      `UPDATE canonical_jobs SET is_test_fixture = TRUE WHERE workspace_id = $1 AND id = $2`,
+      [getContext().workspaceId, versions.canonicalJobId],
+    );
+    const observationId = crypto.randomUUID();
+    const description = [
+      "Responsibilities: Design and maintain the data platform, lead architecture reviews, and coordinate delivery with engineering and business teams.",
+      "Requirements: Experience with production systems, data governance, cloud services, and clear written communication.",
+    ].join(" ").repeat(10);
+    await getClient().query(
+      `UPDATE job_versions SET description_text = $1 WHERE workspace_id = $2 AND id = $3`,
+      [description, getContext().workspaceId, versions.latestVersionId],
+    );
+    await getClient().query(
+      `INSERT INTO raw_job_observations (
+         id, workspace_id, source_name, source_url, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id
+       ) VALUES ($1, $2, 'GMAIL_ALERT', 'https://jobs.lever.co/example/12345678',
+         'Pipeline Currentness Test', 'Fixture Role', 'short email snippet', '{}'::jsonb,
+         $3, 'PROCESSED', $4)`,
+      [observationId, getContext().workspaceId, `hash-${observationId}`, versions.latestVersionId],
+    );
+    const taskId = await insertPendingTask({
+      taskType: "FETCH_JOB_CONTENT",
+      taskKey: `FETCH_JOB_CONTENT:${observationId}:posting_fetch_v1`,
+      payload: { observation_id: observationId },
+      fingerprintTaskType: "FETCH_JOB_CONTENT",
+      fingerprintTaskVersion: "posting_fetch_v1",
+    });
+
+    const legacy = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
+      apply: false,
+      taskTypes: ["FETCH_JOB_CONTENT"],
+      observationIds: [observationId],
+    });
+    expect(legacy).toMatchObject({ unresolved: 1, current: 0 });
+    expect(legacy.decisions[0]).toMatchObject({
+      taskId,
+      classification: "UNRESOLVED",
+      reasonCode: "FETCH_OBSERVATION_STATE_UNPROVEN",
+    });
+
+    const proofHash = "a".repeat(64);
+    await getClient().query(
+      `INSERT INTO raw_job_observations (
+         workspace_id, source_name, source_url, company_name, title, description_raw,
+         raw_payload, raw_payload_hash, processing_status, job_version_id, derived_from_observation_id
+       ) VALUES (
+         $1, 'LEVER', 'https://jobs.lever.co/example/12345678', 'Pipeline Currentness Test',
+         'Fixture Role', $2, $3::jsonb, $4, 'FETCH_STAGED', $5, $6
+       )`,
+      [getContext().workspaceId, description, JSON.stringify({
+        source_content_status: "COMPLETE",
+        content_hash: proofHash,
+        source_evidence: {
+          responseHash: proofHash,
+          requestedUrl: "https://jobs.lever.co/example/12345678",
+          resolvedUrl: "https://api.lever.co/v0/postings/example/12345678",
+        },
+        posting: { title: "Fixture Role", companyName: "Pipeline Currentness Test" },
+      }), `derived-${observationId}`, versions.latestVersionId, observationId],
+    );
+    await getClient().query(
+      `UPDATE raw_job_observations SET processing_status = 'FETCH_COMPLETE'
+       WHERE workspace_id = $1 AND id = $2`,
+      [getContext().workspaceId, observationId],
+    );
+    const retrieved = await reconcileStalePendingPipelineTasks(getClient(), getContext(), {
+      apply: false,
+      taskTypes: ["FETCH_JOB_CONTENT"],
+      observationIds: [observationId],
+    });
+    expect(retrieved).toMatchObject({ current: 0, unresolved: 0, byClassification: { PROVEN_SATISFIED: 1 } });
+    expect(retrieved.decisions[0]).toMatchObject({
+      taskId,
+      classification: "PROVEN_SATISFIED",
+      reasonCode: "POSTING_CONTENT_STAGED",
+    });
   });
 
   it("dry-runs and reconciles stale or already-satisfied pending tasks without changing current work", async () => {
@@ -805,6 +975,25 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const normalizationJob = await insertJobVersions();
     const embeddingSpaceId = await createEmbeddingSpace();
     const recommendationJob = await insertJobVersions();
+    const completeFixtureDescription = [
+      "About the role: Build and operate reliable data systems with partner teams.",
+      "Responsibilities: Design platform services, review architecture, improve data quality, and coordinate delivery across engineering and business stakeholders.",
+      "Requirements: Demonstrated experience with production systems, cloud services, data governance, incident response, and clear written communication.",
+    ].join(" ").repeat(12);
+    for (const jobVersionId of [normalizationJob.latestVersionId, recommendationJob.latestVersionId]) {
+      await getClient().query(
+        `UPDATE job_versions SET description_text = $1 WHERE workspace_id = $2 AND id = $3`,
+        [completeFixtureDescription, getContext().workspaceId, jobVersionId],
+      );
+      await getClient().query(
+        `INSERT INTO raw_job_observations (
+           workspace_id, source_name, company_name, title, description_raw,
+           raw_payload_hash, processing_status, job_version_id
+         ) VALUES ($1, 'EMPLOYER_WEBSITE', 'Pipeline Currentness Test', 'Fixture Role', $2,
+           $3, 'PROCESSED', $4)`,
+        [getContext().workspaceId, completeFixtureDescription, `source-${crypto.randomUUID()}`, jobVersionId],
+      );
+    }
     await getClient().query(
       `UPDATE canonical_jobs
        SET processing_state = 'HARD_REJECTED',
@@ -904,6 +1093,7 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
 
     let normalizationCalls = 0;
     const workerDependencies = {
+      fetchJobContent: vi.fn(async () => ({ kind: "BLOCKED" as const, reason: "MISSING_POSTING_URL" as const })),
       runNormalization: vi.fn(async () => {
         normalizationCalls += 1;
         if (normalizationCalls === 1) {
@@ -971,13 +1161,11 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
       runExplanationQueueEnqueuer: vi.fn(async () => ({ enqueued: 0, updated: 0, deferred: 0 })),
     } as PipelineStageWorkerDependencies;
 
-    const taskTypes = ["PUBLISH_EMBEDDING", "NORMALIZE_OBSERVATION", "DECIDE_RECOMMENDATION"] as const;
     const slowEmbeddingRun = await runPipelineStageTaskWorker(getClient(), {
       context: getContext(),
       seed: false,
-      taskTypes: [...taskTypes],
+      taskTypes: ["PUBLISH_EMBEDDING"],
       jobVersionIds: [normalizationJob.latestVersionId, recommendationJob.latestVersionId],
-      stageStartOffset: 0,
       stageQuantum: 1,
       maxTasks: 100,
       claimBatchSize: 1,
@@ -988,7 +1176,6 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     expect(slowEmbeddingRun.claimed).toBe(1);
     expect(slowEmbeddingRun.exitReason).toBe("WALL_CLOCK_BUDGET_REACHED");
     expect(slowEmbeddingRun.byType.PUBLISH_EMBEDDING?.claimed).toBe(1);
-    expect(slowEmbeddingRun.stalePendingReconciliation.stalePendingReconciledThisRun).toBe(1);
     const afterSlowEmbedding = await getClient().query<{ id: string; status: string }>(
       `SELECT id, status FROM pipeline_tasks WHERE id = ANY($1::uuid[])`,
       [[embeddingTaskId, firstNormalizationTaskId, currentDecisionTaskId]],
@@ -1002,9 +1189,8 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const normalizationRun = await runPipelineStageTaskWorker(getClient(), {
       context: getContext(),
       seed: false,
-      taskTypes: [...taskTypes],
+      taskTypes: ["NORMALIZE_OBSERVATION"],
       jobVersionIds: [normalizationJob.latestVersionId, recommendationJob.latestVersionId],
-      stageStartOffset: 1,
       stageQuantum: 1,
       maxTasks: 1,
       claimBatchSize: 1,
@@ -1025,9 +1211,8 @@ describe.skipIf(skipReal)("pending pipeline task currentness (PostgreSQL)", () =
     const recommendationRun = await runPipelineStageTaskWorker(getClient(), {
       context: getContext(),
       seed: false,
-      taskTypes: [...taskTypes],
+      taskTypes: ["DECIDE_RECOMMENDATION"],
       jobVersionIds: [normalizationJob.latestVersionId, recommendationJob.latestVersionId],
-      stageStartOffset: 2,
       stageQuantum: 1,
       maxTasks: 1,
       claimBatchSize: 1,

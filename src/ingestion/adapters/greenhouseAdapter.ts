@@ -34,9 +34,10 @@ export class GreenhouseAdapter extends BaseSourceAdapter {
         return this.errorResult(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const payload: unknown = await response.json();
+      const payload = await this.readJsonResponse(response);
       const data = asRecord(payload);
       const rawJobs = Array.isArray(data?.jobs) ? data.jobs : [];
+      this.assertRecordCount(rawJobs);
       const limit = Math.min(200, Math.max(1, options.limit ?? 50));
       const page = snapshotPage(rawJobs, limit, options.cursor, options.page, stableAdapterIdentity);
       const jobs: ExtractedJob[] = [];

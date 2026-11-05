@@ -1,31 +1,22 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-describe("documents workflow", () => {
-  it("skips auto-pick cleanly when no document-ready job exists", () => {
-    const workflow = readFileSync(resolve(".github/workflows/documents.yml"), "utf8");
-    const picker = readFileSync(resolve("scripts/pick_documents_job.ts"), "utf8");
+describe("public repository document workflow policy", () => {
+  it("does not expose a GitHub Actions document generator or its dispatch validator", () => {
+    expect(existsSync(resolve(".github/workflows/documents.yml"))).toBe(false);
+    expect(existsSync(resolve("scripts/validate_document_workflow_dispatch.ts"))).toBe(false);
+    expect(existsSync(resolve("src/services/documentWorkflowDispatchPolicy.ts"))).toBe(false);
+  });
 
-    expect(workflow).toContain('PICK_DOCUMENTS_ALLOW_EMPTY: "true"');
-    expect(workflow).toContain("DOCUMENTS_JOB_FOUND=false");
-    expect(workflow).toContain("DOCUMENTS_JOB_FOUND=true");
-    expect(workflow).toContain("No eligible jobs found for document generation yet. Generation was skipped.");
-    expect(workflow).toContain("if: env.DOCUMENTS_JOB_FOUND == 'true'");
-    expect(workflow).toContain("always() && env.DOCUMENTS_JOB_FOUND == 'true'");
-    expect(workflow).toContain("npx tsx scripts/preflight_database.ts");
-    expect(workflow).toContain("INPUT_CANONICAL_JOB_ID: ${{ inputs.canonical_job_id }}");
-    expect(workflow).toContain("canonical_job_id must be a UUID.");
-    expect(workflow).toContain("job_version_id must be a UUID when provided.");
+  it("documents local generation and keeps only real schedule claims in the sidebar", () => {
+    const runbook = readFileSync(resolve("docs/release-runbook.md"), "utf8");
+    const sidebar = readFileSync(resolve("streamlit_app.py"), "utf8");
 
-    expect(picker).toContain("PICK_DOCUMENTS_ALLOW_EMPTY");
-    expect(picker).toContain("documents_job_found: false");
-    expect(picker).toContain("documents_job_found: true");
-    expect(picker).toContain("process.exitCode = allowEmptyAutoPick ? 0 : 1");
-
-    const jobVersionJoin = picker.indexOf("JOIN job_versions jv");
-    const matchRunJoin = picker.indexOf("JOIN match_runs mr");
-    expect(jobVersionJoin).toBeGreaterThan(-1);
-    expect(matchRunJoin).toBeGreaterThan(jobVersionJoin);
+    expect(runbook).toContain("Generate application documents locally");
+    expect(runbook).not.toContain("Dispatch `documents.yml`");
+    expect(sidebar).toContain("Daily ingestion");
+    expect(sidebar).toContain("Hourly processing");
+    expect(sidebar).not.toContain("Weekly LinkedIn Auto-Sync");
   });
 });

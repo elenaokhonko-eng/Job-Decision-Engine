@@ -10,6 +10,7 @@
  */
 import { createHash } from "node:crypto";
 import { ExtractedJob, ExtractedJobSchema, SourceName } from "../../contracts/index.js";
+import { readJsonResponseBounded, readResponseTextBounded } from "../../security/boundedResponse.js";
 import { stripHtmlToText } from "../../security/sanitize.js";
 
 export interface QuarantinedSourceCandidate {
@@ -38,6 +39,9 @@ export interface AdapterFetchOptions {
   readonly page?: number;
   readonly cursor?: string | null;
 }
+
+export const MAX_SOURCE_RESPONSE_BYTES = 8 * 1024 * 1024;
+export const MAX_SOURCE_RECORDS = 2_000;
 
 export function snapshotPage<T>(
   records: readonly T[],
@@ -105,6 +109,23 @@ export abstract class BaseSourceAdapter {
       return await fetch(url, { ...init, signal: controller.signal });
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  protected async readResponseText(
+    response: Response,
+    maxBytes = MAX_SOURCE_RESPONSE_BYTES,
+  ): Promise<string> {
+    return readResponseTextBounded(response, maxBytes, "Source response");
+  }
+
+  protected async readJsonResponse(response: Response): Promise<unknown> {
+    return readJsonResponseBounded(response, MAX_SOURCE_RESPONSE_BYTES, "Source response");
+  }
+
+  protected assertRecordCount(records: readonly unknown[], maxRecords = MAX_SOURCE_RECORDS): void {
+    if (records.length > maxRecords) {
+      throw new RangeError(`Source response contains ${records.length} records; limit is ${maxRecords}.`);
     }
   }
 

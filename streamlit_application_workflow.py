@@ -23,35 +23,6 @@ def application_api_path(path: str) -> str:
     return f"{API_V2_PREFIX}{normalized}"
 
 
-def parse_application_document_pair_status(
-    stdout: str,
-    *,
-    application_record_id: str,
-    cv_document_run_id: str,
-    cover_letter_document_run_id: str,
-) -> dict[str, object]:
-    for line in reversed(stdout.splitlines()):
-        try:
-            status = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if (
-            not isinstance(status, dict)
-            or status.get("event") != "APPLICATION_DOCUMENT_PAIR_VALIDATED"
-        ):
-            continue
-        if (
-            status.get("applicationRecordId") != application_record_id
-            or status.get("cvDocumentRunId") != cv_document_run_id
-            or status.get("coverLetterDocumentRunId") != cover_letter_document_run_id
-        ):
-            raise ValueError(
-                "Document-pair status does not match the selected application and run IDs."
-            )
-        return status
-    raise ValueError("The document-pair validator returned no structured status.")
-
-
 def _is_future_timestamp(value: object) -> bool:
     if isinstance(value, datetime):
         parsed = value
@@ -98,6 +69,36 @@ def has_current_ready_assessment(job: Mapping[str, object]) -> bool:
         and _is_future_timestamp(job.get("readiness_expires_at"))
         and _is_future_timestamp(job.get("availability_recheck_at"))
     )
+
+
+def salary_disclosure_message(job: Mapping[str, object]) -> str | None:
+    """Return the user-facing note for a non-blocking undisclosed salary.
+
+    Args:
+        job: A readiness-enriched canonical read-model row.
+
+    Returns:
+        The recruiter follow-up note when base salary is undisclosed; otherwise None.
+    """
+    readiness = job.get("application_readiness")
+    if isinstance(readiness, str):
+        try:
+            readiness = json.loads(readiness)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(readiness, Mapping):
+        return None
+    checks = readiness.get("checks")
+    if not isinstance(checks, list):
+        return None
+    for check in checks:
+        if (
+            isinstance(check, Mapping)
+            and check.get("key") == "COMPENSATION"
+            and check.get("reason_code") == "COMPENSATION_UNDISCLOSED"
+        ):
+            return "Salary undisclosed—confirm with recruiter."
+    return None
 
 
 def is_document_generation_eligible(

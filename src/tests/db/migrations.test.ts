@@ -84,7 +84,7 @@ describe("P0-03: Additive Migration Chain & Canonical Schema Integrity", () => {
 
   it("adds an independent archive lifecycle and active-view filters without moving job history", () => {
     const migration = fs.readFileSync(
-      path.join(MIGRATIONS_DIR, "080_reversible_job_archiving.sql"),
+      path.join(MIGRATIONS_DIR, "093_reversible_job_archiving.sql"),
       "utf8",
     );
 
@@ -221,7 +221,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(versions).toContain("074_rebalance_optional_ranking_confidence.sql");
     expect(versions).toContain("076_lower_top_ten_confidence_threshold.sql");
     expect(versions).toContain("078_evidence_readiness_discovery.sql");
-    expect(versions).toContain("080_reversible_job_archiving.sql");
+    expect(versions).toContain("093_reversible_job_archiving.sql");
   });
 
   it("V5 creates the ranking, culture, and workspace-scoped application read models", async () => {
@@ -1244,7 +1244,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     expect(currentIndex?.indexdef).toContain("context_fingerprint");
   });
 
-  it("gate_decisions audit table and pipeline run identity exist", async () => {
+  it("gate_decisions audit table preserves run identity and the effective policy hash", async () => {
     const { rows } = await realPool.query(`
       SELECT table_name
       FROM information_schema.tables
@@ -1256,10 +1256,13 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       SELECT column_name
       FROM information_schema.columns
       WHERE table_name = 'gate_decisions'
-        AND column_name = 'pipeline_run_id'
+        AND column_name IN ('pipeline_run_id', 'workability_policy_hash')
         AND table_schema = 'public'
     `);
-    expect(columns).toHaveLength(1);
+    expect(columns.map((row) => row.column_name)).toEqual(
+      expect.arrayContaining(['pipeline_run_id', 'workability_policy_hash'])
+    );
+    expect(columns).toHaveLength(2);
   });
 
   it("rejected-job audit read models exist for base and workspace-scoped consumers", async () => {
@@ -1293,11 +1296,20 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
 
   it("migration 075 exposes versioned preferences and nullable authoritative freshness lineage idempotently", async () => {
     const client = await realPool.connect();
+    // Its own schema: replaying 075 recreates a unique index that 078 later drops on purpose, so the
+    // shared database may already hold rows (genuine reposts) that 075's index would reject.
+    const schemaName = `replay_075_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
     try {
-      await applyMigrationFile(client, '075_user_preference_lineage_freshness_company_policy.sql');
-      await applyMigrationFile(client, '075_user_preference_lineage_freshness_company_policy.sql');
-      await applyMigrationFile(client, '078_evidence_readiness_discovery.sql');
-      await applyMigrationFile(client, '080_reversible_job_archiving.sql');
+      await client.query(`CREATE SCHEMA ${schemaName}`);
+      await client.query(`SET search_path TO ${schemaName}, public`);
+      await client.query(`CREATE TABLE schema_migrations (version VARCHAR(255) PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW())`);
+      const files = fs.readdirSync(MIGRATIONS_DIR).filter((file) => file.endsWith(".sql") && !file.startsWith(".")).sort();
+      const replayed = '075_user_preference_lineage_freshness_company_policy.sql';
+      for (const file of files.filter((name) => name <= replayed)) await applyMigrationFile(client, file);
+      await applyMigrationFile(client, replayed);
+      for (const file of files.filter((name) => name > replayed && name <= '078_evidence_readiness_discovery.sql')) {
+        await applyMigrationFile(client, file);
+      }
 
       const preferenceTables = await client.query<{ table_name: string }>(
         `SELECT table_name
@@ -1355,9 +1367,11 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
       );
       expect(rankingColumns.rows).toHaveLength(11);
     } finally {
+      await client.query("RESET search_path").catch(() => undefined);
+      await client.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`).catch(() => undefined);
       client.release();
     }
-  }, 30_000);
+  }, 120_000);
 
   it("migration 008 succeeds on legacy upgrade path without uq_canonical_job_content_hash", async () => {
     const client = await realPool.connect();
@@ -1457,7 +1471,7 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     const client = await realPool.connect();
     try {
       await applyMigrationFile(client, "078_evidence_readiness_discovery.sql");
-      await applyMigrationFile(client, "080_reversible_job_archiving.sql");
+      await applyMigrationFile(client, "093_reversible_job_archiving.sql");
       const { rows: columns } = await client.query<{ table_name: string; column_name: string; data_type: string }>(`
         SELECT table_name, column_name, data_type
         FROM information_schema.columns
@@ -1527,10 +1541,10 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
     }
   });
 
-  it("080 replays safely and exposes archive lifecycle and operational views", async () => {
+  it("093 replays safely and exposes archive lifecycle and operational views", async () => {
     const client = await realPool.connect();
     try {
-      await applyMigrationFile(client, "080_reversible_job_archiving.sql");
+      await applyMigrationFile(client, "093_reversible_job_archiving.sql");
       const { rows: columns } = await client.query<{ table_name: string; column_name: string }>(`
         SELECT table_name, column_name
         FROM information_schema.columns

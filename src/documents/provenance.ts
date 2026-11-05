@@ -3,6 +3,8 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { DocumentCurrentnessFieldsSchema, DocumentOutputManifestSchema } from './contracts.js';
+import { hashDocumentOutputManifest } from './outputManifest.js';
 import { getActiveDocumentTemplatePluginRevision } from './plugins.js';
 import { validatePersistedDocumentCurrentness } from './provenanceCurrentness.js';
 
@@ -23,9 +25,9 @@ export interface DocumentProvenanceInput {
   canonicalJobId: string;
   jobVersionId: string;
   matchRunId?: string | null;
-  profileVersionId?: string | null;
-  deterministicDecisionId?: string | null;
-  contextFingerprint?: string | null;
+  profileVersionId: string;
+  deterministicDecisionId: string;
+  contextFingerprint: string;
   documentType: 'CV' | 'COVER_LETTER';
   policyVersion: string;
   generatorVersion: string;
@@ -39,6 +41,7 @@ export interface DocumentProvenanceInput {
 export interface DocumentProvenanceResult {
   documentRunId: string;
   claimCount: number;
+  outputManifestHash: string;
 }
 
 interface RequirementRow {
@@ -51,10 +54,6 @@ function uniqueStrings(values: string[] | undefined): string[] {
     return [];
   }
   return [...new Set(values.map((v) => v.trim()).filter((v) => v.length > 0))];
-}
-
-function hashManifest(outputManifest: Record<string, unknown>): string {
-  return crypto.createHash('sha256').update(JSON.stringify(outputManifest)).digest('hex');
 }
 
 async function upsertDocumentReadyStage(
@@ -233,13 +232,12 @@ async function assertDocumentCurrentContext(
   workspaceId: string,
   input: DocumentProvenanceInput
 ): Promise<void> {
-  const currentContextFields = [
-    input.profileVersionId,
-    input.deterministicDecisionId,
-    input.contextFingerprint,
-  ];
-  if (currentContextFields.every((value) => value == null)) return;
-  if (currentContextFields.some((value) => !value || value.trim().length === 0)) {
+  const currentContext = DocumentCurrentnessFieldsSchema.safeParse({
+    profileVersionId: input.profileVersionId,
+    deterministicDecisionId: input.deterministicDecisionId,
+    contextFingerprint: input.contextFingerprint,
+  });
+  if (!currentContext.success) {
     throw new Error("Document provenance requires the active profile, deterministic decision, and context fingerprint together.");
   }
 
@@ -247,9 +245,7 @@ async function assertDocumentCurrentContext(
     canonicalJobId: input.canonicalJobId,
     jobVersionId: input.jobVersionId,
     matchRunId: input.matchRunId ?? null,
-    profileVersionId: input.profileVersionId ?? null,
-    deterministicDecisionId: input.deterministicDecisionId ?? null,
-    contextFingerprint: input.contextFingerprint ?? null,
+    ...currentContext.data,
   });
   if (!currentness.current) {
     throw new Error(`Document generation rejected stale context: ${currentness.reason}.`);
@@ -261,6 +257,8 @@ export async function persistDocumentProvenance(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options?: { context?: WorkspaceContext }
 ): Promise<DocumentProvenanceResult> {
+  const outputManifest = DocumentOutputManifestSchema.parse(input.outputManifest);
+  const outputManifestHash = hashDocumentOutputManifest(outputManifest);
   const pool = clientOrPool || defaultPool;
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
     typeof (value as pg.Pool).connect === 'function' && !('release' in value);
@@ -322,8 +320,8 @@ export async function persistDocumentProvenance(
           input.documentTemplatePluginRevisionId || null,
           input.documentTemplatePluginKey || null,
           {
-            ...input.outputManifest,
-            manifest_hash: hashManifest(input.outputManifest),
+            ...outputManifest,
+            manifest_hash: outputManifestHash,
           },
           claimRows.length,
         ]
@@ -365,8 +363,8 @@ export async function persistDocumentProvenance(
           input.policyVersion,
           input.generatorVersion,
           {
-            ...input.outputManifest,
-            manifest_hash: hashManifest(input.outputManifest),
+            ...outputManifest,
+            manifest_hash: outputManifestHash,
           },
           claimRows.length,
         ]
@@ -503,6 +501,7 @@ export async function persistDocumentProvenance(
     return {
       documentRunId,
       claimCount: claimRows.length,
+      outputManifestHash,
     };
   } catch (error) {
     await client.query('ROLLBACK');

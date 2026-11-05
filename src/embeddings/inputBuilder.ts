@@ -3,6 +3,7 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../db/pgSsl.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { isProfileFactModelShareable } from '../profile/privacy.js';
 import { listActiveLaneRevisions } from '../lanes/registry.js';
 import type { LaneFileConfig } from '../lanes/contracts.js';
 
@@ -144,6 +145,7 @@ export async function buildEmbeddingInputs(
     context?: WorkspaceContext;
     jobVersionIds?: string[];
     includeProfileFacts?: boolean;
+    includeRequirements?: boolean;
     profileVersionId?: string;
     includeLanePrototypes?: boolean;
     includeJobVersions?: boolean;
@@ -166,56 +168,59 @@ export async function buildEmbeddingInputs(
     const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
     const scopedToJobVersions = jobVersionIds.length > 0;
     const includeProfileFacts = options?.includeProfileFacts ?? !scopedToJobVersions;
+    const includeRequirements = options?.includeRequirements ?? true;
     const includeLanePrototypes = options?.includeLanePrototypes ?? true;
     const includeJobVersions = options?.includeJobVersions ?? true;
 
     await client.query('BEGIN');
 
-    const requirementParams: unknown[] = [ctx.workspaceId, maxPerSource];
-    const requirementScope = scopedToJobVersions
-      ? `AND jv.id = ANY($${requirementParams.push(jobVersionIds)}::uuid[])`
-      : '';
-    const reqRows = await client.query<{
-      id: string;
-      requirement_type: string;
-      requirement_text: string;
-      quote_text: string | null;
-      structured_value: unknown;
-    }>(
-      `SELECT jr.id, jr.requirement_type, jr.requirement_text, jr.quote_text, jr.structured_value
-       FROM job_requirements jr
-       JOIN job_versions jv
-         ON jv.workspace_id = jr.workspace_id
-        AND jv.id = jr.job_version_id
-       WHERE jr.workspace_id = $1
-         AND jr.status = 'VALIDATED'
-         ${requirementScope}
-         AND (
-           jv.active_requirement_set_id IS NULL
-           OR jr.requirement_set_id = jv.active_requirement_set_id
-         )
-       ORDER BY jr.created_at ASC
-       LIMIT $2`,
-      requirementParams
-    );
+    if (includeRequirements) {
+      const requirementParams: unknown[] = [ctx.workspaceId, maxPerSource];
+      const requirementScope = scopedToJobVersions
+        ? `AND jv.id = ANY($${requirementParams.push(jobVersionIds)}::uuid[])`
+        : '';
+      const reqRows = await client.query<{
+        id: string;
+        requirement_type: string;
+        requirement_text: string;
+        quote_text: string | null;
+        structured_value: unknown;
+      }>(
+        `SELECT jr.id, jr.requirement_type, jr.requirement_text, jr.quote_text, jr.structured_value
+         FROM job_requirements jr
+         JOIN job_versions jv
+           ON jv.workspace_id = jr.workspace_id
+          AND jv.id = jr.job_version_id
+         WHERE jr.workspace_id = $1
+           AND jr.status = 'VALIDATED'
+           ${requirementScope}
+           AND (
+             jv.active_requirement_set_id IS NULL
+             OR jr.requirement_set_id = jv.active_requirement_set_id
+           )
+         ORDER BY jr.created_at ASC
+         LIMIT $2`,
+        requirementParams
+      );
 
-    for (const row of reqRows.rows) {
-      const contentText = buildRequirementInputText(row);
-      const contentHash = hashText(contentText);
-      const inputKey = `req:${row.id}:${contentHash.slice(0, 16)}`;
+      for (const row of reqRows.rows) {
+        const contentText = buildRequirementInputText(row);
+        const contentHash = hashText(contentText);
+        const inputKey = `req:${row.id}:${contentHash.slice(0, 16)}`;
 
-      const didWrite = await upsertEmbeddingInput(client, {
-        workspaceId: ctx.workspaceId,
-        inputKey,
-        sourceType: 'JOB_REQUIREMENT',
-        sourceId: row.id,
-        contentText,
-        contentHash,
-      });
+        const didWrite = await upsertEmbeddingInput(client, {
+          workspaceId: ctx.workspaceId,
+          inputKey,
+          sourceType: 'JOB_REQUIREMENT',
+          sourceId: row.id,
+          contentText,
+          contentHash,
+        });
 
-      if (didWrite) {
-        inserted += 1;
-        fromRequirements += 1;
+        if (didWrite) {
+          inserted += 1;
+          fromRequirements += 1;
+        }
       }
     }
 
@@ -232,22 +237,26 @@ export async function buildEmbeddingInputs(
         statement: string;
         structured_value: unknown;
         evidence_tier: string;
+        confidentiality: string;
       }>(
         `SELECT pf.id, COALESCE(pf.fact_revision_id, pf.id) AS embedding_node_id,
-                pf.fact_type, pf.statement, pf.structured_value, pf.evidence_tier
+                pf.fact_type, pf.statement, pf.structured_value, pf.evidence_tier, pf.confidentiality
          FROM profile_facts pf
          JOIN profile_versions pv
            ON pv.workspace_id = pf.workspace_id
           AND pv.id = pf.profile_version_id
           AND pv.status = 'ACTIVE'
          WHERE pf.workspace_id = $1
+           AND pf.fact_type <> 'CONTACT'
+           AND pf.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')
            ${profileVersionScope}
-         ORDER BY pf.created_at ASC
+         ORDER BY pf.created_at ASC, pf.id ASC
          LIMIT ${profileFactLimit}`,
         profileFactParams
       );
 
       for (const row of factRows.rows) {
+        if (!isProfileFactModelShareable(row)) continue;
         const contentText = buildProfileFactInputText(row);
         const contentHash = hashText(contentText);
         const embeddingNodeId = row.embedding_node_id || row.id;

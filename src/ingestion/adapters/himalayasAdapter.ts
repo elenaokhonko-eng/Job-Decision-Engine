@@ -49,7 +49,7 @@ export class HimalayasAdapter extends BaseSourceAdapter {
         return this.errorResult(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const payload: unknown = await response.json();
+      const payload = await this.readJsonResponse(response);
       const data = asRecord(payload);
       const rawJobs: unknown[] = Array.isArray(payload)
         ? payload
@@ -58,6 +58,7 @@ export class HimalayasAdapter extends BaseSourceAdapter {
           : Array.isArray(data?.data)
             ? data.data
             : [];
+      this.assertRecordCount(rawJobs, limit);
       const jobs: ExtractedJob[] = [];
       let quarantined = 0;
 

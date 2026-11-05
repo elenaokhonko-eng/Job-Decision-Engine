@@ -1,0 +1,448 @@
+import base64
+import hashlib
+from io import BytesIO
+
+import docx
+import streamlit as st
+
+import streamlit_manual_application
+from streamlit_manual_application import (
+    render_manual_application_flow,
+    render_pipeline_review_action,
+    render_selected_documents,
+)
+
+# The automatic retry after CONCURRENT_UPDATE need not wait in tests.
+streamlit_manual_application.PIPELINE_RETRY_DELAY_SECONDS = 0
+
+
+SCHEMA_VERSION = "manual_application_v1"
+JOB_ID = "11111111-1111-4111-8111-111111111111"
+JOB_VERSION_ID = "22222222-2222-4222-8222-222222222222"
+OBSERVATION_ID = "33333333-3333-4333-8333-333333333333"
+PROFILE_VERSION_ID = "44444444-4444-4444-8444-444444444444"
+CANDIDATE_ID = "55555555-5555-4555-8555-555555555555"
+REQUIREMENT_SET_ID = "66666666-6666-4666-8666-666666666666"
+DRAFT_ID = "77777777-7777-4777-8777-777777777777"
+APPROVAL_ID = "88888888-8888-4888-8888-888888888888"
+FETCH_RECEIPT_ID = "99999999-9999-4999-8999-999999999999"
+SELECTION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+APPLICATION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+CV_RUN_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+COVER_LETTER_RUN_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+FINGERPRINT = "a" * 64
+CONTACT_FINGERPRINT = "b" * 64
+PREFERENCE_FINGERPRINT = "c" * 64
+CONTEXT_FINGERPRINT = "d" * 64
+DESCRIPTION = (
+    "A detailed role description fetched from the selected public posting. " * 8
+)
+
+
+def _docx_bytes():
+    document = docx.Document()
+    document.add_paragraph("Candidate")
+    stream = BytesIO()
+    document.save(stream)
+    return stream.getvalue()
+
+
+def _artifact_bytes(format_name):
+    if format_name == "PDF":
+        return b"%PDF-1.4\nmanual application test\n%%EOF\n"
+    # Zip entries carry the write time, so keep one DOCX per session for stable hashes.
+    return st.session_state.setdefault("test_docx_bytes", _docx_bytes())
+
+
+def _artifact_sha256(format_name):
+    return hashlib.sha256(_artifact_bytes(format_name)).hexdigest()
+
+
+def _selection(tampered=False):
+    return {
+        "selection_id": SELECTION_ID,
+        "application_record_id": APPLICATION_ID,
+        "approval_id": APPROVAL_ID,
+        "cv_document_run_id": CV_RUN_ID,
+        "cover_letter_document_run_id": COVER_LETTER_RUN_ID,
+        "cv_docx_sha256": "0" * 64 if tampered else _artifact_sha256("DOCX"),
+        "cv_pdf_sha256": _artifact_sha256("PDF"),
+        "cover_letter_docx_sha256": _artifact_sha256("DOCX"),
+        "cover_letter_pdf_sha256": _artifact_sha256("PDF"),
+        "pipeline_readiness": "USER_SELECTED",
+        "selected_at": "2026-11-05T10:00:00.000Z",
+    }
+
+
+def _artifact(item_type, format_name):
+    mime = (
+        "application/pdf"
+        if format_name == "PDF"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    suffix = format_name.lower()
+    prefix = "cv" if item_type == "CV" else "cover-letter"
+    return {
+        "type": item_type,
+        "format": format_name,
+        "filename": f"{prefix}.{suffix}",
+        "mime_type": mime,
+    }
+
+
+def _comparison_response(source_content_status="COMPLETE"):
+    evidence = {
+        "id": "fact-1",
+        "evidence_type": "FACT",
+        "label": "data systems",
+        "statement": "Designed data systems.",
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "draft_id": DRAFT_ID,
+        "comparison_id": DRAFT_ID,
+        "comparison_fingerprint": FINGERPRINT,
+        "selected_job": {
+            "schema_version": SCHEMA_VERSION,
+            "canonicalJobId": JOB_ID,
+            "jobVersionId": JOB_VERSION_ID,
+            "sourceObservationId": OBSERVATION_ID,
+            "contentHash": "job-content-hash",
+            "title": "Data Architect",
+            "company": "Example",
+            "url": "https://example.test/job",
+            "source": {
+                "source_kind": "FETCHED",
+                "source_content_status": source_content_status,
+                "provider": "EMPLOYER_WEBSITE",
+                "fetched_content_hash": hashlib.sha256(
+                    DESCRIPTION.encode()
+                ).hexdigest(),
+                "source_evidence": {
+                    "requestedUrl": "https://example.test/job",
+                    "resolvedUrl": "https://example.test/job",
+                    "redirectHistory": [],
+                    "retrievedAt": "2026-10-28T00:00:00.000Z",
+                    "httpStatus": 200,
+                    "contentType": "text/html; charset=utf-8",
+                    "responseHash": "f" * 64,
+                },
+            },
+        },
+        "comparison": {
+            "schema_version": SCHEMA_VERSION,
+            "comparator_version": "literal-overlap-v1",
+            "canonical_job_id": JOB_ID,
+            "job_version_id": JOB_VERSION_ID,
+            "source_observation_id": OBSERVATION_ID,
+            "source_evidence_fingerprint": "e" * 64,
+            "job_content_hash": "job-content-hash",
+            "profile_version_id": PROFILE_VERSION_ID,
+            "candidate_profile_id": CANDIDATE_ID,
+            "requirement_set_id": REQUIREMENT_SET_ID,
+            "profile_contact_fact_ids": [],
+            "profile_contact_fingerprint": CONTACT_FINGERPRINT,
+            "preference_context_fingerprint": PREFERENCE_FINGERPRINT,
+            "context_fingerprint": CONTEXT_FINGERPRINT,
+            "title": "Data Architect",
+            "company": "Example",
+            "canonical_url": "https://example.test/job",
+            "requirements": [
+                {
+                    "requirement_key": "R-001",
+                    "requirement_type": "FUNCTION",
+                    "importance": "MUST",
+                    "requirement_text": "Experience building data systems",
+                }
+            ],
+            "evidence": [evidence],
+            "rows": [
+                {
+                    "requirement_key": "R-001",
+                    "requirement_type": "FUNCTION",
+                    "importance": "MUST",
+                    "requirement": "Experience building data systems",
+                    "evidence": [
+                        {
+                            "id": "fact-1",
+                            "type": "FACT",
+                            "label": "data systems",
+                            "statement": "Designed data systems.",
+                            "confidence": 0.9,
+                            "justification": "Designing data systems is the requirement.",
+                        }
+                    ],
+                    "gap": None,
+                    "comparison_method": "model-judged pairing; advisory evidence only",
+                },
+                {
+                    "requirement_key": "R-004",
+                    "requirement_type": "FUNCTION",
+                    "importance": "MUST",
+                    "requirement": "Commodity derivatives and futures curves",
+                    "evidence": [
+                        {
+                            "id": "fact-2",
+                            "type": "FACT",
+                            "label": "governance",
+                            "statement": "Established golden-record master data governance across CRM and ERP.",
+                            "confidence": 0.9,
+                            "justification": "Derivatives programme.",
+                        }
+                    ],
+                    "gap": None,
+                    "comparison_method": "model-judged pairing; advisory evidence only",
+                    "attention": [
+                        {
+                            "code": "DOMAIN_QUALIFIER",
+                            "detail": "The requirement names commodities, futures; none of the proposed evidence does.",
+                        }
+                    ],
+                    "suggested_status": "PARTIAL",
+                },
+                {
+                    "requirement_key": "R-005",
+                    "requirement_type": "POSTING_RESPONSIBILITY",
+                    "importance": "PREFERRED",
+                    "requirement": "Run delivery with engineering teams",
+                    "evidence": [
+                        {
+                            "id": "fact-1",
+                            "type": "FACT",
+                            "label": "data systems",
+                            "statement": "Designed data systems.",
+                        }
+                    ],
+                    "gap": None,
+                    "comparison_method": "model-judged pairing; advisory evidence only",
+                },
+            ],
+            "fit": {
+                "must_total": 3,
+                "must_covered": 1,
+                "uncovered_must": [
+                    {
+                        "requirement_key": "R-002",
+                        "requirement": "Operate Azure cloud infrastructure",
+                    },
+                    {"requirement_key": "R-003", "requirement": "Hold AZ-305"},
+                ],
+                "verdict": "FEWER_THAN_HALF_MUSTS_EVIDENCED",
+                "message": "Only 1 of 3 MUST requirements have direct evidence in your profile.",
+                "advisory": "Evidence coverage only, not a hiring or suitability decision.",
+            },
+            "suitability_warnings": ["Automatic suitability gate: NEEDS_VERIFICATION."],
+            "evidence_notice": "Potential matches are retrieval hints, not a suitability decision.",
+        },
+        "document_contact_ready": True,
+        "missing_contact_fields": [],
+        "requirements_extracted": True,
+        "role_plan": [
+            {
+                "engagement_id": "eng-major",
+                "label": "Program Lead at Example Investment Management",
+                "period": "Apr 2023 – Apr 2025",
+                "kind": "EMPLOYMENT",
+                "default_layout": "FULL",
+                "default_source": "AUTOMATIC",
+            },
+            {
+                "engagement_id": "eng-lab",
+                "label": "Founder at Example Lab",
+                "period": "May 2026 – Present",
+                "kind": "VENTURE",
+                "default_layout": "ONE_LINE",
+                "default_source": "PROFILE",
+            },
+        ],
+        "selectable_evidence": [
+            {
+                "id": "fact-1",
+                "evidence_type": "FACT",
+                "statement": "Designed data systems.",
+                "role": "Program Lead at Example Investment Management",
+                "period": "Apr 2023 – Apr 2025",
+            },
+            {
+                "id": "fact-2",
+                "evidence_type": "FACT",
+                "statement": "Established golden-record master data governance across CRM and ERP.",
+                "role": "Regional CRM Architect at Example Consumer Goods",
+                "period": "Feb 2012 – Sep 2017",
+            },
+        ],
+    }
+
+
+def fake_api_request(method, path, params=None, body=None, timeout=30):
+    st.session_state.setdefault("test_api_calls", []).append((method, path, body))
+    if path.endswith("/candidate-profiles"):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "profiles": [
+                {"candidate_profile_id": CANDIDATE_ID, "display_name": "Candidate"}
+            ],
+        }
+    if path.endswith("/fetch-description"):
+        assert body["title"] == "Data Architect"
+        assert body["company"] == "Example"
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "fetch_receipt_id": FETCH_RECEIPT_ID,
+            "description": DESCRIPTION,
+            "final_url": body["url"],
+            "provider": "EMPLOYER_WEBSITE",
+            "content_hash": hashlib.sha256(DESCRIPTION.encode()).hexdigest(),
+            "source_evidence": {
+                "requestedUrl": body["url"],
+                "resolvedUrl": body["url"],
+                "redirectHistory": [],
+                "retrievedAt": "2026-10-28T00:00:00.000Z",
+                "httpStatus": 200,
+                "contentType": "text/html; charset=utf-8",
+                "responseHash": "f" * 64,
+            },
+        }
+    if path.endswith("/compare-existing"):
+        assert body == {
+            "schema_version": SCHEMA_VERSION,
+            "canonical_job_id": JOB_ID,
+            "job_version_id": JOB_VERSION_ID,
+            "candidate_profile_id": CANDIDATE_ID,
+        }
+        # Refusals a test scripts in advance, raised the way api_request raises them.
+        failures = st.session_state.get("test_compare_existing_failures") or []
+        if failures:
+            raise RuntimeError(failures.pop(0))
+        response = _comparison_response()
+        response["selected_job"]["source"] = {
+            "source_kind": "PIPELINE",
+            "source_content_status": "PIPELINE_OBSERVED",
+            "provider": None,
+            "fetched_content_hash": None,
+            "source_evidence": None,
+            "source_name": "GREENHOUSE",
+        }
+        return response
+    if path.endswith("/compare"):
+        assert body["schema_version"] == SCHEMA_VERSION
+        assert body["source_kind"] == "FETCHED"
+        assert body["candidate_profile_id"] == CANDIDATE_ID
+        assert body["fetch_receipt_id"] == FETCH_RECEIPT_ID
+        source_content_status = (
+            "COMPLETE" if body["description"] == DESCRIPTION.strip() else "USER_EDITED"
+        )
+        return _comparison_response(source_content_status)
+    if path.endswith("/use-for-application"):
+        assert body == {"schema_version": SCHEMA_VERSION, "approval_id": APPROVAL_ID}
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "selection": _selection(),
+            "application_status": "INTENT",
+            "application_created": True,
+            "already_selected": False,
+        }
+    if path.endswith("/approve"):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "approval_id": APPROVAL_ID,
+            "approved": True,
+            "comparison_fingerprint": FINGERPRINT,
+        }
+    if path.endswith("/documents"):
+        artifacts = [
+            _artifact(kind, format_name)
+            for kind in ("CV", "COVER_LETTER")
+            for format_name in ("DOCX", "PDF")
+        ]
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "draft_id": DRAFT_ID,
+            "approval_id": APPROVAL_ID,
+            "comparison_fingerprint": FINGERPRINT,
+            "preview": {
+                "cv": "# Candidate\n- Designed data systems.",
+                "cover_letter": "Dear team\n\nI designed data systems for regulated teams.",
+            },
+            "artifacts": artifacts,
+            "cv_pages": 3,
+            "cover_letter": {
+                "mode": "AI_WRITTEN",
+                "reason": None,
+                "sentences": [
+                    {
+                        "text": "I designed data systems for regulated teams.",
+                        "evidence": [
+                            {
+                                "id": "fact-data",
+                                "label": "data architecture",
+                                "statement": "Designed data systems.",
+                            }
+                        ],
+                        "requirement_keys": ["R-001"],
+                    }
+                ],
+                "framing": [
+                    {
+                        "kind": "OPENING",
+                        "text": "I am applying for the Data Architect role at Example. Its data platform focus appeals to me.",
+                        "requirement_keys": ["R-001"],
+                        "included": True,
+                    },
+                    {
+                        "kind": "GAP_NOTE",
+                        "text": "I do not yet hold AZ-305.",
+                        "requirement_keys": ["R-003"],
+                        "included": False,
+                    },
+                    {
+                        "kind": "CLOSING",
+                        "text": "Thank you for your time and consideration.",
+                        "requirement_keys": [],
+                        "included": True,
+                    },
+                ],
+            },
+            "summary": {
+                "mode": "DETERMINISTIC",
+                "reason": "The AI-written summary was not used because it failed validation.",
+                "sentences": [],
+            },
+        }
+    if "/documents/" in path:
+        _, _, item_type, format_name = path.rsplit("/", 3)
+        item_type = item_type.upper()
+        format_name = format_name.upper()
+        item = _artifact(item_type, format_name)
+        content = _artifact_bytes(format_name)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": True,
+            "filename": item["filename"],
+            "mime_type": item["mime_type"],
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "content_base64": base64.b64encode(content).decode("ascii"),
+        }
+    raise AssertionError(f"Unexpected API call: {method} {path}")
+
+
+st.title("Manual Application Test")
+# A pipeline job card's "Prepare application documents" action, when a test sets one.
+pipeline_job = st.session_state.get("test_pipeline_job")
+if pipeline_job:
+    render_pipeline_review_action(fake_api_request, pipeline_job, "test_pipeline")
+# The tracker's view of an application's chosen documents, when a test asks for it.
+if "test_tracker_selection" in st.session_state:
+    choice = st.session_state["test_tracker_selection"]
+    render_selected_documents(
+        fake_api_request,
+        None if choice is None else _selection(tampered=choice == "TAMPERED"),
+    )
+else:
+    render_manual_application_flow(fake_api_request)

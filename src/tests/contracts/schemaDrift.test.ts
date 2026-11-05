@@ -246,6 +246,14 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
     expect(() => PersistedEvaluationQueueItemSchema.parse(withoutVersion(samplePendingQueueItem))).toThrow();
   });
 
+  it("requires an effective workability policy hash on new persisted gate decisions", () => {
+    const { workability_policy_hash: _hash, ...legacyGate } = sampleHardRejectGate;
+
+    expect(() => GateDecisionSchema.parse(legacyGate)).not.toThrow();
+    expect(() => PersistedGateDecisionSchema.parse(legacyGate)).toThrow();
+    expect(PersistedGateDecisionSchema.parse(sampleHardRejectGate).workability_policy_hash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
   it("should retain persisted observation provenance and version-linkage metadata", () => {
     const observation = JobObservationSchema.parse(sampleAtsObservation);
 

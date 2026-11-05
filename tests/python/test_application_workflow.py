@@ -1,11 +1,7 @@
-import json
-
-import pytest
-
 from streamlit_application_workflow import (
     application_api_path,
     is_document_generation_eligible,
-    parse_application_document_pair_status,
+    salary_disclosure_message,
 )
 
 
@@ -19,43 +15,6 @@ def test_application_routes_are_namespaced_under_api_v2():
         application_api_path("/api/v2/applications/record-id/events")
         == "/api/v2/applications/record-id/events"
     )
-
-
-def test_parses_read_only_document_pair_status_for_exact_run_ids():
-    manifest = {
-        "event": "APPLICATION_DOCUMENT_PAIR_VALIDATED",
-        "applicationRecordId": "application-1",
-        "cvDocumentRunId": "cv-run-1",
-        "coverLetterDocumentRunId": "letter-run-1",
-        "pairCurrent": True,
-    }
-    output = f"logging output\n{json.dumps(manifest)}\n"
-
-    parsed = parse_application_document_pair_status(
-        output,
-        application_record_id="application-1",
-        cv_document_run_id="cv-run-1",
-        cover_letter_document_run_id="letter-run-1",
-    )
-    assert parsed["pairCurrent"] is True
-
-
-def test_rejects_document_pair_status_for_different_run_ids():
-    manifest = {
-        "event": "APPLICATION_DOCUMENT_PAIR_VALIDATED",
-        "applicationRecordId": "application-1",
-        "cvDocumentRunId": "other-cv",
-        "coverLetterDocumentRunId": "letter-run-1",
-    }
-    output = json.dumps(manifest)
-
-    with pytest.raises(ValueError, match="does not match"):
-        parse_application_document_pair_status(
-            output,
-            application_record_id="application-1",
-            cv_document_run_id="cv-run-1",
-            cover_letter_document_run_id="letter-run-1",
-        )
 
 
 def current_review_job(**overrides):
@@ -82,6 +41,26 @@ def current_review_job(**overrides):
 
 def test_includes_current_matched_review_without_optional_ai_evaluation():
     assert is_document_generation_eligible(current_review_job())
+
+
+def test_undisclosed_salary_is_visible_but_does_not_block_documents():
+    job = current_review_job(
+        application_readiness={
+            "checks": [
+                {
+                    "key": "COMPENSATION",
+                    "status": "NEEDS_VERIFICATION",
+                    "importance": "PREFERRED",
+                    "reason_code": "COMPENSATION_UNDISCLOSED",
+                }
+            ]
+        }
+    )
+
+    assert (
+        salary_disclosure_message(job) == "Salary undisclosed—confirm with recruiter."
+    )
+    assert is_document_generation_eligible(job)
 
 
 def test_excludes_stale_or_incomplete_deterministic_context():

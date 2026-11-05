@@ -157,6 +157,8 @@ export async function loadProfileFactsByIds(
         FROM profile_facts
         WHERE workspace_id = $1
           AND id = ANY($2::uuid[])
+          AND fact_type <> 'CONTACT'
+          AND confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')
       `,
       [ctx.workspaceId, profileFactIds]
     );

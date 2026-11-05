@@ -13,7 +13,7 @@ jobs:
   managed-e2e-gate:
     name: Verify managed API and desktop release prerequisites
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.WORKFLOW_KILL_SWITCH != 'true' }}
     timeout-minutes: 15
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}

@@ -124,6 +124,10 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     expect(summary.errors).toBe(0);
 
     const calls = (mPool.query as any).mock.calls;
+    const profileFactSelect = calls.find(
+      (c: any) => typeof c[0] === 'string' && c[0].includes('FROM profile_facts pf'),
+    );
+    expect(profileFactSelect?.[0]).toContain("pf.fact_type <> 'CONTACT'");
     const runInsert = calls.find((c: any) => typeof c[0] === 'string' && c[0].includes('INSERT INTO match_runs'));
     expect(runInsert).toBeDefined();
     expect(runInsert?.[0]).toContain('requirement_set_id');

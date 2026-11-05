@@ -617,7 +617,7 @@ export async function runJobArchive(
 
     capabilities = await readSchemaCapabilities(client);
     if (options.mode === "APPLY" && (!capabilities.archiveColumns || !capabilities.archiveRunTable || !capabilities.archiveHoldTable || !capabilities.evaluationQueueSkipColumns || !capabilities.rawObservationEvidence)) {
-      throw new Error("Archive schema migration 080 must be applied before archive mode.");
+      throw new Error("Archive schema migration 093 must be applied before archive mode.");
     }
     if (!capabilities.archiveColumns) {
       throw new Error("Archive age scan requires migration 075 and the canonical job-version date columns.");

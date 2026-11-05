@@ -1,0 +1,1988 @@
+import crypto from "node:crypto";
+import express from "express";
+import pg from "pg";
+import { z, ZodError } from "zod";
+import type { WorkspaceContext } from "../../workspace/context.js";
+import { runNormalization } from "../../pipeline/normalize.js";
+import { runRequirementsExtraction } from "../../pipeline/requirementsExtractor.js";
+import { checkModelRegistryPreflight } from "../../services/agent.js";
+import { loadProfileContactSnapshot, type DocumentContactInfo } from "../../documents/contactInfo.js";
+import {
+  buildControlledDocuments,
+  candidateGapNotes,
+  engagementPeriod,
+  matchableEvidence,
+  planRoles,
+  buildManualComparison,
+  fingerprintManualComparison,
+  MANUAL_COMPARATOR_VERSION,
+  renderControlledDocx,
+  pdfPageCount,
+  renderControlledPdf,
+  sha256Buffer,
+  validateManualApprovalCurrentness,
+  validateManualArtifactPair,
+  type ManualComparisonInput,
+  type ManualApprovalIdentity,
+  type ManualEvidence,
+  type ManualRequirement,
+  type ControlledDocuments,
+  type ControlledDocumentOptions,
+} from "../../documents/manualPreparation.js";
+import { documentRequirements, isInternalAssessmentStatement, type StoredRequirementRow } from "../../documents/manualDocumentPolicy.js";
+import { applyManualCorrections, correctionsFingerprint, ManualCorrectionError, normaliseCorrections } from "../../documents/manualCorrections.js";
+import {
+  manualPairingMode,
+  MANUAL_PAIRING_METHOD,
+  MANUAL_PAIRING_SCHEMA_VERSION,
+  pairEvidenceWithModel,
+  strongestPairs,
+  validatePairingPayload,
+  type EvidencePair,
+  type EvidencePairer,
+} from "../../documents/manualEvidencePairing.js";
+import {
+  allowedCoverLetterEvidence,
+  approvedCoverLetterPairs,
+  buildWrittenCoverLetter,
+  jobDescriptionExcerpt,
+  manualCoverLetterMode,
+  MANUAL_COVER_LETTER_GENERATOR_VERSION,
+  MANUAL_COVER_LETTER_SCHEMA_VERSION,
+  MANUAL_SUMMARY_GENERATOR_VERSION,
+  MANUAL_SUMMARY_SCHEMA_VERSION,
+  allowedSummaryEvidence,
+  validateCoverLetterPayload,
+  validateSummaryPayload,
+  writeCoverLetterWithModel,
+  writeSummaryWithModel,
+  type CoverLetterWriter,
+  type JobRequirementRef,
+  type LetterFraming,
+  type SummaryWriter,
+} from "../../documents/manualCoverLetter.js";
+import {
+  ManualApiErrorSchema,
+  ManualCandidateProfilesResponseSchema,
+  ManualApprovalIdentitySchema,
+  ManualApprovalRequestSchema,
+  ManualApprovalResponseSchema,
+  ManualCompareResponseSchema,
+  ManualComparisonSchema,
+  ManualCoverLetterReviewSchema,
+  ManualDocumentsResponseSchema,
+  ManualDownloadResponseSchema,
+  ManualExistingJobCompareRequestSchema,
+  ManualGenerateRequestSchema,
+  ManualFetchDescriptionRequestSchema,
+  ManualFetchDescriptionResponseSchema,
+  ManualFetchSourceEvidenceSchema,
+  ManualPostingInputSchema,
+  ManualPersistedFetchReceiptSchema,
+  ManualPersistedApprovalSchema,
+  ManualPersistedDraftSchema,
+  ManualStagedPostingIdentitySchema,
+  ManualUseForApplicationRequestSchema,
+  ManualUseForApplicationResponseSchema,
+  MANUAL_APPLICATION_SCHEMA_VERSION,
+} from "../../contracts/manualApplication.js";
+import { isCurrentReadyApplicationReadiness, loadCurrentApplicationReadiness } from "../../services/currentApplicationReadiness.js";
+import { fetchJobContent, type JobContentResult } from "../../ingestion/jobContentFetcher.js";
+
+function errorPayload(code: "INVALID_REQUEST" | "DESCRIPTION_INSUFFICIENT" | "FORBIDDEN" | "NOT_FOUND" | "JOB_VERSION_CHANGED" | "IDENTITY_CONFLICT" | "APPROVAL_STALE" | "DEPENDENCY_UNAVAILABLE" | "INTERNAL_ERROR" | "CONCURRENT_UPDATE", message: string, retryAfter?: string) {
+  return ManualApiErrorSchema.parse({
+    schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+    ok: false,
+    code,
+    error: code,
+    message,
+    ...(retryAfter ? { retry_after: retryAfter } : {}),
+  });
+}
+
+function sendApiError(res: express.Response, status: number, code: Parameters<typeof errorPayload>[0], message: string, retryAfter?: string): void {
+  if (retryAfter) {
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) res.setHeader("Retry-After", String(Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))));
+  }
+  res.status(status).json(errorPayload(code, message, retryAfter));
+}
+
+export class ManualFlowError extends Error {
+  constructor(readonly status: number, readonly code: Parameters<typeof errorPayload>[0], message: string) {
+    super(message);
+  }
+}
+
+const CONCURRENT_RETRY_AFTER_MS = 3000;
+// serialization_failure, deadlock_detected and unique_violation: two requests staged the same draft at once.
+const CONCURRENT_WRITE_SQLSTATES = new Set(["40001", "40P01", "23505"]);
+
+function isConcurrentWriteConflict(error: unknown): boolean {
+  return typeof error === "object" && error !== null && CONCURRENT_WRITE_SQLSTATES.has(String((error as { code?: unknown }).code));
+}
+
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function normalizeIdentity(value: string): string {
+  return value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
+}
+
+export function matchesExactFetchedPostingIdentity(
+  expected: { title: string; company: string; requisitionId?: string | null },
+  posting: { title: string; companyName: string; requisitionId: string | null },
+): boolean {
+  const expectedTitle = normalizeIdentity(expected.title);
+  const expectedCompany = normalizeIdentity(expected.company);
+  return Boolean(expectedTitle && expectedCompany)
+    && expectedTitle === normalizeIdentity(posting.title)
+    && expectedCompany === normalizeIdentity(posting.companyName)
+    && (!expected.requisitionId || expected.requisitionId === posting.requisitionId);
+}
+
+function normalizePostingUrl(value: string): string {
+  const url = new URL(value);
+  url.hash = "";
+  return url.toString().replace(/\/$/, "");
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+interface SelectedPostingIdentity {
+  candidateProfileId: string;
+  canonicalJobId: string;
+  jobVersionId: string;
+  sourceObservationId: string;
+  contentHash: string;
+}
+
+interface CurrentManualInputs {
+  input: ManualComparisonInput;
+  contact: DocumentContactInfo;
+  contactFactIds: string[];
+  contactFingerprint: string;
+  preferenceContextFingerprint: string;
+}
+
+function profileFactIdsFingerprint(ids: readonly string[]): string {
+  return sha256(stableStringify([...ids].sort()));
+}
+
+function approvalIdentityFromDraft(draft: ReturnType<typeof ManualPersistedDraftSchema.parse>): ManualApprovalIdentity {
+  return {
+    canonicalJobId: draft.canonical_job_id,
+    jobVersionId: draft.job_version_id,
+    sourceObservationId: draft.source_observation_id,
+    jobContentHash: draft.job_content_hash,
+    profileVersionId: draft.profile_version_id,
+    candidateProfileId: draft.candidate_profile_id,
+    profileContactFactIdsFingerprint: profileFactIdsFingerprint(draft.profile_contact_fact_ids),
+    profileContactFingerprint: draft.profile_contact_fingerprint,
+    preferenceContextFingerprint: draft.preference_context_fingerprint,
+    requirementSetId: draft.requirement_set_id,
+    comparatorVersion: draft.comparator_version,
+    comparisonFingerprint: draft.comparison_fingerprint,
+  };
+}
+
+function approvalIdentityFromCurrent(
+  current: CurrentManualInputs,
+  comparisonFingerprint: string,
+): ManualApprovalIdentity {
+  return {
+    canonicalJobId: current.input.canonical_job_id,
+    jobVersionId: current.input.job_version_id,
+    sourceObservationId: current.input.source_observation_id,
+    jobContentHash: current.input.job_content_hash,
+    profileVersionId: current.input.profile_version_id,
+    candidateProfileId: current.input.candidate_profile_id,
+    profileContactFactIdsFingerprint: profileFactIdsFingerprint(current.contactFactIds),
+    profileContactFingerprint: current.contactFingerprint,
+    preferenceContextFingerprint: current.preferenceContextFingerprint,
+    requirementSetId: current.input.requirement_set_id,
+    comparatorVersion: MANUAL_COMPARATOR_VERSION,
+    comparisonFingerprint,
+  };
+}
+
+function approvalIdentityFromPersisted(approval: ReturnType<typeof ManualPersistedApprovalSchema.parse>): ManualApprovalIdentity {
+  return {
+    canonicalJobId: approval.canonical_job_id,
+    jobVersionId: approval.job_version_id,
+    sourceObservationId: approval.source_observation_id,
+    jobContentHash: approval.job_content_hash,
+    profileVersionId: approval.profile_version_id,
+    candidateProfileId: approval.candidate_profile_id,
+    profileContactFactIdsFingerprint: profileFactIdsFingerprint(approval.profile_contact_fact_ids),
+    profileContactFingerprint: approval.profile_contact_fingerprint,
+    preferenceContextFingerprint: approval.preference_context_fingerprint,
+    requirementSetId: approval.requirement_set_id,
+    comparatorVersion: approval.comparator_version,
+    comparisonFingerprint: approval.comparison_fingerprint,
+  };
+}
+
+function selectedPostingFromApproval(approval: ReturnType<typeof ManualPersistedApprovalSchema.parse>): SelectedPostingIdentity {
+  return {
+    candidateProfileId: approval.candidate_profile_id,
+    canonicalJobId: approval.canonical_job_id,
+    jobVersionId: approval.job_version_id,
+    sourceObservationId: approval.source_observation_id,
+    contentHash: approval.job_content_hash,
+  };
+}
+
+async function loadPersistedApproval(
+  client: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  draftId: string,
+  approvalId: string,
+  lock = false,
+): Promise<{ approval: ReturnType<typeof ManualPersistedApprovalSchema.parse>; comparison: ReturnType<typeof ManualComparisonSchema.parse> } | null> {
+  const result = await client.query(
+    `SELECT approval.id,approval.workspace_id,approval.user_id,approval.draft_id,approval.candidate_profile_id,
+            approval.canonical_job_id,approval.job_version_id,approval.source_observation_id,approval.job_content_hash,
+            approval.profile_version_id,approval.profile_contact_fact_ids,approval.profile_contact_fingerprint,
+            approval.preference_context_fingerprint,approval.requirement_set_id,approval.comparator_version,
+            approval.context_fingerprint,approval.comparison_fingerprint,approval.approved,
+            approval.corrections,approval.corrections_fingerprint,approval.revision,draft.comparison_payload
+     FROM manual_application_preparation_approvals approval
+     JOIN manual_application_drafts draft ON draft.id=approval.draft_id AND draft.workspace_id=approval.workspace_id
+       AND draft.user_id=approval.user_id AND draft.comparison_fingerprint=approval.comparison_fingerprint
+     WHERE approval.workspace_id=$1 AND approval.user_id=$2 AND approval.id=$3 AND approval.draft_id=$4
+       AND approval.approved IS TRUE${lock ? " FOR UPDATE OF approval" : ""}`,
+    [ctx.workspaceId, ctx.userId, approvalId, draftId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  const approval = ManualPersistedApprovalSchema.parse({
+    id: row.id,
+    workspace_id: row.workspace_id,
+    user_id: row.user_id,
+    draft_id: row.draft_id,
+    candidate_profile_id: row.candidate_profile_id,
+    canonical_job_id: row.canonical_job_id,
+    job_version_id: row.job_version_id,
+    source_observation_id: row.source_observation_id,
+    job_content_hash: row.job_content_hash,
+    profile_version_id: row.profile_version_id,
+    profile_contact_fact_ids: row.profile_contact_fact_ids,
+    profile_contact_fingerprint: row.profile_contact_fingerprint,
+    preference_context_fingerprint: row.preference_context_fingerprint,
+    requirement_set_id: row.requirement_set_id,
+    comparator_version: row.comparator_version,
+    context_fingerprint: row.context_fingerprint,
+    comparison_fingerprint: row.comparison_fingerprint,
+    approved: row.approved,
+    corrections: row.corrections,
+    corrections_fingerprint: row.corrections_fingerprint,
+    revision: row.revision,
+  });
+  const comparison = ManualComparisonSchema.parse(row.comparison_payload);
+  if (fingerprintManualComparison(comparison) !== approval.comparison_fingerprint ||
+      correctionsFingerprint(approval.corrections) !== approval.corrections_fingerprint ||
+      comparison.canonical_job_id !== approval.canonical_job_id ||
+      comparison.job_version_id !== approval.job_version_id ||
+      comparison.source_observation_id !== approval.source_observation_id ||
+      comparison.job_content_hash !== approval.job_content_hash ||
+      comparison.profile_version_id !== approval.profile_version_id ||
+      comparison.candidate_profile_id !== approval.candidate_profile_id ||
+      comparison.requirement_set_id !== approval.requirement_set_id ||
+      comparison.context_fingerprint !== approval.context_fingerprint ||
+      comparison.profile_contact_fingerprint !== approval.profile_contact_fingerprint ||
+      comparison.preference_context_fingerprint !== approval.preference_context_fingerprint ||
+      comparison.comparator_version !== approval.comparator_version ||
+      profileFactIdsFingerprint(comparison.profile_contact_fact_ids) !== profileFactIdsFingerprint(approval.profile_contact_fact_ids)) {
+    throw new ManualFlowError(500, "INTERNAL_ERROR", "Persisted approval or comparison failed exact-context integrity validation.");
+  }
+  const linkedContactFacts = await client.query<{ profile_contact_fact_id: string }>(
+    `SELECT profile_contact_fact_id FROM manual_application_approval_contact_facts
+     WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 AND draft_id=$4 AND profile_version_id=$5
+     ORDER BY profile_contact_fact_id`,
+    [ctx.workspaceId, ctx.userId, approval.id, approval.draft_id, approval.profile_version_id],
+  );
+  if (stableStringify(linkedContactFacts.rows.map((row) => row.profile_contact_fact_id).sort()) !==
+      stableStringify([...approval.profile_contact_fact_ids].sort())) {
+    throw new ManualFlowError(500, "INTERNAL_ERROR", "Persisted approval contact facts do not match the private profile contact snapshot.");
+  }
+  return { approval, comparison };
+}
+
+function assertCurrentApproval(
+  approval: ReturnType<typeof ManualPersistedApprovalSchema.parse>,
+  comparison: ReturnType<typeof ManualComparisonSchema.parse>,
+  current: CurrentManualInputs,
+): string {
+  const currentComparison = ManualComparisonSchema.parse(buildManualComparison(current.input));
+  const currentFingerprint = fingerprintManualComparison(currentComparison);
+  const currentness = validateManualApprovalCurrentness(
+    ManualApprovalIdentitySchema.parse(approvalIdentityFromPersisted(approval)),
+    ManualApprovalIdentitySchema.parse(approvalIdentityFromCurrent(current, currentFingerprint)),
+  );
+  if (!currentness.ok) {
+    throw new ManualFlowError(409, "APPROVAL_STALE", `Manual approval is stale (${currentness.reason}); compare and approve the current inputs again.`);
+  }
+  if (fingerprintManualComparison(comparison) !== currentFingerprint) {
+    throw new ManualFlowError(409, "APPROVAL_STALE", "The comparison payload no longer matches current profile, contact, preferences, job or requirements.");
+  }
+  return currentFingerprint;
+}
+
+interface JobRow {
+  canonical_job_id: string;
+  job_version_id: string;
+  source_observation_id: string;
+  source_observation_payload_hash: string;
+  title: string;
+  company: string;
+  canonical_url: string | null;
+  content_hash: string;
+  active_requirement_set_id: string | null;
+  gate_status: string | null;
+  rejection_codes: string[] | null;
+  processing_state: string | null;
+  recommendation_outcome: string | null;
+  recommendation_eligibility: string | null;
+  readiness_status: string | null;
+  readiness_reason_codes: string[] | null;
+}
+
+interface ProfileRow {
+  profile_version_id: string;
+  candidate_profile_id: string;
+  candidate_name: string;
+}
+
+/**
+ * AI-quoted requirement extraction (verbatim, validated quotes from the job text) runs when a model
+ * provider key is configured, unless REQUIREMENTS_ENABLE_QUOTED=false. Without it, requirements come
+ * only from deterministic rules and are often generic.
+ */
+export function manualQuotedRequirementMode(): "with_quoted" | "deterministic_only" {
+  if (process.env.REQUIREMENTS_ENABLE_QUOTED === "false") return "deterministic_only";
+  const preflight = checkModelRegistryPreflight();
+  return preflight.primaryAvailable || preflight.fallbackAvailable ? "with_quoted" : "deterministic_only";
+}
+
+/** Derived from the durable extraction audit so compare, approve and generate all see the same warning. */
+export async function quotedRequirementExtractionWarning(
+  client: pg.Pool | pg.PoolClient,
+  workspaceId: string,
+  jobVersionId: string,
+  requirementSetId: string,
+): Promise<string | null> {
+  const { rows } = await client.query<{ status: string; error_message: string | null }>(
+    `SELECT status, error_message FROM requirement_extraction_runs
+     WHERE workspace_id = $1 AND job_version_id = $2 AND requirement_set_id = $3 AND run_type = 'LLM_QUOTED'
+     ORDER BY started_at DESC, id DESC LIMIT 1`,
+    [workspaceId, jobVersionId, requirementSetId],
+  );
+  const run = rows[0];
+  if (run?.status === "COMPLETED") return null;
+  if (run?.status === "FAILED") {
+    return `AI requirement extraction failed (${(run.error_message ?? "no detail").slice(0, 200)}); requirements below come from deterministic rules only and may be generic.`;
+  }
+  if (run?.status === "STARTED") return "AI requirement extraction has not finished; requirements below come from deterministic rules only and may be generic.";
+  return "AI requirement extraction did not run (no model API key configured, or REQUIREMENTS_ENABLE_QUOTED=false); requirements below come from deterministic rules only and may be generic.";
+}
+
+/** Profile evidence a manual comparison may cite: facts, active credentials and engagements. */
+export async function loadManualProfileEvidence(
+  client: pg.Pool | pg.PoolClient,
+  workspaceId: string,
+  profileVersionId: string,
+): Promise<ManualEvidence[]> {
+  // Past-role facts are is_current = FALSE but remain valid evidence; only CONTACT facts need currentness,
+  // and those are loaded separately by loadProfileContactSnapshot.
+  const factResult = await client.query<{ id: string; fact_key: string; fact_type: string; statement: string; engagement_id: string | null; cv_statement: string | null }>(
+    `SELECT id::text, fact_key, fact_type, statement, engagement_id::text AS engagement_id,
+            NULLIF(btrim(structured_value->>'cv_statement'), '') AS cv_statement FROM profile_facts
+     WHERE workspace_id = $1 AND profile_version_id = $2 AND fact_type <> 'CONTACT'
+       AND verification_status IN ('VERIFIED','SELF_ATTESTED')
+       AND confidentiality IN ('PUBLIC','PRIVATE_REUSABLE') ORDER BY fact_key, id`,
+    [workspaceId, profileVersionId]);
+  const credentialResult = await client.query<{
+    id: string; credential_name: string; issuer: string; credential_type: ManualEvidence["credential_type"] & string; level: string | null; status: string;
+    always_include_in_documents: boolean; issued_on: string | null;
+  }>(
+    `SELECT id::text, credential_name, issuer, credential_type, level, status, always_include_in_documents, issued_on::text AS issued_on
+     FROM profile_credentials WHERE workspace_id = $1 AND profile_version_id = $2
+       AND status = 'ACTIVE' AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY credential_key, id`,
+    [workspaceId, profileVersionId]);
+  const engagementResult = await client.query<{
+    id: string; organization_legal_name: string; role_title: string; start_date: string; end_date: string | null; is_current: boolean;
+    summary: string; engagement_type: ManualEvidence["engagement_type"] & string; experience_class: string;
+    document_layout: ManualEvidence["document_layout"] | null;
+  }>(
+    `SELECT id::text, organization_legal_name, role_title, start_date::text AS start_date, end_date::text AS end_date, is_current, summary,
+            engagement_type, experience_class, document_layout
+     FROM profile_engagements WHERE workspace_id = $1 AND profile_version_id = $2
+       AND verification_status IN ('VERIFIED','SELF_ATTESTED') ORDER BY start_date DESC, engagement_key, id`,
+    [workspaceId, profileVersionId]);
+  return [
+    // Self-ratings, preference and screening notes inform matching elsewhere but are never document evidence.
+    ...factResult.rows.filter((row) => !isInternalAssessmentStatement(row.statement)).map((row) => ({
+      id: row.id, evidence_type: "FACT" as const, label: row.fact_key, statement: row.statement, fact_type: row.fact_type,
+      ...(row.engagement_id ? { engagement_id: row.engagement_id } : {}),
+      ...(row.cv_statement ? { cv_statement: row.cv_statement.slice(0, 400) } : {}),
+    })),
+    ...credentialResult.rows.map((row) => ({
+      id: row.id, evidence_type: "CREDENTIAL" as const, label: row.credential_name, credential_type: row.credential_type,
+      ...(row.always_include_in_documents ? { always_include: true } : {}),
+      issuer: row.issuer,
+      ...(row.issued_on ? { issued_on: row.issued_on } : {}),
+      statement: `${row.credential_name}${row.level ? ` (${row.level})` : ""}, ${row.credential_type.toLowerCase()} issued by ${row.issuer}; status ${row.status}.`,
+    })),
+    ...engagementResult.rows.map((row) => ({
+      id: row.id, evidence_type: "ENGAGEMENT" as const, label: `${row.role_title} at ${row.organization_legal_name}`,
+      statement: `${row.role_title} at ${row.organization_legal_name} (${row.start_date}${row.is_current ? "–present" : row.end_date ? `–${row.end_date}` : ""}). ${row.summary}`,
+      engagement_id: row.id, engagement_type: row.engagement_type, experience_class: row.experience_class, start_date: row.start_date,
+      ...(row.end_date && !row.is_current ? { end_date: row.end_date } : {}),
+      ...(row.document_layout ? { document_layout: row.document_layout } : {}),
+    })),
+  ];
+}
+
+async function loadCurrentInputs(
+  client: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  selected: SelectedPostingIdentity,
+): Promise<CurrentManualInputs | null> {
+  const jobResult = await client.query<JobRow>(
+    `SELECT job.id AS canonical_job_id, version.id AS job_version_id,
+            observation.id AS source_observation_id, observation.raw_payload_hash AS source_observation_payload_hash, observation.title,
+            observation.company_name AS company, job.canonical_url, version.content_hash,
+            version.active_requirement_set_id, gate.decision AS gate_status, gate.rejection_codes,
+            job.processing_state, shortlist.recommendation_outcome, shortlist.recommendation_eligibility,
+            shortlist.readiness_status, shortlist.readiness_reason_codes
+     FROM canonical_jobs job
+     JOIN job_versions version ON version.workspace_id = job.workspace_id
+       AND version.canonical_job_id = job.id AND version.id = $3 AND version.content_hash = $5
+       AND version.id = COALESCE(job.latest_job_version_id, (
+         SELECT candidate.id FROM job_versions candidate
+         WHERE candidate.workspace_id = job.workspace_id AND candidate.canonical_job_id = job.id
+         ORDER BY candidate.observed_at DESC, candidate.id DESC LIMIT 1
+       ))
+     JOIN raw_job_observations observation ON observation.workspace_id = job.workspace_id
+       AND observation.id = $4 AND observation.job_version_id = version.id
+     LEFT JOIN v_canonical_shortlist_readiness_scoped shortlist
+       ON shortlist.workspace_id = job.workspace_id AND shortlist.canonical_job_id = job.id AND shortlist.job_version_id = version.id
+     LEFT JOIN LATERAL (
+       SELECT decision.decision, decision.rejection_codes
+       FROM gate_decisions decision
+       WHERE decision.workspace_id = job.workspace_id AND decision.canonical_job_id = job.id
+         AND decision.job_version_id = version.id
+       ORDER BY decision.created_at DESC, decision.id DESC LIMIT 1
+     ) gate ON TRUE
+     WHERE job.workspace_id = $1 AND job.id = $2
+     LIMIT 1`,
+    [ctx.workspaceId, selected.canonicalJobId, selected.jobVersionId, selected.sourceObservationId, selected.contentHash],
+  );
+  if (!jobResult.rows[0]) return null;
+  const job = jobResult.rows[0];
+  if (!job.active_requirement_set_id) {
+    throw new Error("Deterministic requirement extraction did not produce an active requirement set for this exact job version.");
+  }
+
+  const profileResult = await client.query<ProfileRow>(
+    `SELECT profile.id AS profile_version_id, profile.candidate_profile_id,
+            candidate.display_name AS candidate_name
+     FROM profile_versions profile
+     JOIN candidate_profiles candidate ON candidate.workspace_id = profile.workspace_id
+       AND candidate.id = profile.candidate_profile_id
+     WHERE profile.workspace_id = $1 AND profile.candidate_profile_id = $2 AND profile.status = 'ACTIVE'
+     ORDER BY profile.created_at DESC, profile.id DESC LIMIT 1`,
+    [ctx.workspaceId, selected.candidateProfileId],
+  );
+  const profile = profileResult.rows[0];
+  if (!profile) throw new ManualFlowError(409, "APPROVAL_STALE", "The selected candidate has no active profile version in this workspace. Select an active candidate and compare again.");
+
+  // Sequential: a PoolClient runs one query at a time, and queueing concurrent queries on it is deprecated in pg.
+  const requirementResult = await client.query<StoredRequirementRow>(
+    `SELECT requirement_key, requirement_type, importance, requirement_text, extractor_type, quote_text
+     FROM job_requirements WHERE workspace_id = $1 AND canonical_job_id = $2 AND job_version_id = $3
+       AND requirement_set_id = $4 AND status <> 'REJECTED' ORDER BY requirement_key`,
+    [ctx.workspaceId, selected.canonicalJobId, selected.jobVersionId, job.active_requirement_set_id]);
+  const descriptionResult = await client.query<{ description_text: string | null }>(
+    `SELECT description_text FROM job_versions WHERE workspace_id = $1 AND canonical_job_id = $2 AND id = $3`,
+    [ctx.workspaceId, selected.canonicalJobId, selected.jobVersionId]);
+  const evidence = await loadManualProfileEvidence(client, ctx.workspaceId, profile.profile_version_id);
+  const preferenceResult = await client.query<{ preference_domain: string; revision_id: string; preference_hash: string }>(
+    `SELECT active.preference_domain, active.revision_id, revision.preference_hash
+     FROM workspace_user_preference_active_versions active
+     JOIN workspace_user_preference_revisions revision
+       ON revision.workspace_id = active.workspace_id AND revision.user_id = active.user_id
+      AND revision.preference_domain = active.preference_domain AND revision.id = active.revision_id
+     WHERE active.workspace_id = $1 AND active.user_id = $2
+     ORDER BY active.preference_domain`,
+    [ctx.workspaceId, ctx.userId]);
+  const contactSnapshot = await loadProfileContactSnapshot(client, ctx.workspaceId, profile.profile_version_id, profile.candidate_name);
+  const requirements: ManualRequirement[] = documentRequirements(requirementResult.rows, descriptionResult.rows[0]?.description_text ?? null);
+  const warnings: string[] = [];
+  const quotedWarning = await quotedRequirementExtractionWarning(client, ctx.workspaceId, job.job_version_id, job.active_requirement_set_id);
+  if (quotedWarning) warnings.push(quotedWarning);
+  if (job.gate_status) warnings.push(`Automatic suitability gate: ${job.gate_status}${job.rejection_codes?.length ? ` (${job.rejection_codes.join(", ")})` : ""}.`);
+  if (job.recommendation_outcome || job.recommendation_eligibility) {
+    warnings.push(`Automatic recommendation remains ${job.recommendation_outcome ?? "unknown"} / ${job.recommendation_eligibility ?? "unknown"}. Manual preparation does not change it.`);
+  }
+  if (job.readiness_status && job.readiness_status !== "READY") {
+    warnings.push(`Automatic document readiness remains ${job.readiness_status}${job.readiness_reason_codes?.length ? ` (${job.readiness_reason_codes.join(", ")})` : ""}. Manual preparation does not change it.`);
+  }
+  if (!job.gate_status) warnings.push("Automatic suitability was not completed for this manual comparison; workability warnings remain unresolved until the normal pipeline evaluates them.");
+  if (job.processing_state) warnings.push(`Current pipeline state: ${job.processing_state}.`);
+  const pairingResult = await client.query<{ status: "COMPLETED" | "FAILED"; pairs: EvidencePair[]; error_message: string | null }>(
+    `SELECT status, pairs, error_message FROM manual_evidence_pairings
+     WHERE workspace_id = $1 AND job_version_id = $2 AND requirement_set_id = $3 AND profile_version_id = $4 AND method = $5`,
+    [ctx.workspaceId, job.job_version_id, job.active_requirement_set_id, profile.profile_version_id, MANUAL_PAIRING_METHOD]);
+  const storedPairing = pairingResult.rows[0];
+  const pairing = storedPairing?.status === "COMPLETED" ? { pairs: strongestPairs(storedPairing.pairs) } : null;
+  if (!storedPairing) {
+    warnings.push("AI evidence pairing has not run for this comparison (no model API key was configured, or MANUAL_EVIDENCE_PAIRING_AI=false); requirement pairs come from strict word matching and may be sparse.");
+  } else if (storedPairing.status === "FAILED") {
+    warnings.push(`AI evidence pairing failed (${(storedPairing.error_message ?? "no detail").slice(0, 200)}); requirement pairs come from strict word matching and may be sparse.`);
+  }
+
+  const preferenceContextFingerprint = sha256(stableStringify(preferenceResult.rows));
+  const contactFactIds = [...contactSnapshot.factIds];
+  const context = {
+    canonical_job_id: job.canonical_job_id,
+    job_version_id: job.job_version_id,
+    source_observation_id: job.source_observation_id,
+    source_evidence_fingerprint: sha256(stableStringify({ source_observation_payload_hash: job.source_observation_payload_hash })),
+    job_content_hash: job.content_hash,
+    profile_version_id: profile.profile_version_id,
+    candidate_profile_id: profile.candidate_profile_id,
+    requirement_set_id: job.active_requirement_set_id,
+    requirements,
+    evidence,
+    profile_contact_fact_ids: contactFactIds,
+    profile_contact_fingerprint: contactSnapshot.fingerprint,
+    preference_context_fingerprint: preferenceContextFingerprint,
+    suitability_warnings: warnings,
+    comparator_version: MANUAL_COMPARATOR_VERSION,
+  };
+  const input: ManualComparisonInput = {
+    ...context,
+    context_fingerprint: sha256(stableStringify(context)),
+    title: job.title,
+    company: job.company,
+    canonical_url: job.canonical_url,
+    pairing,
+  };
+  return {
+    input,
+    contact: contactSnapshot.contact,
+    contactFactIds,
+    contactFingerprint: contactSnapshot.fingerprint,
+    preferenceContextFingerprint,
+  };
+}
+
+/**
+ * Runs the model pairing once per job version, requirement set and profile version and stores it, so
+ * approve and generate rebuild exactly the comparison the candidate reviewed. A completed pairing is
+ * reused; a failed one is retried on the next compare. Without a model key nothing is stored and the
+ * comparison uses strict word matching.
+ */
+export async function ensureManualEvidencePairing(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  input: ManualComparisonInput,
+  pairer: EvidencePairer,
+): Promise<void> {
+  if (manualPairingMode() === "lexical" || input.pairing) return;
+  const candidates = matchableEvidence(input.evidence);
+  const roleLabels = Object.fromEntries(input.evidence
+    .filter((item) => item.evidence_type === "ENGAGEMENT")
+    .map((item) => [item.id, item.label]));
+  const scope = [ctx.workspaceId, input.job_version_id, input.requirement_set_id, input.profile_version_id, MANUAL_PAIRING_METHOD];
+  const upsert = `INSERT INTO manual_evidence_pairings
+       (workspace_id, job_version_id, requirement_set_id, profile_version_id, method, status, provider, model, pairs, error_message)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+     ON CONFLICT (workspace_id, job_version_id, requirement_set_id, profile_version_id, method) DO UPDATE
+       SET status = EXCLUDED.status, provider = EXCLUDED.provider, model = EXCLUDED.model, pairs = EXCLUDED.pairs,
+           error_message = EXCLUDED.error_message, created_at = NOW()
+       WHERE manual_evidence_pairings.status <> 'COMPLETED'`;
+  try {
+    if (input.requirements.length === 0 || candidates.length === 0) {
+      await pool.query(upsert, [...scope, "COMPLETED", null, null, "[]", null]);
+      return;
+    }
+    const result = await pairer({
+      title: input.title, company: input.company, requirements: input.requirements, evidence: candidates, roleLabels,
+      clientOrPool: pool, context: ctx,
+    });
+    // Validated again here so the rules hold whichever pairer produced the result.
+    const validated = validatePairingPayload({ schema_version: MANUAL_PAIRING_SCHEMA_VERSION, pairs: result.pairs }, input.requirements, candidates);
+    if (!validated.valid) throw new Error(`Evidence pairing validation failed: ${validated.issues.join(" ")}`);
+    await pool.query(upsert, [...scope, "COMPLETED", result.provider, result.model, JSON.stringify(validated.pairs), null]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await pool.query(upsert, [...scope, "FAILED", null, null, "[]", message.slice(0, 2000)]);
+  }
+}
+
+async function hasWritableMembership(client: pg.Pool | pg.PoolClient, ctx: WorkspaceContext): Promise<boolean> {
+  const { rows } = await client.query<{ role: string }>(
+    `SELECT role FROM workspace_memberships
+     WHERE workspace_id = $1 AND user_id = $2 AND status = 'ACTIVE' FOR SHARE`,
+    [ctx.workspaceId, ctx.userId],
+  );
+  return rows[0]?.role === "OWNER" || rows[0]?.role === "MEMBER";
+}
+
+/** A comparison draft ready for the review, approve and generate screens. */
+export interface StagedManualComparison {
+  draftId: string;
+  comparisonFingerprint: string;
+  comparison: ReturnType<typeof ManualComparisonSchema.parse>;
+  /** True when an identical comparison already existed and its draft was returned unchanged. */
+  reused: boolean;
+  requirementsExtracted: boolean;
+  documentContactReady: boolean;
+  missingContactFields: Array<"full_name" | "phone">;
+  rolePlan: ReturnType<typeof planRoles>;
+  selectableEvidence: ReturnType<typeof selectableEvidence>;
+}
+
+/**
+ * Everything /compare does once a posting exists as an exact job version: requirement extraction,
+ * evidence pairing, the comparison and its fingerprint, and the write-once draft. Shared by the
+ * manual route and by prepareComparisonForExistingJobVersion so both produce the same draft.
+ */
+async function stageComparisonDraft(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  evidencePairer: EvidencePairer,
+  selected: SelectedPostingIdentity,
+  postingKeptNote: string,
+  requirementMode: "with_quoted" | "deterministic_only",
+): Promise<StagedManualComparison> {
+  // Requirement extraction only runs on COMPLETE descriptions; say why instead of failing later
+  // with "no active requirement set".
+  const quality = await pool.query<{ description_quality_status: string | null; description_quality_reason: string | null }>(
+    `SELECT description_quality_status, description_quality_reason FROM canonical_jobs WHERE workspace_id = $1 AND id = $2`,
+    [ctx.workspaceId, selected.canonicalJobId]);
+  if (quality.rows[0]?.description_quality_status !== "COMPLETE") {
+    throw new ManualFlowError(422, "DESCRIPTION_INSUFFICIENT",
+      `The job description looks incomplete (${quality.rows[0]?.description_quality_reason ?? "quality not assessed"}). ` +
+      "Paste the full posting, including the responsibilities and the requirements or qualifications sections. " +
+      postingKeptNote);
+  }
+  // Quoted-extraction failures are non-blocking: deterministic requirements still complete the stage,
+  // and the failure surfaces as a comparison warning via quotedRequirementExtractionWarning.
+  const requirementSummary = await runRequirementsExtraction(pool, {
+    context: ctx, jobVersionIds: [selected.jobVersionId], quotedMode: requirementMode, failFastOnQuotedProviderFailure: false,
+  });
+  const reqDetail = requirementSummary.details.find((item) => item.jobVersionId === selected.jobVersionId);
+  if (reqDetail?.error) {
+    throw new ManualFlowError(503, "DEPENDENCY_UNAVAILABLE", `Deterministic requirement extraction failed; the source observation remains durably staged. ${reqDetail.error}`);
+  }
+
+  const preliminary = await loadCurrentInputs(pool, ctx, selected);
+  if (preliminary) await ensureManualEvidencePairing(pool, ctx, preliminary.input, evidencePairer);
+  const observedCurrent = await loadCurrentInputs(pool, ctx, selected);
+  if (!observedCurrent) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "This posting version is no longer current. Compare the current posting again.");
+  const observedComparison = ManualComparisonSchema.parse(buildManualComparison(observedCurrent.input));
+  const comparisonFingerprint = fingerprintManualComparison(observedComparison);
+  const draftClient = await pool.connect();
+  let current: CurrentManualInputs;
+  let comparison: ReturnType<typeof ManualComparisonSchema.parse>;
+  let draftId: string;
+  let reused = false;
+  try {
+    await draftClient.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    if (!(await hasWritableMembership(draftClient, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "Workspace membership no longer permits comparison staging.");
+    const latest = await loadCurrentInputs(draftClient, ctx, selected);
+    if (!latest) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "This posting version is no longer current. Compare the current posting again.");
+    comparison = ManualComparisonSchema.parse(buildManualComparison(latest.input));
+    if (fingerprintManualComparison(comparison) !== comparisonFingerprint) {
+      throw new ManualFlowError(409, "APPROVAL_STALE", "The selected job or profile inputs changed while this comparison was being created. Compare again.");
+    }
+    current = latest;
+    const draftResult = await draftClient.query<{ id: string }>(
+      `INSERT INTO manual_application_drafts (
+         workspace_id,user_id,candidate_profile_id,canonical_job_id,job_version_id,source_observation_id,
+         job_content_hash,profile_version_id,profile_contact_fact_ids,profile_contact_fingerprint,
+         preference_context_fingerprint,requirement_set_id,comparator_version,context_fingerprint,
+         comparison_fingerprint,comparison_payload,suitability_warnings
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17::jsonb)
+       ON CONFLICT (workspace_id,user_id,comparison_fingerprint,profile_contact_fact_ids) DO NOTHING RETURNING id`,
+      [ctx.workspaceId, ctx.userId, comparison.candidate_profile_id, selected.canonicalJobId, selected.jobVersionId,
+        selected.sourceObservationId, selected.contentHash, comparison.profile_version_id, current.contactFactIds,
+        current.contactFingerprint, current.preferenceContextFingerprint, comparison.requirement_set_id,
+        comparison.comparator_version, comparison.context_fingerprint, comparisonFingerprint,
+        JSON.stringify(comparison), JSON.stringify(comparison.suitability_warnings)],
+    );
+    draftId = draftResult.rows[0]?.id;
+    if (!draftId) {
+      const existing = await draftClient.query(
+        `SELECT id,workspace_id,user_id,candidate_profile_id,canonical_job_id,job_version_id,
+                source_observation_id,job_content_hash,profile_version_id,profile_contact_fact_ids,
+                profile_contact_fingerprint,preference_context_fingerprint,requirement_set_id,
+                comparator_version,context_fingerprint,comparison_fingerprint,comparison_payload,suitability_warnings
+         FROM manual_application_drafts
+         WHERE workspace_id=$1 AND user_id=$2 AND comparison_fingerprint=$3 AND profile_contact_fact_ids=$4
+         FOR UPDATE`,
+        [ctx.workspaceId, ctx.userId, comparisonFingerprint, current.contactFactIds],
+      );
+      const persistedDraft = ManualPersistedDraftSchema.parse(existing.rows[0]);
+      if (fingerprintManualComparison(persistedDraft.comparison_payload) !== comparisonFingerprint
+          || stableStringify(persistedDraft.comparison_payload) !== stableStringify(comparison)) {
+        throw new ManualFlowError(409, "APPROVAL_STALE", "An existing comparison with this fingerprint has different persisted content. Compare again.");
+      }
+      draftId = persistedDraft.id;
+      reused = true;
+    }
+    if (!draftId) throw new Error("Manual comparison draft was not durably staged.");
+    await draftClient.query(
+      `INSERT INTO manual_application_draft_contact_facts (workspace_id,user_id,draft_id,profile_version_id,profile_contact_fact_id)
+       SELECT $1,$2,$3,$4,contact_fact_id FROM unnest($5::uuid[]) AS contact_fact_id
+       ON CONFLICT DO NOTHING`,
+      [ctx.workspaceId, ctx.userId, draftId, comparison.profile_version_id, current.contactFactIds],
+    );
+    await draftClient.query("COMMIT");
+  } catch (error) {
+    await draftClient.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally { draftClient.release(); }
+  return {
+    draftId,
+    comparisonFingerprint,
+    comparison,
+    reused,
+    requirementsExtracted: requirementSummary.processed === 1,
+    documentContactReady: Boolean(current.contact.full_name && current.contact.phone),
+    missingContactFields: [
+      !current.contact.full_name && "full_name",
+      !current.contact.phone && "phone",
+    ].filter((field): field is "full_name" | "phone" => Boolean(field)),
+    rolePlan: planRoles(comparison),
+    selectableEvidence: selectableEvidence(comparison),
+  };
+}
+
+export interface ExistingJobComparisonRequest {
+  canonicalJobId: string;
+  jobVersionId: string;
+  /** Required only when the workspace has more than one candidate with an active profile. */
+  candidateProfileId?: string;
+}
+
+export interface ExistingJobComparison extends StagedManualComparison {
+  /** The draft id; pass it to the approve and generate routes as :draftId. */
+  comparisonId: string;
+  canonicalJobId: string;
+  jobVersionId: string;
+  sourceObservationId: string;
+  candidateProfileId: string;
+}
+
+/**
+ * Prepares a manual comparison for a job the pipeline already holds, without staging new posting
+ * content. Applies the same membership, currentness and description-quality checks as /compare and
+ * returns the same draft /compare would for these inputs, so calling it again is a no-op.
+ * Throws ManualFlowError (status, code, message) for every refusal.
+ */
+export async function prepareComparisonForExistingJobVersion(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  request: ExistingJobComparisonRequest,
+  options: { evidencePairer?: EvidencePairer } = {},
+): Promise<ExistingJobComparison> {
+  if (!(await hasWritableMembership(pool, ctx))) {
+    throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to prepare application documents.");
+  }
+  // The version's first observation, so the comparison (whose fingerprint covers the source
+  // observation) does not change when the same posting is seen again later.
+  const { rows } = await pool.query<{ content_hash: string; source_observation_id: string | null }>(
+    `SELECT version.content_hash, (
+       SELECT observation.id FROM raw_job_observations observation
+       WHERE observation.workspace_id = version.workspace_id AND observation.job_version_id = version.id
+       ORDER BY observation.retrieved_at ASC, observation.id ASC LIMIT 1
+     ) AS source_observation_id
+     FROM job_versions version
+     WHERE version.workspace_id = $1 AND version.canonical_job_id = $2 AND version.id = $3`,
+    [ctx.workspaceId, request.canonicalJobId, request.jobVersionId]);
+  const version = rows[0];
+  if (!version) throw new ManualFlowError(404, "NOT_FOUND", "This job version does not exist in this workspace.");
+  if (!version.source_observation_id) {
+    throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "This job version has no source observation to cite; it cannot be compared.");
+  }
+  const candidateProfileId = request.candidateProfileId ?? await soleActiveCandidate(pool, ctx);
+  const selected: SelectedPostingIdentity = {
+    candidateProfileId,
+    canonicalJobId: request.canonicalJobId,
+    jobVersionId: request.jobVersionId,
+    sourceObservationId: version.source_observation_id,
+    contentHash: version.content_hash,
+  };
+  // The pipeline's own requirement set only. A quoted run here would make the version's requirement
+  // set newer than its match, dropping the job from Apply Now with no successor task queued; quoted
+  // enrichment stays with the pipeline's EXTRACT_QUOTED_REQUIREMENTS task, which re-matches after it.
+  const staged = await stageComparisonDraft(pool, ctx, options.evidencePairer ?? pairEvidenceWithModel, selected,
+    "The job remains in the pipeline unchanged.", "deterministic_only");
+  return {
+    ...staged,
+    comparisonId: staged.draftId,
+    canonicalJobId: selected.canonicalJobId,
+    jobVersionId: selected.jobVersionId,
+    sourceObservationId: selected.sourceObservationId,
+    candidateProfileId,
+  };
+}
+
+/** The same test POST /applications uses for an Apply Now handoff: current artifacts, READY, gate PASS, PRIORITY or REVIEW. */
+async function isApplyNowReady(client: pg.PoolClient, workspaceId: string, canonicalJobId: string, jobVersionId: string): Promise<boolean> {
+  const shortlist = (await client.query<{
+    current_artifact_status: string | null; gate_status: string | null;
+    recommendation_eligibility: string | null; recommendation_outcome: string | null;
+  }>(
+    `SELECT current_artifact_status, gate_status, recommendation_eligibility, recommendation_outcome
+     FROM v_canonical_shortlist_scoped WHERE workspace_id=$1 AND canonical_job_id=$2 AND job_version_id=$3`,
+    [workspaceId, canonicalJobId, jobVersionId])).rows[0];
+  if (!shortlist
+      || !["CURRENT_OR_NOT_APPLICABLE", "EVALUATION_MISSING", "EVALUATION_STALE"].includes(shortlist.current_artifact_status ?? "")
+      || shortlist.gate_status !== "PASS" || shortlist.recommendation_eligibility !== "ELIGIBLE"
+      || !["PRIORITY", "REVIEW"].includes(shortlist.recommendation_outcome ?? "")) {
+    return false;
+  }
+  return isCurrentReadyApplicationReadiness(await loadCurrentApplicationReadiness(client, workspaceId, canonicalJobId, jobVersionId));
+}
+
+async function soleActiveCandidate(pool: pg.Pool, ctx: WorkspaceContext): Promise<string> {
+  const { rows } = await pool.query<{ candidate_profile_id: string }>(
+    `SELECT DISTINCT profile.candidate_profile_id::text AS candidate_profile_id FROM profile_versions profile
+     WHERE profile.workspace_id = $1 AND profile.status = 'ACTIVE' LIMIT 2`,
+    [ctx.workspaceId]);
+  if (rows.length === 1) return rows[0].candidate_profile_id;
+  if (rows.length === 0) throw new ManualFlowError(409, "APPROVAL_STALE", "No candidate in this workspace has an active profile version.");
+  throw new ManualFlowError(400, "INVALID_REQUEST", "This workspace has more than one candidate with an active profile; pass candidateProfileId.");
+}
+
+export interface ManualApplicationRouterDeps {
+  pool: pg.Pool;
+  resolveContext: (req: express.Request) => WorkspaceContext;
+  /** Proposes requirement-to-evidence pairs; defaults to the extraction model route. */
+  evidencePairer?: EvidencePairer;
+  /** Writes the cover letter body; defaults to the document model route. */
+  coverLetterWriter?: CoverLetterWriter;
+  /** Writes the CV summary; defaults to the document model route. */
+  summaryWriter?: SummaryWriter;
+}
+
+type ManualWrittenReview = z.infer<typeof ManualCoverLetterReviewSchema>;
+type DocumentContact = { full_name: string; location?: string; email?: string; phone?: string; linkedin?: string };
+
+/** How one written section (the CV summary or the cover letter) was produced, for the run manifest and review screen. */
+interface WrittenSectionOutcome {
+  review: ManualWrittenReview;
+  generatorVersion: string;
+  manifest: Record<string, unknown>;
+}
+
+interface WrittenSectionsOutcome {
+  docs: ControlledDocuments;
+  summary: WrittenSectionOutcome;
+  letter: WrittenSectionOutcome;
+}
+
+const MAX_FALLBACK_REASON_CHARS = 1500;
+// Letter manifest keys carried over when a later revision keeps an earlier AI-written letter.
+const REUSABLE_LETTER_MANIFEST_KEYS = ["cover_letter_mode", "factual_template", "provider", "model", "attempts", "fallback_used", "include_gap_note"];
+
+/** An AI-written letter from an earlier revision, kept so only the summary is written again. */
+interface ReusedCoverLetter {
+  coverLetter: string;
+  claims: ControlledDocuments["claims"];
+  outcome: WrittenSectionOutcome;
+}
+
+function evidenceOf(comparison: Record<string, any>): ManualEvidence[] {
+  return Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [];
+}
+
+/** Every fact or credential the candidate may choose as evidence on the review screen, with its role and dates. */
+function selectableEvidence(comparison: Record<string, any>) {
+  const evidence = evidenceOf(comparison);
+  const roles = new Map(evidence.filter((item) => item.evidence_type === "ENGAGEMENT").map((item) => [item.id, item]));
+  return matchableEvidence(evidence).map((item) => {
+    const role = item.engagement_id ? roles.get(item.engagement_id) : undefined;
+    return {
+      id: item.id, evidence_type: item.evidence_type as "FACT" | "CREDENTIAL", statement: item.statement,
+      role: role?.label ?? null, period: role ? engagementPeriod(role.statement) : null,
+    };
+  });
+}
+
+/**
+ * The AI-written letter of an earlier revision of the same approval: same draft, comparison and
+ * corrections, a lower revision, and a stored AI_WRITTEN letter with its claims. Anything else is a
+ * request error, so a retried summary never pairs with a letter built from different inputs.
+ */
+async function loadReusableCoverLetter(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  draftId: string,
+  priorApprovalId: string,
+  approval: ReturnType<typeof ManualPersistedApprovalSchema.parse>,
+  evidence: ManualEvidence[],
+): Promise<ReusedCoverLetter> {
+  const prior = await loadPersistedApproval(pool, ctx, draftId, priorApprovalId);
+  if (!prior || prior.approval.comparison_fingerprint !== approval.comparison_fingerprint
+      || prior.approval.corrections_fingerprint !== approval.corrections_fingerprint || prior.approval.revision >= approval.revision) {
+    throw new ManualFlowError(400, "INVALID_REQUEST", "The letter to keep must come from an earlier revision of the same approved comparison and corrections.");
+  }
+  const run = await pool.query<{ id: string; generator_version: string; output_manifest: Record<string, any> }>(
+    `SELECT id,generator_version,output_manifest FROM manual_application_document_runs
+     WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 AND document_type='COVER_LETTER'`,
+    [ctx.workspaceId, ctx.userId, priorApprovalId]);
+  const manifest = run.rows[0]?.output_manifest ?? {};
+  const review = ManualCoverLetterReviewSchema.safeParse(manifest.cover_letter_review);
+  if (!run.rows[0] || manifest.cover_letter_mode !== "AI_WRITTEN" || typeof manifest.preview_markdown !== "string" || !review.success) {
+    throw new ManualFlowError(409, "APPROVAL_STALE", "The earlier revision has no AI-written cover letter to keep; generate both documents again.");
+  }
+  const claims = await pool.query<{ section_label: string; claim_text: string; evidence_ids: string[]; requirement_keys: string[] }>(
+    `SELECT section_label,claim_text,evidence_ids,requirement_keys FROM manual_application_document_claims
+     WHERE workspace_id=$1 AND manual_document_run_id=$2 ORDER BY created_at, id`,
+    [ctx.workspaceId, run.rows[0].id]);
+  const known = new Set(evidence.map((item) => item.id));
+  if (claims.rows.some((claim) => claim.evidence_ids.some((id) => !known.has(id)))) {
+    throw new ManualFlowError(409, "APPROVAL_STALE", "The earlier letter cites evidence that is not in this comparison; generate both documents again.");
+  }
+  return {
+    coverLetter: manifest.preview_markdown,
+    claims: claims.rows.map((claim) => ({ section: claim.section_label, text: claim.claim_text, evidenceIds: claim.evidence_ids, requirementKeys: claim.requirement_keys })),
+    outcome: {
+      review: review.data,
+      generatorVersion: run.rows[0].generator_version,
+      manifest: {
+        ...Object.fromEntries(REUSABLE_LETTER_MANIFEST_KEYS.filter((key) => key in manifest).map((key) => [key, manifest[key]])),
+        reused_cover_letter_from: priorApprovalId,
+      },
+    },
+  };
+}
+
+function writtenReview(
+  mode: ManualWrittenReview["mode"],
+  reason: string | null,
+  section: "Summary" | "Cover letter",
+  claims: ControlledDocuments["claims"],
+  evidence: ManualEvidence[],
+  framing?: LetterFraming[],
+): ManualWrittenReview {
+  const evidenceById = new Map(evidence.map((item) => [item.id, item]));
+  return ManualCoverLetterReviewSchema.parse({
+    mode,
+    ...(framing ? { framing } : {}),
+    reason: reason ? reason.slice(0, MAX_FALLBACK_REASON_CHARS) : null,
+    sentences: claims.filter((claim) => claim.section === section).map((claim) => ({
+      text: claim.text,
+      evidence: claim.evidenceIds.map((id) => evidenceById.get(id)).filter((item): item is ManualEvidence => Boolean(item))
+        .map(({ id, label, statement }) => ({ id, label, statement })),
+      requirement_keys: claim.requirementKeys,
+    })).filter((sentence) => sentence.evidence.length > 0),
+  });
+}
+
+/**
+ * Has the model write the CV summary and the cover letter body from the approved
+ * requirement-to-evidence pairs and the job description. Each section falls back to the plain,
+ * statement-built version on its own when no key is configured, the comparison has no pairs, the
+ * description is missing, the provider fails or the text fails validation; the reason is recorded.
+ */
+async function prepareWrittenSections(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  approval: { canonical_job_id: string; job_version_id: string },
+  comparison: Record<string, any>,
+  contact: DocumentContact,
+  writers: { summary: SummaryWriter; coverLetter: CoverLetterWriter },
+  documentOptions: ControlledDocumentOptions = {},
+  letterOptions: { includeGapNote?: boolean } = {},
+  reusedLetter?: ReusedCoverLetter,
+): Promise<WrittenSectionsOutcome> {
+  const plain = buildControlledDocuments(comparison, contact, documentOptions);
+  const evidence = Array.isArray(comparison.evidence) ? comparison.evidence as ManualEvidence[] : [];
+  const plainSummary = (reason: string, claims = plain.claims): WrittenSectionOutcome => ({
+    review: writtenReview("DETERMINISTIC", reason, "Summary", claims, evidence),
+    generatorVersion: "manual_preparation_v1",
+    manifest: { summary_mode: "DETERMINISTIC", summary_reason: reason.slice(0, MAX_FALLBACK_REASON_CHARS) },
+  });
+  const plainLetter = (reason: string, claims = plain.claims): WrittenSectionOutcome => ({
+    review: writtenReview("DETERMINISTIC", reason, "Cover letter", claims, evidence),
+    generatorVersion: "manual_preparation_v1",
+    manifest: { cover_letter_mode: "DETERMINISTIC", cover_letter_reason: reason.slice(0, MAX_FALLBACK_REASON_CHARS), factual_template: true },
+  });
+  const skipBoth = (reason: string): WrittenSectionsOutcome => ({
+    docs: plain,
+    summary: plainSummary(`${reason} The summary was built from your statements.`),
+    letter: plainLetter(`${reason} The letter was assembled from your statements.`),
+  });
+  if (manualCoverLetterMode() === "deterministic") {
+    return skipBoth("AI writing did not run (no model API key configured, or MANUAL_COVER_LETTER_AI=false).");
+  }
+  const pairs = approvedCoverLetterPairs(comparison);
+  if (pairs.length === 0) {
+    return skipBoth("No job requirement in the approved comparison is matched to your evidence, so there was nothing grounded for a model to write from.");
+  }
+  const description = await pool.query<{ description_text: string | null }>(
+    `SELECT description_text FROM job_versions WHERE workspace_id=$1 AND id=$2 AND canonical_job_id=$3`,
+    [ctx.workspaceId, approval.job_version_id, approval.canonical_job_id],
+  );
+  const descriptionText = description.rows[0]?.description_text?.trim();
+  if (!descriptionText) return skipBoth("The approved job version has no stored description text.");
+  const requirementRows = Array.isArray(comparison.rows) ? comparison.rows as Array<Record<string, unknown>> : [];
+  const requirements: JobRequirementRef[] = requirementRows.map((row) => ({
+    requirement_key: String(row.requirement_key), importance: String(row.importance), requirement: String(row.requirement),
+  }));
+  // A requirement the candidate wrote their own gap sentence for gets no model-written one.
+  const candidateNoteKeys = new Set(candidateGapNotes(comparison).flatMap((note) => note.requirement_keys));
+  const uncoveredKeys = new Set<string>((comparison.fit?.uncovered_must ?? [])
+    .map((item: { requirement_key: string }) => item.requirement_key)
+    .filter((key: string) => !candidateNoteKeys.has(key)));
+  const baseInput = {
+    title: String(comparison.title), company: String(comparison.company), pairs, requirements,
+    uncoveredMust: requirements.filter((item) => uncoveredKeys.has(item.requirement_key)),
+    jobDescriptionExcerpt: jobDescriptionExcerpt(descriptionText), clientOrPool: pool, context: ctx,
+  };
+
+  // Summary first: the CV it produces is the one the letter is attached to.
+  let cvDocs = plain;
+  let summary: WrittenSectionOutcome;
+  try {
+    const allowedEvidence = allowedSummaryEvidence(comparison, pairs);
+    const written = await writers.summary({ ...baseInput, allowedEvidence });
+    // Validated again here so the evidence rule holds whichever writer produced the summary.
+    const validated = validateSummaryPayload({ schema_version: MANUAL_SUMMARY_SCHEMA_VERSION, sentences: written.sentences }, pairs, allowedEvidence);
+    if (!validated.valid) throw new Error(`Summary validation failed: ${validated.issues.join(" ")}`);
+    cvDocs = buildControlledDocuments(comparison, contact, { ...documentOptions, writtenSummary: validated.sentences });
+    summary = {
+      review: writtenReview("AI_WRITTEN", null, "Summary", cvDocs.claims, evidence),
+      generatorVersion: MANUAL_SUMMARY_GENERATOR_VERSION,
+      manifest: { summary_mode: "AI_WRITTEN", summary_provider: written.provider, summary_model: written.model,
+        summary_attempts: written.attempts, summary_fallback_used: written.fallbackUsed },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    summary = plainSummary(`The AI-written summary was not used because it failed or did not pass validation: ${message} The summary was built from your statements.`);
+  }
+
+  if (reusedLetter) {
+    return {
+      docs: { cv: cvDocs.cv, coverLetter: reusedLetter.coverLetter, claims: [...cvDocs.claims.filter((claim) => claim.section !== "Cover letter"), ...reusedLetter.claims] },
+      summary,
+      letter: reusedLetter.outcome,
+    };
+  }
+
+  try {
+    const allowedEvidence = allowedCoverLetterEvidence(comparison, pairs);
+    const written = await writers.coverLetter({ ...baseInput, allowedEvidence });
+    // Validated again here so the evidence rule holds whichever writer produced the letter.
+    const validated = validateCoverLetterPayload(
+      {
+        schema_version: MANUAL_COVER_LETTER_SCHEMA_VERSION, opening: written.opening,
+        paragraphs: written.paragraphs.map((sentences) => ({ sentences })), gap_note: written.gapNote,
+      },
+      pairs, allowedEvidence, baseInput.requirements, baseInput.uncoveredMust);
+    if (!validated.valid) throw new Error(`Cover letter validation failed: ${validated.issues.join(" ")}`);
+    const letter = buildWrittenCoverLetter(comparison, contact, validated, letterOptions);
+    return {
+      docs: { cv: cvDocs.cv, coverLetter: letter.coverLetter, claims: [...cvDocs.claims.filter((claim) => claim.section !== "Cover letter"), ...letter.claims] },
+      summary,
+      letter: {
+        review: writtenReview("AI_WRITTEN", null, "Cover letter", letter.claims, evidence, letter.framing),
+        generatorVersion: MANUAL_COVER_LETTER_GENERATOR_VERSION,
+        manifest: { cover_letter_mode: "AI_WRITTEN", factual_template: false, provider: written.provider, model: written.model,
+          attempts: written.attempts, fallback_used: written.fallbackUsed, include_gap_note: letterOptions.includeGapNote !== false },
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      docs: cvDocs,
+      summary,
+      letter: plainLetter(`The AI-written cover letter was not used because it failed or did not pass validation: ${message} The letter was assembled from your statements.`, cvDocs.claims),
+    };
+  }
+}
+
+export function createManualApplicationRouter({
+  pool, resolveContext, evidencePairer = pairEvidenceWithModel, coverLetterWriter = writeCoverLetterWithModel,
+  summaryWriter = writeSummaryWithModel,
+}: ManualApplicationRouterDeps): express.Router {
+  const router = express.Router();
+  const handler = (fn: (req: express.Request, res: express.Response) => Promise<void>): express.RequestHandler =>
+    (req, res, next) => {
+      void fn(req, res).catch((error: unknown) => {
+        if (error instanceof ManualFlowError) {
+          sendApiError(res, error.status, error.code, error.message);
+          return;
+        }
+        if (error instanceof ZodError) {
+          sendApiError(res, 500, "INTERNAL_ERROR", "Persisted manual application data failed runtime contract validation.");
+          return;
+        }
+        next(error);
+      });
+    };
+
+  router.get("/candidate-profiles", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    if (!(await hasWritableMembership(pool, ctx))) {
+      sendApiError(res, 403, "FORBIDDEN", "An active owner or member role is required to prepare application documents.");
+      return;
+    }
+    const { rows } = await pool.query<{ candidate_profile_id: string; display_name: string }>(
+      `SELECT DISTINCT ON (candidate.id) candidate.id AS candidate_profile_id, candidate.display_name
+       FROM candidate_profiles candidate
+       JOIN profile_versions profile ON profile.workspace_id=candidate.workspace_id
+         AND profile.candidate_profile_id=candidate.id AND profile.status='ACTIVE'
+       WHERE candidate.workspace_id=$1
+       ORDER BY candidate.id, profile.created_at DESC, profile.id DESC
+       LIMIT 50`,
+      [ctx.workspaceId],
+    );
+    res.json(ManualCandidateProfilesResponseSchema.parse({
+      schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+      ok: true,
+      profiles: rows,
+    }));
+  }));
+
+  router.post("/fetch-description", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    if (!(await hasWritableMembership(pool, ctx))) {
+      sendApiError(res, 403, "FORBIDDEN", "An active owner or member role is required to fetch a posting for manual preparation.");
+      return;
+    }
+    const parsed = ManualFetchDescriptionRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendApiError(res, 400, "INVALID_REQUEST", "Provide a public posting URL and the expected title and company.");
+      return;
+    }
+    // LinkedIn shows job descriptions only to signed-in browsers, so a fetch can never succeed.
+    if (/(^|\.)linkedin\.com$/i.test(new URL(parsed.data.url).hostname)) {
+      sendApiError(res, 422, "INVALID_REQUEST", "LinkedIn job pages can't be fetched because LinkedIn only shows them to signed-in browsers. Open the posting, copy the full description including the responsibilities and requirements, and paste it instead.");
+      return;
+    }
+    let result: JobContentResult;
+    try {
+      result = await fetchJobContent(parsed.data.url, {
+        title: parsed.data.title,
+        companyName: parsed.data.company,
+        requisitionId: parsed.data.requisition_id,
+      });
+    } catch (error) {
+      sendApiError(res, 503, "DEPENDENCY_UNAVAILABLE", error instanceof Error ? error.message : "Posting retrieval failed.");
+      return;
+    }
+    if (result.kind === "COMPLETE") {
+      if (!matchesExactFetchedPostingIdentity({
+        title: parsed.data.title,
+        company: parsed.data.company,
+        requisitionId: parsed.data.requisition_id,
+      }, result.posting)) {
+        sendApiError(res, 409, "IDENTITY_CONFLICT", "Fetched posting title, company, or requisition ID does not exactly match the confirmed posting identity.");
+        return;
+      }
+      const sourceEvidence = ManualFetchSourceEvidenceSchema.parse(result.evidence);
+      const client = await pool.connect();
+      let receiptId: string;
+      try {
+        await client.query("BEGIN");
+        if (!(await hasWritableMembership(client, ctx))) {
+          throw new ManualFlowError(403, "FORBIDDEN", "Workspace membership no longer permits posting retrieval.");
+        }
+        const inserted = await client.query<{ id: string }>(
+          `INSERT INTO manual_application_fetch_receipts (
+             workspace_id,user_id,requested_url,resolved_url,canonical_url,expected_title,expected_company,expected_requisition_id,
+             description_hash,content_hash,provider,source_evidence
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) RETURNING id`,
+          [ctx.workspaceId, ctx.userId, sourceEvidence.requestedUrl, sourceEvidence.resolvedUrl,
+            result.posting.canonicalUrl, parsed.data.title, parsed.data.company, parsed.data.requisition_id ?? null,
+            sha256(result.posting.description.trim()), result.contentHash, result.provider.key,
+            JSON.stringify(sourceEvidence)],
+        );
+        receiptId = inserted.rows[0]?.id;
+        if (!receiptId) throw new Error("Verified posting receipt was not durably persisted.");
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally { client.release(); }
+      res.json(ManualFetchDescriptionResponseSchema.parse({
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+        ok: true,
+        fetch_receipt_id: receiptId,
+        description: result.posting.description,
+        final_url: result.posting.canonicalUrl,
+        provider: result.provider.key,
+        content_hash: result.contentHash,
+        source_evidence: sourceEvidence,
+      }));
+      return;
+    }
+    if (result.kind === "IDENTITY_CONFLICT") {
+      sendApiError(res, 409, "IDENTITY_CONFLICT", result.reason);
+      return;
+    }
+    if (result.kind === "BLOCKED") {
+      sendApiError(res, 422, "INVALID_REQUEST", result.reason);
+      return;
+    }
+    sendApiError(res, 503, "DEPENDENCY_UNAVAILABLE", result.reason,
+      result.kind === "RETRYABLE_FAILURE" ? result.retryAfter : undefined);
+  }));
+
+  router.post("/compare", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    if (!(await hasWritableMembership(pool, ctx))) { sendApiError(res, 403, "FORBIDDEN", "An active owner or member role is required to stage a manual application."); return; }
+    const parsed = ManualPostingInputSchema.safeParse(req.body);
+    if (!parsed.success) { sendApiError(res, 400, "INVALID_REQUEST", "Confirm the posting URL, title and company, and provide at least 100 characters of description."); return; }
+    const inputJob = parsed.data;
+    let fetchReceipt: ReturnType<typeof ManualPersistedFetchReceiptSchema.parse> | null = null;
+    let sourceContentStatus: "COMPLETE" | "USER_EDITED" | "USER_PROVIDED" = "USER_PROVIDED";
+    if (inputJob.source_kind === "FETCHED") {
+      const receiptResult = await pool.query(
+        `SELECT id,workspace_id,user_id,requested_url,resolved_url,canonical_url,expected_title,expected_company,expected_requisition_id,
+           description_hash,content_hash,provider,source_evidence,
+           to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS expires_at
+         FROM manual_application_fetch_receipts
+         WHERE id=$1 AND workspace_id=$2 AND user_id=$3 AND expires_at > NOW()`,
+        [inputJob.fetch_receipt_id, ctx.workspaceId, ctx.userId],
+      );
+      if (!receiptResult.rows[0]) {
+        throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "The verified posting receipt expired or is not available in this workspace. Fetch the posting again or use a pasted/uploaded description.");
+      }
+      fetchReceipt = ManualPersistedFetchReceiptSchema.parse(receiptResult.rows[0]);
+      const permittedUrls = [fetchReceipt.requested_url, fetchReceipt.resolved_url, fetchReceipt.canonical_url]
+        .map(normalizePostingUrl);
+      if (!permittedUrls.includes(normalizePostingUrl(inputJob.url))
+        || normalizeIdentity(inputJob.title) !== normalizeIdentity(fetchReceipt.expected_title)
+        || normalizeIdentity(inputJob.company) !== normalizeIdentity(fetchReceipt.expected_company)
+        || (inputJob.requisition_id ?? null) !== fetchReceipt.expected_requisition_id) {
+        throw new ManualFlowError(409, "IDENTITY_CONFLICT", "The confirmed title, company, or URL differs from the verified fetch. Fetch the exact posting again or switch to a pasted description.");
+      }
+      sourceContentStatus = sha256(inputJob.description.trim()) === fetchReceipt.description_hash
+        ? "COMPLETE"
+        : "USER_EDITED";
+    }
+    const rawPayload = JSON.stringify({
+      source: "MANUAL_STREAMLIT",
+      source_provenance: sourceContentStatus === "COMPLETE" ? "VERIFIED_PUBLIC_FETCH"
+        : sourceContentStatus === "USER_EDITED" ? "USER_EDITED_AFTER_FETCH" : "USER_PROVIDED",
+      source_content_status: sourceContentStatus,
+      ...(fetchReceipt ? {
+        fetch_receipt_id: fetchReceipt.id,
+        fetch_provider: fetchReceipt.provider,
+        fetched_content_hash: fetchReceipt.content_hash,
+        submitted_description_hash: sha256(inputJob.description.trim()),
+        source_evidence: fetchReceipt.source_evidence,
+      } : {}),
+      ...inputJob,
+    });
+    const payloadHash = sha256(rawPayload);
+    let observation = (await pool.query<{ id: string; job_version_id: string | null }>(
+      `SELECT id, job_version_id FROM raw_job_observations WHERE workspace_id = $1 AND raw_payload_hash = $2 LIMIT 1`,
+      [ctx.workspaceId, payloadHash])).rows[0];
+    if (!observation) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        if (!(await hasWritableMembership(client, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "Workspace membership no longer permits manual staging.");
+        const run = await client.query<{ id: string }>(
+          `INSERT INTO source_runs (workspace_id, status, total_fetched, total_new)
+           VALUES ($1, 'COMPLETED', 1, 1) RETURNING id`, [ctx.workspaceId]);
+        const inserted = await client.query<{ id: string; job_version_id: string | null }>(
+          `INSERT INTO raw_job_observations (
+             workspace_id, source_run_id, source_name, source_external_id, source_url, retrieved_at,
+             company_name, title, description_raw, location_raw, workplace_type_raw, employment_type_raw,
+             compensation_raw, canonical_apply_url, source_lane, search_plan_version, raw_payload, raw_payload_hash
+           ) VALUES ($1,$2,'MANUAL_STREAMLIT',$3,$4,NOW(),$5,$6,$7,$8,'UNKNOWN','UNKNOWN','UNKNOWN',$4,'UNKNOWN','manual_application_v1',$9::jsonb,$10)
+           ON CONFLICT (workspace_id, raw_payload_hash) DO NOTHING RETURNING id, job_version_id`,
+          [ctx.workspaceId, run.rows[0].id, `manual-${payloadHash.slice(0, 16)}`, inputJob.url, inputJob.company,
+            inputJob.title, inputJob.description, inputJob.location, rawPayload, payloadHash]);
+        observation = inserted.rows[0] ?? (await client.query<{ id: string; job_version_id: string | null }>(
+          `SELECT id, job_version_id FROM raw_job_observations WHERE workspace_id = $1 AND raw_payload_hash = $2 LIMIT 1`,
+          [ctx.workspaceId, payloadHash])).rows[0];
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally { client.release(); }
+    }
+    if (!observation) throw new Error("Manual observation could not be durably staged.");
+    let jobVersionId = observation.job_version_id;
+    let canonicalJobId: string | undefined;
+    if (!jobVersionId) {
+      const normalized = await runNormalization(pool, { context: ctx, observationIds: [observation.id], limit: 1 });
+      const detail = normalized.details.find((item) => item.observationId === observation.id);
+      if (!detail?.versionId || !detail.canonicalJobId) {
+        throw new Error(`Normalization did not produce a job version; the raw observation remains staged for recovery. ${detail?.error ?? ""}`.trim());
+      }
+      canonicalJobId = detail.canonicalJobId;
+      jobVersionId = detail.versionId;
+    }
+    if (!canonicalJobId) {
+      const canonical = await pool.query<{ canonical_job_id: string }>(`SELECT canonical_job_id FROM job_versions WHERE workspace_id = $1 AND id = $2`, [ctx.workspaceId, jobVersionId]);
+      canonicalJobId = canonical.rows[0]?.canonical_job_id;
+    }
+    if (!canonicalJobId) throw new Error("Normalized observation has no canonical job identity; its record remains staged.");
+    const selectedVersion = await pool.query<{ canonical_job_id: string; job_version_id: string; content_hash: string }>(
+      `SELECT canonical_job_id, id AS job_version_id, content_hash FROM job_versions
+       WHERE workspace_id = $1 AND canonical_job_id = $2 AND id = $3`,
+      [ctx.workspaceId, canonicalJobId, jobVersionId]);
+    const versionRow = selectedVersion.rows[0];
+    if (!versionRow) { sendApiError(res, 409, "JOB_VERSION_CHANGED", "The staged posting no longer resolves to its exact current job version. Stage it again."); return; }
+    const accepted = ManualStagedPostingIdentitySchema.parse({
+      schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+      canonicalJobId,
+      jobVersionId,
+      sourceObservationId: observation.id,
+      contentHash: versionRow.content_hash,
+    });
+    const staged = await stageComparisonDraft(pool, ctx, evidencePairer, {
+      candidateProfileId: inputJob.candidate_profile_id,
+      canonicalJobId: accepted.canonicalJobId,
+      jobVersionId: accepted.jobVersionId,
+      sourceObservationId: accepted.sourceObservationId,
+      contentHash: accepted.contentHash,
+    }, "The posting you entered is kept on record.", manualQuotedRequirementMode());
+    const { comparison, draftId, comparisonFingerprint } = staged;
+    const response = ManualCompareResponseSchema.parse({
+      schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+      ok: true,
+      draft_id: draftId,
+      comparison_id: draftId,
+      comparison_fingerprint: comparisonFingerprint,
+      selected_job: {
+        ...accepted,
+        title: comparison.title,
+        company: comparison.company,
+        url: comparison.canonical_url,
+        source: fetchReceipt ? {
+          source_kind: "FETCHED",
+          source_content_status: sourceContentStatus,
+          provider: fetchReceipt.provider,
+          fetched_content_hash: fetchReceipt.content_hash,
+          source_evidence: fetchReceipt.source_evidence,
+        } : {
+          source_kind: inputJob.source_kind,
+          source_content_status: "USER_PROVIDED",
+          provider: null,
+          fetched_content_hash: null,
+          source_evidence: null,
+        },
+      },
+      comparison,
+      document_contact_ready: staged.documentContactReady,
+      missing_contact_fields: staged.missingContactFields,
+      requirements_extracted: staged.requirementsExtracted,
+      role_plan: staged.rolePlan,
+      selectable_evidence: staged.selectableEvidence,
+    });
+    res.json(response);
+  }));
+
+  // A job the pipeline already holds goes to the same review, approve and generate screens as a
+  // pasted one. 409 JOB_VERSION_CHANGED and 422 DESCRIPTION_INSUFFICIENT are final for that version;
+  // CONCURRENT_UPDATE means another request was staging the same draft and a retry returns it.
+  router.post("/compare-existing", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const parsed = ManualExistingJobCompareRequestSchema.safeParse(req.body);
+    if (!parsed.success) { sendApiError(res, 400, "INVALID_REQUEST", "A canonical job id and job version id are required."); return; }
+    let prepared: Awaited<ReturnType<typeof prepareComparisonForExistingJobVersion>>;
+    try {
+      prepared = await prepareComparisonForExistingJobVersion(pool, ctx, {
+        canonicalJobId: parsed.data.canonical_job_id,
+        jobVersionId: parsed.data.job_version_id,
+        candidateProfileId: parsed.data.candidate_profile_id,
+      }, { evidencePairer });
+    } catch (error) {
+      if (isConcurrentWriteConflict(error)) {
+        sendApiError(res, 409, "CONCURRENT_UPDATE", "This job is already being prepared in another request. Try again in a moment.",
+          new Date(Date.now() + CONCURRENT_RETRY_AFTER_MS).toISOString());
+        return;
+      }
+      throw error;
+    }
+    const observation = await pool.query<{ source_name: string }>(
+      `SELECT source_name FROM raw_job_observations WHERE workspace_id = $1 AND id = $2`,
+      [ctx.workspaceId, prepared.sourceObservationId]);
+    const sourceName = observation.rows[0]?.source_name;
+    if (!sourceName) throw new Error("The cited source observation is no longer readable in this workspace.");
+    const { comparison } = prepared;
+    res.json(ManualCompareResponseSchema.parse({
+      schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+      ok: true,
+      draft_id: prepared.draftId,
+      comparison_id: prepared.comparisonId,
+      comparison_fingerprint: prepared.comparisonFingerprint,
+      selected_job: {
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+        canonicalJobId: prepared.canonicalJobId,
+        jobVersionId: prepared.jobVersionId,
+        sourceObservationId: prepared.sourceObservationId,
+        contentHash: comparison.job_content_hash,
+        title: comparison.title,
+        company: comparison.company,
+        url: comparison.canonical_url,
+        source: {
+          source_kind: "PIPELINE",
+          source_content_status: "PIPELINE_OBSERVED",
+          provider: null,
+          fetched_content_hash: null,
+          source_evidence: null,
+          source_name: sourceName,
+        },
+      },
+      comparison,
+      document_contact_ready: prepared.documentContactReady,
+      missing_contact_fields: prepared.missingContactFields,
+      requirements_extracted: prepared.requirementsExtracted,
+      role_plan: prepared.rolePlan,
+      selectable_evidence: prepared.selectableEvidence,
+    }));
+  }));
+
+  router.post("/:draftId/approve", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const draftId = String(req.params.draftId || "");
+    const request = ManualApprovalRequestSchema.safeParse(req.body);
+    if (!z.string().uuid().safeParse(draftId).success || !request.success) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", "Explicit approval and the exact comparison fingerprint are required.");
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      if (!(await hasWritableMembership(client, ctx))) {
+        throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to approve document preparation.");
+      }
+      const result = await client.query(
+        "SELECT id,workspace_id,user_id,candidate_profile_id,canonical_job_id,job_version_id,\n" +
+        "source_observation_id,job_content_hash,profile_version_id,profile_contact_fact_ids,\n" +
+        "profile_contact_fingerprint,preference_context_fingerprint,requirement_set_id,\n" +
+        "comparator_version,context_fingerprint,comparison_fingerprint,comparison_payload,suitability_warnings\n" +
+        "FROM manual_application_drafts WHERE workspace_id=$1 AND user_id=$2 AND id=$3",
+        [ctx.workspaceId, ctx.userId, draftId],
+      );
+      if (!result.rows[0]) throw new ManualFlowError(404, "NOT_FOUND", "Manual comparison draft was not found.");
+      const draft = ManualPersistedDraftSchema.parse(result.rows[0]);
+      if (request.data.comparison_fingerprint !== draft.comparison_fingerprint) {
+        throw new ManualFlowError(409, "APPROVAL_STALE", "The comparison fingerprint changed. Compare again before approving.");
+      }
+      const storedComparison = ManualComparisonSchema.parse(draft.comparison_payload);
+      if (fingerprintManualComparison(storedComparison) !== draft.comparison_fingerprint) {
+        throw new ManualFlowError(500, "INTERNAL_ERROR", "The persisted comparison does not match its fingerprint.");
+      }
+      if (storedComparison.canonical_job_id !== draft.canonical_job_id
+          || storedComparison.job_version_id !== draft.job_version_id
+          || storedComparison.source_observation_id !== draft.source_observation_id
+          || storedComparison.job_content_hash !== draft.job_content_hash
+          || storedComparison.profile_version_id !== draft.profile_version_id
+          || storedComparison.candidate_profile_id !== draft.candidate_profile_id
+          || storedComparison.requirement_set_id !== draft.requirement_set_id
+          || storedComparison.context_fingerprint !== draft.context_fingerprint
+          || storedComparison.profile_contact_fingerprint !== draft.profile_contact_fingerprint
+          || storedComparison.preference_context_fingerprint !== draft.preference_context_fingerprint
+          || storedComparison.comparator_version !== draft.comparator_version) {
+        throw new ManualFlowError(500, "INTERNAL_ERROR", "The persisted comparison context does not match its database identity.");
+      }
+      const current = await loadCurrentInputs(client, ctx, {
+        candidateProfileId: draft.candidate_profile_id,
+        canonicalJobId: draft.canonical_job_id,
+        jobVersionId: draft.job_version_id,
+        sourceObservationId: draft.source_observation_id,
+        contentHash: draft.job_content_hash,
+      });
+      if (!current) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "The exact job version is no longer current. Compare the current posting again.");
+      const currentComparison = ManualComparisonSchema.parse(buildManualComparison(current.input));
+      const currentFingerprint = fingerprintManualComparison(currentComparison);
+      const currentness = validateManualApprovalCurrentness(
+        ManualApprovalIdentitySchema.parse(approvalIdentityFromDraft(draft)),
+        ManualApprovalIdentitySchema.parse(approvalIdentityFromCurrent(current, currentFingerprint)),
+      );
+      if (!currentness.ok) {
+        throw new ManualFlowError(409, "APPROVAL_STALE", "Job, source, profile, contact, preferences, requirements or comparison changed. Compare again before approving.");
+      }
+      // The candidate's corrections must name rows of this comparison and document-eligible evidence.
+      const corrections = normaliseCorrections(request.data.corrections ?? []);
+      try {
+        applyManualCorrections(storedComparison, corrections);
+      } catch (error) {
+        if (error instanceof ManualCorrectionError) throw new ManualFlowError(400, "INVALID_REQUEST", error.message);
+        throw error;
+      }
+      const reviewFingerprint = correctionsFingerprint(corrections);
+      // The same comparison and corrections approve once; new_revision approves them again for fresh documents.
+      const latest = await client.query<{ revision: number }>(
+        `SELECT revision FROM manual_application_preparation_approvals
+         WHERE workspace_id=$1 AND user_id=$2 AND draft_id=$3 AND comparison_fingerprint=$4 AND corrections_fingerprint=$5
+         ORDER BY revision DESC LIMIT 1`,
+        [draft.workspace_id, draft.user_id, draft.id, draft.comparison_fingerprint, reviewFingerprint],
+      );
+      const latestRevision = latest.rows[0]?.revision ?? 0;
+      const revision = request.data.new_revision || latestRevision === 0 ? latestRevision + 1 : latestRevision;
+      if (revision > latestRevision) {
+        await client.query(
+          "INSERT INTO manual_application_preparation_approvals (\n" +
+          "workspace_id,user_id,draft_id,candidate_profile_id,canonical_job_id,job_version_id,\n" +
+          "source_observation_id,job_content_hash,profile_version_id,profile_contact_fact_ids,\n" +
+          "profile_contact_fingerprint,preference_context_fingerprint,requirement_set_id,\n" +
+          "comparator_version,context_fingerprint,comparison_fingerprint,approved,corrections,corrections_fingerprint,revision\n" +
+          ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,TRUE,$17::jsonb,$18,$19)",
+          [draft.workspace_id, draft.user_id, draft.id, draft.candidate_profile_id, draft.canonical_job_id,
+            draft.job_version_id, draft.source_observation_id, draft.job_content_hash, draft.profile_version_id,
+            draft.profile_contact_fact_ids, draft.profile_contact_fingerprint, draft.preference_context_fingerprint,
+            draft.requirement_set_id, draft.comparator_version, draft.context_fingerprint, draft.comparison_fingerprint,
+            JSON.stringify(corrections), reviewFingerprint, revision],
+        );
+      }
+      const approvalResult = await client.query(
+        "SELECT id,workspace_id,user_id,draft_id,candidate_profile_id,canonical_job_id,job_version_id,\n" +
+        "source_observation_id,job_content_hash,profile_version_id,profile_contact_fact_ids,\n" +
+        "profile_contact_fingerprint,preference_context_fingerprint,requirement_set_id,\n" +
+        "comparator_version,context_fingerprint,comparison_fingerprint,approved,corrections,corrections_fingerprint,revision\n" +
+        "FROM manual_application_preparation_approvals\n" +
+        "WHERE workspace_id=$1 AND user_id=$2 AND draft_id=$3 AND comparison_fingerprint=$4 AND corrections_fingerprint=$5 AND revision=$6",
+        [draft.workspace_id, draft.user_id, draft.id, draft.comparison_fingerprint, reviewFingerprint, revision],
+      );
+      const approval = ManualPersistedApprovalSchema.parse(approvalResult.rows[0]);
+      if (correctionsFingerprint(approval.corrections) !== reviewFingerprint) {
+        throw new ManualFlowError(500, "INTERNAL_ERROR", "The approval record did not preserve the review corrections.");
+      }
+      await client.query(
+        `INSERT INTO manual_application_approval_contact_facts (workspace_id,user_id,approval_id,draft_id,profile_version_id,profile_contact_fact_id)
+         SELECT workspace_id,user_id,$3,draft_id,profile_version_id,profile_contact_fact_id
+         FROM manual_application_draft_contact_facts WHERE workspace_id=$1 AND user_id=$2 AND draft_id=$4 AND profile_version_id=$5
+         ON CONFLICT DO NOTHING`,
+        [draft.workspace_id, draft.user_id, approval.id, draft.id, draft.profile_version_id],
+      );
+      const persistedIdentity = ManualApprovalIdentitySchema.parse({
+        canonicalJobId: approval.canonical_job_id,
+        jobVersionId: approval.job_version_id,
+        sourceObservationId: approval.source_observation_id,
+        jobContentHash: approval.job_content_hash,
+        profileVersionId: approval.profile_version_id,
+        candidateProfileId: approval.candidate_profile_id,
+        profileContactFactIdsFingerprint: profileFactIdsFingerprint(approval.profile_contact_fact_ids),
+        profileContactFingerprint: approval.profile_contact_fingerprint,
+        preferenceContextFingerprint: approval.preference_context_fingerprint,
+        requirementSetId: approval.requirement_set_id,
+        comparatorVersion: approval.comparator_version,
+        comparisonFingerprint: approval.comparison_fingerprint,
+      });
+      if (!validateManualApprovalCurrentness(
+        ManualApprovalIdentitySchema.parse(approvalIdentityFromDraft(draft)),
+        persistedIdentity,
+      ).ok) {
+        throw new ManualFlowError(500, "INTERNAL_ERROR", "The approval record did not preserve the exact comparison identity.");
+      }
+      await client.query("COMMIT");
+      res.json(ManualApprovalResponseSchema.parse({
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+        ok: true,
+        approval_id: approval.id,
+        approved: true,
+        comparison_fingerprint: approval.comparison_fingerprint,
+        corrections_fingerprint: approval.corrections_fingerprint,
+        revision: approval.revision,
+      }));
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }));
+  router.post("/:draftId/documents", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const draftId = String(req.params.draftId || "");
+    const request = ManualGenerateRequestSchema.safeParse(req.body);
+    if (!z.string().uuid().safeParse(draftId).success || !request.success) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", "A valid draft and its explicit approval ID are required.");
+    }
+    const approvalId = request.data.approval_id;
+    if (!(await hasWritableMembership(pool, ctx))) {
+      throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to generate documents.");
+    }
+    const selected = await loadPersistedApproval(pool, ctx, draftId, approvalId);
+    if (!selected) throw new ManualFlowError(403, "FORBIDDEN", "No matching explicit approval exists for this workspace and draft.");
+    const current = await loadCurrentInputs(pool, ctx, selectedPostingFromApproval(selected.approval));
+    if (!current) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "The exact approved job version is no longer current. Compare and approve the current posting again.");
+    const currentFingerprint = assertCurrentApproval(selected.approval, selected.comparison, current);
+    const contact = current.contact;
+    const fullName = contact.full_name?.trim();
+    const phone = contact.phone?.trim();
+    if (!fullName || !phone) {
+      throw new ManualFlowError(409, "APPROVAL_STALE", "The current private contact graph must contain a candidate name and phone before documents can be generated.");
+    }
+    // Documents are built from the comparison as the candidate corrected it when approving.
+    const reviewed = applyManualCorrections(selected.comparison, selected.approval.corrections);
+    const roleLayout = request.data.role_layout ?? {};
+    const plannedRoles = new Set(planRoles(reviewed).map((plan) => plan.engagement_id));
+    const unknownRoles = Object.keys(roleLayout).filter((id) => !plannedRoles.has(id));
+    if (unknownRoles.length > 0) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", `Role choices name roles that are not in the approved comparison: ${unknownRoles.join(", ")}.`);
+    }
+    const documentContact = { ...contact, full_name: fullName, phone };
+    const documentOptions: ControlledDocumentOptions = {
+      roleLayout, includeGapNotes: request.data.include_gap_note !== false, includeMatchSection: request.data.include_match_section === true,
+    };
+    // Documents already generated for this approval are returned as stored, without calling the model again.
+    const alreadyGenerated = await pool.query(
+      `SELECT 1 FROM manual_application_document_artifacts WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 LIMIT 1`,
+      [ctx.workspaceId, ctx.userId, approvalId]);
+    const reusedLetter = alreadyGenerated.rows.length === 0 && request.data.reuse_cover_letter_from
+      ? await loadReusableCoverLetter(pool, ctx, draftId, request.data.reuse_cover_letter_from, selected.approval, evidenceOf(reviewed))
+      : undefined;
+    const letter = alreadyGenerated.rows.length > 0
+      ? null
+      : await prepareWrittenSections(pool, ctx, selected.approval, reviewed, documentContact,
+        { summary: summaryWriter, coverLetter: coverLetterWriter }, documentOptions, { includeGapNote: request.data.include_gap_note }, reusedLetter);
+    const docs = letter?.docs ?? buildControlledDocuments(reviewed, documentContact, documentOptions);
+    const cvDocx = await renderControlledDocx(docs.cv);
+    const cvPdf = renderControlledPdf(docs.cv);
+    const letterDocx = await renderControlledDocx(docs.coverLetter);
+    const letterPdf = renderControlledPdf(docs.coverLetter);
+    const artifacts = [
+      { type: "CV", format: "DOCX", filename: `${safeFilename(current.input.title)}_CV.docx`, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: cvDocx },
+      { type: "CV", format: "PDF", filename: `${safeFilename(current.input.title)}_CV.pdf`, mime: "application/pdf", content: cvPdf },
+      { type: "COVER_LETTER", format: "DOCX", filename: `${safeFilename(current.input.company)}_Cover_Letter.docx`, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: letterDocx },
+      { type: "COVER_LETTER", format: "PDF", filename: `${safeFilename(current.input.company)}_Cover_Letter.pdf`, mime: "application/pdf", content: letterPdf },
+    ];
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      if (!(await hasWritableMembership(client, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "Workspace membership no longer permits document generation.");
+      const locked = await loadPersistedApproval(client, ctx, draftId, approvalId, true);
+      if (!locked) throw new ManualFlowError(403, "FORBIDDEN", "The approved comparison is no longer available.");
+      const lockedCurrent = await loadCurrentInputs(client, ctx, selectedPostingFromApproval(locked.approval));
+      if (!lockedCurrent) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "The exact approved job version is no longer current.");
+      const lockedFingerprint = assertCurrentApproval(locked.approval, locked.comparison, lockedCurrent);
+      if (lockedFingerprint !== currentFingerprint) throw new ManualFlowError(409, "APPROVAL_STALE", "Approved inputs changed while documents were being prepared.");
+      const existing = await client.query<{ document_type: "CV" | "COVER_LETTER"; format: "DOCX" | "PDF"; filename: string; mime_type: string; document_run_id: string }>(
+        `SELECT document_type,format,filename,mime_type,document_run_id FROM manual_application_document_artifacts
+         WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 ORDER BY document_type,format`,
+        [ctx.workspaceId, ctx.userId, approvalId],
+      );
+      if (existing.rows.length !== 0) {
+        validateManualArtifactPair(existing.rows);
+        const storedRuns = await client.query<{ document_type: "CV" | "COVER_LETTER"; output_manifest: Record<string, any> }>(
+          `SELECT document_type,output_manifest FROM manual_application_document_runs WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`,
+          [ctx.workspaceId, ctx.userId, approvalId]);
+        await client.query("COMMIT");
+        // Runs stored before preview_markdown existed were deterministic, so rebuilding them reproduces the same text.
+        const stored = (type: "CV" | "COVER_LETTER") => storedRuns.rows.find((run) => run.document_type === type)?.output_manifest ?? {};
+        const storedPreview = (type: "CV" | "COVER_LETTER", rebuilt: string) =>
+          typeof stored(type).preview_markdown === "string" ? stored(type).preview_markdown as string : rebuilt;
+        const storedReview = ManualCoverLetterReviewSchema.safeParse(stored("COVER_LETTER").cover_letter_review);
+        const storedSummaryReview = ManualCoverLetterReviewSchema.safeParse(stored("CV").summary_review);
+        const response = ManualDocumentsResponseSchema.parse({
+          schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, draft_id: draftId, approval_id: approvalId,
+          comparison_fingerprint: currentFingerprint,
+          preview: { cv: storedPreview("CV", docs.cv), cover_letter: storedPreview("COVER_LETTER", docs.coverLetter) },
+          artifacts: existing.rows.map(({ document_type, format, filename, mime_type }) => ({ type: document_type, format, filename, mime_type })),
+          ...(storedReview.success ? { cover_letter: storedReview.data } : {}),
+          ...(storedSummaryReview.success ? { summary: storedSummaryReview.data } : {}),
+          revision: locked.approval.revision, corrections_applied: locked.approval.corrections.length,
+        });
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(response);
+        return;
+      }
+      const runIds: Record<string, string> = {};
+      for (const type of ["CV", "COVER_LETTER"] as const) {
+        const content = type === "CV" ? docs.cv : docs.coverLetter;
+        const claimSet = docs.claims.filter((claim) => (claim.section === "Cover letter") === (type === "COVER_LETTER"));
+        const sectionRun = letter ? (type === "COVER_LETTER" ? letter.letter : letter.summary) : null;
+        const run = await client.query<{ id: string }>(
+          `INSERT INTO manual_application_document_runs (
+            workspace_id,user_id,approval_id,canonical_job_id,job_version_id,source_observation_id,job_content_hash,
+            candidate_profile_id,profile_version_id,profile_contact_fact_ids,profile_contact_fingerprint,
+            preference_context_fingerprint,requirement_set_id,comparator_version,context_fingerprint,
+            comparison_fingerprint,document_type,status,generator_version,output_manifest
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'COMPLETED',$19,$18::jsonb)
+           RETURNING id`,
+          [ctx.workspaceId, ctx.userId, approvalId, locked.approval.canonical_job_id, locked.approval.job_version_id,
+            locked.approval.source_observation_id, locked.approval.job_content_hash, locked.approval.candidate_profile_id,
+            locked.approval.profile_version_id, locked.approval.profile_contact_fact_ids, locked.approval.profile_contact_fingerprint,
+            locked.approval.preference_context_fingerprint, locked.approval.requirement_set_id, locked.approval.comparator_version,
+            locked.approval.context_fingerprint, currentFingerprint, type,
+            JSON.stringify({ manual_preparation: true, draft_id: draftId, approval_id: approvalId,
+              requirement_set_id: locked.approval.requirement_set_id, comparison_fingerprint: currentFingerprint,
+              factual_template: true, automatic_readiness_mutated: false, role_layout: roleLayout, preview_markdown: content,
+              revision: locked.approval.revision, corrections: locked.approval.corrections,
+              corrections_fingerprint: locked.approval.corrections_fingerprint,
+              ...(sectionRun ? { ...sectionRun.manifest, [type === "COVER_LETTER" ? "cover_letter_review" : "summary_review"]: sectionRun.review } : {}) }),
+            sectionRun ? sectionRun.generatorVersion : "manual_preparation_v1"]);
+        runIds[type] = run.rows[0].id;
+        for (const claim of claimSet) {
+          await client.query(
+            `INSERT INTO manual_application_document_claims (
+              workspace_id,manual_document_run_id,section_label,claim_text,evidence_ids,requirement_keys
+             ) VALUES ($1,$2,$3,$4,$5,$6)`,
+            [ctx.workspaceId, runIds[type], claim.section, claim.text, claim.evidenceIds, claim.requirementKeys]);
+        }
+      }
+      for (const artifact of artifacts) {
+        await client.query(
+          `INSERT INTO manual_application_document_artifacts (
+            workspace_id,user_id,approval_id,document_run_id,document_type,format,filename,mime_type,content,sha256
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           ON CONFLICT (approval_id,document_type,format) DO NOTHING`,
+          [ctx.workspaceId, ctx.userId, approvalId, runIds[artifact.type], artifact.type, artifact.format,
+            artifact.filename, artifact.mime, artifact.content, sha256Buffer(artifact.content)]);
+      }
+      const pair = await client.query<{ document_type: "CV" | "COVER_LETTER"; format: "DOCX" | "PDF"; document_run_id: string }>(
+        `SELECT document_type,format,document_run_id FROM manual_application_document_artifacts
+         WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`, [ctx.workspaceId, ctx.userId, approvalId]);
+      validateManualArtifactPair(pair.rows);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+    const response = ManualDocumentsResponseSchema.parse({
+      schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, draft_id: draftId, approval_id: approvalId,
+      comparison_fingerprint: currentFingerprint, preview: { cv: docs.cv, cover_letter: docs.coverLetter },
+      artifacts: artifacts.map(({ type, format, filename, mime }) => ({ type, format, filename, mime_type: mime })),
+      ...(letter ? { cover_letter: letter.letter.review, summary: letter.summary.review } : {}),
+      revision: selected.approval.revision, corrections_applied: selected.approval.corrections.length,
+      cv_pages: pdfPageCount(cvPdf),
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json(response);
+  }));
+
+  // "Use these documents for my application": only on the user's explicit request. Pins the chosen
+  // approval's two runs and four file hashes to the job's application record (created as INTENT when
+  // missing), adds a DOCUMENT_LINKED event, and never changes the application's status.
+  router.post("/:draftId/use-for-application", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const draftId = String(req.params.draftId || "");
+    const request = ManualUseForApplicationRequestSchema.safeParse(req.body);
+    if (!z.string().uuid().safeParse(draftId).success || !request.success) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", "An approved document pair (approval_id) is required.");
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      if (!(await hasWritableMembership(client, ctx))) {
+        throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to link documents to an application.");
+      }
+      const approval = (await client.query<{ canonical_job_id: string; job_version_id: string }>(
+        `SELECT canonical_job_id, job_version_id FROM manual_application_preparation_approvals
+         WHERE workspace_id=$1 AND user_id=$2 AND id=$3 AND draft_id=$4 AND approved IS TRUE`,
+        [ctx.workspaceId, ctx.userId, request.data.approval_id, draftId])).rows[0];
+      if (!approval) throw new ManualFlowError(404, "NOT_FOUND", "The approved document pair was not found.");
+      const artifacts = (await client.query<{ document_type: "CV" | "COVER_LETTER"; format: "DOCX" | "PDF"; document_run_id: string; sha256: string }>(
+        `SELECT document_type, format, document_run_id, sha256 FROM manual_application_document_artifacts
+         WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`,
+        [ctx.workspaceId, ctx.userId, request.data.approval_id])).rows;
+      if (artifacts.length === 0) throw new ManualFlowError(409, "APPROVAL_STALE", "Generate the documents for this approval before linking them.");
+      validateManualArtifactPair(artifacts);
+      const hash = (type: string, format: string) => artifacts.find((item) => item.document_type === type && item.format === format)!.sha256;
+      const pinned = {
+        approval_id: request.data.approval_id,
+        cv_document_run_id: artifacts.find((item) => item.document_type === "CV")!.document_run_id,
+        cover_letter_document_run_id: artifacts.find((item) => item.document_type === "COVER_LETTER")!.document_run_id,
+        cv_docx_sha256: hash("CV", "DOCX"),
+        cv_pdf_sha256: hash("CV", "PDF"),
+        cover_letter_docx_sha256: hash("COVER_LETTER", "DOCX"),
+        cover_letter_pdf_sha256: hash("COVER_LETTER", "PDF"),
+      };
+      const pipelineReadiness = await isApplyNowReady(client, ctx.workspaceId, approval.canonical_job_id, approval.job_version_id)
+        ? "APPLY_NOW_READY" : "USER_SELECTED";
+
+      const inserted = await client.query<{ id: string; status: string }>(
+        `INSERT INTO application_records (workspace_id, user_id, canonical_job_id, job_version_id, status)
+         VALUES ($1,$2,$3,$4,'INTENT')
+         ON CONFLICT (workspace_id, user_id, canonical_job_id, job_version_id) DO NOTHING RETURNING id, status`,
+        [ctx.workspaceId, ctx.userId, approval.canonical_job_id, approval.job_version_id]);
+      const applicationCreated = inserted.rows.length === 1;
+      const application = inserted.rows[0] ?? (await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM application_records WHERE workspace_id=$1 AND user_id=$2 AND canonical_job_id=$3 AND job_version_id=$4`,
+        [ctx.workspaceId, ctx.userId, approval.canonical_job_id, approval.job_version_id])).rows[0];
+      if (applicationCreated) {
+        await client.query(
+          `INSERT INTO application_events (workspace_id, application_record_id, event_type, to_status, event_payload, created_by_user_id)
+           VALUES ($1,$2,'CREATED','INTENT',$3::jsonb,$4)`,
+          [ctx.workspaceId, application.id, JSON.stringify({ source: "MANUAL_DOCUMENT_SELECTION", pipeline_readiness: pipelineReadiness }), ctx.userId]);
+      }
+
+      const current = (await client.query(
+        `SELECT selection_id, application_record_id, approval_id, cv_document_run_id, cover_letter_document_run_id,
+                cv_docx_sha256, cv_pdf_sha256, cover_letter_docx_sha256, cover_letter_pdf_sha256, pipeline_readiness,
+                to_char(selected_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS selected_at
+         FROM v_application_document_selection_current WHERE workspace_id=$1 AND application_record_id=$2`,
+        [ctx.workspaceId, application.id])).rows[0];
+      const alreadySelected = Boolean(current) && Object.entries(pinned).every(([key, value]) => current[key] === value);
+      let selection = current;
+      if (!alreadySelected) {
+        selection = (await client.query(
+          `INSERT INTO application_document_selections (
+             workspace_id, user_id, application_record_id, canonical_job_id, job_version_id, approval_id,
+             cv_document_run_id, cover_letter_document_run_id, cv_docx_sha256, cv_pdf_sha256,
+             cover_letter_docx_sha256, cover_letter_pdf_sha256, pipeline_readiness
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           RETURNING id AS selection_id, application_record_id, approval_id, cv_document_run_id, cover_letter_document_run_id,
+                     cv_docx_sha256, cv_pdf_sha256, cover_letter_docx_sha256, cover_letter_pdf_sha256, pipeline_readiness,
+                     to_char(selected_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS selected_at`,
+          [ctx.workspaceId, ctx.userId, application.id, approval.canonical_job_id, approval.job_version_id,
+            pinned.approval_id, pinned.cv_document_run_id, pinned.cover_letter_document_run_id, pinned.cv_docx_sha256,
+            pinned.cv_pdf_sha256, pinned.cover_letter_docx_sha256, pinned.cover_letter_pdf_sha256, pipelineReadiness])).rows[0];
+        await client.query(
+          `INSERT INTO application_events (workspace_id, application_record_id, event_type, event_payload, created_by_user_id)
+           VALUES ($1,$2,'DOCUMENT_LINKED',$3::jsonb,$4)`,
+          [ctx.workspaceId, application.id, JSON.stringify({ source: "MANUAL_DOCUMENT_SELECTION", selection_id: selection.selection_id,
+            ...pinned, pipeline_readiness: pipelineReadiness }), ctx.userId]);
+      }
+      const response = ManualUseForApplicationResponseSchema.parse({
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+        ok: true,
+        selection,
+        application_status: application.status,
+        application_created: applicationCreated,
+        already_selected: alreadySelected,
+      });
+      await client.query("COMMIT");
+      res.json(response);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      if (isConcurrentWriteConflict(error)) {
+        sendApiError(res, 409, "CONCURRENT_UPDATE", "These documents are already being linked in another request. Try again in a moment.",
+          new Date(Date.now() + CONCURRENT_RETRY_AFTER_MS).toISOString());
+        return;
+      }
+      throw error;
+    } finally { client.release(); }
+  }));
+
+  // The exact files of a document choice in the tracker, checked against the hashes pinned at selection.
+  router.get("/selections/:selectionId/documents/:documentType/:format", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const selectionId = String(req.params.selectionId || "");
+    const type = String(req.params.documentType || "").toUpperCase();
+    const format = String(req.params.format || "").toUpperCase();
+    if (!z.string().uuid().safeParse(selectionId).success || !["CV", "COVER_LETTER"].includes(type) || !["DOCX", "PDF"].includes(format)) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", "Invalid document request.");
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      if (!(await hasWritableMembership(client, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to download private documents.");
+      const row = (await client.query<{ filename: string; mime_type: string; content: Buffer; sha256: string; pinned_sha256: string }>(
+        `SELECT artifact.filename, artifact.mime_type, artifact.content, artifact.sha256,
+                CASE $4 || ':' || $5
+                  WHEN 'CV:DOCX' THEN selection.cv_docx_sha256 WHEN 'CV:PDF' THEN selection.cv_pdf_sha256
+                  WHEN 'COVER_LETTER:DOCX' THEN selection.cover_letter_docx_sha256 ELSE selection.cover_letter_pdf_sha256
+                END AS pinned_sha256
+         FROM application_document_selections selection
+         JOIN manual_application_document_artifacts artifact
+           ON artifact.workspace_id = selection.workspace_id AND artifact.user_id = selection.user_id
+          AND artifact.approval_id = selection.approval_id
+          AND artifact.document_run_id = CASE $4 WHEN 'CV' THEN selection.cv_document_run_id ELSE selection.cover_letter_document_run_id END
+          AND artifact.document_type = $4 AND artifact.format = $5
+         WHERE selection.workspace_id=$1 AND selection.user_id=$2 AND selection.id=$3`,
+        [ctx.workspaceId, ctx.userId, selectionId, type, format])).rows[0];
+      if (!row) throw new ManualFlowError(404, "NOT_FOUND", "The chosen document was not found.");
+      const content = Buffer.from(row.content);
+      if (sha256Buffer(content) !== row.sha256 || row.sha256 !== row.pinned_sha256) {
+        throw new ManualFlowError(500, "INTERNAL_ERROR", "The stored document does not match the version chosen for this application.");
+      }
+      const result = ManualDownloadResponseSchema.parse({
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, filename: row.filename,
+        mime_type: row.mime_type, sha256: row.sha256, content_base64: content.toString("base64"),
+      });
+      await client.query("COMMIT");
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.json(result);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }));
+
+  router.get("/:draftId/documents/:documentType/:format", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const draftId = String(req.params.draftId || "");
+    const type = String(req.params.documentType || "").toUpperCase();
+    const format = String(req.params.format || "").toUpperCase();
+    if (!z.string().uuid().safeParse(draftId).success || !["CV", "COVER_LETTER"].includes(type) || !["DOCX", "PDF"].includes(format)) {
+      res.status(400).json({ ok: false, error: "Invalid document request." }); return;
+    }
+    const client = await pool.connect();
+    try {
+      // Not READ ONLY: hasWritableMembership locks the membership row FOR SHARE.
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      if (!(await hasWritableMembership(client, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to download private documents.");
+      // The draft's most recent approval that produced documents.
+      const approvalResult = await client.query<{ id: string }>(
+        `SELECT approval.id FROM manual_application_preparation_approvals approval
+         WHERE approval.workspace_id=$1 AND approval.user_id=$2 AND approval.draft_id=$3 AND approval.approved IS TRUE
+           AND EXISTS (SELECT 1 FROM manual_application_document_artifacts artifact
+                       WHERE artifact.workspace_id=approval.workspace_id AND artifact.user_id=approval.user_id
+                         AND artifact.approval_id=approval.id)
+         ORDER BY approval.approved_at DESC, approval.id DESC LIMIT 1`,
+        [ctx.workspaceId, ctx.userId, draftId],
+      );
+      const approvalId = approvalResult.rows[0]?.id;
+      if (!approvalId) throw new ManualFlowError(404, "NOT_FOUND", "Approved private document pair was not found.");
+      const artifactResult = await client.query(
+        `SELECT artifact.filename,artifact.mime_type,artifact.content,artifact.sha256,artifact.document_type,artifact.format,
+                artifact.document_run_id,document_run.status
+         FROM manual_application_document_artifacts artifact
+         JOIN manual_application_document_runs document_run ON document_run.id=artifact.document_run_id
+           AND document_run.workspace_id=artifact.workspace_id AND document_run.user_id=artifact.user_id
+           AND document_run.approval_id=artifact.approval_id AND document_run.document_type=artifact.document_type
+         WHERE artifact.workspace_id=$1 AND artifact.user_id=$2 AND artifact.approval_id=$3
+           AND artifact.document_type=$4 AND artifact.format=$5`,
+        [ctx.workspaceId, ctx.userId, approvalId, type, format],
+      );
+      const row = artifactResult.rows[0];
+      if (!row) throw new ManualFlowError(404, "NOT_FOUND", "Private document artifact was not found.");
+      const selected = await loadPersistedApproval(client, ctx, draftId, approvalId);
+      if (!selected) throw new ManualFlowError(404, "NOT_FOUND", "The matching approved comparison was not found.");
+      const pair = await client.query<{ document_type: "CV" | "COVER_LETTER"; format: "DOCX" | "PDF"; document_run_id: string }>(
+        `SELECT document_type,format,document_run_id FROM manual_application_document_artifacts
+         WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`, [ctx.workspaceId, ctx.userId, approvalId]);
+      validateManualArtifactPair(pair.rows);
+      if (row.document_type !== type || row.format !== format || row.status !== "COMPLETED") {
+        throw new ManualFlowError(500, "INTERNAL_ERROR", "Document artifact metadata does not match its validated pair.");
+      }
+      // Currentness guards compare, approve and generate. A stored artifact is the exact output of an
+      // approved version, so it stays downloadable after the posting, profile or requirements change.
+      const content = Buffer.from(row.content);
+      if (sha256Buffer(content) !== row.sha256) throw new ManualFlowError(500, "INTERNAL_ERROR", "Stored private artifact failed its SHA-256 integrity check.");
+      const result = ManualDownloadResponseSchema.parse({
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, filename: row.filename,
+        mime_type: row.mime_type, sha256: row.sha256, content_base64: content.toString("base64"),
+      });
+      await client.query("COMMIT");
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.json(result);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }));
+
+  return router;
+}
+
+function safeFilename(value: string): string {
+  return value.normalize("NFKD").replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "Application";
+}

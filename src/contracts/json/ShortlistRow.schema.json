@@ -7,6 +7,7 @@
         "schema_version": {
           "type": "string",
           "enum": [
+            "2.3.0",
             "2.2.0",
             "2.0",
             "1.0.0"
@@ -40,6 +41,7 @@
           "type": "string",
           "enum": [
             "GMAIL_ALERT",
+            "EMPLOYER_WEBSITE",
             "GREENHOUSE",
             "LEVER",
             "ASHBY",
@@ -592,7 +594,10 @@
               "properties": {
                 "schema_version": {
                   "type": "string",
-                  "const": "job_source_evidence_v1"
+                  "enum": [
+                    "job_source_evidence_v1",
+                    "job_source_evidence_v2"
+                  ]
                 },
                 "normalizer_version": {
                   "type": "string",
@@ -1041,6 +1046,7 @@
                         "EMPLOYER_ATS_LISTING",
                         "EXPLICIT_SOURCE_STATUS",
                         "EMPLOYER_APPLICATION_PAGE",
+                        "VERIFIED_POSTING_RETRIEVAL",
                         "USER_SUPPLIED",
                         "NONE"
                       ]

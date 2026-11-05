@@ -42,7 +42,7 @@ export class AttributedRssAdapter extends BaseSourceAdapter {
       if (response.status === 429) return this.errorResult("429 Rate limited", { isRateLimited: true });
       if (!response.ok) return this.errorResult(`HTTP ${response.status}: ${response.statusText}`);
 
-      const xml = await response.text();
+      const xml = await this.readResponseText(response);
       const parsed: unknown = new XMLParser({ ignoreAttributes: false, trimValues: true }).parse(xml);
       const root = asRecord(parsed);
       const rss = asRecord(root?.rss);
@@ -50,6 +50,7 @@ export class AttributedRssAdapter extends BaseSourceAdapter {
       const feed = asRecord(root?.feed);
       const rawItems = channel?.item ?? feed?.entry;
       const items: unknown[] = Array.isArray(rawItems) ? rawItems : rawItems === null || rawItems === undefined ? [] : [rawItems];
+      this.assertRecordCount(items);
       const identity = (rawItem: unknown): string => {
         const item = asRecord(rawItem);
         if (!item) return stableAdapterIdentity(rawItem);

@@ -5,7 +5,7 @@ import {
   RequirementTypeSchema,
   REQUIREMENTS_SCHEMA_VERSION,
 } from './contracts.js';
-import { validateQuotedRequirements } from './quotedRequirementExtractor.js';
+import { MAX_QUOTED_REQUIREMENTS, validateQuotedRequirements } from './quotedRequirementExtractor.js';
 import type { WorkspaceContext } from '../workspace/context.js';
 
 export interface QuotedProviderInput {
@@ -27,6 +27,8 @@ export interface QuotedProviderOutput {
   errors: Array<{ provider: string; model: string; error: string }>;
 }
 
+export const MAX_QUOTED_PROVIDER_RESPONSE_BYTES = 256 * 1024;
+
 export const quotedRequirementProviderSchema = {
   type: 'object',
   additionalProperties: false,
@@ -39,7 +41,7 @@ export const quotedRequirementProviderSchema = {
     requirements: {
       type: 'array',
       minItems: 1,
-      maxItems: 25,
+      maxItems: MAX_QUOTED_REQUIREMENTS,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -152,6 +154,9 @@ function cleanJsonResponseText(rawText: string): string {
 }
 
 function parseAndValidateQuotedPayload(input: QuotedProviderInput, rawText: string): unknown {
+  if (Buffer.byteLength(rawText, "utf8") > MAX_QUOTED_PROVIDER_RESPONSE_BYTES) {
+    throw new RangeError(`Quoted requirement response exceeds the ${MAX_QUOTED_PROVIDER_RESPONSE_BYTES}-byte limit.`);
+  }
   let payload: unknown;
   try {
     payload = JSON.parse(cleanJsonResponseText(rawText));

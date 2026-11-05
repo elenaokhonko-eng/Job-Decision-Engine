@@ -1,4 +1,4 @@
-schema_version: "2.2.0"
+schema_version: "2.3.0"
 source_key: jobicy
 display_name: Jobicy remote jobs feed
 kind: json_api
@@ -54,4 +54,9 @@ mapping:
   employment_type: $.jobType
   posted_at: $.pubDate
   updated_at: null
+
+availability:
+  full_posting_hosts:
+    - jobicy.com
+    - www.jobicy.com
 

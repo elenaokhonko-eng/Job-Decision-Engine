@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 import {
   selectEligibleEvaluationQueueRows,
   supersedeStaleEvaluationQueueRows,
@@ -63,6 +64,7 @@ async function createFixture(
   const currentDecisionId = variant === "stale-match" ? crypto.randomUUID() : staleDecisionId;
   const matchFingerprint = `match-${crypto.randomUUID()}`;
   const queueFingerprint = `decision-${crypto.randomUUID()}`;
+  const canonicalUrl = `https://example.test/${canonicalJobId}`;
 
   await database.query(
     `INSERT INTO canonical_jobs (
@@ -70,14 +72,22 @@ async function createFixture(
        processing_state, processing_status, gate_decision, primary_lane
      ) VALUES ($1, $2, 'Lineage Test Co', 'Evaluation Lineage Fixture', $3,
                'QUEUED_FOR_AI', 'QUEUED_FOR_AI', 'PASS', 'CORE_AI_DATA')`,
-    [canonicalJobId, workspaceId, `https://example.test/${canonicalJobId}`],
+    [canonicalJobId, workspaceId, canonicalUrl],
   );
   await database.query(
     `INSERT INTO job_versions (
        id, workspace_id, canonical_job_id, content_hash, description_text, observed_at
-     ) VALUES ($1, $2, $3, $4, 'Deterministic integration fixture', NOW())`,
-    [jobVersionId, workspaceId, canonicalJobId, contentHash],
+     ) VALUES ($1, $2, $3, $4, $5, NOW())`,
+    [jobVersionId, workspaceId, canonicalJobId, contentHash, COMPLETE_TEST_POSTING_DESCRIPTION],
   );
+  await insertCompletePostingEvidence(database, {
+    workspaceId,
+    jobVersionId,
+    companyName: "Lineage Test Co",
+    title: "Evaluation Lineage Fixture",
+    sourceUrl: canonicalUrl,
+    description: COMPLETE_TEST_POSTING_DESCRIPTION,
+  });
   await database.query(
     `INSERT INTO requirement_set_identities (
        id, workspace_id, canonical_job_id, identity_hash, job_content_hash,
@@ -223,6 +233,7 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
   let policySnapshotId = "";
   let validFixture: LineageFixture;
   let staleFixture: LineageFixture;
+  let unrelatedStaleFixture: LineageFixture;
   let bulkFixtures: LineageFixture[] = [];
   let latestGateDecisionId = "";
 
@@ -260,6 +271,7 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
 
     validFixture = await createFixture(profileVersionId, policySnapshotId, "valid-different-match-fingerprint");
     staleFixture = await createFixture(profileVersionId, policySnapshotId, "stale-match");
+    unrelatedStaleFixture = await createFixture(profileVersionId, policySnapshotId, "stale-match");
     latestGateDecisionId = (await insertGateDecisionHistory(validFixture, 9)) ?? "";
     if (!latestGateDecisionId) throw new Error("The gate-decision fan-out fixture was not seeded.");
 
@@ -308,9 +320,15 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
     const superseded = await supersedeStaleEvaluationQueueRows(database, {
       workspaceId: getContext().workspaceId,
       profileVersionId,
+      jobVersionIds: [staleFixture.jobVersionId],
     });
 
     expect(superseded).toBe(1);
+    const unrelated = await database.query<{ status: string }>(
+      `SELECT status FROM evaluation_queue WHERE id = $1`,
+      [unrelatedStaleFixture.queueId],
+    );
+    expect(unrelated.rows[0]?.status).toBe("PENDING");
     const preserved = await database.query<{
       status: string;
       last_error: string | null;
@@ -425,6 +443,11 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
         [getContext().workspaceId, validFixture.queueId],
       );
       expect(queue.rows[0]?.status).toBe("NEEDS_MANUAL_REVIEW");
+      const unrelatedQueue = await getClient().query<{ status: string }>(
+        `SELECT status FROM evaluation_queue WHERE workspace_id = $1 AND id = $2`,
+        [getContext().workspaceId, unrelatedStaleFixture.queueId],
+      );
+      expect(unrelatedQueue.rows[0]?.status).toBe("PENDING");
       await closeEvaluationQueuePool();
       closeQueuePool = undefined;
     } finally {

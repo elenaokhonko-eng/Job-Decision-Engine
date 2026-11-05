@@ -1,0 +1,60 @@
+{
+  "$ref": "#/definitions/ManualFetchSourceEvidence",
+  "definitions": {
+    "ManualFetchSourceEvidence": {
+      "type": "object",
+      "properties": {
+        "requestedUrl": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048
+        },
+        "resolvedUrl": {
+          "$ref": "#/definitions/ManualFetchSourceEvidence/properties/requestedUrl"
+        },
+        "redirectHistory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ManualFetchSourceEvidence/properties/requestedUrl"
+          },
+          "maxItems": 5
+        },
+        "retrievedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "httpStatus": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "contentType": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "responseHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "requestedUrl",
+        "resolvedUrl",
+        "redirectHistory",
+        "retrievedAt",
+        "httpStatus",
+        "contentType",
+        "responseHash"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

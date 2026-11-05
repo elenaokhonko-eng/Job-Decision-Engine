@@ -361,7 +361,7 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     field: "cv_document_run_id",
     sourceTable: "document_runs",
     sourceColumn: "id",
-    producerStage: "generate_cv.ts -> provenance.ts",
+    producerStage: "retired legacy generator (scripts/generate_cv.ts, removed in P7); historical rows only",
     transformation: "Latest completed CV document run for displayed job version",
     nullable: true
   },
@@ -369,7 +369,7 @@ export const SHORTLIST_FIELD_LINEAGE: FieldLineageEntry[] = [
     field: "cover_letter_document_run_id",
     sourceTable: "document_runs",
     sourceColumn: "id",
-    producerStage: "generate_cover_letter.ts -> provenance.ts",
+    producerStage: "retired legacy generator (scripts/generate_cover_letter.ts, removed in P7); historical rows only",
     transformation: "Latest completed cover letter run for displayed job version",
     nullable: true
   },

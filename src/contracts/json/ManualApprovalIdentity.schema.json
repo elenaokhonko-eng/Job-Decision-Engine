@@ -1,0 +1,68 @@
+{
+  "$ref": "#/definitions/ManualApprovalIdentity",
+  "definitions": {
+    "ManualApprovalIdentity": {
+      "type": "object",
+      "properties": {
+        "canonicalJobId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "jobVersionId": {
+          "$ref": "#/definitions/ManualApprovalIdentity/properties/canonicalJobId"
+        },
+        "sourceObservationId": {
+          "$ref": "#/definitions/ManualApprovalIdentity/properties/canonicalJobId"
+        },
+        "jobContentHash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "profileVersionId": {
+          "$ref": "#/definitions/ManualApprovalIdentity/properties/canonicalJobId"
+        },
+        "candidateProfileId": {
+          "$ref": "#/definitions/ManualApprovalIdentity/properties/canonicalJobId"
+        },
+        "profileContactFactIdsFingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "profileContactFingerprint": {
+          "$ref": "#/definitions/ManualApprovalIdentity/properties/profileContactFactIdsFingerprint"
+        },
+        "preferenceContextFingerprint": {
+          "$ref": "#/definitions/ManualApprovalIdentity/properties/profileContactFactIdsFingerprint"
+        },
+        "requirementSetId": {
+          "$ref": "#/definitions/ManualApprovalIdentity/properties/canonicalJobId"
+        },
+        "comparatorVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "comparisonFingerprint": {
+          "$ref": "#/definitions/ManualApprovalIdentity/properties/profileContactFactIdsFingerprint"
+        }
+      },
+      "required": [
+        "canonicalJobId",
+        "jobVersionId",
+        "sourceObservationId",
+        "jobContentHash",
+        "profileVersionId",
+        "candidateProfileId",
+        "profileContactFactIdsFingerprint",
+        "profileContactFingerprint",
+        "preferenceContextFingerprint",
+        "requirementSetId",
+        "comparatorVersion",
+        "comparisonFingerprint"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

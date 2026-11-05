@@ -395,16 +395,45 @@ function parseSalaryAmount(value: string): number | null {
   return Number.isFinite(amount) && amount > 0 ? amount : null;
 }
 
-export function parseCompensationEvidence(
+const BASE_CASH_TEXT_PATTERN = /\b(base salary|base pay|base cash|guaranteed base(?: salary| cash)?)\b/i;
+
+function normalizedCompensationText(raw: string | null | undefined): string {
+  return (raw ?? "").replace(/\u00a0/g, " ").trim();
+}
+
+function baseCashSegments(raw: string | null | undefined): string[] {
+  return normalizedCompensationText(raw)
+    .split(/[;|\n]+/)
+    .filter((segment) => BASE_CASH_TEXT_PATTERN.test(segment));
+}
+
+export function isBaseSalaryExplicitlyUndisclosed(raw: string | null | undefined): boolean {
+  return baseCashSegments(raw).some((segment) => {
+    const match = segment.match(BASE_CASH_TEXT_PATTERN);
+    if (!match || match.index === undefined) return false;
+    const disclosure = segment.slice(match.index + match[0].length);
+    return /^\s*(?:[:=-]\s*)?(?:(?:is|was)\s+)?\(?\s*(?:competitive|undisclosed|not\s+disclosed|unknown|n\/?a)\b/i.test(disclosure);
+  });
+}
+
+function parseCompensationSegment(
   raw: string | null | undefined,
   structured: Partial<JobCompensationInput> = {},
 ): JobCompensationInput | null {
-  const text = (raw ?? "").replace(/\u00a0/g, " ").trim();
+  const text = normalizedCompensationText(raw);
   if (/^(unknown|undisclosed|competitive|not disclosed|n\/?a)$/i.test(text)) return null;
-  const explicitCurrency = text.match(/\b(SGD|USD|EUR|GBP|AUD|CAD|HKD|MYR|JPY)\b|S\$|US\$/i)?.[0].toUpperCase();
+  const segments = baseCashSegments(text);
+  const explicitlyBaseCash = segments.length > 0;
+  const baseCashSegment = segments[0];
+  const variableCompensationPattern = /\b(bonus|commission|ote|on[- ]target|variable|equity|stock|rsu|options?)\b/i;
+  const variableStart = baseCashSegment?.search(variableCompensationPattern) ?? -1;
+  const salaryText = baseCashSegment
+    ? variableStart >= 0 ? baseCashSegment.slice(0, variableStart) : baseCashSegment
+    : text;
+  const explicitCurrency = salaryText.match(/\b(SGD|USD|EUR|GBP|AUD|CAD|HKD|MYR|JPY)\b|S\$|US\$/i)?.[0].toUpperCase();
   const salaryCurrency = structured.salary_currency?.toUpperCase()
     ?? (explicitCurrency === "S$" ? "SGD" : explicitCurrency === "US$" ? "USD" : explicitCurrency ?? null);
-  const periodText = `${text} ${structured.salary_period ?? ""}`.toLowerCase();
+  const periodText = `${salaryText} ${structured.salary_period ?? ""}`.toLowerCase();
   const salaryPeriod: SalaryPeriod = structured.salary_period
     ?? (/\b(hourly|per\s+hour|\/\s*hour|per\s+hr)\b/i.test(periodText)
       ? "HOURLY"
@@ -415,22 +444,24 @@ export function parseCompensationEvidence(
           : "UNKNOWN");
   const currencyToken = String.raw`(?:SGD|USD|EUR|GBP|AUD|CAD|HKD|MYR|JPY|S\$|US\$|\$)`;
   const amountToken = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*[kK]?`;
-  const rangeMatch = text.match(new RegExp(String.raw`(?:^|[^A-Z0-9])(?:${currencyToken}\s*)?(${amountToken})\s*(?:-|–|to)\s*(?:${currencyToken}\s*)?(${amountToken})`, "i"));
-  const singleMatch = rangeMatch ? null : text.match(new RegExp(String.raw`(?:^|[^A-Z0-9])(?:${currencyToken}\s*)?(${amountToken})`, "i"));
+  const rangeMatch = salaryText.match(new RegExp(String.raw`(?:^|[^A-Z0-9])(?:${currencyToken}\s*)?(${amountToken})\s*(?:-|–|to)\s*(?:${currencyToken}\s*)?(${amountToken})`, "i"));
+  const singleMatch = rangeMatch ? null : salaryText.match(new RegExp(String.raw`(?:^|[^A-Z0-9])(?:${currencyToken}\s*)?(${amountToken})`, "i"));
   const rangeMin = rangeMatch ? parseSalaryAmount(rangeMatch[1]) : null;
   const rangeMax = rangeMatch ? parseSalaryAmount(rangeMatch[2]) : null;
   const singleAmount = singleMatch ? parseSalaryAmount(singleMatch[1]) : null;
   const salaryMin = structured.salary_min ?? rangeMin ?? singleAmount ?? null;
   const salaryMax = structured.salary_max ?? rangeMax ?? singleAmount ?? salaryMin;
   const componentType = structured.component_type
-    ?? (/\b(equity|stock|rsu|options?)\b/i.test(text)
-      ? "EQUITY"
-      : /\b(ote|on[- ]target|commission|bonus|variable)\b/i.test(text)
-        ? "VARIABLE_CASH"
-        : "BASE_CASH");
+    ?? (explicitlyBaseCash
+      ? "BASE_CASH"
+      : /\b(equity|stock|rsu|options?)\b/i.test(text)
+        ? "EQUITY"
+        : /\b(ote|on[- ]target|commission|bonus|variable)\b/i.test(text)
+          ? "VARIABLE_CASH"
+          : "BASE_CASH");
   const hoursMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:guaranteed\s+)?hours?\s*(?:per|a|\/)\s*week/i);
   const basis: SalaryBasis = structured.salary_basis
-    ?? (/\bnet\b/i.test(text) ? "NET" : /\bgross\b/i.test(text) ? "GROSS" : "UNKNOWN");
+    ?? (/\bnet\b/i.test(salaryText) ? "NET" : /\bgross\b/i.test(salaryText) ? "GROSS" : "UNKNOWN");
   if (salaryMin === null && salaryMax === null) return null;
   return {
     ...structured,
@@ -442,6 +473,52 @@ export function parseCompensationEvidence(
     component_type: componentType,
     guaranteed_hours_per_week: structured.guaranteed_hours_per_week ?? (hoursMatch ? Number(hoursMatch[1]) : null),
   };
+}
+
+function annualizeSalaryValue(input: JobCompensationInput, value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  if (input.salary_period === "ANNUAL") return Math.round(value);
+  if (input.salary_period === "MONTHLY") return Math.round(value * 12);
+  return null;
+}
+
+function sameBaseSalaryDisclosure(left: JobCompensationInput, right: JobCompensationInput): boolean {
+  if (left.salary_currency !== right.salary_currency || left.salary_basis !== right.salary_basis) return false;
+  if (left.salary_period === right.salary_period) {
+    return left.salary_min === right.salary_min && left.salary_max === right.salary_max;
+  }
+  const leftMinimum = annualizeSalaryValue(left, left.salary_min);
+  const leftMaximum = annualizeSalaryValue(left, left.salary_max);
+  const rightMinimum = annualizeSalaryValue(right, right.salary_min);
+  const rightMaximum = annualizeSalaryValue(right, right.salary_max);
+  return leftMinimum !== null && leftMaximum !== null &&
+    rightMinimum !== null && rightMaximum !== null &&
+    Math.abs(leftMinimum - rightMinimum) <= 1 && Math.abs(leftMaximum - rightMaximum) <= 1;
+}
+
+export function hasConflictingBaseSalaryDisclosures(raw: string | null | undefined): boolean {
+  const segments = baseCashSegments(raw);
+  if (segments.some((segment) =>
+    (segment.match(new RegExp(BASE_CASH_TEXT_PATTERN.source, "gi"))?.length ?? 0) > 1
+  )) return true;
+  if (segments.length < 2) return false;
+
+  const parsed = segments.map((segment) => parseCompensationSegment(segment));
+  const supported = parsed.filter((item): item is JobCompensationInput => item !== null);
+  if (supported.length === 0) return false;
+  if (supported.length !== parsed.length) return true;
+
+  const reference = supported[0];
+  return supported.some((item) => !sameBaseSalaryDisclosure(item, reference));
+}
+
+export function parseCompensationEvidence(
+  raw: string | null | undefined,
+  structured: Partial<JobCompensationInput> = {},
+): JobCompensationInput | null {
+  if (hasConflictingBaseSalaryDisclosures(raw)) return null;
+  const segments = baseCashSegments(raw);
+  return parseCompensationSegment(segments.length > 1 ? segments[0] : raw, structured);
 }
 
 export function evaluateCompensationPolicy(
@@ -497,8 +574,8 @@ export function evaluateCompensationPolicy(
     }
     annualizationFactor = input.guaranteed_hours_per_week * input.paid_weeks_per_year;
   }
-  const annualMin = salaryMinimum === null ? null : salaryMinimum * annualizationFactor * conversionRate;
-  const annualMax = salaryMaximum === null ? null : salaryMaximum * annualizationFactor * conversionRate;
+  const annualMin = salaryMinimum === null ? null : Math.round(salaryMinimum * annualizationFactor * conversionRate);
+  const annualMax = salaryMaximum === null ? null : Math.round(salaryMaximum * annualizationFactor * conversionRate);
 
   let minThreshold: number | undefined;
   let targetThreshold: number | undefined;
@@ -539,7 +616,7 @@ export function evaluateCompensationPolicy(
     return unknown("A minimum guaranteed base-cash bound is missing; compensation cannot be confirmed as meeting the configured floor.", annualMin, annualMax, configuredFloor);
   }
   if (annualMin < configuredFloor) {
-    return unknown(`Guaranteed base-cash range SGD ${Math.round(annualMin).toLocaleString()}–${Math.round(annualMax).toLocaleString()} straddles the configured SGD ${configuredFloor.toLocaleString()} floor and needs verification.`, annualMin, annualMax, configuredFloor);
+    return unknown(`Guaranteed base-cash range SGD ${annualMin.toLocaleString()}–${annualMax.toLocaleString()} straddles the configured SGD ${configuredFloor.toLocaleString()} floor; eligibility depends on the eventual offer.`, annualMin, annualMax, configuredFloor);
   }
 
   return {

@@ -1,5 +1,7 @@
 import pg from "pg";
 
+import { ApplicationReadinessSchema } from "../contracts/applicationReadiness.js";
+
 export interface CurrentApplicationReadiness {
   readonly application_readiness: unknown;
   readonly readiness_status: string | null;
@@ -115,10 +117,14 @@ export function isCurrentReadyApplicationReadiness(
       !/^[a-f0-9]{64}$/.test(readiness.readiness_fingerprint ?? "") ||
       readiness.readiness_reason_codes?.length !== 0) return false;
 
-  const payload = record(readiness.application_readiness);
+  const payloadCandidate = record(readiness.application_readiness);
+  if (!payloadCandidate) return false;
+  const parsed = ApplicationReadinessSchema.safeParse(payloadCandidate);
+  if (!parsed.success) return false;
+  const payload = parsed.data;
   const expiry = timestamp(readiness.readiness_expires_at);
-  const payloadExpiry = typeof payload?.expires_at === "string" ? Date.parse(payload.expires_at) : Number.NaN;
-  return payload?.status === "READY" &&
+  const payloadExpiry = Date.parse(payload.expires_at ?? "");
+  return payload.status === "READY" &&
     identityMatches(readiness, payload) &&
     expiry !== null && expiry > now &&
     Number.isFinite(payloadExpiry) && payloadExpiry === expiry;
@@ -131,8 +137,12 @@ export function isCurrentReadinessAssessment(
   if (!readiness || !readiness.readiness_fingerprint || readiness.readiness_status === null ||
       readiness.readiness_status === "PROCESSING") return false;
 
-  const payload = record(readiness.application_readiness);
-  if (!payload || !identityMatches(readiness, payload) ||
+  const payloadCandidate = record(readiness.application_readiness);
+  if (!payloadCandidate) return false;
+  const parsed = ApplicationReadinessSchema.safeParse(payloadCandidate);
+  if (!parsed.success) return false;
+  const payload = parsed.data;
+  if (!identityMatches(readiness, payload) ||
       (payload.status !== readiness.readiness_status && readiness.readiness_status !== "BLOCKED")) return false;
   if (["READINESS_EVIDENCE_STALE", "READINESS_FINGERPRINT_STALE", "READINESS_CONTEXT_STALE"]
     .some((reason) => hasReason(readiness, reason))) return false;
@@ -140,7 +150,7 @@ export function isCurrentReadinessAssessment(
   if (!hasReason(readiness, "READINESS_EVIDENCE_EXPIRED")) return true;
 
   const expiry = timestamp(readiness.readiness_expires_at);
-  const assessedAt = typeof payload.evaluated_at === "string" ? Date.parse(payload.evaluated_at) : Number.NaN;
+  const assessedAt = Date.parse(payload.evaluated_at);
   return payload.status !== "READY" && expiry !== null &&
     Number.isFinite(assessedAt) && assessedAt >= expiry && assessedAt <= now;
 }

@@ -1,0 +1,65 @@
+{
+  "$ref": "#/definitions/ManualDocumentSelection",
+  "definitions": {
+    "ManualDocumentSelection": {
+      "type": "object",
+      "properties": {
+        "selection_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "application_record_id": {
+          "$ref": "#/definitions/ManualDocumentSelection/properties/selection_id"
+        },
+        "approval_id": {
+          "$ref": "#/definitions/ManualDocumentSelection/properties/selection_id"
+        },
+        "cv_document_run_id": {
+          "$ref": "#/definitions/ManualDocumentSelection/properties/selection_id"
+        },
+        "cover_letter_document_run_id": {
+          "$ref": "#/definitions/ManualDocumentSelection/properties/selection_id"
+        },
+        "cv_docx_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "cv_pdf_sha256": {
+          "$ref": "#/definitions/ManualDocumentSelection/properties/cv_docx_sha256"
+        },
+        "cover_letter_docx_sha256": {
+          "$ref": "#/definitions/ManualDocumentSelection/properties/cv_docx_sha256"
+        },
+        "cover_letter_pdf_sha256": {
+          "$ref": "#/definitions/ManualDocumentSelection/properties/cv_docx_sha256"
+        },
+        "pipeline_readiness": {
+          "type": "string",
+          "enum": [
+            "APPLY_NOW_READY",
+            "USER_SELECTED"
+          ]
+        },
+        "selected_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "selection_id",
+        "application_record_id",
+        "approval_id",
+        "cv_document_run_id",
+        "cover_letter_document_run_id",
+        "cv_docx_sha256",
+        "cv_pdf_sha256",
+        "cover_letter_docx_sha256",
+        "cover_letter_pdf_sha256",
+        "pipeline_readiness",
+        "selected_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

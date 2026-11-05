@@ -6,6 +6,8 @@ import { extractDeterministicRequirements } from '../requirements/deterministicE
 import { validateQuotedRequirements } from '../requirements/quotedRequirementExtractor.js';
 import { JobRequirementSchema, REQUIREMENTS_SCHEMA_VERSION } from '../requirements/contracts.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
+import { sourceContentEvidencePredicate } from './descriptionQuality.js';
+import { publicErrorSummary } from '../security/publicErrorSummary.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -432,6 +434,8 @@ export async function runRequirementsExtraction(
       )
       ${jobVersionFilter}
       ${completedRequirementClause}
+      AND c.description_quality_status = 'COMPLETE'
+      AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
       AND (
         ps.stage_status IS NULL
         OR ps.stage_status <> 'RETRY_WAIT'
@@ -879,7 +883,7 @@ export async function runRequirementsExtraction(
                   summary.quotedFailed += 1;
                   summary.metrics.quotedValidationFailures += 1;
                   bucket.validationFailures += 1;
-                  warning = validated.issues.map((i) => `${i.requirement_key}: ${i.message}`).join('; ');
+                  warning = validated.issues.map((issue) => `${issue.requirement_key}: ${issue.message}`).join("; ");
                   console.warn(
                     `${progress} quoted validation failed issues=${validated.issues.length} provider=${quotedResult.provider} model=${quotedResult.model}`
                   );
@@ -969,9 +973,10 @@ export async function runRequirementsExtraction(
             } catch (quotedError) {
               summary.quotedFailed += 1;
               summary.metrics.quotedProviderFailures += 1;
-              warning = quotedError instanceof Error ? quotedError.message : String(quotedError);
+              const rawWarning = quotedError instanceof Error ? quotedError.message : String(quotedError);
+              warning = publicErrorSummary(quotedError, "evaluation");
 
-              const parsedFailures = parseProviderFailuresFromError(warning);
+              const parsedFailures = parseProviderFailuresFromError(rawWarning);
               if (parsedFailures.length > 0) {
                 for (const fail of parsedFailures) {
                   const bucket = ensureMetricBucket(summary, fail.provider, fail.model);
@@ -1051,7 +1056,7 @@ export async function runRequirementsExtraction(
         summary.errors += 1;
         summary.metrics.retryWaitTransitions += 1;
 
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorMessage = publicErrorSummary(error, "pipeline");
         console.warn(
           `${progress} failed elapsed_ms=${Date.now() - jobStartedAt} error=${truncateLogValue(errorMessage)}`
         );

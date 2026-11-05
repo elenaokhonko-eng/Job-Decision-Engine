@@ -317,6 +317,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     const range = parseCompensationEvidence("SGD 220,000–260,000 gross per year base salary");
     const unknownCurrency = parseCompensationEvidence("$220k–$260k gross per year base salary");
     const variable = parseCompensationEvidence("SGD 300,000 OTE annual compensation, including commission");
+    const baseWithBonus = parseCompensationEvidence("SGD 250,000 annual gross base salary plus bonus");
 
     expect(range).toMatchObject({
       salary_min: 220000,
@@ -328,6 +329,34 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     });
     expect(unknownCurrency?.salary_currency).toBeNull();
     expect(variable?.component_type).toBe("VARIABLE_CASH");
+    expect(baseWithBonus).toMatchObject({
+      salary_min: 250000,
+      component_type: "BASE_CASH",
+    });
+  });
+
+  it("treats equivalent annual and rounded monthly gross disclosures consistently", () => {
+    const monthly = evaluateCompensationPolicy({
+      salary_min: 20833.33,
+      salary_max: 20833.33,
+      salary_currency: "SGD",
+      salary_period: "MONTHLY",
+      salary_basis: "GROSS",
+      component_type: "BASE_CASH",
+    }, "COMMERCIAL", approvedCompensation);
+    const annual = evaluateCompensationPolicy({
+      salary_min: 250000,
+      salary_max: 250000,
+      salary_currency: "SGD",
+      salary_period: "ANNUAL",
+      salary_basis: "GROSS",
+      component_type: "BASE_CASH",
+    }, "COMMERCIAL", approvedCompensation);
+
+    expect(monthly.status).toBe("TARGET_MET");
+    expect(monthly.salary_annual_sgd).toBe(250000);
+    expect(annual.status).toBe(monthly.status);
+    expect(annual.salary_annual_sgd).toBe(monthly.salary_annual_sgd);
   });
 
   it("treats straddling ranges, unknown currency, hourly assumptions, and non-base cash as verification", () => {
@@ -364,6 +393,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
 
     expect(straddling.status).toBe("UNKNOWN");
     expect(straddling.prevents_apply_now).toBe(true);
+    expect(straddling.evidence).toContain("eligibility depends on the eventual offer");
     expect(unknownCurrency.status).toBe("UNKNOWN");
     expect(hourly.status).toBe("UNKNOWN");
     expect(ote.status).toBe("UNKNOWN");
@@ -598,6 +628,79 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
     expect(result.passed).toBe(true);
     expect(result.status).toBe('PASS');
     expect(result.rejection_codes).not.toContain('COMPENSATION_BELOW_USER_FLOOR');
+  });
+
+  it.each([
+    {
+      requirement_type: 'FUNCTION',
+      requirement_text: 'Own data lineage and implement data quality controls for investment products.',
+      quote_text: 'Own data lineage and implement data quality controls for investment products.',
+    },
+    {
+      requirement_type: 'DOMAIN',
+      requirement_text: 'Design and maintain reference data models and market data standards.',
+      quote_text: 'Design and maintain reference data models and market data standards.',
+    },
+  ] as const)('uses persisted $requirement_type requirements as technical ownership evidence', (requirement) => {
+    const job = {
+      title: 'Data Governance Lead',
+      company_name: 'Investment Data Co',
+      workplace_type: 'REMOTE',
+      location: 'Singapore',
+      employment_type: 'PERMANENT',
+      posted_at: new Date().toISOString(),
+      description: 'Coordinate governance meetings and publish status updates.',
+    };
+    const persistedRequirement = {
+      requirement_key: `P11-${requirement.requirement_type}`,
+      requirement_type: requirement.requirement_type,
+      importance: 'REQUIRED',
+      requirement_text: requirement.requirement_text,
+      quote_text: requirement.quote_text,
+      structured_value: null,
+    };
+
+    const withoutPersistedEvidence = applyPersistedRequirementGates(
+      job,
+      [],
+      undefined,
+      null,
+      approvedStage3Preferences,
+    );
+    const withPersistedEvidence = applyPersistedRequirementGates(
+      job,
+      [persistedRequirement],
+      undefined,
+      null,
+      approvedStage3Preferences,
+    );
+
+    expect(withoutPersistedEvidence.rejection_codes).toContain('NON_TECHNICAL_FUNCTION');
+    expect(withPersistedEvidence.status).toBe('PASS');
+    expect(withPersistedEvidence.rejection_codes).not.toContain('NON_TECHNICAL_FUNCTION');
+  });
+
+  // Hard gate integration test for excluded employer
+  it('does not reject a direct-employer fixed-term contract in persisted requirement gates', () => {
+    const gateResult = applyPersistedRequirementGates({
+      title: 'Lead Data Architect (Investment Management) (Contract)',
+      company_name: 'Monetary Authority of Singapore',
+      employment_type: 'CONTRACT',
+      workplace_type: 'REMOTE',
+      location: 'Singapore',
+      posted_at: new Date().toISOString(),
+      description: 'Lead data architecture for investment management, including data models, governance, lineage, and platforms.',
+    }, [{
+      requirement_key: 'MAS-CONTRACT-1',
+      requirement_type: 'EMPLOYMENT_TYPE',
+      importance: 'REQUIRED',
+      requirement_text: 'Fixed-term staff appointment',
+      quote_text: 'Fixed-term staff appointment',
+      structured_value: null,
+    }]);
+
+    expect(gateResult.status).toBe('PASS');
+    expect(gateResult.rejection_codes).not.toContain('GATE_CONTRACT_ROLE');
   });
 
   // Hard gate integration test for excluded employer

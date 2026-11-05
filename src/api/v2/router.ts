@@ -38,6 +38,8 @@ import {
   restoreArchivedJob,
 } from "../../services/jobArchive.js";
 import { RejectedJobRowSchema, ShortlistRowV2Schema } from "../../readModels/contracts.js";
+import { createManualApplicationRouter } from "./manualApplicationRouter.js";
+import { describeDatabaseFailure } from "./databaseFailure.js";
 
 type QueryClient = {
   query: pg.PoolClient["query"];
@@ -169,6 +171,12 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
   // database URL exists. Database-backed routes are guarded by this flag.
   let databaseConfigured = Boolean(deps.pool || String(process.env.DATABASE_URL || "").trim());
   let pool = deps.pool ?? new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
+  const dynamicPool = new Proxy({} as pg.Pool, {
+    get: (_target, property) => {
+      const value = (pool as any)[property];
+      return typeof value === "function" ? value.bind(pool) : value;
+    },
+  });
 
   const resolveContext: ResolveContextFn = deps.resolveContext ?? resolveWorkspaceContext;
 
@@ -209,11 +217,8 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         (req as any).workspaceContext = ctx;
         next();
       } catch (err: any) {
-        res.status(503).json({
-          ok: false,
-          error: "DATABASE_NOT_INITIALIZED",
-          message: "Database schema is not initialized yet. Complete the desktop setup wizard to install the schema.",
-        });
+        // Only a missing schema is a setup problem; an unreachable host or a rejected password is reported as such.
+        res.status(503).json(describeDatabaseFailure(err, process.env.DATABASE_URL));
       }
     })
   );
@@ -229,6 +234,14 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
         user_key: ctx.userKey,
       });
     })
+  );
+
+  router.use(
+    "/application-drafts",
+    createManualApplicationRouter({
+      pool: dynamicPool,
+      resolveContext: (req) => (req as any).workspaceContext as WorkspaceContext,
+    }),
   );
 
   router.get(

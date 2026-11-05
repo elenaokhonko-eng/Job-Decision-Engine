@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildEvidenceRevisionHash, buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
+import {
+  buildEvidenceRevisionHash,
+  buildJobSourceEvidence,
+  hasCompleteFetchedPostingReceipt,
+  isFetchedPostingReceiptBoundToObservation,
+} from "../../ingestion/jobSourceEvidence.js";
 
 const baseInput = {
   sourceName: "GREENHOUSE",
@@ -45,6 +50,8 @@ describe("job source evidence builder", () => {
     expect(evidence.dates.source_updated_at.basis).toBe("SOURCE_UPDATED_AT");
     expect(evidence.dates.expires_at.value).toBe("2026-12-31T23:59:59.000Z");
     expect(evidence.availability).toMatchObject({ status: "OPEN", verification_method: "EMPLOYER_ATS_LISTING" });
+    expect(Date.parse(evidence.availability.expires_at!) - Date.parse(evidence.availability.verified_at!))
+      .toBe(24 * 60 * 60 * 1000);
     expect(evidence.workability.work_mode).toMatchObject({ status: "UNKNOWN", value: "HYBRID" });
     expect(evidence.compensation).toMatchObject({ status: "UNKNOWN", components: [] });
     expect(evidence.opportunity_category).toMatchObject({ status: "UNKNOWN", value: null });
@@ -63,6 +70,276 @@ describe("job source evidence builder", () => {
     expect(evidence.compensation.components[0]?.currency).toBeNull();
     expect(evidence.opportunity_category).toMatchObject({ status: "UNKNOWN", value: null });
     expect(evidence.availability.status).toBe("UNKNOWN");
+  });
+
+  it("marks complete postings OPEN for exact manifest-approved source hosts for seven days", () => {
+    const retrievedAt = "2026-10-24T00:00:00.000Z";
+    const completeDescription = [
+      "The role designs and operates production data and AI platform services for engineering teams.",
+      "Responsibilities include building distributed services, maintaining data pipelines, and improving reliability.",
+      "Qualifications include professional software engineering experience and a record of delivering production systems.",
+    ].join(" ");
+    const evidence = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "HIMALAYAS",
+      sourcePluginKey: "himalayas",
+      sourceUrl: "https://www.himalayas.app/jobs/role-42",
+      canonicalApplyUrl: "https://www.himalayas.app/jobs/role-42",
+      retrievedAt,
+      rawPayload: {},
+      descriptionText: completeDescription,
+      fullPostingHosts: ["himalayas.app", "www.himalayas.app"],
+    });
+
+    expect(evidence.description.completeness_status).toBe("COMPLETE");
+    expect(evidence.availability).toMatchObject({
+      status: "OPEN",
+      verification_method: "VERIFIED_POSTING_RETRIEVAL",
+      reason_code: "FULL_POSTING_RETRIEVED",
+      verified_at: retrievedAt,
+      expires_at: "2026-10-31T00:00:00.000Z",
+    });
+  });
+
+  it.each(["GREENHOUSE", "LEVER", "ASHBY"])(
+    "gives a complete %s ATS posting a seven-day availability window",
+    (sourceName) => {
+      const completeDescription = [
+        "The role designs and operates production data and AI platform services for engineering teams.",
+        "Responsibilities include building distributed services, maintaining data pipelines, and improving reliability.",
+        "Qualifications include professional software engineering experience and a record of delivering production systems.",
+      ].join(" ");
+      const evidence = buildJobSourceEvidence({
+        ...baseInput,
+        sourceName,
+        retrievedAt: "2026-10-24T00:00:00.000Z",
+        rawPayload: { id: "job-42", status: "active" },
+        descriptionText: completeDescription,
+      });
+
+      expect(evidence.description.completeness_status).toBe("COMPLETE");
+      expect(evidence.availability).toMatchObject({ status: "OPEN", reason_code: "FULL_POSTING_RETRIEVED" });
+      expect(Date.parse(evidence.availability.expires_at!) - Date.parse(evidence.availability.verified_at!))
+        .toBe(7 * 24 * 60 * 60 * 1000);
+    },
+  );
+
+  it("keeps an incomplete ATS listing on the one-day window", () => {
+    const retrievedAt = "2026-10-24T00:00:00.000Z";
+    const evidence = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "LEVER",
+      retrievedAt,
+      rawPayload: { id: "job-42", status: "active" },
+      descriptionText: "A short role teaser.",
+    });
+
+    expect(evidence.description.completeness_status).not.toBe("COMPLETE");
+    expect(evidence.availability.status).toBe("OPEN");
+    expect(Date.parse(evidence.availability.expires_at!) - Date.parse(evidence.availability.verified_at!))
+      .toBe(24 * 60 * 60 * 1000);
+  });
+
+  it("keeps board postings UNKNOWN when the URL host is not manifest-approved or the description is incomplete", () => {
+    const notApproved = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "JOBICY",
+      sourcePluginKey: "jobicy",
+      sourceUrl: "https://attacker.example/jobs/role-42",
+      rawPayload: {},
+      fullPostingHosts: ["jobicy.com", "www.jobicy.com"],
+    });
+    const incomplete = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "JOBICY",
+      sourcePluginKey: "jobicy",
+      sourceUrl: "https://jobicy.com/jobs/role-42",
+      descriptionText: "A short role teaser.",
+      rawPayload: {},
+      fullPostingHosts: ["jobicy.com", "www.jobicy.com"],
+    });
+
+    expect(notApproved.availability.status).toBe("UNKNOWN");
+    expect(incomplete.description.completeness_status).not.toBe("COMPLETE");
+    expect(incomplete.availability.status).toBe("UNKNOWN");
+  });
+
+  it("requires a safe HTTP(S) URL and exact manifest host before treating a board posting as retrieved", () => {
+    const completeDescription = [
+      "The role designs and operates production data and AI platform services for engineering teams.",
+      "Responsibilities include building distributed services, maintaining data pipelines, and improving reliability.",
+      "Qualifications include professional software engineering experience and a record of delivering production systems.",
+    ].join(" ");
+    const hosts = ["jobicy.com", "www.jobicy.com"];
+    for (const sourceUrl of [
+      "ftp://jobicy.com/jobs/role-42",
+      "https://user:secret@jobicy.com/jobs/role-42",
+      "https://careers.jobicy.com/jobs/role-42",
+    ]) {
+      const evidence = buildJobSourceEvidence({
+        ...baseInput,
+        sourceName: "JOBICY",
+        sourcePluginKey: "jobicy",
+        sourceUrl,
+        rawPayload: {},
+        descriptionText: completeDescription,
+        fullPostingHosts: hosts,
+      });
+      expect(evidence.description.completeness_status).toBe("COMPLETE");
+      expect(evidence.availability.status).toBe("UNKNOWN");
+    }
+  });
+
+  it("binds Gmail fetch receipts to the exact discovery observation, URL, and staged posting", () => {
+    const retrievedAt = "2026-10-24T00:00:00.000Z";
+    const completeDescription = [
+      "The role designs and operates production data and AI platform services for engineering teams.",
+      "Responsibilities include building distributed services, maintaining data pipelines, and improving reliability.",
+      "Qualifications include professional software engineering experience and a record of delivering production systems.",
+    ].join(" ");
+    const discoveryObservationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const postingUrl = "https://careers.example.test/jobs/role-42";
+    const receiptPayload = {
+      source_content_status: "COMPLETE",
+      discovery_observation_id: discoveryObservationId,
+      requested_url: postingUrl,
+      canonical_url: postingUrl,
+      source_evidence: {
+        requestedUrl: postingUrl,
+        resolvedUrl: "https://api.lever.co/v0/postings/acme/role-42?mode=json",
+        redirectHistory: [],
+        retrievedAt,
+        httpStatus: 200,
+        contentType: "application/json",
+        responseHash: "a".repeat(64),
+      },
+      posting: { title: baseInput.title, companyName: baseInput.companyName, description: completeDescription, canonicalUrl: postingUrl },
+    };
+    const lineage = {
+      discoveryObservationId,
+      discoverySourceUrl: postingUrl,
+      postingSourceUrl: postingUrl,
+      companyName: baseInput.companyName,
+      title: baseInput.title,
+      description: completeDescription,
+    };
+    const fetched = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "EMPLOYER_WEBSITE",
+      sourcePluginKey: "employer_website",
+      sourceUrl: postingUrl,
+      canonicalApplyUrl: postingUrl,
+      rawPayload: receiptPayload,
+      retrievedAt,
+      descriptionText: completeDescription,
+      fetchedPostingLineage: lineage,
+    });
+    const alertOnly = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "GMAIL_ALERT",
+      sourcePluginKey: "gmail_alert",
+      rawPayload: { body_text: "Open the position and apply online." },
+      retrievedAt,
+      descriptionText: completeDescription,
+    });
+
+    expect(fetched.availability).toMatchObject({
+      status: "OPEN",
+      verification_method: "VERIFIED_POSTING_RETRIEVAL",
+      reason_code: "FULL_POSTING_RETRIEVED",
+      expires_at: "2026-10-31T00:00:00.000Z",
+    });
+    expect(alertOnly.availability).toMatchObject({
+      status: "UNKNOWN",
+      verification_method: "NONE",
+      reason_code: "AVAILABILITY_NOT_VERIFIED",
+    });
+    expect(isFetchedPostingReceiptBoundToObservation(receiptPayload, lineage)).toBe(true);
+    const incompleteReceipt = {
+      ...receiptPayload,
+      source_evidence: { ...receiptPayload.source_evidence, redirectHistory: undefined },
+    };
+    expect(hasCompleteFetchedPostingReceipt(incompleteReceipt)).toBe(false);
+    const incompleteEvidence = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "EMPLOYER_WEBSITE",
+      sourcePluginKey: "employer_website",
+      sourceUrl: postingUrl,
+      canonicalApplyUrl: postingUrl,
+      rawPayload: incompleteReceipt,
+      retrievedAt,
+      descriptionText: completeDescription,
+      fetchedPostingLineage: lineage,
+    });
+    expect(incompleteEvidence.availability.status).toBe("UNKNOWN");
+    expect(isFetchedPostingReceiptBoundToObservation({ ...receiptPayload, discovery_observation_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }, lineage)).toBe(false);
+    expect(isFetchedPostingReceiptBoundToObservation({
+      ...receiptPayload,
+      requested_url: "https://careers.example.test/jobs/other",
+      source_evidence: { ...receiptPayload.source_evidence, requestedUrl: "https://careers.example.test/jobs/other" },
+    }, lineage)).toBe(false);
+    expect(isFetchedPostingReceiptBoundToObservation({
+      ...receiptPayload,
+      canonical_url: "https://careers.example.test/jobs/other",
+    }, lineage)).toBe(false);
+    expect(isFetchedPostingReceiptBoundToObservation({
+      ...receiptPayload,
+      posting: { ...receiptPayload.posting, canonicalUrl: "https://careers.example.test/jobs/other" },
+    }, lineage)).toBe(false);
+    expect(isFetchedPostingReceiptBoundToObservation({
+      ...receiptPayload,
+      posting: { ...receiptPayload.posting, title: "Different role" },
+    }, lineage)).toBe(false);
+
+    const mismatchedReceipts = [
+      { ...receiptPayload, discovery_observation_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+      {
+        ...receiptPayload,
+        requested_url: "https://careers.example.test/jobs/other",
+        source_evidence: { ...receiptPayload.source_evidence, requestedUrl: "https://careers.example.test/jobs/other" },
+      },
+      { ...receiptPayload, canonical_url: "https://careers.example.test/jobs/other" },
+      { ...receiptPayload, posting: { ...receiptPayload.posting, canonicalUrl: "https://careers.example.test/jobs/other" } },
+      { ...receiptPayload, posting: { ...receiptPayload.posting, title: "Different role" } },
+      { ...receiptPayload, posting: { ...receiptPayload.posting, companyName: "Different company" } },
+      { ...receiptPayload, posting: { ...receiptPayload.posting, description: "Different description" } },
+    ];
+    for (const mismatchedReceipt of mismatchedReceipts) {
+      const evidence = buildJobSourceEvidence({
+        ...baseInput,
+        sourceName: "EMPLOYER_WEBSITE",
+        sourcePluginKey: "employer_website",
+        sourceUrl: postingUrl,
+        canonicalApplyUrl: postingUrl,
+        rawPayload: mismatchedReceipt,
+        retrievedAt,
+        descriptionText: completeDescription,
+        fetchedPostingLineage: lineage,
+      });
+      expect(evidence.availability.status).toBe("UNKNOWN");
+    }
+  });
+
+  it("keeps pasted and uploaded manual postings UNKNOWN without independent availability evidence", () => {
+    const pasted = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "MANUAL_STREAMLIT",
+      sourcePluginKey: "manual_streamlit",
+      rawPayload: {
+        source: "MANUAL_STREAMLIT",
+        source_content_status: "USER_PROVIDED",
+        source_provenance: "USER_PROVIDED",
+      },
+    });
+    const uploaded = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "MANUAL_IMPORT",
+      sourcePluginKey: "manual_import",
+      rawPayload: { source: "MANUAL_IMPORT", user_confirmed_posting: true },
+    });
+
+    expect(pasted.availability.status).toBe("UNKNOWN");
+    expect(uploaded.availability.status).toBe("UNKNOWN");
   });
 
   it("preserves separate base, variable, and equity compensation components with k notation", () => {

@@ -413,6 +413,31 @@ describe('evaluateSingleCanonicalJob output validation', () => {
     await expect(evaluateSingleCanonicalJob(job)).rejects.toThrow(/MAYBE_APPLY/);
   });
 
+  it('rejects oversized culture evidence before validating array elements', async () => {
+    configureOpenAiOnlyEvaluation();
+    stubOpenAiEvaluationResponse(validEvaluationPayload({
+      culture_evidence: Array.from({ length: 5 }, () => ({ invalid: true })),
+    }));
+
+    await expect(evaluateSingleCanonicalJob(job)).rejects.toThrow(/culture_evidence.*4-item limit/);
+  });
+
+  it('rejects oversized model response text before JSON parsing', async () => {
+    configureOpenAiOnlyEvaluation();
+    const fetchMock = stubOpenAiEvaluationResponse(' '.repeat(256 * 1024 + 1));
+
+    await expect(evaluateSingleCanonicalJob(job)).rejects.toThrow(/262144-byte limit/);
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
+    expect(requestBody.max_completion_tokens).toBe(8192);
+  });
+
+  it('rejects an oversized model API envelope before parsing its JSON', async () => {
+    configureOpenAiOnlyEvaluation();
+    stubOpenAiEvaluationResponse('x'.repeat(1024 * 1024));
+
+    await expect(evaluateSingleCanonicalJob(job)).rejects.toThrow(/1048576-byte limit/);
+  });
+
   it('ignores unsupported model-proposed culture scores while preserving other explicit zeros', async () => {
     configureOpenAiOnlyEvaluation();
     const fetchMock = stubOpenAiEvaluationResponse(

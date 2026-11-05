@@ -165,6 +165,26 @@ describe('Stage 1 Capability Profile V1', () => {
     expect(afterDelete.capabilityProfile.evidence_index['fact.arch.ai_llm_solution_architecture']).toBeUndefined();
   });
 
+  it('excludes private contact facts from capability artifacts', () => {
+    const loaded = createCapabilityProfileFixture();
+    loaded.facts.facts.push({
+      fact_key: 'contact_phone',
+      fact_type: 'CONTACT',
+      statement: 'Private contact phone',
+      structured_value: { kind: 'phone', value: '+6500000000' },
+      evidence_tier: 'PROFESSIONAL_PRODUCTION',
+      verification_status: 'SELF_ATTESTED',
+      is_current: true,
+      confidentiality: 'PRIVATE_INTERNAL',
+    });
+
+    const { capabilityProfile, markdown } = generateCapabilityProfile(loaded);
+
+    expect(capabilityProfile.evidence_index.contact_phone).toBeUndefined();
+    expect(markdown).not.toContain('contact_phone');
+    expect(markdown).not.toContain('+6500000000');
+  });
+
   it('demonstrates derived outputs never create new unsupported claims', () => {
     const loaded = createCapabilityProfileFixture();
     const { capabilityProfile } = generateCapabilityProfile(loaded);

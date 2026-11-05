@@ -1,7 +1,10 @@
 import pg from "pg";
+import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
 import { computeEvidenceStrength, loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement } from "./requirementComparators.js";
 import { isRequirementOptional } from "./hardGate.js";
@@ -233,15 +236,28 @@ async function listSemanticEmbeddingSpaceCandidates(
   ctx: WorkspaceContext
 ): Promise<string[]> {
   try {
+    const configuration = getEmbeddingSpaceRegistryConfiguration();
     const primary = await client.query<{ id: string }>(
       `SELECT id
        FROM embedding_spaces
        WHERE workspace_id = $1
          AND active = TRUE
          AND is_fallback_space = FALSE
+         AND LOWER(provider) = LOWER($2)
+         AND model = $3
+         AND dimensions = $4
+         AND normalization = $5
+         AND distance_metric = $6
        ORDER BY created_at DESC
-       LIMIT 1`,
-      [ctx.workspaceId]
+       LIMIT 2`,
+      [
+        ctx.workspaceId,
+        configuration.primary.provider,
+        configuration.primary.model,
+        configuration.primary.dimensions,
+        configuration.normalization,
+        configuration.distanceMetric,
+      ]
     );
 
     const fallback = await client.query<{ id: string }>(
@@ -250,12 +266,27 @@ async function listSemanticEmbeddingSpaceCandidates(
        WHERE workspace_id = $1
          AND active = TRUE
          AND is_fallback_space = TRUE
+         AND LOWER(provider) = LOWER($2)
+         AND model = $3
+         AND dimensions = $4
+         AND normalization = $5
+         AND distance_metric = $6
        ORDER BY created_at DESC
-       LIMIT 1`,
-      [ctx.workspaceId]
+       LIMIT 2`,
+      [
+        ctx.workspaceId,
+        configuration.fallback.provider,
+        configuration.fallback.model,
+        configuration.fallback.dimensions,
+        configuration.normalization,
+        configuration.distanceMetric,
+      ]
     );
 
-    const candidates = [primary.rows[0]?.id, fallback.rows[0]?.id].filter(
+    const candidates = [
+      primary.rows.length === 1 ? primary.rows[0]?.id : undefined,
+      fallback.rows.length === 1 ? fallback.rows[0]?.id : undefined,
+    ].filter(
       (id): id is string => typeof id === "string" && id.length > 0
     );
     return candidates;
@@ -410,7 +441,8 @@ export async function runDeterministicMatcher(
               pf.fact_type, pf.statement, pf.evidence_tier, pf.verification_status, pf.structured_value
        FROM profile_facts pf
        WHERE pf.workspace_id = $1
-         AND pf.profile_version_id = $2`,
+         AND pf.profile_version_id = $2
+         AND pf.fact_type <> 'CONTACT'`,
       [ctx.workspaceId, profileVersionId]
     );
 
@@ -542,6 +574,7 @@ export async function runDeterministicMatcher(
          FROM job_versions
          WHERE workspace_id = $1
            AND canonical_job_id = c.id
+           AND (c.latest_job_version_id IS NULL OR id = c.latest_job_version_id)
          ORDER BY observed_at DESC
          LIMIT 1
        ) jv ON TRUE
@@ -567,6 +600,8 @@ export async function runDeterministicMatcher(
          )
          AND c.primary_lane IS NOT NULL
          AND c.primary_lane != 'UNCLASSIFIED'
+         AND c.description_quality_status = 'COMPLETE'
+         AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
          ${jobVersionFilter}
          ${canonicalJobFilter}
        ORDER BY c.created_at ASC, c.id ASC
@@ -1206,7 +1241,7 @@ export async function runDeterministicMatcher(
       } catch (error) {
         await client.query("ROLLBACK");
         errors += 1;
-        console.error(`Deterministic matching failed for canonical job ${job.id}:`, error);
+        console.error(`Deterministic matching failed for canonical job ${job.id}: ${publicErrorSummary(error, "pipeline")}`);
       }
     }
   } finally {
@@ -1251,7 +1286,7 @@ export async function rematchActionableJobs(
         rankingsMaterialized = true;
       }
     } catch (err) {
-      console.warn("Ranking materialization after rematch encountered non-fatal error:", err);
+      console.warn("Ranking materialization after rematch encountered non-fatal error:", publicErrorSummary(err, "pipeline"));
     }
 
     return { ...summary, rankingsMaterialized };

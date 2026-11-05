@@ -30,6 +30,15 @@ describe('buildEmbeddingInputs', () => {
               statement: 'Built production data pipelines',
               structured_value: { throughput: '2M/day' },
               evidence_tier: 'PROFESSIONAL_PRODUCTION',
+              confidentiality: 'PRIVATE_REUSABLE',
+            },
+            {
+              id: '33333333-3333-4333-8333-333333333333',
+              fact_type: 'CONTACT',
+              statement: 'Private contact detail for document rendering',
+              structured_value: { kind: 'phone', value: '+6500000000' },
+              evidence_tier: 'KNOWLEDGE_ONLY',
+              confidentiality: 'PRIVATE_INTERNAL',
             },
           ],
         };
@@ -58,6 +67,9 @@ describe('buildEmbeddingInputs', () => {
     expect(summary.fromProfileFacts).toBe(1);
 
     const calls = query.mock.calls.map((c: unknown[]) => String(c[0]));
+    const profileFactQuery = calls.find((sql) => sql.includes('FROM profile_facts pf'));
+    expect(profileFactQuery).toContain("pf.fact_type <> 'CONTACT'");
+    expect(profileFactQuery).toContain("pf.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')");
     expect(calls.filter((sql) => sql.includes('INSERT INTO embedding_inputs')).length).toBe(2);
   });
 
@@ -123,6 +135,51 @@ describe('buildEmbeddingInputs', () => {
     expect(summary.fromJobVersions).toBe(1);
   });
 
+  it('builds profile-only inputs without querying or upserting job requirements', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.includes('FROM job_requirements jr')) {
+        throw new Error('profile repair must not read job requirements');
+      }
+      if (sql.includes('FROM profile_facts pf')) {
+        return { rows: [{
+          id: '22222222-2222-4222-8222-222222222222',
+          embedding_node_id: '22222222-2222-4222-8222-222222222222',
+          fact_type: 'SKILL',
+          statement: 'Built production data pipelines',
+          structured_value: null,
+          evidence_tier: 'PROFESSIONAL_PRODUCTION',
+          confidentiality: 'PRIVATE_REUSABLE',
+        }] };
+      }
+      if (sql.includes('FROM canonical_jobs c')) {
+        throw new Error('profile repair must not read job versions');
+      }
+      if (sql.includes('INSERT INTO embedding_inputs')) return { rows: [{ id: 'profile-input' }], rowCount: 1 };
+      return { rows: [] };
+    });
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+
+    const summary = await buildEmbeddingInputs({ query } as any, 20, {
+      context,
+      profileVersionId: '77777777-7777-4777-8777-777777777777',
+      includeRequirements: false,
+      includeProfileFacts: true,
+      includeLanePrototypes: false,
+      includeJobVersions: false,
+    });
+
+    expect(summary).toMatchObject({ inserted: 1, fromRequirements: 0, fromProfileFacts: 1, fromJobVersions: 0 });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('FROM job_requirements jr'))).toBe(false);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO embedding_inputs'))).toBe(true);
+  });
+
   it('can scope a publication batch to profile facts and requirements only', async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
@@ -143,6 +200,7 @@ describe('buildEmbeddingInputs', () => {
           statement: 'Active v6 profile fact',
           structured_value: null,
           evidence_tier: 'PROFESSIONAL_PRODUCTION',
+          confidentiality: 'PRIVATE_REUSABLE',
         }] };
       }
       if (sql.includes('FROM canonical_jobs c')) {
@@ -195,6 +253,7 @@ describe('buildEmbeddingInputs', () => {
           statement: 'Active profile fact',
           structured_value: null,
           evidence_tier: 'PROFESSIONAL_PRODUCTION',
+          confidentiality: 'PRIVATE_REUSABLE',
         }] };
       }
       if (sql.includes('FROM canonical_jobs c')) {

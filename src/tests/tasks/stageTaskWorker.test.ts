@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { planPipelineStageRound } from "../../tasks/pipelineStageScheduler.js";
 import { scopeSeedQuery } from "../../tasks/seedQueryScope.js";
+import { createTaskIntentV2 } from "../../tasks/taskIntent.js";
 import {
   PipelineWorkerCancelledError,
   buildPipelineTaskKey,
@@ -11,15 +12,84 @@ import {
   type PipelineStageWorkerDependencies,
   type PipelineStageWorkerOptions,
 } from "../../tasks/stageTaskWorker.js";
+import { classifyDescriptionQuality } from "../../pipeline/descriptionQuality.js";
 
 describe("stageTaskWorker", () => {
   it("parses a validated task allowlist for deterministic recovery", () => {
+    expect(parsePipelineTaskTypes("FETCH_JOB_CONTENT,NORMALIZE_OBSERVATION")).toEqual([
+      "FETCH_JOB_CONTENT",
+      "NORMALIZE_OBSERVATION",
+    ]);
     expect(parsePipelineTaskTypes("NORMALIZE_OBSERVATION, MATCH_PROFILE_EVIDENCE, NORMALIZE_OBSERVATION")).toEqual([
       "NORMALIZE_OBSERVATION",
       "MATCH_PROFILE_EVIDENCE",
     ]);
     expect(() => parsePipelineTaskTypes("NOT_A_STAGE")).toThrow("Unsupported PIPELINE_TASK_WORKER_TASK_TYPES");
     expect(() => parsePipelineTaskTypes("  , ")).toThrow("must contain at least one task type");
+  });
+
+  it("blocks substantive stages when a sectioned Gmail description lacks fetched-source evidence", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const sectionedAlertText = [
+      "About the role: Build and operate a research data platform used by scientists.",
+      "Responsibilities: Design services, implement data workflows, and support production releases.",
+      "Requirements: Experience with Python, cloud systems, and cross-functional technical delivery.",
+      "The position is full-time and based in Singapore with a hybrid work arrangement.",
+    ].join(" ");
+    expect(classifyDescriptionQuality(sectionedAlertText).status).toBe("COMPLETE");
+    const task = {
+      id: "task-snippet",
+      workspace_id: ctx.workspaceId,
+      task_type: "APPLY_HARD_GATES",
+      task_key: "APPLY_HARD_GATES:version-snippet:hard_gate_v1",
+      payload: { canonical_job_id: "canonical-snippet", job_version_id: "version-snippet" },
+      status: "RUNNING",
+      available_at: new Date().toISOString(),
+      lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+      heartbeat_at: new Date().toISOString(),
+      claimed_by: "worker:test",
+      attempt_count: 1,
+      max_attempts: 8,
+      last_error: null,
+      dead_letter_reason: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      completed_at: null,
+    };
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) return { rows: [task], rowCount: 1 };
+      if (sql.includes("SELECT canonical.latest_job_version_id::text AS latest_job_version_id")) {
+        return { rows: [{ latest_job_version_id: "version-snippet", description_text: sectionedAlertText, has_source_content_evidence: false }], rowCount: 1 };
+      }
+      if (sql.includes("FROM raw_job_observations") && sql.includes("source_name = 'GMAIL_ALERT'")) {
+        return { rows: [{ raw_email_alert_id: "alert-snippet" }], rowCount: 1 };
+      }
+      if (sql.includes("UPDATE pipeline_tasks") || sql.includes("UPDATE pipeline_task_attempts")) {
+        return { rows: [{ id: task.id }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorkerImpl(client, {
+      context: ctx,
+      seed: false,
+      reconcileStalePending: false,
+      taskTypes: ["APPLY_HARD_GATES"],
+      maxTasks: 1,
+      heartbeatSeconds: 0,
+    }, deps);
+
+    expect(summary.blocked).toBe(1);
+    expect(summary.failed).toBe(0);
+    expect(deps.runHardGates).not.toHaveBeenCalled();
+    expect(calls.some((call) => call.params?.some((value) => typeof value === "string" && value.includes("SOURCE_CONTENT_QUALITY_GATE")))).toBe(true);
+    expect(calls.some((call) => call.sql.includes("lifecycle_status = 'SOURCE_BLOCKED'"))).toBe(true);
+    expect(calls.some((call) => call.sql.includes("HARD_REJECTED"))).toBe(false);
   });
 
   const ctx = {
@@ -35,8 +105,27 @@ describe("stageTaskWorker", () => {
     options: PipelineStageWorkerOptions = {},
     dependenciesOverride?: PipelineStageWorkerDependencies,
   ) {
+    const client = clientOrPool as any;
+    if (client && typeof client.query === "function" && !client.__contentQualityFixture) {
+      const originalQuery = client.query.bind(client);
+      client.query = async (sql: unknown, ...args: unknown[]) => {
+        if (typeof sql === "string" && sql.includes("SELECT canonical.latest_job_version_id::text AS latest_job_version_id")) {
+          const parameters = args[0] as unknown[] | undefined;
+          return {
+            rows: [{
+              latest_job_version_id: parameters?.[1] ?? "version-1",
+              description_text: "Responsibilities include leading delivery, coordinating teams, documenting decisions, resolving risks, and maintaining reliable services. Requirements include relevant experience, strong communication skills, technical judgment, and the ability to manage cross-functional work in a regulated environment. The role supports partner teams and improves service quality.",
+              has_source_content_evidence: true,
+            }],
+            rowCount: 1,
+          };
+        }
+        return originalQuery(sql, ...args);
+      };
+      client.__contentQualityFixture = true;
+    }
     return runPipelineStageTaskWorkerImpl(
-      clientOrPool,
+      client,
       { reconcileStalePending: false, ...options },
       dependenciesOverride,
     );
@@ -44,6 +133,7 @@ describe("stageTaskWorker", () => {
 
   function dependencies(overrides: Partial<PipelineStageWorkerDependencies> = {}): PipelineStageWorkerDependencies {
     return {
+      fetchJobContent: vi.fn(async () => ({ kind: "BLOCKED" as const, reason: "MISSING_POSTING_URL" as const })),
       runNormalization: vi.fn(async () => ({
         totalDiscovered: 0,
         totalProcessed: 0,
@@ -133,6 +223,8 @@ describe("stageTaskWorker", () => {
     const claim = calls.find((call) => call.sql.includes("WITH claimable AS"));
     expect(claim?.sql).toContain("payload->>'job_version_id' = ANY($6::text[])");
     expect(claim?.sql).toContain("payload->>'observation_id' = ANY($7::text[])");
+    expect(claim?.sql).toContain("scoped_child.derived_from_observation_id::text = ANY($7::text[])");
+    expect(claim?.sql).toContain("scoped_parent.job_version_id::text = candidate.payload->>'job_version_id'");
     expect(claim?.params?.[5]).toEqual(["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]);
     expect(claim?.params?.[6]).toEqual(["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]);
     expect(summary.claimed).toBe(0);
@@ -151,10 +243,11 @@ describe("stageTaskWorker", () => {
 
   it("allocates bounded round-robin quanta so an earlier backlog cannot drain ahead of later stages", () => {
     const types = ["NORMALIZE_OBSERVATION", "PUBLISH_EMBEDDING", "MATCH_PROFILE_EVIDENCE"] as const;
+    const downstreamFirst = ["MATCH_PROFILE_EVIDENCE", "PUBLISH_EMBEDDING", "NORMALIZE_OBSERVATION"];
     const firstRound = planPipelineStageRound(types, 1, {}, {}, 100, 100);
-    expect(firstRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
+    expect(firstRound).toEqual(downstreamFirst.map((taskType) => ({ taskType, claimLimit: 1 })));
     const scarceBudgetRound = planPipelineStageRound(types, 1, {}, {}, 100, 1);
-    expect(scarceBudgetRound.map((entry) => entry.taskType)).toEqual([...types]);
+    expect(scarceBudgetRound.map((entry) => entry.taskType)).toEqual(downstreamFirst);
 
     const secondRound = planPipelineStageRound(
       types,
@@ -164,7 +257,47 @@ describe("stageTaskWorker", () => {
       100,
       97,
     );
-    expect(secondRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
+    expect(secondRound).toEqual(downstreamFirst.map((taskType) => ({ taskType, claimLimit: 1 })));
+  });
+
+  it("preserves parameters that follow a non-terminal limit placeholder when scoping a seed query", () => {
+    const scoped = scopeSeedQuery(
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.canonical_job_id = c.id
+       WHERE c.workspace_id = $1
+         AND jv.source_provider = $3
+         AND jv.embedding_model = $4
+       ORDER BY jv.observed_at ASC
+       LIMIT $2`,
+      [ctx.workspaceId, 100, "gemini", "embedding-model"],
+      { jobVersionIds: ["target-version"] },
+      1,
+    );
+
+    expect(scoped.sql).toContain("jv.source_provider = $2");
+    expect(scoped.sql).toContain("jv.embedding_model = $3");
+    expect(scoped.sql).toContain("scoped_seed.job_version_id::text = ANY($4::text[])");
+    expect(scoped.sql).toContain("LIMIT $5");
+    expect(scoped.params).toEqual([ctx.workspaceId, "gemini", "embedding-model", ["target-version"], 1]);
+  });
+
+  it("preserves a limit parameter also referenced in the seed query body", () => {
+    const scoped = scopeSeedQuery(
+      `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+       FROM canonical_jobs c
+       JOIN job_versions jv ON jv.canonical_job_id = c.id
+       WHERE c.workspace_id = $1 AND jv.priority <= $2
+       LIMIT $2`,
+      [ctx.workspaceId, 100],
+      { jobVersionIds: ["target-version"] },
+      1,
+    );
+
+    expect(scoped.sql).toContain("jv.priority <= $2");
+    expect(scoped.sql).toContain("scoped_seed.job_version_id::text = ANY($3::text[])");
+    expect(scoped.sql).toContain("LIMIT $4");
+    expect(scoped.params).toEqual([ctx.workspaceId, 100, ["target-version"], 1]);
   });
 
   it("pushes the exact target filter into bounded seed queries before their limit", () => {
@@ -187,16 +320,23 @@ describe("stageTaskWorker", () => {
     expect(scoped.sql).not.toContain("LIMIT $2\n       ) AS scoped_seed");
   });
 
-  it("rotates the first stage across bounded worker runs and rounds", () => {
-    const types = ["NORMALIZE_OBSERVATION", "PUBLISH_EMBEDDING", "MATCH_PROFILE_EVIDENCE"] as const;
-    const firstTaskByRun = types.map((_, startOffset) => {
-      const round = planPipelineStageRound(types, 1, {}, {}, 100, 1, startOffset);
-      return round[0]?.taskType;
-    });
-    const nextRound = planPipelineStageRound(types, 1, {}, {}, 100, 1, 1);
+  it("keeps the oldest downstream stages first for every bounded run", () => {
+    const intakeFirst = [
+      "FETCH_JOB_CONTENT",
+      "NORMALIZE_OBSERVATION",
+      "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      "APPLY_HARD_GATES",
+      "ROUTE_LANE",
+      "MATCH_PROFILE_EVIDENCE",
+      "DECIDE_RECOMMENDATION",
+      "ENQUEUE_EXPLANATION",
+    ] as const;
+    const reversedInput = [...intakeFirst].reverse();
+    const firstRound = planPipelineStageRound(intakeFirst, 1, {}, {}, 100, 1);
+    const nextRound = planPipelineStageRound(reversedInput, 1, {}, {}, 100, 1);
 
-    expect(firstTaskByRun).toEqual([...types]);
-    expect(nextRound[0]?.taskType).toBe(types[1]);
+    expect(firstRound[0]?.taskType).toBe("ENQUEUE_EXPLANATION");
+    expect(nextRound[0]?.taskType).toBe("ENQUEUE_EXPLANATION");
   });
 
   it("versions profile matching task keys by active profile version", () => {
@@ -518,6 +658,15 @@ describe("stageTaskWorker", () => {
 
   it("completes deterministic extraction tasks when no deterministic patterns are found", async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const extractionPayload = { canonical_job_id: "job-empty", job_version_id: "version-empty" };
+    const extractionIntent = createTaskIntentV2({
+      workspaceId: ctx.workspaceId,
+      taskType: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      stageVersion: "deterministic_v3",
+      producer: "stageTaskWorker:EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      requestId: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v3",
+      payload: extractionPayload,
+    });
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params });
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
@@ -531,7 +680,7 @@ describe("stageTaskWorker", () => {
               workspace_id: ctx.workspaceId,
               task_type: "EXTRACT_DETERMINISTIC_REQUIREMENTS",
               task_key: "EXTRACT_DETERMINISTIC_REQUIREMENTS:version-empty:deterministic_v3",
-              payload: { canonical_job_id: "job-empty", job_version_id: "version-empty" },
+              payload: { ...extractionPayload, task_intent: extractionIntent },
               status: "RUNNING",
               available_at: new Date().toISOString(),
               lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
@@ -626,14 +775,23 @@ describe("stageTaskWorker", () => {
       ignoreRetryWindow: true,
       reprocess: false,
     });
-    expect(
-      calls.some(
-        (call) =>
-          call.sql.includes("INSERT INTO pipeline_tasks") &&
-          call.params?.[1] === "APPLY_HARD_GATES" &&
-          call.params?.[2] === "APPLY_HARD_GATES:version-empty:hard_gate_v1"
-      )
-    ).toBe(true);
+    const gateTaskInsert = calls.find(
+      (call) =>
+        call.sql.includes("INSERT INTO pipeline_tasks") &&
+        call.params?.[1] === "APPLY_HARD_GATES" &&
+        call.params?.[2] === "APPLY_HARD_GATES:version-empty:hard_gate_v1",
+    );
+    expect(gateTaskInsert).toBeDefined();
+    expect(gateTaskInsert?.params?.[3]).toMatchObject({
+      canonical_job_id: "job-empty",
+      job_version_id: "version-empty",
+      task_intent: {
+        taskType: "APPLY_HARD_GATES",
+        target: { canonicalJobId: "job-empty", jobVersionId: "version-empty" },
+      },
+    });
+    expect((gateTaskInsert?.params?.[3] as Record<string, unknown>).task_intent)
+      .not.toEqual(extractionIntent);
   });
 
   it("defers an old match task until deterministic requirements have been repaired", async () => {
@@ -794,7 +952,7 @@ describe("stageTaskWorker", () => {
       if (sql.includes("FROM job_version_pipeline_state ps") && sql.includes("requirement_extraction_runs rer")) {
         return { rows: [{ exists: true }], rowCount: 1 };
       }
-      if (sql.includes("WITH active_spaces AS")) {
+      if (sql.includes("WITH configured_spaces AS")) {
         return {
           rows: [{
             has_active_space: true,
@@ -825,6 +983,9 @@ describe("stageTaskWorker", () => {
     );
 
     expect(stateReads).toBeGreaterThanOrEqual(2);
+    const profileEmbeddingCheck = calls.find((call) => call.sql.includes("WITH configured_spaces AS"));
+    expect(profileEmbeddingCheck?.sql).toContain("fact.fact_type <> 'CONTACT'");
+    expect(profileEmbeddingCheck?.sql).toContain("fact.confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')");
     expect(summary).toMatchObject({ completed: 0, blocked: 1, failed: 0, deadLettered: 0 });
     expect(deps.runDeterministicMatcher).toHaveBeenCalledOnce();
     expect(
@@ -1005,6 +1166,26 @@ describe("stageTaskWorker", () => {
     expect(orphanSeed?.sql).toContain("mr.embedding_space_id IS NULL");
   });
 
+  it("projects the version column used by scoped observation seeding", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [], rowCount: 0 };
+    });
+
+    await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["NORMALIZE_OBSERVATION"],
+      jobVersionIds: ["selected-version"],
+      maxSeedPerType: 1,
+    });
+
+    const normalizationSeed = calls.find((call) => call.sql.includes("FROM raw_job_observations obs"));
+    expect(normalizationSeed?.sql).toContain("obs.job_version_id AS job_version_id");
+    expect(normalizationSeed?.sql).toContain("scoped_seed.job_version_id::text = ANY($2::text[])");
+    expect(normalizationSeed?.params).toEqual([ctx.workspaceId, ["selected-version"], 1]);
+  });
+
   it("does not seed unrelated provider stages during a stage-scoped recovery", async () => {
     const calls: string[] = [];
     const query = vi.fn(async (sql: string) => {
@@ -1044,9 +1225,37 @@ describe("stageTaskWorker", () => {
     );
     expect(routeSeed?.sql).toContain("$2::boolean");
     expect(routeSeed?.sql).toContain("COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'");
+    expect(routeSeed?.sql).toContain("c.gate_decision = 'NEEDS_VERIFICATION'");
+    expect(routeSeed?.sql).toContain("NEEDS_VERIFICATION_TRAVEL");
+    expect(routeSeed?.sql).not.toContain("NEEDS_VERIFICATION_WORK_AUTHORIZATION");
     expect(routeSeed?.params?.[1]).toBe(true);
     expect(routeSeed?.params?.[2]).toBe("lanes_2.2.0");
     expect(routeSeed?.params?.[3]).toBe(103);
+  });
+
+  it("seeds embeddings for previously gated workability-verification jobs", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [], rowCount: 0 };
+    });
+
+    await seedRecoverablePipelineTasks({ query } as any, {
+      context: ctx,
+      taskTypes: ["PUBLISH_EMBEDDING"],
+      maxSeedPerType: 1,
+    });
+
+    const verificationSeed = calls.find((call) =>
+      call.sql.includes("COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'") &&
+      call.sql.includes("FROM embedding_inputs ei") &&
+      call.sql.includes("NOT EXISTS") &&
+      call.sql.includes("c.gate_decision = 'NEEDS_VERIFICATION'")
+    );
+    expect(verificationSeed).toBeDefined();
+    expect(verificationSeed?.sql).toContain("GATE_UNKNOWN_WORK_MODE");
+    expect(verificationSeed?.sql).toContain("NEEDS_VERIFICATION_TRAVEL");
+    expect(verificationSeed?.sql).not.toContain("NEEDS_VERIFICATION_WORK_AUTHORIZATION");
   });
 
   it("resolves advisory policy rechecks only after a deterministic hard-gate rerun completes", async () => {
@@ -1236,6 +1445,92 @@ describe("stageTaskWorker", () => {
       verificationAnswerRevisionId: "answer-revision-1",
       verificationJobVersionId: "version-1",
     });
+  });
+
+  it("sends a workability verification gate through embeddings and routing", async () => {
+    const insertedTaskTypes: string[] = [];
+    const states = [
+      {
+        canonical_job_id: "job-unknown-mode",
+        processing_state: "RAW_STAGED",
+        gate_decision: null,
+        gate_rejection_reason: null,
+        latest_job_version_id: "version-unknown-mode",
+      },
+      {
+        canonical_job_id: "job-unknown-mode",
+        processing_state: "NEEDS_VERIFICATION",
+        gate_decision: "NEEDS_VERIFICATION",
+        gate_rejection_reason: "GATE_UNKNOWN_WORK_MODE",
+        latest_job_version_id: "version-unknown-mode",
+      },
+      {
+        canonical_job_id: "job-unknown-mode",
+        processing_state: "NEEDS_VERIFICATION",
+        gate_decision: "NEEDS_VERIFICATION",
+        gate_rejection_reason: "GATE_UNKNOWN_WORK_MODE",
+        latest_job_version_id: "version-unknown-mode",
+      },
+    ];
+    const task = {
+      id: "task-unknown-mode-gate",
+      workspace_id: ctx.workspaceId,
+      task_type: "APPLY_HARD_GATES",
+      task_key: "APPLY_HARD_GATES:version-unknown-mode:hard_gate_v1",
+      payload: { canonical_job_id: "job-unknown-mode", job_version_id: "version-unknown-mode" },
+      status: "RUNNING",
+      available_at: new Date().toISOString(),
+      lease_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      lease_expires_at: new Date(Date.now() + 300000).toISOString(),
+      heartbeat_at: new Date().toISOString(),
+      claimed_by: "worker:test",
+      attempt_count: 1,
+      max_attempts: 8,
+      last_error: null,
+      dead_letter_reason: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      completed_at: null,
+    };
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (sql.includes("WITH claimable AS")) return { rows: [task], rowCount: 1 };
+      if (sql.includes("FROM job_versions jv") && sql.includes("JOIN canonical_jobs c")) {
+        return { rows: [states.shift()], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_tasks")) {
+        insertedTaskTypes.push(String(params?.[1]));
+        return { rows: [{ id: "task-embedding-successor" }], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO pipeline_task_attempts") ||
+          sql.includes("UPDATE pipeline_task_attempts") ||
+          sql.includes("UPDATE pipeline_tasks")) {
+        return { rows: [{ id: task.id }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const fakeClient = { query } as any;
+    const deps = dependencies();
+
+    const summary = await runPipelineStageTaskWorker(
+      fakeClient,
+      {
+        context: ctx,
+        seed: false,
+        taskTypes: ["APPLY_HARD_GATES"],
+        maxTasks: 1,
+        claimBatchSize: 1,
+        leaseSeconds: 300,
+        heartbeatSeconds: 0,
+        claimedBy: "worker:test",
+      },
+      deps,
+    );
+
+    expect(summary.completed).toBe(1);
+    expect(deps.runHardGates).toHaveBeenCalled();
+    expect(insertedTaskTypes).toContain("PUBLISH_EMBEDDING");
+    expect(insertedTaskTypes).not.toContain("DECIDE_RECOMMENDATION");
   });
 
   it("does not attach an answer revision to a repair/replay gate task", async () => {
@@ -2205,7 +2500,7 @@ describe("stageTaskWorker", () => {
     });
   });
 
-  it("passes one explicit budget run identity to explanation enqueue tasks", async () => {
+  it("uses one explicit budget run identity for explanation tasks in a worker invocation", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("WITH claimable AS")) {
         return {
@@ -2252,7 +2547,7 @@ describe("stageTaskWorker", () => {
         claimBatchSize: 1,
         heartbeatSeconds: 0,
         claimedBy: "worker:test",
-        budgetRunId: "budget-run-1",
+        budgetRunId: "22222222-2222-4222-8222-222222222222",
       },
       deps
     );
@@ -2262,7 +2557,7 @@ describe("stageTaskWorker", () => {
       context: ctx,
       jobVersionIds: ["version-1"],
       limit: 1,
-      budgetRunId: "budget-run-1",
+      budgetRunId: "22222222-2222-4222-8222-222222222222",
     });
   });
 

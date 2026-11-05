@@ -2,7 +2,7 @@
 
 ## Lifecycle and age policy
 
-Archiving is a reversible lifecycle flag on `canonical_jobs` introduced by additive migration `migrations/080_reversible_job_archiving.sql` (numbered `080` after Agent 2's `079_profile_fact_contact_type.sql`). It does not change qualification, recommendation, or application status, and it does not delete or move observations, versions, decisions, documents, or application history.
+Archiving is a reversible lifecycle flag on `canonical_jobs` introduced by additive migration `migrations/093_reversible_job_archiving.sql` (renumbered from `080` to follow `092` under the migration-order check). It does not change qualification, recommendation, or application status, and it does not delete or move observations, versions, decisions, documents, or application history.
 
 The daily cutoff is calculated by PostgreSQL as `run_started_at - INTERVAL '3 months'`. A job is age-eligible only when its reference date is strictly earlier than that cutoff. Reference dates are selected in this order:
 

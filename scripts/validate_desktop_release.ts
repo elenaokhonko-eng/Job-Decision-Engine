@@ -48,6 +48,16 @@ function expectedTag(version: string): string {
   return `v${version}`;
 }
 
+export function isDesktopReleaseDispatchAllowed(
+  ref: string,
+  publish: boolean,
+  killSwitchEnabled: boolean,
+): boolean {
+  if (killSwitchEnabled) return false;
+  if (ref === "refs/heads/main") return !publish;
+  return /^refs\/tags\/v.+$/.test(ref) && publish;
+}
+
 function parseArgs(argv: string[]): DesktopReleaseValidationOptions {
   const value = (name: string): string | undefined => {
     const prefix = `--${name}=`;
@@ -84,6 +94,17 @@ export function validateDesktopRelease(
     checks.push(label);
     if (!condition) failures.push(label);
   };
+
+  if (env.GITHUB_REF) {
+    requireCheck(
+      isDesktopReleaseDispatchAllowed(
+        env.GITHUB_REF,
+        env.JDEC_DESKTOP_PUBLISH_REQUESTED === "true",
+        env.WORKFLOW_KILL_SWITCH === "true",
+      ),
+      "desktop release dispatch uses an allowed reviewed ref and publish mode",
+    );
+  }
 
   const warnCheck = (condition: boolean, label: string) => {
     checks.push(label);

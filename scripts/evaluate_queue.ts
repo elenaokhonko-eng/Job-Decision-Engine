@@ -6,6 +6,8 @@ import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION, toEvaluationW
 import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { isProfileFactModelShareable } from "../src/profile/privacy.js";
+import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
 import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
 import {
@@ -68,6 +70,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
       supersededQueueCount = await supersedeStaleEvaluationQueueRows(client, {
         workspaceId: ctx.workspaceId,
         ...(options.profileVersionId ? { profileVersionId: options.profileVersionId } : {}),
+        ...(jobVersionIds.length > 0 ? { jobVersionIds } : {}),
       });
       queueItems = await selectEligibleEvaluationQueueRows(client, {
         workspaceId: ctx.workspaceId,
@@ -91,14 +94,10 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
     if (queueItems.length > 0) {
       const profileVersionRes = await client.query<{
         id: string;
-        display_name: string;
         source_hash: string;
       }>(
-        `SELECT pv.id, cp.display_name, pv.source_hash
+        `SELECT pv.id, pv.source_hash
          FROM profile_versions pv
-         JOIN candidate_profiles cp
-           ON cp.workspace_id = pv.workspace_id
-          AND cp.id = pv.candidate_profile_id
          WHERE pv.workspace_id = $1
            AND pv.status = 'ACTIVE'
          ORDER BY pv.created_at DESC
@@ -118,6 +117,8 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
            WHERE workspace_id = $1
              AND profile_version_id = $2
              AND verification_status IN ('VERIFIED', 'SELF_ATTESTED')
+             AND fact_type <> 'CONTACT'
+             AND confidentiality IN ('PUBLIC', 'PRIVATE_REUSABLE')
            ORDER BY fact_key`,
           [ctx.workspaceId, profileVersion.id]
         ),
@@ -144,11 +145,11 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
         ),
       ]);
 
+      const modelShareableFacts = factsRes.rows.filter(isProfileFactModelShareable);
       candidateProfileContext = JSON.stringify({
         profile_version_id: profileVersion.id,
-        profile_display_name: profileVersion.display_name,
         profile_source_hash: profileVersion.source_hash,
-        verified_profile_facts: factsRes.rows,
+        verified_profile_facts: modelShareableFacts,
         verified_credentials: credentialsRes.rows,
         active_workability_preference_mode: preferenceRes.rows[0] ?? null,
       });
@@ -231,7 +232,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
             console.warn(`Lease fence lost for evaluation queue item ${item.id}.`);
           }
         }).catch((error) => {
-          console.warn(`Lease heartbeat failed for evaluation queue item ${item.id}:`, error);
+          console.warn(`Lease heartbeat failed for evaluation queue item ${item.id}: ${publicErrorSummary(error, "evaluation")}`);
         });
       }, 60_000);
 
@@ -293,7 +294,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
 
         const validatedResult: EvaluationResult = EvaluationResultSchema.parse(evalExecution.evaluatedJob);
 
-        console.log(`  -> AI Evaluation complete: Provider = ${validatedResult.provider} (${validatedResult.model}), Confidence = ${validatedResult.lane_confidence}, Action = ${validatedResult.next_action}, Fallback = ${validatedResult.is_fallback}`);
+        console.log(`  -> Evaluation persisted: Provider = ${validatedResult.provider} (${validatedResult.model}), Fallback = ${validatedResult.is_fallback}`);
 
         await client.query("BEGIN");
         try {
@@ -380,7 +381,8 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
         }
       } catch (err: any) {
         clearInterval(heartbeat);
-        console.error(`❌ Evaluation failed for queue item ${item.id}:`, err.message || err);
+        const safeError = publicErrorSummary(err, "evaluation");
+        console.error(`❌ Evaluation failed for queue item ${item.id}: ${safeError}`);
         failedCount++;
 
         await client.query(
@@ -400,7 +402,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
             attemptNum,
             item.attempt_count > 0 ? "fallback-chain" : "primary-chain",
             "unknown",
-            err.message || String(err),
+            safeError,
             item.id,
             activeLeaseId,
           ]
@@ -418,7 +420,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
                updated_at = NOW()
            WHERE workspace_id = $2 AND id = $3 AND lease_id = $4
            RETURNING id`,
-          [err.message || String(err), ctx.workspaceId, item.id, activeLeaseId]
+          [safeError, ctx.workspaceId, item.id, activeLeaseId]
         );
         if ((retryTransition.rowCount ?? 0) === 0) {
           console.warn(`Lease fence lost while scheduling retry for evaluation queue item ${item.id}.`);
@@ -451,7 +453,7 @@ async function runEvaluationQueueCli(): Promise<void> {
   try {
     const outcome = await runEvaluationQueueWithExitPolicy(evaluateQueue, exitOnRetryWait);
     if (!outcome.ok) {
-      console.error("Fatal queue evaluation error:", outcome.error);
+      console.error("Fatal queue evaluation error:", publicErrorSummary(outcome.error, "evaluation"));
       process.exitCode = outcome.exitCode;
       return;
     }
@@ -467,13 +469,13 @@ async function runEvaluationQueueCli(): Promise<void> {
     }
     process.exitCode = outcome.exitCode;
   } catch (error: unknown) {
-    console.error("Fatal queue evaluation error:", error);
+    console.error("Fatal queue evaluation error:", publicErrorSummary(error, "evaluation"));
     process.exitCode = 1;
   } finally {
     try {
       await closeEvaluationQueuePool();
     } catch (error: unknown) {
-      console.error("Failed to close evaluation queue pool:", error);
+      console.error("Failed to close evaluation queue pool:", publicErrorSummary(error, "pipeline"));
       process.exitCode = 1;
     }
   }
@@ -481,7 +483,7 @@ async function runEvaluationQueueCli(): Promise<void> {
 
 if (process.argv[1] && process.argv[1].includes("evaluate_queue")) {
   void runEvaluationQueueCli().catch((error: unknown) => {
-    console.error("Fatal queue evaluation CLI error:", error);
+    console.error("Fatal queue evaluation CLI error:", publicErrorSummary(error, "evaluation"));
     process.exitCode = 1;
   });
 }

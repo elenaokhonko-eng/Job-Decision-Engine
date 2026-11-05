@@ -1,5 +1,6 @@
 import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
-import { JobSourceEvidenceSchema, type JobEvidenceSpan, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
+import { JOB_SOURCE_EVIDENCE_SCHEMA_VERSION, JobSourceEvidenceSchema, type JobEvidenceSpan, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
+import { ManualFetchSourceEvidenceSchema } from "../contracts/manualApplication.js";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
 import { extractFreshnessEvidence } from "./freshnessEvidence.js";
@@ -15,6 +16,9 @@ export interface BuildJobSourceEvidenceInput {
   readonly retrievedAt: string;
   readonly rawPayloadHash: string;
   readonly rawPayload: unknown;
+  readonly fullPostingHosts?: readonly string[];
+  readonly fetchedPostingLineage?: FetchedPostingLineage;
+  readonly availabilityReceiptPayload?: unknown;
   readonly companyName: string;
   readonly title: string;
   readonly locationRaw: string | null;
@@ -55,6 +59,74 @@ function payloadRecords(value: unknown): Record<string, unknown>[] {
     if (nested) records.push(nested);
   }
   return records;
+}
+
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+export function hasCompleteFetchedPostingReceipt(rawPayload: unknown): boolean {
+  const records = payloadRecords(rawPayload);
+  const receipt = firstValue(records, ["source_evidence"]);
+  const posting = firstValue(records, ["posting"]);
+  if (firstValue(records, ["source_content_status"]) !== "COMPLETE"
+      || !receipt || typeof receipt !== "object" || Array.isArray(receipt)
+      || !posting || typeof posting !== "object" || Array.isArray(posting)) return false;
+
+  const sourceEvidence = receipt as Record<string, unknown>;
+  const parsedReceipt = ManualFetchSourceEvidenceSchema.safeParse(receipt);
+  return parsedReceipt.success
+    && sourceEvidence.requestedUrl === parsedReceipt.data.requestedUrl
+    && sourceEvidence.resolvedUrl === parsedReceipt.data.resolvedUrl
+    && parsedReceipt.data.httpStatus >= 200
+    && parsedReceipt.data.httpStatus < 300;
+}
+
+export interface FetchedPostingLineage {
+  readonly discoveryObservationId: string;
+  readonly discoverySourceUrl: string | null;
+  readonly postingSourceUrl: string | null;
+  readonly companyName: string;
+  readonly title: string;
+  readonly description: string;
+}
+
+export function isFetchedPostingReceiptBoundToObservation(
+  rawPayload: unknown,
+  lineage: FetchedPostingLineage,
+): boolean {
+  const root = asRecord(rawPayload);
+  if (!root || !hasCompleteFetchedPostingReceipt(root)) return false;
+  const receipt = asRecord(root.source_evidence);
+  const posting = asRecord(root.posting);
+  if (!receipt || !posting) return false;
+
+  return root.discovery_observation_id === lineage.discoveryObservationId
+    && root.requested_url === receipt.requestedUrl
+    && isHttpUrl(lineage.discoverySourceUrl)
+    && receipt.requestedUrl === lineage.discoverySourceUrl
+    && isHttpUrl(lineage.postingSourceUrl)
+    && root.canonical_url === lineage.postingSourceUrl
+    && posting.canonicalUrl === lineage.postingSourceUrl
+    && posting.companyName === lineage.companyName
+    && posting.title === lineage.title
+    && posting.description === lineage.description;
+}
+
+function sourceHostIsAllowed(sourceUrl: string | null, hosts: readonly string[] | undefined): boolean {
+  if (!isHttpUrl(sourceUrl) || !hosts?.length) return false;
+  try {
+    const hostname = new URL(sourceUrl).hostname.toLowerCase().replace(/\.$/, "");
+    return hosts.some((host) => hostname === host.toLowerCase().replace(/\.$/, ""));
+  } catch {
+    return false;
+  }
 }
 
 function firstValue(records: readonly Record<string, unknown>[], keys: readonly string[]): unknown {
@@ -583,14 +655,27 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
     || firstValue(records, ["isClosed", "closed"]) === true;
   const isExplicitOpen = /^(open|active|published|live)$/.test(explicitStatus)
     || firstValue(records, ["isOpen", "active"]) === true;
-  const availabilityStatus = isClosed ? "CLOSED" : directAts || isExplicitOpen ? "OPEN" : "UNKNOWN";
+  const completePostingRetrieved = quality.status === "COMPLETE"
+    && (directAts
+      || (input.fetchedPostingLineage !== undefined
+      && isFetchedPostingReceiptBoundToObservation(input.availabilityReceiptPayload ?? input.rawPayload, input.fetchedPostingLineage))
+      || sourceHostIsAllowed(input.sourceUrl, input.fullPostingHosts));
+  const availabilityStatus = isClosed
+    ? "CLOSED"
+    : directAts || isExplicitOpen || completePostingRetrieved
+      ? "OPEN"
+      : "UNKNOWN";
   const availabilityVerifiedAt = availabilityStatus === "UNKNOWN" ? null : retrievedAt;
   const availabilityExpiresAt = availabilityVerifiedAt
-    ? new Date(new Date(availabilityVerifiedAt).getTime() + 24 * 60 * 60 * 1000).toISOString()
+    ? new Date(new Date(availabilityVerifiedAt).getTime() + (availabilityStatus === "OPEN" && completePostingRetrieved ? 7 : 1) * 24 * 60 * 60 * 1000).toISOString()
     : null;
   const availabilityEvidence = availabilityStatus === "UNKNOWN"
     ? []
-    : [evidenceSpan(input, "AVAILABILITY", isClosed ? `Source status: ${explicitStatus || "closed"}` : `Active public listing observed from ${input.sourceName}`)];
+    : [evidenceSpan(input, "AVAILABILITY", isClosed
+      ? `Source status: ${explicitStatus || "closed"}`
+      : completePostingRetrieved
+          ? `Complete posting retrieved from ${input.sourceName}`
+          : `Active public listing observed from ${input.sourceName}`)];
   const modeValue = normalizedWorkMode(input.workplaceTypeRaw);
   const assumedMode = (input.workplaceTypeRaw ?? "").toUpperCase() === "ASSUMED_HYBRID";
   const officeDaysMatch = input.descriptionText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i);
@@ -617,7 +702,7 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
   const sourceIdentity = freshness.postingIdentityHash;
 
   return JobSourceEvidenceSchema.parse({
-    schema_version: "job_source_evidence_v1",
+    schema_version: JOB_SOURCE_EVIDENCE_SCHEMA_VERSION,
     normalizer_version: "job_source_evidence_builder_v1",
     source_name: input.sourceName,
     source_plugin_key: input.sourcePluginKey,
@@ -645,8 +730,18 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
       status: availabilityStatus,
       verified_at: availabilityVerifiedAt,
       expires_at: availabilityExpiresAt,
-      verification_method: availabilityStatus === "UNKNOWN" ? "NONE" : directAts ? "EMPLOYER_ATS_LISTING" : "EXPLICIT_SOURCE_STATUS",
-      reason_code: availabilityStatus === "OPEN" ? "CURRENT_LISTING_EVIDENCE" : availabilityStatus === "CLOSED" ? "SOURCE_EXPLICITLY_CLOSED" : "AVAILABILITY_NOT_VERIFIED",
+      verification_method: availabilityStatus === "UNKNOWN"
+        ? "NONE"
+        : isClosed
+          ? "EXPLICIT_SOURCE_STATUS"
+          : completePostingRetrieved
+              ? "VERIFIED_POSTING_RETRIEVAL"
+              : directAts
+                ? "EMPLOYER_ATS_LISTING"
+                : "EXPLICIT_SOURCE_STATUS",
+      reason_code: availabilityStatus === "OPEN"
+        ? completePostingRetrieved ? "FULL_POSTING_RETRIEVED" : "CURRENT_LISTING_EVIDENCE"
+        : availabilityStatus === "CLOSED" ? "SOURCE_EXPLICITLY_CLOSED" : "AVAILABILITY_NOT_VERIFIED",
       evidence: availabilityEvidence,
     },
     workability: {

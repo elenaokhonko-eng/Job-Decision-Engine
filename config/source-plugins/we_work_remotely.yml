@@ -1,4 +1,4 @@
-schema_version: "2.2.0"
+schema_version: "2.3.0"
 source_key: we_work_remotely
 display_name: We Work Remotely RSS feed
 kind: rss
@@ -54,4 +54,9 @@ mapping:
   employment_type: $derive.employment_type_from_text
   posted_at: $.pubDate
   updated_at: null
+
+availability:
+  full_posting_hosts:
+    - weworkremotely.com
+    - www.weworkremotely.com
 

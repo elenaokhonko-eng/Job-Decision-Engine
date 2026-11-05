@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 2 * * *'
   workflow_dispatch:
+    inputs:
+      repair_gmail_content_backlog:
+        description: "Enqueue one reviewed batch of up to 25 Gmail posting repairs"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   # Ingestion and pipeline processing share durable leases and the same
@@ -19,7 +25,7 @@ jobs:
   gmail_ingestion:
     name: Ingest Gmail job alerts
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && (vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false') }}
     timeout-minutes: 20
     steps:
       - name: Checkout repository code
@@ -52,24 +58,16 @@ jobs:
           GMAIL_MAX_MESSAGES_PER_RUN: ${{ vars.GMAIL_MAX_MESSAGES_PER_RUN || '250' }}
           GMAIL_PACING_DELAY_MS: ${{ vars.GMAIL_PACING_DELAY_MS || '25' }}
         run: npx tsx scripts/ingest_gmail.ts
-      - name: Run LLM email parser
+      - name: Extract Gmail job links and stage posting fetches
         timeout-minutes: 10
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
-          GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
-          MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
-          MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
         run: npx tsx scripts/parse_emails.ts
 
   public_source_ingestion:
     name: Ingest public job sources
     runs-on: ubuntu-latest
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && (vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false') }}
     timeout-minutes: 20
     steps:
       - name: Checkout repository code
@@ -104,7 +102,7 @@ jobs:
     needs: [gmail_ingestion, public_source_ingestion]
     # Drain staged work whenever at least one discovery source ran without cancellation.
     # An ingestion error will be surfaced at the end so partial work is processed.
-    if: ${{ vars.WORKFLOW_KILL_SWITCH != 'true' && !cancelled() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success' || needs.gmail_ingestion.result == 'failure' || needs.public_source_ingestion.result == 'failure') }}
+    if: ${{ github.ref == 'refs/heads/main' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && (vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false') && !cancelled() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success' || needs.gmail_ingestion.result == 'failure' || needs.public_source_ingestion.result == 'failure') }}
     timeout-minutes: 60
     steps:
       - name: Checkout repository code
@@ -133,7 +131,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           DOCUMENT_PRIMARY_PROVIDER: ${{ vars.DOCUMENT_PRIMARY_PROVIDER || 'openai' }}
-          REQUIREMENTS_PRIMARY_PROVIDER: ${{ vars.REQUIREMENTS_PRIMARY_PROVIDER || 'openai' }}
+          REQUIREMENTS_PRIMARY_PROVIDER: gemini
           EMBEDDING_PRIMARY_PROVIDER: ${{ vars.EMBEDDING_PRIMARY_PROVIDER || 'gemini' }}
           EMBEDDING_FALLBACK_PROVIDER: ${{ vars.EMBEDDING_FALLBACK_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
@@ -151,6 +149,32 @@ jobs:
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
           REQUIREMENTS_ENABLE_QUOTED: 'true'
         run: npx tsx scripts/preflight_models.ts
+      - name: Preview one Gmail posting backlog batch
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_gmail_content_backlog == true && vars.GMAIL_CONTENT_BACKLOG_REPAIR_ENABLED == 'true' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GMAIL_CONTENT_BACKLOG_WORKSPACE_KEY: ${{ vars.JOB_WORKSPACE_KEY || 'default' }}
+          GMAIL_CONTENT_BACKLOG_USER_KEY: ${{ vars.JOB_WORKSPACE_USER_KEY || 'local_user' }}
+          GMAIL_CONTENT_BACKLOG_RUN_KEY: ${{ vars.GMAIL_CONTENT_BACKLOG_RUN_KEY || 'gmail_posting_retrieval_v1' }}
+        run: >-
+          npx tsx scripts/repair_job_content_backlog.ts
+          --workspace-key "$GMAIL_CONTENT_BACKLOG_WORKSPACE_KEY"
+          --user-key "$GMAIL_CONTENT_BACKLOG_USER_KEY"
+          --run-key "$GMAIL_CONTENT_BACKLOG_RUN_KEY"
+          --batch-size 25 --dry-run
+      - name: Enqueue one Gmail posting backlog batch
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_gmail_content_backlog == true && vars.GMAIL_CONTENT_BACKLOG_REPAIR_ENABLED == 'true' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GMAIL_CONTENT_BACKLOG_WORKSPACE_KEY: ${{ vars.JOB_WORKSPACE_KEY || 'default' }}
+          GMAIL_CONTENT_BACKLOG_USER_KEY: ${{ vars.JOB_WORKSPACE_USER_KEY || 'local_user' }}
+          GMAIL_CONTENT_BACKLOG_RUN_KEY: ${{ vars.GMAIL_CONTENT_BACKLOG_RUN_KEY || 'gmail_posting_retrieval_v1' }}
+        run: >-
+          npx tsx scripts/repair_job_content_backlog.ts
+          --workspace-key "$GMAIL_CONTENT_BACKLOG_WORKSPACE_KEY"
+          --user-key "$GMAIL_CONTENT_BACKLOG_USER_KEY"
+          --run-key "$GMAIL_CONTENT_BACKLOG_RUN_KEY"
+          --batch-size 25 --apply
       - name: Process discovery pipeline
         id: process_pipeline_worker
         timeout-minutes: 15
@@ -162,7 +186,7 @@ jobs:
           GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
-          REQUIREMENTS_PRIMARY_PROVIDER: ${{ vars.REQUIREMENTS_PRIMARY_PROVIDER || 'openai' }}
+          REQUIREMENTS_PRIMARY_PROVIDER: gemini
           EMBEDDING_PRIMARY_PROVIDER: ${{ vars.EMBEDDING_PRIMARY_PROVIDER || 'gemini' }}
           EMBEDDING_FALLBACK_PROVIDER: ${{ vars.EMBEDDING_FALLBACK_PROVIDER || 'openai' }}
           EMBEDDING_PRIMARY_MODEL: ${{ vars.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001' }}
@@ -177,8 +201,9 @@ jobs:
           REQUIREMENTS_PROVIDER_FAILURE_LIMIT: ${{ vars.REQUIREMENTS_PROVIDER_FAILURE_LIMIT || '1' }}
           REQUIREMENTS_DB_STATEMENT_TIMEOUT_MS: ${{ vars.REQUIREMENTS_DB_STATEMENT_TIMEOUT_MS || '60000' }}
           REQUIREMENTS_ENABLE_QUOTED: 'true'
+          PIPELINE_TASK_WORKER_INCLUDE_QUOTED_REQUIREMENTS: 'true'
           PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '2500' }}
-          PIPELINE_TASK_WORKER_STAGE_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_STAGE_MAX_TASKS || 'NORMALIZE_OBSERVATION=800,EXTRACT_DETERMINISTIC_REQUIREMENTS=800,APPLY_HARD_GATES=800,PUBLISH_EMBEDDING=400,ROUTE_LANE=400,MATCH_PROFILE_EVIDENCE=400,DECIDE_RECOMMENDATION=800,ENQUEUE_EXPLANATION=400' }}
+          PIPELINE_TASK_WORKER_STAGE_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_STAGE_MAX_TASKS || 'FETCH_JOB_CONTENT=400,NORMALIZE_OBSERVATION=800,EXTRACT_DETERMINISTIC_REQUIREMENTS=800,APPLY_HARD_GATES=800,PUBLISH_EMBEDDING=400,ROUTE_LANE=400,MATCH_PROFILE_EVIDENCE=400,DECIDE_RECOMMENDATION=800,ENQUEUE_EXPLANATION=400' }}
           PIPELINE_TASK_WORKER_STAGE_QUANTUM: ${{ vars.PIPELINE_TASK_WORKER_STAGE_QUANTUM || '1' }}
           PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT: ${{ vars.PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT || '100' }}
           PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS: ${{ vars.PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS || '10000' }}

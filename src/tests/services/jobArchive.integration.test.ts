@@ -122,7 +122,9 @@ async function createJobFixture(
         options.observationAt ?? options.firstSeenAt ?? oldFirstObservation,
         company, title, longDescription, `raw-${canonicalJobId}`,
         options.normalizedEvidence === undefined ? null : JSON.stringify(options.normalizedEvidence),
-        options.normalizedEvidence === undefined ? null : "job_source_evidence_v1",
+        // The version the evidence builder actually emitted (v2 for a verified posting retrieval).
+        options.normalizedEvidence === undefined ? null
+          : (options.normalizedEvidence as { schema_version: string }).schema_version,
         jobVersionId,
       ],
     );
@@ -191,7 +193,7 @@ async function insertObservation(
        processing_status, normalized_evidence, evidence_schema_version
      ) VALUES ($1, $2, 'GREENHOUSE', $3, $4, $5, 'Repost Test Company',
                'Platform Engineer', $6, $7::jsonb, $8, 'PENDING', $9::jsonb,
-               'job_source_evidence_v1')`,
+               $9::jsonb->>'schema_version')`,
     [
       id, context.workspaceId, input.sourceExternalId, input.sourceUrl, input.retrievedAt,
       input.description, JSON.stringify(input.payload), rawHash(input.payload),
@@ -384,7 +386,8 @@ describe.skipIf(skipReal)("daily job archiving PostgreSQL integration", () => {
       }),
     ).rejects.toThrow(/Initial APPLY activation requires an active AGENT2_PILOT archive hold/i);
 
-    const holdExpiresAt = new Date(runStartedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+    // The hold's created_at is the database clock, so its expiry must follow today, not only the fixed run time.
+    const holdExpiresAt = new Date(Math.max(runStartedAt.getTime(), Date.now()) + 7 * 24 * 60 * 60 * 1000);
     const client = await pool.connect();
     try {
       await createArchiveHold(client, {
