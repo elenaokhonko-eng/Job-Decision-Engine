@@ -145,9 +145,7 @@ def test_verify_then_apply_contract_requires_matched_review_and_unresolved_readi
     except ValueError:
         pass
     else:
-        raise AssertionError(
-            "Verify-then-apply contract accepted a READY row"
-        )
+        raise AssertionError("Verify-then-apply contract accepted a READY row")
 
     try:
         validate_verify_then_apply_row(

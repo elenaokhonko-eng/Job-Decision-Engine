@@ -313,7 +313,9 @@ def validate_verify_then_apply_row(
     if row.get("gate_status") != "NEEDS_VERIFICATION":
         raise ValueError("Verify-then-apply rows require an unresolved gate decision.")
     if row.get("processing_state") != "MATCHED":
-        raise ValueError("Verify-then-apply rows require a completed current profile match.")
+        raise ValueError(
+            "Verify-then-apply rows require a completed current profile match."
+        )
     if (
         row.get("recommendation_eligibility") != "VERIFY"
         or row.get("recommendation_outcome") != "REVIEW"
@@ -322,7 +324,9 @@ def validate_verify_then_apply_row(
             "Verify-then-apply rows require a REVIEW decision with VERIFY eligibility."
         )
     if row.get("readiness_status") != "NEEDS_VERIFICATION":
-        raise ValueError("Verify-then-apply rows must remain blocked from READY until verification.")
+        raise ValueError(
+            "Verify-then-apply rows must remain blocked from READY until verification."
+        )
     for field in ("rejection_codes", "gate_evidence_quotes", "readiness_reason_codes"):
         value = row.get(field)
         if not isinstance(value, (list, tuple)) or not all(
