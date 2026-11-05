@@ -109,6 +109,23 @@ jobs:
         REQUIRE_POSTGRES_INTEGRATION: "true"
       run: npx vitest run --no-file-parallelism src/tests/tasks/jobContentFetchPersistence.integration.test.ts src/tests/tasks/pipelineTaskCurrentness.integration.test.ts
 
+    - name: Checkout target-branch migration baseline
+      uses: actions/checkout@v5
+      with:
+        ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+        path: migration-baseline
+
+    - name: Apply target-branch migrations as the CI baseline
+      env:
+        DATABASE_URL: postgres://test:password@localhost:5432/testdb
+        JDEC_MIGRATIONS_DIR: ${{ github.workspace }}/migration-baseline/migrations
+      run: npx tsx migration-baseline/src/db/migrate.ts
+
+    - name: Verify pending migration numbers follow the CI baseline
+      env:
+        DATABASE_URL: postgres://test:password@localhost:5432/testdb
+      run: npx vitest run src/tests/db/migrationOrdering.integration.test.ts
+
     - name: Initialize Database
       env:
         DATABASE_URL: postgres://test:password@localhost:5432/testdb
