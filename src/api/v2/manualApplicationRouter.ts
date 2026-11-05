@@ -72,6 +72,7 @@ import {
   ManualCoverLetterReviewSchema,
   ManualDocumentsResponseSchema,
   ManualDownloadResponseSchema,
+  ManualExistingJobCompareRequestSchema,
   ManualGenerateRequestSchema,
   ManualFetchDescriptionRequestSchema,
   ManualFetchDescriptionResponseSchema,
@@ -85,7 +86,7 @@ import {
 } from "../../contracts/manualApplication.js";
 import { fetchJobContent, type JobContentResult } from "../../ingestion/jobContentFetcher.js";
 
-function errorPayload(code: "INVALID_REQUEST" | "DESCRIPTION_INSUFFICIENT" | "FORBIDDEN" | "NOT_FOUND" | "JOB_VERSION_CHANGED" | "IDENTITY_CONFLICT" | "APPROVAL_STALE" | "DEPENDENCY_UNAVAILABLE" | "INTERNAL_ERROR", message: string, retryAfter?: string) {
+function errorPayload(code: "INVALID_REQUEST" | "DESCRIPTION_INSUFFICIENT" | "FORBIDDEN" | "NOT_FOUND" | "JOB_VERSION_CHANGED" | "IDENTITY_CONFLICT" | "APPROVAL_STALE" | "DEPENDENCY_UNAVAILABLE" | "INTERNAL_ERROR" | "CONCURRENT_UPDATE", message: string, retryAfter?: string) {
   return ManualApiErrorSchema.parse({
     schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
     ok: false,
@@ -108,6 +109,14 @@ export class ManualFlowError extends Error {
   constructor(readonly status: number, readonly code: Parameters<typeof errorPayload>[0], message: string) {
     super(message);
   }
+}
+
+const CONCURRENT_RETRY_AFTER_MS = 3000;
+// serialization_failure, deadlock_detected and unique_violation: two requests staged the same draft at once.
+const CONCURRENT_WRITE_SQLSTATES = new Set(["40001", "40P01", "23505"]);
+
+function isConcurrentWriteConflict(error: unknown): boolean {
+  return typeof error === "object" && error !== null && CONCURRENT_WRITE_SQLSTATES.has(String((error as { code?: unknown }).code));
 }
 
 function sha256(value: string): string {
@@ -1360,6 +1369,67 @@ export function createManualApplicationRouter({
       selectable_evidence: staged.selectableEvidence,
     });
     res.json(response);
+  }));
+
+  // A job the pipeline already holds goes to the same review, approve and generate screens as a
+  // pasted one. 409 JOB_VERSION_CHANGED and 422 DESCRIPTION_INSUFFICIENT are final for that version;
+  // CONCURRENT_UPDATE means another request was staging the same draft and a retry returns it.
+  router.post("/compare-existing", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const parsed = ManualExistingJobCompareRequestSchema.safeParse(req.body);
+    if (!parsed.success) { sendApiError(res, 400, "INVALID_REQUEST", "A canonical job id and job version id are required."); return; }
+    let prepared: Awaited<ReturnType<typeof prepareComparisonForExistingJobVersion>>;
+    try {
+      prepared = await prepareComparisonForExistingJobVersion(pool, ctx, {
+        canonicalJobId: parsed.data.canonical_job_id,
+        jobVersionId: parsed.data.job_version_id,
+        candidateProfileId: parsed.data.candidate_profile_id,
+      }, { evidencePairer });
+    } catch (error) {
+      if (isConcurrentWriteConflict(error)) {
+        sendApiError(res, 409, "CONCURRENT_UPDATE", "This job is already being prepared in another request. Try again in a moment.",
+          new Date(Date.now() + CONCURRENT_RETRY_AFTER_MS).toISOString());
+        return;
+      }
+      throw error;
+    }
+    const observation = await pool.query<{ source_name: string }>(
+      `SELECT source_name FROM raw_job_observations WHERE workspace_id = $1 AND id = $2`,
+      [ctx.workspaceId, prepared.sourceObservationId]);
+    const sourceName = observation.rows[0]?.source_name;
+    if (!sourceName) throw new Error("The cited source observation is no longer readable in this workspace.");
+    const { comparison } = prepared;
+    res.json(ManualCompareResponseSchema.parse({
+      schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+      ok: true,
+      draft_id: prepared.draftId,
+      comparison_id: prepared.comparisonId,
+      comparison_fingerprint: prepared.comparisonFingerprint,
+      selected_job: {
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION,
+        canonicalJobId: prepared.canonicalJobId,
+        jobVersionId: prepared.jobVersionId,
+        sourceObservationId: prepared.sourceObservationId,
+        contentHash: comparison.job_content_hash,
+        title: comparison.title,
+        company: comparison.company,
+        url: comparison.canonical_url,
+        source: {
+          source_kind: "PIPELINE",
+          source_content_status: "PIPELINE_OBSERVED",
+          provider: null,
+          fetched_content_hash: null,
+          source_evidence: null,
+          source_name: sourceName,
+        },
+      },
+      comparison,
+      document_contact_ready: prepared.documentContactReady,
+      missing_contact_fields: prepared.missingContactFields,
+      requirements_extracted: prepared.requirementsExtracted,
+      role_plan: prepared.rolePlan,
+      selectable_evidence: prepared.selectableEvidence,
+    }));
   }));
 
   router.post("/:draftId/approve", handler(async (req, res) => {

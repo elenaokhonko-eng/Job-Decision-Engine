@@ -262,6 +262,104 @@ def test_fetched_source_edits_are_clearly_marked_for_user_review():
     assert any("not attested by that fetch" in warning.value for warning in app.warning)
 
 
+PIPELINE_JOB = {
+    "canonical_job_id": "11111111-1111-4111-8111-111111111111",
+    "job_version_id": "22222222-2222-4222-8222-222222222222",
+}
+
+
+def _pipeline_job_app(failures=()):
+    app = AppTest.from_file(
+        str(PROJECT_ROOT / "tests/python/manual_application_fixture.py")
+    )
+    app.session_state["test_pipeline_job"] = PIPELINE_JOB
+    app.session_state["test_compare_existing_failures"] = list(failures)
+    return app.run(timeout=10)
+
+
+def _compare_existing_calls(app):
+    return [
+        call
+        for call in app.session_state["test_api_calls"]
+        if call[1].endswith("/compare-existing")
+    ]
+
+
+def test_a_pipeline_job_opens_in_the_same_review_approve_and_generate_screens():
+    app = _pipeline_job_app()
+    app.button(key="test_pipeline_prepare_documents").click().run(timeout=10)
+
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    selected = app.session_state["manual_comparison"]["selected_job"]
+    assert selected["source"]["source_kind"] == "PIPELINE"
+    assert any("Opened in the Add job tab" in item.value for item in app.success)
+    assert any(
+        "a job the pipeline found (GREENHOUSE)" in caption.value
+        for caption in app.caption
+    )
+    assert any(
+        "Requirement, evidence and gap review" in header.value
+        for header in app.markdown
+    )
+    # The rest is the manual route unchanged: the approval checkbox for this comparison.
+    fingerprint = app.session_state["manual_comparison"]["comparison_fingerprint"]
+    assert app.checkbox(key=f"manual_approval_checked_{fingerprint}")
+    assert len(_compare_existing_calls(app)) == 1
+
+
+def test_a_concurrent_first_call_is_retried_once_automatically():
+    app = _pipeline_job_app(
+        [
+            "HTTP 409 CONCURRENT_UPDATE: This job is already being prepared in another request."
+        ]
+    )
+    app.button(key="test_pipeline_prepare_documents").click().run(timeout=10)
+
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    assert len(_compare_existing_calls(app)) == 2
+    assert (
+        app.session_state["manual_comparison"]["selected_job"]["source"]["source_kind"]
+        == "PIPELINE"
+    )
+
+
+def test_a_changed_or_thin_posting_version_is_final_and_not_offered_again():
+    app = _pipeline_job_app(
+        ["HTTP 422 DESCRIPTION_INSUFFICIENT: The job description looks incomplete."]
+    )
+    app.button(key="test_pipeline_prepare_documents").click().run(timeout=10)
+
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    assert any(
+        warning.value
+        == "Documents can't be prepared for this posting version: The job description looks incomplete."
+        for warning in app.warning
+    )
+    assert "manual_comparison" not in app.session_state
+    app.run(timeout=10)
+    assert not any(
+        button.key == "test_pipeline_prepare_documents" for button in app.button
+    )
+    assert len(_compare_existing_calls(app)) == 1
+
+
+def test_an_unavailable_dependency_leaves_the_button_for_another_try():
+    app = _pipeline_job_app(
+        [
+            "HTTP 503 DEPENDENCY_UNAVAILABLE: Deterministic requirement extraction failed."
+        ]
+    )
+    app.button(key="test_pipeline_prepare_documents").click().run(timeout=10)
+
+    assert any("Try again." in error.value for error in app.error)
+    assert len(_compare_existing_calls(app)) == 1
+    app.button(key="test_pipeline_prepare_documents").click().run(timeout=10)
+    assert (
+        app.session_state["manual_comparison"]["selected_job"]["source"]["source_kind"]
+        == "PIPELINE"
+    )
+
+
 def test_manual_upload_reader_accepts_text_files_without_rewriting_content():
     class Uploaded:
         name = "role.txt"

@@ -194,6 +194,26 @@ async function compareApproveGenerate(url: string, title: string, generateOption
   return { compared, approved, generated };
 }
 
+/** A job as ingestion stores it: a raw observation from a public source, normalised by the pipeline. */
+async function ingestPipelineJob(db: pg.Pool, ctx: WorkspaceContext, externalId: string, url: string, title: string, description: string[]) {
+  const run = await db.query<{ id: string }>(
+    `INSERT INTO source_runs (workspace_id, status, total_fetched, total_new) VALUES ($1, 'COMPLETED', 1, 1) RETURNING id`, [ctx.workspaceId]);
+  const payload = JSON.stringify({ source: "PIPELINE_FIXTURE", externalId, description });
+  const observation = await db.query<{ id: string }>(
+    `INSERT INTO raw_job_observations (
+       workspace_id, source_run_id, source_name, source_external_id, source_url, retrieved_at,
+       company_name, title, description_raw, location_raw, workplace_type_raw, employment_type_raw,
+       compensation_raw, canonical_apply_url, source_lane, search_plan_version, raw_payload, raw_payload_hash
+     ) VALUES ($1,$2,'GREENHOUSE',$3,$4,NOW(),'Example Bank',$5,$6,'Singapore',
+       'UNKNOWN','UNKNOWN','UNKNOWN',$4,'UNKNOWN','pipeline_fixture_v1',$7::jsonb,$8) RETURNING id`,
+    [ctx.workspaceId, run.rows[0].id, externalId, url, title, description.join("\n"),
+      payload, crypto.createHash("sha256").update(payload).digest("hex")]);
+  const normalized = await runNormalization(db, { context: ctx, observationIds: [observation.rows[0].id], limit: 1 });
+  const detail = normalized.details.find((item) => item.observationId === observation.rows[0].id);
+  if (!detail?.versionId || !detail.canonicalJobId) throw new Error(`Fixture normalisation failed: ${detail?.error ?? "no detail"}`);
+  return { canonicalJobId: detail.canonicalJobId, jobVersionId: detail.versionId, observationId: observation.rows[0].id };
+}
+
 async function documentXml(draftId: string, type: "cv" | "cover_letter"): Promise<string | undefined> {
   const download = await fetch(`${baseUrl}/${draftId}/documents/${type}/docx`);
   expect(download.status).toBe(200);
@@ -816,25 +836,8 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     const db = pool;
     const ctx = context;
     const candidateProfileId = profile.candidateProfileId;
-    // A job as ingestion stores it: a raw observation from a public source, normalised by the pipeline.
-    const ingest = async (description: string[]) => {
-      const run = await db.query<{ id: string }>(
-        `INSERT INTO source_runs (workspace_id, status, total_fetched, total_new) VALUES ($1, 'COMPLETED', 1, 1) RETURNING id`, [ctx.workspaceId]);
-      const payload = JSON.stringify({ source: "PIPELINE_FIXTURE", description });
-      const observation = await db.query<{ id: string }>(
-        `INSERT INTO raw_job_observations (
-           workspace_id, source_run_id, source_name, source_external_id, source_url, retrieved_at,
-           company_name, title, description_raw, location_raw, workplace_type_raw, employment_type_raw,
-           compensation_raw, canonical_apply_url, source_lane, search_plan_version, raw_payload, raw_payload_hash
-         ) VALUES ($1,$2,'GREENHOUSE','pipeline-ref-data-1',$3,NOW(),'Example Bank','Reference Data Platform Lead',$4,'Singapore',
-           'UNKNOWN','UNKNOWN','UNKNOWN',$3,'UNKNOWN','pipeline_fixture_v1',$5::jsonb,$6) RETURNING id`,
-        [ctx.workspaceId, run.rows[0].id, "https://careers.example.test/pipeline/reference-data-lead", description.join("\n"),
-          payload, crypto.createHash("sha256").update(payload).digest("hex")]);
-      const normalized = await runNormalization(db, { context: ctx, observationIds: [observation.rows[0].id], limit: 1 });
-      const detail = normalized.details.find((item) => item.observationId === observation.rows[0].id);
-      if (!detail?.versionId || !detail.canonicalJobId) throw new Error(`Fixture normalisation failed: ${detail?.error ?? "no detail"}`);
-      return { canonicalJobId: detail.canonicalJobId, jobVersionId: detail.versionId, observationId: observation.rows[0].id };
-    };
+    const ingest = (description: string[]) => ingestPipelineJob(db, ctx, "pipeline-ref-data-1",
+      "https://careers.example.test/pipeline/reference-data-lead", "Reference Data Platform Lead", description);
     const description = [
       "About the role: Example Bank is hiring a Reference Data Platform Lead in Singapore.",
       "Responsibilities: design target operating models and lead front office transformation programmes.",
@@ -882,6 +885,67 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       const newer = await ingest([...description, "Experience with regulatory reporting is a plus."]);
       expect(newer.canonicalJobId).toBe(job.canonicalJobId);
       expect(await refusal({ ...job, candidateProfileId })).toMatchObject({ status: 409, code: "JOB_VERSION_CHANGED" });
+    } finally {
+      for (const key of MODEL_KEY_ENV) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    }
+  });
+
+  it("opens a pipeline job in the review screens over HTTP; concurrent first calls are retryable, a changed version is final", async () => {
+    if (!pool || !context || !profile) throw new Error("The manual router test pool is not initialized.");
+    const description = [
+      "About the role: Example Bank is hiring a Collateral Data Lead in Singapore.",
+      "Responsibilities: lead collateral and derivatives data programmes across front office and operations.",
+      "Requirements: at least 8 years of experience in derivatives operations or investment technology.",
+      "You must have a bachelor's degree in finance, economics or computer science.",
+    ];
+    const ingest = (lines: string[]) => ingestPipelineJob(pool!, context!, "pipeline-collateral-1",
+      "https://careers.example.test/pipeline/collateral-data-lead", "Collateral Data Lead", lines);
+    const savedEnv = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
+    for (const key of MODEL_KEY_ENV) delete process.env[key];
+    try {
+      const job = await ingest(description);
+      const body = {
+        schema_version: "manual_application_v1",
+        canonical_job_id: job.canonicalJobId,
+        job_version_id: job.jobVersionId,
+        candidate_profile_id: profile.candidateProfileId,
+      };
+      const call = async () => {
+        const response = await fetch(`${baseUrl}/compare-existing`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        return { status: response.status, retryAfter: response.headers.get("retry-after"), json: await response.json() as Record<string, any> };
+      };
+
+      // Two first clicks at once: one stages the draft; the other either gets the same draft or is told to retry.
+      const racing = await Promise.all([call(), call()]);
+      const staged = racing.filter((result) => result.status === 200);
+      expect(staged.length, JSON.stringify(racing.map((result) => result.json))).toBeGreaterThan(0);
+      for (const result of racing.filter((item) => item.status !== 200)) {
+        expect(result).toMatchObject({ status: 409, json: { code: "CONCURRENT_UPDATE" } });
+        expect(Number(result.retryAfter)).toBeGreaterThan(0);
+      }
+      const retried = await post("/compare-existing", body);
+      expect(retried.draft_id).toBe(staged[0].json.draft_id);
+      expect(retried.selected_job).toMatchObject({
+        canonicalJobId: job.canonicalJobId, jobVersionId: job.jobVersionId, sourceObservationId: job.observationId,
+        title: "Collateral Data Lead", company: "Example Bank",
+        source: { source_kind: "PIPELINE", source_content_status: "PIPELINE_OBSERVED", source_name: "GREENHOUSE" },
+      });
+      const drafts = await pool.query(`SELECT id FROM manual_application_drafts WHERE workspace_id = $1 AND job_version_id = $2`,
+        [context.workspaceId, job.jobVersionId]);
+      expect(drafts.rowCount).toBe(1);
+
+      const approved = await post(`/${retried.draft_id}/approve`, { approved: true, comparison_fingerprint: retried.comparison_fingerprint });
+      const generated = await post(`/${retried.draft_id}/documents`, { approval_id: approved.approval_id });
+      expect(generated.ok).toBe(true);
+
+      expect(await post("/compare-existing", { ...body, job_version_id: "not-a-uuid" }, 400)).toMatchObject({ code: "INVALID_REQUEST" });
+      await ingest([...description, "Experience with regulatory reporting is a plus."]);
+      expect(await post("/compare-existing", body, 409)).toMatchObject({ code: "JOB_VERSION_CHANGED" });
     } finally {
       for (const key of MODEL_KEY_ENV) {
         if (savedEnv[key] === undefined) delete process.env[key];

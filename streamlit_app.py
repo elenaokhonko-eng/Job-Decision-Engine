@@ -33,7 +33,7 @@ from streamlit_workspace_contracts import (
     validate_track_row,
     validate_verify_then_apply_row,
 )
-from streamlit_manual_application import render_manual_application_flow
+from streamlit_manual_application import render_manual_application_flow, render_pipeline_review_action
 from streamlit_runtime import code_version, database_outage, ensure_hosted_api_ready, open_api_json
 
 
@@ -2392,6 +2392,12 @@ with tab_dashboard:
                             except Exception:
                                 pass
                         st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"active_desc_{idx}")
+
+                        verify_first = workspace_category == "Verify, then apply"
+                        if verify_first or is_document_generation_eligible(job):
+                            if verify_first:
+                                st.caption("Settle the open question with the employer before you send these documents.")
+                            render_pipeline_review_action(api_request, job, f"active_{job.get('job_version_id')}")
 
                         if is_document_generation_eligible(job):
                             application_key = (job.get("canonical_job_id"), job.get("job_version_id"))

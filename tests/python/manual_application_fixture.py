@@ -5,7 +5,14 @@ from io import BytesIO
 import docx
 import streamlit as st
 
-from streamlit_manual_application import render_manual_application_flow
+import streamlit_manual_application
+from streamlit_manual_application import (
+    render_manual_application_flow,
+    render_pipeline_review_action,
+)
+
+# The automatic retry after CONCURRENT_UPDATE need not wait in tests.
+streamlit_manual_application.PIPELINE_RETRY_DELAY_SECONDS = 0
 
 
 SCHEMA_VERSION = "manual_application_v1"
@@ -273,6 +280,27 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
                 "responseHash": "f" * 64,
             },
         }
+    if path.endswith("/compare-existing"):
+        assert body == {
+            "schema_version": SCHEMA_VERSION,
+            "canonical_job_id": JOB_ID,
+            "job_version_id": JOB_VERSION_ID,
+            "candidate_profile_id": CANDIDATE_ID,
+        }
+        # Refusals a test scripts in advance, raised the way api_request raises them.
+        failures = st.session_state.get("test_compare_existing_failures") or []
+        if failures:
+            raise RuntimeError(failures.pop(0))
+        response = _comparison_response()
+        response["selected_job"]["source"] = {
+            "source_kind": "PIPELINE",
+            "source_content_status": "PIPELINE_OBSERVED",
+            "provider": None,
+            "fetched_content_hash": None,
+            "source_evidence": None,
+            "source_name": "GREENHOUSE",
+        }
+        return response
     if path.endswith("/compare"):
         assert body["schema_version"] == SCHEMA_VERSION
         assert body["source_kind"] == "FETCHED"
@@ -369,4 +397,8 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
 
 
 st.title("Manual Application Test")
+# A pipeline job card's "Prepare application documents" action, when a test sets one.
+pipeline_job = st.session_state.get("test_pipeline_job")
+if pipeline_job:
+    render_pipeline_review_action(fake_api_request, pipeline_job, "test_pipeline")
 render_manual_application_flow(fake_api_request)

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 from io import BytesIO
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
@@ -21,6 +22,14 @@ _SCHEMA_CACHE = {}
 # timeouts, ValueError for bad JSON; contract and integrity checks raise ValueError.
 API_CALL_ERRORS = (RuntimeError, ValueError, OSError)
 UPLOAD_READ_ERRORS = (ValueError, OSError, BadZipFile, KeyError, PackageNotFoundError)
+MANUAL_SCHEMA_VERSION = "manual_application_v1"
+# api_error_message formats an API refusal as "HTTP 409 JOB_VERSION_CHANGED: <message>".
+_API_ERROR_CODE = re.compile(r"^HTTP \d{3} ([A-Z_]+):")
+# Opening a pipeline job: these refusals hold for that posting version, so the button is not offered again.
+PIPELINE_FINAL_CODES = {"JOB_VERSION_CHANGED", "DESCRIPTION_INSUFFICIENT"}
+# Another request was staging the same comparison; one automatic retry returns its draft.
+PIPELINE_RETRYABLE_CODES = {"CONCURRENT_UPDATE"}
+PIPELINE_RETRY_DELAY_SECONDS = 3
 
 
 def _validate_payload(schema_name, payload):
@@ -473,6 +482,84 @@ def _retry_summary(api_request, draft_id, fingerprint, approval, generated):
         st.error(f"Could not retry the AI summary: {error}")
 
 
+def _api_error_code(error):
+    match = _API_ERROR_CODE.match(str(error))
+    return match.group(1) if match else None
+
+
+def open_pipeline_job_for_review(api_request, job):
+    """Makes a pipeline job version the comparison under review in the Add job tab.
+
+    Returns None when the review is open, or (final, message) when it could not be opened.
+    """
+    body = {
+        "schema_version": MANUAL_SCHEMA_VERSION,
+        "canonical_job_id": str(job["canonical_job_id"]),
+        "job_version_id": str(job["job_version_id"]),
+    }
+    candidate_profile_id = st.session_state.get("manual_candidate_profile")
+    if candidate_profile_id:
+        body["candidate_profile_id"] = candidate_profile_id
+    for attempt in range(2):
+        try:
+            comparison = api_request(
+                "POST",
+                "/api/v2/application-drafts/compare-existing",
+                body=body,
+                timeout=120,
+            )
+            _validate_payload("ManualCompareResponse", comparison)
+            break
+        except API_CALL_ERRORS as error:
+            code = _api_error_code(error)
+            if code in PIPELINE_RETRYABLE_CODES and attempt == 0:
+                time.sleep(PIPELINE_RETRY_DELAY_SECONDS)
+                continue
+            return code in PIPELINE_FINAL_CODES, _API_ERROR_CODE.sub(
+                "", str(error)
+            ).strip()
+    st.session_state["manual_comparison"] = comparison
+    st.session_state.pop("manual_approval", None)
+    st.session_state.pop("manual_generated_documents", None)
+    return None
+
+
+def render_pipeline_review_action(api_request, job, key_prefix):
+    """Offers the manual review, approve and generate screens for a job the pipeline holds."""
+    version = str(job["job_version_id"])
+    refused = st.session_state.setdefault("manual_pipeline_final_refusals", {})
+    if version in refused:
+        st.warning(
+            f"Documents can't be prepared for this posting version: {refused[version]}"
+        )
+        return
+    current = (st.session_state.get("manual_comparison") or {}).get(
+        "selected_job"
+    ) or {}
+    if current.get("jobVersionId") == version:
+        st.success(
+            "This job is open in the Add job tab: review the matches, approve, then generate."
+        )
+        return
+    if not st.button(
+        "Prepare application documents", key=f"{key_prefix}_prepare_documents"
+    ):
+        return
+    with st.spinner("Comparing this posting with your profile..."):
+        outcome = open_pipeline_job_for_review(api_request, job)
+    if outcome is None:
+        st.success(
+            "Opened in the Add job tab: review the matches, approve, then generate."
+        )
+        return
+    final, message = outcome
+    if final:
+        refused[version] = message
+        st.warning(f"Documents can't be prepared for this posting version: {message}")
+    else:
+        st.error(f"Could not open this job for review: {message} Try again.")
+
+
 def render_manual_application_flow(api_request):
     st.subheader("Prepare documents for one manually selected role")
     st.caption(
@@ -720,6 +807,10 @@ def render_manual_application_flow(api_request):
             st.info(
                 "The staged description matches the verified fetched content. The retrieval evidence is pinned to this posting observation."
             )
+    elif source.get("source_kind") == "PIPELINE":
+        st.caption(
+            f"Source: a job the pipeline found ({source.get('source_name')}); its stored posting version is cited as it is."
+        )
     else:
         st.caption(
             "Source: user-pasted or uploaded description; no public retrieval receipt is attached."

@@ -125,6 +125,42 @@
             "source_evidence"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "source_kind": {
+              "type": "string",
+              "const": "PIPELINE"
+            },
+            "source_content_status": {
+              "type": "string",
+              "const": "PIPELINE_OBSERVED"
+            },
+            "provider": {
+              "type": "null"
+            },
+            "fetched_content_hash": {
+              "type": "null"
+            },
+            "source_evidence": {
+              "type": "null"
+            },
+            "source_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          "required": [
+            "source_kind",
+            "source_content_status",
+            "provider",
+            "fetched_content_hash",
+            "source_evidence",
+            "source_name"
+          ],
+          "additionalProperties": false
         }
       ]
     }
