@@ -24,6 +24,8 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/
 import { SYSTEMATIC_TRADING_PRODUCT_LEAD_DESCRIPTION } from "../fixtures/systematicTradingProductLead.js";
 import type { EvidencePairer, EvidencePairingInput } from "../../documents/manualEvidencePairing.js";
 import { resetManualDocuments } from "../../../scripts/reset_manual_documents.js";
+import { ManualFlowError, prepareComparisonForExistingJobVersion } from "../../documents/manualExistingJobComparison.js";
+import { runNormalization } from "../../pipeline/normalize.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
@@ -805,5 +807,111 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
 
     expect(response.status).toBe(404);
     expect(JSON.stringify(body)).toContain("NOT_FOUND");
+  });
+
+  it("prepares a comparison for a job the pipeline already holds, idempotently, ready to approve and generate", async () => {
+    if (!pool || !context || !profile) throw new Error("The manual router test pool is not initialized.");
+    const db = pool;
+    const ctx = context;
+    const candidateProfileId = profile.candidateProfileId;
+    // A job as ingestion stores it: a raw observation from a public source, normalised by the pipeline.
+    const ingest = async (description: string[]) => {
+      const run = await db.query<{ id: string }>(
+        `INSERT INTO source_runs (workspace_id, status, total_fetched, total_new) VALUES ($1, 'COMPLETED', 1, 1) RETURNING id`, [ctx.workspaceId]);
+      const payload = JSON.stringify({ source: "PIPELINE_FIXTURE", description });
+      const observation = await db.query<{ id: string }>(
+        `INSERT INTO raw_job_observations (
+           workspace_id, source_run_id, source_name, source_external_id, source_url, retrieved_at,
+           company_name, title, description_raw, location_raw, workplace_type_raw, employment_type_raw,
+           compensation_raw, canonical_apply_url, source_lane, search_plan_version, raw_payload, raw_payload_hash
+         ) VALUES ($1,$2,'GREENHOUSE','pipeline-ref-data-1',$3,NOW(),'Example Bank','Reference Data Platform Lead',$4,'Singapore',
+           'UNKNOWN','UNKNOWN','UNKNOWN',$3,'UNKNOWN','pipeline_fixture_v1',$5::jsonb,$6) RETURNING id`,
+        [ctx.workspaceId, run.rows[0].id, "https://careers.example.test/pipeline/reference-data-lead", description.join("\n"),
+          payload, crypto.createHash("sha256").update(payload).digest("hex")]);
+      const normalized = await runNormalization(db, { context: ctx, observationIds: [observation.rows[0].id], limit: 1 });
+      const detail = normalized.details.find((item) => item.observationId === observation.rows[0].id);
+      if (!detail?.versionId || !detail.canonicalJobId) throw new Error(`Fixture normalisation failed: ${detail?.error ?? "no detail"}`);
+      return { canonicalJobId: detail.canonicalJobId, jobVersionId: detail.versionId, observationId: observation.rows[0].id };
+    };
+    const description = [
+      "About the role: Example Bank is hiring a Reference Data Platform Lead in Singapore.",
+      "Responsibilities: design target operating models and lead front office transformation programmes.",
+      "Requirements: at least 8 years of experience in derivatives operations or investment technology.",
+      "You must have a bachelor's degree in finance, economics or computer science.",
+    ];
+    const savedEnv = Object.fromEntries(MODEL_KEY_ENV.map((key) => [key, process.env[key]]));
+    for (const key of MODEL_KEY_ENV) delete process.env[key];
+    try {
+      const job = await ingest(description);
+      const observationCount = async () => Number((await db.query<{ n: string }>(
+        `SELECT count(*) AS n FROM raw_job_observations WHERE workspace_id = $1`, [ctx.workspaceId])).rows[0].n);
+      const before = await observationCount();
+
+      const first = await prepareComparisonForExistingJobVersion(db, ctx, { ...job, candidateProfileId });
+      expect(first).toMatchObject({
+        comparisonId: first.draftId, reused: false, canonicalJobId: job.canonicalJobId, jobVersionId: job.jobVersionId,
+        sourceObservationId: job.observationId, candidateProfileId,
+      });
+      expect(first.comparison.job_version_id).toBe(job.jobVersionId);
+      expect(first.comparison.requirements.length).toBeGreaterThan(0);
+      expect(first.selectableEvidence.length).toBeGreaterThan(0);
+      // No posting content is staged: the pipeline's observation is cited as it is.
+      expect(await observationCount()).toBe(before);
+
+      const again = await prepareComparisonForExistingJobVersion(db, ctx, { ...job, candidateProfileId });
+      expect(again).toMatchObject({ comparisonId: first.comparisonId, comparisonFingerprint: first.comparisonFingerprint, reused: true });
+      const drafts = await db.query(`SELECT id FROM manual_application_drafts WHERE workspace_id = $1 AND job_version_id = $2`, [ctx.workspaceId, job.jobVersionId]);
+      expect(drafts.rowCount).toBe(1);
+
+      // The comparison id drives the existing approve and generate routes unchanged.
+      const approved = await post(`/${first.comparisonId}/approve`, { approved: true, comparison_fingerprint: first.comparisonFingerprint });
+      const generated = await post(`/${first.comparisonId}/documents`, { approval_id: approved.approval_id });
+      expect(generated.ok).toBe(true);
+
+      // Refusals carry the same codes as the manual route.
+      const refusal = (request: Parameters<typeof prepareComparisonForExistingJobVersion>[2]) =>
+        prepareComparisonForExistingJobVersion(db, ctx, request).then(() => null, (error: unknown) => error as ManualFlowError);
+      expect(await refusal({ canonicalJobId: job.canonicalJobId, jobVersionId: crypto.randomUUID(), candidateProfileId }))
+        .toMatchObject({ status: 404, code: "NOT_FOUND" });
+      // Two candidates have active profiles by now, so the caller must say which one.
+      expect(await refusal({ canonicalJobId: job.canonicalJobId, jobVersionId: job.jobVersionId }))
+        .toMatchObject({ status: 400, code: "INVALID_REQUEST" });
+
+      const newer = await ingest([...description, "Experience with regulatory reporting is a plus."]);
+      expect(newer.canonicalJobId).toBe(job.canonicalJobId);
+      expect(await refusal({ ...job, candidateProfileId })).toMatchObject({ status: 409, code: "JOB_VERSION_CHANGED" });
+    } finally {
+      for (const key of MODEL_KEY_ENV) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    }
+  });
+
+  it("refuses an existing job whose stored description is too thin, leaving the job untouched", async () => {
+    if (!pool || !context || !profile) throw new Error("The manual router test pool is not initialized.");
+    const run = await pool.query<{ id: string }>(
+      `INSERT INTO source_runs (workspace_id, status, total_fetched, total_new) VALUES ($1, 'COMPLETED', 1, 1) RETURNING id`, [context.workspaceId]);
+    const payload = JSON.stringify({ source: "PIPELINE_FIXTURE", thin: true });
+    const observation = await pool.query<{ id: string }>(
+      `INSERT INTO raw_job_observations (
+         workspace_id, source_run_id, source_name, source_external_id, source_url, retrieved_at,
+         company_name, title, description_raw, location_raw, workplace_type_raw, employment_type_raw,
+         compensation_raw, canonical_apply_url, source_lane, search_plan_version, raw_payload, raw_payload_hash
+       ) VALUES ($1,$2,'GREENHOUSE','pipeline-thin-1',$3,NOW(),'Example Bank','Data Analyst',$4,'Singapore',
+         'UNKNOWN','UNKNOWN','UNKNOWN',$3,'UNKNOWN','pipeline_fixture_v1',$5::jsonb,$6) RETURNING id`,
+      [context.workspaceId, run.rows[0].id, "https://careers.example.test/pipeline/thin", "Example Bank is hiring a Data Analyst in Singapore.",
+        payload, crypto.createHash("sha256").update(payload).digest("hex")]);
+    const normalized = await runNormalization(pool, { context, observationIds: [observation.rows[0].id], limit: 1 });
+    const detail = normalized.details.find((item) => item.observationId === observation.rows[0].id);
+    if (!detail?.versionId || !detail.canonicalJobId) throw new Error(`Fixture normalisation failed: ${detail?.error ?? "no detail"}`);
+
+    const error = await prepareComparisonForExistingJobVersion(pool, context, {
+      canonicalJobId: detail.canonicalJobId, jobVersionId: detail.versionId, candidateProfileId: profile.candidateProfileId,
+    }).then(() => null, (failure: unknown) => failure as ManualFlowError);
+    expect(error).toMatchObject({ status: 422, code: "DESCRIPTION_INSUFFICIENT" });
+    expect(error?.message).toContain("remains in the pipeline unchanged");
+    const drafts = await pool.query(`SELECT id FROM manual_application_drafts WHERE workspace_id = $1 AND job_version_id = $2`, [context.workspaceId, detail.versionId]);
+    expect(drafts.rowCount).toBe(0);
   });
 });
