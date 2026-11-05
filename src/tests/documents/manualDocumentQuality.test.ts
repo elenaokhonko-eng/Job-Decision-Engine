@@ -4,6 +4,7 @@ import {
   assertNoInternalAssessmentText,
   documentRequirements,
   isInternalAssessmentStatement,
+  MAX_OPTIONAL_THEMES,
   postingRequirementLines,
   type StoredRequirementRow,
 } from "../../documents/manualDocumentPolicy.js";
@@ -111,7 +112,7 @@ describe("manual document quality (baseline regression)", () => {
   // The loader drops internal assessment facts before comparison; the builder filters them again.
   const evidence = PROFILE.filter((item) => !isInternalAssessmentStatement(item.statement));
   const requirements = documentRequirements(PLACEHOLDER_ROWS, JOB_DESCRIPTION);
-  const docs = buildControlledDocuments(comparisonFor(requirements, evidence), CONTACT, { asOf: AS_OF });
+  const docs = buildControlledDocuments(comparisonFor(requirements, evidence), CONTACT, { asOf: AS_OF, includeMatchSection: true });
 
   it("uses the posting's own lines instead of placeholder requirements when AI extraction failed", () => {
     expect(requirements.map((row) => row.requirement_text)).toEqual([
@@ -178,13 +179,17 @@ describe("manual document quality (baseline regression)", () => {
 
     const requirements = documentRequirements(modelRows, description);
     const texts = requirements.map((row) => row.requirement_text);
-    expect(requirements.length).toBeGreaterThanOrEqual(background.length + responsibilities.length);
-    for (const line of [...background, ...responsibilities]) {
+    for (const line of background) {
       expect(texts.filter((text) => text.replace(/\.$/, "") === line.replace(/\.$/, ""))).toHaveLength(1);
     }
+    // Duties stay, but similar ones share a theme row.
+    for (const line of responsibilities) {
+      expect(texts.some((text) => text.toLowerCase().includes(line.replace(/\.$/, "").toLowerCase())), line).toBe(true);
+    }
+    expect(requirements.filter((row) => row.importance !== "MUST").length).toBeLessThanOrEqual(MAX_OPTIONAL_THEMES);
     const byText = new Map(requirements.map((row) => [row.requirement_text, row]));
     expect(byText.get(background[0])?.importance).toBe("MUST");
-    expect(byText.get(responsibilities[0])?.importance).toBe("PREFERRED");
+    expect(requirements.find((row) => row.requirement_text.startsWith(responsibilities[0].replace(/\.$/, "")))?.importance).toBe("PREFERRED");
     expect(texts).not.toContain("Hybrid working and an annual bonus.");
     expect(new Set(requirements.map((row) => row.requirement_key)).size).toBe(requirements.length);
   });
@@ -310,9 +315,10 @@ describe("manual document quality (baseline regression)", () => {
     const experience = section(docs.cv, "Experience");
     expect(experience).toContain("### Delivery Architect at Old Brokerage | Jan 2004 – Jun 2006");
     expect(experience).toContain("- Integrated an order management system across 3 custodians for a brokerage.");
-    // Cited only by the summary, the import role is promoted too.
-    expect(experience).toContain("### Import-Export Coordinator at Trading House");
-    expect(section(docs.cv, "Earlier career")).not.toMatch(/Old Brokerage|Trading House/);
+    // Cited only by the summary, the 2002 import role is shown as one line: findable, not promoted.
+    expect(experience).not.toContain("Trading House");
+    expect(section(docs.cv, "Earlier career")).toContain("Import-Export Coordinator at Trading House");
+    expect(section(docs.cv, "Earlier career")).not.toContain("Old Brokerage");
     // The candidate's choice still wins.
     const hidden = buildControlledDocuments(comparison, CONTACT, { asOf: AS_OF, roleLayout: { "eng-broker": "ONE_LINE" } });
     expect(section(hidden.cv, "Experience")).not.toContain("Old Brokerage");
@@ -324,15 +330,21 @@ describe("manual document quality (baseline regression)", () => {
       requirement_key: `R-00${index + 1}`, requirement_type: "FUNCTION", importance: "MUST", requirement_text: line,
       extractor_type: "LLM_QUOTED", quote_text: line,
     }));
-    const requirements = documentRequirements(modelRows, EXCHANGE_DESCRIPTION);
-    const texts = requirements.map((row) => row.requirement_text);
-    expect(requirements.length).toBe(EXCHANGE_REQUIREMENTS.length + EXCHANGE_RESPONSIBILITIES.length);
-    for (const line of [...EXCHANGE_REQUIREMENTS, ...EXCHANGE_RESPONSIBILITIES]) expect(texts).toContain(line);
-    const importance = (line: string) => requirements.find((row) => row.requirement_text === line)?.importance;
+    // Every line is parsed with the right importance before optional rows are merged into themes.
+    const parsed = documentRequirements(modelRows, EXCHANGE_DESCRIPTION);
+    const lines = postingRequirementLines(EXCHANGE_DESCRIPTION);
+    const lineTexts = lines.map((row) => row.requirement_text);
+    for (const line of [...EXCHANGE_REQUIREMENTS, ...EXCHANGE_RESPONSIBILITIES]) expect(lineTexts).toContain(line);
+    const importance = (line: string) => lines.find((row) => row.requirement_text === line)?.importance;
     expect(EXCHANGE_REQUIREMENTS.filter((line) => importance(line) === "MUST")).toHaveLength(7);
     expect(importance(EXCHANGE_REQUIREMENTS[2])).toBe("PREFERRED"); // "is a strong plus"
     expect(importance(EXCHANGE_REQUIREMENTS[8])).toBe("PREFERRED"); // "is a plus"
     expect(EXCHANGE_RESPONSIBILITIES.every((line) => importance(line) === "PREFERRED")).toBe(true);
+    // The review keeps every MUST, and the long duty list becomes at most six themes.
+    const requirements = parsed;
+    const texts = requirements.map((row) => row.requirement_text);
+    for (const line of EXCHANGE_REQUIREMENTS.filter((line) => importance(line) === "MUST")) expect(texts).toContain(line);
+    expect(requirements.filter((row) => row.importance !== "MUST").length).toBeLessThanOrEqual(MAX_OPTIONAL_THEMES);
     // Sub-headings, the opening paragraphs and the closing "Why this role matters" section are not requirements.
     expect(texts.some((text) => /Stakeholder Management|Why this role|critical market infrastructure|WE RUN MARKETS|partnership role/.test(text))).toBe(false);
   });
