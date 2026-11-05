@@ -15,7 +15,7 @@ import { buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
 import { COMPLETE_TEST_POSTING_DESCRIPTION } from "../fixtures/completePostingEvidence.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
-const DATABASE_MIGRATION = "087_accept_job_source_evidence_v2.sql";
+const DATABASE_MIGRATION = "090_accept_job_source_evidence_v2.sql";
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
 if (process.env.REQUIRE_POSTGRES_INTEGRATION === "true" && skipReal) {

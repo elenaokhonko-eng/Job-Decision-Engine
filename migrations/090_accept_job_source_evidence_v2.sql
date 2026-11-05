@@ -1,4 +1,4 @@
--- Migration 087: accept version 2 of normalized job source evidence.
+-- Migration 090: accept version 2 of normalized job source evidence.
 --
 -- This changes only the schema-version checks. Existing v1 JSON and version values are
 -- untouched; the equality check continues to require the JSON version to match its column.
