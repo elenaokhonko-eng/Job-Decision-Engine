@@ -14,7 +14,8 @@ import { fileURLToPath } from "url";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
-import { buildEvidenceRevisionHash } from "../../ingestion/jobSourceEvidence.js";
+import { buildEvidenceRevisionHash, buildJobSourceEvidence } from "../../ingestion/jobSourceEvidence.js";
+import { htmlToPlainText } from "../../ingestion/emailAlertExtractor.js";
 import { SourceBroker } from "../../ingestion/sourceBroker.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../../contracts/jobSourceEvidence.js";
 import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
@@ -58,7 +59,7 @@ type FixtureLane =
   | "UNCLASSIFIED";
 type FixtureAction = "PRIORITY_APPLY" | "APPLY_AFTER_VERIFICATION" | "HARD_REJECT";
 type RecommendationOutcome = "PRIORITY" | "REVIEW" | "TRACK" | "SKIP";
-type LifecycleStatus = "QUEUED_FOR_AI" | "MATCHED" | "HARD_REJECTED";
+type LifecycleStatus = "QUEUED_FOR_AI" | "MATCHED" | "NEEDS_VERIFICATION" | "HARD_REJECTED";
 
 interface NineEmailFixture {
   readonly id: string;
@@ -87,6 +88,10 @@ interface PipelineFixtureRow {
   readonly primary_lane: FixtureLane | null;
   readonly recommendation_outcome: RecommendationOutcome;
   readonly recommendation_eligibility: "ELIGIBLE" | "VERIFY" | "INELIGIBLE" | null;
+  readonly profile_match_status: string | null;
+  readonly routing_disposition: string | null;
+  readonly readiness_check_summary: unknown;
+  readonly mandatory_mismatch_summary: unknown;
   readonly version_count: number;
 }
 
@@ -279,7 +284,8 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       "CloudScale Data",
     ];
     await q("DELETE FROM canonical_jobs WHERE company_name = ANY($1)", [fixtureCompanies]);
-    await q("DELETE FROM raw_job_observations WHERE source_name = 'gmail'");
+    await q("DELETE FROM raw_job_observations WHERE source_name = 'EMPLOYER_WEBSITE' AND source_external_id LIKE 'employer-fixture-email-%'");
+    await q("DELETE FROM raw_job_observations WHERE source_name = 'GMAIL_ALERT'");
     await q("DELETE FROM raw_email_alerts WHERE gmail_message_id LIKE 'fixture-email-%'");
 
     // Mock embeddings for deterministic offline CI runs
@@ -318,7 +324,9 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         t.includes("llm") ||
         t.includes("data pipeline") ||
         t.includes("cloudscale") ||
-        t.includes('"domain_key":"ai_systems"')
+        t.includes("target technical domain requirement") ||
+        t.includes('"domain_key":"ai_systems"') ||
+        t.includes('"domain_key":"ai"')
       ) {
         return [1, 0, 0, 0];
       }
@@ -354,39 +362,93 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         [email.subject, email.raw_html || email.subject, email.id]
       );
 
-      const contentHash = crypto.createHash("sha256").update(email.raw_html || email.subject).digest("hex");
+      const emailPayload = {
+        message_id: email.id,
+        subject: email.subject,
+        body_text: htmlToPlainText(email.raw_html || email.subject),
+      };
+      const emailPayloadHash = crypto.createHash("sha256").update(JSON.stringify(emailPayload)).digest("hex");
       const company = email.subject.split(" at ")[1] || "Unknown Corp";
       const title =
         email.subject
           .replace("Job Alert: ", "")
           .replace("REPOST - ", "")
           .split(" at ")[0] || "Unknown Title";
+      const sourceUrl = `https://example.com/jobs/${email.id}`;
+      const alertObservationId = crypto.randomUUID();
+      const description = [
+        htmlToPlainText(email.raw_html || email.subject),
+        `About the role: ${title} at ${company} delivers the specific systems and outcomes described in the employer posting.`,
+        `Responsibilities: Plan and carry out the work described for ${title}, coordinate implementation with relevant teams, document decisions, monitor quality, and resolve delivery risks.`,
+        `Qualifications: The successful candidate brings relevant professional experience, role-specific skills, sound judgment, clear communication, and the ability to deliver the stated responsibilities.`,
+      ].join(" ");
+      const contentHash = crypto.createHash("sha256").update(description).digest("hex");
+      const sourcePayload = {
+        source_content_status: "COMPLETE",
+        discovery_observation_id: alertObservationId,
+        source_provider: "EMPLOYER_WEBSITE",
+        requested_url: sourceUrl,
+        canonical_url: sourceUrl,
+        source_evidence: {
+          requestedUrl: sourceUrl,
+          resolvedUrl: sourceUrl,
+          responseHash: contentHash,
+        },
+        posting: { title, companyName: company, description },
+        content_hash: contentHash,
+      };
+      const sourcePayloadHash = crypto.createHash("sha256").update(JSON.stringify(sourcePayload)).digest("hex");
 
       await q(
         `INSERT INTO raw_job_observations (
-           source_name, source_external_id, source_url, company_name, title,
+           id, workspace_id, source_name, source_external_id, source_url, company_name, title,
            description_raw, location_raw, workplace_type_raw, employment_type_raw,
-           raw_payload_hash, processing_status
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING')`,
+           raw_payload, raw_payload_hash, processing_status
+         ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, 'FETCH_COMPLETE')`,
         [
-          "gmail",
+          alertObservationId,
+          getContext().workspaceId,
           email.id,
-          `https://example.com/jobs/${email.id}`,
+          sourceUrl,
           company,
           title,
           email.raw_html || email.subject,
           email.location_raw,
           email.workplace_type_raw,
           email.employment_type_raw,
-          contentHash,
+          JSON.stringify(emailPayload),
+          emailPayloadHash,
         ]
+      );
+
+      await q(
+        `INSERT INTO raw_job_observations (
+           workspace_id, source_name, source_external_id, source_url, retrieved_at,
+           company_name, title, description_raw, location_raw, workplace_type_raw,
+           employment_type_raw, raw_payload, raw_payload_hash, processing_status,
+           derived_from_observation_id
+         ) VALUES ($1, 'EMPLOYER_WEBSITE', $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10::jsonb, $11, 'PENDING', $12::uuid)`,
+        [
+          getContext().workspaceId,
+          `employer-${email.id}`,
+          sourceUrl,
+          company,
+          title,
+          description,
+          email.location_raw,
+          email.workplace_type_raw,
+          email.employment_type_raw,
+          JSON.stringify(sourcePayload),
+          sourcePayloadHash,
+          alertObservationId,
+        ],
       );
     }
 
     const alertCount = await countWhere("raw_email_alerts", "gmail_message_id LIKE 'fixture-email-%'");
     const obsCount = await countWhere(
       "raw_job_observations",
-      "source_name = 'gmail' AND source_external_id LIKE 'fixture-email-%'"
+      "source_name = 'GMAIL_ALERT' AND source_external_id LIKE 'fixture-email-%'"
     );
     expect(alertCount).toBe(9);
     expect(obsCount).toBe(9);
@@ -398,7 +460,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     const observationCount = await countWhere(
       "raw_job_observations",
-      "source_name = 'gmail' AND source_external_id LIKE 'fixture-email-%'"
+      "source_name = 'GMAIL_ALERT' AND source_external_id LIKE 'fixture-email-%'"
     );
     const canonicalCount = await countWhere("canonical_jobs", "processing_status = 'RAW_STAGED'");
     const versionCount = await countWhere("job_versions", "TRUE");
@@ -409,7 +471,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
               COUNT(DISTINCT jv.canonical_job_id)::int AS canonical_count
          FROM raw_job_observations rjo
          LEFT JOIN job_versions jv ON jv.id = rjo.job_version_id
-        WHERE rjo.source_name = 'gmail'
+        WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'`
     );
 
@@ -422,12 +484,12 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(Number(conservation.rows[0].canonical_count)).toBe(8);
   });
 
-  it("Stage 2 — hard gates produce 3 HARD_REJECTED, 0 NEEDS_VERIFICATION, 5 PREQUALIFIED", async () => {
+  it("Stage 2 — hard gates preserve one unknown work mode for verification", async () => {
     const { runHardGates } = await import("../../pipeline/hardGate.js");
     const result = await runHardGates(getClient(), { context: getContext() });
 
-    expect(result.hardRejected).toBe(3);
-    expect(result.needsVerification).toBe(0);
+    expect(result.hardRejected).toBe(2);
+    expect(result.needsVerification).toBe(1);
     expect(result.passed).toBe(5);
 
     const gated = await countWhere(
@@ -467,8 +529,8 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
     const embeddings = await runEmbeddingBatchWithFallback(200, getClient(), { context: getContext() });
 
-    // The fixture includes five PREQUALIFIED jobs; all three unknown or
-    // unworkable workplace cases are HARD_REJECTED before this stage.
+    // Five jobs are PREQUALIFIED and one with an unknown work mode remains in
+    // verification while still receiving deterministic requirements.
     const requirementTargetCount = await countWhere(
       "canonical_jobs",
       `COALESCE(processing_state, processing_status) IN (
@@ -478,7 +540,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
        )`
     );
 
-    expect(requirementTargetCount).toBe(5);
+    expect(requirementTargetCount).toBe(6);
     expect(requirements.errors).toBe(0);
     expect(requirements.processed).toBe(requirementTargetCount);
     expect(requirements.deterministicInserted).toBeGreaterThan(0);
@@ -490,7 +552,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(embeddings.primary.succeeded).toBeGreaterThan(0);
   });
 
-  it("Stage 3 — lane router assigns primary_lane + secondary_lanes to all PREQUALIFIED jobs", async () => {
+  it("Stage 3 — lane router routes gate-passed and workability-verification jobs", async () => {
     const { runLaneRouter } = await import("../../pipeline/laneRouter.js");
     await runLaneRouter(getClient(), { context: getContext() });
 
@@ -501,7 +563,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         WHERE primary_lane IS NOT NULL
           AND processing_status IN ('LANE_ROUTED', 'PREQUALIFIED')`
     );
-    expect(routed.rows).toHaveLength(5);
+    expect(routed.rows).toHaveLength(6);
     for (const row of routed.rows) {
       expect(row.primary_lane).not.toBe("UNCLASSIFIED");
       expect(row.routing_disposition).toBe("ROUTED");
@@ -522,7 +584,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       "canonical_jobs",
       "processing_status = 'HARD_REJECTED' AND primary_lane IS NOT NULL"
     );
-    expect(Number(laneDecisions.rows[0].count)).toBe(5);
+    expect(Number(laneDecisions.rows[0].count)).toBe(6);
     expect(rejectedWithLane).toBe(0);
   });
 
@@ -585,12 +647,14 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
               d.evidence
          FROM evaluation_budget_deferrals d
          JOIN canonical_jobs c ON c.id = d.canonical_job_id
+         -- Each fixture version also has its derived employer observation; report the Gmail fixture.
          JOIN raw_job_observations rjo ON rjo.job_version_id = d.job_version_id
+          AND rjo.source_name = 'GMAIL_ALERT'
         WHERE d.workspace_id = $1 AND d.budget_run_id = $2`,
       [getContext().workspaceId, budgetRunId]
     );
     expect(matching.errors).toBe(0);
-    expect(matching.matchedJobs).toBe(5);
+    expect(matching.matchedJobs).toBe(6);
     expect(decisions.errors).toBe(0);
     expect(queueSummary.enqueued).toBe(4);
     expect(queueSummary.updated).toBe(4);
@@ -629,6 +693,40 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
               c.primary_lane,
               c.recommendation_outcome,
               c.recommendation_eligibility,
+              c.profile_match_status,
+              c.routing_disposition,
+              (
+                SELECT jsonb_agg(jsonb_build_object(
+                  'key', check_item->>'key',
+                  'status', check_item->>'status',
+                  'reason_code', check_item->>'reason_code'
+                ) ORDER BY check_item->>'key')
+                FROM jsonb_array_elements(latest_decision.readiness_json->'checks') AS check_rows(check_item)
+              ) AS readiness_check_summary,
+              (
+                SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                  'requirement_type', jr.requirement_type,
+                  'match_type', current_match.match_type,
+                  'qualification_code', current_match.evidence->>'match_qualification_code'
+                ) ORDER BY jr.requirement_type), '[]'::jsonb)
+                FROM job_requirements jr
+                LEFT JOIN LATERAL (
+                  SELECT rem.match_type, rem.evidence
+                    FROM requirement_evidence_matches rem
+                   WHERE rem.workspace_id = jr.workspace_id
+                     AND rem.match_run_id = c.latest_match_run_id
+                     AND rem.requirement_id = jr.id
+                   ORDER BY rem.created_at DESC, rem.id DESC
+                   LIMIT 1
+                ) current_match ON TRUE
+               WHERE jr.workspace_id = c.workspace_id
+                 AND jr.canonical_job_id = c.id
+                 AND jr.job_version_id = jv.id
+                 AND jr.requirement_set_id = jv.active_requirement_set_id
+                 AND jr.importance = 'MUST'
+                 AND jr.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')
+                 AND current_match.match_type = 'NO_MATCH'
+              ) AS mandatory_mismatch_summary,
               c.deterministic_match_score,
               c.deterministic_match_coverage,
               c.recommendation_evidence_completeness,
@@ -636,7 +734,16 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
          FROM raw_job_observations rjo
          JOIN job_versions jv ON jv.id = rjo.job_version_id
          JOIN canonical_jobs c ON c.id = jv.canonical_job_id
-        WHERE rjo.source_name = 'gmail'
+         LEFT JOIN LATERAL (
+           SELECT dd.readiness_json
+             FROM deterministic_decisions dd
+            WHERE dd.workspace_id = c.workspace_id
+              AND dd.canonical_job_id = c.id
+              AND dd.job_version_id = jv.id
+            ORDER BY dd.created_at DESC, dd.id DESC
+            LIMIT 1
+         ) latest_decision ON TRUE
+        WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'
         ORDER BY rjo.source_external_id`
     );
@@ -660,12 +767,28 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
       expect(actionToOutcome[fixture.expected_action]).toBe(fixture.expected_recommendation_outcome);
       expect(row.gate_decision).toBe(fixture.expected_gate);
-      expect(row.recommendation_outcome, fixture.id).toBe(fixture.expected_recommendation_outcome);
+      expect(
+        row.recommendation_outcome,
+        `${fixture.id}: ${JSON.stringify({
+          gate: row.gate_decision,
+          state: row.processing_state,
+          lane: row.primary_lane,
+          eligibility: row.recommendation_eligibility,
+          profileMatch: row.profile_match_status,
+          routing: row.routing_disposition,
+          readiness: row.readiness_check_summary,
+          mandatoryMismatches: row.mandatory_mismatch_summary,
+        })}`,
+      ).toBe(fixture.expected_recommendation_outcome);
       expect(row.primary_lane ?? "UNCLASSIFIED").toBe(fixture.expected_lane);
       expect(row.processing_state).toBe(fixture.expected_status);
       expect(row.processing_status).toBe(fixture.expected_status);
       expect(row.recommendation_eligibility).toBe(
-        fixture.expected_gate === "HARD_REJECT" ? "INELIGIBLE" : "ELIGIBLE"
+        fixture.expected_gate === "HARD_REJECT"
+          ? "INELIGIBLE"
+          : fixture.expected_gate === "NEEDS_VERIFICATION"
+            ? "VERIFY"
+            : "ELIGIBLE"
       );
       expect(row.version_count).toBe(fixture.expected_version);
 
@@ -678,6 +801,25 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         expect(row.canonical_job_id).toBe(original.canonical_job_id);
       }
     }
+
+    const verificationFixture = rowsByFixture.get("fixture-email-007");
+    expect(verificationFixture, "Missing unknown-work-mode fixture").toBeDefined();
+    if (!verificationFixture) throw new Error("Missing unknown-work-mode fixture");
+    expect(verificationFixture.gate_decision).toBe("NEEDS_VERIFICATION");
+    expect(verificationFixture.processing_state).toBe("MATCHED");
+    expect(verificationFixture.recommendation_eligibility).toBe("VERIFY");
+    expect(verificationFixture.recommendation_outcome).toBe("REVIEW");
+    const verificationReadiness = await q(
+      `SELECT readiness_status
+         FROM v_application_readiness_current
+        WHERE workspace_id = $1
+          AND canonical_job_id = $2::uuid
+          AND job_version_id = $3::uuid`,
+      [getContext().workspaceId, verificationFixture.canonical_job_id, verificationFixture.job_version_id]
+    );
+    expect(verificationReadiness.rows).toHaveLength(1);
+    expect(verificationReadiness.rows[0].readiness_status).toBe("NEEDS_VERIFICATION");
+    expect(verificationReadiness.rows[0].readiness_status).not.toBe("READY");
   });
 
   it("PostgreSQL positive path — normal scoped pipeline stages can produce READY from actual matcher rows", async () => {
@@ -710,12 +852,21 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         companyName: "Readiness Evidence Fixture Labs",
         salary: "SGD250,000",
         expectedStatus: "READY",
+        sourceKind: "ATS",
       },
       {
         externalId: `readiness-below-floor-${crypto.randomUUID()}`,
         companyName: "Readiness Below Floor Fixture Labs",
         salary: "SGD200,000",
         expectedStatus: "BLOCKED",
+        sourceKind: "ATS",
+      },
+      {
+        externalId: `readiness-gmail-fetched-${crypto.randomUUID()}`,
+        companyName: "Readiness Gmail Fetched Fixture Labs",
+        salary: "SGD250,000",
+        expectedStatus: "NEEDS_VERIFICATION",
+        sourceKind: "GMAIL_FETCHED",
       },
     ] as const;
     const retrievedAt = new Date().toISOString();
@@ -724,7 +875,9 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     await broker.startRun("READINESS_COMPENSATION_POSTGRES_E2E");
     const observationIds: string[] = [];
     for (const posting of postings) {
-      const postingUrl = `https://boards.greenhouse.io/readiness-fixture/jobs/${posting.externalId}`;
+      const postingUrl = posting.sourceKind === "ATS"
+        ? `https://boards.greenhouse.io/readiness-fixture/jobs/${posting.externalId}`
+        : `https://careers.example.test/jobs/${posting.externalId}`;
       const description = [
         "<h1>Principal AI Systems Architect</h1>",
         `<h2>About the role</h2><p>${posting.companyName} builds production AI platforms for enterprise data teams.</p>`,
@@ -733,20 +886,65 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         `<h2>Compensation</h2><p>${posting.salary} gross base salary per year.</p>`,
         "<p>This position is fully remote. Candidates must be authorized to work in Singapore or Australia. No travel is required.</p>",
       ].join("");
-      const rawPayload = {
-        id: posting.externalId,
-        title: "Principal AI Systems Architect",
-        status: "active",
-        publishedAt,
-        location: "Singapore",
-        workplaceType: "REMOTE",
-        employmentType: "PERMANENT",
-        organizationType: "commercial",
-        description,
-      };
+      let derivedFromObservationId: string | undefined;
+      let rawPayload: Record<string, unknown>;
+      if (posting.sourceKind === "GMAIL_FETCHED") {
+        derivedFromObservationId = crypto.randomUUID();
+        const emailPayload = { message_id: `readiness-${posting.externalId}`, body_text: "A role is available; open the link to view the posting." };
+        const emailPayloadHash = crypto.createHash("sha256").update(JSON.stringify(emailPayload)).digest("hex");
+        await q(
+          `INSERT INTO raw_job_observations (
+             id, workspace_id, source_name, source_external_id, source_url, retrieved_at,
+             company_name, title, description_raw, raw_payload, raw_payload_hash, processing_status
+           ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, $5, $6, $7, 'A role is available; open the link to view the posting.', $8::jsonb, $9, 'FETCH_COMPLETE')`,
+          [derivedFromObservationId, getContext().workspaceId, `gmail-${posting.externalId}`, postingUrl,
+            retrievedAt, posting.companyName, "Principal AI Systems Architect", JSON.stringify(emailPayload), emailPayloadHash],
+        );
+        const responseHash = crypto.createHash("sha256").update(description).digest("hex");
+        rawPayload = {
+          source_content_status: "COMPLETE",
+          discovery_observation_id: derivedFromObservationId,
+          source_provider: "EMPLOYER_WEBSITE",
+          requested_url: postingUrl,
+          canonical_url: postingUrl,
+          retrieved_at: retrievedAt,
+          source_evidence: {
+            requestedUrl: postingUrl,
+            resolvedUrl: postingUrl,
+            redirectHistory: [],
+            retrievedAt,
+            httpStatus: 200,
+            contentType: "text/html",
+            responseHash,
+          },
+          posting: {
+            title: "Principal AI Systems Architect",
+            companyName: posting.companyName,
+            organizationType: "commercial",
+            description,
+            canonicalUrl: postingUrl,
+          },
+          content_hash: responseHash,
+        };
+      } else {
+        rawPayload = {
+          id: posting.externalId,
+          title: "Principal AI Systems Architect",
+          status: "active",
+          publishedAt,
+          location: "Singapore",
+          workplaceType: "REMOTE",
+          employmentType: "PERMANENT",
+          organizationType: "commercial",
+          description,
+        };
+      }
+      const sourceName = posting.sourceKind === "ATS"
+        ? "GREENHOUSE"
+        : "EMPLOYER_WEBSITE";
       const staged = await broker.processObservation({
-        sourceName: "GREENHOUSE",
-        sourcePluginKey: "greenhouse",
+        sourceName,
+        sourcePluginKey: sourceName.toLowerCase(),
         sourceExternalId: posting.externalId,
         sourceUrl: postingUrl,
         canonicalApplyUrl: postingUrl,
@@ -760,21 +958,32 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         compensationRaw: "UNKNOWN",
         sourceLane: "CORE_AI_DATA",
         searchPlanVersion: "readiness-compensation-v1",
+        ...(derivedFromObservationId ? { derivedFromObservationId } : {}),
         rawPayload,
       }, rawPayload);
       expect(staged.observationId).toBeTruthy();
-      expect(staged.normalizedEvidence?.description.completeness_status).toBe("COMPLETE");
-      expect(staged.normalizedEvidence?.availability.status).toBe("OPEN");
-      expect(staged.normalizedEvidence?.workability.hiring_territories).toMatchObject({
+      const normalizedEvidence = staged.normalizedEvidence;
+      if (!normalizedEvidence) throw new Error("Readiness fixture source evidence was not normalized.");
+      expect(normalizedEvidence.description.completeness_status).toBe("COMPLETE");
+      expect(normalizedEvidence.availability.status).toBe("OPEN");
+      if (posting.sourceKind === "GMAIL_FETCHED") {
+        expect(normalizedEvidence.availability).toMatchObject({
+          reason_code: "FULL_POSTING_RETRIEVED",
+          verification_method: "VERIFIED_POSTING_RETRIEVAL",
+        });
+        expect(Date.parse(normalizedEvidence.availability.expires_at!) - Date.parse(normalizedEvidence.availability.verified_at!))
+          .toBe(7 * 24 * 60 * 60 * 1000);
+      }
+      expect(normalizedEvidence.workability.hiring_territories).toMatchObject({
         status: "SUPPORTED",
         operator: "ANY",
         countries: ["SINGAPORE", "AUSTRALIA"],
       });
-      expect(staged.normalizedEvidence?.opportunity_category).toMatchObject({
+      expect(normalizedEvidence.opportunity_category).toMatchObject({
         status: "SUPPORTED",
         value: "COMMERCIAL",
       });
-      expect(staged.normalizedEvidence?.compensation.components[0]).toMatchObject({
+      expect(normalizedEvidence.compensation.components[0]).toMatchObject({
         component_type: "BASE_CASH",
         amount_min: Number(posting.salary.replace(/[^0-9]/g, "")),
         currency: "SGD",
@@ -867,10 +1076,13 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       );
       const readiness = decisionRows[0]?.readiness_json;
       expect(readiness).toBeDefined();
-      expect(readiness.status).toBe(posting.expectedStatus);
+      expect(readiness.status, `${posting.externalId}: ${JSON.stringify(readiness.checks)}`).toBe(posting.expectedStatus);
       expect(readiness.checks.find((check: { key: string }) => check.key === "MANDATORY_QUALIFICATIONS").status).toBe("MET");
       expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").status)
-        .toBe(posting.expectedStatus === "READY" ? "MET" : "BLOCKED");
+        .toBe(posting.expectedStatus === "BLOCKED" ? "BLOCKED" : "MET");
+      if (posting.sourceKind === "GMAIL_FETCHED") {
+        expect(readiness.checks.find((check: { key: string }) => check.key === "AVAILABILITY").status).toBe("MET");
+      }
       if (posting.expectedStatus === "BLOCKED") {
         expect(readiness.checks.find((check: { key: string }) => check.key === "COMPENSATION").reason_code)
           .toBe("COMPENSATION_BELOW_USER_FLOOR");
@@ -1034,6 +1246,37 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(reassessedDecision?.context_fingerprint).not.toBe(expiredDecision?.context_fingerprint);
     expect(reassessedDecision?.readiness_fingerprint).not.toBe(expiredDecision?.readiness_fingerprint);
     expect(reassessedDecision?.evidence_revision_hash).toBe(buildEvidenceRevisionHash(freshEvidence));
+
+    const alertOnlyPayload = {
+      message_id: `alert-only-${positivePosting.externalId}`,
+      body_text: "A role is available; open the link to view the full posting.",
+    };
+    const alertOnlyRetrievedAt = new Date().toISOString();
+    const alertOnlyUrl = `https://careers.example.test/alerts/${positivePosting.externalId}`;
+    const alertOnlyPayloadHash = crypto.createHash("sha256").update(JSON.stringify(alertOnlyPayload)).digest("hex");
+    const alertOnlyEvidence = buildJobSourceEvidence({
+      sourceName: "GMAIL_ALERT",
+      sourcePluginKey: "gmail_alert",
+      sourcePluginRevisionId: null,
+      sourceExternalId: `gmail-${positivePosting.externalId}`,
+      sourceUrl: alertOnlyUrl,
+      canonicalApplyUrl: alertOnlyUrl,
+      retrievedAt: alertOnlyRetrievedAt,
+      rawPayloadHash: alertOnlyPayloadHash,
+      rawPayload: alertOnlyPayload,
+      companyName: positivePosting.companyName,
+      title: "Principal AI Systems Architect",
+      locationRaw: "Singapore",
+      workplaceTypeRaw: "REMOTE",
+      employmentTypeRaw: "PERMANENT",
+      compensationRaw: "UNKNOWN",
+      descriptionText: alertOnlyPayload.body_text,
+    });
+    expect(alertOnlyEvidence.availability).toMatchObject({
+      status: "UNKNOWN",
+      verification_method: "NONE",
+      reason_code: "AVAILABILITY_NOT_VERIFIED",
+    });
   });
   it("Conservation — no observation, canonical job, or version disappears", async () => {
     const conservation = await q(
@@ -1042,7 +1285,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
               COUNT(DISTINCT jv.canonical_job_id)::int AS canonical_count
          FROM raw_job_observations rjo
          JOIN job_versions jv ON jv.id = rjo.job_version_id
-        WHERE rjo.source_name = 'gmail'
+        WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'`
     );
     const versionCount = await countWhere("job_versions", "TRUE");
@@ -1050,19 +1293,19 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(Number(conservation.rows[0].observation_count)).toBe(9);
     expect(Number(conservation.rows[0].observed_version_count)).toBe(9);
     expect(Number(conservation.rows[0].canonical_count)).toBe(8);
-    expect(versionCount).toBe(11); // Nine email fixture versions plus positive and below-floor readiness jobs.
+    expect(versionCount).toBe(12); // Nine email fixture versions plus three readiness jobs.
   });
 
   it("Integrity — every fixture observation maps to a live canonical job version", async () => {
     const unmapped = await countWhere(
       "raw_job_observations",
-      "source_name = 'gmail' AND source_external_id LIKE 'fixture-email-%' AND job_version_id IS NULL"
+      "source_name = 'GMAIL_ALERT' AND source_external_id LIKE 'fixture-email-%' AND job_version_id IS NULL"
     );
     const orphaned = await q(
       `SELECT COUNT(*)::int AS count
          FROM raw_job_observations rjo
          LEFT JOIN job_versions jv ON jv.id = rjo.job_version_id
-        WHERE rjo.source_name = 'gmail'
+        WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'
           AND jv.id IS NULL`
     );

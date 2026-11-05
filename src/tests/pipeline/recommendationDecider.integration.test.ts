@@ -9,6 +9,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import pg from "pg";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from "../fixtures/completePostingEvidence.js";
 
 const DB_URL = process.env.DATABASE_URL || "";
 const isCI = isLocalPostgresConnectionString(DB_URL);
@@ -41,10 +42,21 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
 
     await q(
       `INSERT INTO job_versions (id, canonical_job_id, content_hash, description_text, observed_at)
-       VALUES ($1, $2, $3, 'Test job description', NOW())
+       VALUES ($1, $2, $3, $4, NOW())
        ON CONFLICT (id) DO NOTHING`,
-      [VERSION_ID, JOB_ID, `recommendation-decider-legacy-${JOB_ID}`]
+      [VERSION_ID, JOB_ID, `recommendation-decider-legacy-${JOB_ID}`, COMPLETE_TEST_POSTING_DESCRIPTION]
     );
+
+    await q(`DELETE FROM raw_job_observations WHERE job_version_id = $1`, [VERSION_ID]);
+    const workspace = await q(`SELECT workspace_id::text AS workspace_id FROM canonical_jobs WHERE id = $1`, [JOB_ID]);
+    await insertCompletePostingEvidence(client, {
+      workspaceId: workspace.rows[0].workspace_id,
+      jobVersionId: VERSION_ID,
+      companyName: "DeciderTestCo",
+      title: "Legacy Gate Decision",
+      sourceUrl: "https://example.test/decider",
+      description: COMPLETE_TEST_POSTING_DESCRIPTION,
+    });
 
     await q(`UPDATE canonical_jobs SET latest_job_version_id = $1, updated_at = NOW() WHERE id = $2`, [
       VERSION_ID,

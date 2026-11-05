@@ -66,3 +66,14 @@ def test_ready_apply_now_row_exposes_documents_and_unresolved_readiness_blocks_t
         "readiness_reason_codes": ["COMPENSATION_BASIS_UNRESOLVED"],
     }
     assert not is_document_generation_eligible(unresolved_row)
+
+
+def test_verify_then_apply_query_uses_scoped_read_model_and_sorts_by_match_fit():
+    query = read_query_constant("VERIFY_THEN_APPLY_JOBS_QUERY")
+    assert "FROM v_canonical_shortlist_scoped AS jobs" in query
+    assert "JOIN v_application_readiness_current" in query
+    assert "jobs.gate_status = 'NEEDS_VERIFICATION'" in query
+    assert "jobs.processing_state = 'MATCHED'" in query
+    assert "current_readiness.readiness_status = 'NEEDS_VERIFICATION'" in query
+    assert "ORDER BY jobs.deterministic_match_score DESC" in query
+    assert "FROM canonical_jobs" not in query

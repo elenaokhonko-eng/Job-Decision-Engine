@@ -45,6 +45,9 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('PIPELINE_TASK_WORKER_WALL_CLOCK_MS');
     expect(workflow).toContain("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'");
+    expect(workflow.match(/REQUIREMENTS_PRIMARY_PROVIDER: gemini/g)).toHaveLength(2);
+    const worker = workflow.slice(workflow.indexOf('name: Process saved discovery backlog'));
+    expect(worker).toContain("PIPELINE_TASK_WORKER_INCLUDE_QUOTED_REQUIREMENTS: 'true'");
     expect(workflow).toContain('scripts/report_pipeline_status.ts');
     expect(workflow).not.toContain('scripts/ingest_gmail.ts');
     expect(workflow).not.toContain('scripts/run_adapters.ts');

@@ -8,6 +8,7 @@ import { extractWithFallback } from "./llmFallback.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION } from "../contracts/index.js";
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { readJsonResponseBounded, readResponseTextBounded } from "../security/boundedResponse.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import {
   CULTURE_SCORE_DERIVATION_VERSION,
   scoreCultureEvidenceFromQuote,
@@ -81,6 +82,66 @@ function modelRequestTimeoutMs(): number {
   const parsed = Number.parseInt(String(process.env.MODEL_REQUEST_TIMEOUT_MS || "60000"), 10);
   if (!Number.isFinite(parsed)) return 60000;
   return Math.max(5000, Math.min(300000, parsed));
+}
+
+/** Per-call attempt limit: an explicit override (clamped like the env value) or the env default. */
+function effectiveMaxRetries(override: unknown): number {
+  if (typeof override === "number" && Number.isFinite(override)) {
+    return Math.max(1, Math.min(5, Math.floor(override)));
+  }
+  return modelRequestMaxRetries();
+}
+
+/** Per-call request timeout: an explicit override (clamped like the env value) or the env default. */
+function effectiveTimeoutMs(override: unknown): number {
+  if (typeof override === "number" && Number.isFinite(override)) {
+    return Math.max(5000, Math.min(300000, Math.floor(override)));
+  }
+  return modelRequestTimeoutMs();
+}
+
+export interface GeminiErrorClassification {
+  dailyQuota: boolean;
+  rateLimit: boolean;
+  timeout: boolean;
+  serverError: boolean;
+  retryable: boolean;
+}
+
+const GEMINI_RETRYABLE_HTTP_STATUSES = new Set([500, 502, 503, 504]);
+
+/**
+ * Classifies an error thrown by `@google/genai` `models.generateContent`.
+ *
+ * For a non-2xx response the SDK (v2.x) throws `ApiError` (name "ApiError") whose numeric
+ * `status` is the HTTP status and whose `message` is the JSON error body, e.g. for a 504:
+ * `{"error":{"code":504,"message":"Deadline expired before operation could complete.","status":"DEADLINE_EXCEEDED"}}`.
+ * Server-side failures (5xx, DEADLINE_EXCEEDED, UNAVAILABLE, INTERNAL, "overloaded") are transient,
+ * so they are retried with the same backoff as rate limits and client-side timeouts. A daily quota
+ * exhaustion is never retried: it will not clear within the backoff window.
+ */
+export function classifyGeminiError(error: any): GeminiErrorClassification {
+  const message = String(error?.message ?? error ?? "");
+  const status = Number(error?.status);
+  const dailyQuota =
+    message.includes("GenerateRequestsPerDay") ||
+    message.includes("free_tier_requests") ||
+    message.includes("quota");
+  const rateLimit = message.includes("RESOURCE_EXHAUSTED") || status === 429;
+  const timeout = error?.name === "AbortError" || message.includes("timeout") || message.includes("aborted");
+  const serverError =
+    GEMINI_RETRYABLE_HTTP_STATUSES.has(status) ||
+    message.includes("DEADLINE_EXCEEDED") ||
+    message.includes("UNAVAILABLE") ||
+    /\bINTERNAL\b/.test(message) ||
+    /overloaded/i.test(message);
+  return {
+    dailyQuota,
+    rateLimit,
+    timeout,
+    serverError,
+    retryable: !dailyQuota && (rateLimit || timeout || serverError),
+  };
 }
 
 interface ModelTokenUsage {
@@ -385,8 +446,9 @@ export async function runAgentWithFallback<T>(
         degraded: false
       };
     } catch (err: any) {
-      console.warn(`[Gemini Error] Primary model failed: ${err.message}. Triggering fallback...`);
-      errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error: err.message });
+      const error = publicErrorSummary(err, "gemini");
+      console.warn(`[Gemini Error] Primary model failed: ${error}. Triggering fallback...`);
+      errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error });
     }
   } else if (order[0] === "openai" && openaiApiKey) {
     try {
@@ -410,8 +472,9 @@ export async function runAgentWithFallback<T>(
         degraded: false
       };
     } catch (err: any) {
-      console.warn(`[OpenAI Error] Primary model failed: ${err.message}. Triggering fallback...`);
-      errors.push({ provider: 'openai', model: PRIMARY_MODEL, error: err.message });
+      const error = publicErrorSummary(err, "openai");
+      console.warn(`[OpenAI Error] Primary model failed: ${error}. Triggering fallback...`);
+      errors.push({ provider: 'openai', model: PRIMARY_MODEL, error });
     }
   } else if (order[0] === "gemini") {
     errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error: 'GEMINI_API_KEY not configured' });
@@ -442,8 +505,9 @@ export async function runAgentWithFallback<T>(
         degraded: true
       };
     } catch (err: any) {
-      console.error(`[OpenAI Error] Fallback model failed: ${err.message}`);
-      errors.push({ provider: 'openai', model: FALLBACK_MODEL, error: err.message });
+      const error = publicErrorSummary(err, "openai");
+      console.error(`[OpenAI Error] Fallback model failed: ${error}`);
+      errors.push({ provider: 'openai', model: FALLBACK_MODEL, error });
     }
   } else if (order[0] === "openai" && geminiApiKey) {
     try {
@@ -467,8 +531,9 @@ export async function runAgentWithFallback<T>(
         degraded: true
       };
     } catch (err: any) {
-      console.error(`[Gemini Error] Fallback model failed: ${err.message}`);
-      errors.push({ provider: 'gemini', model: FALLBACK_MODEL, error: err.message });
+      const error = publicErrorSummary(err, "gemini");
+      console.error(`[Gemini Error] Fallback model failed: ${error}`);
+      errors.push({ provider: 'gemini', model: FALLBACK_MODEL, error });
     }
   } else if (order[0] === "gemini") {
     errors.push({ provider: 'openai', model: FALLBACK_MODEL, error: 'OPENAI_API_KEY not configured' });
@@ -479,10 +544,76 @@ export async function runAgentWithFallback<T>(
   throw new Error(`All model providers failed: ${JSON.stringify(errors)}`);
 }
 
+/**
+ * The response schema as sent to Gemini. Gemini rejects schemas whose constraint state is too
+ * large with 400 INVALID_ARGUMENT; an array cap such as maxItems: 25 over items with enum fields is
+ * enough to trigger it. Array caps are therefore left out of the request; callers still enforce
+ * them when they validate the response locally.
+ */
+export function geminiResponseSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(geminiResponseSchema);
+  if (!schema || typeof schema !== "object") return schema;
+  return Object.fromEntries(
+    Object.entries(schema as Record<string, unknown>)
+      .filter(([key]) => key !== "maxItems")
+      .map(([key, value]) => {
+        if (key === "enum") return [key, value];
+        // Keys under "properties" are field names, so only their schemas are rewritten.
+        if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+          return [key, Object.fromEntries(Object.entries(value).map(([name, child]) => [name, geminiResponseSchema(child)]))];
+        }
+        return [key, geminiResponseSchema(value)];
+      })
+  );
+}
+
+// OpenAI strict structured outputs reject string length bounds; callers still enforce them when
+// they validate the response locally. Array bounds, number ranges, pattern and enum are supported.
+const OPENAI_STRICT_UNSUPPORTED_KEYWORDS = new Set(["minLength", "maxLength"]);
+
+function nullableSchema(schema: unknown): unknown {
+  const record = schema && typeof schema === "object" && !Array.isArray(schema) ? schema as Record<string, unknown> : null;
+  if (record && Array.isArray(record.anyOf)) {
+    const hasNull = record.anyOf.some((option) => (option as Record<string, unknown> | null)?.type === "null");
+    return hasNull ? record : { ...record, anyOf: [...record.anyOf, { type: "null" }] };
+  }
+  return { anyOf: [schema, { type: "null" }] };
+}
+
+/**
+ * The response schema as sent to OpenAI with strict: true. Strict mode requires every object to
+ * list all of its properties in `required` and to forbid additional properties, so a property the
+ * caller left optional is sent as required-but-nullable, and unsupported keywords are dropped.
+ */
+export function openAiStrictSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(openAiStrictSchema);
+  if (!schema || typeof schema !== "object") return schema;
+  const source = schema as Record<string, unknown>;
+  const converted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (OPENAI_STRICT_UNSUPPORTED_KEYWORDS.has(key) || key === "required" || key === "properties" || key === "additionalProperties") continue;
+    converted[key] = key === "enum" ? value : openAiStrictSchema(value);
+  }
+  const properties = source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
+    ? source.properties as Record<string, unknown>
+    : null;
+  if (properties || source.type === "object") {
+    const required = new Set(Array.isArray(source.required) ? source.required as string[] : []);
+    // Keys under "properties" are field names, so only their schemas are rewritten.
+    converted.properties = Object.fromEntries(Object.entries(properties ?? {}).map(([name, child]) => {
+      const strictChild = openAiStrictSchema(child);
+      return [name, required.has(name) ? strictChild : nullableSchema(strictChild)];
+    }));
+    converted.required = Object.keys(properties ?? {});
+    converted.additionalProperties = false;
+  }
+  return converted;
+}
+
 async function tryGemini(geminiKey: string, options: any): Promise<string> {
   const ai = getGeminiClient();
-  const maxRetries = modelRequestMaxRetries();
-  const timeoutMs = modelRequestTimeoutMs();
+  const maxRetries = effectiveMaxRetries(options.maxRetries);
+  const timeoutMs = effectiveTimeoutMs(options.timeoutMs);
   const model = options.model || MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -498,7 +629,7 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
           abortSignal: AbortSignal.timeout(timeoutMs),
           httpOptions: { timeout: timeoutMs },
           responseMimeType: options.responseMimeType as any,
-          responseSchema: options.responseSchema,
+          responseSchema: options.responseSchema ? geminiResponseSchema(options.responseSchema) as any : undefined,
           maxOutputTokens: options.maxOutputTokens ?? MODEL_MAX_OUTPUT_TOKENS,
           systemInstruction: options.systemInstruction
         }
@@ -518,10 +649,9 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
       });
       return response.text || "";
     } catch (gErr: any) {
-      const isDailyQuota = gErr.message?.includes("GenerateRequestsPerDay") || gErr.message?.includes("free_tier_requests") || gErr.message?.includes("quota");
-      const isRateLimit = gErr.message?.includes("RESOURCE_EXHAUSTED") || gErr.status === 429;
-      const isTimeout = gErr.name === "AbortError" || gErr.message?.includes("timeout") || gErr.message?.includes("aborted");
-      const retryable = !isDailyQuota && (isRateLimit || isTimeout);
+      const classification = classifyGeminiError(gErr);
+      const isDailyQuota = classification.dailyQuota;
+      const retryable = classification.retryable;
       recordProviderAttempt(options, {
         provider: "gemini",
         model,
@@ -531,17 +661,18 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
         httpStatus: finiteUsageNumber(gErr.status) ?? null,
         retryable: retryable && attempt < maxRetries,
         latencyMs: Date.now() - startedAt,
-        error: gErr.message || String(gErr),
+        error: publicErrorSummary(gErr, "gemini"),
       });
       
       if (isDailyQuota) {
         throw gErr; // Daily quota exhausted, fallback immediately
       }
       
-      if ((isRateLimit || isTimeout) && attempt < maxRetries) {
+      if (retryable && attempt < maxRetries) {
         // Exponential backoff: 5s, 15s, 45s
         const backoffMs = Math.pow(3, attempt - 1) * 5000;
-        console.warn(`⏳ Gemini request failed (${isRateLimit ? 'RateLimit' : 'Timeout'}). Attempt ${attempt}/${maxRetries}. Retrying in ${backoffMs/1000}s...`);
+        const reason = classification.rateLimit ? "RateLimit" : classification.serverError ? "ServerError" : "Timeout";
+        console.warn(`⏳ Gemini request failed (${reason}). Attempt ${attempt}/${maxRetries}. Retrying in ${backoffMs/1000}s...`);
         await new Promise((resolve) => setTimeout(resolve, backoffMs));
       } else {
         throw gErr; // Fallback after max retries
@@ -558,8 +689,8 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
   }
   messages.push({ role: "user", content: options.contents });
 
-  const maxRetries = modelRequestMaxRetries();
-  const timeoutMs = modelRequestTimeoutMs();
+  const maxRetries = effectiveMaxRetries(options.maxRetries);
+  const timeoutMs = effectiveTimeoutMs(options.timeoutMs);
   const providerLabel = isKimi ? "kimi" : "openai";
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const startedAt = Date.now();
@@ -580,7 +711,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
           temperature: 1,
           max_completion_tokens: options.maxOutputTokens ?? MODEL_MAX_OUTPUT_TOKENS,
           response_format: options.responseSchema && !isKimi
-            ? { type: "json_schema", json_schema: { name: "extraction", strict: true, schema: options.responseSchema } }
+            ? { type: "json_schema", json_schema: { name: "extraction", strict: true, schema: openAiStrictSchema(options.responseSchema) } }
             : (options.responseMimeType === "application/json" ? { type: "json_object" } : undefined)
         }),
         signal: AbortSignal.timeout(timeoutMs)
@@ -639,7 +770,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
         httpStatus: finiteUsageNumber(err.status) ?? null,
         retryable: retryable && attempt < maxRetries,
         latencyMs: Date.now() - startedAt,
-        error: err.message || String(err),
+        error: publicErrorSummary(err, providerLabel),
       });
       if (attempt === maxRetries || !retryable) throw err;
       
@@ -647,7 +778,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
       const baseBackoff = Math.pow(3, attempt - 1) * 5000;
       const backoffMs = err.retryAfterSecs ? err.retryAfterSecs * 1000 : baseBackoff;
       
-      console.warn(`⏳ API request failed (${baseUrl}, Status: ${err.status || 'Timeout'}). Attempt ${attempt}/${maxRetries}. Retrying in ${backoffMs/1000}s...`);
+      console.warn(`⏳ ${publicErrorSummary(err, providerLabel)}. Attempt ${attempt}/${maxRetries}. Retrying in ${backoffMs/1000}s...`);
       await new Promise((resolve) => setTimeout(resolve, backoffMs));
     }
   }
@@ -760,7 +891,7 @@ export async function generateContent(options: {
         const text = await tryGemini(geminiKey as string, options);
         if (text) return text;
       } catch (err: any) {
-        console.warn(`⚠️ Gemini request failed (${err.message || err}).`);
+        console.warn(`⚠️ ${publicErrorSummary(err, "gemini")}.`);
       }
     }
 
@@ -770,7 +901,7 @@ export async function generateContent(options: {
         const text = await tryOpenAI(openaiKey as string, options);
         if (text) return text;
       } catch (err: any) {
-        console.warn(`⚠️ OpenAI request failed (${err.message || err}).`);
+        console.warn(`⚠️ ${publicErrorSummary(err, "openai")}.`);
       }
     }
   }
@@ -882,6 +1013,24 @@ function cleanJsonResponseText(rawText: string): string {
   return cleaned;
 }
 
+const MAX_CORRECTION_REASON_CHARS = 4000;
+const MAX_CORRECTION_PREVIOUS_ANSWER_CHARS = 20000;
+
+/** The original request plus why its answer was rejected and the answer itself, for one correction round. */
+export function validationCorrectionContents(original: string, reasons: string, previousAnswer: string): string {
+  return [
+    original,
+    "",
+    "Your previous answer was rejected for these reasons:",
+    reasons.slice(0, MAX_CORRECTION_REASON_CHARS),
+    "",
+    "Your previous answer:",
+    previousAnswer.slice(0, MAX_CORRECTION_PREVIOUS_ANSWER_CHARS),
+    "",
+    "Return a corrected answer that fixes every reason and follows every rule above.",
+  ].join("\n");
+}
+
 async function validateGeneratedResponseText(
   text: string,
   context: GenerateContentResponseValidationContext,
@@ -908,6 +1057,17 @@ export async function generateContentAudited(options: {
   context?: WorkspaceContext;
   seedRoute?: boolean;
   validateResponseText?: GenerateContentResponseValidator;
+  /** Per-call request timeout; overrides MODEL_REQUEST_TIMEOUT_MS for this call only. */
+  timeoutMs?: number;
+  /** Per-call attempts per model; overrides MODEL_REQUEST_MAX_RETRIES for this call only. */
+  maxRetries?: number;
+  /**
+   * When a response fails validateResponseText, ask the same model once more with the validator's
+   * reasons before moving on. Only for string contents; provider errors never trigger it.
+   */
+  correctOnValidationFailure?: boolean;
+  /** A second Gemini model tried once when the route's Gemini model fails, before the next provider. */
+  secondaryGeminiModel?: string;
 }): Promise<GenerateContentAuditedResult> {
   const startedAt = Date.now();
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
@@ -969,7 +1129,12 @@ export async function generateContentAudited(options: {
     }
   }
 
-  const attemptedErrors: Array<{ provider: string; model: string; error: string }> = [];
+  const attemptedErrors: Array<{
+    provider: string;
+    model: string;
+    error: string;
+    publicError?: string;
+  }> = [];
   const providers: Array<"gemini" | "openai"> = [
     routeContent.primary_provider,
     routeContent.fallback_provider,
@@ -996,9 +1161,13 @@ export async function generateContentAudited(options: {
     has_schema: !!options.responseSchema,
     contents_length: contentsText.length,
     system_length: systemText.length,
-    model_request_max_retries: modelRequestMaxRetries(),
-    model_request_timeout_ms: modelRequestTimeoutMs(),
+    model_request_max_retries: effectiveMaxRetries(options.maxRetries),
+    model_request_timeout_ms: effectiveTimeoutMs(options.timeoutMs),
   };
+  const secondaryGeminiModel = String(options.secondaryGeminiModel || "").trim();
+  if (secondaryGeminiModel) {
+    requestMetadata.secondary_gemini_model = secondaryGeminiModel;
+  }
 
   let successText: string | null = null;
   let successValidatedPayload: unknown = undefined;
@@ -1006,6 +1175,44 @@ export async function generateContentAudited(options: {
   let successModel = options.model;
   let attempts = 0;
   const providerAttemptTelemetry: ModelProviderAttemptTelemetry[] = [];
+  const correctionRounds =
+    options.correctOnValidationFailure && options.validateResponseText && typeof options.contents === "string" ? 1 : 0;
+  if (correctionRounds > 0) {
+    requestMetadata.correct_on_validation_failure = true;
+  }
+
+  // One model: call it, validate, and on a validation failure (never a provider error) ask the same
+  // model to correct its answer, up to correctionRounds times. The last failure is thrown.
+  const callAndValidate = async (
+    provider: "gemini" | "openai",
+    model: string,
+    call: (contents: any) => Promise<string>
+  ): Promise<{ text: string; validatedPayload: unknown }> => {
+    let contents = options.contents;
+    for (let round = 0; ; round++) {
+      attempts++;
+      const text = await call(contents);
+      try {
+        const validatedPayload = await validateGeneratedResponseText(
+          text,
+          { provider, model, purpose, routeKey },
+          options.validateResponseText
+        );
+        return { text, validatedPayload };
+      } catch (err: any) {
+        if (round >= correctionRounds) throw err;
+        const message = err?.message || String(err);
+        console.warn(`[model:${provider}] model=${model} response failed validation; asking it to correct once.`);
+        attemptedErrors.push({
+          provider,
+          model,
+          error: message,
+          publicError: publicErrorSummary(err, provider),
+        });
+        contents = validationCorrectionContents(options.contents, message, text);
+      }
+    }
+  };
 
   for (const provider of providers) {
     const isFallbackAttempt = provider !== routeContent.primary_provider;
@@ -1016,50 +1223,65 @@ export async function generateContentAudited(options: {
 
     if (provider === "gemini") {
       if (!geminiKey) {
-        attemptedErrors.push({ provider, model: modelForProvider, error: "GEMINI_API_KEY not configured" });
+        attemptedErrors.push({
+          provider,
+          model: modelForProvider,
+          error: "GEMINI_API_KEY not configured",
+          publicError: "GEMINI_API_KEY not configured",
+        });
         continue;
       }
-      try {
-        attempts++;
-        const text = await tryGemini(geminiKey, {
-          ...options,
-          model: modelForProvider,
-          __providerAttemptTelemetry: providerAttemptTelemetry,
-        });
-        const validatedPayload = await validateGeneratedResponseText(
-          text,
-          { provider, model: modelForProvider, purpose, routeKey },
-          options.validateResponseText
-        );
-        successText = text;
-        successValidatedPayload = validatedPayload;
-        successProvider = "gemini";
-        successModel = modelForProvider;
-        break;
-      } catch (err: any) {
-        const message = err?.message || String(err);
-        console.warn(`âš ï¸ Gemini request failed (${message}).`);
-        attemptedErrors.push({ provider, model: modelForProvider, error: message });
+      // The route's Gemini model first; then, when configured and different, one secondary
+      // Gemini model before moving on to the next provider.
+      const geminiModels = [modelForProvider];
+      if (secondaryGeminiModel && secondaryGeminiModel !== modelForProvider) {
+        geminiModels.push(secondaryGeminiModel);
       }
+      for (const geminiModel of geminiModels) {
+        try {
+          const { text, validatedPayload } = await callAndValidate(provider, geminiModel, (contents) => tryGemini(geminiKey, {
+            ...options,
+            contents,
+            model: geminiModel,
+            __providerAttemptTelemetry: providerAttemptTelemetry,
+          }));
+          successText = text;
+          successValidatedPayload = validatedPayload;
+          successProvider = "gemini";
+          successModel = geminiModel;
+          break;
+        } catch (err: any) {
+          const message = err?.message || String(err);
+          const safeMessage = publicErrorSummary(err, "gemini");
+          console.warn(`Gemini model request failed: ${safeMessage}.`);
+          attemptedErrors.push({
+            provider,
+            model: geminiModel,
+            error: message,
+            publicError: safeMessage,
+          });
+        }
+      }
+      if (successText !== null) break;
     }
 
     if (provider === "openai") {
       if (!openaiKey) {
-        attemptedErrors.push({ provider, model: modelForProvider, error: "OPENAI_API_KEY not configured" });
+        attemptedErrors.push({
+          provider,
+          model: modelForProvider,
+          error: "OPENAI_API_KEY not configured",
+          publicError: "OPENAI_API_KEY not configured",
+        });
         continue;
       }
       try {
-        attempts++;
-        const text = await tryOpenAI(openaiKey, {
+        const { text, validatedPayload } = await callAndValidate(provider, modelForProvider, (contents) => tryOpenAI(openaiKey, {
           ...options,
+          contents,
           model: modelForProvider,
           __providerAttemptTelemetry: providerAttemptTelemetry,
-        });
-        const validatedPayload = await validateGeneratedResponseText(
-          text,
-          { provider, model: modelForProvider, purpose, routeKey },
-          options.validateResponseText
-        );
+        }));
         successText = text;
         successValidatedPayload = validatedPayload;
         successProvider = "openai";
@@ -1067,8 +1289,14 @@ export async function generateContentAudited(options: {
         break;
       } catch (err: any) {
         const message = err?.message || String(err);
-        console.warn(`âš ï¸ OpenAI request failed (${message}).`);
-        attemptedErrors.push({ provider, model: modelForProvider, error: message });
+        const safeMessage = publicErrorSummary(err, "openai");
+        console.warn(`OpenAI model request failed: ${safeMessage}.`);
+        attemptedErrors.push({
+          provider,
+          model: modelForProvider,
+          error: message,
+          publicError: safeMessage,
+        });
       }
     }
 
@@ -1078,12 +1306,24 @@ export async function generateContentAudited(options: {
   }
 
   const latencyMs = Date.now() - startedAt;
-  const fallbackUsed = successText !== null && successProvider !== routeContent.primary_provider;
+  // A secondary Gemini model counts as a fallback too; for callers without one, a success on the
+  // primary provider always used the primary model, so this matches the provider-only check.
+  const fallbackUsed =
+    successText !== null &&
+    (successProvider !== routeContent.primary_provider || successModel !== routeContent.primary_model);
   const successfulUsage = summarizeSuccessfulUsage(providerAttemptTelemetry, successProvider, successModel);
   const costUsd = estimateCostUsd(successProvider, successModel, successfulUsage);
+  const safeAttemptedErrors = attemptedErrors.map(({ provider, model, error, publicError }) => ({
+    provider,
+    model,
+    error: publicError ?? publicErrorSummary(error, provider),
+  }));
 
   if (successText === null) {
     const errorMessage = `All model API calls failed. Purpose=${purpose}, route=${routeKey}, errors=${attemptedErrors
+      .map((e) => `${e.provider}:${e.model}:${e.error}`)
+      .join(" | ")}`;
+    const safeErrorMessage = `All model API calls failed. Purpose=${purpose}, route=${routeKey}, errors=${safeAttemptedErrors
       .map((e) => `${e.provider}:${e.model}:${e.error}`)
       .join(" | ")}`;
 
@@ -1100,7 +1340,7 @@ export async function generateContentAudited(options: {
           requestHash,
           requestMetadata,
           responseMetadata: {
-            errors: attemptedErrors,
+            errors: safeAttemptedErrors,
             provider_attempts: providerAttemptTelemetry,
             internal_http_attempts: providerAttemptTelemetry.length,
           },
@@ -1109,7 +1349,7 @@ export async function generateContentAudited(options: {
           tokensCompletion: successfulUsage?.completionTokens ?? null,
           tokensTotal: successfulUsage?.totalTokens ?? null,
           costUsd,
-          errorMessage,
+          errorMessage: safeErrorMessage,
         },
         options.clientOrPool,
         { context: options.context }
@@ -1135,7 +1375,7 @@ export async function generateContentAudited(options: {
         responseMetadata: {
           response_length: successText.length,
           validated_payload: successValidatedPayload !== undefined,
-          errors: attemptedErrors,
+          errors: safeAttemptedErrors,
           provider_attempts: providerAttemptTelemetry,
           internal_http_attempts: providerAttemptTelemetry.length,
         },
@@ -1156,7 +1396,7 @@ export async function generateContentAudited(options: {
     model: successModel,
     fallbackUsed,
     attempts,
-    errors: attemptedErrors,
+    errors: attemptedErrors.map(({ provider, model, error }) => ({ provider, model, error })),
     latencyMs,
     routeKey,
     routeRevisionId: routeRevisionId ?? undefined,
@@ -1175,7 +1415,7 @@ function geminiEmbeddingDisableKey(model: string): string {
   return `${apiVersion}:${model}`;
 }
 
-function describeError(error: unknown): string {
+function rawErrorText(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
@@ -1189,8 +1429,12 @@ function describeError(error: unknown): string {
   }
 }
 
+function describeError(error: unknown): string {
+  return publicErrorSummary(error, "embedding");
+}
+
 function isGeminiEmbeddingModelNotFound(error: unknown): boolean {
-  const message = describeError(error);
+  const message = rawErrorText(error);
   try {
     const parsed = JSON.parse(message) as any;
     const code = parsed?.error?.code;
@@ -1471,7 +1715,7 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
             ok: false,
             degraded: role === "primary",
             latencyMs: Date.now() - startedAt,
-            error: err.message || String(err),
+            error: publicErrorSummary(err, provider),
           });
         }
       }
@@ -1519,7 +1763,7 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
             ok: false,
             degraded: role === "primary",
             latencyMs: Date.now() - startedAt,
-            error: err.message || String(err),
+            error: publicErrorSummary(err, provider),
           });
         }
       }
@@ -1581,7 +1825,7 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
       latencyMs: Date.now() - embeddingStartedAt,
     });
   } catch (err: any) {
-    errors.push(`embedding: ${err.message || err}`);
+    errors.push(publicErrorSummary(err, "embedding"));
     checks.push({
       route: "embedding",
       purpose: "EMBEDDING",
@@ -1593,7 +1837,7 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
       ok: false,
       degraded: false,
       latencyMs: Date.now() - embeddingStartedAt,
-      error: err.message || String(err),
+      error: publicErrorSummary(err, "embedding"),
     });
   }
 
@@ -1867,7 +2111,7 @@ You MUST return a JSON object matching this schema exactly.
         fallbackUsed = false;
         if (parsedResult) break;
       } catch (geminiErr: any) {
-        const msg = geminiErr.message || String(geminiErr);
+        const msg = publicErrorSummary(geminiErr, "gemini");
         console.warn(`⚠️ Gemini agent run failed: ${msg}.`);
         trace.push(`Step ${trace.length + 1}: Gemini agent run failed: ${msg}`);
         errors.push(`Gemini: ${msg}`);
@@ -1891,7 +2135,7 @@ You MUST return a JSON object matching this schema exactly.
         fallbackUsed = tried.has("gemini");
         if (parsedResult) break;
       } catch (err: any) {
-        const msg = err.message || String(err);
+        const msg = publicErrorSummary(err, "openai");
         console.warn(`⚠️ OpenAI agent run failed: ${msg}`);
         trace.push(`Step ${trace.length + 1}: OpenAI agent run failed: ${msg}`);
         errors.push(`OpenAI: ${msg}`);
@@ -2068,8 +2312,8 @@ function parseStrictSingleEvaluationPayload(
   let parsed: unknown;
   try {
     parsed = JSON.parse(cleanJsonResponseText(rawText));
-  } catch (parseErr: any) {
-    throw new Error(`Failed to parse evaluation response JSON: ${parseErr.message}. Raw text: ${rawText.slice(0, 200)}`);
+  } catch {
+    throw new Error("Evaluation provider returned invalid JSON; response content omitted.");
   }
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {

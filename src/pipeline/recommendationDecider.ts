@@ -7,6 +7,7 @@ import { RecommendationDecisionSchema } from "../decision/contracts.js";
 import { evaluateDecisionPolicy } from "../policy/decisionPolicy.js";
 import { resolveWorkspacePolicySnapshot } from "../policy/policySnapshot.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
+import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 import {
   evaluateCompensationPolicy,
   evaluateJobFreshness,
@@ -23,6 +24,7 @@ import { assessHiringTerritoryReadiness, assessTravelReadiness, assessWorkModeRe
 import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { resolveWorkspaceWorkabilityPolicy } from "./workabilityPolicy.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -392,6 +394,8 @@ export async function runRecommendationDecider(
       ) AS source_evidence ON TRUE
       WHERE c.workspace_id = $1
         AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
+        AND c.description_quality_status = 'COMPLETE'
+        AND ${sourceContentEvidencePredicate("c.workspace_id", "lv.id")}
         ${jobVersionFilter}
         ${canonicalJobFilter}
       ORDER BY c.created_at ASC, c.id ASC
@@ -711,15 +715,15 @@ export async function runRecommendationDecider(
         ));
 
         const employmentType = String(workabilityFacts["employment_type"] ?? job.employment_type ?? "UNKNOWN").toUpperCase();
-        const employmentStatus = employmentType === "CONTRACT" && !workabilityPolicyResolution.policy.contractAllowed
-          ? "BLOCKED"
-          : employmentType === "PERMANENT" || employmentType === "CONTRACT" ? "MET" : "NEEDS_VERIFICATION";
+        const employmentStatus = employmentType === "PERMANENT" || employmentType === "CONTRACT"
+          ? "MET"
+          : "NEEDS_VERIFICATION";
         readinessChecks.push(readinessCheck(
           "EMPLOYMENT_ROUTE",
           employmentStatus,
-          employmentStatus === "MET" ? `Employment type ${employmentType} is permitted by the active preference.` : employmentStatus === "BLOCKED" ? "Contract employment conflicts with the active employment preference." : "Employment type or hiring route is unknown.",
+          employmentStatus === "MET" ? `Employment type ${employmentType} is permitted under the direct-employer fixed-term policy.` : "Employment type or hiring route is unknown.",
           readinessAssessedAt,
-          { reasonCode: employmentStatus === "BLOCKED" ? "CONTRACT_EMPLOYMENT_NOT_ALLOWED" : employmentStatus === "NEEDS_VERIFICATION" ? "EMPLOYMENT_ROUTE_UNKNOWN" : null },
+          { reasonCode: employmentStatus === "NEEDS_VERIFICATION" ? "EMPLOYMENT_ROUTE_UNKNOWN" : null },
         ));
 
         let mandatoryQualificationCheck: MaterialReadinessCheck;
@@ -1042,8 +1046,7 @@ export async function runRecommendationDecider(
         await client.query("ROLLBACK");
         errors += 1;
         console.error(
-          `❌ Recommendation decider failed for canonical job ${job.canonical_job_id}:`,
-          error
+          `❌ Recommendation decider failed for canonical job ${job.canonical_job_id}: ${publicErrorSummary(error, "pipeline")}`
         );
       }
     }

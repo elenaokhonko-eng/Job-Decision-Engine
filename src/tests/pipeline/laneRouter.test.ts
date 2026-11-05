@@ -132,6 +132,25 @@ describe('Pipeline Stage: Lane Routing', () => {
     expect(researchShare.tieBreakAdjustment).toBeGreaterThan(0);
   });
 
+  it("selects only routable workability-verification jobs for lane assignment", async () => {
+    const context: WorkspaceContext = {
+      workspaceId: 'workspace-id-1',
+      workspaceKey: 'default',
+      userId: 'user-id-1',
+      userKey: 'local_user',
+      role: 'OWNER',
+    };
+    (mPool.query as any).mockResolvedValueOnce({ rows: [] });
+
+    await runLaneRouting(mPool as any, { context });
+
+    const selectionSql = (mPool.query as any).mock.calls[0]?.[0] as string;
+    expect(selectionSql).toContain("c.gate_decision = 'NEEDS_VERIFICATION'");
+    expect(selectionSql).not.toContain("NEEDS_VERIFICATION_WORK_AUTHORIZATION");
+    expect(selectionSql).toContain("NEEDS_VERIFICATION_TRAVEL");
+    expect(selectionSql).toContain("regexp_split_to_array");
+  });
+
   it('should calculate cosine similarity and update job lane', async () => {
     const context: WorkspaceContext = {
       workspaceId: 'workspace-id-1',

@@ -34,6 +34,19 @@ export const STAGE1_3_STAGING_IDENTITY_EXPECTATIONS: StagingDatabaseIdentityExpe
   ],
 };
 
+export function expectationsForSuppliedStagingBranch(
+  suppliedBranchId: string | null | undefined,
+): StagingDatabaseIdentityExpectations {
+  const branchId = suppliedBranchId?.trim() ?? "";
+  if (!/^br-[a-z0-9-]{5,}$/i.test(branchId)) {
+    throw new Error("STAGE1_3_SMOKE_EXPECTED_BRANCH_ID must be a Neon branch ID beginning with br-.");
+  }
+  if (branchId === STAGE1_3_STAGING_IDENTITY_EXPECTATIONS.knownProductionBranchId) {
+    throw new Error("The supplied smoke branch ID is the known production branch.");
+  }
+  return { ...STAGE1_3_STAGING_IDENTITY_EXPECTATIONS, expectedBranchId: branchId };
+}
+
 function normalizeHostname(hostname: string): string {
   return hostname.trim().toLowerCase().replace(/\.$/, "");
 }

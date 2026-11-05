@@ -3,16 +3,21 @@ import pg from "pg";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { SourceBroker } from "../ingestion/sourceBroker.js";
+import { fetchJobContent as defaultFetchJobContent } from "../ingestion/jobContentFetcher.js";
 import { runNormalization as defaultRunNormalization } from "../pipeline/normalize.js";
 import { runRequirementsExtraction as defaultRunRequirementsExtraction } from "../pipeline/requirementsExtractor.js";
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
 import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback } from "../embeddings/batchCoordinator.js";
+import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
 import { runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
+import { classifyDescriptionQuality, completeRetrievedPostingPredicate, sourceContentEvidencePredicate } from "../pipeline/descriptionQuality.js";
 import { applicationReadinessViewAvailable } from "../services/currentApplicationReadiness.js";
+import { isRoutableWorkabilityVerification, routableWorkabilityVerificationSql } from "../pipeline/verificationRouting.js";
 import { isCurrentCanonicalJobVersion } from "./canonicalJobVersion.js";
 import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
@@ -33,6 +38,7 @@ import {
   releasePipelineTaskForRetry,
   type ClaimedPipelineTask,
 } from "./pipelineTasks.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -40,6 +46,7 @@ dotenv.config({ path: ".env.local" });
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
 export const PIPELINE_STAGE_TASK_TYPES = [
+  "FETCH_JOB_CONTENT",
   "NORMALIZE_OBSERVATION",
   "EXTRACT_DETERMINISTIC_REQUIREMENTS",
   "APPLY_HARD_GATES",
@@ -52,6 +59,7 @@ export const PIPELINE_STAGE_TASK_TYPES = [
 ] as const;
 
 const SEMANTIC_MATCH_REPAIR_GENERATION = "semantic_match_repair_v2";
+const ROUTABLE_VERIFICATION_SQL = routableWorkabilityVerificationSql("c");
 
 export type PipelineStageTaskType = (typeof PIPELINE_STAGE_TASK_TYPES)[number];
 
@@ -95,6 +103,7 @@ export function parsePipelineStageTaskLimits(
 }
 
 export interface PipelineStageWorkerDependencies {
+  fetchJobContent: typeof defaultFetchJobContent;
   runNormalization: typeof defaultRunNormalization;
   runRequirementsExtraction: typeof defaultRunRequirementsExtraction;
   runHardGates: typeof defaultRunHardGates;
@@ -130,7 +139,15 @@ export interface PipelineStageWorkerSummary {
   deadLettered: number;
   exitReason: PipelineWorkerExitReason;
   durationMs: number;
-  byType: Record<string, { claimed: number; completed: number; blocked: number; failed: number; deadLettered: number }>;
+  byType: Record<string, {
+    claimed: number;
+    completed: number;
+    blocked: number;
+    failed: number;
+    deadLettered: number;
+    executionDurationMs: number;
+    secondsPerClaimedTask: number | null;
+  }>;
   errors: Array<{ taskType: string; taskKey: string; error: string }>;
 }
 
@@ -152,8 +169,6 @@ export interface PipelineStageWorkerOptions {
   seedTimeBudgetMs?: number;
   /** Tasks claimed per stage on each round-robin pass. */
   stageQuantum?: number;
-  /** First stage index for this run; bounded by the stage count. */
-  stageStartOffset?: number;
   /** Defaults to true; set false only when reconciliation is exercised separately. */
   reconcileStalePending?: boolean;
   maxStalePendingReconciliation?: number;
@@ -164,7 +179,7 @@ export interface PipelineStageWorkerOptions {
   wallClockMs?: number;
   minTimeToStartTaskMs?: number;
   claimedBy?: string;
-  /** Reuse one durable AI budget identity across all explanation tasks in this worker run. */
+  /** Share one AI budget run across all explanation tasks handled in this worker invocation. */
   budgetRunId?: string;
   abortSignal?: AbortSignal;
 }
@@ -174,6 +189,7 @@ type QueryClient = {
 };
 
 const defaultDependencies: PipelineStageWorkerDependencies = {
+  fetchJobContent: defaultFetchJobContent,
   runNormalization: defaultRunNormalization,
   runRequirementsExtraction: defaultRunRequirementsExtraction,
   runHardGates: defaultRunHardGates,
@@ -214,7 +230,15 @@ function incrementWorker(
   taskType: string,
   field: "claimed" | "completed" | "blocked" | "failed" | "deadLettered"
 ): void {
-  summary.byType[taskType] ??= { claimed: 0, completed: 0, blocked: 0, failed: 0, deadLettered: 0 };
+  summary.byType[taskType] ??= {
+    claimed: 0,
+    completed: 0,
+    blocked: 0,
+    failed: 0,
+    deadLettered: 0,
+    executionDurationMs: 0,
+    secondsPerClaimedTask: null,
+  };
   summary.byType[taskType][field] += 1;
 }
 
@@ -291,14 +315,20 @@ async function resolveActiveProfileVersionId(
      WHERE pv.workspace_id = $1
        AND pv.status = 'ACTIVE'
      ORDER BY pv.created_at DESC
-     LIMIT 1`,
+     LIMIT 2`,
     [ctx.workspaceId]
   );
-  const profileVersionId = rows[0]?.id;
-  if (!profileVersionId) {
-    throw new Error(`No ACTIVE profile version found for workspace_id=${ctx.workspaceId}.`);
+  if (rows.length !== 1) {
+    const detail = rows.length === 0
+      ? `No ACTIVE profile version found for workspace_id=${ctx.workspaceId}.`
+      : `Found multiple ACTIVE profile versions for workspace_id=${ctx.workspaceId}; exactly one is required.`;
+    throw new PipelineTaskDependencyBlockedError(
+      "PROFILE_VERSION_ACTIVE",
+      "IMPORT_OR_ACTIVATE_PROFILE_AND_REPAIR_EMBEDDINGS",
+      detail,
+    );
   }
-  return profileVersionId;
+  return rows[0].id;
 }
 
 async function enqueueStageTask(
@@ -509,7 +539,6 @@ export async function seedRecoverablePipelineTasks(
     includeRoutingDeferred?: boolean;
     includeTestFixtures?: boolean;
     routingDeferredReplayVersion?: string;
-    budgetRunId?: string;
     timeBudgetMs?: number;
   } = {}
 ): Promise<SeedPipelineTasksSummary> {
@@ -635,6 +664,17 @@ export async function seedRecoverablePipelineTasks(
              AND ps.job_version_id = jv.id
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
              AND ps.stage_status = 'COMPLETED'
+         )
+         -- A version blocked on missing posting content is resumed when that content is
+         -- normalized; re-seeding it would only re-block it and repeat its error history.
+         AND NOT EXISTS (
+           SELECT 1
+           FROM pipeline_tasks blocked
+           WHERE blocked.workspace_id = c.workspace_id
+             AND blocked.task_type = 'EXTRACT_DETERMINISTIC_REQUIREMENTS'
+             AND blocked.status = 'BLOCKED_DEPENDENCY'
+             AND blocked.blocked_on = 'JOB_CONTENT'
+             AND blocked.payload->>'job_version_id' = jv.id::text
          )
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
@@ -817,6 +857,7 @@ export async function seedRecoverablePipelineTasks(
        WHERE c.workspace_id = $1
           AND (
             COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+            OR ${ROUTABLE_VERIFICATION_SQL}
             OR (
               COALESCE(c.processing_state, c.processing_status) = 'ROUTING_DEFERRED'
               AND COALESCE(c.routing_disposition, 'TECHNICAL_DEFERRED') = 'TECHNICAL_DEFERRED'
@@ -889,6 +930,7 @@ export async function seedRecoverablePipelineTasks(
        WHERE c.workspace_id = $1
          AND (
            COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+           OR ${ROUTABLE_VERIFICATION_SQL}
            OR (
             $2::boolean
              AND (
@@ -1205,7 +1247,6 @@ export async function seedRecoverablePipelineTasks(
         payload: {
           canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
           job_version_id: requiredSeedValue(row, "job_version_id"),
-          ...(options.budgetRunId ? { queue_budget_run_id: options.budgetRunId } : {}),
         },
       }),
       enabledTypes,
@@ -1295,6 +1336,7 @@ async function lookupJobState(
   recommendationEligibility: string | null;
   recommendationOutcome: string | null;
   gateDecision: string | null;
+  gateRejectionCodes: string[];
   latestJobVersionId: string | null;
 }> {
   const { rows } = await (clientOrPool as QueryClient).query<{
@@ -1305,6 +1347,7 @@ async function lookupJobState(
     routing_disposition: string | null;
     profile_match_status: string | null;
     gate_decision: string | null;
+    gate_rejection_reason: string | null;
     recommendation_eligibility: string | null;
     recommendation_outcome: string | null;
     latest_job_version_id: string | null;
@@ -1316,6 +1359,7 @@ async function lookupJobState(
             c.routing_disposition,
             c.profile_match_status,
             c.gate_decision,
+            c.rejection_reason AS gate_rejection_reason,
             c.recommendation_eligibility,
             c.recommendation_outcome,
             c.latest_job_version_id
@@ -1337,6 +1381,9 @@ async function lookupJobState(
     routingDisposition: row?.routing_disposition ?? null,
     profileMatchStatus: row?.profile_match_status ?? null,
     gateDecision: row?.gate_decision ?? null,
+    gateRejectionCodes: typeof row?.gate_rejection_reason === "string"
+      ? row.gate_rejection_reason.split(",").map((code) => code.trim()).filter(Boolean)
+      : [],
     recommendationEligibility: row?.recommendation_eligibility ?? null,
     recommendationOutcome: row?.recommendation_outcome ?? null,
     latestJobVersionId: row?.latest_job_version_id ?? null,
@@ -1477,16 +1524,37 @@ async function classifySemanticMatchDependency(
   ctx: WorkspaceContext,
   jobVersionId: string,
 ): Promise<AutomaticDependency> {
+  const configuration = getEmbeddingSpaceRegistryConfiguration();
   const { rows } = await (clientOrPool as QueryClient).query<{
     has_active_space: boolean;
     requirements_complete: boolean;
     profile_facts_complete: boolean;
     complete_cohort: boolean;
   }>(
-    `WITH active_spaces AS (
-       SELECT id
+    `WITH configured_spaces AS (
+       SELECT id,
+              COUNT(*) OVER (PARTITION BY is_fallback_space) AS matching_space_count
        FROM embedding_spaces
-       WHERE workspace_id = $1 AND active = TRUE
+       WHERE workspace_id = $1
+         AND active = TRUE
+         AND normalization = $6
+         AND distance_metric = $7
+         AND (
+           (is_fallback_space = FALSE
+             AND LOWER(provider) = LOWER($3)
+             AND model = $4
+             AND dimensions = $5)
+           OR
+           (is_fallback_space = TRUE
+             AND LOWER(provider) = LOWER($8)
+             AND model = $9
+             AND dimensions = $10)
+         )
+     ),
+     active_spaces AS (
+       SELECT id
+       FROM configured_spaces
+       WHERE matching_space_count = 1
      ),
      requirements AS (
        SELECT requirement.id::text AS node_id
@@ -1571,7 +1639,18 @@ async function classifySemanticMatchDependency(
            )
          )
        ) AS complete_cohort`,
-    [ctx.workspaceId, jobVersionId],
+    [
+      ctx.workspaceId,
+      jobVersionId,
+      configuration.primary.provider,
+      configuration.primary.model,
+      configuration.primary.dimensions,
+      configuration.normalization,
+      configuration.distanceMetric,
+      configuration.fallback.provider,
+      configuration.fallback.model,
+      configuration.fallback.dimensions,
+    ],
   );
   const result = rows[0];
   if (!result?.has_active_space || result.complete_cohort) {
@@ -1635,6 +1714,229 @@ async function reactivateBlockedDependencyTasks(
   );
 }
 
+class PipelineTaskRetryAtError extends Error {
+  constructor(message: string, readonly retryAt: Date | null) {
+    super(message);
+    this.name = "PipelineTaskRetryAtError";
+  }
+}
+
+async function markGmailFetchOutcome(
+  observationId: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  processingStatus: "FETCH_PENDING" | "FETCH_BLOCKED" | "FETCH_FAILED",
+  lifecycleStatus: "SOURCE_PENDING" | "SOURCE_BLOCKED",
+  errorMessage: string,
+): Promise<void> {
+  const client = clientOrPool as QueryClient;
+  const { rows } = await client.query<{ raw_email_alert_id: string | null; gmail_message_id: string | null }>(
+    `SELECT raw_email_alert_id::text AS raw_email_alert_id, gmail_message_id
+     FROM raw_job_observations
+     WHERE workspace_id = $1 AND id = $2::uuid AND source_name = 'GMAIL_ALERT'
+     LIMIT 1`,
+    [ctx.workspaceId, observationId],
+  );
+  const alertId = rows[0]?.raw_email_alert_id ?? null;
+  const gmailMessageId = rows[0]?.gmail_message_id ?? null;
+  if (!rows[0]) throw new Error(`Gmail fetch target ${observationId} is missing or belongs to another source.`);
+
+  await client.query(
+    `UPDATE raw_job_observations
+     SET processing_status = $3,
+         error_history = COALESCE(error_history, '[]'::jsonb) || jsonb_build_array($4::jsonb)
+     WHERE workspace_id = $1 AND id = $2::uuid`,
+    [ctx.workspaceId, observationId, processingStatus, JSON.stringify({
+      stage: "FETCH_JOB_CONTENT",
+      processing_status: processingStatus,
+      error: errorMessage,
+      occurred_at: new Date().toISOString(),
+    })],
+  );
+  if (alertId || gmailMessageId) {
+    await client.query(
+      `UPDATE raw_email_alerts
+       SET lifecycle_status = $4, last_error = $5
+       WHERE workspace_id = $1
+         AND (($2::uuid IS NOT NULL AND id = $2::uuid)
+           OR ($3::text IS NOT NULL AND gmail_message_id = $3::text))`,
+      [ctx.workspaceId, alertId, gmailMessageId, lifecycleStatus, errorMessage],
+    );
+  }
+}
+
+async function lockCurrentFetchTarget(
+  task: ClaimedPipelineTask,
+  observationId: string,
+  snapshot: { sourceUrl: string; title: string; companyName: string },
+  client: QueryClient,
+  ctx: WorkspaceContext,
+): Promise<void> {
+  const lease = await client.query(
+    `SELECT id
+     FROM pipeline_tasks
+     WHERE workspace_id = $1
+       AND id = $2::uuid
+       AND status = 'RUNNING'
+       AND lease_id = $3::uuid
+       AND lease_expires_at > NOW()
+     FOR UPDATE`,
+    [ctx.workspaceId, task.taskId, task.leaseId],
+  );
+  if (lease.rows.length === 0) {
+    throw new Error(`Posting fetch task ${task.taskKey} lost its lease before source persistence.`);
+  }
+
+  const current = await client.query<{
+    source_name: string;
+    source_url: string | null;
+    title: string;
+    company_name: string;
+  }>(
+    `SELECT source_name, source_url, title, company_name
+     FROM raw_job_observations
+     WHERE workspace_id = $1 AND id = $2::uuid
+     FOR UPDATE`,
+    [ctx.workspaceId, observationId],
+  );
+  const row = current.rows[0];
+  if (
+    !row
+    || row.source_name !== "GMAIL_ALERT"
+    || row.source_url !== snapshot.sourceUrl
+    || row.title !== snapshot.title
+    || row.company_name !== snapshot.companyName
+  ) {
+    throw new PipelineTaskDependencyBlockedError(
+      "JOB_CONTENT",
+      "REVIEW_UPDATED_GMAIL_DISCOVERY",
+      `Gmail discovery observation ${observationId} changed while its posting was being fetched.`,
+    );
+  }
+}
+
+async function markTerminalGmailAlertsForJob(
+  jobVersionId: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<void> {
+  await (clientOrPool as QueryClient).query(
+    `UPDATE raw_email_alerts alert
+     SET lifecycle_status = 'PROCESSED', last_error = NULL
+     WHERE alert.workspace_id = $1
+       AND alert.lifecycle_status IN ('SOURCE_PENDING', 'ASSESSMENT_PENDING')
+       AND EXISTS (
+         SELECT 1
+         FROM raw_job_observations target
+         JOIN job_versions target_version
+           ON target_version.workspace_id = target.workspace_id
+          AND target_version.id = target.job_version_id
+         WHERE target.workspace_id = alert.workspace_id
+           AND (
+             target.raw_email_alert_id = alert.id
+             OR (alert.gmail_message_id IS NOT NULL AND target.gmail_message_id = alert.gmail_message_id)
+             OR (alert.gmail_message_id IS NOT NULL AND target.source_external_id LIKE 'gmail-' || alert.gmail_message_id || '-%')
+           )
+           AND target_version.id = $2::uuid
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM raw_job_observations observation
+         LEFT JOIN job_versions version
+           ON version.workspace_id = observation.workspace_id
+          AND version.id = observation.job_version_id
+         LEFT JOIN canonical_jobs job
+           ON job.workspace_id = observation.workspace_id
+          AND job.id = version.canonical_job_id
+         WHERE observation.workspace_id = alert.workspace_id
+           AND (
+             observation.raw_email_alert_id = alert.id
+             OR (alert.gmail_message_id IS NOT NULL AND observation.gmail_message_id = alert.gmail_message_id)
+             OR (alert.gmail_message_id IS NOT NULL AND observation.source_external_id LIKE 'gmail-' || alert.gmail_message_id || '-%')
+           )
+           AND (
+             job.id IS NULL
+             OR NOT (
+               COALESCE(job.processing_state, job.processing_status) IN ('HARD_REJECTED', 'UNMATCHED', 'AI_EVALUATED')
+               OR job.recommendation_outcome IS NOT NULL
+             )
+           )
+       )`,
+    [ctx.workspaceId, jobVersionId],
+  );
+}
+
+async function requireCompleteJobContent(
+  jobVersionId: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<boolean> {
+  const client = clientOrPool as QueryClient;
+  const { rows } = await client.query<{
+    latest_job_version_id: string | null;
+    description_text: string | null;
+    has_source_content_evidence: boolean;
+  }>(
+    `SELECT canonical.latest_job_version_id::text AS latest_job_version_id,
+            version.description_text,
+            ${sourceContentEvidencePredicate("version.workspace_id", "version.id")} AS has_source_content_evidence
+     FROM job_versions version
+     JOIN canonical_jobs canonical
+       ON canonical.workspace_id = version.workspace_id
+      AND canonical.id = version.canonical_job_id
+     WHERE version.workspace_id = $1 AND version.id = $2::uuid
+     LIMIT 1`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  const job = rows[0];
+  if (!job) throw new Error(`Pipeline task references missing job version ${jobVersionId}.`);
+  if (job.latest_job_version_id !== jobVersionId) return true;
+
+  const quality = classifyDescriptionQuality(job.description_text);
+  if (quality.status === "COMPLETE" && job.has_source_content_evidence) return true;
+
+  const qualityReason = quality.status !== "COMPLETE"
+    ? quality.reason ?? "DESCRIPTION_NEEDS_SOURCE_VERIFICATION"
+    : "SOURCE_CONTENT_EVIDENCE_MISSING";
+  const reason = `DESCRIPTION_CONTENT_INCOMPLETE: ${qualityReason}`;
+  await client.query(
+    `UPDATE raw_job_observations observation
+     SET error_history = COALESCE(observation.error_history, '[]'::jsonb) || jsonb_build_array($3::jsonb)
+     WHERE observation.workspace_id = $1
+       AND observation.source_name = 'GMAIL_ALERT'
+       AND observation.job_version_id = $2::uuid`,
+    [ctx.workspaceId, jobVersionId, JSON.stringify({
+      stage: "SOURCE_CONTENT_QUALITY_GATE",
+      reason_code: qualityReason,
+      error: reason,
+      occurred_at: new Date().toISOString(),
+    })],
+  );
+  await client.query(
+    `UPDATE raw_email_alerts alert
+     SET lifecycle_status = 'SOURCE_BLOCKED', last_error = $3
+     WHERE alert.workspace_id = $1
+       AND EXISTS (
+         SELECT 1
+         FROM raw_job_observations observation
+         WHERE observation.workspace_id = $1
+           AND observation.source_name = 'GMAIL_ALERT'
+           AND observation.job_version_id = $2::uuid
+           AND (
+             observation.raw_email_alert_id = alert.id
+             OR (alert.gmail_message_id IS NOT NULL AND observation.gmail_message_id = alert.gmail_message_id)
+             OR (alert.gmail_message_id IS NOT NULL AND observation.source_external_id LIKE 'gmail-' || alert.gmail_message_id || '-%')
+           )
+       )`,
+    [ctx.workspaceId, jobVersionId, reason],
+  );
+  throw new PipelineTaskDependencyBlockedError(
+    "JOB_CONTENT",
+    "FETCH_OR_PROVIDE_FULL_POSTING",
+    reason,
+  );
+}
+
 async function markTaskTargetProcessingError(
   task: ClaimedPipelineTask,
   clientOrPool: pg.Pool | pg.PoolClient,
@@ -1642,6 +1944,18 @@ async function markTaskTargetProcessingError(
   errorMessage: string
 ): Promise<void> {
   const payload = (task.payload || {}) as Record<string, unknown>;
+  if (task.taskType === "FETCH_JOB_CONTENT") {
+    const observationId = requireStringPayload(task, "observation_id");
+    await markGmailFetchOutcome(
+      observationId,
+      clientOrPool,
+      ctx,
+      "FETCH_FAILED",
+      "SOURCE_BLOCKED",
+      `Posting retrieval exhausted automatic retries: ${errorMessage}`,
+    );
+    return;
+  }
   let canonicalJobId = typeof payload.canonical_job_id === "string" ? payload.canonical_job_id : null;
   const jobVersionId = typeof payload.job_version_id === "string" ? payload.job_version_id : null;
   if (!canonicalJobId && jobVersionId) {
@@ -1667,7 +1981,8 @@ async function maybeEnqueueAfterTask(
   taskType: PipelineStageTaskType,
   task: ClaimedPipelineTask,
   clientOrPool: pg.Pool | pg.PoolClient,
-  ctx: WorkspaceContext
+  ctx: WorkspaceContext,
+  retrievedObservationId?: string,
 ): Promise<number> {
   let insertedSuccessors = 0;
   const enqueueSuccessor = async (
@@ -1679,6 +1994,22 @@ async function maybeEnqueueAfterTask(
   };
   const payload = (task.payload || {}) as Record<string, unknown>;
   const jobVersionId = typeof payload.job_version_id === "string" ? payload.job_version_id : null;
+
+  if (taskType === "FETCH_JOB_CONTENT") {
+    if (!retrievedObservationId) {
+      throw new Error(`Posting fetch task ${task.taskKey} completed without a derived source observation.`);
+    }
+    await (clientOrPool as QueryClient).query(
+      `UPDATE raw_job_observations
+       SET processing_status = 'PENDING'
+       WHERE workspace_id = $1 AND id = $2::uuid AND processing_status = 'FETCH_STAGED'`,
+      [ctx.workspaceId, retrievedObservationId],
+    );
+    await enqueueSuccessor("NORMALIZE_OBSERVATION", retrievedObservationId, {
+      observation_id: retrievedObservationId,
+    });
+    return insertedSuccessors;
+  }
 
   if (taskType === "NORMALIZE_OBSERVATION") {
     const observationId = requireStringPayload(task, "observation_id");
@@ -1752,7 +2083,10 @@ async function maybeEnqueueAfterTask(
   };
 
   if (taskType === "APPLY_HARD_GATES") {
-    if (state.processingState === "PREQUALIFIED") {
+    if (
+      state.processingState === "PREQUALIFIED" ||
+      isRoutableWorkabilityVerification(state.gateDecision, state.gateRejectionCodes)
+    ) {
       // Quoted requirements are advisory enrichment and must be explicitly
       // drained after the mandatory pipeline. Publish deterministic
       // requirement embeddings immediately so quote-provider latency/failure
@@ -1812,6 +2146,9 @@ async function maybeEnqueueAfterTask(
   ) {
     await enqueueSuccessor("ENQUEUE_EXPLANATION", jobVersionId, stagePayload);
   }
+  if (taskType === "DECIDE_RECOMMENDATION") {
+    await markTerminalGmailAlertsForJob(jobVersionId, clientOrPool, ctx);
+  }
   return insertedSuccessors;
 }
 
@@ -1824,7 +2161,170 @@ async function executeStageTask(
   budgetRunId: string,
   onSuccessorTaskCreated: () => void,
   onTaskRerouted: () => void,
-): Promise<void> {
+): Promise<string | void> {
+  if (taskType === "FETCH_JOB_CONTENT") {
+    const observationId = requireStringPayload(task, "observation_id");
+    const { rows } = await (clientOrPool as QueryClient).query<{
+      source_name: string;
+      source_url: string | null;
+      company_name: string;
+      title: string;
+      processing_status: string | null;
+    }>(
+      `SELECT source_name, source_url, company_name, title, processing_status
+       FROM raw_job_observations
+       WHERE workspace_id = $1 AND id = $2::uuid
+       LIMIT 1`,
+      [ctx.workspaceId, observationId],
+    );
+    const discovery = rows[0];
+    if (!discovery || discovery.source_name !== "GMAIL_ALERT" || !discovery.source_url) {
+      throw new Error(`Posting fetch target ${observationId} is not a valid Gmail discovery observation.`);
+    }
+    if (discovery.processing_status === "FETCH_COMPLETE" && (task.payload as Record<string, unknown> | null)?.force_refetch !== true) {
+      const existing = await (clientOrPool as QueryClient).query<{ id: string }>(
+        `SELECT derived.id::text AS id
+         FROM raw_job_observations derived
+         WHERE derived.workspace_id = $1
+           AND derived.derived_from_observation_id = $2::uuid
+           AND ${completeRetrievedPostingPredicate("derived")}
+         ORDER BY retrieved_at DESC, id ASC
+         LIMIT 1`,
+        [ctx.workspaceId, observationId],
+      );
+      if (existing.rows[0]?.id) return existing.rows[0].id;
+    }
+
+    const result = await dependencies.fetchJobContent(discovery.source_url, {
+      title: discovery.title,
+      companyName: discovery.company_name,
+    });
+    if (result.kind === "RETRYABLE_FAILURE") {
+      throw new PipelineTaskRetryAtError(
+        `Posting retrieval is retryable: ${result.reason}`,
+        result.retryAfter ? new Date(result.retryAfter) : null,
+      );
+    }
+    if (result.kind !== "COMPLETE") {
+      const reason = result.kind === "IDENTITY_CONFLICT"
+        ? "POSTING_IDENTITY_CONFLICT: " + result.reason
+        : result.kind === "UNAVAILABLE"
+          ? "POSTING_CONTENT_UNAVAILABLE: " + result.reason
+          : "POSTING_CONTENT_BLOCKED: " + result.reason;
+      const client = clientOrPool as QueryClient;
+      await client.query("BEGIN");
+      try {
+        await lockCurrentFetchTarget(task, observationId, {
+          sourceUrl: discovery.source_url,
+          title: discovery.title,
+          companyName: discovery.company_name,
+        }, client, ctx);
+        await markGmailFetchOutcome(
+          observationId,
+          clientOrPool,
+          ctx,
+          "FETCH_BLOCKED",
+          "SOURCE_BLOCKED",
+          reason,
+        );
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+      const repairAction = result.kind === "IDENTITY_CONFLICT"
+        ? "VERIFY_POSTING_IDENTITY"
+        : result.kind === "UNAVAILABLE"
+          ? "VERIFY_SOURCE_AVAILABILITY"
+          : "PROVIDE_EMPLOYER_URL_OR_FULL_JD";
+      throw new PipelineTaskDependencyBlockedError("JOB_CONTENT", repairAction, reason);
+    }
+
+    const sourcePayload = {
+      source_content_status: "COMPLETE",
+      discovery_observation_id: observationId,
+      source_provider: result.provider.key,
+      requested_url: result.evidence.requestedUrl,
+      canonical_url: result.provider.canonicalUrl,
+      retrieved_at: result.evidence.retrievedAt,
+      source_evidence: result.evidence,
+      posting: result.posting,
+      content_hash: result.contentHash,
+    };
+    const client = clientOrPool as QueryClient;
+    const broker = new SourceBroker(clientOrPool, ctx);
+    let runStarted = false;
+    let derivedObservationId: string | null = null;
+    await client.query("BEGIN");
+    try {
+      await lockCurrentFetchTarget(task, observationId, {
+        sourceUrl: discovery.source_url,
+        title: discovery.title,
+        companyName: discovery.company_name,
+      }, client, ctx);
+      await broker.startRun("POSTING_CONTENT_FETCH");
+      runStarted = true;
+      const staged = await broker.processObservation({
+        sourceName: result.provider.key,
+        sourceExternalId: result.posting.requisitionId
+          ? `${result.provider.key.toLowerCase()}-${result.posting.requisitionId}`
+          : `${result.provider.key.toLowerCase()}-${crypto.createHash("sha256").update(result.provider.canonicalUrl).digest("hex").slice(0, 32)}`,
+        sourceUrl: result.provider.canonicalUrl,
+        canonicalApplyUrl: result.posting.applyUrl ?? result.provider.canonicalUrl,
+        retrievedAt: result.evidence.retrievedAt,
+        publishedAt: result.posting.publishedAt ?? undefined,
+        expiresAt: result.posting.expiresAt ?? undefined,
+        companyName: result.posting.companyName,
+        title: result.posting.title,
+        descriptionRaw: result.posting.description,
+        locationRaw: result.posting.location ?? "Unknown",
+        workplaceTypeRaw: result.posting.workplaceType,
+        employmentTypeRaw: result.posting.employmentType ?? "UNKNOWN",
+        compensationRaw: result.posting.compensationRaw ?? "UNKNOWN",
+        sourceLane: "UNKNOWN",
+        searchPlanVersion: "posting_fetch_v1",
+        derivedFromObservationId: observationId,
+        rawPayload: sourcePayload,
+      }, sourcePayload, clientOrPool);
+      if (!staged.observationId) throw new Error("Retrieved posting did not receive a durable source observation id.");
+      derivedObservationId = staged.observationId;
+      await (clientOrPool as QueryClient).query(
+        `UPDATE raw_job_observations
+         SET processing_status = 'FETCH_STAGED'
+         WHERE workspace_id = $1 AND id = $2::uuid AND derived_from_observation_id = $3::uuid`,
+        [ctx.workspaceId, derivedObservationId, observationId],
+      );
+      await (clientOrPool as QueryClient).query(
+        `UPDATE raw_job_observations SET processing_status = 'FETCH_COMPLETE'
+         WHERE workspace_id = $1 AND id = $2::uuid AND source_name = 'GMAIL_ALERT'`,
+        [ctx.workspaceId, observationId],
+      );
+      await (clientOrPool as QueryClient).query(
+        `UPDATE raw_email_alerts
+         SET lifecycle_status = 'SOURCE_PENDING', last_error = NULL
+         WHERE workspace_id = $1
+           AND EXISTS (
+             SELECT 1 FROM raw_job_observations observation
+             WHERE observation.workspace_id = $1 AND observation.id = $2::uuid
+               AND (
+                 observation.raw_email_alert_id = raw_email_alerts.id
+                 OR (raw_email_alerts.gmail_message_id IS NOT NULL AND observation.gmail_message_id = raw_email_alerts.gmail_message_id)
+               )
+           )`,
+        [ctx.workspaceId, observationId],
+      );
+      await broker.endRun("COMPLETED");
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (runStarted) {
+        broker.recordError(error instanceof Error ? error.message : String(error));
+      }
+      throw error;
+    }
+    return derivedObservationId;
+  }
+
   if (taskType === "NORMALIZE_OBSERVATION") {
     const observationId = requireStringPayload(task, "observation_id");
     const summary = await dependencies.runNormalization(clientOrPool, {
@@ -1843,6 +2343,7 @@ async function executeStageTask(
   }
 
   const jobVersionId = requireStringPayload(task, "job_version_id");
+  if (!(await requireCompleteJobContent(jobVersionId, clientOrPool, ctx))) return;
 
   if (taskType === "EXTRACT_DETERMINISTIC_REQUIREMENTS") {
     const payload = (task.payload || {}) as Record<string, unknown>;
@@ -2261,7 +2762,7 @@ async function processClaimedTask(
         context: ctx,
         extendLeaseSeconds: Math.max(options.heartbeatSeconds * 3, 60),
       }).catch((error) => {
-        console.warn(`Pipeline task heartbeat failed for ${task.taskKey}:`, error);
+        console.warn(`Pipeline task heartbeat failed for ${task.taskKey}: ${publicErrorSummary(error, "pipeline")}`);
       });
     }, options.heartbeatSeconds * 1000);
     heartbeatTimer.unref?.();
@@ -2311,7 +2812,7 @@ async function processClaimedTask(
         return;
       }
     }
-    await executeStageTask(
+    const retrievedObservationId = await executeStageTask(
       taskType,
       task,
       clientOrPool,
@@ -2325,7 +2826,13 @@ async function processClaimedTask(
       context: ctx,
       afterComplete: async (transactionClient) => {
         if (!metrics.rerouted) {
-          metrics.successorTasksCreated += await maybeEnqueueAfterTask(taskType, task, transactionClient, ctx);
+          metrics.successorTasksCreated += await maybeEnqueueAfterTask(
+            taskType,
+            task,
+            transactionClient,
+            ctx,
+            typeof retrievedObservationId === "string" ? retrievedObservationId : undefined,
+          );
         }
       },
     });
@@ -2359,8 +2866,6 @@ export async function runPipelineStageTaskWorker(
   const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
   const budgetRunId = options.budgetRunId?.trim() || crypto.randomUUID();
   const claimedByType: Partial<Record<PipelineStageTaskType, number>> = {};
-  const stageStartOffset = Math.max(0, Math.floor(options.stageStartOffset ?? 0));
-  let stageRound = 0;
   const startedAt = Date.now();
   const deadlineAt = startedAt + wallClockMs;
   const preparationReserveMs = Math.min(wallClockMs, Math.max(minTimeToStartTaskMs, 1_000));
@@ -2415,7 +2920,6 @@ export async function runPipelineStageTaskWorker(
         includeRoutingDeferred: options.includeRoutingDeferred,
         includeTestFixtures: options.includeTestFixtures,
         routingDeferredReplayVersion: options.routingDeferredReplayVersion,
-        budgetRunId,
         maxSeedPerType: options.maxSeedPerType,
         timeBudgetMs: seedTimeBudgetMs,
       });
@@ -2451,11 +2955,7 @@ export async function runPipelineStageTaskWorker(
         options.maxTasksByType ?? {},
         maxTasks,
         maxTasks - summary.claimed,
-        stageRound === 0 || taskTypes.length === 0
-          ? stageStartOffset
-          : (stageStartOffset + stageRound) % taskTypes.length,
       );
-      stageRound += 1;
       for (const { taskType, claimLimit: stagePassLimit } of roundPlan) {
         const stageLimit = Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks));
         let claimedThisPass = 0;
@@ -2494,6 +2994,7 @@ export async function runPipelineStageTaskWorker(
             claimedByType[taskType] = (claimedByType[taskType] ?? 0) + 1;
             incrementWorker(summary, task.taskType, "claimed");
             const taskMetrics: PipelineTaskRunMetrics = { successorTasksCreated: 0, rerouted: false };
+            const taskStartedAt = Date.now();
             try {
               // Keep the cancellation check inside the lease-release catch:
               // aborting immediately after claim must never strand a RUNNING
@@ -2547,9 +3048,26 @@ export async function runPipelineStageTaskWorker(
               }
               const message = error instanceof Error ? error.message : String(error);
               const exhausted = task.attemptNumber >= task.maxAttempts;
-              await failPipelineTask(task, message, client as any, { context: ctx });
+              await failPipelineTask(task, message, client as any, {
+                context: ctx,
+                ...(error instanceof PipelineTaskRetryAtError && error.retryAt
+                  ? { retryAt: error.retryAt }
+                  : {}),
+              });
+              if (task.taskType === "FETCH_JOB_CONTENT") {
+                await markGmailFetchOutcome(
+                  requireStringPayload(task, "observation_id"),
+                  client as any,
+                  ctx,
+                  exhausted ? "FETCH_FAILED" : "FETCH_PENDING",
+                  exhausted ? "SOURCE_BLOCKED" : "SOURCE_PENDING",
+                  message,
+                );
+              }
               if (exhausted) {
-                await markTaskTargetProcessingError(task, client as any, ctx, message);
+                if (task.taskType !== "FETCH_JOB_CONTENT") {
+                  await markTaskTargetProcessingError(task, client as any, ctx, message);
+                }
                 summary.deadLettered += 1;
                 incrementWorker(summary, task.taskType, "deadLettered");
               }
@@ -2558,6 +3076,7 @@ export async function runPipelineStageTaskWorker(
               summary.errors.push({ taskType: task.taskType, taskKey: task.taskKey, error: message });
             } finally {
               summary.successorTasksCreated += taskMetrics.successorTasksCreated;
+              summary.byType[task.taskType].executionDurationMs += Date.now() - taskStartedAt;
             }
           }
         }
@@ -2571,6 +3090,11 @@ export async function runPipelineStageTaskWorker(
     }
 
     const durationMs = Date.now() - startedAt;
+    for (const stageSummary of Object.values(summary.byType)) {
+      stageSummary.secondsPerClaimedTask = stageSummary.claimed > 0
+        ? Math.round((stageSummary.executionDurationMs / stageSummary.claimed) / 10) / 100
+        : null;
+    }
     const stageLimitsReached = taskTypes.every((taskType) =>
       (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
     );

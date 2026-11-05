@@ -1,4 +1,5 @@
 import { appendFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import dotenv from "dotenv";
 import { isPooledPostgresConnectionString, pgConnectionConfig } from "../src/db/pgSsl.js";
@@ -10,11 +11,16 @@ import {
 } from "../src/tasks/stageTaskWorker.js";
 import type { PipelineTaskReconciliationSummary } from "../src/tasks/pipelineTaskCurrentness.js";
 import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
+import { recordPipelineWorkerProgressSnapshot } from "../src/tasks/pipelineWorkerProgress.js";
 import {
+  DEAD_LETTER_CLASSIFICATION_SQL,
+  DEAD_LETTER_LINEAGE_JOINS_SQL,
   readDeadLetterTaskHealth,
   reconcileStaleSupersededEmbeddingDeadLetters,
 } from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { inspectProfileEmbeddingReadiness } from "../src/embeddings/profileEmbeddingRepair.js";
+import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -45,25 +51,20 @@ function parsePositiveIntEnv(name: string, fallback: number, max?: number): numb
   return max ? Math.min(parsed, max) : parsed;
 }
 
+function parseUuidListEnv(name: string): string[] | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const values = [...new Set(raw.split(",").map((value) => value.trim()).filter(Boolean))];
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const invalid = values.filter((value) => !uuidPattern.test(value));
+  if (invalid.length > 0) throw new Error(`${name} contains invalid UUID value(s).`);
+  return values;
+}
+
 function parseBooleanEnv(name: string, fallback: boolean): boolean {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
-}
-
-function pipelineStageStartOffset(taskTypeCount: number): number {
-  if (taskTypeCount <= 0) return 0;
-  const configuredOffset = process.env.PIPELINE_TASK_WORKER_STAGE_START_OFFSET?.trim();
-  if (configuredOffset) {
-    const parsedOffset = Number.parseInt(configuredOffset, 10);
-    return Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset % taskTypeCount : 0;
-  }
-
-  const runId = Number.parseInt(process.env.GITHUB_RUN_ID ?? "0", 10);
-  const runAttempt = Number.parseInt(process.env.GITHUB_RUN_ATTEMPT ?? "1", 10);
-  const runOffset = Number.isFinite(runId) && runId >= 0 ? runId : 0;
-  const attemptOffset = Number.isFinite(runAttempt) && runAttempt > 1 ? runAttempt - 1 : 0;
-  return (runOffset + attemptOffset) % taskTypeCount;
 }
 
 interface QueueHealthRow {
@@ -83,6 +84,13 @@ interface QueueHealth {
   oldestPendingAgeSeconds: number;
   oldestRetryWaitAgeSeconds: number;
   byType: QueueHealthRow[];
+}
+
+interface OldestPendingTask {
+  id: string;
+  taskType: string;
+  createdAt: string;
+  ageSeconds: number;
 }
 
 interface PipelineDeadLetterHealthReport {
@@ -112,9 +120,130 @@ interface PipelineTaskReconciliationReport {
   error: string | null;
 }
 
-async function readQueueHealth(pool: pg.Pool, workspaceId: string): Promise<QueueHealth> {
+interface QueueHealthScope {
+  taskTypes: readonly string[];
+  jobVersionIds?: readonly string[];
+  observationIds?: readonly string[];
+}
+
+function scopedTaskTargetClause(jobVersionParam: number, observationParam: number): string {
+  return `AND (
+    ($${jobVersionParam}::text[] IS NULL AND $${observationParam}::text[] IS NULL)
+    OR task.payload->>'job_version_id' = ANY(COALESCE($${jobVersionParam}::text[], ARRAY[]::text[]))
+    OR task.payload->>'observation_id' = ANY(COALESCE($${observationParam}::text[], ARRAY[]::text[]))
+    OR EXISTS (
+      SELECT 1
+      FROM raw_job_observations AS scoped_observation
+      WHERE scoped_observation.workspace_id = task.workspace_id
+        AND scoped_observation.id::text = task.payload->>'observation_id'
+        AND scoped_observation.job_version_id::text = ANY(COALESCE($${jobVersionParam}::text[], ARRAY[]::text[]))
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM raw_job_observations AS scoped_child
+      WHERE scoped_child.workspace_id = task.workspace_id
+        AND scoped_child.id::text = task.payload->>'observation_id'
+        AND scoped_child.derived_from_observation_id::text = ANY(COALESCE($${observationParam}::text[], ARRAY[]::text[]))
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM raw_job_observations AS scoped_parent
+      WHERE scoped_parent.workspace_id = task.workspace_id
+        AND scoped_parent.id::text = ANY(COALESCE($${observationParam}::text[], ARRAY[]::text[]))
+        AND scoped_parent.job_version_id::text = task.payload->>'job_version_id'
+    )
+  )`;
+}
+
+async function readQueueHealth(
+  pool: pg.Pool,
+  workspaceId: string,
+  scope?: QueueHealthScope,
+): Promise<QueueHealth> {
   const client = await pool.connect();
   try {
+    if (scope) {
+      const jobVersionIds = scope.jobVersionIds ?? null;
+      const observationIds = scope.observationIds ?? null;
+      const params = [workspaceId, [...scope.taskTypes], jobVersionIds, observationIds];
+      const targetClause = scopedTaskTargetClause(3, 4);
+      const queueResult = await client.query<QueueHealthRow>(
+        `SELECT task.task_type,
+                task.status,
+                COUNT(*)::INTEGER AS task_count,
+                EXTRACT(EPOCH FROM NOW() - MIN(task.created_at))::INTEGER AS oldest_age_seconds
+         FROM pipeline_tasks AS task
+         WHERE task.workspace_id = $1
+           AND task.task_type = ANY($2::text[])
+           AND task.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY')
+           ${targetClause}
+         GROUP BY task.task_type, task.status
+         ORDER BY task.task_type, task.status`,
+        params,
+      );
+      const deadLetterResult = await client.query<{
+        task_type: string;
+        actionable_dead_letter_count: number;
+        stale_historical_dead_letter_count: number;
+      }>(
+        `SELECT task.task_type,
+                COUNT(*) FILTER (
+                  WHERE (${DEAD_LETTER_CLASSIFICATION_SQL}) = 'ACTIONABLE_CURRENT'
+                )::INTEGER AS actionable_dead_letter_count,
+                COUNT(*) FILTER (
+                  WHERE (${DEAD_LETTER_CLASSIFICATION_SQL}) = 'STALE_HISTORICAL'
+                )::INTEGER AS stale_historical_dead_letter_count
+         FROM pipeline_tasks AS task
+         ${DEAD_LETTER_LINEAGE_JOINS_SQL}
+         WHERE task.workspace_id = $1
+           AND task.task_type = ANY($2::text[])
+           AND task.status = 'DEAD_LETTER'
+           ${targetClause}
+           AND NOT EXISTS (
+             SELECT 1
+             FROM canonical_jobs AS fixture_job
+             LEFT JOIN job_versions AS fixture_version
+               ON fixture_version.workspace_id = fixture_job.workspace_id
+              AND fixture_version.canonical_job_id = fixture_job.id
+             WHERE fixture_job.workspace_id = task.workspace_id
+               AND fixture_job.is_test_fixture = TRUE
+               AND (
+                 task.payload->>'canonical_job_id' = fixture_job.id::TEXT
+                 OR task.payload->>'job_version_id' = fixture_version.id::TEXT
+               )
+           )
+         GROUP BY task.task_type
+         ORDER BY task.task_type`,
+        params,
+      );
+      const actionableCurrentDeadLetter = deadLetterResult.rows.reduce(
+        (total, row) => total + Number(row.actionable_dead_letter_count),
+        0,
+      );
+      const staleHistoricalDeadLetter = deadLetterResult.rows.reduce(
+        (total, row) => total + Number(row.stale_historical_dead_letter_count),
+        0,
+      );
+      const byStatus = (status: string) => queueResult.rows
+        .filter((row) => row.status === status)
+        .reduce((total, row) => total + Number(row.task_count), 0);
+      const oldestAge = (status: string) => queueResult.rows
+        .filter((row) => row.status === status)
+        .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+
+      return {
+        pending: byStatus("PENDING"),
+        retryWait: byStatus("RETRY_WAIT"),
+        blockedDependency: byStatus("BLOCKED_DEPENDENCY"),
+        deadLetter: actionableCurrentDeadLetter + staleHistoricalDeadLetter,
+        actionableCurrentDeadLetter,
+        staleHistoricalDeadLetter,
+        oldestPendingAgeSeconds: oldestAge("PENDING"),
+        oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
+        byType: queueResult.rows,
+      };
+    }
+
     const queueResult = await client.query<QueueHealthRow>(
       `SELECT task_type, status, task_count, oldest_age_seconds
        FROM v_pipeline_task_queue_health
@@ -148,6 +277,52 @@ async function readQueueHealth(pool: pg.Pool, workspaceId: string): Promise<Queu
       oldestPendingAgeSeconds: oldestAge("PENDING"),
       oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
       byType: queueResult.rows,
+    };
+  } finally {
+    client.release();
+  }
+}
+
+async function readOldestPendingTask(
+  pool: pg.Pool,
+  workspaceId: string,
+  taskTypes: readonly string[],
+  scope?: QueueHealthScope,
+): Promise<OldestPendingTask | null> {
+  const client = await pool.connect();
+  try {
+    const jobVersionIds = scope?.jobVersionIds ?? null;
+    const observationIds = scope?.observationIds ?? null;
+    const params: unknown[] = scope
+      ? [workspaceId, [...taskTypes], jobVersionIds, observationIds]
+      : [workspaceId, [...taskTypes]];
+    const targetClause = scope ? scopedTaskTargetClause(3, 4) : "";
+    const { rows } = await client.query<{
+      id: string;
+      task_type: string;
+      created_at: Date;
+      age_seconds: number;
+    }>(
+      `SELECT task.id::text AS id,
+              task.task_type,
+              task.created_at,
+              EXTRACT(EPOCH FROM NOW() - task.created_at)::INTEGER AS age_seconds
+       FROM pipeline_tasks AS task
+       WHERE task.workspace_id = $1
+         AND task.status = 'PENDING'
+         AND task.task_type = ANY($2::text[])
+         ${targetClause}
+       ORDER BY task.created_at ASC, task.id ASC
+       LIMIT 1`,
+      params,
+    );
+    const oldest = rows[0];
+    if (!oldest) return null;
+    return {
+      id: oldest.id,
+      taskType: oldest.task_type,
+      createdAt: oldest.created_at.toISOString(),
+      ageSeconds: Number(oldest.age_seconds ?? 0),
     };
   } finally {
     client.release();
@@ -190,6 +365,12 @@ export async function processPipelineTasks(): Promise<void> {
   // them; an explicit task-type selection or opt-in environment flag drains
   // them after the mandatory pipeline without holding up routing/matching.
   const lockId = taskTypes.length === 1 && taskTypes[0] === "EXTRACT_QUOTED_REQUIREMENTS" ? 1002 : LOCK_ID;
+  const jobVersionIds = parseUuidListEnv("PIPELINE_TASK_WORKER_JOB_VERSION_IDS");
+  const observationIds = parseUuidListEnv("PIPELINE_TASK_WORKER_OBSERVATION_IDS");
+  const hasExplicitTargetScope = jobVersionIds !== undefined || observationIds !== undefined;
+  const queueHealthScope: QueueHealthScope | undefined = hasExplicitTargetScope
+    ? { taskTypes, jobVersionIds, observationIds }
+    : undefined;
 
   const checkAiPreflight = parseBooleanEnv("PIPELINE_TASK_WORKER_PREFLIGHT_MODELS", true);
   const requiresExtractionRoute = taskTypes.includes("EXTRACT_QUOTED_REQUIREMENTS");
@@ -274,7 +455,22 @@ export async function processPipelineTasks(): Promise<void> {
       contextClient.release();
     }
 
-    if (lockId === LOCK_ID) {
+    const profileReadiness = await inspectProfileEmbeddingReadiness(pool, { context });
+    console.log("Profile embedding readiness:", JSON.stringify(profileReadiness));
+    if (profileReadiness.status === "NO_ACTIVE_PROFILE") {
+      console.warn("NO_ACTIVE_PROFILE: profile matching will remain dependency-blocked until a profile is imported or activated.");
+    }
+    if (profileReadiness.unembeddedProfileFacts > 0) {
+      console.warn(`PROFILE_FACTS_UNEMBEDDED=${profileReadiness.unembeddedProfileFacts}`);
+    }
+    if (profileReadiness.status === "AMBIGUOUS_ACTIVE_PROFILE") {
+      console.warn(`AMBIGUOUS_ACTIVE_PROFILE: found ${profileReadiness.activeProfileCount} active profile versions; matching requires exactly one.`);
+    }
+    if (profileReadiness.status === "PRIMARY_SPACE_MISSING" || profileReadiness.status === "PRIMARY_SPACE_AMBIGUOUS") {
+      console.warn(`${profileReadiness.status}: configured primary embedding space is missing or ambiguous.`);
+    }
+
+    if (lockId === LOCK_ID && !hasExplicitTargetScope) {
       const reconciliationClient = await pool.connect();
       try {
         staleHistoricalDeadLettersReconciled = await reconcileStaleSupersededEmbeddingDeadLetters(
@@ -287,7 +483,7 @@ export async function processPipelineTasks(): Promise<void> {
       console.log("Stale historical embedding dead letters reconciled:", staleHistoricalDeadLettersReconciled);
     }
 
-    const queueHealthBefore = await readQueueHealth(pool, context.workspaceId);
+    const queueHealthBefore = await readQueueHealth(pool, context.workspaceId, queueHealthScope);
     const activeQueueRowsBefore = queueHealthBefore.byType.filter(
       (row) => activeTaskTypes.includes(row.task_type as typeof activeTaskTypes[number]),
     );
@@ -299,11 +495,10 @@ export async function processPipelineTasks(): Promise<void> {
       .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
     reconciliationReport.activePendingBefore = activePendingBefore;
     reconciliationReport.oldestActivePendingAgeSecondsBefore = oldestActivePendingAgeBefore;
-    const stageStartOffset = pipelineStageStartOffset(activeTaskTypes.length);
-    console.log("Pipeline stage start offset:", stageStartOffset);
     const summary = await runPipelineStageTaskWorker(pool, {
       taskTypes: activeTaskTypes,
-      stageStartOffset,
+      jobVersionIds,
+      observationIds,
       seed: parseBooleanEnv("PIPELINE_TASK_WORKER_SEED", true),
       includeRoutingDeferred: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_ROUTING_DEFERRED", true),
       includeTestFixtures: parseBooleanEnv("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES", false),
@@ -345,7 +540,7 @@ export async function processPipelineTasks(): Promise<void> {
       ].join("\n") + "\n", "utf8");
     }
 
-    const queueHealth = await readQueueHealth(pool, context.workspaceId);
+    const queueHealth = await readQueueHealth(pool, context.workspaceId, queueHealthScope);
     deadLetterReport.actionableDeadLetters = queueHealth.actionableCurrentDeadLetter;
     deadLetterReport.staleHistoricalDeadLetters = queueHealth.staleHistoricalDeadLetter;
     deadLetterReport.newlyDeadLetteredThisRun = summary.deadLettered;
@@ -358,6 +553,41 @@ export async function processPipelineTasks(): Promise<void> {
     const oldestActivePendingAgeSeconds = activeQueueRows
       .filter((row) => row.status === "PENDING")
       .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+    const oldestPendingTask = await readOldestPendingTask(
+      pool,
+      context.workspaceId,
+      activeTaskTypes,
+      queueHealthScope,
+    );
+    console.log("Oldest active pending stage:", JSON.stringify(oldestPendingTask
+      ? { task_type: oldestPendingTask.taskType, age_seconds: oldestPendingTask.ageSeconds }
+      : { task_type: null, age_seconds: 0 }));
+    const pendingAgeTrendRunCount = parsePositiveIntEnv(
+      "PIPELINE_TASK_WORKER_PENDING_AGE_TREND_RUNS",
+      3,
+      20,
+    );
+    const progressClient = await pool.connect();
+    let consecutiveOldestTaskRuns: number;
+    try {
+      const runId = process.env.GITHUB_RUN_ID?.trim();
+      const runKey = runId ? `github:${runId}` : `local:${randomUUID()}`;
+      ({ consecutiveOldestTaskRuns } = await recordPipelineWorkerProgressSnapshot(progressClient, {
+        workspaceId: context.workspaceId,
+        runKey,
+        activePendingCount: activePending,
+        oldestPendingTaskId: oldestPendingTask?.id ?? null,
+        oldestPendingTaskType: oldestPendingTask?.taskType ?? null,
+        oldestPendingCreatedAt: oldestPendingTask?.createdAt ?? null,
+        oldestPendingAgeSeconds: oldestPendingTask?.ageSeconds ?? 0,
+      }, pendingAgeTrendRunCount));
+    } finally {
+      progressClient.release();
+    }
+    console.log("Oldest pending task consecutive run trend:", JSON.stringify({
+      same_oldest_task_runs: consecutiveOldestTaskRuns,
+      threshold_runs: pendingAgeTrendRunCount,
+    }));
     reconciliationReport.activePendingAfter = activePending;
     reconciliationReport.netActivePendingDelta = activePending - activePendingBefore;
     reconciliationReport.oldestActivePendingAgeSecondsAfter = oldestActivePendingAgeSeconds;
@@ -368,6 +598,8 @@ export async function processPipelineTasks(): Promise<void> {
         `net_active_pending_delta=${activePending - activePendingBefore}`,
         `oldest_active_pending_age_seconds_before=${oldestActivePendingAgeBefore}`,
         `oldest_active_pending_age_seconds_after=${oldestActivePendingAgeSeconds}`,
+        `oldest_active_pending_task_type=${oldestPendingTask?.taskType ?? "none"}`,
+        `oldest_pending_same_task_runs=${consecutiveOldestTaskRuns}`,
       ].join("\n") + "\n", "utf8");
     }
     console.log("Pipeline task queue health:", JSON.stringify(queueHealth, null, 2));
@@ -386,6 +618,8 @@ export async function processPipelineTasks(): Promise<void> {
       net_active_pending_delta: activePending - activePendingBefore,
       oldest_active_pending_age_seconds_before: oldestActivePendingAgeBefore,
       oldest_active_pending_age_seconds_after: oldestActivePendingAgeSeconds,
+      oldest_active_pending_task_type: oldestPendingTask?.taskType ?? null,
+      oldest_pending_same_task_runs: consecutiveOldestTaskRuns,
       tasks_completed_this_run: summary.completed,
       successor_tasks_created_this_run: summary.successorTasksCreated,
       stale_pending_reconciled: summary.stalePendingReconciliation.reconciled,
@@ -399,6 +633,9 @@ export async function processPipelineTasks(): Promise<void> {
       seed_time_budget_exceeded: summary.seeded?.timeBudgetExceeded ?? false,
       remaining_pending: queueHealth.pending,
       duration_ms: summary.durationMs,
+      seconds_per_claimed_task: summary.claimed > 0
+        ? Math.round((summary.durationMs / summary.claimed) / 10) / 100
+        : null,
     }, null, 2));
     if (queueHealth.retryWait > 0) {
       console.warn(`Pipeline has ${queueHealth.retryWait} RETRY_WAIT task(s); automatic recovery remains scheduled.`);
@@ -426,6 +663,11 @@ export async function processPipelineTasks(): Promise<void> {
     const maxRetryWaitCount = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT", 500, 100000);
     const maxRetryWaitAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_AGE_SECONDS", 21600, 604800);
     const maxPendingAgeSeconds = parsePositiveIntEnv("PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS", 7200, 604800);
+    const pendingAgeTrendRuns = parsePositiveIntEnv(
+      "PIPELINE_TASK_WORKER_PENDING_AGE_TREND_RUNS",
+      3,
+      20,
+    );
     const noProgressPendingThreshold = parsePositiveIntEnv(
       "PIPELINE_TASK_WORKER_NO_FORWARD_PROGRESS_PENDING_THRESHOLD",
       1,
@@ -446,6 +688,9 @@ export async function processPipelineTasks(): Promise<void> {
       activePendingCount: activePending,
       oldestActivePendingAgeSecondsBefore: oldestActivePendingAgeBefore,
       oldestActivePendingAgeSeconds,
+      oldestActivePendingTaskType: oldestPendingTask?.taskType ?? null,
+      oldestPendingTaskSameRuns: consecutiveOldestTaskRuns,
+      pendingAgeTrendRuns,
       failOnRetryWait,
       maxRetryWaitCount,
       maxRetryWaitAgeSeconds,
@@ -461,31 +706,31 @@ export async function processPipelineTasks(): Promise<void> {
 
   } catch (err: any) {
     workerError = err instanceof Error ? err : new Error(String(err));
-    console.error("Pipeline task worker failed:", workerError.message);
+    console.error("Pipeline task worker failed:", publicErrorSummary(workerError, "pipeline"));
   } finally {
     if (deadLetterReport.actionableDeadLetters === null && workspaceId !== null) {
       try {
-        const queueHealth = await readQueueHealth(pool, workspaceId);
+        const queueHealth = await readQueueHealth(pool, workspaceId, queueHealthScope);
         deadLetterReport.actionableDeadLetters = queueHealth.actionableCurrentDeadLetter;
         deadLetterReport.staleHistoricalDeadLettersRemaining = queueHealth.staleHistoricalDeadLetter;
         deadLetterReport.staleHistoricalDeadLetters = queueHealth.staleHistoricalDeadLetter;
       } catch (error: unknown) {
-        deadLetterReport.error = error instanceof Error ? error.message : String(error);
+        deadLetterReport.error = publicErrorSummary(error, "pipeline");
       }
     }
     deadLetterReport.staleHistoricalDeadLettersReconciled = staleHistoricalDeadLettersReconciled;
     deadLetterReport.staleHistoricalDeadLetters ??= staleHistoricalDeadLettersReconciled;
     deadLetterReport.reportGeneratedAt = new Date().toISOString();
-    deadLetterReport.error ??= workerError?.message ?? null;
+    deadLetterReport.error ??= workerError ? publicErrorSummary(workerError, "pipeline") : null;
     try {
       await writeFile(deadLetterReportPath, `${JSON.stringify(deadLetterReport, null, 2)}\n`, "utf8");
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = publicErrorSummary(error, "pipeline");
       console.error("Failed to write pipeline dead-letter health report:", message);
       workerError ??= new Error(`Could not write pipeline dead-letter health report: ${message}`);
     }
     reconciliationReport.reportGeneratedAt = new Date().toISOString();
-    reconciliationReport.error ??= workerError?.message ?? null;
+    reconciliationReport.error ??= workerError ? publicErrorSummary(workerError, "pipeline") : null;
     const reconciliationArtifact = {
       stale_pending_reconciliation: reconciliationReport.stalePendingReconciliation,
       stale_pending_reconciled_this_run: reconciliationReport.stalePendingReconciledThisRun,
@@ -505,7 +750,7 @@ export async function processPipelineTasks(): Promise<void> {
     try {
       await writeFile(reconciliationReportPath, `${JSON.stringify(reconciliationArtifact, null, 2)}\n`, "utf8");
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = publicErrorSummary(error, "pipeline");
       console.error("Failed to write pipeline task reconciliation report:", message);
       workerError ??= new Error(`Could not write pipeline task reconciliation report: ${message}`);
     }

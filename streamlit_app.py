@@ -31,7 +31,10 @@ from streamlit_workspace_contracts import (
     validate_profile_evidence_row,
     validate_ranked_job_row,
     validate_track_row,
+    validate_verify_then_apply_row,
 )
+from streamlit_manual_application import render_manual_application_flow, render_pipeline_review_action
+from streamlit_runtime import code_version, database_outage, ensure_hosted_api_ready, open_api_json
 
 
 # Load environment variables from Streamlit secrets, .env, and .env.local
@@ -42,8 +45,9 @@ def load_dotenv():
             for key, val in st.secrets.items():
                 if isinstance(val, str):
                     os.environ.setdefault(key, val)
-    except Exception:
-        pass
+    except Exception as exc:
+        if exc.__class__.__name__ != "StreamlitSecretNotFoundError":
+            raise
 
     # Load from local .env and .env.local files
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -336,6 +340,41 @@ APPLY_NOW_JOBS_QUERY = """
     LIMIT 5000
 """
 
+VERIFY_THEN_APPLY_JOBS_QUERY = """
+    SELECT jobs.workspace_id, jobs.canonical_job_id, jobs.job_version_id,
+           jobs.title, jobs.company, jobs.canonical_url, jobs.source,
+           jobs.location, jobs.workplace_type, jobs.employment_type,
+           jobs.description, jobs.gate_status, jobs.rejection_codes,
+           jobs.gate_evidence_quotes, jobs.primary_lane, jobs.secondary_lanes,
+           jobs.lane_confidence, jobs.deterministic_match_score,
+           jobs.deterministic_match_coverage, jobs.processing_state,
+           jobs.recommendation_eligibility, jobs.recommendation_outcome,
+           jobs.recommendation_requirement_score,
+           jobs.recommendation_coverage_score,
+           jobs.recommendation_evidence_completeness,
+           jobs.recommendation_decided_at, jobs.observed_at,
+           jobs.current_artifact_status, jobs.current_artifact_reason,
+           current_readiness.readiness_status,
+           current_readiness.readiness_reason_codes
+    FROM v_canonical_shortlist_scoped AS jobs
+    JOIN v_application_readiness_current AS current_readiness
+      ON current_readiness.workspace_id = jobs.workspace_id
+     AND current_readiness.canonical_job_id = jobs.canonical_job_id
+     AND current_readiness.job_version_id::text = jobs.job_version_id::text
+    WHERE jobs.workspace_id = %s
+      AND jobs.gate_status = 'NEEDS_VERIFICATION'
+      AND jobs.processing_state = 'MATCHED'
+      AND jobs.recommendation_eligibility = 'VERIFY'
+      AND jobs.recommendation_outcome = 'REVIEW'
+      AND current_readiness.readiness_status = 'NEEDS_VERIFICATION'
+    ORDER BY jobs.deterministic_match_score DESC NULLS LAST,
+             jobs.recommendation_requirement_score DESC NULLS LAST,
+             jobs.recommendation_coverage_score DESC NULLS LAST,
+             jobs.lane_confidence DESC NULLS LAST,
+             jobs.observed_at DESC NULLS LAST
+    LIMIT 5000
+"""
+
 TRACK_JOBS_QUERY = """
     SELECT workspace_id, canonical_job_id, job_version_id, title, company,
            canonical_url, source, location, workplace_type, employment_type,
@@ -517,6 +556,32 @@ def fetch_apply_now_jobs():
     return _validate_workspace_rows(rows, workspace_id, validate_apply_now_row)
 
 
+def fetch_verify_then_apply_jobs():
+    connection = _open_read_only_connection()
+    try:
+        workspace_id = _read_model_workspace_id(connection)
+    finally:
+        connection.close()
+    rows = _read_model_query(VERIFY_THEN_APPLY_JOBS_QUERY, (workspace_id,))
+    return _validate_workspace_rows(rows, workspace_id, validate_verify_then_apply_row)
+
+
+def verification_question_for_job(job):
+    codes = set(job.get("rejection_codes") or [])
+    questions = []
+    if "GATE_UNKNOWN_WORK_MODE" in codes:
+        questions.append("Ask whether the role is remote, hybrid, or on-site.")
+    if "NEEDS_VERIFICATION_LOCATION_DETAIL" in codes:
+        questions.append("Confirm the work location and any residency requirement.")
+    if "NEEDS_VERIFICATION_OFFICE_DAYS" in codes:
+        questions.append("Confirm how many days per week are required in the office.")
+    if "NEEDS_VERIFICATION_TRAVEL" in codes:
+        questions.append("Confirm the expected travel percentage and frequency.")
+    if questions:
+        return " ".join(questions)
+    return "Confirm the unresolved workability detail shown in the gate evidence."
+
+
 def fetch_track_jobs():
     connection = _open_read_only_connection()
     try:
@@ -671,11 +736,10 @@ def api_request(method, path, params=None, body=None, timeout=30):
         data = json.dumps(body).encode("utf-8")
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        if response.status == 204:
-            return {}
-        raw = response.read().decode("utf-8")
-        return json.loads(raw) if raw else {}
+    return open_api_json(req, timeout)
+
+
+ensure_hosted_api_ready()
 
 def default_accessibility_settings():
     return {
@@ -1450,6 +1514,36 @@ def save_application_status(job, status, application=None):
     st.rerun()
 
 
+@st.cache_data(ttl=15, show_spinner=False)
+def _database_outage(api_url, database_url):
+    def probe_direct():
+        try:
+            from psycopg2 import Error as DriverError
+        except ImportError:
+            DriverError = RuntimeError
+        try:
+            _open_read_only_connection().close()
+        except DriverError as error:
+            raise RuntimeError(str(error)) from error
+
+    return database_outage(
+        api_url,
+        lambda path: api_request("GET", path, timeout=20),
+        probe_direct,
+        database_url,
+    )
+
+
+# Every panel reads the database, so an unusable database is reported once, before the first read,
+# instead of by each panel.
+database_problem = _database_outage(
+    get_api_base_url(), (os.environ.get("DATABASE_URL") or "").strip()
+)
+if database_problem:
+    st.sidebar.caption(f"Code version: `{code_version()}`")
+    st.error(database_problem)
+    st.stop()
+
 # Fetch data
 jobs_list = fetch_jobs_from_db()
 rejected_jobs_audit = fetch_rejected_jobs_from_db()
@@ -1690,6 +1784,7 @@ if api_base_url:
     st.sidebar.caption(f"🔌 Connected to Managed API (`{api_base_url}`)")
 else:
     st.sidebar.caption("📦 PostgreSQL Direct Read Model (Live)")
+st.sidebar.caption(f"Code version: `{code_version()}`")
 
 # Unpaginated counts come only from the authoritative V5 workspace read model.
 application_workspace_summary = {}
@@ -1747,8 +1842,8 @@ if application_records is not None:
 st.sidebar.markdown("---")
 st.sidebar.subheader("📅 Automated Schedules")
 st.sidebar.info("""
-* **Daily Ingestion & Evaluation**: Runs daily at **10:00 AM SGT** (02:00 UTC) via GitHub Actions.
-* **Weekly LinkedIn Auto-Sync**: Runs every **Sunday at 10:00 AM SGT** (02:00 UTC) via GitHub Actions.
+* **Daily ingestion**: Runs at **10:00 AM SGT** (02:00 UTC) via GitHub Actions.
+* **Hourly processing**: Backlog and queue-worker workflows run hourly.
 """)
 
 st.sidebar.subheader("⚡ Pipeline Action Controls")
@@ -1990,11 +2085,18 @@ with tab_dashboard:
             except Exception as exc:
                 st.error(f"Current profile evidence could not be loaded: {exc}")
 
-    category_options = ["Top 10", "Apply Now", "Track", "Processing", "Applied", "Skip", "Rejected / Unmatched", "All"]
+    category_options = ["Top 10", "Apply Now", "Verify, then apply", "Track", "Processing", "Applied", "Skip", "Rejected / Unmatched", "All"]
     workspace_category = st.selectbox("Opportunity category", category_options, index=1, key="application_workspace_category")
+    verification_jobs = None
+    if workspace_category == "Verify, then apply":
+        try:
+            verification_jobs = fetch_verify_then_apply_jobs()
+        except Exception as exc:
+            st.error(f"Verification opportunities are unavailable from the canonical read model: {exc}")
     category_counts = {
         "Top 10": application_workspace_summary.get("top_ten_ready_count"),
         "Apply Now": application_workspace_summary.get("apply_now_count"),
+        "Verify, then apply": len(verification_jobs) if verification_jobs is not None else None,
         "Track": application_workspace_summary.get("track_count"),
         "Processing": application_workspace_summary.get("processing_count"),
         "Applied": application_workspace_summary.get("applied_count"),
@@ -2017,6 +2119,8 @@ with tab_dashboard:
             category_rows = fetch_top_ten_ready_jobs()
         elif workspace_category == "Apply Now":
             category_rows = fetch_apply_now_jobs()
+        elif workspace_category == "Verify, then apply":
+            category_rows = verification_jobs
         elif workspace_category == "Track":
             category_rows = fetch_track_jobs()
         elif workspace_category == "Applied":
@@ -2043,7 +2147,19 @@ with tab_dashboard:
         st.error("This category is unavailable because its authoritative read model could not be loaded.")
         filtered_jobs = []
     else:
-        if workspace_category not in ("Applied", "Rejected / Unmatched"):
+        if workspace_category == "Verify, then apply":
+            category_rows = [
+                job for job in category_rows
+                if (lane_filter in (None, "All Lanes") or job.get("primary_lane") == lane_filter)
+                and (status_filter in (None, "All Statuses") or job.get("processing_state") == status_filter)
+                and (board_filter == "All Sources" or (job.get("source") or "UNKNOWN") == board_filter)
+                and (
+                    track_filter in (None, "All Tracks")
+                    or (track_filter == "Unassigned" and not job.get("primary_lane"))
+                    or job.get("primary_lane") == track_filter
+                )
+            ]
+        elif workspace_category not in ("Applied", "Rejected / Unmatched"):
             for category_job in category_rows:
                 category_job["decision_eligibility"] = category_job.get("recommendation_eligibility")
                 category_job["decision_outcome"] = category_job.get("recommendation_outcome")
@@ -2154,7 +2270,19 @@ with tab_dashboard:
 
             return (rank_missing, rank_sort, outcome_rank, eligibility_rank, status_rank, match_sort, priority_sort)
 
-        sorted_filtered_jobs = sorted(filtered_jobs, key=status_sort_key)
+        if workspace_category == "Verify, then apply":
+            sorted_filtered_jobs = sorted(
+                filtered_jobs,
+                key=lambda job: (
+                    as_number(job.get("deterministic_match_score")) is None,
+                    -(as_number(job.get("deterministic_match_score")) or 0),
+                    -(as_number(job.get("recommendation_requirement_score")) or 0),
+                    -(as_number(job.get("recommendation_coverage_score")) or 0),
+                    job.get("observed_at") or "",
+                ),
+            )
+        else:
+            sorted_filtered_jobs = sorted(filtered_jobs, key=status_sort_key)
         listing_page_size = 25
         listing_page_count = max(1, (len(sorted_filtered_jobs) + listing_page_size - 1) // listing_page_size)
         listing_page = st.number_input(
@@ -2167,9 +2295,11 @@ with tab_dashboard:
         )
         start_index = (int(listing_page) - 1) * listing_page_size
         active_jobs = sorted_filtered_jobs[start_index:start_index + listing_page_size]
-        rejected_jobs = [] if workspace_category == "Rejected / Unmatched" else rejected_jobs_audit
+        rejected_jobs = [] if workspace_category in ("Rejected / Unmatched", "Verify, then apply") else rejected_jobs_audit
 
         st.subheader(f"{workspace_category} opportunities")
+        if workspace_category == "Verify, then apply":
+            st.caption("Sorted by deterministic profile-match score. These jobs have a current match and decision, but stay out of READY and document generation until the open workability question is resolved.")
         if not active_jobs and not rejected_jobs:
             st.info("No matching jobs in the current Postgres database.")
         else:
@@ -2198,6 +2328,8 @@ with tab_dashboard:
                     
                     with st.expander(f"{badge_style} {title} — {company} ({status})"):
                         st.markdown(f"**Decision:** `{outcome}` ({eligibility}) | **Gate:** `{gate_status}`")
+                        if workspace_category == "Verify, then apply":
+                            st.text(f"Open question: {verification_question_for_job(job)}")
                         artifact_status = job.get("current_artifact_status") or "CURRENTNESS_UNKNOWN"
                         artifact_reason = job.get("current_artifact_reason")
                         blocked_count = job.get("blocked_task_count") or 0
@@ -2260,6 +2392,12 @@ with tab_dashboard:
                             except Exception:
                                 pass
                         st.text_area("Full Description Brief", desc_text or "", height=100, disabled=True, key=f"active_desc_{idx}")
+
+                        verify_first = workspace_category == "Verify, then apply"
+                        if verify_first or is_document_generation_eligible(job):
+                            if verify_first:
+                                st.caption("Settle the open question with the employer before you send these documents.")
+                            render_pipeline_review_action(api_request, job, f"active_{job.get('job_version_id')}")
 
                         if is_document_generation_eligible(job):
                             application_key = (job.get("canonical_job_id"), job.get("job_version_id"))
@@ -2432,36 +2570,7 @@ with tab_dashboard:
             st.info("No evaluated jobs in view. Run the discovery & evaluation pipeline to populate AI_EVALUATED rows.")
 
 with tab_add_job:
-    st.subheader("➕ Import a New Job Advertisement")
-    st.write("Add raw jobs manually to the Postgres Vault. The daily evaluation cron job will automatically score and route them.")
-    if "manual_import_success" in st.session_state:
-        st.success(st.session_state["manual_import_success"])
-        del st.session_state["manual_import_success"]
-
-    with st.form("custom_job_form"):
-        title = st.text_input("Job Title", "Principal AI Architect")
-        company = st.text_input("Company Name", "Novartis Pharmaceuticals")
-        source = st.selectbox("Source Portal", ["LinkedIn", "MyCareersFuture", "eFinancialCareers", "Gmail"])
-        salary = st.text_input("Salary Range Indicator", "SGD 22,000 - SGD 26,000 / month")
-        location = st.text_input("Location", "Singapore (Remote)")
-        careers_url = st.text_input("Careers Portal Direct Link (Verification)", "https://www.novartis.com/careers")
-        desc = st.text_area("Job Description Raw text", "Paste raw details here...")
-        
-        submitted = st.form_submit_button("Import & Save to Postgres Vault")
-        if submitted:
-            new_job = {
-                "title": title,
-                "company": company,
-                "source": source,
-                "salaryRange": salary,
-                "location": location,
-                "careers_portal_url": careers_url if careers_url else f"https://www.{company.lower().replace(' ', '')}.com/careers",
-                "description": desc
-            }
-            if save_new_job_to_db(new_job):
-                st.session_state["manual_import_success"] = f"✅ Successfully added '{title}' to the Staging Vault! It is now pending evaluation. To evaluate it immediately, click the '🧠 2. Run LLM Evaluation & Processing' button in the sidebar."
-                st.rerun()
-
+    render_manual_application_flow(api_request)
 with tab_linkedin:
     st.subheader("🔗 Import Saved LinkedIn Jobs")
     st.write("Sync your saved LinkedIn jobs and stage them in your Postgres database for evaluation. Auto-unsave is disabled to keep ingestion read-only.")

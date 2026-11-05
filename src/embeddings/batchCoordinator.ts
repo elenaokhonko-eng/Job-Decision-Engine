@@ -11,6 +11,7 @@ import { seedEmbeddingSpaces } from './spaceRegistry.js';
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 import { recordModelRouteInvocation } from '../modelRoutes/registry.js';
 import { sha256Hex, stableStringify } from '../config/structuredLoader.js';
+import { publicErrorSummary } from '../security/publicErrorSummary.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -89,8 +90,7 @@ interface EmbeddingInvocationRecord {
 }
 
 function describeEmbeddingError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.length > 500 ? `${message.slice(0, 500)}...` : message;
+  return publicErrorSummary(error, 'embedding');
 }
 
 async function recordEmbeddingInvocation(

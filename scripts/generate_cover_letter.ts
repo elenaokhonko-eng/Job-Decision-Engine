@@ -25,6 +25,7 @@ import Ajv2020Import from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
 import { generateContentAudited, MODEL_REGISTRY } from "../src/services/agent.js";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
+import { sourceContentEvidencePredicate } from "../src/pipeline/descriptionQuality.js";
 import { generateCoverLetterDocx } from "../src/services/renderers/docx_cl_renderer.js";
 import { generatePdf } from "../src/services/renderers/pdf_renderer.js";
 import { persistDocumentProvenance, type DocumentClaimInput } from "../src/documents/provenance.js";
@@ -41,6 +42,7 @@ import {
   selectCoverLetterClaimPlan,
 } from "../src/documents/claimSelector.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -142,7 +144,7 @@ async function generateTailoredCoverLetter(): Promise<void> {
     const ctx: WorkspaceContext = await resolveWorkspaceContext(pool as any);
     const jobRes = await pool.query(
       `SELECT
-         c.id,
+         c.id AS canonical_job_id,
          COALESCE(c.latest_job_version_id, (
            SELECT jv_current.id
            FROM job_versions jv_current
@@ -234,7 +236,9 @@ async function generateTailoredCoverLetter(): Promise<void> {
        ) ae ON TRUE
        WHERE c.workspace_id = $3
          AND c.id = $1
-         AND jv.canonical_job_id = c.id`,
+         AND jv.canonical_job_id = c.id
+         AND c.description_quality_status = 'COMPLETE'
+         AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}`,
       [jobId, requestedJobVersionId || null, ctx.workspaceId]
     );
 
@@ -467,7 +471,6 @@ ${JSON.stringify(coverLetterSchema)}`;
       finalCl = JSON.parse(cleanJsonResponse(rawResponse));
     } catch (parseErr) {
       console.error("❌ ERROR: AI returned invalid JSON for cover letter. Aborting.");
-      console.error("Raw response:", rawResponse.substring(0, 500));
       process.exit(1);
     }
 
@@ -588,8 +591,7 @@ ${JSON.stringify(coverLetterSchema)}`;
     }));
 
   } catch (error: any) {
-    console.error("❌ ERROR during Cover Letter generation:", error.message || error);
-    if (error.stack) console.error(error.stack);
+    console.error("❌ ERROR during Cover Letter generation:", publicErrorSummary(error, "evaluation"));
     process.exit(1);
   } finally {
     await pool.end();

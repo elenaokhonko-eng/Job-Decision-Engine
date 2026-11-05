@@ -112,6 +112,8 @@ describe('Pipeline Stage: Hard Gates', () => {
     await runHardGates(undefined, { context });
 
     expect(criteria.applyGlobalGates).toHaveBeenCalledTimes(1);
+    expect((mPool.query as any).mock.calls[2]?.[0]).toContain("c.description_quality_status = 'COMPLETE'");
+    expect((mPool.query as any).mock.calls[2]?.[0]).toContain("source_content_observation.source_name <> 'GMAIL_ALERT'");
     const gateCallArg = (criteria.applyGlobalGates as any).mock.calls[0]?.[0];
     expect(String(gateCallArg?.raw_description || "")).toContain("Extracted requirements");
     expect(String(gateCallArg?.raw_description || "")).toContain("2 days per week in office");
@@ -126,7 +128,9 @@ describe('Pipeline Stage: Hard Gates', () => {
 
     const insertCall = (mPool.query as any).mock.calls[7];
     expect(insertCall[0]).toContain('pipeline_run_id');
+    expect(insertCall[0]).toContain('workability_policy_hash');
     expect(insertCall[1][3]).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(insertCall[1][5]).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it('gates via applyGlobalGates when no persisted requirements exist', async () => {

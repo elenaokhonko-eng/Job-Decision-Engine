@@ -21,6 +21,9 @@ import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
 import { PersistedLaneDecisionSchema, SCHEMA_VERSION } from "../contracts/index.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
 import { SixLaneKeySchema, type LaneIntentPreferences, type LanePreferenceTaxonomy } from "../policy/laneIntentContracts.js";
+import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
+import { routableWorkabilityVerificationSql } from "./verificationRouting.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
 export { loadGlobalLanesConfig, loadLanesConfig };
 export type { GlobalLanesConfig, LaneDefinition };
@@ -870,9 +873,12 @@ export async function runLaneRouter(
     ? `AND c.id = ANY($${params.push(canonicalJobIds)}::uuid[])`
     : "";
   const limitClause = limit ? `LIMIT $${params.push(limit)}` : "";
+  const routableVerificationFilter = routableWorkabilityVerificationSql("c");
   const replayableStateFilter = reprocessExisting
-    ? `COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED', 'UNMATCHED', 'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED')`
-    : `COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+    ? `(COALESCE(c.processing_state, c.processing_status) IN ('PREQUALIFIED', 'ROUTING_DEFERRED', 'UNMATCHED', 'LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED')
+        OR ${routableVerificationFilter})`
+    : `(COALESCE(c.processing_state, c.processing_status) = 'PREQUALIFIED'
+           OR ${routableVerificationFilter}
            OR (
              COALESCE(c.processing_state, c.processing_status) IN ('ROUTING_DEFERRED', 'UNMATCHED')
              AND (
@@ -890,7 +896,7 @@ export async function runLaneRouter(
                  )
                `}
              )
-           )`;
+           ))`;
   const replayExistingDecisionFilter = reprocessExisting
     ? `AND (
          c.latest_lane_decision_id IS NULL
@@ -926,6 +932,8 @@ export async function runLaneRouter(
           ${replayExistingDecisionFilter}
           ${jobVersionFilter}
           ${canonicalJobFilter}
+          AND c.description_quality_status = 'COMPLETE'
+          AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
         ORDER BY c.created_at ASC, c.id ASC
         ${limitClause}
       `,
@@ -963,6 +971,8 @@ export async function runLaneRouter(
           ${replayExistingDecisionFilter}
           ${fallbackJobVersionFilter}
           ${fallbackCanonicalJobFilter}
+          AND c.description_quality_status = 'COMPLETE'
+          AND ${sourceContentEvidencePredicate("c.workspace_id", "jv.id")}
         ORDER BY c.created_at ASC, c.id ASC
         ${fallbackLimitClause}
       `,
@@ -1335,7 +1345,7 @@ export async function runLaneRouter(
         try {
           vector = await generateEmbeddingWithProvider(laneDef.prototype_query, provider);
         } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message = publicErrorSummary(error, provider);
           throw new EmbeddingRunError(
             provider,
             `prototype embedding failed for lane ${laneKey}: ${message}`
@@ -1744,9 +1754,9 @@ export async function runLaneRouter(
             throw jobErr;
           }
 
-          const message = jobErr instanceof Error ? jobErr.message : String(jobErr);
+          const message = publicErrorSummary(jobErr, provider);
           const trimmed = message.length > 200 ? `${message.slice(0, 200)}...` : message;
-          console.error(`❌ Failed to route job ${job.id}:`, jobErr);
+          console.error(`❌ Failed to route job ${job.id}: ${trimmed}`);
           const evaluatedAt = new Date().toISOString();
           const laneDecisionId = await persistLaneDecision({
             canonicalJobId: job.id,
@@ -1821,7 +1831,7 @@ export async function runLaneRouter(
         if (error instanceof EmbeddingRunError) {
           const where = error.jobId ? `job ${error.jobId}` : "prototype embeddings";
           console.warn(
-            `⚠️ Embedding provider ${provider} failed during ${where}: ${error.message}. Trying fallback...`
+            `⚠️ Embedding provider ${provider} failed during ${where}: ${publicErrorSummary(error, provider)}. Trying fallback...`
           );
           continue;
         }
@@ -1829,7 +1839,7 @@ export async function runLaneRouter(
       }
     }
 
-    const message = lastError instanceof Error ? lastError.message : String(lastError || "unknown");
+    const message = publicErrorSummary(lastError || "unknown", "embedding");
     const trimmed = message.length > 200 ? `${message.slice(0, 200)}...` : message;
     let deferredCount = 0;
 

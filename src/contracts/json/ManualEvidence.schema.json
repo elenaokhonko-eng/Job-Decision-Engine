@@ -1,0 +1,100 @@
+{
+  "$ref": "#/definitions/ManualEvidence",
+  "definitions": {
+    "ManualEvidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_type": {
+          "type": "string",
+          "enum": [
+            "FACT",
+            "CREDENTIAL",
+            "ENGAGEMENT"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "engagement_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fact_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credential_type": {
+          "type": "string",
+          "enum": [
+            "CERTIFICATION",
+            "DEGREE",
+            "COURSE",
+            "LICENSE"
+          ]
+        },
+        "engagement_type": {
+          "type": "string",
+          "enum": [
+            "EMPLOYEE",
+            "FOUNDER_OPERATOR",
+            "CONTRACTOR",
+            "RESEARCHER"
+          ]
+        },
+        "experience_class": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "end_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "document_layout": {
+          "type": "string",
+          "enum": [
+            "FULL",
+            "ONE_LINE",
+            "HIDDEN"
+          ]
+        },
+        "always_include": {
+          "type": "boolean"
+        },
+        "cv_statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "issued_on": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        }
+      },
+      "required": [
+        "id",
+        "evidence_type",
+        "label",
+        "statement"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

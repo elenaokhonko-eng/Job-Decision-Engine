@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
@@ -45,6 +46,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error("Model preflight failed:", error.message || error);
+  console.error("Model preflight failed:", publicErrorSummary(error, "evaluation"));
   process.exit(1);
 });

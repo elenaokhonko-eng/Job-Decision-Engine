@@ -1,10 +1,32 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyDescriptionQuality,
+  completeRetrievedPostingPredicate,
   MIN_COMPLETE_DESCRIPTION_CHARS,
+  sourceContentEvidencePredicate,
 } from "../../pipeline/descriptionQuality.js";
 
 describe("description quality policy", () => {
+  it("builds a scoped source evidence predicate and rejects untrusted SQL expressions", () => {
+    expect(sourceContentEvidencePredicate("version.workspace_id", "version.id")).toContain(
+      "source_content_observation.job_version_id = version.id",
+    );
+    expect(sourceContentEvidencePredicate("version.workspace_id", "version.id")).toContain(
+      "source_content_observation.source_name <> 'GMAIL_ALERT'",
+    );
+    expect(() => sourceContentEvidencePredicate("version.workspace_id; DROP TABLE jobs", "version.id")).toThrow(
+      "trusted identifiers",
+    );
+  });
+
+  it("requires fetched source, response hashes, identity, and a matching persisted version", () => {
+    const predicate = completeRetrievedPostingPredicate("derived");
+    expect(predicate).toContain("derived.raw_payload#>>'{source_evidence,responseHash}'");
+    expect(predicate).toContain("derived.raw_payload#>>'{posting,title}' = derived.title");
+    expect(predicate).toContain("retrieved_version.description_text = derived.description_raw");
+    expect(() => completeRetrievedPostingPredicate("derived; DROP TABLE jobs")).toThrow("trusted identifiers");
+  });
+
   it("classifies missing and short source text as enrichment debt", () => {
     expect(classifyDescriptionQuality("")).toEqual({
       status: "UNKNOWN",
@@ -34,6 +56,21 @@ describe("description quality policy", () => {
       status: "INCOMPLETE",
       reason: "DESCRIPTION_CONSISTS_OF_ACCESS_OR_COOKIE_SHELL",
     });
+  });
+
+  it("rejects generic company copy without job duties and qualifications", () => {
+    const generic = [
+      "Example Org is a global company with a diverse team and collaborative culture.",
+      "We offer competitive benefits, professional development, flexible programs, and opportunities to make an impact.",
+      "Our values include integrity, respect, inclusion, teamwork, innovation, and service to our customers.",
+      "Join our talent community to learn about future opportunities and hear from our people.",
+      "We are an equal opportunity employer and welcome applicants from every background.",
+      "Explore our locations, teams, stories, events, benefits, and frequently asked questions.",
+      "Candidate privacy information and accommodation details are available on our careers website.",
+    ].join(" ");
+    expect(generic.split(/\s+/).length).toBeGreaterThanOrEqual(50);
+    expect(generic.split(/\s+/).length).toBeLessThanOrEqual(100);
+    expect(classifyDescriptionQuality(generic).status).toBe("INCOMPLETE");
   });
 
   it("recognizes a substantive full-length posting as complete", () => {

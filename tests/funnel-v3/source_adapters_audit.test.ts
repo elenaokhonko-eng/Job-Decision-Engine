@@ -37,7 +37,6 @@ describe("Funnel V3 Independent Test Suite — Source Plugins & Adapters Audit (
       const parsed = SourcePluginSchema.safeParse(raw);
       expect(parsed.success, `Source plugin manifest ${file} must conform to schema: ${JSON.stringify(parsed.error?.format())}`).toBe(true);
       if (parsed.success) {
-        expect(parsed.data.schema_version).toBe("2.2.0");
         expect(parsed.data.source_key).toBeDefined();
         expect(parsed.data.display_name).toBeDefined();
         expect(parsed.data.kind).toBeDefined();

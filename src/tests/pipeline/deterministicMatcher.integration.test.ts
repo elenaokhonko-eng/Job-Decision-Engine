@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import { runMigrations } from '../../db/migrate.js';
 import { isLocalPostgresConnectionString, pgConnectionConfig } from '../../db/pgSsl.js';
+import { COMPLETE_TEST_POSTING_DESCRIPTION, insertCompletePostingEvidence } from '../fixtures/completePostingEvidence.js';
 import { runDeterministicMatcher } from '../../pipeline/deterministicMatcher.js';
 import type { WorkspaceContext } from '../../workspace/context.js';
 
@@ -85,11 +86,19 @@ async function seedFixture(): Promise<void> {
     `INSERT INTO job_versions (
        workspace_id, canonical_job_id, version_number, content_hash,
        description_text, observed_at
-     ) VALUES ($1, $2, 1, $3, 'Build production fraud detection systems.', NOW())
+     ) VALUES ($1, $2, 1, $3, $4, NOW())
      RETURNING id`,
-    [workspaceId, canonicalJobId, `incomplete-embedding-job-${Date.now()}`]
+    [workspaceId, canonicalJobId, `incomplete-embedding-job-${Date.now()}`, COMPLETE_TEST_POSTING_DESCRIPTION]
   );
   const jobVersionId = jobVersion.rows[0].id;
+  await insertCompletePostingEvidence(client!, {
+    workspaceId,
+    jobVersionId,
+    companyName: 'Incomplete Embedding Fixture',
+    title: 'Machine Learning Engineer',
+    sourceUrl: `https://example.test/incomplete-embedding-${Date.now()}`,
+    description: COMPLETE_TEST_POSTING_DESCRIPTION,
+  });
 
   const identity = await query<{ id: string }>(
     `INSERT INTO requirement_set_identities (

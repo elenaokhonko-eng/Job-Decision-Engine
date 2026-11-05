@@ -1,0 +1,48 @@
+{
+  "$ref": "#/definitions/ManualCandidateProfilesResponse",
+  "definitions": {
+    "ManualCandidateProfilesResponse": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "manual_application_v1"
+        },
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "candidate_profile_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "display_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            },
+            "required": [
+              "candidate_profile_id",
+              "display_name"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 50
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "profiles"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

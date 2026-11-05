@@ -1,0 +1,42 @@
+{
+  "$ref": "#/definitions/ManualGenerateRequest",
+  "definitions": {
+    "ManualGenerateRequest": {
+      "type": "object",
+      "properties": {
+        "approval_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "role_layout": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "FULL",
+              "ONE_LINE",
+              "HIDDEN"
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          }
+        },
+        "include_gap_note": {
+          "type": "boolean"
+        },
+        "include_match_section": {
+          "type": "boolean"
+        },
+        "reuse_cover_letter_from": {
+          "$ref": "#/definitions/ManualGenerateRequest/properties/approval_id"
+        }
+      },
+      "required": [
+        "approval_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

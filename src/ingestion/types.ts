@@ -33,4 +33,10 @@ export interface RawJobObservation {
 
   rawPayload: unknown;
   rawPayloadHash: string;
+
+  /** Gmail alert lineage for source observations. */
+  rawEmailAlertId?: string | null;
+  gmailMessageId?: string | null;
+  /** Parent observation for content retrieved from a discovery link. */
+  derivedFromObservationId?: string | null;
 }

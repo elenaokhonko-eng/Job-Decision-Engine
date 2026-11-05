@@ -1,0 +1,31 @@
+{
+  "$ref": "#/definitions/ManualExistingJobCompareRequest",
+  "definitions": {
+    "ManualExistingJobCompareRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "manual_application_v1"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "$ref": "#/definitions/ManualExistingJobCompareRequest/properties/canonical_job_id"
+        },
+        "candidate_profile_id": {
+          "$ref": "#/definitions/ManualExistingJobCompareRequest/properties/canonical_job_id"
+        }
+      },
+      "required": [
+        "schema_version",
+        "canonical_job_id",
+        "job_version_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

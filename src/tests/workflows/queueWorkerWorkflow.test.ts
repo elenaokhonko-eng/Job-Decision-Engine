@@ -3,6 +3,18 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("evaluation queue workflow", () => {
+  it("runs deterministic Gmail link extraction without sending email content to a model", () => {
+    const workflow = readFileSync(resolve(".github/workflows/ingest.yml"), "utf8");
+    const parserStep = workflow.slice(
+      workflow.indexOf("Extract Gmail job links and stage posting fetches"),
+      workflow.indexOf("public_source_ingestion:"),
+    );
+
+    expect(parserStep).toContain("npx tsx scripts/parse_emails.ts");
+    expect(parserStep).not.toContain("GEMINI_API_KEY");
+    expect(parserStep).not.toContain("OPENAI_API_KEY");
+  });
+
   it("does not cancel an active leased evaluation drain", () => {
     const workflow = readFileSync(resolve(".github/workflows/queue_worker.yml"), "utf8");
 
@@ -73,10 +85,34 @@ describe("evaluation queue workflow", () => {
     expect(scopedJob).toBeGreaterThan(standardJob);
     expect(workflow).toContain("REQUESTED_REF");
     expect(workflow).toContain("refs/heads/main");
-    expect(workflow).toContain("valid canonical_job_id and job_version_id inputs are required.");
+    expect(workflow).toContain('case "$WORKFLOW_KILL_SWITCH" in');
+    expect(workflow).toContain('case "$PILOT_MODE" in');
+    expect(workflow).toContain("WORKFLOW_KILL_SWITCH must be exactly true, false, or unset.");
+    expect(workflow).toContain("PILOT_MODE must be exactly true, false, or unset.");
+    expect(workflow).toContain("PILOT_MODE=true requires valid canonical_job_id and job_version_id inputs.");
+    expect(workflow).toContain("WORKFLOW_KILL_SWITCH=true pauses all processing, including scoped pilots.");
+    expect(workflow).toContain("(vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false')");
+    expect(workflow).toContain("(vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false')");
+    expect(workflow).toContain("vars.PILOT_MODE == 'true'");
+    expect(workflow).not.toContain("vars.WORKFLOW_KILL_SWITCH != 'true'");
+    expect(workflow).not.toContain("vars.PILOT_MODE != 'true'");
     expect(workflow).toContain("[1-8][0-9a-fA-F]{3}");
     expect(workflow).toContain("npx tsx scripts/verify_migration_status.ts");
     expect(workflow).toContain("run_scoped_pilot.ts --canonical-job-id");
+  });
+
+  it("pauses scheduled ingestion and backlog drains while scoped pilot mode is active", () => {
+    const ingestion = readFileSync(resolve(".github/workflows/ingest.yml"), "utf8");
+    const backlog = readFileSync(resolve(".github/workflows/process_backlog.yml"), "utf8");
+
+    expect(ingestion.match(/vars\.PILOT_MODE == '' \|\| vars\.PILOT_MODE == 'false'/g)).toHaveLength(3);
+    expect(ingestion.match(/vars\.WORKFLOW_KILL_SWITCH == '' \|\| vars\.WORKFLOW_KILL_SWITCH == 'false'/g)).toHaveLength(3);
+    expect(backlog).toContain("vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false'");
+    expect(backlog).toContain("vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false'");
+    expect(ingestion).not.toContain("vars.WORKFLOW_KILL_SWITCH != 'true'");
+    expect(ingestion).not.toContain("vars.PILOT_MODE != 'true'");
+    expect(backlog).not.toContain("vars.WORKFLOW_KILL_SWITCH != 'true'");
+    expect(backlog).not.toContain("vars.PILOT_MODE != 'true'");
   });
 
   it("requires queue context to match the current deterministic artifacts", () => {
