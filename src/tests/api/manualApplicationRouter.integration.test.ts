@@ -301,7 +301,8 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       expect(thin.code).toBe("DESCRIPTION_INSUFFICIENT");
       expect(thin.message).toContain("responsibilities");
 
-      const { compared, generated } = await compareApproveGenerate("https://careers.example.test/derivatives-lead", "Derivatives Operating Model Lead");
+      // The match section is optional; this run asks for it to check the job's own wording.
+      const { compared, generated } = await compareApproveGenerate("https://careers.example.test/derivatives-lead", "Derivatives Operating Model Lead", { include_match_section: true });
       expect(compared.document_contact_ready).toBe(true);
       expect(compared.comparison.suitability_warnings.join(" ")).toContain("AI requirement extraction did not run");
       expect(generated.preview.cv).toContain("### Past Program Lead at Example Org | Mar 2015 – Jun 2019");
@@ -456,7 +457,7 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       expect(uncorrected.approval_id).not.toBe(approved.approval_id);
       expect(uncorrected.corrections_fingerprint).toBe("");
 
-      const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id });
+      const generated = await post(`/${compared.draft_id}/documents`, { approval_id: approved.approval_id, include_match_section: true });
       expect(generated).toMatchObject({ revision: 1, corrections_applied: 3 });
       const matchSection = generated.preview.cv.split("## How my experience matches this role\n")[1]?.split("\n## ")[0] ?? "";
       const requirementLabel = reviewed.requirement.replace(/[.;:]+$/, "");
@@ -632,7 +633,8 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
       expect(cv).not.toContain("Certification Sprint");
       const summary = /## Summary\n([^\n]+)\n\n/.exec(cv);
       expect(summary?.[1]).toBeTruthy();
-      expect(cv).toMatch(/## Education\n- Master of Science in Finance(\n|$)/);
+      // The institution is listed with the degree (this fixture has no issue date).
+      expect(cv).toMatch(/## Education\n- Master of Science in Finance, Example University(\n|$)/);
       expect(cv).not.toContain("Professional Cloud Architect");
       // Pinned in the profile, so listed regardless of relevance to the job.
       expect(cv).toMatch(/## Certifications\n(- .*\n)*- Passed Level I of the CFA Program/);

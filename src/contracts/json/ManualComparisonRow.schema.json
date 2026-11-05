@@ -81,6 +81,35 @@
             "distinctive-term overlap; potential evidence only",
             "model-judged pairing; advisory evidence only"
           ]
+        },
+        "attention": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "DOMAIN_QUALIFIER",
+                  "YEARS_THRESHOLD",
+                  "NAMED_CERTIFICATION"
+                ]
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "code",
+              "detail"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "suggested_status": {
+          "type": "string",
+          "const": "PARTIAL"
         }
       },
       "required": [

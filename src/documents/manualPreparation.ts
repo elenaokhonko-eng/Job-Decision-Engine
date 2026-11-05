@@ -1,8 +1,15 @@
 import crypto from "node:crypto";
 import { Document, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
-import { assertNoInternalAssessmentText, isInternalAssessmentStatement, isSelfDescriptionStatement } from "./manualDocumentPolicy.js";
+import {
+  assertNoInternalAssessmentText,
+  domainQualifiers,
+  isInternalAssessmentStatement,
+  isSelfDescriptionStatement,
+  namesCertification,
+  requiredYears,
+} from "./manualDocumentPolicy.js";
 
-export const MANUAL_COMPARATOR_VERSION = "evidence-pairing-v5";
+export const MANUAL_COMPARATOR_VERSION = "evidence-pairing-v6";
 
 export interface ManualRequirement {
   requirement_key: string;
@@ -27,6 +34,11 @@ export interface ManualEvidence {
   document_layout?: "FULL" | "ONE_LINE" | "HIDDEN";
   /** The candidate pinned this credential to appear in every document. */
   always_include?: boolean;
+  /** The candidate's short CV form of a fact (at most MAX_CV_STATEMENT_WORDS words); the full statement is used for matching. */
+  cv_statement?: string;
+  /** A credential's issuing institution and date, for the Education section. */
+  issuer?: string;
+  issued_on?: string;
 }
 
 export interface ManualComparisonInput {
@@ -191,11 +203,75 @@ const IMPORTANCE_RANK: Record<string, number> = { MUST: 0, PREFERRED: 1, NICE_TO
 /**
  * Evidence a requirement may be paired with: work-done facts and credentials, minus internal
  * assessments and self-descriptions. Role summaries and skill statements are not printed as
- * evidence, so they are not offered for pairing either.
+ * evidence, so they are not offered for pairing either, and neither are facts from roles the
+ * profile hides from documents: citing one would put the hidden role back on the CV.
  */
 export function matchableEvidence(evidence: ManualEvidence[]): ManualEvidence[] {
+  const hiddenRoles = new Set(evidence.filter((item) => item.evidence_type === "ENGAGEMENT" && item.document_layout === "HIDDEN").map((item) => item.id));
   return evidence.filter((item) => (isExperienceFact(item) || item.evidence_type === "CREDENTIAL")
+    && !(item.engagement_id && hiddenRoles.has(item.engagement_id))
     && !isInternalAssessmentStatement(item.statement) && !(item.evidence_type === "FACT" && isSelfDescriptionStatement(item.statement)));
+}
+
+/** Why a person should check a row before approving: the places the matcher is least reliable. */
+export interface RowAttention {
+  code: "DOMAIN_QUALIFIER" | "YEARS_THRESHOLD" | "NAMED_CERTIFICATION";
+  detail: string;
+}
+
+// "ML", "machine learning", "AI" and "data science" name one field in tenure statements and postings.
+const AI_ML_TERMS = /\b(?:machine[- ]learning|artificial intelligence|data science|deep learning|ML|AI)\b/g;
+// Words a years requirement and a tenure statement share without being about the same field.
+const TENURE_GENERIC = new Set(["production", "hand", "hands", "professional", "overall", "industry", "direct", "total", "build", "building"]);
+
+function fieldTerms(text: string): Set<string> {
+  return new Set([...terms(text.replace(AI_ML_TERMS, " aiml "))].filter((term) => !TENURE_GENERIC.has(term)));
+}
+
+/** Profile-level tenure statements ("Has 2 years of direct AI ... experience") with their years. */
+export function tenureStatements(evidence: ManualEvidence[]): Array<{ item: ManualEvidence; years: number; fields: Set<string> }> {
+  return evidence.flatMap((item) => {
+    if (item.evidence_type !== "FACT" || item.engagement_id) return [];
+    const match = /\b(\d{1,2})\+?\s+years?\b/i.exec(item.statement);
+    return match ? [{ item, years: Number(match[1]), fields: fieldTerms(item.statement) }] : [];
+  });
+}
+
+/**
+ * Flags a paired row for a human check, and suggests PARTIAL where the record visibly falls short:
+ * the requirement names a market or product (commodities, Azure) that none of its evidence names,
+ * or asks for more years than the profile's own tenure statement for that field. Model confidence
+ * is not calibrated, so a confident pair is never taken as proof of these.
+ */
+export function rowAttention(
+  requirementText: string,
+  paired: ManualEvidence[],
+  tenure: ReturnType<typeof tenureStatements>,
+): { attention: RowAttention[]; suggestedStatus: "PARTIAL" | null } {
+  const attention: RowAttention[] = [];
+  let partial = false;
+  const pairedQualifiers = new Set(paired.flatMap((item) => domainQualifiers(`${item.label} ${item.statement}`)));
+  const missing = domainQualifiers(requirementText).filter((qualifier) => !pairedQualifiers.has(qualifier));
+  if (missing.length > 0) {
+    partial = true;
+    attention.push({ code: "DOMAIN_QUALIFIER", detail: `The requirement names ${missing.join(", ")}; none of the proposed evidence does.` });
+  }
+  const years = requiredYears(requirementText);
+  if (years !== null) {
+    const fields = fieldTerms(requirementText);
+    const related = tenure.filter((entry) => [...entry.fields].some((term) => fields.has(term)));
+    const most = related.reduce<(typeof related)[number] | null>((best, entry) => (!best || entry.years > best.years ? entry : best), null);
+    if (most && most.years < years) {
+      partial = true;
+      attention.push({ code: "YEARS_THRESHOLD", detail: `The posting asks for ${years} years; your profile states ${most.years} ("${most.item.statement.trim()}").` });
+    } else {
+      attention.push({ code: "YEARS_THRESHOLD", detail: `The posting asks for ${years} years; check that the evidence covers them.` });
+    }
+  }
+  if (namesCertification(requirementText) && !paired.some((item) => item.evidence_type === "CREDENTIAL")) {
+    attention.push({ code: "NAMED_CERTIFICATION", detail: "The requirement names a certification; only a credential can evidence it." });
+  }
+  return { attention, suggestedStatus: partial ? "PARTIAL" : null };
 }
 
 function stem(word: string): string {
@@ -271,9 +347,13 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
       : lexicalPairs(requirement.requirement_text, candidates, evidenceTerms, distinctive, ages),
   }));
   const allocated = allocateEvidence(ranked, (id) => candidateById.get(id)?.engagement_id ?? id);
+  const tenure = tenureStatements(input.evidence);
 
   const rows = input.requirements.map((requirement, index) => {
     const evidence = allocated[index];
+    const check = evidence.length > 0
+      ? rowAttention(requirement.requirement_text, evidence.map((item) => candidateById.get(item.id)!), tenure)
+      : { attention: [], suggestedStatus: null };
     return {
       requirement_key: requirement.requirement_key,
       requirement_type: requirement.requirement_type,
@@ -284,6 +364,8 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
         ? "No direct evidence was found in your profile. It stays unmatched in your documents; absence is not proof of inability."
         : null,
       comparison_method: method,
+      ...(check.attention.length > 0 ? { attention: check.attention } : {}),
+      ...(check.suggestedStatus ? { suggested_status: check.suggestedStatus } : {}),
     };
   });
 
@@ -386,7 +468,7 @@ const MAX_SUMMARY_STATEMENTS = 3;
 const MAX_FULL_VENTURES = 2;
 const MAX_CERTIFICATIONS = 6;
 const FULL_ENTRY_YEARS = 10;
-const ONE_LINE_YEARS = 20;
+const ONE_LINE_YEARS = 15;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const CERTIFICATION_ORDER: Record<string, number> = { CERTIFICATION: 0, LICENSE: 1, COURSE: 2 };
 const FACT_TYPE_IMPACT: Record<string, number> = { ACHIEVEMENT: 3, PROJECT: 2, PUBLICATION: 2, RESPONSIBILITY: 1 };
@@ -404,7 +486,7 @@ type Claim = ControlledDocuments["claims"][number];
 export type RoleLayout = "FULL" | "ONE_LINE" | "HIDDEN";
 
 export interface ControlledDocumentOptions {
-  /** The date the 10- and 20-year windows are measured from; defaults to today. */
+  /** The date the 10- and 15-year windows are measured from; defaults to today. */
   asOf?: Date;
   /** The candidate's per-role choice, keyed by engagement evidence id; overrides the default layout. */
   roleLayout?: Record<string, RoleLayout>;
@@ -412,6 +494,37 @@ export interface ControlledDocumentOptions {
   writtenSummary?: Array<{ text: string; evidence_ids: string[]; requirement_keys: string[] }>;
   /** Whether the letter includes the candidate's own gap sentences from the review; default true. */
   includeGapNotes?: boolean;
+  /** Whether the CV has a "How my experience matches this role" section; default false, since the letter maps requirements. */
+  includeMatchSection?: boolean;
+}
+
+export const MAX_CV_STATEMENT_WORDS = 30;
+const MIN_CV_CLAUSE_WORDS = 8;
+
+function wordCount(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+/**
+ * A fact as a CV bullet: the candidate's own short form when the profile has one, otherwise the
+ * statement's first sentence without parenthetical asides, cut back to its last colon, semicolon or
+ * dash when still longer than MAX_CV_STATEMENT_WORDS. A comma is not a safe cut ("moving a highly
+ * manual."), so without one of those the whole first sentence stays. Never invents words: every
+ * bullet is a prefix of the statement's own text, less asides.
+ */
+export function cvStatement(item: ManualEvidence): string {
+  const own = item.cv_statement?.trim();
+  if (own && wordCount(own) <= MAX_CV_STATEMENT_WORDS) return own;
+  const statement = item.statement.trim();
+  if (wordCount(statement) <= MAX_CV_STATEMENT_WORDS) return statement;
+  const firstSentence = (/^.*?[.!?](?=\s+[A-Z]|$)/s.exec(statement)?.[0] ?? statement).replace(/\s*\([^)]*\)/g, "").replace(/\s+/g, " ").trim();
+  if (wordCount(firstSentence) <= MAX_CV_STATEMENT_WORDS) return firstSentence;
+  const words = firstSentence.split(" ");
+  for (let end = MAX_CV_STATEMENT_WORDS; end >= MIN_CV_CLAUSE_WORDS; end--) {
+    if (/[;:]$/.test(words[end - 1])) return `${words.slice(0, end).join(" ").replace(/[;:]$/, "")}.`;
+    if (/^[–—]$/.test(words[end] ?? "")) return `${words.slice(0, end).join(" ")}.`;
+  }
+  return firstSentence;
 }
 
 function formatMonth(isoDate: string): string {
@@ -443,16 +556,39 @@ function monthsBetween(start: string, end: string): number {
   return (endYear - startYear) * 12 + (endMonth - startMonth) + 1;
 }
 
+// Bullets per full entry by how long ago the role ended, so a VP CV fits on about two pages:
+// current roles 5, roles ended in the last 5 years 4, 5-10 years 2, older 1.
+const RECENT_ROLE_YEARS = 5;
+const RECENT_ROLE_FACTS = 4;
+const MID_ROLE_FACTS = 2;
+const OLD_ROLE_FACTS = 1;
+
+function factsPerRole(engagement: ManualEvidence, asOf: Date): number {
+  const { end } = engagementDates(engagement);
+  if (!end) return MAX_FACTS_PER_ENGAGEMENT;
+  if (end >= yearsBefore(asOf, RECENT_ROLE_YEARS)) return RECENT_ROLE_FACTS;
+  return end >= yearsBefore(asOf, FULL_ENTRY_YEARS) ? MID_ROLE_FACTS : OLD_ROLE_FACTS;
+}
+
 function yearsBefore(asOf: Date, years: number): string {
   const date = new Date(asOf);
   date.setUTCFullYear(date.getUTCFullYear() - years);
   return date.toISOString().slice(0, 10);
 }
 
-/** Courses and certification sprints are never jobs; founder, venture and current research work is listed apart from employment. */
+// A registered company: founding and running one is a job, not a side venture.
+const INCORPORATED = /\b(?:pte\.?\s*ltd|ltd|limited|inc|llc|gmbh|plc|corp(?:oration)?|s\.?a\.?r\.?l|b\.?v|ag|sa)\.?$/i;
+
+/**
+ * Courses and certification sprints are never jobs. Founder and current research work is listed
+ * apart from employment, except founding a registered company in production work (a "Pte Ltd"),
+ * which is a job and sits in Experience in date order.
+ */
 function engagementKind(engagement: ManualEvidence): "EMPLOYMENT" | "VENTURE" | "COURSE" {
   if (engagement.experience_class === "COURSE_PROJECT") return "COURSE";
   const current = !engagementDates(engagement).end;
+  if (engagement.engagement_type === "FOUNDER_OPERATOR" && engagement.experience_class === "PROFESSIONAL_PRODUCTION"
+    && INCORPORATED.test(organisationOf(engagement).trim())) return "EMPLOYMENT";
   if (engagement.engagement_type === "FOUNDER_OPERATOR" || engagement.experience_class === "APPLIED_PROJECT") return "VENTURE";
   if (engagement.engagement_type === "RESEARCHER" && current) return "VENTURE";
   return "EMPLOYMENT";
@@ -502,7 +638,7 @@ export interface RolePlan {
  * Default role layout, newest first. A layout set on the role in the profile wins. Otherwise
  * employment from the last 10 years lasting a year or more gets a full entry (shorter engagements
  * get one line); ventures only when relevant to this job (at
- * most two); older employment becomes one line, and anything over 20 years old is summarised in
+ * most two); older employment becomes one line, and anything that started over 15 years ago is summarised in
  * one shared line. Courses are left out.
  */
 export function planRoles(
@@ -530,7 +666,9 @@ export function planRoles(
   // Ventures keep their cap on relevance-only promotion, but one the summary cites is shown in full.
   const summaryCited = (engagement: ManualEvidence) => cited.has(engagement.id)
     || evidence.some((item) => item.engagement_id === engagement.id && cited.has(item.id));
-  const isCited = (engagement: ManualEvidence) => roleScore(engagement) > 0 || summaryCited(engagement);
+  // A summary citation promotes a role from the last 10 years to a full entry; an older one is shown
+  // as one line, enough to find the role behind the claim without a 2007 role crowding the CV.
+  const isRecent = (engagement: ManualEvidence) => { const { end } = engagementDates(engagement); return !end || end >= fullEntryCutoff; };
   return [...engagements]
     .sort((left, right) => (engagementDates(right).end ?? "9999").localeCompare(engagementDates(left).end ?? "9999")
       || (engagementDates(right).start ?? "").localeCompare(engagementDates(left).start ?? ""))
@@ -538,7 +676,8 @@ export function planRoles(
       const kind = engagementKind(engagement) as "EMPLOYMENT" | "VENTURE";
       const { start, end } = engagementDates(engagement);
       const tenureMonths = start ? monthsBetween(start, end ?? asOf.toISOString().slice(0, 10)) : Infinity;
-      const automatic: RolePlan["default_layout"] = kind === "EMPLOYMENT" && isCited(engagement) ? "FULL"
+      const automatic: RolePlan["default_layout"] = kind === "EMPLOYMENT" && (roleScore(engagement) > 0 || summaryCited(engagement) && isRecent(engagement)) ? "FULL"
+        : kind === "EMPLOYMENT" && summaryCited(engagement) ? "ONE_LINE"
         : kind === "VENTURE"
         ? (relevantVentures.has(engagement.id) || summaryCited(engagement) ? "FULL" : "ONE_LINE")
         : !end || end >= fullEntryCutoff
@@ -615,8 +754,8 @@ export function buildControlledDocuments(
       return { row, index, best };
     })
     .filter((entry): entry is { row: ComparisonRow; index: number; best: ManualEvidence } => Boolean(entry.best));
-  const requirementLines = matchedRows.slice(0, MAX_REQUIREMENT_LINES).map(({ row, best }) =>
-    `- ${claim("Role requirements", `${withoutTrailingPeriod(row.requirement)}: ${best.statement.trim()}`, [best.id], [row.requirement_key])}`);
+  const requirementLines = options.includeMatchSection ? matchedRows.slice(0, MAX_REQUIREMENT_LINES).map(({ row, best }) =>
+    `- ${claim("Role requirements", `${withoutTrailingPeriod(row.requirement)}: ${cvStatement(best)}`, [best.id], [row.requirement_key])}`) : [];
 
   // Summary: one paragraph of the most relevant profile-level statements, then tenure statements,
   // each verbatim so hands-on coding and architecture years are never combined.
@@ -667,11 +806,11 @@ export function buildControlledDocuments(
     const unlinked = facts.filter(({ item }) => score(item.id) === 0 && isExperienceFact(item))
       .sort((left, right) => impact(right.item) - impact(left.item) || left.order - right.order)
       .slice(0, UNLINKED_FACTS_PER_FULL_ENGAGEMENT);
-    const shown = [...linked, ...unlinked].slice(0, MAX_FACTS_PER_ENGAGEMENT);
+    const shown = [...linked, ...unlinked].slice(0, factsPerRole(engagement, asOf));
     if (layout === "FULL" && shown.length > 0) {
       const section = kind === "VENTURE" ? "Ventures and research" : "Experience";
       sections[kind].push(`### ${claim(section, `${engagement.label}${period ? ` | ${period}` : ""}`, [engagement.id])}`);
-      for (const { item } of shown) sections[kind].push(`- ${claim(section, item.statement.trim(), [item.id])}`);
+      for (const { item } of shown) sections[kind].push(`- ${claim(section, cvStatement(item), [item.id])}`);
       sections[kind].push("");
     } else if (layout === "SUMMARISED") {
       summarised.push(engagement);
@@ -696,8 +835,10 @@ export function buildControlledDocuments(
   // Education lists every degree; certifications, licences and courses are ranked by relevance to this job.
   const jobTerms = terms(`${comparison.title ?? ""} ${rows.map((row) => row.requirement).join(" ")}`);
   const credentials = evidence.filter((item) => item.evidence_type === "CREDENTIAL");
+  // "Master of Science in Wealth Management, Singapore Management University, 2015", newest first.
   const educationLines = credentials.filter((item) => credentialType(item) === "DEGREE")
-    .map((item) => `- ${claim("Education", item.label, [item.id])}`);
+    .sort((left, right) => (right.issued_on ?? "").localeCompare(left.issued_on ?? ""))
+    .map((item) => `- ${claim("Education", [item.label, item.issuer, item.issued_on?.slice(0, 4)].filter(Boolean).join(", "), [item.id])}`);
   const credentialRelevance = (item: ManualEvidence) =>
     score(item.id) * 10 + [...terms(item.label)].filter((term) => !CREDENTIAL_GENERIC.has(term) && jobTerms.has(term)).length;
   const rankedCertifications = credentials
@@ -896,6 +1037,11 @@ export function renderControlledPdf(markdown: string): Buffer {
   for (const offset of offsets.slice(1)) pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
   pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
   return Buffer.from(pdf, "latin1");
+}
+
+/** Pages in a PDF this module rendered: one "/Type /Page" object per page. */
+export function pdfPageCount(pdf: Buffer): number {
+  return (pdf.toString("latin1").match(/\/Type\s*\/Page(?!s)\b/g) ?? []).length;
 }
 
 export function sha256Buffer(buffer: Buffer): string {

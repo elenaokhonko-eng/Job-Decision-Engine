@@ -98,6 +98,11 @@ export const ManualEvidenceSchema = z.object({
   // Candidate preferences from the profile: a role's default CV layout, and a credential pinned to every document.
   document_layout: z.enum(["FULL", "ONE_LINE", "HIDDEN"]).optional(),
   always_include: z.boolean().optional(),
+  // The candidate's short CV form of a fact; the full statement stays the matching text.
+  cv_statement: z.string().min(1).max(400).optional(),
+  // A credential's institution and issue date, for the Education section.
+  issuer: z.string().min(1).optional(),
+  issued_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 }).strict();
 
 export const ManualComparisonRowSchema = z.object({
@@ -120,6 +125,13 @@ export const ManualComparisonRowSchema = z.object({
     "distinctive-term overlap; potential evidence only",
     "model-judged pairing; advisory evidence only",
   ]),
+  // Why the row needs a human look (a market or product the evidence does not name, a years
+  // threshold, a named certification), and PARTIAL when the record visibly falls short.
+  attention: z.array(z.object({
+    code: z.enum(["DOMAIN_QUALIFIER", "YEARS_THRESHOLD", "NAMED_CERTIFICATION"]),
+    detail: z.string().min(1),
+  }).strict()).optional(),
+  suggested_status: z.literal("PARTIAL").optional(),
 }).strict();
 
 // How many MUST requirements have direct evidence; advisory, never a suitability decision.
@@ -315,6 +327,8 @@ export const ManualGenerateRequestSchema = z.object({
   role_layout: z.record(z.string().min(1), ManualRoleLayoutSchema).optional(),
   // Whether the letter may include its candid sentences on requirements without evidence; default true.
   include_gap_note: z.boolean().optional(),
+  // Whether the CV has a "How my experience matches this role" section; default false (the letter maps requirements).
+  include_match_section: z.boolean().optional(),
   // An earlier revision of the same approval whose AI-written letter is kept, so only the summary is rewritten.
   reuse_cover_letter_from: Uuid.optional(),
 }).strict();
@@ -359,6 +373,8 @@ export const ManualDocumentsResponseSchema = z.object({
   // The approval revision these documents belong to, and how many review corrections they applied.
   revision: z.number().int().min(1).optional(),
   corrections_applied: z.number().int().min(0).optional(),
+  // Pages in the CV PDF, so the review can say when it runs past two.
+  cv_pages: z.number().int().min(1).optional(),
 }).strict();
 
 export const ManualDownloadResponseSchema = z.object({
