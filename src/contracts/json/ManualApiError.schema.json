@@ -27,7 +27,8 @@
             "IDENTITY_CONFLICT",
             "APPROVAL_STALE",
             "DEPENDENCY_UNAVAILABLE",
-            "INTERNAL_ERROR"
+            "INTERNAL_ERROR",
+            "CONCURRENT_UPDATE"
           ]
         },
         "message": {

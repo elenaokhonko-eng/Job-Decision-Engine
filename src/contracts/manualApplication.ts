@@ -72,7 +72,25 @@ export const ManualComparisonSourceSchema = z.discriminatedUnion("source_kind", 
     fetched_content_hash: Sha256,
     source_evidence: ManualFetchSourceEvidenceSchema,
   }).strict(),
+  // A job the pipeline already holds, cited through the version's first observation; nothing new is staged.
+  z.object({
+    source_kind: z.literal("PIPELINE"),
+    source_content_status: z.literal("PIPELINE_OBSERVED"),
+    provider: z.null(),
+    fetched_content_hash: z.null(),
+    source_evidence: z.null(),
+    source_name: z.string().min(1).max(120),
+  }).strict(),
 ]);
+
+// Opens the review screens for a pipeline job version (Apply Now, or Verify, then apply).
+export const ManualExistingJobCompareRequestSchema = z.object({
+  schema_version: z.literal(MANUAL_APPLICATION_SCHEMA_VERSION),
+  canonical_job_id: Uuid,
+  job_version_id: Uuid,
+  // Required only when the workspace has more than one candidate with an active profile.
+  candidate_profile_id: Uuid.optional(),
+}).strict();
 
 export const ManualRequirementSchema = z.object({
   requirement_key: z.string().min(1),
@@ -396,6 +414,8 @@ export const ManualApiErrorSchema = z.object({
   code: z.enum([
     "INVALID_REQUEST", "DESCRIPTION_INSUFFICIENT", "FORBIDDEN", "NOT_FOUND",
     "JOB_VERSION_CHANGED", "IDENTITY_CONFLICT", "APPROVAL_STALE", "DEPENDENCY_UNAVAILABLE", "INTERNAL_ERROR",
+    // Another request was preparing the same comparison at the same moment; retrying returns its result.
+    "CONCURRENT_UPDATE",
   ]),
   message: z.string().min(1),
   retry_after: z.string().datetime().optional(),

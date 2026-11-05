@@ -600,6 +600,7 @@ export {
   ManualCandidateProfileOptionSchema,
   ManualCandidateProfilesResponseSchema,
   ManualComparisonSourceSchema,
+  ManualExistingJobCompareRequestSchema,
   ManualRequirementSchema,
   ManualEvidenceSchema,
   ManualComparisonRowSchema,
