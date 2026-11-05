@@ -681,6 +681,29 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
   });
 
   // Hard gate integration test for excluded employer
+  it('does not reject a direct-employer fixed-term contract in persisted requirement gates', () => {
+    const gateResult = applyPersistedRequirementGates({
+      title: 'Lead Data Architect (Investment Management) (Contract)',
+      company_name: 'Monetary Authority of Singapore',
+      employment_type: 'CONTRACT',
+      workplace_type: 'REMOTE',
+      location: 'Singapore',
+      posted_at: new Date().toISOString(),
+      description: 'Lead data architecture for investment management, including data models, governance, lineage, and platforms.',
+    }, [{
+      requirement_key: 'MAS-CONTRACT-1',
+      requirement_type: 'EMPLOYMENT_TYPE',
+      importance: 'REQUIRED',
+      requirement_text: 'Fixed-term staff appointment',
+      quote_text: 'Fixed-term staff appointment',
+      structured_value: null,
+    }]);
+
+    expect(gateResult.status).toBe('PASS');
+    expect(gateResult.rejection_codes).not.toContain('GATE_CONTRACT_ROLE');
+  });
+
+  // Hard gate integration test for excluded employer
   it('applies employer exclusions directly within applyPersistedRequirementGates', () => {
     const excludedJob = {
       title: 'Senior Cloud Solutions Architect',

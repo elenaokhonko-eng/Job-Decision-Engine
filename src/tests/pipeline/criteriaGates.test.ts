@@ -182,18 +182,51 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       expect(result.rejection_codes).toContain("UNWORKABLE_LOCATION_MODEL");
     });
 
-    it("allows structured CONTRACT employment under the owner-approved policy", () => {
+    it("allows a direct-employer fixed-term contract such as the MAS data architect role", () => {
       const job = {
-        id: "contract-job",
-        title: "Lead Data Architect (1 year contract)",
-        company_name: "Randstad",
-        raw_description: "Design and govern data architecture for investment data.",
+        id: "mas-investment-data-architect-contract",
+        title: "Lead Data Architect (Investment Management) (Contract)",
+        company_name: "Monetary Authority of Singapore",
+        raw_description: "The Monetary Authority of Singapore is hiring directly for a fixed-term staff appointment. Lead data architecture for investment management, including data models, governance, lineage, and platforms.",
         location: "Singapore",
         workplace_type: "REMOTE",
         employment_type: "CONTRACT"
       };
       const result = applyGlobalGates(job as any);
       expect(result.status).toBe("PASS");
+    });
+
+    it("rejects a contract placed with a third-party client by an employment agency", () => {
+      const job = {
+        id: "agency-client-data-architect-contract",
+        title: "Lead Data Architect (12-month contract)",
+        company_name: "Randstad",
+        raw_description: "Randstad is hiring on behalf of our client, a Singapore investment firm, for a 12-month contract role. Design and govern data architecture, models, and lineage.",
+        location: "Singapore",
+        workplace_type: "REMOTE",
+        employment_type: "CONTRACT",
+      };
+
+      const result = applyGlobalGates(job as any);
+
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toContain("GATE_CONTRACT_ROLE");
+      expect(result.evidence_quotes.join(" ")).toContain("on behalf of our client");
+    });
+
+    it("rejects agency contract placements even when the client relationship is unstated", () => {
+      const result = applyGlobalGates({
+        id: "agency-company-no-placement-evidence",
+        title: "Lead Data Architect (12-month contract)",
+        company_name: "Randstad",
+        raw_description: "Design and govern the data platform, models, and lineage for internal operations.",
+        location: "Singapore",
+        workplace_type: "REMOTE",
+        employment_type: "CONTRACT",
+      } as any);
+
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toContain("GATE_CONTRACT_ROLE");
     });
 
     it("rejects structured CONTRACT employment when the active policy disallows it", () => {

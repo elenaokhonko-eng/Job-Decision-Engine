@@ -339,6 +339,7 @@ export function evaluateWorkability(
   employmentType?: string,
   policy: WorkabilityPolicy = loadWorkabilityPolicy(),
   answerContext?: VerificationAnswerContext | null,
+  companyName?: string,
 ): { workable: boolean; needsVerify: boolean; reason?: string; reasonCode?: string; facts?: Partial<GateResult["workability_facts"]> } {
   const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
   const officeDaysAnswerUnknown = isVerificationAnswerProvided(
@@ -349,6 +350,7 @@ export function evaluateWorkability(
   const loc = (location || "").toLowerCase().trim();
   const d = (description || "").toLowerCase().trim();
   const emp = (employmentType || "").toUpperCase().trim();
+  const employer = String(companyName || "").toLowerCase().trim();
   const removeNonEmploymentContractPhrases = (text: string): string =>
     text
       .replace(/\bsmart contracts?\b/g, " ")
@@ -380,6 +382,33 @@ export function evaluateWorkability(
   const baseFacts: Partial<GateResult["workability_facts"]> = {
     employment_type: normalizedEmp,
   };
+
+  const companyTokens = employer.replace(/[^a-z0-9]+/g, " ").trim();
+  const employerIsListedAgency = effectivePolicy.employmentAgencyCompanyNames.some((name) => {
+    const agencyTokens = name.replace(/[^a-z0-9]+/g, " ").trim();
+    return agencyTokens.length > 0 &&
+      (` ${companyTokens} `).includes(` ${agencyTokens} `);
+  });
+  const agencyMention = d.match(/\b(?:employment|recruitment|staffing)\s+agency\b/i);
+  const agencyRelationship = employerIsListedAgency || agencyMention !== null;
+  const clientPlacementEvidence = d.match(/\b(?:on behalf of (?:our |the )?client|our client\b|client\s*[:=]|(?:the |our )?client employer\b)\b/i);
+  if (
+    normalizedEmp === "CONTRACT" &&
+    effectivePolicy.rejectAgencyContractPlacements &&
+    agencyRelationship &&
+    (employerIsListedAgency || clientPlacementEvidence)
+  ) {
+    return {
+      workable: false,
+      needsVerify: false,
+      reason: employerIsListedAgency
+        ? `Contract employment through the employment agency "${companyName}" is not eligible.${clientPlacementEvidence ? ` Posting evidence: "${clientPlacementEvidence[0]}".` : ""}`
+        : `Agency contract placement for a third-party client is not eligible: "${clientPlacementEvidence?.[0]}"`,
+      reasonCode: "GATE_CONTRACT_ROLE",
+      facts: baseFacts,
+    };
+  }
+
   const unknownWorkModeOutcome = (assumedHybrid = false) => {
     const facts: Partial<GateResult["workability_facts"]> = {
       ...baseFacts,
@@ -847,7 +876,15 @@ export function applyGlobalGates(
   }
 
   // ── 0a. Workability Check (location / workplace / employment type) ──
-  const workability = evaluateWorkability(job.location || "", job.workplace_type || "", d, job.employment_type || "", effectivePolicy, answerContext);
+  const workability = evaluateWorkability(
+    job.location || "",
+    job.workplace_type || "",
+    d,
+    job.employment_type || "",
+    effectivePolicy,
+    answerContext,
+    job.company_name || "",
+  );
   if (!workability.workable) {
     if (workability.reasonCode === "GATE_UNKNOWN_WORK_MODE") {
       pendingVerification = {

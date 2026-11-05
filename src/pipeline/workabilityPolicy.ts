@@ -19,6 +19,8 @@ export interface WorkabilityPolicy {
   maxTravelPct: number;
   minimalTravelAllowed: boolean;
   contractAllowed: boolean;
+  rejectAgencyContractPlacements: boolean;
+  employmentAgencyCompanyNames: string[];
   minimumBuildingResearchPct: number;
   maximumInteractionPct: number;
   preferredBuildingResearchPct?: number;
@@ -82,6 +84,8 @@ const defaults: WorkabilityPolicy = {
   maxTravelPct: 20,
   minimalTravelAllowed: true,
   contractAllowed: true,
+  rejectAgencyContractPlacements: true,
+  employmentAgencyCompanyNames: [],
   minimumBuildingResearchPct: 60,
   maximumInteractionPct: 60,
   preferredBuildingResearchPct: 85,
@@ -680,6 +684,7 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
   const workMode = document?.global_workability_gates?.work_mode ?? {};
   const territory = document?.global_workability_gates?.territory ?? {};
   const operations = document?.global_workability_gates?.operations ?? {};
+  const employment = document?.global_workability_gates?.employment ?? {};
   const composition = document?.global_workability_gates?.work_composition ?? {};
   const configuredHardFail = finiteNumber(workMode.max_office_days_hard_fail, defaults.hardFailOfficeDaysPerWeek);
   const configuredMaxOffice = finiteNumber(workMode.max_office_days_per_week, defaults.maxOfficeDaysPerWeek);
@@ -723,7 +728,13 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
       document?.global_workability_gates?.travel?.minimal_qualitative_travel_allowed,
       defaults.minimalTravelAllowed
     ),
-    contractAllowed: document?.global_workability_gates?.employment?.contract_allowed === true,
+    contractAllowed: employment.contract_allowed === true,
+    rejectAgencyContractPlacements: booleanValue(
+      employment.reject_agency_placement_contracts,
+      defaults.rejectAgencyContractPlacements,
+    ),
+    employmentAgencyCompanyNames: stringArray(employment.employment_agency_company_names)
+      .map((name) => name.toLowerCase()),
     minimumBuildingResearchPct: finiteNumber(composition.minimum_building_research_pct, defaults.minimumBuildingResearchPct),
     maximumInteractionPct: finiteNumber(composition.maximum_interaction_pct, defaults.maximumInteractionPct),
     preferredBuildingResearchPct: finiteNumber(composition.preferred_building_research_pct, defaults.preferredBuildingResearchPct ?? 85),
@@ -788,10 +799,6 @@ export function mergeWorkabilityPreferenceContent(
     1,
     5
   );
-
-  const employmentTypes = stringArray(
-    firstDefined(workability.employment_types, workability.allowed_employment_types, root.employment_types)
-  ).map((type) => type.toUpperCase().replace(/[-\s]+/g, "_"));
 
   const policy: WorkabilityPolicy = {
     ...basePolicy,
@@ -880,17 +887,12 @@ export function mergeWorkabilityPreferenceContent(
       ),
       basePolicy.minimalTravelAllowed
     ),
-    contractAllowed: employmentTypes.length > 0
-      ? employmentTypes.some((type) => type === "CONTRACT" || type === "CONTRACTOR")
-      : booleanValue(
-          firstDefined(
-            workability.contract_allowed,
-            workability.contractAllowed,
-            workability.contract_roles_allowed,
-            root.contract_allowed
-          ),
-          basePolicy.contractAllowed
-        ),
+    // Direct fixed-term employment is eligible. Employment-agency contract
+    // placements are rejected separately by the global placement rule.
+    contractAllowed: true,
+    // Agency placement is a global eligibility rule, not an owner preference.
+    rejectAgencyContractPlacements: basePolicy.rejectAgencyContractPlacements,
+    employmentAgencyCompanyNames: [...basePolicy.employmentAgencyCompanyNames],
     minimumBuildingResearchPct: finitePolicyNumber(
       firstDefined(
         composition.minimum_building_research_pct,

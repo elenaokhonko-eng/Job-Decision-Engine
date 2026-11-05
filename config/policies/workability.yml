@@ -20,8 +20,26 @@ global_workability_gates:
     unknown_work_authorization_needs_verification: false
 
   employment:
-    # Fixed-term and contract roles remain eligible; duration is evaluated as fit evidence.
+    # Direct fixed-term hires remain eligible; third-party agency placements do not.
     contract_allowed: true
+    reject_agency_placement_contracts: true
+    employment_agency_company_names:
+      - adecco
+      - allegis group
+      - charterhouse
+      - hays
+      - hudson
+      - kelly services
+      - manpower
+      - manpowergroup
+      - michael page
+      - morgan mckinley
+      - pagegroup
+      - persolkelly
+      - randstad
+      - recruit express
+      - robert walters
+      - talentvis
 
   operations:
     regular_on_call_allowed: false

@@ -32,11 +32,33 @@ describe("workspace workability policy", () => {
     }).unknownWorkModeDisposition).toBe("NEEDS_VERIFICATION");
   });
 
-  it("uses the owner-approved contract and client-interaction policy defaults", () => {
+  it("uses the direct fixed-term and client-interaction policy defaults", () => {
     const policy = loadWorkabilityPolicy();
     expect(policy.contractAllowed).toBe(true);
+    expect(policy.rejectAgencyContractPlacements).toBe(true);
+    expect(policy.employmentAgencyCompanyNames).toContain("randstad");
     expect(policy.maximumInteractionPct).toBe(60);
     expect(policy.externalClientPrimaryAllowed).toBe(false);
+  });
+
+  it("keeps employment-agency contract placements rejected when preferences attempt to override the global rule", () => {
+    const merged = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+      workability: {
+        reject_agency_placement_contracts: false,
+        employment_agency_company_names: [],
+      },
+    });
+
+    expect(merged.rejectAgencyContractPlacements).toBe(true);
+    expect(merged.employmentAgencyCompanyNames).toContain("randstad");
+  });
+
+  it("keeps direct fixed-term employment eligible when preferences omit contract roles", () => {
+    const merged = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+      hard_constraints: { employment_types: ["FULL_TIME"] },
+    });
+
+    expect(merged.contractAllowed).toBe(true);
   });
 
   it("distinguishes worker territory restrictions from employer/company locations", () => {
@@ -75,6 +97,8 @@ describe("workspace workability policy", () => {
     expect(merged.minimalTravelAllowed).toBe(false);
     expect(loadWorkabilityPolicy().minimalTravelAllowed).toBe(true);
     expect(merged.contractAllowed).toBe(true);
+    expect(merged.rejectAgencyContractPlacements).toBe(true);
+    expect(merged.employmentAgencyCompanyNames).toContain("randstad");
     expect(merged.regularOnCallAllowed).toBe(true);
     expect(merged.shiftWorkAllowed).toBe(true);
     expect(merged.authorizedRegions).toEqual(["SINGAPORE"]);
@@ -99,7 +123,7 @@ describe("workspace workability policy", () => {
     expect(merged.maxOfficeDaysPerWeek).toBe(0);
     expect(merged.maxTravelPct).toBe(0);
     expect(merged.onsiteOnlyAllowed).toBe(false);
-    expect(merged.contractAllowed).toBe(false);
+    expect(merged.contractAllowed).toBe(true);
     expect(merged.regularOnCallAllowed).toBe(false);
     expect(merged.authorizedRegions).toEqual(["AUSTRALIA"]);
     expect(merged.hybridWithoutOfficeDaysAllowed).toBe(false);
