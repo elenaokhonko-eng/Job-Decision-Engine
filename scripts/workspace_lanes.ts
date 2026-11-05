@@ -6,6 +6,7 @@ import pg from "pg";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 import { LaneFileConfigSchema, type LaneFileConfig } from "../src/lanes/contracts.js";
+import { withMaximumAiInterpretationsPerRun } from "../src/lanes/evaluationBudgetConfig.js";
 import {
   cloneLane,
   deactivateLane,
@@ -158,6 +159,63 @@ async function cmdSetPreference(
   );
 }
 
+async function cmdSetBudget(
+  pool: pg.Pool,
+  laneKeyArg?: string,
+  budgetRaw?: string,
+): Promise<void> {
+  if (!laneKeyArg || !budgetRaw) {
+    throw new Error("set-budget requires a LANE_KEY or 'all', and MAXIMUM_PER_RUN.");
+  }
+  const maximum = Number(budgetRaw);
+  if (!Number.isInteger(maximum) || maximum < 0 || maximum > 1000) {
+    throw new Error("MAXIMUM_PER_RUN must be an integer from 0 to 1000.");
+  }
+
+  const ctx = await resolveWorkspaceContext(pool as any);
+  const active = await listActiveLaneRevisions(pool, { context: ctx });
+  const laneKey = laneKeyArg.toUpperCase();
+  const targets = laneKey === "ALL" ? active : active.filter((lane) => lane.laneKey === laneKey);
+  if (targets.length === 0) {
+    throw new Error(laneKey === "ALL"
+      ? "No active lane revisions found for this workspace."
+      : `No active lane revision found for ${laneKey}.`);
+  }
+
+  const changes = targets.map((lane) => ({
+    lane,
+    previous: lane.content.budget?.maximum_ai_interpretations_per_run ?? 0,
+    content: withMaximumAiInterpretationsPerRun(lane.content, maximum),
+  }));
+  const pending = changes.filter((change) => change.previous !== maximum);
+  const apply = process.argv.includes("--apply");
+  console.log(JSON.stringify({
+    mode: apply ? "APPLY" : "DRY_RUN",
+    workspace: ctx.workspaceKey,
+    target: laneKey,
+    maximumAiInterpretationsPerRun: maximum,
+    changes: changes.map(({ lane, previous }) => ({
+      laneKey: lane.laneKey,
+      activeRevision: lane.revisionNumber,
+      previousMaximumAiInterpretationsPerRun: previous,
+      nextMaximumAiInterpretationsPerRun: maximum,
+      changed: previous !== maximum,
+    })),
+  }, null, 2));
+
+  if (!apply || pending.length === 0) return;
+  for (const change of pending) {
+    const result = await upsertLaneRevision({
+      laneKey: change.lane.laneKey,
+      content: change.content,
+    }, pool, {
+      context: ctx,
+      note: `Set maximum AI interpretations per run to ${maximum}.`,
+    });
+    console.log(`Activated ${change.lane.laneKey} lane revision ${result.revisionNumber}.`);
+  }
+}
+
 async function main(): Promise<void> {
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required.");
@@ -186,6 +244,10 @@ async function main(): Promise<void> {
     }
     if (cmd === "set-pref") {
       await cmdSetPreference(pool, process.argv[3], process.argv[4], process.argv[5]);
+      return;
+    }
+    if (cmd === "set-budget") {
+      await cmdSetBudget(pool, process.argv[3], process.argv[4]);
       return;
     }
 
