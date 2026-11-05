@@ -405,7 +405,7 @@ describe.skipIf(skipReal)("profile embedding repair (PostgreSQL)", () => {
     );
     expect(persistedMatch.rows[0]).toMatchObject({
       processing_state: "MATCHED",
-      profile_match_status: "MATCHED",
+      profile_match_status: "POSITIVE_MATCH",
     });
     expect(persistedMatch.rows[0]?.latest_match_run_id).toBeTruthy();
   }, 60_000);
