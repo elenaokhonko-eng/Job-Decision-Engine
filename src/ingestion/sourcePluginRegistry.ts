@@ -1,5 +1,5 @@
 import pg from "pg";
-import type { SourcePlugin } from "../contracts/sourcePlugin.js";
+import { SourcePluginSchema, type SourcePlugin } from "../contracts/sourcePlugin.js";
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 
@@ -74,6 +74,36 @@ export async function getActiveSourcePluginRevision(
   } finally {
     if (ownsClient && typeof (client as any).release === "function") {
       (client as any).release();
+    }
+  }
+}
+
+export async function getSourcePluginRevisionById(
+  sourcePluginRevisionId: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  options?: GetActiveSourcePluginRevisionOptions,
+): Promise<SourcePlugin | null> {
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const ownsClient = isPool(clientOrPool);
+  const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
+
+  try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    const { rows } = await (client as QueryClient).query<{ content: unknown }>(
+      `SELECT revision.content
+       FROM source_plugin_revisions revision
+       JOIN source_plugins plugin ON plugin.id = revision.source_plugin_id
+       WHERE plugin.workspace_id = $1 AND revision.id = $2::uuid
+       LIMIT 1`,
+      [ctx.workspaceId, sourcePluginRevisionId],
+    );
+    if (rows.length === 0) return null;
+    const raw = typeof rows[0].content === "string" ? JSON.parse(rows[0].content) : rows[0].content;
+    return SourcePluginSchema.parse(raw);
+  } finally {
+    if (ownsClient && typeof (client as any).release === "function") {
+      client.release();
     }
   }
 }

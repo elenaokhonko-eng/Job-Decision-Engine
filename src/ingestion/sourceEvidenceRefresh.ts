@@ -68,6 +68,9 @@ interface RefreshTarget extends pg.QueryResultRow {
   readonly source_name: string;
   readonly source_plugin_key: string | null;
   readonly source_plugin_revision_id: string | null;
+  readonly derived_from_observation_id: string | null;
+  readonly derived_from_source_url: string | null;
+  readonly derived_from_source_name: string | null;
   readonly source_external_id: string | null;
   readonly source_url: string | null;
   readonly canonical_apply_url: string | null;
@@ -392,6 +395,9 @@ async function loadRefreshTarget(
             observation.source_name,
             observation.source_plugin_key,
             observation.source_plugin_revision_id::text AS source_plugin_revision_id,
+            parent.id::text AS derived_from_observation_id,
+            parent.source_url AS derived_from_source_url,
+            parent.source_name AS derived_from_source_name,
             observation.source_external_id,
             observation.source_url,
             observation.canonical_apply_url,
@@ -413,6 +419,9 @@ async function loadRefreshTarget(
      JOIN raw_job_observations observation
        ON observation.workspace_id = version.workspace_id
       AND observation.job_version_id = version.id
+     LEFT JOIN raw_job_observations parent
+       ON parent.workspace_id = observation.workspace_id
+      AND parent.id = observation.derived_from_observation_id
      WHERE canonical.workspace_id = $1
        AND canonical.id = $2::uuid
        AND version.id = $3::uuid
@@ -632,6 +641,18 @@ export async function refreshCanonicalJobSourceEvidence(
     const rawPayload = matchedJob.raw_payload ?? matchedJob;
     const rawPayloadHash = payloadHash(rawPayload);
     const sourceUrl = target.source_url ?? postingUrl(matchedJob);
+    const sourcePlugin = await broker.loadSourcePluginRevision(target.source_plugin_revision_id, client, context);
+    const fetchedPostingLineage = target.derived_from_source_name === "GMAIL_ALERT"
+      && target.derived_from_observation_id !== null
+      ? {
+        discoveryObservationId: target.derived_from_observation_id,
+        discoverySourceUrl: target.derived_from_source_url,
+        postingSourceUrl: target.source_url,
+        companyName: target.company_name_raw,
+        title: target.title_raw,
+        description: target.description_raw,
+      }
+      : undefined;
     let evidence: JobSourceEvidence;
     try {
       evidence = clearConflictingAvailability(JobSourceEvidenceSchema.parse(buildJobSourceEvidence({
@@ -644,6 +665,11 @@ export async function refreshCanonicalJobSourceEvidence(
         retrievedAt,
         rawPayloadHash,
         rawPayload,
+        fullPostingHosts: sourcePlugin?.source_key === target.source_plugin_key
+          ? sourcePlugin.availability?.full_posting_hosts
+          : undefined,
+        fetchedPostingLineage,
+        availabilityReceiptPayload: target.raw_payload,
         companyName: matchedJob.company_name,
         title: matchedJob.title,
         locationRaw: matchedJob.location_raw,
