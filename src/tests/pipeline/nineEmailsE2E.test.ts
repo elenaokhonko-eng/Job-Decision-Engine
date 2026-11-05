@@ -546,7 +546,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(embeddings.primary.succeeded).toBeGreaterThan(0);
   });
 
-  it("Stage 3 — lane router assigns primary_lane + secondary_lanes to all PREQUALIFIED jobs", async () => {
+  it("Stage 3 — lane router routes gate-passed and workability-verification jobs", async () => {
     const { runLaneRouter } = await import("../../pipeline/laneRouter.js");
     await runLaneRouter(getClient(), { context: getContext() });
 
@@ -557,7 +557,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         WHERE primary_lane IS NOT NULL
           AND processing_status IN ('LANE_ROUTED', 'PREQUALIFIED')`
     );
-    expect(routed.rows).toHaveLength(5);
+    expect(routed.rows).toHaveLength(6);
     for (const row of routed.rows) {
       expect(row.primary_lane).not.toBe("UNCLASSIFIED");
       expect(row.routing_disposition).toBe("ROUTED");
@@ -578,7 +578,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       "canonical_jobs",
       "processing_status = 'HARD_REJECTED' AND primary_lane IS NOT NULL"
     );
-    expect(Number(laneDecisions.rows[0].count)).toBe(5);
+    expect(Number(laneDecisions.rows[0].count)).toBe(6);
     expect(rejectedWithLane).toBe(0);
   });
 
@@ -648,7 +648,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       [getContext().workspaceId, budgetRunId]
     );
     expect(matching.errors).toBe(0);
-    expect(matching.matchedJobs).toBe(5);
+    expect(matching.matchedJobs).toBe(6);
     expect(decisions.errors).toBe(0);
     expect(queueSummary.enqueued).toBe(4);
     expect(queueSummary.updated).toBe(4);
@@ -740,6 +740,25 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         expect(row.canonical_job_id).toBe(original.canonical_job_id);
       }
     }
+
+    const verificationFixture = rowsByFixture.get("fixture-email-007");
+    expect(verificationFixture, "Missing unknown-work-mode fixture").toBeDefined();
+    if (!verificationFixture) throw new Error("Missing unknown-work-mode fixture");
+    expect(verificationFixture.gate_decision).toBe("NEEDS_VERIFICATION");
+    expect(verificationFixture.processing_state).toBe("MATCHED");
+    expect(verificationFixture.recommendation_eligibility).toBe("VERIFY");
+    expect(verificationFixture.recommendation_outcome).toBe("REVIEW");
+    const verificationReadiness = await q(
+      `SELECT readiness_status
+         FROM v_application_readiness_current
+        WHERE workspace_id = $1
+          AND canonical_job_id = $2::uuid
+          AND job_version_id = $3::uuid`,
+      [getContext().workspaceId, verificationFixture.canonical_job_id, verificationFixture.job_version_id]
+    );
+    expect(verificationReadiness.rows).toHaveLength(1);
+    expect(verificationReadiness.rows[0].readiness_status).toBe("NEEDS_VERIFICATION");
+    expect(verificationReadiness.rows[0].readiness_status).not.toBe("READY");
   });
 
   it("PostgreSQL positive path — normal scoped pipeline stages can produce READY from actual matcher rows", async () => {
