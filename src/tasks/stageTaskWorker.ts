@@ -9,6 +9,7 @@ import { runNormalization as defaultRunNormalization } from "../pipeline/normali
 import { runRequirementsExtraction as defaultRunRequirementsExtraction } from "../pipeline/requirementsExtractor.js";
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
 import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback } from "../embeddings/batchCoordinator.js";
+import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
 import { runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
@@ -297,14 +298,20 @@ async function resolveActiveProfileVersionId(
      WHERE pv.workspace_id = $1
        AND pv.status = 'ACTIVE'
      ORDER BY pv.created_at DESC
-     LIMIT 1`,
+     LIMIT 2`,
     [ctx.workspaceId]
   );
-  const profileVersionId = rows[0]?.id;
-  if (!profileVersionId) {
-    throw new Error(`No ACTIVE profile version found for workspace_id=${ctx.workspaceId}.`);
+  if (rows.length !== 1) {
+    const detail = rows.length === 0
+      ? `No ACTIVE profile version found for workspace_id=${ctx.workspaceId}.`
+      : `Found multiple ACTIVE profile versions for workspace_id=${ctx.workspaceId}; exactly one is required.`;
+    throw new PipelineTaskDependencyBlockedError(
+      "PROFILE_VERSION_ACTIVE",
+      "IMPORT_OR_ACTIVATE_PROFILE_AND_REPAIR_EMBEDDINGS",
+      detail,
+    );
   }
-  return profileVersionId;
+  return rows[0].id;
 }
 
 async function enqueueStageTask(
@@ -1494,16 +1501,37 @@ async function classifySemanticMatchDependency(
   ctx: WorkspaceContext,
   jobVersionId: string,
 ): Promise<AutomaticDependency> {
+  const configuration = getEmbeddingSpaceRegistryConfiguration();
   const { rows } = await (clientOrPool as QueryClient).query<{
     has_active_space: boolean;
     requirements_complete: boolean;
     profile_facts_complete: boolean;
     complete_cohort: boolean;
   }>(
-    `WITH active_spaces AS (
-       SELECT id
+    `WITH configured_spaces AS (
+       SELECT id,
+              COUNT(*) OVER (PARTITION BY is_fallback_space) AS matching_space_count
        FROM embedding_spaces
-       WHERE workspace_id = $1 AND active = TRUE
+       WHERE workspace_id = $1
+         AND active = TRUE
+         AND normalization = $6
+         AND distance_metric = $7
+         AND (
+           (is_fallback_space = FALSE
+             AND LOWER(provider) = LOWER($3)
+             AND model = $4
+             AND dimensions = $5)
+           OR
+           (is_fallback_space = TRUE
+             AND LOWER(provider) = LOWER($8)
+             AND model = $9
+             AND dimensions = $10)
+         )
+     ),
+     active_spaces AS (
+       SELECT id
+       FROM configured_spaces
+       WHERE matching_space_count = 1
      ),
      requirements AS (
        SELECT requirement.id::text AS node_id
@@ -1588,7 +1616,18 @@ async function classifySemanticMatchDependency(
            )
          )
        ) AS complete_cohort`,
-    [ctx.workspaceId, jobVersionId],
+    [
+      ctx.workspaceId,
+      jobVersionId,
+      configuration.primary.provider,
+      configuration.primary.model,
+      configuration.primary.dimensions,
+      configuration.normalization,
+      configuration.distanceMetric,
+      configuration.fallback.provider,
+      configuration.fallback.model,
+      configuration.fallback.dimensions,
+    ],
   );
   const result = rows[0];
   if (!result?.has_active_space || result.complete_cohort) {

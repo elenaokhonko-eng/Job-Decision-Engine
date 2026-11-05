@@ -14,6 +14,46 @@ export interface SeedEmbeddingSpacesResult {
   fallbackSpaceId: string;
 }
 
+export interface EmbeddingSpaceSpecification {
+  provider: string;
+  model: string;
+  dimensions: number;
+}
+
+export interface EmbeddingSpaceRegistryConfiguration {
+  primary: EmbeddingSpaceSpecification;
+  fallback: EmbeddingSpaceSpecification;
+  normalization: 'L2';
+  distanceMetric: 'COSINE';
+}
+
+export function getEmbeddingSpaceRegistryConfiguration(): EmbeddingSpaceRegistryConfiguration {
+  const configuration = {
+    primary: {
+      provider: process.env.EMBEDDING_PRIMARY_PROVIDER || 'gemini',
+      model: process.env.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001',
+      dimensions: Number(process.env.EMBEDDING_PRIMARY_DIMENSIONS || 768),
+    },
+    fallback: {
+      provider: process.env.EMBEDDING_FALLBACK_PROVIDER || 'openai',
+      model: process.env.EMBEDDING_FALLBACK_MODEL || 'text-embedding-3-small',
+      dimensions: Number(process.env.EMBEDDING_FALLBACK_DIMENSIONS || 1536),
+    },
+    normalization: 'L2' as const,
+    distanceMetric: 'COSINE' as const,
+  };
+  for (const [label, specification] of [
+    ['primary', configuration.primary],
+    ['fallback', configuration.fallback],
+  ] as const) {
+    if (!specification.provider.trim() || !specification.model.trim() ||
+        !Number.isInteger(specification.dimensions) || specification.dimensions <= 0) {
+      throw new Error(`Configured ${label} embedding provider, model, or dimensions are invalid.`);
+    }
+  }
+  return configuration;
+}
+
 type PgQueryable = pg.Pool | pg.PoolClient | pg.Client;
 
 function stableSpaceKey(prefix: string, parts: string[]): string {
@@ -154,14 +194,10 @@ export async function seedEmbeddingSpaces(
       typeof maybe?.release !== 'function');
   const client = ownsClient ? await pool.connect() : pool;
 
-  const primaryProvider = process.env.EMBEDDING_PRIMARY_PROVIDER || 'gemini';
-  const fallbackProvider = process.env.EMBEDDING_FALLBACK_PROVIDER || 'openai';
-  const primaryModel = process.env.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001';
-  const fallbackModel = process.env.EMBEDDING_FALLBACK_MODEL || 'text-embedding-3-small';
-  const primaryDimensions = Number(process.env.EMBEDDING_PRIMARY_DIMENSIONS || 768);
-  const fallbackDimensions = Number(process.env.EMBEDDING_FALLBACK_DIMENSIONS || 1536);
-  const normalization = 'L2';
-  const distanceMetric = 'COSINE';
+  const configuration = getEmbeddingSpaceRegistryConfiguration();
+  const { provider: primaryProvider, model: primaryModel, dimensions: primaryDimensions } = configuration.primary;
+  const { provider: fallbackProvider, model: fallbackModel, dimensions: fallbackDimensions } = configuration.fallback;
+  const { normalization, distanceMetric } = configuration;
 
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));

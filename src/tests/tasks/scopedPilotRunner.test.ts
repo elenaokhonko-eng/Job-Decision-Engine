@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createEmployerAtsAdapter,
+  assertScopedPilotMode,
   createScopedEvaluationOptions,
   canResumeScopedPilotState,
   createScopedPilotWorkerOptions,
@@ -17,18 +18,34 @@ const profileVersionId = "30000000-0000-4000-8000-000000000003";
 afterEach(() => vi.unstubAllEnvs());
 
 describe("scoped pilot runner", () => {
-  it("requires the workflow kill switch before opening database connections", async () => {
+  it("requires PILOT_MODE before opening database connections", async () => {
     vi.stubEnv("DATABASE_URL", "postgresql://pilot:test@db.example.test/jobs");
     vi.stubEnv("DATABASE_URL_UNPOOLED", "postgresql://pilot:test@db.example.test/jobs");
     vi.stubEnv("WORKFLOW_KILL_SWITCH", "false");
+    vi.stubEnv("PILOT_MODE", "false");
 
-    await expect(runScopedPilot({ canonicalJobId, jobVersionId })).rejects.toThrow(/WORKFLOW_KILL_SWITCH=true/);
+    await expect(runScopedPilot({ canonicalJobId, jobVersionId })).rejects.toThrow(/PILOT_MODE=true/);
+  });
+
+  it("allows scoped pilot mode only while the global kill switch is off", () => {
+    expect(() => assertScopedPilotMode({ PILOT_MODE: "true", WORKFLOW_KILL_SWITCH: "false" })).not.toThrow();
+    expect(() => assertScopedPilotMode({ PILOT_MODE: "true", WORKFLOW_KILL_SWITCH: "true" }))
+      .toThrow(/prevents all pipeline processing/i);
+    expect(() => assertScopedPilotMode({ PILOT_MODE: " true ", WORKFLOW_KILL_SWITCH: "false" }))
+      .toThrow(/exactly true, false, or unset/i);
+    expect(() => assertScopedPilotMode({ PILOT_MODE: "true", WORKFLOW_KILL_SWITCH: " false " }))
+      .toThrow(/exactly true, false, or unset/i);
+    expect(() => assertScopedPilotMode({ PILOT_MODE: "yes", WORKFLOW_KILL_SWITCH: "false" }))
+      .toThrow(/exactly true, false, or unset/i);
+    expect(() => assertScopedPilotMode({ PILOT_MODE: "true", WORKFLOW_KILL_SWITCH: "on" }))
+      .toThrow(/exactly true, false, or unset/i);
   });
 
   it("rejects pooled connections for the singleton worker lock", async () => {
     vi.stubEnv("DATABASE_URL", "postgresql://pilot:test@db-pooler.example.test/jobs");
     vi.stubEnv("DATABASE_URL_UNPOOLED", "postgresql://pilot:test@db-pooler.example.test/jobs");
-    vi.stubEnv("WORKFLOW_KILL_SWITCH", "true");
+    vi.stubEnv("WORKFLOW_KILL_SWITCH", "false");
+    vi.stubEnv("PILOT_MODE", "true");
 
     await expect(runScopedPilot({ canonicalJobId, jobVersionId })).rejects.toThrow(/direct connection/i);
   });

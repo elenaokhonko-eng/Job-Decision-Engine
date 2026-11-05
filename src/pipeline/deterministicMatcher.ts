@@ -3,6 +3,7 @@ import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
+import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
 import { computeEvidenceStrength, loadActiveEvidenceStrengthPolicy } from "../evidence/evidenceStrengthPolicy.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement } from "./requirementComparators.js";
 import { isRequirementOptional } from "./hardGate.js";
@@ -234,15 +235,28 @@ async function listSemanticEmbeddingSpaceCandidates(
   ctx: WorkspaceContext
 ): Promise<string[]> {
   try {
+    const configuration = getEmbeddingSpaceRegistryConfiguration();
     const primary = await client.query<{ id: string }>(
       `SELECT id
        FROM embedding_spaces
        WHERE workspace_id = $1
          AND active = TRUE
          AND is_fallback_space = FALSE
+         AND LOWER(provider) = LOWER($2)
+         AND model = $3
+         AND dimensions = $4
+         AND normalization = $5
+         AND distance_metric = $6
        ORDER BY created_at DESC
-       LIMIT 1`,
-      [ctx.workspaceId]
+       LIMIT 2`,
+      [
+        ctx.workspaceId,
+        configuration.primary.provider,
+        configuration.primary.model,
+        configuration.primary.dimensions,
+        configuration.normalization,
+        configuration.distanceMetric,
+      ]
     );
 
     const fallback = await client.query<{ id: string }>(
@@ -251,12 +265,27 @@ async function listSemanticEmbeddingSpaceCandidates(
        WHERE workspace_id = $1
          AND active = TRUE
          AND is_fallback_space = TRUE
+         AND LOWER(provider) = LOWER($2)
+         AND model = $3
+         AND dimensions = $4
+         AND normalization = $5
+         AND distance_metric = $6
        ORDER BY created_at DESC
-       LIMIT 1`,
-      [ctx.workspaceId]
+       LIMIT 2`,
+      [
+        ctx.workspaceId,
+        configuration.fallback.provider,
+        configuration.fallback.model,
+        configuration.fallback.dimensions,
+        configuration.normalization,
+        configuration.distanceMetric,
+      ]
     );
 
-    const candidates = [primary.rows[0]?.id, fallback.rows[0]?.id].filter(
+    const candidates = [
+      primary.rows.length === 1 ? primary.rows[0]?.id : undefined,
+      fallback.rows.length === 1 ? fallback.rows[0]?.id : undefined,
+    ].filter(
       (id): id is string => typeof id === "string" && id.length > 0
     );
     return candidates;

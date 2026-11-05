@@ -17,6 +17,7 @@ import {
   reconcileStaleSupersededEmbeddingDeadLetters,
 } from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { inspectProfileEmbeddingReadiness } from "../src/embeddings/profileEmbeddingRepair.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -411,6 +412,21 @@ export async function processPipelineTasks(): Promise<void> {
       workspaceId = context.workspaceId;
     } finally {
       contextClient.release();
+    }
+
+    const profileReadiness = await inspectProfileEmbeddingReadiness(pool, { context });
+    console.log("Profile embedding readiness:", JSON.stringify(profileReadiness));
+    if (profileReadiness.status === "NO_ACTIVE_PROFILE") {
+      console.warn("NO_ACTIVE_PROFILE: profile matching will remain dependency-blocked until a profile is imported or activated.");
+    }
+    if (profileReadiness.unembeddedProfileFacts > 0) {
+      console.warn(`PROFILE_FACTS_UNEMBEDDED=${profileReadiness.unembeddedProfileFacts}`);
+    }
+    if (profileReadiness.status === "AMBIGUOUS_ACTIVE_PROFILE") {
+      console.warn(`AMBIGUOUS_ACTIVE_PROFILE: found ${profileReadiness.activeProfileCount} active profile versions; matching requires exactly one.`);
+    }
+    if (profileReadiness.status === "PRIMARY_SPACE_MISSING" || profileReadiness.status === "PRIMARY_SPACE_AMBIGUOUS") {
+      console.warn(`${profileReadiness.status}: configured primary embedding space is missing or ambiguous.`);
     }
 
     if (lockId === LOCK_ID && !hasExplicitTargetScope) {
