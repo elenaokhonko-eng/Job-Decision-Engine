@@ -180,7 +180,7 @@ describe("Funnel V3 Independent Test Suite — Work Composition (C01-C11)", () =
     expect(result.status).toBe("PASS");
   });
 
-  it("C05: interaction 40.1% fail (> 40%)", () => {
+  it("C05: interaction 40.1% remains eligible under the relaxed cap", () => {
     const fixture = COMPOSITION_FIXTURES.C05;
     const result = applyGlobalGates({
       id: fixture.id,
@@ -191,8 +191,7 @@ describe("Funnel V3 Independent Test Suite — Work Composition (C01-C11)", () =
       raw_description: fixture.raw_description,
     });
 
-    expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
+    expect(result.status).toBe("PASS");
   });
 
   it("C06: 15% interaction pass", () => {

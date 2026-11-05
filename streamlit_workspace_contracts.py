@@ -286,6 +286,56 @@ def validate_apply_now_row(row: Mapping[str, object], workspace_id: object) -> N
             _optional_score(row, field)
 
 
+def validate_verify_then_apply_row(
+    row: Mapping[str, object], workspace_id: object
+) -> None:
+    """Validate a matched job held only for a user-verifiable workability fact."""
+    fields = (
+        "workspace_id",
+        "canonical_job_id",
+        "job_version_id",
+        "title",
+        "company",
+        "gate_status",
+        "rejection_codes",
+        "gate_evidence_quotes",
+        "processing_state",
+        "recommendation_eligibility",
+        "recommendation_outcome",
+        "deterministic_match_score",
+        "readiness_status",
+        "readiness_reason_codes",
+    )
+    _require_fields(row, fields)
+    _require_scope(row, workspace_id)
+    for field in ("canonical_job_id", "job_version_id", "title", "company"):
+        _require_string(row, field)
+    if row.get("gate_status") != "NEEDS_VERIFICATION":
+        raise ValueError("Verify-then-apply rows require an unresolved gate decision.")
+    if row.get("processing_state") != "MATCHED":
+        raise ValueError(
+            "Verify-then-apply rows require a completed current profile match."
+        )
+    if (
+        row.get("recommendation_eligibility") != "VERIFY"
+        or row.get("recommendation_outcome") != "REVIEW"
+    ):
+        raise ValueError(
+            "Verify-then-apply rows require a REVIEW decision with VERIFY eligibility."
+        )
+    if row.get("readiness_status") != "NEEDS_VERIFICATION":
+        raise ValueError(
+            "Verify-then-apply rows must remain blocked from READY until verification."
+        )
+    for field in ("rejection_codes", "gate_evidence_quotes", "readiness_reason_codes"):
+        value = row.get(field)
+        if not isinstance(value, (list, tuple)) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise TypeError(f"Read-model field {field} must be a string array.")
+    _optional_score(row, "deterministic_match_score")
+
+
 def validate_track_row(row: Mapping[str, object], workspace_id: object) -> None:
     """Validate a current deterministic Track row and its decision trace.
 
