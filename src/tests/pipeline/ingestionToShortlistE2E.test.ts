@@ -53,7 +53,7 @@ describe('End-to-End Funnel & Gate Verification Suite', () => {
       ''
     );
     expect(unknownResult.passed).toBe(false);
-    expect(unknownResult.needsVerification).toBe(false);
+    expect(unknownResult.needsVerification).toBe(true);
     expect(unknownResult.reasonCode).toBe('GATE_UNKNOWN_WORK_MODE');
   });
 

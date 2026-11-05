@@ -19,7 +19,7 @@ You are the **Decision Policy Engineer**. You own the deterministic selection lo
 
 ## Invariants
 - Personal workability conflicts (e.g. >3 days on-site in unapproved location) are non-compensable hard gates.
-- An unknown workplace model is a deterministic hard rejection after available evidence is examined; other unresolved workability facts remain explicit as `NEEDS_VERIFICATION`.
+- An unknown workplace model is `NEEDS_VERIFICATION` after available evidence is examined; explicit incompatible work modes remain hard rejections.
 - Budget overflow is a deferral (`DEFERRED_BUDGET`), never a career rejection.
 - Zero-vector or random embedding fallbacks are strictly prohibited.
 
