@@ -6,6 +6,8 @@ import dotenv from "dotenv";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
+import { loadGlobalLanesConfig, loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
+import { upsertLaneRevision } from "../../lanes/registry.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
 dotenv.config();
@@ -35,6 +37,58 @@ function getContext(): WorkspaceContext {
 
 async function seedBudgetFixture(): Promise<void> {
   const database = getClient();
+  const workspace = getContext();
+  await loadWorkspaceLanesConfig(database, { context: workspace, seedIfEmpty: true });
+  const dbOnlyLane = await upsertLaneRevision(
+    {
+      laneKey: "DB_ONLY_BUDGET_TEST",
+      content: {
+        schema_version: "2.2.0",
+        lane_key: "DB_ONLY_BUDGET_TEST",
+        display_name: "Database only budget test",
+        description: "Integration fixture lane that exists only in the workspace registry.",
+        scope: {
+          included_domain_concepts: { any: ["budget fixture"] },
+          required_function_concepts: { any: ["test"] },
+        },
+        prototypes: [{ prototype_key: "db-only-test", text: "Database only budget fixture." }],
+        routing: { minimum_semantic_score: 0.35 },
+        budget: { maximum_ai_interpretations_per_run: 1 },
+      },
+    },
+    database,
+    { context: workspace, note: "budget enqueuer integration fixture" }
+  );
+  const workspaceLaneConfig = await loadWorkspaceLanesConfig(database, {
+    context: workspace,
+    seedIfEmpty: true,
+  });
+  const laneSnapshot = {
+    source: workspaceLaneConfig.source,
+    lanes_version: workspaceLaneConfig.config.version ?? null,
+    active_lane_revisions: (workspaceLaneConfig.activeLaneRevisions ?? []).map((lane) => ({
+      lane_key: lane.laneKey,
+      lane_identity_id: lane.laneIdentityId,
+      lane_revision_id: lane.laneRevisionId,
+      revision_number: lane.revisionNumber,
+      content_hash: lane.contentHash,
+      activated_at: lane.activatedAt,
+    })),
+  };
+
+  if (workspaceLaneConfig.source !== "LANE_REGISTRY_DB") {
+    throw new Error("Budget integration requires the workspace lane registry to be active.");
+  }
+  const dbOnlyRevision = workspaceLaneConfig.activeLaneRevisions?.find(
+    (lane) => lane.laneKey === "DB_ONLY_BUDGET_TEST"
+  );
+  if (!dbOnlyRevision || dbOnlyRevision.laneRevisionId !== dbOnlyLane.laneRevisionId) {
+    throw new Error("Database-only lane revision was not present in the routing registry snapshot.");
+  }
+  if (Object.hasOwn(loadGlobalLanesConfig().lanes, "DB_ONLY_BUDGET_TEST")) {
+    throw new Error("Database-only test lane unexpectedly exists in the global YAML registry.");
+  }
+
   const activeProfile = await database.query<{ id: string }>(
     `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name)
      VALUES ($1, 'budget_integration_profile', 'Budget Integration Profile')
@@ -59,7 +113,8 @@ async function seedBudgetFixture(): Promise<void> {
     [getContext().workspaceId, JSON.stringify({ fixture: "budget-integration" })]
   );
 
-  for (let index = 1; index <= 4; index += 1) {
+  for (let index = 1; index <= 6; index += 1) {
+    const laneKey = index <= 4 ? "CORE_AI_DATA" : "DB_ONLY_BUDGET_TEST";
     const canonicalJob = await database.query<{ id: string }>(
       `INSERT INTO canonical_jobs (
          workspace_id, company_name, normalized_title, canonical_url,
@@ -70,7 +125,7 @@ async function seedBudgetFixture(): Promise<void> {
        )
        VALUES (
          $1, $2, $3, $4, 'Remote', 'REMOTE', 'PERMANENT',
-         'MATCHED', 'MATCHED', 'PASS', 'CORE_AI_DATA', 0.80, 80.00,
+         'MATCHED', 'MATCHED', 'PASS', $5, 0.80, 80.00,
          'ELIGIBLE', 'PRIORITY'
        )
        RETURNING id`,
@@ -79,6 +134,7 @@ async function seedBudgetFixture(): Promise<void> {
         `Budget Fixture Company ${index}`,
         `AI Platform Engineer ${index}`,
         `https://example.test/budget-${index}`,
+        laneKey,
       ]
     );
     const canonicalJobId = canonicalJob.rows[0].id;
@@ -179,6 +235,39 @@ async function seedBudgetFixture(): Promise<void> {
        WHERE id = $4 AND workspace_id = $5`,
       [jobVersionId, matchRunId, decision.rows[0].id, canonicalJobId, getContext().workspaceId]
     );
+
+    const laneDecision = await database.query<{ id: string }>(
+      `INSERT INTO lane_decisions (
+         workspace_id, canonical_job_id, job_version_id, decision_hash,
+         schema_version, model_version, lane_snapshot, decision_json
+       )
+       VALUES ($1, $2, $3, $4, '2.2.0', 'budget-fixture-v1', $5::jsonb, $6::jsonb)
+       RETURNING id`,
+      [
+        getContext().workspaceId,
+        canonicalJobId,
+        jobVersionId,
+        `budget-integration-lane-decision-${index}`,
+        JSON.stringify(laneSnapshot),
+        JSON.stringify({
+          schema_version: "2.2.0",
+          canonical_job_id: canonicalJobId,
+          job_version_id: jobVersionId,
+          primary_lane: laneKey,
+          secondary_lanes: [],
+          lane_confidence: "high",
+          semantic_scores: {},
+          lane_evidence: ["budget integration fixture"],
+          evaluated_at: new Date().toISOString(),
+        }),
+      ]
+    );
+    await database.query(
+      `UPDATE canonical_jobs
+       SET latest_lane_decision_id = $1
+       WHERE workspace_id = $2 AND id = $3`,
+      [laneDecision.rows[0].id, getContext().workspaceId, canonicalJobId]
+    );
   }
 }
 
@@ -207,6 +296,176 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
     }
   });
 
+  it("rejects a partially populated lane configuration snapshot", async () => {
+    const database = getClient();
+    const workspace = getContext();
+    const budgetRunId = crypto.randomUUID();
+    await database.query(
+      `INSERT INTO ai_evaluation_budget_runs (id, workspace_id) VALUES ($1::uuid, $2::uuid)`,
+      [budgetRunId, workspace.workspaceId]
+    );
+
+    await database.query("BEGIN");
+    try {
+      await expect(database.query(
+        `UPDATE ai_evaluation_budget_runs
+         SET lane_config_source = NULL,
+             lane_config_version = 'lane-registry-v1',
+             lane_config_hash = $2,
+             lane_config_snapshot = '{}'::jsonb
+         WHERE id = $1::uuid AND workspace_id = $3::uuid`,
+        [budgetRunId, "a".repeat(64), workspace.workspaceId]
+      )).rejects.toThrow(/ai_evaluation_budget_runs_lane_config_snapshot_check/i);
+    } finally {
+      await database.query("ROLLBACK");
+    }
+  });
+
+  it("seeds an empty workspace lane registry before pinning its budget snapshot", async () => {
+    const database = getClient();
+    const suffix = crypto.randomUUID();
+    const workspaceKey = `budget-seed-${suffix}`;
+    const userKey = `budget-seed-user-${suffix}`;
+    const workspaceInsert = await database.query<{ id: string }>(
+      `INSERT INTO workspaces (workspace_key, display_name)
+       VALUES ($1, 'Budget Seed Integration Workspace')
+       RETURNING id`,
+      [workspaceKey]
+    );
+    const userInsert = await database.query<{ id: string }>(
+      `INSERT INTO workspace_users (user_key, display_name)
+       VALUES ($1, 'Budget Seed Integration User')
+       RETURNING id`,
+      [userKey]
+    );
+    await database.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'OWNER', 'ACTIVE')`,
+      [workspaceInsert.rows[0].id, userInsert.rows[0].id]
+    );
+    const seedContext = await resolveWorkspaceContext(database, { workspaceKey, userKey });
+    const budgetRunId = crypto.randomUUID();
+
+    expect(await runExplanationQueueEnqueuer(database, {
+      context: seedContext,
+      budgetRunId,
+    })).toEqual({ enqueued: 0, updated: 0, deferred: 0 });
+
+    const seededConfig = await loadWorkspaceLanesConfig(database, {
+      context: seedContext,
+      seedIfEmpty: false,
+    });
+    expect(seededConfig.source).toBe("LANE_REGISTRY_DB");
+    expect(seededConfig.activeLaneRevisions?.length).toBeGreaterThan(0);
+    const pinnedRun = await database.query<{
+      lane_config_source: string;
+      lane_config_version: string;
+      lane_config_snapshot: { source: string; version: string; budgets: Record<string, unknown> };
+    }>(
+      `SELECT lane_config_source, lane_config_version, lane_config_snapshot
+       FROM ai_evaluation_budget_runs
+       WHERE id = $1::uuid AND workspace_id = $2::uuid`,
+      [budgetRunId, seedContext.workspaceId]
+    );
+    expect(pinnedRun.rows[0]).toMatchObject({
+      lane_config_source: "LANE_REGISTRY_DB",
+      lane_config_version: seededConfig.config.version,
+      lane_config_snapshot: {
+        source: "LANE_REGISTRY_DB",
+        version: seededConfig.config.version,
+      },
+    });
+  }, 60_000);
+
+  it("rejects a stale route snapshot and rolls the budget transaction back", async () => {
+    const database = getClient();
+    const workspace = getContext();
+    const budgetRunId = "33333333-3333-4333-8333-333333333333";
+    const routed = await database.query<{
+      id: string;
+      canonical_job_id: string;
+      primary_lane: string;
+      latest_lane_decision_id: string;
+      job_version_id: string;
+      decision_json: Record<string, unknown>;
+      lane_snapshot: unknown;
+    }>(
+      `SELECT ld.id, ld.canonical_job_id, ld.job_version_id, ld.decision_json, ld.lane_snapshot,
+              c.primary_lane, c.latest_lane_decision_id
+       FROM lane_decisions ld
+       JOIN canonical_jobs c
+         ON c.workspace_id = ld.workspace_id
+        AND c.id = ld.canonical_job_id
+        AND c.latest_lane_decision_id = ld.id
+       WHERE ld.workspace_id = $1
+         AND ld.decision_json->>'primary_lane' = 'DB_ONLY_BUDGET_TEST'
+       ORDER BY ld.created_at ASC
+       LIMIT 1`,
+      [workspace.workspaceId]
+    );
+    const route = routed.rows[0];
+    if (!route) throw new Error("The budget fixture has no DB-only lane decision.");
+
+    const malformedSnapshot = { ...(route.lane_snapshot as Record<string, unknown>) };
+    delete malformedSnapshot.active_lane_revisions;
+    const unconfiguredLane = "UNCONFIGURED_BUDGET_TEST";
+    const malformedDecisionJson = {
+      ...route.decision_json,
+      primary_lane: unconfiguredLane,
+    };
+    const malformedDecision = await database.query<{ id: string }>(
+      `INSERT INTO lane_decisions (
+         workspace_id, canonical_job_id, job_version_id, decision_hash,
+         schema_version, model_version, lane_snapshot, decision_json
+       ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, '2.2.0', 'budget-enqueue-test', $5::jsonb, $6::jsonb)
+       RETURNING id`,
+      [
+        workspace.workspaceId,
+        route.canonical_job_id,
+        route.job_version_id,
+        `malformed-budget-route-${crypto.randomUUID()}`,
+        JSON.stringify(malformedSnapshot),
+        JSON.stringify(malformedDecisionJson),
+      ]
+    );
+    try {
+      await database.query(
+        `UPDATE canonical_jobs
+         SET primary_lane = $1, latest_lane_decision_id = $2::uuid
+         WHERE workspace_id = $3::uuid AND id = $4::uuid`,
+        [unconfiguredLane, malformedDecision.rows[0].id, workspace.workspaceId, route.canonical_job_id]
+      );
+      await expect(runExplanationQueueEnqueuer(database, {
+        context: workspace,
+        budgetRunId,
+        canonicalJobIds: [route.canonical_job_id],
+      })).rejects.toThrow(/latest lane decision does not use the active lane revision/);
+
+      const persistedRun = await database.query(
+        `SELECT 1 FROM ai_evaluation_budget_runs WHERE id = $1::uuid`,
+        [budgetRunId]
+      );
+      const queueRows = await database.query(
+        `SELECT 1 FROM evaluation_queue WHERE budget_run_id = $1::uuid`,
+        [budgetRunId]
+      );
+      const deferrals = await database.query(
+        `SELECT 1 FROM evaluation_budget_deferrals WHERE budget_run_id = $1::uuid`,
+        [budgetRunId]
+      );
+      expect(persistedRun.rows).toHaveLength(0);
+      expect(queueRows.rows).toHaveLength(0);
+      expect(deferrals.rows).toHaveLength(0);
+    } finally {
+      await database.query(
+        `UPDATE canonical_jobs
+         SET primary_lane = $1, latest_lane_decision_id = $2::uuid
+         WHERE workspace_id = $3::uuid AND id = $4::uuid`,
+        [route.primary_lane, route.latest_lane_decision_id, workspace.workspaceId, route.canonical_job_id]
+      );
+    }
+  }, 60_000);
+
   it("persists lane-cap deferrals and releases them on a later budget run", async () => {
     const database = getClient();
     const workspace = getContext();
@@ -217,7 +476,34 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
       context: workspace,
       budgetRunId: firstBudgetRunId,
     });
-    expect(first).toEqual({ enqueued: 3, updated: 3, deferred: 1 });
+    expect(first).toEqual({ enqueued: 4, updated: 4, deferred: 2 });
+
+    const yamlLanes = loadGlobalLanesConfig().lanes;
+    const workspaceLanes = await loadWorkspaceLanesConfig(database, {
+      context: workspace,
+      seedIfEmpty: true,
+    });
+    const dbOnlyRevision = workspaceLanes.activeLaneRevisions?.find(
+      (lane) => lane.laneKey === "DB_ONLY_BUDGET_TEST"
+    );
+    const routedDbOnlyRevision = await database.query<{ lane_revision_id: string }>(
+      `SELECT revision.value->>'lane_revision_id' AS lane_revision_id
+       FROM lane_decisions ld
+       JOIN canonical_jobs c
+         ON c.workspace_id = ld.workspace_id
+        AND c.id = ld.canonical_job_id
+        AND c.latest_lane_decision_id = ld.id
+       CROSS JOIN LATERAL jsonb_array_elements(ld.lane_snapshot->'active_lane_revisions') revision(value)
+       WHERE ld.workspace_id = $1
+         AND ld.decision_json->>'primary_lane' = 'DB_ONLY_BUDGET_TEST'
+         AND revision.value->>'lane_key' = 'DB_ONLY_BUDGET_TEST'
+       ORDER BY ld.created_at ASC
+       LIMIT 1`,
+      [workspace.workspaceId]
+    );
+    expect(yamlLanes).not.toHaveProperty("DB_ONLY_BUDGET_TEST");
+    expect(workspaceLanes.source).toBe("LANE_REGISTRY_DB");
+    expect(dbOnlyRevision?.laneRevisionId).toBe(routedDbOnlyRevision.rows[0].lane_revision_id);
 
     const firstQueue = await database.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count
@@ -237,9 +523,16 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
        WHERE workspace_id = $1 AND budget_run_id = $2 AND lane = 'CORE_AI_DATA'`,
       [workspace.workspaceId, firstBudgetRunId]
     );
-    expect(firstQueue.rows[0].count).toBe(3);
-    expect(firstDeferrals.rows[0].count).toBe(1);
+    expect(firstQueue.rows[0].count).toBe(4);
+    expect(firstDeferrals.rows[0].count).toBe(2);
     expect(usage.rows[0]).toEqual({ budget_limit: 3, selected_count: 3 });
+    const dbOnlyUsage = await database.query<{ budget_limit: number; selected_count: number }>(
+      `SELECT budget_limit, selected_count
+       FROM ai_evaluation_budget_usage
+       WHERE workspace_id = $1 AND budget_run_id = $2 AND lane = 'DB_ONLY_BUDGET_TEST'`,
+      [workspace.workspaceId, firstBudgetRunId]
+    );
+    expect(dbOnlyUsage.rows[0]).toEqual({ budget_limit: 1, selected_count: 1 });
 
     const retry = await runExplanationQueueEnqueuer(database, {
       context: workspace,
@@ -247,11 +540,50 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
     });
     expect(retry).toEqual({ enqueued: 0, updated: 0, deferred: 0 });
 
+    await database.query("BEGIN");
+    try {
+      await expect(database.query(
+        `UPDATE ai_evaluation_budget_runs
+         SET lane_config_snapshot = '{}'::jsonb
+         WHERE id = $1::uuid AND workspace_id = $2::uuid`,
+        [firstBudgetRunId, workspace.workspaceId]
+      )).rejects.toThrow(/snapshots are immutable/i);
+    } finally {
+      await database.query("ROLLBACK");
+    }
+
+    const configBeforeChange = await loadWorkspaceLanesConfig(database, { context: workspace });
+    const dbOnlyLane = configBeforeChange.activeLaneRevisions?.find(
+      (lane) => lane.laneKey === "DB_ONLY_BUDGET_TEST"
+    );
+    if (!dbOnlyLane) throw new Error("The DB-only budget lane was not active for the retry snapshot test.");
+    const changedLaneContent = {
+      ...dbOnlyLane.content,
+      budget: { ...dbOnlyLane.content.budget, maximum_ai_interpretations_per_run: 2 },
+    };
+    await upsertLaneRevision(
+      { laneKey: "DB_ONLY_BUDGET_TEST", content: changedLaneContent },
+      database,
+      { context: workspace, note: "verify budget run rejects changed lane revision" }
+    );
+    try {
+      await expect(runExplanationQueueEnqueuer(database, {
+        context: workspace,
+        budgetRunId: firstBudgetRunId,
+      })).rejects.toThrow(/different lane configuration snapshot/);
+    } finally {
+      await upsertLaneRevision(
+        { laneKey: "DB_ONLY_BUDGET_TEST", content: dbOnlyLane.content },
+        database,
+        { context: workspace, note: "restore budget fixture lane revision" }
+      );
+    }
+
     const laterRun = await runExplanationQueueEnqueuer(database, {
       context: workspace,
       budgetRunId: secondBudgetRunId,
     });
-    expect(laterRun).toEqual({ enqueued: 1, updated: 1, deferred: 0 });
+    expect(laterRun).toEqual({ enqueued: 2, updated: 2, deferred: 0 });
 
     const finalState = await database.query<{ processing_state: string; count: number }>(
       `SELECT processing_state, COUNT(*)::int AS count
@@ -262,7 +594,7 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
     );
     expect(finalState.rows).toEqual(
       expect.arrayContaining([
-        { processing_state: "QUEUED_FOR_AI", count: 4 },
+        { processing_state: "QUEUED_FOR_AI", count: 6 },
       ])
     );
 
@@ -272,7 +604,7 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
        WHERE workspace_id = $1 AND status = 'PENDING'`,
       [workspace.workspaceId]
     );
-    expect(totalQueue.rows[0].count).toBe(4);
+    expect(totalQueue.rows[0].count).toBe(6);
   }, 60_000);
 
   it("supersedes a mismatched active duplicate and preserves the authoritative queue row", async () => {

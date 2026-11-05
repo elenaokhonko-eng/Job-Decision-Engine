@@ -1,9 +1,10 @@
 import crypto from "crypto";
 import pg from "pg";
 import dotenv from "dotenv";
+import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
-import { loadLanesConfig } from "./laneConfigLoader.js";
+import { loadWorkspaceLanesConfig } from "./laneConfigLoader.js";
 import { PersistedEvaluationQueueItemSchema } from "../contracts/index.js";
 import { supersedeStaleEvaluationQueueRows } from "./evaluationQueueLineage.js";
 
@@ -24,14 +25,35 @@ function normalizePersistedTimestamp(value: unknown): unknown {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
 }
 
-function laneBudgets(): Record<string, number> {
-  const configured = loadLanesConfig().lanes;
+function laneBudgets(configured: Awaited<ReturnType<typeof loadWorkspaceLanesConfig>>): Record<string, {
+  budget_limit: number;
+  lane_revision_id: string | null;
+  lane_config_source: "LANE_REGISTRY_DB" | "FILES";
+  lane_config_version: string | null;
+}> {
+  const revisionsByLane = new Map(
+    (configured.activeLaneRevisions ?? []).map((revision) => [revision.laneKey, revision.laneRevisionId])
+  );
   return Object.fromEntries(
-    Object.entries(configured).map(([lane, definition]) => [
+    Object.entries(configured.config.lanes).map(([lane, definition]) => [
       lane,
-      Math.max(0, Math.floor(definition.maximum_ai_interpretations_per_run)),
+      {
+        budget_limit: Math.max(0, Math.floor(definition.maximum_ai_interpretations_per_run)),
+        lane_revision_id: revisionsByLane.get(lane) ?? null,
+        lane_config_source: configured.source,
+        lane_config_version: configured.config.version ?? null,
+      },
     ])
   );
+}
+
+function laneBudgetRunSnapshot(configured: Awaited<ReturnType<typeof loadWorkspaceLanesConfig>>) {
+  const budgets = laneBudgets(configured);
+  return {
+    source: configured.source,
+    version: configured.config.version ?? null,
+    budgets,
+  };
 }
 
 export async function runExplanationQueueEnqueuer(
@@ -52,33 +74,121 @@ export async function runExplanationQueueEnqueuer(
   const client = ownsClient ? await pool.connect() : pool;
 
   try {
-    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
     const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
     const canonicalJobIds = options?.canonicalJobIds?.filter(Boolean) ?? [];
     const limit = Number.isInteger(options?.limit) && Number(options?.limit) > 0
       ? Number(options?.limit)
       : null;
     const budgetRunId = options?.budgetRunId ?? crypto.randomUUID();
-    const budgets = laneBudgets();
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    // Registry seeding uses upsertLaneRevision, which owns its transaction. Keep
+    // that setup outside the enqueue transaction, then re-read the active snapshot
+    // inside REPEATABLE READ so the actual run remains atomic and revision-pinned.
+    await loadWorkspaceLanesConfig(client as any, {
+      context: ctx,
+      seedIfEmpty: true,
+    });
 
-    await client.query("BEGIN");
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
     try {
+      // Load and pin the registry snapshot inside the transaction so routing and enqueueing
+      // cannot observe different active revisions during this budget run.
+      const laneConfig = await loadWorkspaceLanesConfig(client as any, {
+        context: ctx,
+        seedIfEmpty: false,
+      });
+      const runSnapshot = laneBudgetRunSnapshot(laneConfig);
+      const runSnapshotJson = stableStringify(runSnapshot);
+      const runSnapshotHash = sha256Hex(runSnapshotJson);
+      const budgets = runSnapshot.budgets;
+
       await supersedeStaleEvaluationQueueRows(client, { workspaceId: ctx.workspaceId });
-      await client.query(
-        `INSERT INTO ai_evaluation_budget_runs (id, workspace_id)
-         VALUES ($1::uuid, $2::uuid)
-         ON CONFLICT (id) DO UPDATE SET last_seen_at = NOW()`,
-        [budgetRunId, ctx.workspaceId]
+      const insertedRun = await client.query<{ id: string }>(
+        `INSERT INTO ai_evaluation_budget_runs (
+           id, workspace_id, lane_config_source, lane_config_version,
+           lane_config_hash, lane_config_snapshot
+         )
+         VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING id`,
+        [budgetRunId, ctx.workspaceId, runSnapshot.source, runSnapshot.version, runSnapshotHash, runSnapshotJson]
       );
+
+      if (insertedRun.rows.length === 0) {
+        const existingRun = await client.query<{
+          workspace_id: string;
+          lane_config_source: string | null;
+          lane_config_version: string | null;
+          lane_config_hash: string | null;
+          lane_config_snapshot: unknown;
+        }>(
+          `SELECT workspace_id, lane_config_source, lane_config_version,
+                  lane_config_hash, lane_config_snapshot
+           FROM ai_evaluation_budget_runs
+           WHERE id = $1::uuid
+           FOR UPDATE`,
+          [budgetRunId]
+        );
+        const persistedRun = existingRun.rows[0];
+        if (!persistedRun || persistedRun.workspace_id !== ctx.workspaceId) {
+          throw new Error(`AI budget run ${budgetRunId} is not available in this workspace.`);
+        }
+
+        if (persistedRun.lane_config_snapshot === null) {
+          const previousWork = await client.query<{ has_prior_work: boolean }>(
+            `SELECT EXISTS (
+               SELECT 1 FROM ai_evaluation_budget_usage
+               WHERE budget_run_id = $1::uuid AND workspace_id = $2::uuid
+               UNION ALL
+               SELECT 1 FROM evaluation_queue
+               WHERE budget_run_id = $1::uuid AND workspace_id = $2::uuid
+               UNION ALL
+               SELECT 1 FROM evaluation_budget_deferrals
+               WHERE budget_run_id = $1::uuid AND workspace_id = $2::uuid
+             ) AS has_prior_work`,
+            [budgetRunId, ctx.workspaceId]
+          );
+          if (previousWork.rows[0]?.has_prior_work) {
+            throw new Error(
+              `AI budget run ${budgetRunId} has prior work but no pinned lane configuration snapshot. Start a new budget run.`
+            );
+          }
+          await client.query(
+            `UPDATE ai_evaluation_budget_runs
+             SET lane_config_source = $2,
+                 lane_config_version = $3,
+                 lane_config_hash = $4,
+                 lane_config_snapshot = $5::jsonb,
+                 last_seen_at = NOW()
+             WHERE id = $1::uuid AND workspace_id = $6::uuid`,
+            [budgetRunId, runSnapshot.source, runSnapshot.version, runSnapshotHash, runSnapshotJson, ctx.workspaceId]
+          );
+        } else {
+          const storedSnapshot = stableStringify(persistedRun.lane_config_snapshot);
+          if (persistedRun.lane_config_hash !== runSnapshotHash
+              || persistedRun.lane_config_source !== runSnapshot.source
+              || persistedRun.lane_config_version !== runSnapshot.version
+              || storedSnapshot !== runSnapshotJson) {
+            throw new Error(
+              `AI budget run ${budgetRunId} cannot be retried with a different lane configuration snapshot. Start a new budget run.`
+            );
+          }
+          await client.query(
+            `UPDATE ai_evaluation_budget_runs
+             SET last_seen_at = NOW()
+             WHERE id = $1::uuid AND workspace_id = $2::uuid`,
+            [budgetRunId, ctx.workspaceId]
+          );
+        }
+      }
+
       await client.query(
         `INSERT INTO ai_evaluation_budget_usage (
            budget_run_id, workspace_id, lane, budget_limit
          )
-         SELECT $1::uuid, $2::uuid, key, GREATEST(value::int, 0)
-         FROM jsonb_each_text($3::jsonb)
-         ON CONFLICT (budget_run_id, lane) DO UPDATE
-           SET budget_limit = EXCLUDED.budget_limit,
-               updated_at = NOW()`,
+         SELECT $1::uuid, $2::uuid, key, GREATEST((value->>'budget_limit')::int, 0)
+         FROM jsonb_each($3::jsonb)
+         ON CONFLICT (budget_run_id, lane) DO NOTHING`,
         [budgetRunId, ctx.workspaceId, JSON.stringify(budgets)]
       );
       await client.query(
@@ -94,6 +204,8 @@ export async function runExplanationQueueEnqueuer(
         budgetRunId,
         JSON.stringify(budgets),
         limit,
+        runSnapshot.source,
+        runSnapshot.version,
       ];
       const jobVersionFilter = jobVersionIds.length > 0
         ? `AND COALESCE(c.latest_job_version_id, lv.id) = ANY($${params.push(jobVersionIds)}::uuid[])`
@@ -106,12 +218,18 @@ export async function runExplanationQueueEnqueuer(
         enqueued: number;
         updated: number;
         deferred: number;
+        lane_revision_mismatch_count: number;
         queue_contract_items: unknown;
       }>(
         `
         WITH lane_budgets AS (
-          SELECT key AS lane, GREATEST(value::int, 0) AS budget_limit
-          FROM jsonb_each_text($3::jsonb)
+          SELECT
+            key AS lane,
+            GREATEST((value->>'budget_limit')::int, 0) AS budget_limit,
+            NULLIF(value->>'lane_revision_id', '') AS lane_revision_id,
+            value->>'lane_config_source' AS lane_config_source,
+            value->>'lane_config_version' AS lane_config_version
+          FROM jsonb_each($3::jsonb)
         ),
         budget_usage AS (
           SELECT lane, budget_limit, selected_count
@@ -129,10 +247,39 @@ export async function runExplanationQueueEnqueuer(
             target_jv.content_hash AS job_content_hash,
             dd.context_fingerprint,
             c.primary_lane AS lane,
+            route_lane.lane_revision_id AS routed_lane_revision_id,
+            CASE
+              WHEN COALESCE(lb.lane_config_source, $5::text) = 'FILES' THEN COALESCE(
+                ld.lane_snapshot->>'source' = $5::text
+                AND (ld.lane_snapshot->>'lanes_version') IS NOT DISTINCT FROM $6::text
+                AND ld.decision_json->>'primary_lane' = c.primary_lane,
+                FALSE
+              )
+              WHEN lb.lane IS NULL THEN COALESCE(
+                ld.lane_snapshot->>'source' = $5::text
+                AND (ld.lane_snapshot->>'lanes_version') IS NOT DISTINCT FROM $6::text
+                AND ld.decision_json->>'primary_lane' = c.primary_lane
+                AND jsonb_typeof(ld.lane_snapshot->'active_lane_revisions') = 'array'
+                AND route_lane.lane_revision_id IS NULL,
+                FALSE
+              )
+              ELSE COALESCE(
+                ld.lane_snapshot->>'source' = lb.lane_config_source
+                AND (ld.lane_snapshot->>'lanes_version') IS NOT DISTINCT FROM lb.lane_config_version
+                AND ld.decision_json->>'primary_lane' = c.primary_lane
+                AND jsonb_typeof(ld.lane_snapshot->'active_lane_revisions') = 'array'
+                AND route_lane.lane_revision_id IS NOT NULL
+                AND route_lane.lane_revision_id = lb.lane_revision_id,
+                FALSE
+              )
+            END AS lane_revision_matches,
             c.created_at AS candidate_created_at,
             COALESCE(bu.selected_count, 0) AS selected_count,
             COALESCE(lb.budget_limit, 0) AS budget_limit,
             (lb.lane IS NOT NULL) AS budget_configured,
+            lb.lane_revision_id,
+            lb.lane_config_source,
+            lb.lane_config_version,
             CASE
               WHEN COALESCE(c.deterministic_match_score, 0) > 0 THEN c.deterministic_match_score::float
               ELSE COALESCE(c.semantic_score, 0)::float
@@ -183,6 +330,23 @@ export async function runExplanationQueueEnqueuer(
            AND dd.job_version_id = target_jv.id
            AND dd.match_run_id = mr.id
            AND dd.context_fingerprint IS NOT NULL
+          LEFT JOIN lane_decisions ld
+            ON ld.workspace_id = c.workspace_id
+           AND ld.id = c.latest_lane_decision_id
+           AND ld.canonical_job_id = c.id
+           AND ld.job_version_id = target_jv.id
+          LEFT JOIN LATERAL (
+            SELECT revision.value->>'lane_revision_id' AS lane_revision_id
+            FROM jsonb_array_elements(
+              CASE
+                WHEN jsonb_typeof(ld.lane_snapshot->'active_lane_revisions') = 'array'
+                  THEN ld.lane_snapshot->'active_lane_revisions'
+                ELSE '[]'::jsonb
+              END
+            ) AS revision(value)
+            WHERE revision.value->>'lane_key' = c.primary_lane
+            LIMIT 1
+          ) route_lane ON TRUE
           LEFT JOIN lane_budgets lb ON lb.lane = c.primary_lane
           LEFT JOIN budget_usage bu ON bu.lane = c.primary_lane
           WHERE c.workspace_id = $1::uuid
@@ -220,9 +384,19 @@ export async function runExplanationQueueEnqueuer(
             ${jobVersionFilter}
             ${canonicalJobFilter}
         ),
-        capacity_candidates AS (
+        candidates_with_current_lane_revision AS (
           SELECT *
           FROM candidates
+          WHERE lane_revision_matches
+        ),
+        lane_revision_mismatches AS (
+          SELECT COUNT(*)::int AS count
+          FROM candidates
+          WHERE lane_revision_matches IS NOT TRUE
+        ),
+        capacity_candidates AS (
+          SELECT *
+          FROM candidates_with_current_lane_revision
           WHERE lane_rank <= GREATEST(budget_limit - selected_count, 0)
         ),
         fair_ranked AS (
@@ -239,7 +413,7 @@ export async function runExplanationQueueEnqueuer(
         ),
         deferred_candidates AS (
           SELECT c.*, NULL::bigint AS fair_rank
-          FROM candidates c
+          FROM candidates_with_current_lane_revision c
           WHERE c.lane_rank > GREATEST(c.budget_limit - c.selected_count, 0)
           UNION ALL
           SELECT fr.*
@@ -333,7 +507,10 @@ export async function runExplanationQueueEnqueuer(
               'selected_count', selected_count,
               'fair_rank', fair_rank,
               'priority_score', priority_score,
-              'budget_configured', budget_configured
+              'budget_configured', budget_configured,
+              'lane_revision_id', lane_revision_id,
+              'lane_config_source', lane_config_source,
+              'lane_config_version', lane_config_version
             )
           FROM deferred_candidates
           WHERE job_version_id IS NOT NULL
@@ -356,6 +533,7 @@ export async function runExplanationQueueEnqueuer(
           (SELECT COUNT(*)::int FROM inserted) AS enqueued,
           (SELECT COUNT(*)::int FROM updated_jobs) AS updated,
           (SELECT COUNT(*)::int FROM deferred_rows) AS deferred,
+          (SELECT count FROM lane_revision_mismatches) AS lane_revision_mismatch_count,
           COALESCE(
             (
               SELECT jsonb_agg(
@@ -370,6 +548,12 @@ export async function runExplanationQueueEnqueuer(
       );
 
       const summary = rows[0] ?? { enqueued: 0, updated: 0, deferred: 0, queue_contract_items: [] };
+      const laneRevisionMismatchCount = Number(summary.lane_revision_mismatch_count ?? 0);
+      if (laneRevisionMismatchCount > 0) {
+        throw new Error(
+          `Cannot enqueue ${laneRevisionMismatchCount} job(s): their latest lane decision does not use the active lane revision. Re-run lane routing before AI enqueue.`
+        );
+      }
       const queueContractItems = Array.isArray(summary.queue_contract_items)
         ? summary.queue_contract_items.map((item: any) => PersistedEvaluationQueueItemSchema.parse({
             ...item,
