@@ -23,6 +23,7 @@ import { resolveWorkspacePreferenceContext } from "../policy/workspacePreference
 import { SixLaneKeySchema, type LaneIntentPreferences, type LanePreferenceTaxonomy } from "../policy/laneIntentContracts.js";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 import { routableWorkabilityVerificationSql } from "./verificationRouting.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
 export { loadGlobalLanesConfig, loadLanesConfig };
 export type { GlobalLanesConfig, LaneDefinition };
@@ -1344,7 +1345,7 @@ export async function runLaneRouter(
         try {
           vector = await generateEmbeddingWithProvider(laneDef.prototype_query, provider);
         } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message = publicErrorSummary(error, provider);
           throw new EmbeddingRunError(
             provider,
             `prototype embedding failed for lane ${laneKey}: ${message}`
@@ -1753,9 +1754,9 @@ export async function runLaneRouter(
             throw jobErr;
           }
 
-          const message = jobErr instanceof Error ? jobErr.message : String(jobErr);
+          const message = publicErrorSummary(jobErr, provider);
           const trimmed = message.length > 200 ? `${message.slice(0, 200)}...` : message;
-          console.error(`❌ Failed to route job ${job.id}:`, jobErr);
+          console.error(`❌ Failed to route job ${job.id}: ${trimmed}`);
           const evaluatedAt = new Date().toISOString();
           const laneDecisionId = await persistLaneDecision({
             canonicalJobId: job.id,
@@ -1830,7 +1831,7 @@ export async function runLaneRouter(
         if (error instanceof EmbeddingRunError) {
           const where = error.jobId ? `job ${error.jobId}` : "prototype embeddings";
           console.warn(
-            `⚠️ Embedding provider ${provider} failed during ${where}: ${error.message}. Trying fallback...`
+            `⚠️ Embedding provider ${provider} failed during ${where}: ${publicErrorSummary(error, provider)}. Trying fallback...`
           );
           continue;
         }
@@ -1838,7 +1839,7 @@ export async function runLaneRouter(
       }
     }
 
-    const message = lastError instanceof Error ? lastError.message : String(lastError || "unknown");
+    const message = publicErrorSummary(lastError || "unknown", "embedding");
     const trimmed = message.length > 200 ? `${message.slice(0, 200)}...` : message;
     let deferredCount = 0;
 

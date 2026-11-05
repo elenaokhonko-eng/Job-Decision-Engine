@@ -8,6 +8,7 @@ import { classifyDescriptionQuality, MIN_COMPLETE_DESCRIPTION_CHARS } from "./de
 import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { extractFreshnessEvidence } from "../ingestion/freshnessEvidence.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -505,12 +506,13 @@ export async function runNormalization(
         });
       } catch (err: any) {
         await client.query("ROLLBACK");
-        console.error(`❌ Failed to normalize observation ${obs.id}:`, err);
+        const safeError = publicErrorSummary(err, "pipeline");
+        console.error(`❌ Failed to normalize observation ${obs.id}: ${safeError}`);
         summary.totalErrors++;
         summary.details.push({
           observationId: obs.id,
           isNewJob: false,
-          error: err.message || String(err)
+          error: safeError
         });
       }
     }

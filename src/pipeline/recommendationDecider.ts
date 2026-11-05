@@ -24,6 +24,7 @@ import { assessHiringTerritoryReadiness, assessTravelReadiness, assessWorkModeRe
 import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { resolveWorkspaceWorkabilityPolicy } from "./workabilityPolicy.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -1045,8 +1046,7 @@ export async function runRecommendationDecider(
         await client.query("ROLLBACK");
         errors += 1;
         console.error(
-          `❌ Recommendation decider failed for canonical job ${job.canonical_job_id}:`,
-          error
+          `❌ Recommendation decider failed for canonical job ${job.canonical_job_id}: ${publicErrorSummary(error, "pipeline")}`
         );
       }
     }
