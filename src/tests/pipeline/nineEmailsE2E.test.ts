@@ -324,7 +324,8 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         t.includes("llm") ||
         t.includes("data pipeline") ||
         t.includes("cloudscale") ||
-        t.includes('"domain_key":"ai_systems"')
+        t.includes('"domain_key":"ai_systems"') ||
+        t.includes('"domain_key":"ai"')
       ) {
         return [1, 0, 0, 0];
       }
