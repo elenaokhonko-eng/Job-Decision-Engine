@@ -120,6 +120,13 @@ export const ManualComparisonRowSchema = z.object({
     "distinctive-term overlap; potential evidence only",
     "model-judged pairing; advisory evidence only",
   ]),
+  // Why the row needs a human look (a market or product the evidence does not name, a years
+  // threshold, a named certification), and PARTIAL when the record visibly falls short.
+  attention: z.array(z.object({
+    code: z.enum(["DOMAIN_QUALIFIER", "YEARS_THRESHOLD", "NAMED_CERTIFICATION"]),
+    detail: z.string().min(1),
+  }).strict()).optional(),
+  suggested_status: z.literal("PARTIAL").optional(),
 }).strict();
 
 // How many MUST requirements have direct evidence; advisory, never a suitability decision.

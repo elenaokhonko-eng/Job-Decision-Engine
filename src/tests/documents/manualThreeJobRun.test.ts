@@ -1,0 +1,168 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  documentRequirements,
+  isWorkabilityRequirement,
+  postingRequirementLines,
+  type StoredRequirementRow,
+} from "../../documents/manualDocumentPolicy.js";
+import {
+  MANUAL_COVER_LETTER_SCHEMA_VERSION,
+  MANUAL_SUMMARY_SCHEMA_VERSION,
+  validateCoverLetterPayload,
+  validateSummaryPayload,
+  type CoverLetterPair,
+} from "../../documents/manualCoverLetter.js";
+import { buildManualComparison, matchableEvidence, rowAttention, tenureStatements, type ManualEvidence } from "../../documents/manualPreparation.js";
+import {
+  INVESTMENT_DATA_SCIENTIST_DESCRIPTION,
+  INVESTMENT_DATA_SCIENTIST_NARRATIVE,
+  INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS,
+} from "../fixtures/investmentDataScientist.js";
+
+const quotedRow = (key: string, text: string, importance = "MUST"): StoredRequirementRow => ({
+  requirement_key: key, requirement_type: "SKILL", importance, requirement_text: text, extractor_type: "LLM_QUOTED", quote_text: text,
+});
+
+describe("posting parser on a question-headed posting", () => {
+  it("turns every qualification bullet into a row and none of the narrative or office logistics", () => {
+    const lines = postingRequirementLines(INVESTMENT_DATA_SCIENTIST_DESCRIPTION);
+    const requirementTexts = lines.filter((line) => line.requirement_type === "POSTING_REQUIREMENT").map((line) => line.requirement_text);
+    expect(requirementTexts).toEqual(INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS);
+    expect(lines.filter((line) => line.requirement_type === "POSTING_RESPONSIBILITY").map((line) => line.requirement_text)).toEqual([
+      "Build and deploy machine learning models that support investment decisions",
+      "Turn alternative and market data into features that portfolio teams can use",
+      "Work with data engineers to put models into production and monitor them",
+    ]);
+
+    // The model's quotes included the team description and the office line; neither survives.
+    const rows = documentRequirements([
+      quotedRow("Q-1", INVESTMENT_DATA_SCIENTIST_NARRATIVE[0]),
+      quotedRow("Q-2", INVESTMENT_DATA_SCIENTIST_NARRATIVE[1]),
+      quotedRow("Q-3", "Come into the office four days per week"),
+      quotedRow("Q-4", INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS[1]),
+    ], INVESTMENT_DATA_SCIENTIST_DESCRIPTION);
+    const texts = rows.map((row) => row.requirement_text);
+    for (const qualification of INVESTMENT_DATA_SCIENTIST_QUALIFICATIONS) expect(texts).toContain(qualification);
+    for (const narrative of INVESTMENT_DATA_SCIENTIST_NARRATIVE) expect(texts).not.toContain(narrative);
+    expect(texts.some((text) => /office/i.test(text))).toBe(false);
+  });
+
+  it("treats office attendance, hybrid and on-site rules as workability, but not hybrid cloud", () => {
+    for (const line of [
+      "Come into the office four days per week",
+      "This is a hybrid role with 3 days a week in the office",
+      "On-site presence at our Singapore campus is expected",
+      "Days in office: Monday to Thursday",
+    ]) expect(isWorkabilityRequirement(line), line).toBe(true);
+    expect(isWorkabilityRequirement("Experience designing hybrid cloud data platforms")).toBe(false);
+  });
+});
+
+const fact = (id: string, statement: string, engagementId?: string): ManualEvidence => ({
+  id, evidence_type: "FACT", label: id, statement, fact_type: "PROJECT", ...(engagementId ? { engagement_id: engagementId } : {}),
+});
+const tenureAi = fact("fact-tenure-ai", "Has 2 years of direct AI and software coding experience, including Python and data science.");
+const tenureAll = fact("fact-tenure-all", "Has 20 years of overall professional production experience across institutional technology.");
+const calypso = fact("fact-calypso", "Took a derivatives and collateral programme to group sign-off, moving it onto BNPP Calypso.", "eng-aim");
+const api = fact("fact-api", "Built cloud-native API orchestrations handling ~1,000 transactions daily.", "eng-venture");
+const mlFoundation = fact("fact-ml", "Designed the data foundation that future machine-learning models will train on.", "eng-venture");
+const tenure = tenureStatements([tenureAi, tenureAll]);
+
+describe("row attention and suggested status", () => {
+  it("flags a market the evidence does not name and suggests partly met (commodity against rates derivatives)", () => {
+    const check = rowAttention("Commodity derivatives, futures curves and roll mechanics", [calypso], tenure);
+    expect(check.suggestedStatus).toBe("PARTIAL");
+    expect(check.attention[0]).toMatchObject({ code: "DOMAIN_QUALIFIER" });
+    expect(check.attention[0].detail).toContain("commodities");
+  });
+
+  it("compares a years threshold with the profile's own tenure for that field", () => {
+    const short = rowAttention("At least 3 years of hands-on experience building machine learning models in production", [mlFoundation], tenure);
+    expect(short.suggestedStatus).toBe("PARTIAL");
+    expect(short.attention.find((item) => item.code === "YEARS_THRESHOLD")?.detail).toContain("your profile states 2");
+    // Enough years for the field: flagged for a look, not marked partial.
+    const enough = rowAttention("At least 10 years in institutional technology", [api], tenure);
+    expect(enough.suggestedStatus).toBeNull();
+    expect(enough.attention.map((item) => item.code)).toEqual(["YEARS_THRESHOLD"]);
+  });
+
+  it("flags a named certification that no credential backs", () => {
+    expect(rowAttention("CFA charterholder preferred", [api], []).attention.map((item) => item.code)).toEqual(["NAMED_CERTIFICATION"]);
+  });
+
+  it("puts the flags and the suggestion on the comparison rows", () => {
+    const comparison = buildManualComparison({
+      canonical_job_id: "job", job_version_id: "version", source_observation_id: "observation", source_evidence_fingerprint: "a".repeat(64),
+      job_content_hash: "hash", title: "Product Leader", company: "Example Trading", canonical_url: null, profile_version_id: "profile",
+      candidate_profile_id: "candidate", requirement_set_id: "set", profile_contact_fact_ids: [], profile_contact_fingerprint: "b".repeat(64),
+      preference_context_fingerprint: "c".repeat(64), context_fingerprint: "d".repeat(64), suitability_warnings: [],
+      requirements: [{ requirement_key: "R-1", requirement_type: "SKILL", importance: "MUST", requirement_text: "Commodity derivatives and futures curves" }],
+      evidence: [calypso, tenureAi],
+      pairing: { pairs: [{ requirement_key: "R-1", evidence_id: "fact-calypso", confidence: 0.9, justification: "derivatives programme" }] },
+    }) as { rows: Array<Record<string, unknown>> };
+    expect(comparison.rows[0]).toMatchObject({ suggested_status: "PARTIAL", attention: [expect.objectContaining({ code: "DOMAIN_QUALIFIER" })] });
+  });
+
+  it("never offers facts from a role the profile hides", () => {
+    const hiddenRole: ManualEvidence = { id: "eng-lab", evidence_type: "ENGAGEMENT", label: "Founder at Research Lab", statement: "Founder at Research Lab.", document_layout: "HIDDEN" };
+    const labFact = fact("fact-lab", "Built multi-agent research tools for literature synthesis.", "eng-lab");
+    expect(matchableEvidence([hiddenRole, labFact, api]).map((item) => item.id)).toEqual(["fact-api"]);
+  });
+});
+
+describe("summary and letter grounding", () => {
+  const pairs: CoverLetterPair[] = [
+    { requirement_key: "R-1", importance: "MUST", requirement: "API and integration architecture", evidence: [api], status: "ACCEPTED" },
+    { requirement_key: "R-2", importance: "MUST", requirement: "3 years hands-on machine learning", evidence: [mlFoundation], status: "PARTIAL" },
+    { requirement_key: "R-3", importance: "MUST", requirement: "Commodity derivatives", evidence: [calypso], status: "ACCEPTED" },
+  ];
+  const allowed = [api, mlFoundation, calypso, tenureAll];
+  const summary = (second: { text: string; evidence_ids: string[]; requirement_keys: string[] }) => validateSummaryPayload({
+    schema_version: MANUAL_SUMMARY_SCHEMA_VERSION,
+    sentences: [
+      { text: "Technology architect with 20 years across institutional technology.", evidence_ids: ["fact-tenure-all"], requirement_keys: [] },
+      second,
+      { text: "This record fits the role's integration architecture needs.", evidence_ids: ["fact-api"], requirement_keys: ["R-1"] },
+    ],
+  }, pairs, allowed, { jobTitle: "AVP/VP, Data Scientist, Investment Insights Group" });
+  const issuesOf = (result: ReturnType<typeof validateSummaryPayload>) => (result.valid ? [] : result.issues).join(" ");
+
+  it("accepts a grounded summary", () => {
+    expect(summary({ text: "Built cloud-native API orchestrations handling about 1,000 transactions a day.", evidence_ids: ["fact-api"], requirement_keys: ["R-1"] }))
+      .toMatchObject({ valid: true });
+  });
+
+  it("rejects quantity words the evidence does not state", () => {
+    expect(issuesOf(summary({ text: "Built API orchestrations processing thousands of daily transactions.", evidence_ids: ["fact-api"], requirement_keys: ["R-1"] })))
+      .toContain("thousands");
+  });
+
+  it("rejects praise, unbacked markets and claims on partly met rows", () => {
+    const commodity = issuesOf(summary({ text: "Possesses deep knowledge of commodity derivatives and collateral programmes.", evidence_ids: ["fact-calypso"], requirement_keys: ["R-3"] }));
+    expect(commodity).toContain("\"deep\"");
+    expect(commodity).toContain("commodities");
+    expect(issuesOf(summary({ text: "Designed the data foundation for future machine-learning models.", evidence_ids: ["fact-ml"], requirement_keys: ["R-2"] })))
+      .toContain("only partly met");
+    expect(issuesOf(summary({ text: "Took a derivatives programme to sign-off, which aligns perfectly with this role.", evidence_ids: ["fact-calypso"], requirement_keys: ["R-3"] })))
+      .toContain("perfectly");
+  });
+
+  it("rejects the posting's title used as the candidate's own", () => {
+    expect(issuesOf(summary({ text: "Data scientist who built API orchestrations for about 1,000 transactions a day.", evidence_ids: ["fact-api"], requirement_keys: ["R-1"] })))
+      .toContain("data scientist");
+  });
+
+  it("rejects passive voice in the letter", () => {
+    const letter = validateCoverLetterPayload({
+      schema_version: MANUAL_COVER_LETTER_SCHEMA_VERSION,
+      opening: { text: "The role's focus on integration architecture matches the work I want to do next.", requirement_keys: ["R-1"] },
+      paragraphs: [
+        { sentences: [{ text: "The API orchestration layer was designed and built to handle about 1,000 transactions a day.", evidence_ids: ["fact-api"], requirement_keys: ["R-1"] }] },
+        { sentences: [{ text: "I designed the data foundation that future machine-learning models will train on.", evidence_ids: ["fact-ml"], requirement_keys: ["R-2"] }] },
+      ],
+      gap_note: null,
+    }, pairs, allowed);
+    expect(letter.valid ? "" : letter.issues.join(" ")).toContain("passive voice");
+  });
+});

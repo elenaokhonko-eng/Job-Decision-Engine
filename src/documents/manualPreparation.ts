@@ -1,8 +1,15 @@
 import crypto from "node:crypto";
 import { Document, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
-import { assertNoInternalAssessmentText, isInternalAssessmentStatement, isSelfDescriptionStatement } from "./manualDocumentPolicy.js";
+import {
+  assertNoInternalAssessmentText,
+  domainQualifiers,
+  isInternalAssessmentStatement,
+  isSelfDescriptionStatement,
+  namesCertification,
+  requiredYears,
+} from "./manualDocumentPolicy.js";
 
-export const MANUAL_COMPARATOR_VERSION = "evidence-pairing-v5";
+export const MANUAL_COMPARATOR_VERSION = "evidence-pairing-v6";
 
 export interface ManualRequirement {
   requirement_key: string;
@@ -191,11 +198,75 @@ const IMPORTANCE_RANK: Record<string, number> = { MUST: 0, PREFERRED: 1, NICE_TO
 /**
  * Evidence a requirement may be paired with: work-done facts and credentials, minus internal
  * assessments and self-descriptions. Role summaries and skill statements are not printed as
- * evidence, so they are not offered for pairing either.
+ * evidence, so they are not offered for pairing either, and neither are facts from roles the
+ * profile hides from documents: citing one would put the hidden role back on the CV.
  */
 export function matchableEvidence(evidence: ManualEvidence[]): ManualEvidence[] {
+  const hiddenRoles = new Set(evidence.filter((item) => item.evidence_type === "ENGAGEMENT" && item.document_layout === "HIDDEN").map((item) => item.id));
   return evidence.filter((item) => (isExperienceFact(item) || item.evidence_type === "CREDENTIAL")
+    && !(item.engagement_id && hiddenRoles.has(item.engagement_id))
     && !isInternalAssessmentStatement(item.statement) && !(item.evidence_type === "FACT" && isSelfDescriptionStatement(item.statement)));
+}
+
+/** Why a person should check a row before approving: the places the matcher is least reliable. */
+export interface RowAttention {
+  code: "DOMAIN_QUALIFIER" | "YEARS_THRESHOLD" | "NAMED_CERTIFICATION";
+  detail: string;
+}
+
+// "ML", "machine learning", "AI" and "data science" name one field in tenure statements and postings.
+const AI_ML_TERMS = /\b(?:machine[- ]learning|artificial intelligence|data science|deep learning|ML|AI)\b/g;
+// Words a years requirement and a tenure statement share without being about the same field.
+const TENURE_GENERIC = new Set(["production", "hand", "hands", "professional", "overall", "industry", "direct", "total", "build", "building"]);
+
+function fieldTerms(text: string): Set<string> {
+  return new Set([...terms(text.replace(AI_ML_TERMS, " aiml "))].filter((term) => !TENURE_GENERIC.has(term)));
+}
+
+/** Profile-level tenure statements ("Has 2 years of direct AI ... experience") with their years. */
+export function tenureStatements(evidence: ManualEvidence[]): Array<{ item: ManualEvidence; years: number; fields: Set<string> }> {
+  return evidence.flatMap((item) => {
+    if (item.evidence_type !== "FACT" || item.engagement_id) return [];
+    const match = /\b(\d{1,2})\+?\s+years?\b/i.exec(item.statement);
+    return match ? [{ item, years: Number(match[1]), fields: fieldTerms(item.statement) }] : [];
+  });
+}
+
+/**
+ * Flags a paired row for a human check, and suggests PARTIAL where the record visibly falls short:
+ * the requirement names a market or product (commodities, Azure) that none of its evidence names,
+ * or asks for more years than the profile's own tenure statement for that field. Model confidence
+ * is not calibrated, so a confident pair is never taken as proof of these.
+ */
+export function rowAttention(
+  requirementText: string,
+  paired: ManualEvidence[],
+  tenure: ReturnType<typeof tenureStatements>,
+): { attention: RowAttention[]; suggestedStatus: "PARTIAL" | null } {
+  const attention: RowAttention[] = [];
+  let partial = false;
+  const pairedQualifiers = new Set(paired.flatMap((item) => domainQualifiers(`${item.label} ${item.statement}`)));
+  const missing = domainQualifiers(requirementText).filter((qualifier) => !pairedQualifiers.has(qualifier));
+  if (missing.length > 0) {
+    partial = true;
+    attention.push({ code: "DOMAIN_QUALIFIER", detail: `The requirement names ${missing.join(", ")}; none of the proposed evidence does.` });
+  }
+  const years = requiredYears(requirementText);
+  if (years !== null) {
+    const fields = fieldTerms(requirementText);
+    const related = tenure.filter((entry) => [...entry.fields].some((term) => fields.has(term)));
+    const most = related.reduce<(typeof related)[number] | null>((best, entry) => (!best || entry.years > best.years ? entry : best), null);
+    if (most && most.years < years) {
+      partial = true;
+      attention.push({ code: "YEARS_THRESHOLD", detail: `The posting asks for ${years} years; your profile states ${most.years} ("${most.item.statement.trim()}").` });
+    } else {
+      attention.push({ code: "YEARS_THRESHOLD", detail: `The posting asks for ${years} years; check that the evidence covers them.` });
+    }
+  }
+  if (namesCertification(requirementText) && !paired.some((item) => item.evidence_type === "CREDENTIAL")) {
+    attention.push({ code: "NAMED_CERTIFICATION", detail: "The requirement names a certification; only a credential can evidence it." });
+  }
+  return { attention, suggestedStatus: partial ? "PARTIAL" : null };
 }
 
 function stem(word: string): string {
@@ -271,9 +342,13 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
       : lexicalPairs(requirement.requirement_text, candidates, evidenceTerms, distinctive, ages),
   }));
   const allocated = allocateEvidence(ranked, (id) => candidateById.get(id)?.engagement_id ?? id);
+  const tenure = tenureStatements(input.evidence);
 
   const rows = input.requirements.map((requirement, index) => {
     const evidence = allocated[index];
+    const check = evidence.length > 0
+      ? rowAttention(requirement.requirement_text, evidence.map((item) => candidateById.get(item.id)!), tenure)
+      : { attention: [], suggestedStatus: null };
     return {
       requirement_key: requirement.requirement_key,
       requirement_type: requirement.requirement_type,
@@ -284,6 +359,8 @@ export function buildManualComparison(input: ManualComparisonInput): Record<stri
         ? "No direct evidence was found in your profile. It stays unmatched in your documents; absence is not proof of inability."
         : null,
       comparison_method: method,
+      ...(check.attention.length > 0 ? { attention: check.attention } : {}),
+      ...(check.suggestedStatus ? { suggested_status: check.suggestedStatus } : {}),
     };
   });
 
