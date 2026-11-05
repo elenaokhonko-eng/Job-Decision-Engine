@@ -136,7 +136,15 @@ export interface PipelineStageWorkerSummary {
   deadLettered: number;
   exitReason: PipelineWorkerExitReason;
   durationMs: number;
-  byType: Record<string, { claimed: number; completed: number; blocked: number; failed: number; deadLettered: number }>;
+  byType: Record<string, {
+    claimed: number;
+    completed: number;
+    blocked: number;
+    failed: number;
+    deadLettered: number;
+    executionDurationMs: number;
+    secondsPerClaimedTask: number | null;
+  }>;
   errors: Array<{ taskType: string; taskKey: string; error: string }>;
 }
 
@@ -158,8 +166,6 @@ export interface PipelineStageWorkerOptions {
   seedTimeBudgetMs?: number;
   /** Tasks claimed per stage on each round-robin pass. */
   stageQuantum?: number;
-  /** First stage index for this run; bounded by the stage count. */
-  stageStartOffset?: number;
   /** Defaults to true; set false only when reconciliation is exercised separately. */
   reconcileStalePending?: boolean;
   maxStalePendingReconciliation?: number;
@@ -221,7 +227,15 @@ function incrementWorker(
   taskType: string,
   field: "claimed" | "completed" | "blocked" | "failed" | "deadLettered"
 ): void {
-  summary.byType[taskType] ??= { claimed: 0, completed: 0, blocked: 0, failed: 0, deadLettered: 0 };
+  summary.byType[taskType] ??= {
+    claimed: 0,
+    completed: 0,
+    blocked: 0,
+    failed: 0,
+    deadLettered: 0,
+    executionDurationMs: 0,
+    secondsPerClaimedTask: null,
+  };
   summary.byType[taskType][field] += 1;
 }
 
@@ -2840,8 +2854,6 @@ export async function runPipelineStageTaskWorker(
   const claimedBy = options.claimedBy ?? `stage-worker:${process.pid}`;
   const budgetRunId = options.budgetRunId?.trim() || crypto.randomUUID();
   const claimedByType: Partial<Record<PipelineStageTaskType, number>> = {};
-  const stageStartOffset = Math.max(0, Math.floor(options.stageStartOffset ?? 0));
-  let stageRound = 0;
   const startedAt = Date.now();
   const deadlineAt = startedAt + wallClockMs;
   const preparationReserveMs = Math.min(wallClockMs, Math.max(minTimeToStartTaskMs, 1_000));
@@ -2932,11 +2944,7 @@ export async function runPipelineStageTaskWorker(
         options.maxTasksByType ?? {},
         maxTasks,
         maxTasks - summary.claimed,
-        stageRound === 0 || taskTypes.length === 0
-          ? stageStartOffset
-          : (stageStartOffset + stageRound) % taskTypes.length,
       );
-      stageRound += 1;
       for (const { taskType, claimLimit: stagePassLimit } of roundPlan) {
         const stageLimit = Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks));
         let claimedThisPass = 0;
@@ -2975,6 +2983,7 @@ export async function runPipelineStageTaskWorker(
             claimedByType[taskType] = (claimedByType[taskType] ?? 0) + 1;
             incrementWorker(summary, task.taskType, "claimed");
             const taskMetrics: PipelineTaskRunMetrics = { successorTasksCreated: 0, rerouted: false };
+            const taskStartedAt = Date.now();
             try {
               // Keep the cancellation check inside the lease-release catch:
               // aborting immediately after claim must never strand a RUNNING
@@ -3056,6 +3065,7 @@ export async function runPipelineStageTaskWorker(
               summary.errors.push({ taskType: task.taskType, taskKey: task.taskKey, error: message });
             } finally {
               summary.successorTasksCreated += taskMetrics.successorTasksCreated;
+              summary.byType[task.taskType].executionDurationMs += Date.now() - taskStartedAt;
             }
           }
         }
@@ -3069,6 +3079,11 @@ export async function runPipelineStageTaskWorker(
     }
 
     const durationMs = Date.now() - startedAt;
+    for (const stageSummary of Object.values(summary.byType)) {
+      stageSummary.secondsPerClaimedTask = stageSummary.claimed > 0
+        ? Math.round((stageSummary.executionDurationMs / stageSummary.claimed) / 10) / 100
+        : null;
+    }
     const stageLimitsReached = taskTypes.every((taskType) =>
       (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
     );

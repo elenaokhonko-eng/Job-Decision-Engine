@@ -243,10 +243,11 @@ describe("stageTaskWorker", () => {
 
   it("allocates bounded round-robin quanta so an earlier backlog cannot drain ahead of later stages", () => {
     const types = ["NORMALIZE_OBSERVATION", "PUBLISH_EMBEDDING", "MATCH_PROFILE_EVIDENCE"] as const;
+    const downstreamFirst = ["MATCH_PROFILE_EVIDENCE", "PUBLISH_EMBEDDING", "NORMALIZE_OBSERVATION"];
     const firstRound = planPipelineStageRound(types, 1, {}, {}, 100, 100);
-    expect(firstRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
+    expect(firstRound).toEqual(downstreamFirst.map((taskType) => ({ taskType, claimLimit: 1 })));
     const scarceBudgetRound = planPipelineStageRound(types, 1, {}, {}, 100, 1);
-    expect(scarceBudgetRound.map((entry) => entry.taskType)).toEqual([...types]);
+    expect(scarceBudgetRound.map((entry) => entry.taskType)).toEqual(downstreamFirst);
 
     const secondRound = planPipelineStageRound(
       types,
@@ -256,7 +257,7 @@ describe("stageTaskWorker", () => {
       100,
       97,
     );
-    expect(secondRound).toEqual(types.map((taskType) => ({ taskType, claimLimit: 1 })));
+    expect(secondRound).toEqual(downstreamFirst.map((taskType) => ({ taskType, claimLimit: 1 })));
   });
 
   it("preserves parameters that follow a non-terminal limit placeholder when scoping a seed query", () => {
@@ -319,16 +320,23 @@ describe("stageTaskWorker", () => {
     expect(scoped.sql).not.toContain("LIMIT $2\n       ) AS scoped_seed");
   });
 
-  it("rotates the first stage across bounded worker runs and rounds", () => {
-    const types = ["NORMALIZE_OBSERVATION", "PUBLISH_EMBEDDING", "MATCH_PROFILE_EVIDENCE"] as const;
-    const firstTaskByRun = types.map((_, startOffset) => {
-      const round = planPipelineStageRound(types, 1, {}, {}, 100, 1, startOffset);
-      return round[0]?.taskType;
-    });
-    const nextRound = planPipelineStageRound(types, 1, {}, {}, 100, 1, 1);
+  it("keeps the oldest downstream stages first for every bounded run", () => {
+    const intakeFirst = [
+      "FETCH_JOB_CONTENT",
+      "NORMALIZE_OBSERVATION",
+      "EXTRACT_DETERMINISTIC_REQUIREMENTS",
+      "APPLY_HARD_GATES",
+      "ROUTE_LANE",
+      "MATCH_PROFILE_EVIDENCE",
+      "DECIDE_RECOMMENDATION",
+      "ENQUEUE_EXPLANATION",
+    ] as const;
+    const reversedInput = [...intakeFirst].reverse();
+    const firstRound = planPipelineStageRound(intakeFirst, 1, {}, {}, 100, 1);
+    const nextRound = planPipelineStageRound(reversedInput, 1, {}, {}, 100, 1);
 
-    expect(firstTaskByRun).toEqual([...types]);
-    expect(nextRound[0]?.taskType).toBe(types[1]);
+    expect(firstRound[0]?.taskType).toBe("ENQUEUE_EXPLANATION");
+    expect(nextRound[0]?.taskType).toBe("ENQUEUE_EXPLANATION");
   });
 
   it("versions profile matching task keys by active profile version", () => {

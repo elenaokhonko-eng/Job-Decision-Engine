@@ -12,6 +12,9 @@ export interface PipelineWorkerExitPolicyInput {
   activePendingCount: number;
   oldestActivePendingAgeSecondsBefore: number;
   oldestActivePendingAgeSeconds: number;
+  oldestActivePendingTaskType?: string | null;
+  oldestPendingTaskSameRuns?: number;
+  pendingAgeTrendRuns?: number;
   failOnRetryWait: boolean;
   maxRetryWaitCount: number;
   maxRetryWaitAgeSeconds: number;
@@ -53,9 +56,21 @@ export function enforcePipelineWorkerExitPolicy(input: PipelineWorkerExitPolicyI
     && input.failedThisRun === 0
     && pendingBacklogProgress
     && ["MAX_TASKS_REACHED", "WALL_CLOCK_BUDGET_REACHED", "STAGE_LIMIT_REACHED"].includes(input.exitReason || "");
-  if (!boundedProgressExit && input.oldestActivePendingAgeSeconds > input.maxPendingAgeSeconds) {
+  const oldestPendingTaskStuckAcrossRuns =
+    input.oldestActivePendingAgeSeconds > input.maxPendingAgeSeconds
+    && (input.oldestPendingTaskSameRuns ?? 0) >= Math.max(1, input.pendingAgeTrendRuns ?? 3);
+  if (
+    input.oldestActivePendingAgeSeconds > input.maxPendingAgeSeconds
+    && (!boundedProgressExit || oldestPendingTaskStuckAcrossRuns)
+  ) {
+    const oldestStage = input.oldestActivePendingTaskType
+      ? ` Oldest pending stage: ${input.oldestActivePendingTaskType}.`
+      : "";
+    const repeatedOldest = oldestPendingTaskStuckAcrossRuns
+      ? ` The same oldest task remained pending for ${input.oldestPendingTaskSameRuns} consecutive runs.`
+      : "";
     throw new Error(
-      `Pending queue age exceeded SLO: ${input.oldestActivePendingAgeSeconds}s > ${input.maxPendingAgeSeconds}s.`,
+      `Pending queue age exceeded SLO: ${input.oldestActivePendingAgeSeconds}s > ${input.maxPendingAgeSeconds}s.${oldestStage}${repeatedOldest}`,
     );
   }
   if (input.claimedThisRun === 0 && input.activePendingCount >= input.noProgressPendingThreshold) {
