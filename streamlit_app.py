@@ -1842,8 +1842,8 @@ if application_records is not None:
 st.sidebar.markdown("---")
 st.sidebar.subheader("📅 Automated Schedules")
 st.sidebar.info("""
-* **Daily Ingestion & Evaluation**: Runs daily at **10:00 AM SGT** (02:00 UTC) via GitHub Actions.
-* **Weekly LinkedIn Auto-Sync**: Runs every **Sunday at 10:00 AM SGT** (02:00 UTC) via GitHub Actions.
+* **Daily ingestion**: Runs at **10:00 AM SGT** (02:00 UTC) via GitHub Actions.
+* **Hourly processing**: Backlog and queue-worker workflows run hourly.
 """)
 
 st.sidebar.subheader("⚡ Pipeline Action Controls")

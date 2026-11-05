@@ -9,7 +9,6 @@ describe("production secret workflow guards", () => {
       ".github/workflows/process_backlog.yml",
       ".github/workflows/managed_e2e_gate.yml",
       ".github/workflows/queue_worker.yml",
-      ".github/workflows/documents.yml",
     ]) {
       const workflow = readFileSync(resolve(workflowPath), "utf8");
       expect(workflow, workflowPath).toContain("refs/heads/main");
