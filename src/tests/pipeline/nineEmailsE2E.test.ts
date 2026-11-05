@@ -91,6 +91,7 @@ interface PipelineFixtureRow {
   readonly profile_match_status: string | null;
   readonly routing_disposition: string | null;
   readonly readiness_check_summary: unknown;
+  readonly mandatory_mismatch_summary: unknown;
   readonly version_count: number;
 }
 
@@ -700,6 +701,30 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
                 ) ORDER BY check_item->>'key')
                 FROM jsonb_array_elements(latest_decision.readiness_json->'checks') AS check_rows(check_item)
               ) AS readiness_check_summary,
+              (
+                SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                  'requirement_type', jr.requirement_type,
+                  'match_type', current_match.match_type,
+                  'qualification_code', current_match.evidence->>'match_qualification_code'
+                ) ORDER BY jr.requirement_type), '[]'::jsonb)
+                FROM job_requirements jr
+                LEFT JOIN LATERAL (
+                  SELECT rem.match_type, rem.evidence
+                    FROM requirement_evidence_matches rem
+                   WHERE rem.workspace_id = jr.workspace_id
+                     AND rem.match_run_id = c.latest_match_run_id
+                     AND rem.requirement_id = jr.id
+                   ORDER BY rem.created_at DESC, rem.id DESC
+                   LIMIT 1
+                ) current_match ON TRUE
+               WHERE jr.workspace_id = c.workspace_id
+                 AND jr.canonical_job_id = c.id
+                 AND jr.job_version_id = jv.id
+                 AND jr.requirement_set_id = jv.active_requirement_set_id
+                 AND jr.importance = 'MUST'
+                 AND jr.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')
+                 AND current_match.match_type = 'NO_MATCH'
+              ) AS mandatory_mismatch_summary,
               c.deterministic_match_score,
               c.deterministic_match_coverage,
               c.recommendation_evidence_completeness,
@@ -750,6 +775,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
           profileMatch: row.profile_match_status,
           routing: row.routing_disposition,
           readiness: row.readiness_check_summary,
+          mandatoryMismatches: row.mandatory_mismatch_summary,
         })}`,
       ).toBe(fixture.expected_recommendation_outcome);
       expect(row.primary_lane ?? "UNCLASSIFIED").toBe(fixture.expected_lane);
