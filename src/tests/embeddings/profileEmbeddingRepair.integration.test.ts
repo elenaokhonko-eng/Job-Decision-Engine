@@ -51,8 +51,7 @@ async function seedJobAndRequirements(): Promise<{ canonicalJobId: string; jobVe
   const database = getClient();
   const workspaceId = getContext().workspaceId;
   const user = await database.query<{ id: string }>(
-    `SELECT id FROM workspace_users WHERE workspace_id = $1 AND user_key = 'local_user' LIMIT 1`,
-    [workspaceId],
+    `SELECT id FROM workspace_users WHERE user_key = 'local_user' LIMIT 1`,
   );
   const userId = user.rows[0]?.id;
   if (!userId) throw new Error("Expected the migration bootstrap local user fixture.");
