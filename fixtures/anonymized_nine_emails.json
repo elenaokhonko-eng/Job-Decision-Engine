@@ -93,18 +93,18 @@
   },
   {
     "id": "fixture-email-007",
-    "subject": "Job Alert: Solutions Engineer at Stealth AI Labs",
+    "subject": "Job Alert: Director, AI Solution Architect at Stealth AI Labs",
     "received_at": "2026-08-28T08:30:00.000Z",
-    "raw_html": "<div><h1>Stealth AI Labs</h1><h2>Solutions Engineer</h2><p>Location: Location flexible / TBD</p><p>Workplace arrangement and office expectations to be evaluated during partner discussions.</p><a href='https://stealthai.example.com/jobs/se-707'>Apply Here</a></div>",
-    "location_raw": "Location flexible / TBD",
+    "raw_html": "<div><h1>Stealth AI Labs</h1><h2>Director, AI Solution Architect</h2><p>Location: Singapore</p><p>Own production AI and machine-learning platform architecture. Design Python services, retrieval-augmented generation systems, data pipelines, APIs, data models, and model deployment workflows.</p><p>The posting does not state its workplace arrangement.</p><a href='https://stealthai.example.com/jobs/se-707'>Apply Here</a></div>",
+    "location_raw": "Singapore",
     "workplace_type_raw": "UNKNOWN",
     "employment_type_raw": "PERMANENT",
-    "expected_lane": "UNCLASSIFIED",
+    "expected_lane": "CORE_AI_DATA",
     "expected_gate": "NEEDS_VERIFICATION",
     "expected_rejection_codes": ["GATE_UNKNOWN_WORK_MODE"],
     "expected_action": "APPLY_AFTER_VERIFICATION",
     "expected_recommendation_outcome": "REVIEW",
-    "expected_status": "NEEDS_VERIFICATION",
+    "expected_status": "MATCHED",
     "expected_version": 1
   },
   {

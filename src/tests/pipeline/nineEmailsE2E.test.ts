@@ -88,6 +88,10 @@ interface PipelineFixtureRow {
   readonly primary_lane: FixtureLane | null;
   readonly recommendation_outcome: RecommendationOutcome;
   readonly recommendation_eligibility: "ELIGIBLE" | "VERIFY" | "INELIGIBLE" | null;
+  readonly profile_match_status: string | null;
+  readonly routing_disposition: string | null;
+  readonly readiness_check_summary: unknown;
+  readonly mandatory_mismatch_summary: unknown;
   readonly version_count: number;
 }
 
@@ -320,7 +324,9 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         t.includes("llm") ||
         t.includes("data pipeline") ||
         t.includes("cloudscale") ||
-        t.includes('"domain_key":"ai_systems"')
+        t.includes("target technical domain requirement") ||
+        t.includes('"domain_key":"ai_systems"') ||
+        t.includes('"domain_key":"ai"')
       ) {
         return [1, 0, 0, 0];
       }
@@ -546,7 +552,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     expect(embeddings.primary.succeeded).toBeGreaterThan(0);
   });
 
-  it("Stage 3 — lane router assigns primary_lane + secondary_lanes to all PREQUALIFIED jobs", async () => {
+  it("Stage 3 — lane router routes gate-passed and workability-verification jobs", async () => {
     const { runLaneRouter } = await import("../../pipeline/laneRouter.js");
     await runLaneRouter(getClient(), { context: getContext() });
 
@@ -557,7 +563,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         WHERE primary_lane IS NOT NULL
           AND processing_status IN ('LANE_ROUTED', 'PREQUALIFIED')`
     );
-    expect(routed.rows).toHaveLength(5);
+    expect(routed.rows).toHaveLength(6);
     for (const row of routed.rows) {
       expect(row.primary_lane).not.toBe("UNCLASSIFIED");
       expect(row.routing_disposition).toBe("ROUTED");
@@ -578,7 +584,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       "canonical_jobs",
       "processing_status = 'HARD_REJECTED' AND primary_lane IS NOT NULL"
     );
-    expect(Number(laneDecisions.rows[0].count)).toBe(5);
+    expect(Number(laneDecisions.rows[0].count)).toBe(6);
     expect(rejectedWithLane).toBe(0);
   });
 
@@ -648,7 +654,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
       [getContext().workspaceId, budgetRunId]
     );
     expect(matching.errors).toBe(0);
-    expect(matching.matchedJobs).toBe(5);
+    expect(matching.matchedJobs).toBe(6);
     expect(decisions.errors).toBe(0);
     expect(queueSummary.enqueued).toBe(4);
     expect(queueSummary.updated).toBe(4);
@@ -687,6 +693,40 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
               c.primary_lane,
               c.recommendation_outcome,
               c.recommendation_eligibility,
+              c.profile_match_status,
+              c.routing_disposition,
+              (
+                SELECT jsonb_agg(jsonb_build_object(
+                  'key', check_item->>'key',
+                  'status', check_item->>'status',
+                  'reason_code', check_item->>'reason_code'
+                ) ORDER BY check_item->>'key')
+                FROM jsonb_array_elements(latest_decision.readiness_json->'checks') AS check_rows(check_item)
+              ) AS readiness_check_summary,
+              (
+                SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                  'requirement_type', jr.requirement_type,
+                  'match_type', current_match.match_type,
+                  'qualification_code', current_match.evidence->>'match_qualification_code'
+                ) ORDER BY jr.requirement_type), '[]'::jsonb)
+                FROM job_requirements jr
+                LEFT JOIN LATERAL (
+                  SELECT rem.match_type, rem.evidence
+                    FROM requirement_evidence_matches rem
+                   WHERE rem.workspace_id = jr.workspace_id
+                     AND rem.match_run_id = c.latest_match_run_id
+                     AND rem.requirement_id = jr.id
+                   ORDER BY rem.created_at DESC, rem.id DESC
+                   LIMIT 1
+                ) current_match ON TRUE
+               WHERE jr.workspace_id = c.workspace_id
+                 AND jr.canonical_job_id = c.id
+                 AND jr.job_version_id = jv.id
+                 AND jr.requirement_set_id = jv.active_requirement_set_id
+                 AND jr.importance = 'MUST'
+                 AND jr.requirement_type NOT IN ('OFFICE_DAYS', 'WORK_MODE', 'EMPLOYMENT_TYPE', 'TRAVEL', 'WORK_AUTH', 'ON_CALL', 'SHIFT_WORK')
+                 AND current_match.match_type = 'NO_MATCH'
+              ) AS mandatory_mismatch_summary,
               c.deterministic_match_score,
               c.deterministic_match_coverage,
               c.recommendation_evidence_completeness,
@@ -694,6 +734,15 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
          FROM raw_job_observations rjo
          JOIN job_versions jv ON jv.id = rjo.job_version_id
          JOIN canonical_jobs c ON c.id = jv.canonical_job_id
+         LEFT JOIN LATERAL (
+           SELECT dd.readiness_json
+             FROM deterministic_decisions dd
+            WHERE dd.workspace_id = c.workspace_id
+              AND dd.canonical_job_id = c.id
+              AND dd.job_version_id = jv.id
+            ORDER BY dd.created_at DESC, dd.id DESC
+            LIMIT 1
+         ) latest_decision ON TRUE
         WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'
         ORDER BY rjo.source_external_id`
@@ -718,7 +767,19 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
       expect(actionToOutcome[fixture.expected_action]).toBe(fixture.expected_recommendation_outcome);
       expect(row.gate_decision).toBe(fixture.expected_gate);
-      expect(row.recommendation_outcome, fixture.id).toBe(fixture.expected_recommendation_outcome);
+      expect(
+        row.recommendation_outcome,
+        `${fixture.id}: ${JSON.stringify({
+          gate: row.gate_decision,
+          state: row.processing_state,
+          lane: row.primary_lane,
+          eligibility: row.recommendation_eligibility,
+          profileMatch: row.profile_match_status,
+          routing: row.routing_disposition,
+          readiness: row.readiness_check_summary,
+          mandatoryMismatches: row.mandatory_mismatch_summary,
+        })}`,
+      ).toBe(fixture.expected_recommendation_outcome);
       expect(row.primary_lane ?? "UNCLASSIFIED").toBe(fixture.expected_lane);
       expect(row.processing_state).toBe(fixture.expected_status);
       expect(row.processing_status).toBe(fixture.expected_status);
@@ -740,6 +801,25 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
         expect(row.canonical_job_id).toBe(original.canonical_job_id);
       }
     }
+
+    const verificationFixture = rowsByFixture.get("fixture-email-007");
+    expect(verificationFixture, "Missing unknown-work-mode fixture").toBeDefined();
+    if (!verificationFixture) throw new Error("Missing unknown-work-mode fixture");
+    expect(verificationFixture.gate_decision).toBe("NEEDS_VERIFICATION");
+    expect(verificationFixture.processing_state).toBe("MATCHED");
+    expect(verificationFixture.recommendation_eligibility).toBe("VERIFY");
+    expect(verificationFixture.recommendation_outcome).toBe("REVIEW");
+    const verificationReadiness = await q(
+      `SELECT readiness_status
+         FROM v_application_readiness_current
+        WHERE workspace_id = $1
+          AND canonical_job_id = $2::uuid
+          AND job_version_id = $3::uuid`,
+      [getContext().workspaceId, verificationFixture.canonical_job_id, verificationFixture.job_version_id]
+    );
+    expect(verificationReadiness.rows).toHaveLength(1);
+    expect(verificationReadiness.rows[0].readiness_status).toBe("NEEDS_VERIFICATION");
+    expect(verificationReadiness.rows[0].readiness_status).not.toBe("READY");
   });
 
   it("PostgreSQL positive path — normal scoped pipeline stages can produce READY from actual matcher rows", async () => {
