@@ -8,6 +8,7 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { runExplanationQueueEnqueuer } from "../../pipeline/explanationQueueEnqueuer.js";
 import { loadGlobalLanesConfig, loadWorkspaceLanesConfig } from "../../pipeline/laneConfigLoader.js";
 import { upsertLaneRevision } from "../../lanes/registry.js";
+import { withMaximumAiInterpretationsPerRun } from "../../lanes/evaluationBudgetConfig.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 
 dotenv.config();
@@ -375,6 +376,30 @@ describe.skipIf(skipReal)("Explanation queue budget integration", () => {
         version: seededConfig.config.version,
       },
     });
+
+    const laneToUpdate = seededConfig.activeLaneRevisions?.[0];
+    if (!laneToUpdate) throw new Error("The seeded workspace has no active lane to update.");
+    await upsertLaneRevision({
+      laneKey: laneToUpdate.laneKey,
+      content: withMaximumAiInterpretationsPerRun(laneToUpdate.content, 10),
+    }, database, {
+      context: seedContext,
+      note: "integration test per-lane evaluation budget registry update",
+    });
+    const updatedBudgetRunId = crypto.randomUUID();
+    await runExplanationQueueEnqueuer(database, {
+      context: seedContext,
+      budgetRunId: updatedBudgetRunId,
+    });
+    const updatedSnapshot = await database.query<{
+      lane_config_snapshot: { budgets: Record<string, { budget_limit: number }> };
+    }>(
+      `SELECT lane_config_snapshot
+       FROM ai_evaluation_budget_runs
+       WHERE id = $1::uuid AND workspace_id = $2::uuid`,
+      [updatedBudgetRunId, seedContext.workspaceId]
+    );
+    expect(updatedSnapshot.rows[0]?.lane_config_snapshot.budgets[laneToUpdate.laneKey]?.budget_limit).toBe(10);
   }, 60_000);
 
   it("rejects a stale route snapshot and rolls the budget transaction back", async () => {

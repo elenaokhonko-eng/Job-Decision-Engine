@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createStagingDatabaseIdentityDiagnostic,
+  expectationsForSuppliedStagingBranch,
   isApprovedStagingDatabaseIdentity,
   STAGE1_3_STAGING_IDENTITY_EXPECTATIONS,
 } from "../../db/stagingDatabaseIdentity.js";
@@ -57,6 +58,18 @@ describe("staging database identity guard", () => {
     }, expectations)).toBe(false);
   });
 
+  it("pins a user-supplied fresh branch ID while refusing production and malformed IDs", () => {
+    const freshBranch = expectationsForSuppliedStagingBranch("br-fresh-smoke-2026");
+    expect(freshBranch.expectedBranchId).toBe("br-fresh-smoke-2026");
+    expect(isApprovedStagingDatabaseIdentity({
+      databaseName: expectations.expectedDatabaseName,
+      branchId: "br-fresh-smoke-2026",
+      hostname: "ep-fresh-smoke.c-3.ap-southeast-1.aws.neon.tech",
+    }, freshBranch)).toBe(true);
+    expect(() => expectationsForSuppliedStagingBranch(expectations.knownProductionBranchId)).toThrow(/production/);
+    expect(() => expectationsForSuppliedStagingBranch("https://example.test")).toThrow(/Neon branch ID/);
+  });
+
   it("accepts a null branch ID only for an exact approved staging hostname", () => {
     expect(isApprovedStagingDatabaseIdentity({
       databaseName: expectations.expectedDatabaseName,
@@ -91,5 +104,7 @@ describe("staging database identity guard", () => {
     expect(serialized).not.toContain("query-marker");
     expect(script).toContain("console.log(identityDiagnostic)");
     expect(script).not.toContain("console.log(databaseUrl)");
+    expect(script).toContain("process.env.STAGE1_3_SMOKE_EXPECTED_BRANCH_ID");
+    expect(script).not.toContain("profile-v6");
   });
 });
