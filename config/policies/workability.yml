@@ -8,9 +8,8 @@ global_workability_gates:
     max_office_days_per_week: 3
     max_office_days_hard_fail: 4
     hybrid_without_office_days_allowed: true
-    # Funnel V3 owner policy: do not infer a workplace model from a location
-    # label and do not hold an unestablished arrangement for verification.
-    unknown_work_mode_policy: HARD_REJECT
+    # An unestablished workplace model is unresolved evidence, not a career conflict.
+    unknown_work_mode_policy: NEEDS_VERIFICATION
 
   territory:
     # Default profile policy. User preference modes can override this list.
@@ -19,6 +18,28 @@ global_workability_gates:
     remote_without_territory_allowed: true
     reject_explicit_foreign_territory: true
     unknown_work_authorization_needs_verification: false
+
+  employment:
+    # Direct fixed-term hires remain eligible; third-party agency placements do not.
+    contract_allowed: true
+    reject_agency_placement_contracts: true
+    employment_agency_company_names:
+      - adecco
+      - allegis group
+      - charterhouse
+      - hays
+      - hudson
+      - kelly services
+      - manpower
+      - manpowergroup
+      - michael page
+      - morgan mckinley
+      - pagegroup
+      - persolkelly
+      - randstad
+      - recruit express
+      - robert walters
+      - talentvis
 
   operations:
     regular_on_call_allowed: false
@@ -33,7 +54,7 @@ global_workability_gates:
 
   work_composition:
     minimum_building_research_pct: 60
-    maximum_interaction_pct: 40
+    maximum_interaction_pct: 60
     preferred_building_research_pct: 85
     preferred_interaction_pct: 15
     external_client_primary_allowed: false

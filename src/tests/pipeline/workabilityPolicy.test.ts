@@ -25,6 +25,53 @@ describe("workspace workability policy", () => {
     expect(inferTerritoryOperator("Must be based in Singapore and collaborate with US customer teams.")).toBe("UNKNOWN");
   });
 
+  it("keeps unknown work mode in verification despite legacy policy overrides", () => {
+    expect(loadWorkabilityPolicy().unknownWorkModeDisposition).toBe("NEEDS_VERIFICATION");
+    expect(mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+      workability: { unknown_work_mode_policy: "HARD_REJECT" },
+    }).unknownWorkModeDisposition).toBe("NEEDS_VERIFICATION");
+  });
+
+  it("uses the direct fixed-term and client-interaction policy defaults", () => {
+    const policy = loadWorkabilityPolicy();
+    expect(policy.contractAllowed).toBe(true);
+    expect(policy.rejectAgencyContractPlacements).toBe(true);
+    expect(policy.employmentAgencyCompanyNames).toContain("randstad");
+    expect(policy.maximumInteractionPct).toBe(60);
+    expect(policy.externalClientPrimaryAllowed).toBe(false);
+  });
+
+  it("keeps employment-agency contract placements rejected when preferences attempt to override the global rule", () => {
+    const merged = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+      workability: {
+        reject_agency_placement_contracts: false,
+        employment_agency_company_names: [],
+      },
+    });
+
+    expect(merged.rejectAgencyContractPlacements).toBe(true);
+    expect(merged.employmentAgencyCompanyNames).toContain("randstad");
+  });
+
+  it("keeps direct fixed-term employment eligible when preferences omit contract roles", () => {
+    const merged = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+      hard_constraints: { employment_types: ["FULL_TIME"] },
+    });
+
+    expect(merged.contractAllowed).toBe(true);
+  });
+
+  it("does not let a legacy contract preference disable direct fixed-term employment", () => {
+    const merged = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+      hard_constraints: {
+        employment_types: ["FULL_TIME"],
+        contract_allowed: false,
+      },
+    });
+
+    expect(merged.contractAllowed).toBe(true);
+  });
+
   it("distinguishes worker territory restrictions from employer/company locations", () => {
     expect(hasExplicitTerritoryRestriction("Must be authorized to work in the United States", "UNITED_STATES")).toBe(true);
     expect(hasExplicitTerritoryRestriction("Candidates must reside in Canada", "CANADA")).toBe(true);
@@ -61,6 +108,8 @@ describe("workspace workability policy", () => {
     expect(merged.minimalTravelAllowed).toBe(false);
     expect(loadWorkabilityPolicy().minimalTravelAllowed).toBe(true);
     expect(merged.contractAllowed).toBe(true);
+    expect(merged.rejectAgencyContractPlacements).toBe(true);
+    expect(merged.employmentAgencyCompanyNames).toContain("randstad");
     expect(merged.regularOnCallAllowed).toBe(true);
     expect(merged.shiftWorkAllowed).toBe(true);
     expect(merged.authorizedRegions).toEqual(["SINGAPORE"]);
@@ -85,7 +134,7 @@ describe("workspace workability policy", () => {
     expect(merged.maxOfficeDaysPerWeek).toBe(0);
     expect(merged.maxTravelPct).toBe(0);
     expect(merged.onsiteOnlyAllowed).toBe(false);
-    expect(merged.contractAllowed).toBe(false);
+    expect(merged.contractAllowed).toBe(true);
     expect(merged.regularOnCallAllowed).toBe(false);
     expect(merged.authorizedRegions).toEqual(["AUSTRALIA"]);
     expect(merged.hybridWithoutOfficeDaysAllowed).toBe(false);
@@ -146,6 +195,8 @@ describe("workspace workability policy", () => {
 
     expect(result.source).toBe("FILE");
     expect(result.modeKey).toBeNull();
-    expect(result.policy.contractAllowed).toBe(false);
+    expect(result.policy.contractAllowed).toBe(true);
+    expect(result.policy.maximumInteractionPct).toBe(60);
+    expect(result.policy.externalClientPrimaryAllowed).toBe(false);
   });
 });
