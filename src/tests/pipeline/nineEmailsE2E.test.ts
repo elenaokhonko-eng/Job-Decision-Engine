@@ -88,6 +88,9 @@ interface PipelineFixtureRow {
   readonly primary_lane: FixtureLane | null;
   readonly recommendation_outcome: RecommendationOutcome;
   readonly recommendation_eligibility: "ELIGIBLE" | "VERIFY" | "INELIGIBLE" | null;
+  readonly profile_match_status: string | null;
+  readonly routing_disposition: string | null;
+  readonly readiness_check_summary: unknown;
   readonly version_count: number;
 }
 
@@ -687,6 +690,16 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
               c.primary_lane,
               c.recommendation_outcome,
               c.recommendation_eligibility,
+              c.profile_match_status,
+              c.routing_disposition,
+              (
+                SELECT jsonb_agg(jsonb_build_object(
+                  'key', check_item->>'key',
+                  'status', check_item->>'status',
+                  'reason_code', check_item->>'reason_code'
+                ) ORDER BY check_item->>'key')
+                FROM jsonb_array_elements(latest_decision.readiness_json->'checks') AS check_rows(check_item)
+              ) AS readiness_check_summary,
               c.deterministic_match_score,
               c.deterministic_match_coverage,
               c.recommendation_evidence_completeness,
@@ -694,6 +707,15 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
          FROM raw_job_observations rjo
          JOIN job_versions jv ON jv.id = rjo.job_version_id
          JOIN canonical_jobs c ON c.id = jv.canonical_job_id
+         LEFT JOIN LATERAL (
+           SELECT dd.readiness_json
+             FROM deterministic_decisions dd
+            WHERE dd.workspace_id = c.workspace_id
+              AND dd.canonical_job_id = c.id
+              AND dd.job_version_id = jv.id
+            ORDER BY dd.created_at DESC, dd.id DESC
+            LIMIT 1
+         ) latest_decision ON TRUE
         WHERE rjo.source_name = 'GMAIL_ALERT'
           AND rjo.source_external_id LIKE 'fixture-email-%'
         ORDER BY rjo.source_external_id`
@@ -718,7 +740,18 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
 
       expect(actionToOutcome[fixture.expected_action]).toBe(fixture.expected_recommendation_outcome);
       expect(row.gate_decision).toBe(fixture.expected_gate);
-      expect(row.recommendation_outcome, fixture.id).toBe(fixture.expected_recommendation_outcome);
+      expect(
+        row.recommendation_outcome,
+        `${fixture.id}: ${JSON.stringify({
+          gate: row.gate_decision,
+          state: row.processing_state,
+          lane: row.primary_lane,
+          eligibility: row.recommendation_eligibility,
+          profileMatch: row.profile_match_status,
+          routing: row.routing_disposition,
+          readiness: row.readiness_check_summary,
+        })}`,
+      ).toBe(fixture.expected_recommendation_outcome);
       expect(row.primary_lane ?? "UNCLASSIFIED").toBe(fixture.expected_lane);
       expect(row.processing_state).toBe(fixture.expected_status);
       expect(row.processing_status).toBe(fixture.expected_status);
