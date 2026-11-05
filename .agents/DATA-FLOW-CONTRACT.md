@@ -12,6 +12,7 @@ The `data-contract-checker` owns this contract. Feature agents propose changes; 
 | Job version -> gate decision | normalizer | `src/pipeline/hardGate.ts` | Structured workplace fields and description evidence agree; tri-state status is stored |
 | Gate decision -> lane decision | hard gate | `src/pipeline/laneRouter.ts` | Only eligible records route; primary/secondary lane, confidence, evidence and model version persist |
 | Lane decision -> deterministic matching | lane router | `src/pipeline/deterministicMatcher.ts` | Only `LANE_ROUTED` records match; match runs are version-pinned and recoverable failures never become rejections |
+| Stage task -> profile matching dependency | `src/tasks/stageTaskWorker.ts` | `pipeline_tasks` and `src/embeddings/profileEmbeddingRepair.ts` | If a profile-match task cannot be enqueued because there is not exactly one active profile, retain the parent stage task as `BLOCKED_DEPENDENCY` with `blocked_on=PROFILE_VERSION_ACTIVE` and `repair_action=IMPORT_OR_ACTIVATE_PROFILE_AND_REPAIR_EMBEDDINGS`; do not turn this operational prerequisite into a job decision or processing error |
 | Deterministic decision -> evaluation queue | `src/pipeline/recommendationDecider.ts` | `src/pipeline/explanationQueueEnqueuer.ts` | Eligible jobs are selected by the durable per-lane AI budget; overflow is recorded as `DEFERRED_BUDGET`, never rejected; one queue item per job version |
 | Queue item -> AI evaluation | evaluation worker | evaluation store | Lease, attempts, provider/model, fallback/degraded state, full validated result and matching job identity persist atomically |
 | Canonical data -> shortlist read model | database view/query | `streamlit_app.py` | One row per current job version; no legacy joins; every displayed field has a real source; UI sanitizes untrusted content + validates links; missing scores remain null/N/A (never coerced to 0) |
@@ -46,9 +47,12 @@ Every persisted contract includes `schema_version`. Every processing decision in
 | Workplace model remains unknown after available evidence is examined | `HARD_REJECTED` with `WORKPLACE_MODEL_UNKNOWN` evidence | Policy recalculation only | Yes |
 | Other material workability fact remains unknown | `NEEDS_VERIFICATION` plus questions | Enrichment/manual | No |
 | Lane embedding/provider failure | `ROUTING_DEFERRED` | Yes | No |
+| Profile-match successor cannot be enqueued because there is no unique active profile version | `pipeline_tasks.status=BLOCKED_DEPENDENCY`, `blocked_on=PROFILE_VERSION_ACTIVE`, `blocked_reason` records the missing/ambiguous prerequisite, and `repair_action=IMPORT_OR_ACTIVATE_PROFILE_AND_REPAIR_EMBEDDINGS`; the job remains at its existing processing state (normally `LANE_ROUTED`) | No timer retry; profile import/activation plus successful primary-space profile-fact embedding repair reactivates matching blocked tasks as `PENDING` | No |
 | AI evaluation capacity not drained | `QUEUED_FOR_AI` / queue remains `PENDING` | Next run | No |
 | Evaluation provider/schema failure | `RETRY_WAIT` | Backoff | No |
 | Evaluation retries exhausted | `NEEDS_MANUAL_REVIEW` | Manual | No |
+
+The profile prerequisite is checked when the worker creates `MATCH_PROFILE_EVIDENCE` task identity. A blocked task preserves its task/attempt history and is recoverable only after the repair path confirms exactly one active profile and verifies that every eligible current profile fact has a published embedding in the configured primary space. The repair path clears the dependency metadata and requeues only tasks with the matching `blocked_on` and `repair_action` values. It does not write a gate, lane, match, or recommendation outcome. These values use the existing `pipeline_tasks` dependency fields and `BLOCKED_DEPENDENCY` status; they do not change the task-intent payload contract or the database shape.
 
 ## Checker commands and artifacts
 
