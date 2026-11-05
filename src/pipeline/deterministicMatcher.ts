@@ -1,5 +1,6 @@
 import pg from "pg";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
@@ -1239,7 +1240,7 @@ export async function runDeterministicMatcher(
       } catch (error) {
         await client.query("ROLLBACK");
         errors += 1;
-        console.error(`Deterministic matching failed for canonical job ${job.id}:`, error);
+        console.error(`Deterministic matching failed for canonical job ${job.id}: ${publicErrorSummary(error, "pipeline")}`);
       }
     }
   } finally {
@@ -1284,7 +1285,7 @@ export async function rematchActionableJobs(
         rankingsMaterialized = true;
       }
     } catch (err) {
-      console.warn("Ranking materialization after rematch encountered non-fatal error:", err);
+      console.warn("Ranking materialization after rematch encountered non-fatal error:", publicErrorSummary(err, "pipeline"));
     }
 
     return { ...summary, rankingsMaterialized };

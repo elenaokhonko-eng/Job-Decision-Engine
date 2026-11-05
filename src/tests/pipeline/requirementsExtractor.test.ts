@@ -217,7 +217,7 @@ describe('runRequirementsExtraction', () => {
     expect(summary.processed).toBe(1);
     expect(summary.errors).toBe(0);
     expect(summary.quotedFailed).toBe(1);
-    expect(summary.details[0].warning).toContain('Quote not found');
+    expect(summary.details[0].warning).toBe('gemini request failed (response validation failed)');
     expect(summary.metrics.quotedAttempted).toBe(1);
     expect(summary.metrics.quotedValidationFailures).toBe(1);
     expect(summary.metrics.quotedSucceeded).toBe(0);

@@ -43,6 +43,7 @@ import {
 import type { Stage3PolicyPreferences } from "../policy/stage3Contracts.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -1092,7 +1093,7 @@ export async function runHardGates(
       } catch (err) {
         await client.query("ROLLBACK");
         errorCount++;
-        console.error(`❌ Failed to gate job ${job.id}:`, err);
+        console.error(`❌ Failed to gate job ${job.id}: ${publicErrorSummary(err, "pipeline")}`);
       }
     }
   } finally {

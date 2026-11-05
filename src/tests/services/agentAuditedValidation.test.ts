@@ -87,6 +87,7 @@ describe('generateContentAudited response validation fallback', () => {
     expect(result.model).toBe('gemini-3.6-flash');
     expect(result.fallbackUsed).toBe(true);
     expect(result.validatedPayload).toEqual({ ok: 'yes' });
-    expect(result.errors[0].error).toContain('validated payload missing ok=yes');
+    expect(result.errors[0].error).toContain('details redacted');
+    expect(result.errors[0].error).not.toContain('validated payload missing ok=yes');
   });
 });

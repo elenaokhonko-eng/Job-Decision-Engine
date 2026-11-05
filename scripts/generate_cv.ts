@@ -33,6 +33,7 @@ import {
 } from "../src/services/currentApplicationReadiness.js";
 import { getActiveDocumentTemplatePluginRevision } from "../src/documents/plugins.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
+import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -891,6 +892,6 @@ async function generateTailoredCV(): Promise<void> {
 }
 
 generateTailoredCV().catch((err: any) => {
-  console.error("Error generating tailored CV:", err?.message || err);
+  console.error("Error generating tailored CV:", publicErrorSummary(err, "evaluation"));
   process.exit(1);
 });

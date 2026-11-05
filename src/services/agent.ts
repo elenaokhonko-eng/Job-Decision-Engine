@@ -8,6 +8,7 @@ import { extractWithFallback } from "./llmFallback.js";
 import { EvaluationResultSchema, EvaluationResult, SCHEMA_VERSION } from "../contracts/index.js";
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { readJsonResponseBounded, readResponseTextBounded } from "../security/boundedResponse.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import {
   CULTURE_SCORE_DERIVATION_VERSION,
   scoreCultureEvidenceFromQuote,
@@ -445,8 +446,9 @@ export async function runAgentWithFallback<T>(
         degraded: false
       };
     } catch (err: any) {
-      console.warn(`[Gemini Error] Primary model failed: ${err.message}. Triggering fallback...`);
-      errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error: err.message });
+      const error = publicErrorSummary(err, "gemini");
+      console.warn(`[Gemini Error] Primary model failed: ${error}. Triggering fallback...`);
+      errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error });
     }
   } else if (order[0] === "openai" && openaiApiKey) {
     try {
@@ -470,8 +472,9 @@ export async function runAgentWithFallback<T>(
         degraded: false
       };
     } catch (err: any) {
-      console.warn(`[OpenAI Error] Primary model failed: ${err.message}. Triggering fallback...`);
-      errors.push({ provider: 'openai', model: PRIMARY_MODEL, error: err.message });
+      const error = publicErrorSummary(err, "openai");
+      console.warn(`[OpenAI Error] Primary model failed: ${error}. Triggering fallback...`);
+      errors.push({ provider: 'openai', model: PRIMARY_MODEL, error });
     }
   } else if (order[0] === "gemini") {
     errors.push({ provider: 'gemini', model: PRIMARY_MODEL, error: 'GEMINI_API_KEY not configured' });
@@ -502,8 +505,9 @@ export async function runAgentWithFallback<T>(
         degraded: true
       };
     } catch (err: any) {
-      console.error(`[OpenAI Error] Fallback model failed: ${err.message}`);
-      errors.push({ provider: 'openai', model: FALLBACK_MODEL, error: err.message });
+      const error = publicErrorSummary(err, "openai");
+      console.error(`[OpenAI Error] Fallback model failed: ${error}`);
+      errors.push({ provider: 'openai', model: FALLBACK_MODEL, error });
     }
   } else if (order[0] === "openai" && geminiApiKey) {
     try {
@@ -527,8 +531,9 @@ export async function runAgentWithFallback<T>(
         degraded: true
       };
     } catch (err: any) {
-      console.error(`[Gemini Error] Fallback model failed: ${err.message}`);
-      errors.push({ provider: 'gemini', model: FALLBACK_MODEL, error: err.message });
+      const error = publicErrorSummary(err, "gemini");
+      console.error(`[Gemini Error] Fallback model failed: ${error}`);
+      errors.push({ provider: 'gemini', model: FALLBACK_MODEL, error });
     }
   } else if (order[0] === "gemini") {
     errors.push({ provider: 'openai', model: FALLBACK_MODEL, error: 'OPENAI_API_KEY not configured' });
@@ -656,7 +661,7 @@ async function tryGemini(geminiKey: string, options: any): Promise<string> {
         httpStatus: finiteUsageNumber(gErr.status) ?? null,
         retryable: retryable && attempt < maxRetries,
         latencyMs: Date.now() - startedAt,
-        error: gErr.message || String(gErr),
+        error: publicErrorSummary(gErr, "gemini"),
       });
       
       if (isDailyQuota) {
@@ -765,7 +770,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
         httpStatus: finiteUsageNumber(err.status) ?? null,
         retryable: retryable && attempt < maxRetries,
         latencyMs: Date.now() - startedAt,
-        error: err.message || String(err),
+        error: publicErrorSummary(err, providerLabel),
       });
       if (attempt === maxRetries || !retryable) throw err;
       
@@ -773,7 +778,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
       const baseBackoff = Math.pow(3, attempt - 1) * 5000;
       const backoffMs = err.retryAfterSecs ? err.retryAfterSecs * 1000 : baseBackoff;
       
-      console.warn(`⏳ API request failed (${baseUrl}, Status: ${err.status || 'Timeout'}). Attempt ${attempt}/${maxRetries}. Retrying in ${backoffMs/1000}s...`);
+      console.warn(`⏳ ${publicErrorSummary(err, providerLabel)}. Attempt ${attempt}/${maxRetries}. Retrying in ${backoffMs/1000}s...`);
       await new Promise((resolve) => setTimeout(resolve, backoffMs));
     }
   }
@@ -886,7 +891,7 @@ export async function generateContent(options: {
         const text = await tryGemini(geminiKey as string, options);
         if (text) return text;
       } catch (err: any) {
-        console.warn(`⚠️ Gemini request failed (${err.message || err}).`);
+        console.warn(`⚠️ ${publicErrorSummary(err, "gemini")}.`);
       }
     }
 
@@ -896,7 +901,7 @@ export async function generateContent(options: {
         const text = await tryOpenAI(openaiKey as string, options);
         if (text) return text;
       } catch (err: any) {
-        console.warn(`⚠️ OpenAI request failed (${err.message || err}).`);
+        console.warn(`⚠️ ${publicErrorSummary(err, "openai")}.`);
       }
     }
   }
@@ -1192,8 +1197,8 @@ export async function generateContentAudited(options: {
       } catch (err: any) {
         if (round >= correctionRounds) throw err;
         const message = err?.message || String(err);
-        console.warn(`[model:${provider}] model=${model} response failed validation; asking it to correct once (${message.slice(0, 300)}).`);
-        attemptedErrors.push({ provider, model, error: message });
+        console.warn(`[model:${provider}] model=${model} response failed validation; asking it to correct once.`);
+        attemptedErrors.push({ provider, model, error: publicErrorSummary(err, provider) });
         contents = validationCorrectionContents(options.contents, message, text);
       }
     }
@@ -1231,8 +1236,8 @@ export async function generateContentAudited(options: {
           successModel = geminiModel;
           break;
         } catch (err: any) {
-          const message = err?.message || String(err);
-          console.warn(`âš ï¸ Gemini request failed (${message}).`);
+          const message = publicErrorSummary(err, "gemini");
+          console.warn(`Gemini model request failed: ${message}.`);
           attemptedErrors.push({ provider, model: geminiModel, error: message });
         }
       }
@@ -1257,8 +1262,8 @@ export async function generateContentAudited(options: {
         successModel = modelForProvider;
         break;
       } catch (err: any) {
-        const message = err?.message || String(err);
-        console.warn(`âš ï¸ OpenAI request failed (${message}).`);
+        const message = publicErrorSummary(err, "openai");
+        console.warn(`OpenAI model request failed: ${message}.`);
         attemptedErrors.push({ provider, model: modelForProvider, error: message });
       }
     }
@@ -1370,7 +1375,7 @@ function geminiEmbeddingDisableKey(model: string): string {
   return `${apiVersion}:${model}`;
 }
 
-function describeError(error: unknown): string {
+function rawErrorText(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
@@ -1384,8 +1389,12 @@ function describeError(error: unknown): string {
   }
 }
 
+function describeError(error: unknown): string {
+  return publicErrorSummary(error, "embedding");
+}
+
 function isGeminiEmbeddingModelNotFound(error: unknown): boolean {
-  const message = describeError(error);
+  const message = rawErrorText(error);
   try {
     const parsed = JSON.parse(message) as any;
     const code = parsed?.error?.code;
@@ -1666,7 +1675,7 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
             ok: false,
             degraded: role === "primary",
             latencyMs: Date.now() - startedAt,
-            error: err.message || String(err),
+            error: publicErrorSummary(err, provider),
           });
         }
       }
@@ -1714,7 +1723,7 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
             ok: false,
             degraded: role === "primary",
             latencyMs: Date.now() - startedAt,
-            error: err.message || String(err),
+            error: publicErrorSummary(err, provider),
           });
         }
       }
@@ -1776,7 +1785,7 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
       latencyMs: Date.now() - embeddingStartedAt,
     });
   } catch (err: any) {
-    errors.push(`embedding: ${err.message || err}`);
+    errors.push(publicErrorSummary(err, "embedding"));
     checks.push({
       route: "embedding",
       purpose: "EMBEDDING",
@@ -1788,7 +1797,7 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
       ok: false,
       degraded: false,
       latencyMs: Date.now() - embeddingStartedAt,
-      error: err.message || String(err),
+      error: publicErrorSummary(err, "embedding"),
     });
   }
 
@@ -2062,7 +2071,7 @@ You MUST return a JSON object matching this schema exactly.
         fallbackUsed = false;
         if (parsedResult) break;
       } catch (geminiErr: any) {
-        const msg = geminiErr.message || String(geminiErr);
+        const msg = publicErrorSummary(geminiErr, "gemini");
         console.warn(`⚠️ Gemini agent run failed: ${msg}.`);
         trace.push(`Step ${trace.length + 1}: Gemini agent run failed: ${msg}`);
         errors.push(`Gemini: ${msg}`);
@@ -2086,7 +2095,7 @@ You MUST return a JSON object matching this schema exactly.
         fallbackUsed = tried.has("gemini");
         if (parsedResult) break;
       } catch (err: any) {
-        const msg = err.message || String(err);
+        const msg = publicErrorSummary(err, "openai");
         console.warn(`⚠️ OpenAI agent run failed: ${msg}`);
         trace.push(`Step ${trace.length + 1}: OpenAI agent run failed: ${msg}`);
         errors.push(`OpenAI: ${msg}`);
@@ -2263,8 +2272,8 @@ function parseStrictSingleEvaluationPayload(
   let parsed: unknown;
   try {
     parsed = JSON.parse(cleanJsonResponseText(rawText));
-  } catch (parseErr: any) {
-    throw new Error(`Failed to parse evaluation response JSON: ${parseErr.message}. Raw text: ${rawText.slice(0, 200)}`);
+  } catch {
+    throw new Error("Evaluation provider returned invalid JSON; response content omitted.");
   }
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {

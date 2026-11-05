@@ -37,6 +37,7 @@ import {
   releasePipelineTaskForRetry,
   type ClaimedPipelineTask,
 } from "./pipelineTasks.js";
+import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -2748,7 +2749,7 @@ async function processClaimedTask(
         context: ctx,
         extendLeaseSeconds: Math.max(options.heartbeatSeconds * 3, 60),
       }).catch((error) => {
-        console.warn(`Pipeline task heartbeat failed for ${task.taskKey}:`, error);
+        console.warn(`Pipeline task heartbeat failed for ${task.taskKey}: ${publicErrorSummary(error, "pipeline")}`);
       });
     }, options.heartbeatSeconds * 1000);
     heartbeatTimer.unref?.();
