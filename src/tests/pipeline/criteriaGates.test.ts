@@ -147,6 +147,23 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       expect(result.status).toBe("HARD_REJECT");
       expect(result.rejection_codes).toContain("GATE_NOT_AI_DATA");
     });
+
+    it("does not let the Technical Product Manager title override Axis 2", () => {
+      const description = "Own product roadmaps, stakeholder alignment, and delivery planning for enterprise software.";
+      const result = applyGlobalGates({
+        id: "technical-product-manager-out-of-domain",
+        title: "Technical Product Manager",
+        company_name: "Enterprise Software Co",
+        raw_description: description,
+        location: "Singapore",
+        workplace_type: "REMOTE",
+        employment_type: "PERMANENT",
+      } as any);
+
+      expect(isTechnicalRole("Technical Product Manager", description).isTechnical).toBe(true);
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toContain("GATE_NOT_AI_DATA");
+    });
   });
 
   describe("Structured Workability & Contract Evaluation", () => {
