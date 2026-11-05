@@ -481,7 +481,25 @@ function hostIdentity(connectionString: string): { host: string; database: strin
   };
 }
 
+export function assertScopedPilotMode(env: NodeJS.ProcessEnv = process.env): void {
+  const pilotMode = env.PILOT_MODE || "";
+  const killSwitch = env.WORKFLOW_KILL_SWITCH || "";
+  if (!new Set(["", "true", "false"]).has(pilotMode)) {
+    throw new Error("PILOT_MODE must be exactly true, false, or unset.");
+  }
+  if (!new Set(["", "true", "false"]).has(killSwitch)) {
+    throw new Error("WORKFLOW_KILL_SWITCH must be exactly true, false, or unset.");
+  }
+  if (pilotMode !== "true") {
+    throw new Error("PILOT_MODE=true is required for scoped pilot execution.");
+  }
+  if (killSwitch === "true") {
+    throw new Error("WORKFLOW_KILL_SWITCH=true prevents all pipeline processing, including scoped pilots.");
+  }
+}
+
 export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilotReport> {
+  assertScopedPilotMode();
   const databaseUrl = process.env.DATABASE_URL?.trim();
   const directUrl = (process.env.DATABASE_URL_UNPOOLED || databaseUrl || "").trim();
   if (!databaseUrl) throw new Error("DATABASE_URL is required for the scoped pilot.");
@@ -492,10 +510,6 @@ export async function runScopedPilot(args: ScopedPilotArgs): Promise<ScopedPilot
       hostIdentity(databaseUrl).database !== hostIdentity(directUrl).database) {
     throw new Error("DATABASE_URL and DATABASE_URL_UNPOOLED must target the same database branch.");
   }
-  if ((process.env.WORKFLOW_KILL_SWITCH || "").trim().toLowerCase() !== "true") {
-    throw new Error("WORKFLOW_KILL_SWITCH=true is required while the scoped pilot runs.");
-  }
-
   const { runPipelineStageTaskWorker } = await import("../src/tasks/stageTaskWorker.js");
   const { refreshCanonicalJobSourceEvidence } = await import("../src/ingestion/sourceEvidenceRefresh.js");
   const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
