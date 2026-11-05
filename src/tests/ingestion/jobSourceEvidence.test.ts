@@ -50,6 +50,8 @@ describe("job source evidence builder", () => {
     expect(evidence.dates.source_updated_at.basis).toBe("SOURCE_UPDATED_AT");
     expect(evidence.dates.expires_at.value).toBe("2026-12-31T23:59:59.000Z");
     expect(evidence.availability).toMatchObject({ status: "OPEN", verification_method: "EMPLOYER_ATS_LISTING" });
+    expect(Date.parse(evidence.availability.expires_at!) - Date.parse(evidence.availability.verified_at!))
+      .toBe(24 * 60 * 60 * 1000);
     expect(evidence.workability.work_mode).toMatchObject({ status: "UNKNOWN", value: "HYBRID" });
     expect(evidence.compensation).toMatchObject({ status: "UNKNOWN", components: [] });
     expect(evidence.opportunity_category).toMatchObject({ status: "UNKNOWN", value: null });
@@ -97,6 +99,45 @@ describe("job source evidence builder", () => {
       verified_at: retrievedAt,
       expires_at: "2026-10-31T00:00:00.000Z",
     });
+  });
+
+  it.each(["GREENHOUSE", "LEVER", "ASHBY"])(
+    "gives a complete %s ATS posting a seven-day availability window",
+    (sourceName) => {
+      const completeDescription = [
+        "The role designs and operates production data and AI platform services for engineering teams.",
+        "Responsibilities include building distributed services, maintaining data pipelines, and improving reliability.",
+        "Qualifications include professional software engineering experience and a record of delivering production systems.",
+      ].join(" ");
+      const evidence = buildJobSourceEvidence({
+        ...baseInput,
+        sourceName,
+        retrievedAt: "2026-10-24T00:00:00.000Z",
+        rawPayload: { id: "job-42", status: "active" },
+        descriptionText: completeDescription,
+      });
+
+      expect(evidence.description.completeness_status).toBe("COMPLETE");
+      expect(evidence.availability).toMatchObject({ status: "OPEN", reason_code: "FULL_POSTING_RETRIEVED" });
+      expect(Date.parse(evidence.availability.expires_at!) - Date.parse(evidence.availability.verified_at!))
+        .toBe(7 * 24 * 60 * 60 * 1000);
+    },
+  );
+
+  it("keeps an incomplete ATS listing on the one-day window", () => {
+    const retrievedAt = "2026-10-24T00:00:00.000Z";
+    const evidence = buildJobSourceEvidence({
+      ...baseInput,
+      sourceName: "LEVER",
+      retrievedAt,
+      rawPayload: { id: "job-42", status: "active" },
+      descriptionText: "A short role teaser.",
+    });
+
+    expect(evidence.description.completeness_status).not.toBe("COMPLETE");
+    expect(evidence.availability.status).toBe("OPEN");
+    expect(Date.parse(evidence.availability.expires_at!) - Date.parse(evidence.availability.verified_at!))
+      .toBe(24 * 60 * 60 * 1000);
   });
 
   it("keeps board postings UNKNOWN when the URL host is not manifest-approved or the description is incomplete", () => {
