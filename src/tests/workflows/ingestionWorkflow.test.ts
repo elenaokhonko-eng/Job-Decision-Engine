@@ -26,5 +26,8 @@ describe("discovery ingestion workflow", () => {
     expect(workflow).toContain('pipeline-dead-letter-health-ingestion-${{ github.run_id }}');
     expect(workflow).toContain('scripts/report_pipeline_status.ts');
     expect(workflow).toContain('PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}');
+    expect(workflow.match(/REQUIREMENTS_PRIMARY_PROVIDER: gemini/g)).toHaveLength(2);
+    const worker = workflow.slice(workflow.indexOf('name: Process discovery pipeline'));
+    expect(worker).toContain("PIPELINE_TASK_WORKER_INCLUDE_QUOTED_REQUIREMENTS: 'true'");
   });
 });
