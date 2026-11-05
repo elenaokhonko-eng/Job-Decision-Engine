@@ -425,17 +425,6 @@ export function evaluateWorkability(
     };
   };
 
-  // Structured or strongly indicated contract employment is deterministic.
-  if (normalizedEmp === "CONTRACT" && !effectivePolicy.contractAllowed) {
-    return {
-      workable: false,
-      needsVerify: false,
-      reason: "Contract employment detected",
-      reasonCode: "GATE_CONTRACT_ROLE",
-      facts: baseFacts
-    };
-  }
-
   // An inferred hybrid signal is never affirmative employer evidence.
   const isAssumedHybrid = String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID";
   if (isAssumedHybrid) {

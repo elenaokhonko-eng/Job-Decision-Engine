@@ -378,14 +378,6 @@ export function applyPersistedRequirementGates(
     : /\b(permanent|full[-_ ]?time|fte)\b/i.test(normalizedEmployment)
       ? "PERMANENT" as const
       : "UNKNOWN" as const;
-  if (employmentType === "CONTRACT" && !effectivePolicy.contractAllowed) {
-    return makeReject(
-      ["GATE_CONTRACT_ROLE"],
-      [employmentReq ? quoteOrText(employmentReq) : "Structured employment_type is CONTRACT"],
-      { employment_type: "CONTRACT" }
-    );
-  }
-
   const officeRequirements = deterministicRequirements.filter((r) => r.requirement_type === "OFFICE_DAYS");
   const officeReq = officeRequirements[0];
   for (const requirement of officeRequirements) {

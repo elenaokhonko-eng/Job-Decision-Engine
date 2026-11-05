@@ -61,6 +61,17 @@ describe("workspace workability policy", () => {
     expect(merged.contractAllowed).toBe(true);
   });
 
+  it("does not let a legacy contract preference disable direct fixed-term employment", () => {
+    const merged = mergeWorkabilityPreferenceContent(loadWorkabilityPolicy(), {
+      hard_constraints: {
+        employment_types: ["FULL_TIME"],
+        contract_allowed: false,
+      },
+    });
+
+    expect(merged.contractAllowed).toBe(true);
+  });
+
   it("distinguishes worker territory restrictions from employer/company locations", () => {
     expect(hasExplicitTerritoryRestriction("Must be authorized to work in the United States", "UNITED_STATES")).toBe(true);
     expect(hasExplicitTerritoryRestriction("Candidates must reside in Canada", "CANADA")).toBe(true);

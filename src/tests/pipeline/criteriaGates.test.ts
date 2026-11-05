@@ -229,7 +229,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       expect(result.rejection_codes).toContain("GATE_CONTRACT_ROLE");
     });
 
-    it("rejects structured CONTRACT employment when the active policy disallows it", () => {
+    it("allows direct fixed-term employment despite a legacy contract preference", () => {
       const job = {
         id: "contract-job-policy-disabled",
         title: "Lead Data Architect",
@@ -242,8 +242,8 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       const restrictivePolicy = { ...loadWorkabilityPolicy(), contractAllowed: false };
       const result = applyGlobalGates(job as any, restrictivePolicy);
 
-      expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("GATE_CONTRACT_ROLE");
+      expect(result.status).toBe("PASS");
+      expect(result.rejection_codes).not.toContain("GATE_CONTRACT_ROLE");
     });
 
     it("passes hybrid workplace_type with <= 3 days", () => {

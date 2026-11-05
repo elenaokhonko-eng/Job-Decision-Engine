@@ -728,7 +728,9 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
       document?.global_workability_gates?.travel?.minimal_qualitative_travel_allowed,
       defaults.minimalTravelAllowed
     ),
-    contractAllowed: employment.contract_allowed === true,
+    // Fixed-term employment by the hiring organization is eligible. Agency
+    // placements are handled separately by rejectAgencyContractPlacements.
+    contractAllowed: true,
     rejectAgencyContractPlacements: booleanValue(
       employment.reject_agency_placement_contracts,
       defaults.rejectAgencyContractPlacements,
