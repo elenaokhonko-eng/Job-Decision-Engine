@@ -36,7 +36,7 @@ export function completeRetrievedPostingPredicate(observationAlias: string): str
     throw new Error("Retrieved-posting SQL aliases must be trusted identifiers.");
   }
   return `
-    ${observationAlias}.source_name IN ('LEVER', 'EMPLOYER_WEBSITE', 'ASHBY', 'GREENHOUSE')
+    ${observationAlias}.source_name IN ('LEVER', 'EMPLOYER_WEBSITE', 'ASHBY', 'GREENHOUSE', 'LINKEDIN')
     AND ${observationAlias}.raw_payload->>'source_content_status' = 'COMPLETE'
     AND ${observationAlias}.raw_payload->>'content_hash' ~ '^[a-f0-9]{64}$'
     AND ${observationAlias}.raw_payload#>>'{source_evidence,responseHash}' ~ '^[a-f0-9]{64}$'

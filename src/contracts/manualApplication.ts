@@ -68,7 +68,7 @@ export const ManualComparisonSourceSchema = z.discriminatedUnion("source_kind", 
   z.object({
     source_kind: z.literal("FETCHED"),
     source_content_status: z.enum(["COMPLETE", "USER_EDITED"]),
-    provider: z.enum(["ASHBY", "GREENHOUSE", "LEVER", "EMPLOYER_WEBSITE"]),
+    provider: z.enum(["ASHBY", "GREENHOUSE", "LEVER", "EMPLOYER_WEBSITE", "LINKEDIN"]),
     fetched_content_hash: Sha256,
     source_evidence: ManualFetchSourceEvidenceSchema,
   }).strict(),
@@ -468,7 +468,7 @@ export const ManualFetchDescriptionResponseSchema = z.object({
   fetch_receipt_id: Uuid,
   description: z.string().min(100).max(100_000),
   final_url: HttpUrl,
-  provider: z.enum(["ASHBY", "GREENHOUSE", "LEVER", "EMPLOYER_WEBSITE"]),
+  provider: z.enum(["ASHBY", "GREENHOUSE", "LEVER", "EMPLOYER_WEBSITE", "LINKEDIN"]),
   content_hash: Sha256,
   source_evidence: ManualFetchSourceEvidenceSchema,
 }).strict();
@@ -485,7 +485,7 @@ export const ManualPersistedFetchReceiptSchema = z.object({
   expected_requisition_id: z.string().max(160).nullable(),
   description_hash: Sha256,
   content_hash: Sha256,
-  provider: z.enum(["ASHBY", "GREENHOUSE", "LEVER", "EMPLOYER_WEBSITE"]),
+  provider: z.enum(["ASHBY", "GREENHOUSE", "LEVER", "EMPLOYER_WEBSITE", "LINKEDIN"]),
   source_evidence: ManualFetchSourceEvidenceSchema,
   expires_at: z.string().datetime(),
 }).strict();

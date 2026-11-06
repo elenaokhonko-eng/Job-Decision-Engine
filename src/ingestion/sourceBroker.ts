@@ -154,6 +154,35 @@ export class SourceBroker {
     );
   }
 
+  /**
+   * LinkedIn job ids that already have an observation (any source, including email alerts) or
+   * a settled discovery disposition. Errored dispositions are not counted so they are retried.
+   */
+  async findObservedLinkedInJobIds(jobIds: readonly string[]): Promise<Set<string>> {
+    const ids = [...new Set(jobIds.filter((jobId) => /^\d{5,20}$/.test(jobId)))];
+    if (ids.length === 0) return new Set();
+    const ctx = await this.ensureContext();
+    const pattern = "(?:linkedin\\.com/(?:comm/)?jobs/view/(?:[^/?#]*-)?|linkedin-job:)(\\d{5,20})";
+    const result = await this.executor.query<{ job_id: string }>(
+      `SELECT DISTINCT matched.job_id
+       FROM (
+         SELECT (regexp_match(lower(concat_ws(' ', source_url, canonical_apply_url, source_external_id)), $3))[1] AS job_id
+         FROM raw_job_observations
+         WHERE workspace_id = $1
+           AND concat_ws(' ', source_url, canonical_apply_url, source_external_id) ILIKE '%linkedin%'
+         UNION ALL
+         SELECT (regexp_match(lower(concat_ws(' ', source_url, source_external_id)), $3))[1]
+         FROM source_candidate_dispositions
+         WHERE workspace_id = $1
+           AND disposition IN ('STAGED', 'FILTERED', 'DUPLICATE')
+           AND concat_ws(' ', source_url, source_external_id) ILIKE '%linkedin%'
+       ) matched
+       WHERE matched.job_id = ANY($2::text[])`,
+      [ctx.workspaceId, ids, pattern],
+    );
+    return new Set(result.rows.map((row) => row.job_id));
+  }
+
   async startSourcePlanRun(sourcePluginKey: string, planKey: string, planVersion: string, laneKey: string | null): Promise<string> {
     if (!this.sourceRunId) throw new Error("Must start a source run before starting a source plan.");
     const ctx = await this.ensureContext();

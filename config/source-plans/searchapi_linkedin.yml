@@ -1,0 +1,21 @@
+schema_version: "1.0.0"
+plan_version: "searchapi_linkedin_v1"
+# One SearchAPI credit per search and per job-details lookup. Each discovery run spends at most
+# (lanes x locations) searches plus max_details_per_run lookups; SEARCHAPI_DAILY_CREDIT_CAP
+# (default 60) is the hard daily ceiling shared with LinkedIn content fetches for email alerts.
+time_period: last_day
+max_details_per_run: 36
+locations:
+  - key: singapore
+    location: Singapore
+    keyword_suffix: null
+  - key: remote_apac
+    location: Asia Pacific
+    keyword_suffix: remote
+lane_queries:
+  CORE_AI_DATA: '"AI architect" OR "machine learning engineer" OR "data architect" OR "AI engineer" OR "technical program manager"'
+  LEGAL_REGTECH: '"legal technology" OR "regtech" OR "compliance technology" OR "legal AI"'
+  HEALTH_BIO_PHARMA: '"bioinformatics" OR "clinical data" OR "healthcare AI" OR "research software engineer"'
+  INVESTMENT_MARKETS_FINTECH: '"investment technology" OR "trading systems" OR "market data" OR "fintech architect"'
+  SOCIAL_IMPACT_MULTILATERAL: '"digital public infrastructure" OR "climate data" OR "humanitarian technology" OR "development data"'
+  UNIVERSITY_AI_RESEARCH: '"research engineer" OR "scientific computing" OR "AI research" OR "research software engineer"'
