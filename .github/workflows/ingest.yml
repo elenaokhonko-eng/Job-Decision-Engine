@@ -94,6 +94,9 @@ jobs:
         timeout-minutes: 10
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SEARCHAPI_API_KEY: ${{ secrets.SEARCHAPI_API_KEY }}
+          SEARCHAPI_LINKEDIN_ENABLED: ${{ vars.SEARCHAPI_LINKEDIN_ENABLED || 'false' }}
+          SEARCHAPI_DAILY_CREDIT_CAP: ${{ vars.SEARCHAPI_DAILY_CREDIT_CAP || '60' }}
         run: npx tsx scripts/run_adapters.ts
 
   process_pipeline:
@@ -185,6 +188,9 @@ jobs:
           GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
           GEMINI_API_VERSION: ${{ vars.GEMINI_API_VERSION || 'v1beta' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SEARCHAPI_API_KEY: ${{ secrets.SEARCHAPI_API_KEY }}
+          SEARCHAPI_LINKEDIN_ENABLED: ${{ vars.SEARCHAPI_LINKEDIN_ENABLED || 'false' }}
+          SEARCHAPI_DAILY_CREDIT_CAP: ${{ vars.SEARCHAPI_DAILY_CREDIT_CAP || '60' }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           REQUIREMENTS_PRIMARY_PROVIDER: gemini
           EMBEDDING_PRIMARY_PROVIDER: ${{ vars.EMBEDDING_PRIMARY_PROVIDER || 'gemini' }}

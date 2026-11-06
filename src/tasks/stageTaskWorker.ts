@@ -5,6 +5,7 @@ import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { SourceBroker } from "../ingestion/sourceBroker.js";
 import { fetchJobContent as defaultFetchJobContent } from "../ingestion/jobContentFetcher.js";
+import { searchApiLinkedInDetailsFromEnv } from "../ingestion/searchApi/searchApiClient.js";
 import { runNormalization as defaultRunNormalization } from "../pipeline/normalize.js";
 import { runRequirementsExtraction as defaultRunRequirementsExtraction } from "../pipeline/requirementsExtractor.js";
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
@@ -2196,10 +2197,11 @@ async function executeStageTask(
       if (existing.rows[0]?.id) return existing.rows[0].id;
     }
 
-    const result = await dependencies.fetchJobContent(discovery.source_url, {
-      title: discovery.title,
-      companyName: discovery.company_name,
-    });
+    const expectedPosting = { title: discovery.title, companyName: discovery.company_name };
+    const linkedInJobDetails = searchApiLinkedInDetailsFromEnv(process.env, clientOrPool as QueryClient);
+    const result = linkedInJobDetails
+      ? await dependencies.fetchJobContent(discovery.source_url, expectedPosting, { linkedInJobDetails })
+      : await dependencies.fetchJobContent(discovery.source_url, expectedPosting);
     if (result.kind === "RETRYABLE_FAILURE") {
       throw new PipelineTaskRetryAtError(
         `Posting retrieval is retryable: ${result.reason}`,

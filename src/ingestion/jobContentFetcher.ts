@@ -5,6 +5,13 @@ import { isIP } from "node:net";
 import { request as httpsRequest } from "node:https";
 import { htmlToPlainText } from "./emailAlertExtractor.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
+import { stripHtmlToText } from "../security/sanitize.js";
+import {
+  linkedInJobIdFromUrl,
+  linkedInJobUrl,
+  type LinkedInJobDetail,
+  type SearchApiCallResult,
+} from "./searchApi/searchApiClient.js";
 
 const MAX_REDIRECTS = 5;
 const MAX_RESPONSE_BYTES = 3 * 1024 * 1024;
@@ -13,7 +20,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const PRODUCTION_HOST_REQUEST_INTERVAL_MS = 1_000;
 const hostNextRequestAt = new Map<string, number>();
 
-export type PostingProviderKey = "ASHBY" | "GREENHOUSE" | "LEVER" | "EMPLOYER_WEBSITE";
+export type PostingProviderKey = "ASHBY" | "GREENHOUSE" | "LEVER" | "EMPLOYER_WEBSITE" | "LINKEDIN";
 export type ContentBlockReason =
   | "AUTH_REQUIRED"
   | "BOT_BLOCKED"
@@ -98,6 +105,11 @@ export interface PostingFetcherDependencies {
   readonly now?: () => Date;
   /** Test-only shortening hook. Callers cannot extend the production ceiling. */
   readonly totalTimeoutMs?: number;
+  /**
+   * LinkedIn job details through SearchAPI. LinkedIn pages require sign-in, so without this
+   * dependency LinkedIn URLs keep the generic fetch path and its blocked outcome.
+   */
+  readonly linkedInJobDetails?: (jobId: string) => Promise<SearchApiCallResult<LinkedInJobDetail>>;
 }
 
 export class UnsafePostingUrlError extends Error {
@@ -1133,6 +1145,90 @@ function failureForStatus(response: SafeHttpResponse, evidence: PostingSourceEvi
   return null;
 }
 
+function nextUtcMidnight(now: Date): string {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+}
+
+function linkedInWorkplaceType(location: string | undefined): VerifiedPosting["workplaceType"] {
+  const match = location?.match(/\((remote|hybrid|on-?site)\)/i)?.[1]?.toLowerCase();
+  if (match === "remote") return "REMOTE";
+  if (match === "hybrid") return "HYBRID";
+  if (match === "onsite" || match === "on-site") return "ONSITE";
+  return "UNKNOWN";
+}
+
+async function fetchLinkedInPosting(
+  requestedUrl: string,
+  jobId: string,
+  expected: ExpectedPostingIdentity,
+  linkedInJobDetails: NonNullable<PostingFetcherDependencies["linkedInJobDetails"]>,
+  now: Date,
+): Promise<JobContentResult> {
+  const canonicalUrl = linkedInJobUrl(jobId);
+  const result = await linkedInJobDetails(jobId);
+  if (result.kind === "BUDGET_EXHAUSTED") {
+    return { kind: "RETRYABLE_FAILURE", reason: result.reason, retryAfter: nextUtcMidnight(now) };
+  }
+  if (result.kind === "FAILED") {
+    if (result.retryable) return { kind: "RETRYABLE_FAILURE", reason: result.reason };
+    return {
+      kind: "UNAVAILABLE",
+      reason: result.reason,
+      evidence: {
+        requestedUrl,
+        resolvedUrl: canonicalUrl,
+        redirectHistory: [],
+        retrievedAt: now.toISOString(),
+        httpStatus: result.httpStatus ?? 404,
+        contentType: "application/json",
+        responseHash: contentHash(result.reason),
+      },
+    };
+  }
+  const detail = result.data;
+  if (!titleMatches(expected.title, detail.title) || !companyMatches(expected.companyName, detail.company_name, "linkedin.com")) {
+    return { kind: "IDENTITY_CONFLICT", reason: "LinkedIn job title or employer did not match the discovered posting." };
+  }
+  if (expected.requisitionId && expected.requisitionId !== jobId) {
+    return { kind: "IDENTITY_CONFLICT", reason: "LinkedIn job id did not match the expected posting identity." };
+  }
+  const description = stripHtmlToText(detail.description);
+  if (!isCompletePostingText(description)) return { kind: "BLOCKED", reason: "UNSUPPORTED_SOURCE" };
+  const posting: VerifiedPosting = {
+    title: detail.title,
+    companyName: detail.company_name,
+    description,
+    requisitionId: jobId,
+    canonicalUrl,
+    applyUrl: canonicalUrl,
+    location: detail.location ?? null,
+    workplaceType: linkedInWorkplaceType(detail.location),
+    employmentType: detail.employment_type ?? null,
+    compensationRaw: detail.salary ?? null,
+    // LinkedIn reports relative ages ("2 weeks ago"); no absolute date is invented from them.
+    publishedAt: null,
+    updatedAt: null,
+    expiresAt: null,
+    availability: "UNKNOWN",
+    rawPayload: result.raw,
+  };
+  return makeCompleteResult(posting, {
+    key: "LINKEDIN",
+    sourceUrl: requestedUrl,
+    canonicalUrl,
+    requisitionId: jobId,
+    providerKey: "searchapi",
+  }, {
+    requestedUrl,
+    resolvedUrl: result.evidence.requestUrl,
+    redirectHistory: [],
+    retrievedAt: result.evidence.retrievedAt,
+    httpStatus: result.evidence.httpStatus,
+    contentType: "application/json",
+    responseHash: result.evidence.responseHash,
+  });
+}
+
 export async function fetchJobContent(
   requestedUrl: string | null | undefined,
   expected: ExpectedPostingIdentity,
@@ -1141,6 +1237,18 @@ export async function fetchJobContent(
   if (!requestedUrl || !requestedUrl.trim()) return { kind: "BLOCKED", reason: "MISSING_POSTING_URL" };
 
   const now = dependencies.now?.() ?? new Date();
+  if (dependencies.linkedInJobDetails) {
+    let decodedUrl: string | null = null;
+    try {
+      decodedUrl = parseHttpUrl(decodeTrackingWrapper(requestedUrl)).toString();
+    } catch {
+      decodedUrl = null;
+    }
+    const linkedInJobId = linkedInJobIdFromUrl(decodedUrl);
+    if (linkedInJobId) {
+      return fetchLinkedInPosting(requestedUrl, linkedInJobId, expected, dependencies.linkedInJobDetails, now);
+    }
+  }
   let sourceUrl: URL;
   let atsAddress: AtsPostingAddress | null;
   let fetched: { response: SafeHttpResponse; redirects: string[] };

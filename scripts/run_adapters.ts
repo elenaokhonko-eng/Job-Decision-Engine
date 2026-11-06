@@ -21,6 +21,18 @@ import { DiscoveryScoutPlanner, type ScoutSearchPlan } from "../src/ingestion/sc
 import { assessCandidateLanes, type LaneDisposition } from "../src/ingestion/discoveryPlanExecution.js";
 import { normalizePostingUrl } from "../src/ingestion/postingIdentity.js";
 import { loadGlobalLanesConfig } from "../src/pipeline/laneConfigLoader.js";
+import {
+  linkedInSearchQueries,
+  loadSearchApiLinkedInPlan,
+  SearchApiLinkedInAdapter,
+} from "../src/ingestion/adapters/searchApiLinkedInAdapter.js";
+import {
+  parseSearchApiDailyCreditCap,
+  PgSearchApiCreditLedger,
+  SearchApiClient,
+} from "../src/ingestion/searchApi/searchApiClient.js";
+import pg from "pg";
+import { pgPoolConfig } from "../src/db/pgSsl.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
@@ -52,7 +64,14 @@ function stableExternalIdForJob(resultSourceName: string, job: unknown): string 
   return canonicalUrl ? normalizePostingUrl(canonicalUrl, resultSourceName) : null;
 }
 
+/** Plugins whose observations belong to an existing source vocabulary entry. */
+const SOURCE_NAME_BY_PLUGIN_KEY: Readonly<Record<string, SourceName>> = {
+  searchapi_linkedin: "LINKEDIN",
+};
+
 function asSourceName(sourceKey: string): SourceName | null {
+  const mapped = SOURCE_NAME_BY_PLUGIN_KEY[String(sourceKey || "").trim()];
+  if (mapped) return mapped;
   const candidate = String(sourceKey || "").trim().toUpperCase();
   const parsed = SourceNameSchema.safeParse(candidate);
   return parsed.success ? parsed.data : null;
@@ -355,6 +374,51 @@ function pickFeedAdapter(plugin: SourcePlugin): BaseSourceAdapter | null {
   return null;
 }
 
+export type SearchApiLinkedInSetup =
+  | { readonly kind: "DISABLED"; readonly reason: string }
+  | { readonly kind: "MISCONFIGURED"; readonly reason: string }
+  | { readonly kind: "READY"; readonly adapter: SearchApiLinkedInAdapter };
+
+/**
+ * The SearchAPI source runs only when SEARCHAPI_LINKEDIN_ENABLED is "true". Once enabled, a
+ * missing key or invalid plan is a source failure, not a silent skip.
+ */
+export function searchApiLinkedInSetup(input: {
+  readonly env: NodeJS.ProcessEnv;
+  readonly broker: Pick<SourceBroker, "findObservedLinkedInJobIds">;
+  readonly ledgerExecutor: ConstructorParameters<typeof PgSearchApiCreditLedger>[0];
+  readonly laneKeys: readonly string[];
+  readonly planPath?: string;
+}): SearchApiLinkedInSetup {
+  if ((input.env.SEARCHAPI_LINKEDIN_ENABLED ?? "").trim().toLowerCase() !== "true") {
+    return { kind: "DISABLED", reason: "SEARCHAPI_LINKEDIN_ENABLED is not true." };
+  }
+  const apiKey = (input.env.SEARCHAPI_API_KEY ?? "").trim();
+  if (!apiKey) return { kind: "MISCONFIGURED", reason: "SEARCHAPI_LINKEDIN_ENABLED is true but SEARCHAPI_API_KEY is not set." };
+  try {
+    const plan = loadSearchApiLinkedInPlan(input.planPath);
+    const queries = linkedInSearchQueries(plan, input.laneKeys);
+    if (queries.length === 0) return { kind: "MISCONFIGURED", reason: "No SearchAPI LinkedIn query is configured for the plugin's lanes." };
+    const client = new SearchApiClient({
+      apiKey,
+      ledger: new PgSearchApiCreditLedger(input.ledgerExecutor),
+      dailyCreditCap: parseSearchApiDailyCreditCap(input.env.SEARCHAPI_DAILY_CREDIT_CAP),
+    });
+    return {
+      kind: "READY",
+      adapter: new SearchApiLinkedInAdapter({
+        client,
+        queries,
+        timePeriod: plan.time_period,
+        maxDetailsPerRun: plan.max_details_per_run,
+        findObservedJobIds: (jobIds) => input.broker.findObservedLinkedInJobIds(jobIds),
+      }),
+    };
+  } catch (error) {
+    return { kind: "MISCONFIGURED", reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 function configuredFeedLanes(
   plugin: SourcePlugin,
   plans: Readonly<Record<string, ScoutSearchPlan>>,
@@ -411,6 +475,7 @@ export async function runAdapters(): Promise<{
     laneCoverage[laneKey] = { plansExecuted: 0, sourcesFailed: 0, discovered: 0, staged: 0, filtered: 0, coverageNote: plan.coverageNote };
   }
   const enabledPlugins = plugins.filter((plugin) => plugin.status === "active" && plugin.schedule.enabled);
+  let ledgerPool: pg.Pool | null = null;
 
   async function runGroup(input: {
     plugin: SourcePlugin;
@@ -536,6 +601,43 @@ export async function runAdapters(): Promise<{
       errorCount += 1;
       continue;
     }
+    if (plugin.source_key === "searchapi_linkedin") {
+      ledgerPool ??= new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
+      const setup = searchApiLinkedInSetup({ env: process.env, broker, ledgerExecutor: ledgerPool, laneKeys });
+      if (setup.kind === "DISABLED") {
+        console.log(`  SKIP: ${label}: ${setup.reason}`);
+        continue;
+      }
+      if (setup.kind === "MISCONFIGURED") {
+        broker.recordError(`${label}: ${setup.reason}`);
+        failedSources.push(label);
+        errorCount += 1;
+        continue;
+      }
+      console.log(`\nPolling ${label} for lanes ${laneKeys.join(", ")}...`);
+      try {
+        await runGroup({
+          plugin,
+          adapter: setup.adapter,
+          label,
+          checkpointTarget: `feed:${plugin.source_key}`,
+          laneKeys,
+          employerLaneKeys: [],
+          targetCompanyId: null,
+          pluginRevisionId,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        broker.recordError(`${label}: ${detail}`);
+        failedSources.push(label);
+        errorCount += 1;
+      }
+      const stats = setup.adapter.lastRunStats;
+      if (stats) {
+        console.log(`  -> ${label} credits: searches ${stats.searchesSent} (failed ${stats.searchesFailed}); candidates ${stats.candidates}; already observed ${stats.alreadyObserved}; details ${stats.detailsFetched} (failed ${stats.detailsFailed}); deferred ${stats.deferredForBudget}${stats.budgetExhausted ? "; daily credit cap reached" : ""}`);
+      }
+      continue;
+    }
     const adapter = pickFeedAdapter(plugin);
     if (!adapter) {
       const detail = `${label}: no supported adapter is configured for this endpoint.`;
@@ -563,6 +665,8 @@ export async function runAdapters(): Promise<{
       errorCount += 1;
     }
   }
+
+  await ledgerPool?.end();
 
   const missingLanePlans = Object.entries(laneCoverage)
     .filter(([, coverage]) => coverage.plansExecuted === 0)

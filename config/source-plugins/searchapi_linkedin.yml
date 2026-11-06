@@ -1,0 +1,60 @@
+schema_version: "2.2.0"
+source_key: searchapi_linkedin
+display_name: LinkedIn jobs via SearchAPI (search + full job details)
+kind: json_api
+status: active
+capabilities:
+  discovery: true
+  pagination: false
+  incremental: true
+  location_filter: true
+  work_mode_evidence: false
+compliance:
+  access_basis: official_api
+  terms_url: https://www.searchapi.io/legal/terms
+  license: null
+  attribution_required: true
+  attribution_text: LinkedIn postings retrieved through the SearchAPI LinkedIn Jobs and Job Details APIs; the LinkedIn job URL is stored for attribution. No LinkedIn session cookie is used.
+  authenticated_scraping: false
+  reviewed_at: "2026-11-07"
+schedule:
+  # Runs only when the SEARCHAPI_LINKEDIN_ENABLED repository variable is "true" and the
+  # SEARCHAPI_API_KEY secret is set.
+  enabled: true
+  interval_minutes: 1440
+  jitter_seconds: 0
+request:
+  endpoint: https://www.searchapi.io/api/v1/search
+  timeout_ms: 30000
+  headers_from_secret_keys: [SEARCHAPI_API_KEY]
+  retry:
+    max_attempts: 0
+    base_delay_ms: 1000
+    max_delay_ms: 1000
+  rate_limit:
+    requests_per_minute: 30
+    items_per_run: 36
+  pagination:
+    strategy: none
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: null
+  query:
+    keywords: []
+    locations: [Singapore, Asia Pacific]
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH, SOCIAL_IMPACT_MULTILATERAL, UNIVERSITY_AI_RESEARCH]
+mapping:
+  external_id: $.job.job_id
+  title: $.job.title
+  company: $.job.company_name
+  description: $.job.description
+  url: $.job.link
+  location: $.job.location
+  work_mode: $derive.work_mode_from_structured_and_text_evidence
+  employment_type: $.job.employment_type
+  posted_at: null
+  updated_at: null
+availability:
+  full_posting_hosts: [www.linkedin.com]

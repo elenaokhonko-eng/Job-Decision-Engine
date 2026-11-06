@@ -88,6 +88,7 @@ import {
 } from "../../contracts/manualApplication.js";
 import { isCurrentReadyApplicationReadiness, loadCurrentApplicationReadiness } from "../../services/currentApplicationReadiness.js";
 import { fetchJobContent, type JobContentResult } from "../../ingestion/jobContentFetcher.js";
+import { linkedInJobIdFromUrl, searchApiLinkedInDetailsFromEnv } from "../../ingestion/searchApi/searchApiClient.js";
 
 function errorPayload(code: "INVALID_REQUEST" | "DESCRIPTION_INSUFFICIENT" | "FORBIDDEN" | "NOT_FOUND" | "JOB_VERSION_CHANGED" | "IDENTITY_CONFLICT" | "APPROVAL_STALE" | "DEPENDENCY_UNAVAILABLE" | "INTERNAL_ERROR" | "CONCURRENT_UPDATE", message: string, retryAfter?: string) {
   return ManualApiErrorSchema.parse({
@@ -1172,9 +1173,14 @@ export function createManualApplicationRouter({
       sendApiError(res, 400, "INVALID_REQUEST", "Provide a public posting URL and the expected title and company.");
       return;
     }
-    // LinkedIn shows job descriptions only to signed-in browsers, so a fetch can never succeed.
-    if (/(^|\.)linkedin\.com$/i.test(new URL(parsed.data.url).hostname)) {
-      sendApiError(res, 422, "INVALID_REQUEST", "LinkedIn job pages can't be fetched because LinkedIn only shows them to signed-in browsers. Open the posting, copy the full description including the responsibilities and requirements, and paste it instead.");
+    // LinkedIn shows job descriptions only to signed-in browsers, so a direct fetch can never
+    // succeed; with SearchAPI configured, a LinkedIn job URL is read through its details API.
+    const linkedInJobDetails = searchApiLinkedInDetailsFromEnv(process.env, pool);
+    const isLinkedIn = /(^|\.)linkedin\.com$/i.test(new URL(parsed.data.url).hostname);
+    if (isLinkedIn && (!linkedInJobDetails || !linkedInJobIdFromUrl(parsed.data.url))) {
+      sendApiError(res, 422, "INVALID_REQUEST", linkedInJobDetails
+        ? "Use the LinkedIn job's own link (linkedin.com/jobs/view/...), or paste the full description instead."
+        : "LinkedIn job pages can't be fetched because LinkedIn only shows them to signed-in browsers. Open the posting, copy the full description including the responsibilities and requirements, and paste it instead.");
       return;
     }
     let result: JobContentResult;
@@ -1183,7 +1189,7 @@ export function createManualApplicationRouter({
         title: parsed.data.title,
         companyName: parsed.data.company,
         requisitionId: parsed.data.requisition_id,
-      });
+      }, isLinkedIn && linkedInJobDetails ? { linkedInJobDetails } : {});
     } catch (error) {
       sendApiError(res, 503, "DEPENDENCY_UNAVAILABLE", error instanceof Error ? error.message : "Posting retrieval failed.");
       return;
