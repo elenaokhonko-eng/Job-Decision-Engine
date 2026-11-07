@@ -15,6 +15,21 @@ describe("evaluation queue workflow", () => {
     expect(parserStep).not.toContain("OPENAI_API_KEY");
   });
 
+  it("stops Gmail link extraction well inside its step timeout so unstarted alerts resume next run", () => {
+    const workflow = readFileSync(resolve(".github/workflows/ingest.yml"), "utf8");
+    const parserStep = workflow.slice(
+      workflow.indexOf("Extract Gmail job links and stage posting fetches"),
+      workflow.indexOf("public_source_ingestion:"),
+    );
+    const timeoutMinutes = Number(parserStep.match(/timeout-minutes:\s*(\d+)/)?.[1]);
+    const budgetSeconds = Number(parserStep.match(/--max-runtime-seconds (\d+)/)?.[1]);
+
+    expect(Number.isInteger(timeoutMinutes)).toBe(true);
+    expect(Number.isInteger(budgetSeconds)).toBe(true);
+    // Leave at least two minutes for in-flight alerts to commit and the summary to be written.
+    expect(budgetSeconds).toBeLessThanOrEqual(timeoutMinutes * 60 - 120);
+  });
+
   it("does not cancel an active leased evaluation drain", () => {
     const workflow = readFileSync(resolve(".github/workflows/queue_worker.yml"), "utf8");
 

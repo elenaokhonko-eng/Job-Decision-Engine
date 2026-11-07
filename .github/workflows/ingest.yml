@@ -62,7 +62,7 @@ jobs:
         timeout-minutes: 10
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npx tsx scripts/parse_emails.ts
+        run: npx tsx scripts/parse_emails.ts --concurrency 4 --max-runtime-seconds 420
 
   public_source_ingestion:
     name: Ingest public job sources
