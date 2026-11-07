@@ -14,6 +14,14 @@ import { HimalayasAdapter } from "../src/ingestion/adapters/himalayasAdapter.js"
 import { JobicyAdapter } from "../src/ingestion/adapters/jobicyAdapter.js";
 import { RemotiveAdapter } from "../src/ingestion/adapters/remotiveAdapter.js";
 import { createWeWorkRemotelyAdapter } from "../src/ingestion/adapters/attributedRssAdapter.js";
+import {
+  WORKDAY_HOST_PATTERN,
+  WORKDAY_SITE_PATTERN,
+  WORKDAY_TENANT_PATTERN,
+  WorkdayAdapter,
+  workdayDeadlineBudget,
+  type WorkdayRunBudget,
+} from "../src/ingestion/adapters/workdayAdapter.js";
 import type { AdapterResult, BaseSourceAdapter } from "../src/ingestion/adapters/baseAdapter.js";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
 import type { JobSourceEvidence } from "../src/contracts/jobSourceEvidence.js";
@@ -37,15 +45,53 @@ import { pgPoolConfig } from "../src/db/pgSsl.js";
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
-const CompanyConfigSchema = z.object({
+export const CompanyConfigSchema = z.object({
   id: z.string().optional(),
   name: z.string().optional(),
   enabled: z.boolean().optional(),
   ats_provider: z.string().optional(),
   board_slug: z.string().nullable().optional(),
   target_lanes: z.array(z.string()).optional(),
-}).passthrough();
+  // Workday career sites are addressed by a verified host, tenant and site, not a board slug.
+  workday_host: z.string().regex(WORKDAY_HOST_PATTERN).optional(),
+  workday_tenant: z.string().regex(WORKDAY_TENANT_PATTERN).optional(),
+  workday_site: z.string().regex(WORKDAY_SITE_PATTERN).optional(),
+}).passthrough().superRefine((company, context) => {
+  const isWorkday = company.ats_provider?.trim().toLowerCase() === "workday";
+  const fields = ["workday_host", "workday_tenant", "workday_site"] as const;
+  if (isWorkday) {
+    for (const field of fields) {
+      if (!company[field]) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `Workday company ${company.id ?? company.name ?? ""} needs ${field}.` });
+    }
+    if (!company.name?.trim()) context.addIssue({ code: z.ZodIssueCode.custom, path: ["name"], message: "Workday company needs a name." });
+    if (company.workday_host && company.workday_tenant && !company.workday_host.startsWith(`${company.workday_tenant.toLowerCase()}.`)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["workday_host"], message: "workday_host must be the tenant's own myworkdayjobs.com host." });
+    }
+  } else {
+    for (const field of fields) {
+      if (company[field] !== undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is only valid when ats_provider is workday.` });
+    }
+  }
+});
 type CompanyConfig = z.infer<typeof CompanyConfigSchema>;
+
+/** Wall-clock budget shared by all Workday tenants in one run (the adapter step has a 10-minute timeout). */
+export const WORKDAY_RUN_BUDGET_MS = 240_000;
+
+/** Rotates a list by the UTC day number so a shared budget does not always favour the same entries. */
+export function rotateDaily<T>(items: readonly T[], now: Date): T[] {
+  if (items.length === 0) return [];
+  const offset = Math.floor(now.getTime() / 86_400_000) % items.length;
+  return [...items.slice(offset), ...items.slice(0, offset)];
+}
+
+/** Search terms for one Workday tenant: the role terms of its lanes plus the shared target functions. */
+export function workdaySearchTermsForLanes(
+  laneKeys: readonly string[],
+  plans: Readonly<Record<string, ScoutSearchPlan>>,
+): string[] {
+  return laneKeys.flatMap((laneKey) => [...(plans[laneKey]?.roleTerms ?? []), ...(plans[laneKey]?.targetFunctions ?? [])]);
+}
 
 function stableExternalIdForJob(resultSourceName: string, job: unknown): string | null {
   if (job === null || typeof job !== "object" || Array.isArray(job)) return null;
@@ -77,8 +123,7 @@ function asSourceName(sourceKey: string): SourceName | null {
   return parsed.success ? parsed.data : null;
 }
 
-function loadCompaniesConfig(): CompanyConfig[] {
-  const companiesPath = path.resolve(process.cwd(), "config/companies.yml");
+export function loadCompaniesConfig(companiesPath = path.resolve(process.cwd(), "config/companies.yml")): CompanyConfig[] {
   if (!fs.existsSync(companiesPath)) throw new Error(`Company source registry is missing: ${companiesPath}`);
   const fileContents = fs.readFileSync(companiesPath, "utf8");
   const document: unknown = loadYaml(fileContents);
@@ -476,6 +521,7 @@ export async function runAdapters(): Promise<{
   }
   const enabledPlugins = plugins.filter((plugin) => plugin.status === "active" && plugin.schedule.enabled);
   let ledgerPool: pg.Pool | null = null;
+  let workdayBudget: WorkdayRunBudget | null = null;
 
   async function runGroup(input: {
     plugin: SourcePlugin;
@@ -554,10 +600,64 @@ export async function runAdapters(): Promise<{
     }
 
     if (plugin.kind === "ats") {
-      const atsCompanies = companies.filter((company) =>
+      const matchingCompanies = companies.filter((company) =>
         company.enabled !== false && company.ats_provider?.trim().toLowerCase() === plugin.source_key
       );
+      // Workday tenants share one run budget, so start at a different tenant each day to avoid starving the tail.
+      const atsCompanies = plugin.source_key === "workday"
+        ? rotateDaily(matchingCompanies, new Date())
+        : matchingCompanies;
       for (const company of atsCompanies) {
+        if (plugin.source_key === "workday") {
+          const laneKeys = configuredCompanyLanes(company, plans);
+          const label = `workday:${company.id ?? company.name ?? company.workday_tenant}`;
+          if (laneKeys.length === 0) {
+            broker.recordError(`${label}: enabled Workday company has no configured lane plan.`);
+            failedSources.push(label);
+            errorCount += 1;
+            continue;
+          }
+          workdayBudget ??= workdayDeadlineBudget(WORKDAY_RUN_BUDGET_MS);
+          if (workdayBudget.exhausted()) {
+            // Not a failure: the tenant keeps its checkpoint, and the daily rotation puts it earlier on a later run.
+            console.log(`  DEFERRED: ${label}: the shared Workday run budget (${WORKDAY_RUN_BUDGET_MS / 1000}s) is spent; it keeps its checkpoint for a later run.`);
+            continue;
+          }
+          try {
+            const adapter = new WorkdayAdapter({
+              config: {
+                companyName: company.name ?? "",
+                host: company.workday_host ?? "",
+                tenant: company.workday_tenant ?? "",
+                site: company.workday_site ?? "",
+              },
+              searchTerms: workdaySearchTermsForLanes(laneKeys, plans),
+              budget: workdayBudget,
+            });
+            console.log(`
+Polling ${label} for lanes ${laneKeys.join(", ")}...`);
+            await runGroup({
+              plugin,
+              adapter,
+              label,
+              checkpointTarget: `ats:${company.id ?? company.workday_tenant}`,
+              laneKeys,
+              employerLaneKeys: laneKeys,
+              targetCompanyId: company.id ?? null,
+              pluginRevisionId,
+            });
+            const stats = adapter.lastRunStats;
+            if (stats) {
+              console.log(`  -> ${label} requests: search ${stats.searchRequests}, detail ${stats.detailRequests}; Singapore facet ${stats.facet ? `${stats.facet.parameter}=${stats.facet.descriptors.join("|")}` : "none (location-text filter)"}; terms completed ${stats.termsCompleted}; hits ${stats.hitsSeen}; outside Singapore ${stats.notSingapore}; gone ${stats.detailsGone}${stats.truncatedTerms.length > 0 ? `; truncated terms ${stats.truncatedTerms.join(", ")}` : ""}${stats.stoppedForBudget ? "; stopped at the run budget" : ""}`);
+            }
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            broker.recordError(`${label}: ${detail}`);
+            failedSources.push(label);
+            errorCount += 1;
+          }
+          continue;
+        }
         const boardSlug = company.board_slug?.trim() ?? "";
         const laneKeys = configuredCompanyLanes(company, plans);
         const label = `${plugin.source_key}:${company.id ?? company.name ?? boardSlug}`;

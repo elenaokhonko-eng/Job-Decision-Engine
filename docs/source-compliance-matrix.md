@@ -23,6 +23,7 @@ npm run docs:compliance
 | remotive | Remotive remote jobs feed | json_api | public_feed | https://remotive.com/ | yes | no | 2026-09-06 | 1440 |
 | searchapi_linkedin | LinkedIn jobs via SearchAPI (search + full job details) | json_api | official_api | https://www.searchapi.io/legal/terms | yes | no | 2026-11-07 | 1440 |
 | we_work_remotely | We Work Remotely RSS feed | rss | public_feed | https://weworkremotely.com/ | yes | no | 2026-09-06 | 60 |
+| workday | Workday employer career sites (CXS JSON) | ats | undocumented_public_endpoint | https://www.workday.com/en-us/legal.html | yes | no | 2026-11-08 | 1440 |
 
 ## Compliance notes
 
@@ -36,3 +37,4 @@ npm run docs:compliance
 - `remotive`: Remotive feed is delayed and may require link-back attribution; use canonical job URL for attribution.
 - `searchapi_linkedin`: LinkedIn postings retrieved through the SearchAPI LinkedIn Jobs and Job Details APIs; the LinkedIn job URL is stored for attribution. No LinkedIn session cookie is used.
 - `we_work_remotely`: Use the canonical posting URL from We Work Remotely; link back where possible.
+- `workday`: Public, unauthenticated but undocumented JSON (/wday/cxs/{tenant}/{site}) that powers each employer's own Workday careers site; no login, cookie or API key is used. Only tenants verified from the employer's careers page are configured in config/companies.yml. Tenant robots.txt files (checked 2026-11-08) do not disallow the CXS path. Requests are sequential with at least 1.1 s between calls, use the source plan's search terms and a Singapore location facet instead of enumerating every job, and are bounded per tenant and per run; 403/429 or a bot page fails the source run. Each posting keeps the employer's Workday job URL for attribution.

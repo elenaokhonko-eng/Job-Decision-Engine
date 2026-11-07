@@ -150,6 +150,13 @@ export abstract class BaseSourceAdapter {
     return result.data;
   }
 
+  /** Quarantine a candidate that failed a check other than schema validation (e.g. job identity). */
+  protected quarantineCandidate(rawPayload: unknown, sourceRef: string, error: string): null {
+    this.quarantinedCandidates.push({ identity: sourceRef, rawPayload, error });
+    console.warn(`[${this.sourceName}] Item quarantined (${sourceRef}): ${error}`);
+    return null;
+  }
+
   /** Helper to build a consistent error result */
   protected errorResult(error: string, opts?: { isRateLimited?: boolean }): AdapterResult {
     return {

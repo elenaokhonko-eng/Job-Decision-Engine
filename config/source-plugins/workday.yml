@@ -1,0 +1,64 @@
+schema_version: "2.3.0"
+source_key: workday
+display_name: Workday employer career sites (CXS JSON)
+kind: ats
+status: active
+capabilities:
+  discovery: true
+  pagination: true
+  incremental: false
+  location_filter: true
+  work_mode_evidence: true
+compliance:
+  access_basis: undocumented_public_endpoint
+  terms_url: https://www.workday.com/en-us/legal.html
+  license: null
+  attribution_required: true
+  attribution_text: >-
+    Public, unauthenticated but undocumented JSON (/wday/cxs/{tenant}/{site}) that powers each employer's own
+    Workday careers site; no login, cookie or API key is used. Only tenants verified from the employer's careers
+    page are configured in config/companies.yml. Tenant robots.txt files (checked 2026-11-08) do not disallow the
+    CXS path. Requests are sequential with at least 1.1 s between calls, use the source plan's search terms and a
+    Singapore location facet instead of enumerating every job, and are bounded per tenant and per run; 403/429 or a
+    bot page fails the source run. Each posting keeps the employer's Workday job URL for attribution.
+  authenticated_scraping: false
+  reviewed_at: "2026-11-08"
+schedule:
+  enabled: true
+  interval_minutes: 1440
+  jitter_seconds: 180
+request:
+  # The host comes from each company's verified workday_host; this endpoint documents the path shape.
+  endpoint: https://myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 1
+    base_delay_ms: 1100
+    max_delay_ms: 30000
+  rate_limit:
+    requests_per_minute: 50
+    # Detail calls per tenant per run; search terms and pages are bounded in the adapter.
+    items_per_run: 8
+  pagination:
+    strategy: cursor
+    page_parameter: offset
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: externalPath
+  query:
+    keywords: []
+    locations: [Singapore]
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: []
+mapping:
+  external_id: $context.workday_tenant_site_external_path
+  title: $.jobPostingInfo.title
+  company: $context.company_name
+  description: $.jobPostingInfo.jobDescription
+  url: $.jobPostingInfo.externalUrl
+  location: $.jobPostingInfo.location
+  work_mode: $.jobPostingInfo.remoteType
+  employment_type: $.jobPostingInfo.timeType
+  posted_at: $.jobPostingInfo.startDate
+  updated_at: null

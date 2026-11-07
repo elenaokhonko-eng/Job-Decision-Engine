@@ -81,7 +81,8 @@
                 "public_feed",
                 "user_supplied",
                 "manual_import",
-                "documented_permission"
+                "documented_permission",
+                "undocumented_public_endpoint"
               ]
             },
             "terms_url": {

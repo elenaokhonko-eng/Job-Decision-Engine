@@ -30,7 +30,8 @@
             "MANUAL_IMPORT",
             "MANUAL_STREAMLIT",
             "LINKEDIN",
-            "LINKEDIN_SAVED"
+            "LINKEDIN_SAVED",
+            "WORKDAY"
           ]
         },
         "source_id": {
