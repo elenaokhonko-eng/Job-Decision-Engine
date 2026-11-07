@@ -7,6 +7,8 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { isNoVacancyFunnelBroken, parseEmails, type ParseEmailsDependencies } from "../../../scripts/parse_emails.js";
 import {
+  CAREER_SITE_NAVIGATION_LINKS,
+  careerSiteAlertRaw,
   digestAlertRaw,
   digestVacancyUrl,
   LINKEDIN_NON_JOB_LINKS_PER_DIGEST,
@@ -414,6 +416,37 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     expect(alert.rows[0]?.last_error).toContain("16 link(s) seen, 0 job card(s), 16 non-job skipped");
     expect(alert.rows[0]?.last_error).not.toContain("linkedin.com");
     expect((await stagingState()).observations).toBe(0);
+  });
+
+  it("stages employer career-site postings with an empty employer, never a placeholder, and no navigation", async () => {
+    await seedDigests(2, 2, ({ digestIndex }) =>
+      careerSiteAlertRaw({ senderName: digestIndex === 0 ? "Synthetic Sender" : "Example Group Bank Careers" }));
+
+    const summary = await parseEmails({ limit: 20 }, { pool: stagingPool(), log: () => undefined, now: () => 0 });
+
+    expect(summary).toMatchObject({ parsedEmails: 2, extractedJobs: 4, failedEmails: 0 });
+    const { rows } = await db().query<{
+      source_url: string; company_name: string; processing_status: string; raw_payload: Record<string, unknown>;
+    }>(
+      `SELECT source_url, company_name, processing_status, raw_payload
+       FROM raw_job_observations WHERE workspace_id = $1 AND source_name = 'GMAIL_ALERT'
+       ORDER BY company_name, source_url`,
+      [workspaceId()],
+    );
+    expect(rows.map((row) => row.company_name)).toEqual(["", "", "Example Group Bank", "Example Group Bank"]);
+    expect(rows.every((row) => row.processing_status === "FETCH_PENDING")).toBe(true);
+    expect(rows.every((row) => !row.source_url.includes("refid") && !row.source_url.includes("eid="))).toBe(true);
+    for (const navigation of CAREER_SITE_NAVIGATION_LINKS) {
+      expect(rows.map((row) => row.source_url)).not.toContain(navigation);
+    }
+    expect(rows[0]?.raw_payload).toMatchObject({ company_name: "", source_content_status: "DISCOVERY_ONLY" });
+    expect(rows[0]?.raw_payload).not.toHaveProperty("discovered_company_source");
+    expect(rows[2]?.raw_payload).toMatchObject({
+      company_name: "Example Group Bank",
+      discovered_company_source: "EMAIL_SENDER",
+    });
+    expect(JSON.stringify(rows)).not.toContain("Unknown Company");
+    expect((await stagingState()).fetchTasks).toBe(4);
   });
 
   it("flags a broken funnel when most decoded alerts have no vacancy link", async () => {
