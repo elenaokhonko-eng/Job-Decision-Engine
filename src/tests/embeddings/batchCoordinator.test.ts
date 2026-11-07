@@ -271,4 +271,80 @@ describe('runEmbeddingBatch', () => {
     expect(primaryOnly.primary.failedInputIds.length).toBeGreaterThan(0);
     expect(spy.mock.calls.every((call) => call[1] === 'gemini')).toBe(true);
   });
+
+  it.each([
+    { concurrency: '3', expectedMaxInFlight: 3 },
+    { concurrency: '1', expectedMaxInFlight: 1 },
+  ])('bounds concurrent provider calls to EMBEDDING_PROVIDER_CONCURRENCY=$concurrency and keeps per-input outcomes', async ({ concurrency, expectedMaxInFlight }) => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const saved = process.env.EMBEDDING_PROVIDER_CONCURRENCY;
+    process.env.EMBEDDING_PROVIDER_CONCURRENCY = concurrency;
+    const inputs = Array.from({ length: 7 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-00000000000${index}`,
+      content_text: `text ${index}`,
+    }));
+    const query = vi.fn(async (sql: string, _params?: unknown[]) => {
+      if (sql.includes('FROM embedding_spaces')) {
+        return {
+          rows: [{
+            id: '11111111-1111-4111-8111-111111111111',
+            workspace_id: 'workspace-id-1',
+            provider: 'openai',
+            model: agent.MODEL_REGISTRY.EMBEDDING_FALLBACK_MODEL,
+            dimensions: 4,
+          }],
+        };
+      }
+      if (sql.includes('INSERT INTO embedding_batches') && sql.includes('RETURNING id')) {
+        return { rows: [{ id: '33333333-3333-4333-8333-333333333333' }] };
+      }
+      if (sql.includes('INSERT INTO model_route_invocations')) return { rows: [{ id: 'route-invocation-1' }] };
+      if (sql.includes('FROM embedding_inputs ei')) return { rows: inputs };
+      return { rows: [], rowCount: 1 };
+    });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const spy = vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel').mockImplementation(async (text: string) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      // One input fails at the provider; the others succeed independently.
+      if (text === 'text 4') throw new Error('provider rejected one input');
+      return [0.1, 0.2, 0.3, 0.4];
+    });
+
+    try {
+      const result = await runEmbeddingBatch(
+        '11111111-1111-4111-8111-111111111111',
+        `batch-key-concurrency-${concurrency}`,
+        'PRIMARY',
+        50,
+        undefined,
+        undefined,
+        undefined,
+        { query, release: vi.fn() } as any,
+        { context }
+      );
+
+      expect(maxInFlight).toBe(expectedMaxInFlight);
+      expect(spy.mock.calls.map((call) => call[0])).toEqual(inputs.map((input) => input.content_text));
+      expect(result).toMatchObject({ processed: 7, succeeded: 6, failed: 1 });
+      expect(result.failedInputIds).toEqual([inputs[4].id]);
+      const sql = query.mock.calls.map((call) => String(call[0]));
+      // Batch items are created with one statement, not one round trip per input.
+      expect(sql.filter((statement) => statement.includes('INSERT INTO embedding_batch_items'))).toHaveLength(1);
+      expect(sql.filter((statement) => statement.includes('INSERT INTO semantic_embeddings'))).toHaveLength(6);
+      expect(sql.filter((statement) => statement.includes('INSERT INTO model_route_invocations'))).toHaveLength(7);
+      // Outcomes are persisted in input order.
+      const itemUpdates = query.mock.calls
+        .filter((call) => String(call[0]).includes('UPDATE embedding_batch_items'))
+        .map((call) => (call[1] as unknown[])[2]);
+      expect(itemUpdates).toEqual(inputs.map((input) => input.id));
+    } finally {
+      if (saved === undefined) delete process.env.EMBEDDING_PROVIDER_CONCURRENCY;
+      else process.env.EMBEDDING_PROVIDER_CONCURRENCY = saved;
+    }
+  });
 });
