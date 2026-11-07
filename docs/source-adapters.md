@@ -34,6 +34,17 @@ A source may return a successful empty result. HTTP errors, timeouts, rate limit
 5. Wire it into `scripts/run_adapters.ts`.
 6. Add success, malformed, timeout, rate-limit, all-quarantined, and empty-result tests.
 
+## Saved jobs from Streamlit (LinkedIn and MyCareersFuture)
+
+The Streamlit **Saved jobs** tab runs the same imports as the commands below without a terminal. Each source has the numbered export steps, the current console script (read at runtime from `scripts/linkedin/export_saved_jobs.console.js` / `scripts/mcf/export_saved_jobs.console.js`, so it cannot drift), a file upload, **Validate (dry run)** and **Import**. Import stays disabled until a successful dry run of the same file (keyed on the file's SHA-256). Results show collected/valid/invalid/new/already-imported counts, a checklist, invalid items grouped by reason code with what to do, parked Gmail alerts the import unblocks, and a copyable block of counts and reason codes only. First time, try 3 to 5 saved jobs.
+
+Streamlit calls the authenticated API; it never touches the database:
+
+- `POST /api/v2/imports/linkedin-saved` and `POST /api/v2/imports/mcf-saved` (bearer token, workspace headers, writable role) with body `{ "items": [...the exported JSON array...], "dryRun": true|false }`. They call `importLinkedInSavedJobs` / `importMcfSavedJobs`; a dry run runs in a read-only transaction that is rolled back.
+- Response (`schema_version: saved_jobs_import_v1`): `mode`, `complete` (false when the CLI would exit 1), `totals`, `invalid` (`index`, `reason`), `duplicates_in_file`, and per-item `job_id`, `outcome`, `observation_id`, `description_quality` and Gmail matches. No titles, employers or descriptions are returned.
+- Limits: 500 items and 8 MB per request (413 `TOO_MANY_ITEMS` / `PAYLOAD_TOO_LARGE`); use the CLI for a larger file. A non-array, empty or malformed body is 400.
+- The retired `POST /api/v2/observations/linkedin` (which wrote `LINKEDIN` rows with a default location of Singapore) now returns **410 Gone** and writes nothing.
+
 ## LinkedIn Saved Jobs (manual browser export)
 
 Saved LinkedIn jobs are your own selections. They reach the pipeline only through a file you export yourself; the repository never signs in to LinkedIn, holds a LinkedIn cookie, drives a headless browser, or unsaves jobs. `scripts/sync_linkedin_saved.ts` (headless Puppeteer with a session cookie, unsaves before staging) and `scripts/ingest_linkedin_saved.ts` (writes the legacy `raw_jobs` table, which the pipeline no longer reads, and defaults the location to Singapore) are deprecated and must not be used.

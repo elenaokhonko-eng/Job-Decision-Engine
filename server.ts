@@ -30,11 +30,13 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // API v2 (authenticated, workspace-scoped). Mounted before the app-wide JSON
+  // parser: the v2 router parses its own bodies, and the saved-jobs import
+  // routes accept a larger body only after authentication.
+  app.use("/api/v2", createApiV2Router());
+
   // Enable JSON request parsing
   app.use(express.json());
-
-  // API v2 (authenticated, workspace-scoped)
-  app.use("/api/v2", createApiV2Router());
 
   const legacyApiGate = legacyApiGateMiddleware();
   const legacyApiAuth = apiAuthMiddleware();

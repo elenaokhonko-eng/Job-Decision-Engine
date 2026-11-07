@@ -40,6 +40,7 @@ import {
 import { RejectedJobRowSchema, ShortlistRowV2Schema } from "../../readModels/contracts.js";
 import { createManualApplicationRouter } from "./manualApplicationRouter.js";
 import { describeDatabaseFailure } from "./databaseFailure.js";
+import { createSavedJobsImportRouter } from "./savedJobsImportRouter.js";
 
 type QueryClient = {
   query: pg.PoolClient["query"];
@@ -165,7 +166,15 @@ export interface ApiV2RouterDeps {
 
 export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
   const router = express.Router();
-  router.use(express.json({ limit: "1mb" }));
+  // Saved-jobs imports parse their own larger body after authentication (savedJobsImportRouter.ts).
+  const defaultJsonParser = express.json({ limit: "1mb" });
+  router.use((req, res, next) => {
+    if (req.path.startsWith("/imports/")) {
+      next();
+      return;
+    }
+    defaultJsonParser(req, res, next);
+  });
 
   // Keep the pool strongly typed while the setup wizard is running before a
   // database URL exists. Database-backed routes are guarded by this flag.
@@ -239,6 +248,14 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
   router.use(
     "/application-drafts",
     createManualApplicationRouter({
+      pool: dynamicPool,
+      resolveContext: (req) => (req as any).workspaceContext as WorkspaceContext,
+    }),
+  );
+
+  router.use(
+    "/imports",
+    createSavedJobsImportRouter({
       pool: dynamicPool,
       resolveContext: (req) => (req as any).workspaceContext as WorkspaceContext,
     }),
@@ -625,90 +642,18 @@ export function createApiV2Router(deps: ApiV2RouterDeps = {}): express.Router {
     })
   );
 
-  router.post(
-    "/observations/linkedin",
-    asyncHandler(async (req, res) => {
-      const ctx = (req as any).workspaceContext as WorkspaceContext;
-      const jobs = Array.isArray(req.body?.jobs) ? req.body.jobs : Array.isArray(req.body) ? req.body : [];
-      if (!Array.isArray(jobs) || jobs.length === 0) {
-        res.status(400).json({ ok: false, error: "Body must be { jobs: [...] } (or an array of jobs)." });
-        return;
-      }
-
-      try {
-        const result = await withTransaction<{ inserted: number; skipped: number }>(pool, async (tx) => {
-          const runRes = await tx.query<{ id: string }>(
-            `INSERT INTO source_runs (workspace_id, status)
-             VALUES ($1, 'LINKEDIN_IMPORT')
-             RETURNING id`,
-            [ctx.workspaceId]
-          );
-          const sourceRunId = runRes.rows[0].id;
-
-          let inserted = 0;
-          let skipped = 0;
-
-          for (const job of jobs) {
-            const title = String(job?.title || "").trim();
-            const company = String(job?.company || "").trim();
-            const url = String(job?.url || "").trim();
-            const description = String(job?.description || "").trim();
-            const location = String(job?.location || "Singapore").trim();
-
-            if (!title || !company || !url || !description) {
-              skipped += 1;
-              continue;
-            }
-
-            const rawPayload = JSON.stringify(job);
-            const rawPayloadHash = sha256Hex(rawPayload);
-            const extId = `linkedin-${rawPayloadHash.slice(0, 16)}`;
-
-            const ins = await tx.query<{ id: string }>(
-              `
-                INSERT INTO raw_job_observations (
-                  workspace_id,
-                  source_run_id,
-                  source_name,
-                  source_external_id,
-                  source_url,
-                  retrieved_at,
-                  company_name,
-                  title,
-                  description_raw,
-                  location_raw,
-                  workplace_type_raw,
-                  employment_type_raw,
-                  compensation_raw,
-                  canonical_apply_url,
-                  source_lane,
-                  search_plan_version,
-                  raw_payload,
-                  raw_payload_hash
-                )
-                VALUES ($1, $2, 'LINKEDIN', $3, $4, NOW(), $5, $6, $7, $8, 'UNKNOWN', 'PERMANENT', 'UNKNOWN', $4, 'UNKNOWN', '1.0', $9::jsonb, $10)
-                ON CONFLICT (workspace_id, raw_payload_hash) DO NOTHING
-                RETURNING id
-              `,
-              [ctx.workspaceId, sourceRunId, extId, url, company, title, description, location, rawPayload, rawPayloadHash]
-            );
-
-            if (ins.rows.length > 0) {
-              inserted += 1;
-            } else {
-              skipped += 1;
-            }
-          }
-
-          return { inserted, skipped };
-        });
-
-        res.json({ ok: true, inserted: result.inserted, skipped: result.skipped });
-      } catch (err) {
-        throw err;
-      }
-    })
-  );
+  // Retired: this route hand-wrote LINKEDIN rows with a default location of
+  // Singapore. Saved LinkedIn jobs go through the canonical importer instead.
+  router.post("/observations/linkedin", (_req, res) => {
+    res.status(410).json({
+      ok: false,
+      error: "GONE",
+      message:
+        "POST /api/v2/observations/linkedin is retired and writes nothing. Use POST /api/v2/imports/linkedin-saved " +
+        "with { items: [...linkedin_saved_jobs.json...], dryRun: true|false }, or npm run import:linkedin-saved.",
+      replacement: "/api/v2/imports/linkedin-saved",
+    });
+  });
 
   router.get(
     "/analytics/companies",

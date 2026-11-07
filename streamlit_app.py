@@ -39,6 +39,7 @@ from streamlit_manual_application import (
     render_pipeline_review_action,
     render_selected_documents,
 )
+from streamlit_saved_jobs import render_saved_jobs_tab
 from streamlit_runtime import code_version, database_outage, ensure_hosted_api_ready, open_api_json
 
 
@@ -1506,17 +1507,6 @@ def python_generate_content(contents, system_instruction=None, response_mime_typ
             
     raise Exception("All configured models (OpenAI, Gemini) failed or no API keys are set.")
 
-def ingest_linkedin_saved_json(jobs):
-    try:
-        resp = api_request("POST", "/api/v2/observations/linkedin", body={"jobs": jobs}, timeout=120)
-        if not resp.get("ok"):
-            st.error(f"LinkedIn import failed (unexpected API response): {resp}")
-            return 0, 0
-        return int(resp.get("inserted") or 0), int(resp.get("skipped") or 0)
-    except Exception as e:
-        st.error(f"LinkedIn import failed: {e}")
-        return 0, 0
-
 def save_application_status(job, status, application=None):
     if not get_api_base_url():
         st.error("Application tracking changes require the managed API. Configure JDEC_API_BASE_URL and JDEC_API_TOKEN.")
@@ -1974,11 +1964,11 @@ if track_filter != "All Tracks":
         filtered_jobs = [j for j in filtered_jobs if j.get("primary_lane") == track_filter]
 
 # Main Dashboard Layout tabs
-tab_dashboard, tab_applications, tab_add_job, tab_linkedin, tab_analytics, tab_cv = st.tabs([
+tab_dashboard, tab_applications, tab_add_job, tab_saved_jobs, tab_analytics, tab_cv = st.tabs([
     "Application command centre",
     "Application tracker",
     "Add job",
-    "LinkedIn saved jobs",
+    "Saved jobs",
     "Company culture analytics",
     "CV customizer",
 ])
@@ -2625,233 +2615,8 @@ with tab_dashboard:
 
 with tab_add_job:
     render_manual_application_flow(api_request)
-with tab_linkedin:
-    st.subheader("🔗 Import Saved LinkedIn Jobs")
-    st.write("Sync your saved LinkedIn jobs and stage them in your Postgres database for evaluation. Auto-unsave is disabled to keep ingestion read-only.")
-    
-    col_auto, col_manual = st.columns(2)
-    
-    with col_auto:
-        st.markdown("### 🤖 Option A: Headless Auto-Sync")
-        st.warning("Auto-sync/unsave is disabled by policy to keep source ingestion non-destructive.")
-        st.caption("Use Option B (manual export and upload) for read-only ingestion.")
-
-    with col_manual:
-        st.markdown("### 📋 Option B: Manual Export & Upload")
-        st.write("If your cookie expires or you prefer manual control, run the browser console script below and upload the exported JSON file.")
-        script_code = r"""(async function extractSavedJobs() {
-  if (window._jobScraperRunning) {
-    alert("Job scraper is already running! Please wait for it to finish or refresh the page.");
-    return;
-  }
-  window._jobScraperRunning = true;
-
-  // Create visual overlay for progress
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);color:white;z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:sans-serif;font-size:18px;';
-  const statusText = document.createElement('div');
-  statusText.innerText = "🚀 Starting LinkedIn Saved Jobs extraction...";
-  const progressText = document.createElement('div');
-  progressText.style.marginTop = '10px';
-  progressText.style.fontSize = '24px';
-  progressText.style.fontWeight = 'bold';
-  overlay.appendChild(statusText);
-  overlay.appendChild(progressText);
-  document.body.appendChild(overlay);
-
-  try {
-    const uniqueJobs = [];
-    const processedUrls = new Set();
-    let pageNum = 1;
-    let hasNextPage = true;
-    
-    while (hasNextPage && pageNum <= 40) {
-      statusText.innerText = `📄 Scanning Page ${pageNum}...`;
-      
-      // Scroll to bottom to ensure elements render
-      window.scrollTo(0, document.body.scrollHeight);
-      await new Promise(r => setTimeout(r, 2000));
-      
-      // Find all job links on this page
-      const jobLinks = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
-      let pageCount = 0;
-      
-      for (const a of jobLinks) {
-        const title = (a.innerText || "").trim();
-        if (!title || title.length < 3) continue;
-        
-        let jobId = '';
-        const match = a.href.match(/\/jobs\/view\/(\d+)/);
-        if (match) jobId = match[1];
-        
-        if (jobId) {
-          const standardUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
-          
-          if (!processedUrls.has(standardUrl)) {
-            processedUrls.add(standardUrl);
-            
-            const container = a.closest('li') || a.closest('.entity-list-item') || a.closest('div');
-            let company = 'Unknown Company';
-            let location = 'Singapore';
-            
-            if (container) {
-              const companyEl = container.querySelector('.entity-list-item__subtitle, .reusable-search__result-subtitle, .job-card-container__company-name');
-              if (companyEl) company = companyEl.innerText.trim();
-              
-              const locationEl = container.querySelector('.entity-list-item__caption, .reusable-search__result-caption, .job-card-container__metadata-item');
-              if (locationEl) location = locationEl.innerText.trim();
-              
-              if (company === 'Unknown Company') {
-                const innerSpans = Array.from(container.querySelectorAll('span, div, p'));
-                for (const span of innerSpans) {
-                  const t = span.innerText.trim();
-                  if (t.includes('·') && !t.includes('\n')) {
-                    const parts = t.split('·');
-                    company = parts[0].trim();
-                    location = parts[1].trim();
-                    break;
-                  }
-                }
-              }
-            }
-            
-            uniqueJobs.push({ title, company, url: standardUrl, location });
-            pageCount++;
-          }
-        }
-      }
-      
-      progressText.innerText = `Found ${uniqueJobs.length} unique jobs so far.`;
-      
-      // Find Next button
-      const nextBtn = document.querySelector('.artdeco-pagination__button--next') || 
-                      Array.from(document.querySelectorAll('button, a')).find(el => {
-                        const text = el.innerText.trim().toLowerCase();
-                        return (text.includes('next') || el.ariaLabel?.toLowerCase().includes('next')) && !el.disabled && !el.classList.contains('disabled');
-                      });
-                      
-      if (nextBtn && !nextBtn.disabled && !nextBtn.classList.contains('artdeco-button--disabled')) {
-        statusText.innerText = `➡️ Moving to Next page...`;
-        nextBtn.click();
-        pageNum++;
-        await new Promise(r => setTimeout(r, 3000));
-      } else {
-        statusText.innerText = `🏁 No more pages found. Ending scan.`;
-        hasNextPage = false;
-      }
-    }
-    
-    if (uniqueJobs.length === 0) {
-      alert("⚠️ No saved jobs identified. Make sure you are on the 'Saved' tab of your Job Tracker.");
-      window._jobScraperRunning = false;
-      document.body.removeChild(overlay);
-      return;
-    }
-    
-    statusText.innerText = "🧠 Fetching job descriptions...";
-    const finalizedJobs = [];
-    
-    // Robust XHR wrapper to bypass broken extensions intercepting fetch
-    function robustGet(url) {
-      return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('GET', url);
-        xhr.setRequestHeader('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8');
-        xhr.withCredentials = true;
-        xhr.onload = () => resolve(xhr.responseText);
-        xhr.onerror = () => reject(new Error('XHR Error'));
-        xhr.send();
-      });
-    }
-    
-    // Sequential fetching to avoid rate limits
-    for (let i = 0; i < uniqueJobs.length; i++) {
-      const job = uniqueJobs[i];
-      progressText.innerText = `Fetching description ${i + 1} of ${uniqueJobs.length}...\n${job.title}`;
-      
-      try {
-        const html = await robustGet(job.url);
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-        const descEl = doc.querySelector('.jobs-description-content') || 
-                      doc.querySelector('.show-more-less-html__markup') || 
-                      doc.querySelector('[id^="job-details"]') || 
-                      doc.querySelector('.jobs-box__html-content') ||
-                      doc.querySelector('.jobs-description');
-        const description = descEl ? descEl.innerText.trim() : '';
-        
-        finalizedJobs.push({
-          title: job.title,
-          company: job.company,
-          url: job.url,
-          location: job.location,
-          description: description || "Full description not available. Please visit job link to apply."
-        });
-      } catch (err) {
-        console.error(`❌ Failed: ${job.title}`, err);
-        finalizedJobs.push({
-          title: job.title,
-          company: job.company,
-          url: job.url,
-          location: job.location,
-          description: "Failed to fetch description automatically."
-        });
-      }
-      
-      // Delay to avoid LinkedIn 429 rate limit or SDUI oops page
-      await new Promise(r => setTimeout(r, 2000));
-    }
-    
-    statusText.innerText = "🎉 All done! Downloading JSON...";
-    progressText.innerText = "";
-    
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(finalizedJobs, null, 2));
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", "linkedin_saved_jobs.json");
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
-    
-    await new Promise(r => setTimeout(r, 2000));
-  } catch (err) {
-    console.error("Critical error during extraction:", err);
-    alert("Extraction failed. See console for details.");
-  } finally {
-    window._jobScraperRunning = false;
-    document.body.removeChild(overlay);
-  }
-})();"""
-        st.code(script_code, language="javascript")
-        
-        uploaded_file = st.file_uploader("Upload your exported 'linkedin_saved_jobs.json' file", type=["json"])
-        
-        if uploaded_file is not None:
-            try:
-                jobs_data = json.load(uploaded_file)
-                if not isinstance(jobs_data, list):
-                    st.error("Invalid file structure. Root must be a JSON array.")
-                else:
-                    st.success(f"Successfully parsed JSON. Found **{len(jobs_data)}** jobs in file.")
-                    
-                    # Show preview
-                    st.markdown("#### **Jobs Preview**")
-                    preview_df = pd.DataFrame([
-                        {"Title": j.get("title"), "Company": j.get("company"), "Location": j.get("location"), "URL": j.get("url")}
-                        for j in jobs_data[:10]
-                    ])
-                    st.dataframe(preview_df, width="stretch")
-                    if len(jobs_data) > 10:
-                        st.write(f"*... and {len(jobs_data) - 10} more jobs.*")
-                    
-                    # Ingest button
-                    if st.button("📥 Import All Saved Jobs to Staging Vault"):
-                        with st.spinner("Inserting jobs into staging table..."):
-                            inserted, skipped = ingest_linkedin_saved_json(jobs_data)
-                            st.success(f"✅ Ingestion complete! **{inserted}** new jobs imported, **{skipped}** skipped as duplicates/invalid.")
-                            st.rerun()
-            except Exception as e:
-                st.error(f"Error reading JSON file: {e}")
+with tab_saved_jobs:
+    render_saved_jobs_tab(api_request, api_configured=bool(get_api_base_url()))
 
 with tab_applications:
     st.subheader("Application tracker")
