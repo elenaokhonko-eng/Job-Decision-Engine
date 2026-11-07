@@ -23,12 +23,14 @@ interface ModelIdSetting {
   provider: ModelIdProvider;
   envChain: readonly string[];
   defaultId: string;
+  /** Embedding models are verified differently on Vertex (see checkVertexModelIds). */
+  kind?: "embedding";
 }
 
 const MODEL_ID_SETTINGS: readonly ModelIdSetting[] = [
   { provider: "gemini", envChain: ["EVALUATION_PRIMARY_MODEL", "GEMINI_MODEL"], defaultId: "gemini-3.6-flash" },
   { provider: "openai", envChain: ["EVALUATION_FALLBACK_MODEL", "OPENAI_MODEL"], defaultId: "gpt-4o-mini" },
-  { provider: "gemini", envChain: ["EMBEDDING_PRIMARY_MODEL"], defaultId: "gemini-embedding-001" },
+  { provider: "gemini", envChain: ["EMBEDDING_PRIMARY_MODEL"], defaultId: "gemini-embedding-001", kind: "embedding" },
   { provider: "openai", envChain: ["EMBEDDING_FALLBACK_MODEL"], defaultId: "text-embedding-3-small" },
   { provider: "gemini", envChain: ["DOCUMENT_PRIMARY_MODEL"], defaultId: "gemini-3.8-flash" },
   { provider: "openai", envChain: ["DOCUMENT_FALLBACK_MODEL", "OPENAI_MODEL"], defaultId: "gpt-4o-mini" },
@@ -45,6 +47,8 @@ export interface ConfiguredModelId {
   id: string;
   /** Env var names that set this id, or "(default)" when it is the code default. */
   sources: string[];
+  /** Set when any setting using this id is an embedding model. */
+  kind?: "embedding";
 }
 
 /** Every distinct configured model id per provider, with the env vars (or default) that set it. */
@@ -57,9 +61,10 @@ export function configuredModelIds(env: NodeJS.ProcessEnv = process.env): Config
     const key = `${setting.provider}\u0000${id}`;
     const existing = byKey.get(key);
     if (!existing) {
-      byKey.set(key, { provider: setting.provider, id, sources: [source] });
-    } else if (!existing.sources.includes(source)) {
-      existing.sources.push(source);
+      byKey.set(key, { provider: setting.provider, id, sources: [source], ...(setting.kind ? { kind: setting.kind } : {}) });
+    } else {
+      if (!existing.sources.includes(source)) existing.sources.push(source);
+      if (setting.kind) existing.kind = setting.kind;
     }
   }
   return [...byKey.values()];
@@ -82,7 +87,10 @@ export interface ModelIdPreflightResult {
 
 /** The part of the @google/genai client the Vertex check uses (injected in tests). */
 export interface VertexModelLookup {
-  models: { get(params: { model: string }): Promise<unknown> };
+  models: {
+    get(params: { model: string }): Promise<unknown>;
+    embedContent(params: { model: string; contents: string; config?: { outputDimensionality?: number } }): Promise<unknown>;
+  };
 }
 
 export interface ModelIdPreflightOptions {
@@ -123,6 +131,9 @@ function errorStatus(error: unknown): number | null {
 /**
  * Vertex mode: models.get for each configured Gemini id at the configured location. A 404 means
  * the id is not available there; any other failure stops the check with a warning.
+ * Embedding models are probed with one tiny embedContent call instead: on the global endpoint
+ * models.get and countTokens both return 404 for gemini-embedding-001 although embedContent
+ * serves it (verified 2026-11-07), so models.get would report a false "not available".
  */
 async function checkVertexModelIds(
   env: NodeJS.ProcessEnv,
@@ -142,7 +153,11 @@ async function checkVertexModelIds(
   for (const entry of configured) {
     if (entry.provider !== "gemini") continue;
     try {
-      await client.models.get({ model: entry.id });
+      if (entry.kind === "embedding") {
+        await client.models.embedContent({ model: entry.id, contents: "model availability check", config: { outputDimensionality: 8 } });
+      } else {
+        await client.models.get({ model: entry.id });
+      }
     } catch (error) {
       if (errorStatus(error) === 404) {
         result.unknown.push({ ...entry, message: unknownVertexModelIdMessage(entry, config.location) });
