@@ -30,6 +30,8 @@ const SourcePluginComplianceSchema = z.object({
     "user_supplied",
     "manual_import",
     "documented_permission",
+    // Public, unauthenticated JSON that powers a site's own pages but is not a documented API.
+    "undocumented_public_endpoint",
   ]),
   terms_url: z.string().url(),
   license: z.string().nullable().optional(),

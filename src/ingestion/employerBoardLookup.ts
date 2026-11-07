@@ -58,6 +58,8 @@ const DEFAULT_MAX_REQUESTS = 20;
 const LEVER_PAGE_SIZE = 50;
 const DEFAULT_LEVER_MAX_PAGES = 6;
 const BOARD_TOKEN_PATTERN = /^[a-z0-9][a-z0-9_-]{0,79}$/i;
+/** Registry slugs may also contain dots (Ashby `mistral.ai`); guessed slugs never do. */
+const KNOWN_BOARD_TOKEN_PATTERN = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 
 export interface KnownEmployerBoard {
   readonly companyName: string;
@@ -316,7 +318,7 @@ export function loadKnownEmployerBoards(filePath = path.resolve(process.cwd(), "
     const token = typeof company.board_slug === "string" ? company.board_slug.trim() : "";
     const name = typeof company.name === "string" ? company.name.trim() : "";
     if (!provider || !token || !name) continue;
-    if (!BOARD_TOKEN_PATTERN.test(token)) throw new Error(`Company ${name} has an invalid board_slug.`);
+    if (!KNOWN_BOARD_TOKEN_PATTERN.test(token)) throw new Error(`Company ${name} has an invalid board_slug.`);
     boards.push({ companyName: name, provider, boardToken: token });
   }
   return boards;

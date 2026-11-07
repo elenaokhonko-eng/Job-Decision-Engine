@@ -14,12 +14,21 @@ npm run sources:sync
 
 `config/source-plugins/*.yml` is the runtime source manifest. Sync it with `npm run sources:sync`; the active revision in PostgreSQL is what the source runner uses. `config/sources.yml` is retained only as a legacy config-registry import and is not read by the live adapter runner.
 
-- Greenhouse, Ashby, Lever: employer ATS boards.
+- Greenhouse, Ashby, Lever, Workable, SmartRecruiters: employer ATS boards. Workable reads the public careers widget (one request per board, full snapshot paged locally). SmartRecruiters reads the documented Posting API: one list page of `items_per_run` (max 100) per company per run, then one sequential detail request per listed posting (1 s apart) for the job-ad sections; an unknown company identifier (HTTP 200, `totalFound: 0`) and any list or detail failure fail the source run without advancing the checkpoint.
+- Workday: employer career sites (UOB, GSK, Citi, ...) through the public CXS JSON that powers each site; see below.
 - Himalayas: public remote job API.
 - Jobicy: public remote job API; attribution retained.
 - Remotive: public remote job API; link-back attribution and 24-hour feed delay recorded.
 - We Work Remotely: attributed RSS feed.
 - Gmail: alerts from sources without supported public APIs.
+
+## Discovery-Scope Location Pre-Filter (employer ATS boards)
+
+`config/source-plans/six_lane_sources.yml` `location_scope` narrows what the runner stages from the ATS sources it lists (Greenhouse, Lever, Ashby, Workable, SmartRecruiters). It runs in `processSourcePage` beside the lane/target-function pre-filter, using `src/ingestion/discoveryLocationScope.ts`. Authorized regions come from `config/policies/workability.yml` (`territory.authorized_regions`); the filter is inactive when that policy does not reject explicit foreign territory.
+
+- Kept: the location (or title) mentions an authorized region or regional term (Singapore, APAC, Asia-Pacific, Southeast Asia, Asia); any location segment is remote without naming a territory ("Remote", "Remote - Worldwide"); the posting is flagged remote and its location does not restrict the remote territory; the location is empty or unknown (the hard gates then decide, usually `NEEDS_VERIFICATION`). A multi-location posting is kept if any location qualifies.
+- Skipped: the location names only other places, or restricts remote work to them ("Remote - US", "Remote, Canada only").
+- A skipped posting creates no observation. Each lane records a `FILTERED` candidate disposition with reason `LOCATION_OUT_OF_SCOPE`, it counts toward the plan run's `items_filtered`, and the run summary prints skips by reason. This is discovery scope, not a career rejection; hard gates are unchanged. Workspace work-authorization overrides do not widen this discovery scope.
 
 ## Failure Semantics
 
@@ -33,6 +42,30 @@ A source may return a successful empty result. HTTP errors, timeouts, rate limit
 4. Add or update the source plugin manifest under `config/source-plugins/`.
 5. Wire it into `scripts/run_adapters.ts`.
 6. Add success, malformed, timeout, rate-limit, all-quarantined, and empty-result tests.
+
+## Workday Career Sites
+
+`src/ingestion/adapters/workdayAdapter.ts` reads the unauthenticated JSON behind every Workday career site:
+
+- Search: `POST https://{tenant}.wd{N}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs` with `{"appliedFacets":{...},"limit":20,"offset":0,"searchText":"..."}`. `limit` above 20 returns no rows, and `total` is reliable only on the first page.
+- Detail: `GET https://{tenant}.wd{N}.myworkdayjobs.com/wday/cxs/{tenant}/{site}{externalPath}` returns `jobPostingInfo` and `hiringOrganization`.
+
+Each employer is a `config/companies.yml` entry with `ats_provider: workday`, `workday_host`, `workday_tenant` and `workday_site` (validated in `scripts/run_adapters.ts`). Only add a tenant after verifying it: find the `myworkdayjobs.com` link on the employer's careers page (or probe with a few spaced, read-only requests) and check that the returned jobs' `hiringOrganization` or titles belong to that employer. Do not guess tenants into config.
+
+Per run and tenant the adapter makes one facet-discovery search (`limit` 1) to find the tenant's Singapore location facet, then searches up to 2 terms (the lanes' `role_terms` plus `target_functions`, sorted) for up to 2 pages each, and fetches up to `items_per_run` (8) details in Workday's relevance order. The `wd:v1:<term>:<position>` checkpoint resumes the next run where this one stopped, so a full cycle over all terms takes several daily runs. Requests are sequential with at least 1.1 s between them; all tenants share a 240 s budget and start from a tenant that rotates daily. Expect roughly 4-11 requests per tenant per run.
+
+403/429, a redirect, an HTML (bot) page, malformed JSON or another HTTP error fails that tenant's source run; postings fetched before the failure are still staged, but the checkpoint does not advance. A 404/410 detail (posting withdrawn since the search) is counted as gone. Workday postings are `WORKDAY` observations and, like Greenhouse/Lever/Ashby, establish retrieval from the employer's own ATS.
+
+## Saved jobs from Streamlit (LinkedIn and MyCareersFuture)
+
+The Streamlit **Saved jobs** tab runs the same imports as the commands below without a terminal. Each source has the numbered export steps, the current console script (read at runtime from `scripts/linkedin/export_saved_jobs.console.js` / `scripts/mcf/export_saved_jobs.console.js`, so it cannot drift), a file upload, **Validate (dry run)** and **Import**. Import stays disabled until a successful dry run of the same file (keyed on the file's SHA-256). Results show collected/valid/invalid/new/already-imported counts, a checklist, invalid items grouped by reason code with what to do, parked Gmail alerts the import unblocks, and a copyable block of counts and reason codes only. First time, try 3 to 5 saved jobs.
+
+Streamlit calls the authenticated API; it never touches the database:
+
+- `POST /api/v2/imports/linkedin-saved` and `POST /api/v2/imports/mcf-saved` (bearer token, workspace headers, writable role) with body `{ "items": [...the exported JSON array...], "dryRun": true|false }`. They call `importLinkedInSavedJobs` / `importMcfSavedJobs`; a dry run runs in a read-only transaction that is rolled back.
+- Response (`schema_version: saved_jobs_import_v1`): `mode`, `complete` (false when the CLI would exit 1), `totals`, `invalid` (`index`, `reason`), `duplicates_in_file`, and per-item `job_id`, `outcome`, `observation_id`, `description_quality` and Gmail matches. No titles, employers or descriptions are returned.
+- Limits: 500 items and 8 MB per request (413 `TOO_MANY_ITEMS` / `PAYLOAD_TOO_LARGE`); use the CLI for a larger file. A non-array, empty or malformed body is 400.
+- The retired `POST /api/v2/observations/linkedin` (which wrote `LINKEDIN` rows with a default location of Singapore) now returns **410 Gone** and writes nothing.
 
 ## LinkedIn Saved Jobs (manual browser export)
 
