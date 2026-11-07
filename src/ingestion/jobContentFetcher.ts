@@ -26,12 +26,19 @@ export type ContentBlockReason =
   | "BOT_BLOCKED"
   | "UNSUPPORTED_SOURCE"
   | "MISSING_POSTING_URL"
-  | "UNSAFE_REDIRECT";
+  | "UNSAFE_REDIRECT"
+  // The LinkedIn posting could not be read and the employer's public ATS board lookup did not
+  // produce exactly one posting (see employerBoardLookup.ts). The job stays recoverable.
+  | "EMPLOYER_BOARD_NOT_FOUND"
+  | "EMPLOYER_BOARD_NO_MATCH"
+  | "EMPLOYER_BOARD_AMBIGUOUS";
 
 export interface ExpectedPostingIdentity {
   readonly title: string;
   readonly companyName: string;
   readonly requisitionId?: string | null;
+  /** Discovery-card location, used only to disambiguate employer-board lookups. */
+  readonly location?: string | null;
 }
 
 export interface VerifiedPosting {
@@ -77,15 +84,42 @@ export type JobContentResult =
       readonly provider: ResolvedPostingSource;
       readonly evidence: PostingSourceEvidence;
       readonly contentHash: string;
+      /** Present when the content came from the employer's ATS board instead of the LinkedIn page. */
+      readonly employerBoardLookup?: EmployerBoardLookupProvenance;
     }
   | { readonly kind: "RETRYABLE_FAILURE"; readonly reason: string; readonly retryAfter?: string }
-  | { readonly kind: "BLOCKED"; readonly reason: ContentBlockReason }
+  | { readonly kind: "BLOCKED"; readonly reason: ContentBlockReason; readonly detail?: string }
   | { readonly kind: "IDENTITY_CONFLICT"; readonly reason: string }
   | {
       readonly kind: "UNAVAILABLE";
       readonly reason: string;
       readonly evidence: PostingSourceEvidence;
     };
+
+export interface EmployerBoardLookupProvenance {
+  readonly linkedInJobId: string;
+  readonly provider: "GREENHOUSE" | "LEVER" | "ASHBY";
+  readonly boardToken: string;
+  readonly employerKey: string;
+  readonly resolutionMethod: "CONFIG" | "DERIVED_SLUG";
+  readonly resolutionCached: boolean;
+}
+
+export interface EmployerBoardFallbackInput {
+  readonly requestedUrl: string;
+  readonly linkedInJobId: string;
+  readonly expected: ExpectedPostingIdentity;
+  readonly now: Date;
+}
+
+/**
+ * Looks up a LinkedIn-discovered job on the employer's own public ATS board. Receives the
+ * fetcher's dependencies so injected transports (tests) apply to the lookup requests too.
+ */
+export type EmployerBoardFallback = (
+  input: EmployerBoardFallbackInput,
+  dependencies: PostingFetcherDependencies,
+) => Promise<JobContentResult>;
 
 export interface SafeHttpResponse {
   readonly status: number;
@@ -100,7 +134,13 @@ export interface PublicAddress {
 }
 
 export interface PostingFetcherDependencies {
-  readonly fetchOnce?: (url: URL, timeoutMs: number, addresses: PublicAddress[], signal: AbortSignal) => Promise<SafeHttpResponse>;
+  readonly fetchOnce?: (
+    url: URL,
+    timeoutMs: number,
+    addresses: PublicAddress[],
+    signal: AbortSignal,
+    maxBytes?: number,
+  ) => Promise<SafeHttpResponse>;
   readonly resolveAddresses?: (hostname: string, signal: AbortSignal) => Promise<PublicAddress[]>;
   readonly now?: () => Date;
   /** Test-only shortening hook. Callers cannot extend the production ceiling. */
@@ -110,6 +150,11 @@ export interface PostingFetcherDependencies {
    * dependency LinkedIn URLs keep the generic fetch path and its blocked outcome.
    */
   readonly linkedInJobDetails?: (jobId: string) => Promise<SearchApiCallResult<LinkedInJobDetail>>;
+  /**
+   * Free fallback for LinkedIn URLs when SearchAPI is not configured: when the LinkedIn page is
+   * blocked or temporarily unavailable, find the same job on the employer's public ATS board.
+   */
+  readonly employerBoardFallback?: EmployerBoardFallback;
 }
 
 export class UnsafePostingUrlError extends Error {
@@ -119,11 +164,11 @@ export class UnsafePostingUrlError extends Error {
   }
 }
 
-function normalizeIdentity(value: string): string {
+export function normalizeIdentity(value: string): string {
   return value.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
 }
 
-function companyMatches(expected: string, actual: string, hostname: string): boolean {
+export function companyMatches(expected: string, actual: string, hostname: string): boolean {
   const expectedKey = normalizeIdentity(expected);
   const actualKey = normalizeIdentity(actual);
   if (!expectedKey || expectedKey === "unknown company" || expectedKey === "unknown") return Boolean(actualKey);
@@ -133,7 +178,7 @@ function companyMatches(expected: string, actual: string, hostname: string): boo
   return expectedTokens.length > 0 && expectedTokens.every((token) => actualHaystack.includes(token));
 }
 
-function titleMatches(expected: string, actual: string): boolean {
+export function titleMatches(expected: string, actual: string): boolean {
   return normalizeIdentity(expected) !== "" && normalizeIdentity(expected) === normalizeIdentity(actual);
 }
 
@@ -332,7 +377,19 @@ function retryAfter(headers: Readonly<Record<string, string>>, now: Date): strin
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined;
 }
 
-async function requestOnce(url: URL, timeoutMs: number, resolved: PublicAddress[], signal: AbortSignal): Promise<SafeHttpResponse> {
+function bodyLimitMessage(maxBytes: number): string {
+  return maxBytes === MAX_RESPONSE_BYTES
+    ? "Posting response exceeds the 3 MiB decoded-body limit."
+    : `Posting response exceeds the ${maxBytes}-byte decoded-body limit.`;
+}
+
+async function requestOnce(
+  url: URL,
+  timeoutMs: number,
+  resolved: PublicAddress[],
+  signal: AbortSignal,
+  maxBytes: number = MAX_RESPONSE_BYTES,
+): Promise<SafeHttpResponse> {
   if (resolved.length === 0 || resolved.some((item) => !isPublicAddress(item.address, item.family))) {
     throw new UnsafePostingUrlError("Posting host did not resolve exclusively to public addresses.");
   }
@@ -377,9 +434,9 @@ async function requestOnce(url: URL, timeoutMs: number, resolved: PublicAddress[
         else if (Array.isArray(value)) headers[key] = value.join(", ");
       }
       const lengthValue = header(headers, "content-length");
-      if (lengthValue && Number(lengthValue) > MAX_RESPONSE_BYTES) {
+      if (lengthValue && Number(lengthValue) > maxBytes) {
         response.destroy();
-        reject(new Error("Posting response exceeds the 3 MiB decoded-body limit."));
+        reject(new Error(bodyLimitMessage(maxBytes)));
         return;
       }
       const chunks: Buffer[] = [];
@@ -387,8 +444,8 @@ async function requestOnce(url: URL, timeoutMs: number, resolved: PublicAddress[
       response.on("data", (chunk: Buffer | string) => {
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         total += bytes.byteLength;
-        if (total > MAX_RESPONSE_BYTES) {
-          response.destroy(new Error("Posting response exceeds the 3 MiB decoded-body limit."));
+        if (total > maxBytes) {
+          response.destroy(new Error(bodyLimitMessage(maxBytes)));
           return;
         }
         chunks.push(bytes);
@@ -404,10 +461,16 @@ async function requestOnce(url: URL, timeoutMs: number, resolved: PublicAddress[
   });
 }
 
-async function fetchSafe(
+/**
+ * Fetches a public HTTP(S) URL with the posting fetcher's SSRF, redirect, timeout and size
+ * protections. `maxBytes` is raised only for known public ATS JSON APIs whose board listings
+ * exceed the default 3 MiB posting limit.
+ */
+export async function fetchSafe(
   input: string,
   dependencies: PostingFetcherDependencies,
   now: Date,
+  maxBytes: number = MAX_RESPONSE_BYTES,
 ): Promise<{ response: SafeHttpResponse; redirects: string[] }> {
   const resolver = dependencies.resolveAddresses ?? resolvePublicAddresses;
   const fetchOnce = dependencies.fetchOnce ?? requestOnce;
@@ -434,8 +497,11 @@ async function fetchSafe(
       }
       const requestRemainingMs = Math.min(DEFAULT_REQUEST_TIMEOUT_MS, deadline - Date.now());
       if (requestRemainingMs <= 0) throw new Error("Posting fetch exceeded its total request time limit.");
-      const response = await awaitWithAbort(fetchOnce(current, requestRemainingMs, addresses, controller.signal), controller.signal);
-      if (response.body.byteLength > MAX_RESPONSE_BYTES) throw new Error("Posting response exceeds the 3 MiB decoded-body limit.");
+      const response = await awaitWithAbort(
+        fetchOnce(current, requestRemainingMs, addresses, controller.signal, maxBytes),
+        controller.signal,
+      );
+      if (response.body.byteLength > maxBytes) throw new Error(bodyLimitMessage(maxBytes));
       if (![301, 302, 303, 307, 308].includes(response.status)) {
         return { response, redirects };
       }
@@ -459,7 +525,7 @@ function record(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function parseBoundedJson(value: string): unknown {
+export function parseBoundedJson(value: string): unknown {
   const parsed: unknown = JSON.parse(value);
   const pending: Array<{ value: unknown; depth: number }> = [{ value: parsed, depth: 0 }];
   let visited = 0;
@@ -703,7 +769,7 @@ function contentHash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function postingEvidence(
+export function postingEvidence(
   requestedUrl: string,
   response: SafeHttpResponse,
   redirects: string[],
@@ -720,7 +786,7 @@ function postingEvidence(
   };
 }
 
-function makeCompleteResult(
+export function makeCompleteResult(
   posting: VerifiedPosting,
   provider: ResolvedPostingSource,
   evidence: PostingSourceEvidence,
@@ -749,7 +815,7 @@ function makeCompleteResult(
   };
 }
 
-function parseLeverPosting(
+export function parseLeverPosting(
   payload: Record<string, unknown>,
   sourceUrl: URL,
   expected: ExpectedPostingIdentity,
@@ -813,7 +879,7 @@ function parseLeverPosting(
   return makeCompleteResult(posting, provider, evidence);
 }
 
-interface AtsPostingAddress {
+export interface AtsPostingAddress {
   readonly key: "ASHBY" | "GREENHOUSE";
   readonly boardToken: string;
   readonly requisitionId: string;
@@ -892,7 +958,7 @@ function htmlOrText(value: unknown): string {
   return /<\/?[a-z][\s\S]*>/i.test(value) ? htmlToPlainText(value) : value.trim();
 }
 
-function parseAshbyPosting(
+export function parseAshbyPosting(
   payload: unknown,
   address: AtsPostingAddress,
   sourceUrl: URL,
@@ -949,7 +1015,7 @@ function parseAshbyPosting(
   }, evidence);
 }
 
-function parseGreenhousePosting(
+export function parseGreenhousePosting(
   payload: unknown,
   address: AtsPostingAddress,
   sourceUrl: URL,
@@ -959,7 +1025,7 @@ function parseGreenhousePosting(
   const item = record(payload);
   const id = item?.id === null || item?.id === undefined ? null : String(item.id);
   const title = stringValue(item?.title) ?? "";
-  const companyName = stringValue(item?.company) ?? address.boardToken;
+  const companyName = stringValue(item?.company) ?? stringValue(item?.company_name) ?? address.boardToken;
   if (!item || !id || id !== address.requisitionId || !titleMatches(expected.title, title)
       || !companyMatches(expected.companyName, companyName, address.boardToken)) {
     return { kind: "IDENTITY_CONFLICT", reason: "Greenhouse requisition ID, title, or employer did not match the discovered posting." };
@@ -1124,7 +1190,7 @@ function parseEmployerHtml(
   }, evidence);
 }
 
-function failureForStatus(response: SafeHttpResponse, evidence: PostingSourceEvidence, now: Date): JobContentResult | null {
+export function failureForStatus(response: SafeHttpResponse, evidence: PostingSourceEvidence, now: Date): JobContentResult | null {
   if (response.status === 401) return { kind: "BLOCKED", reason: "AUTH_REQUIRED" };
   if (response.status === 403) {
     const body = response.body.toString("utf8");
@@ -1233,6 +1299,53 @@ export async function fetchJobContent(
   requestedUrl: string | null | undefined,
   expected: ExpectedPostingIdentity,
   dependencies: PostingFetcherDependencies = {},
+): Promise<JobContentResult> {
+  const direct = await fetchJobContentDirect(requestedUrl, expected, dependencies);
+  return withEmployerBoardFallback(direct, requestedUrl, expected, dependencies);
+}
+
+/**
+ * LinkedIn shows job pages only to signed-in browsers, so from CI the direct fetch ends
+ * BLOCKED (or a transient failure). Without SearchAPI, the employer's public ATS board is
+ * tried for the same job. A lookup that finds nothing reports its own specific BLOCKED
+ * reason; a lookup that fails operationally stays retryable. Identity conflicts and removed
+ * postings from the direct fetch are kept as they are.
+ */
+async function withEmployerBoardFallback(
+  direct: JobContentResult,
+  requestedUrl: string | null | undefined,
+  expected: ExpectedPostingIdentity,
+  dependencies: PostingFetcherDependencies,
+): Promise<JobContentResult> {
+  if (!dependencies.employerBoardFallback || dependencies.linkedInJobDetails || !requestedUrl) return direct;
+  if (direct.kind !== "BLOCKED" && direct.kind !== "RETRYABLE_FAILURE") return direct;
+  let decodedUrl: string | null;
+  try {
+    decodedUrl = parseHttpUrl(decodeTrackingWrapper(requestedUrl)).toString();
+  } catch {
+    decodedUrl = null;
+  }
+  const linkedInJobId = linkedInJobIdFromUrl(decodedUrl);
+  if (!linkedInJobId) return direct;
+  const fallback = await dependencies.employerBoardFallback({
+    requestedUrl,
+    linkedInJobId,
+    expected,
+    now: dependencies.now?.() ?? new Date(),
+  }, dependencies);
+  if (fallback.kind !== "BLOCKED") return fallback;
+  const linkedInOutcome = direct.kind === "BLOCKED" ? direct.reason : `retryable (${direct.reason})`;
+  return {
+    kind: "BLOCKED",
+    reason: fallback.reason,
+    detail: [fallback.detail, `LinkedIn page: ${linkedInOutcome}`].filter(Boolean).join("; "),
+  };
+}
+
+async function fetchJobContentDirect(
+  requestedUrl: string | null | undefined,
+  expected: ExpectedPostingIdentity,
+  dependencies: PostingFetcherDependencies,
 ): Promise<JobContentResult> {
   if (!requestedUrl || !requestedUrl.trim()) return { kind: "BLOCKED", reason: "MISSING_POSTING_URL" };
 
