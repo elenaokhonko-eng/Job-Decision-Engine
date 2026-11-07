@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
-import { parseEmails, type ParseEmailsDependencies } from "../../../scripts/parse_emails.js";
+import { isNoVacancyFunnelBroken, parseEmails, type ParseEmailsDependencies } from "../../../scripts/parse_emails.js";
 import {
   digestAlertRaw,
   digestVacancyUrl,
@@ -133,6 +133,8 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
       parsedEmails: 5,
       extractedJobs: 15,
       failedEmails: 0,
+      noVacancyEmails: 0,
+      noVacancyFunnelBroken: false,
       // Per 3-card digest: 26 links seen (anchors plus the generated text
       // alternative), 8 navigation/image links skipped, 15 repeats collapsed.
       linksSeen: 130,
@@ -153,9 +155,9 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     expect(progress[0]).toContain(
       "batch 1 alert 1 staged 3 vacancy link(s) [26 link(s) seen, 3 job card(s), 8 non-job skipped, 15 duplicate(s) collapsed]; totals",
     );
-    expect(progress[0]).toContain("totals: 1 parsed, 3 links, 0 failed");
+    expect(progress[0]).toContain("totals: 1 parsed, 3 links, 0 without vacancies, 0 failed");
     expect(progress[4]).toContain("batch 3 alert 5 staged 3 vacancy link(s)");
-    expect(progress[4]).toContain("totals: 5 parsed, 15 links, 0 failed");
+    expect(progress[4]).toContain("totals: 5 parsed, 15 links, 0 without vacancies, 0 failed");
     expect(lines.at(-1)).toContain("unprocessed alerts remaining: 0");
     // Progress lines carry counts only, never email content or vacancy URLs.
     expect(lines.join("\n")).not.toContain("careers.example.com");
@@ -226,6 +228,8 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
       parsedEmails: 2,
       extractedJobs: 6,
       failedEmails: 0,
+      noVacancyEmails: 0,
+      noVacancyFunnelBroken: false,
       linksSeen: 52,
       nonJobLinksSkipped: 16,
       duplicateLinksCollapsed: 30,
@@ -392,17 +396,15 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
       .toHaveLength(2);
   });
 
-  it("blocks a LinkedIn email that links only navigation, with counts but no URLs in the error", async () => {
-    const html = LINKEDIN_NON_JOB_LINKS_PER_DIGEST.map((url) => `<a href="${url.replaceAll("&", "&amp;")}">See jobs</a>`).join(" ");
-    const raw = Buffer.from(
-      ["MIME-Version: 1.0", 'Content-Type: text/html; charset="UTF-8"', "", html].join(String.fromCharCode(13, 10)),
-      "utf8",
-    ).toString("base64url");
-    const [alertId] = await seedDigests(1, 1, () => raw);
+  it("records a navigation-only email as SOURCE_BLOCKED without failing the run, with counts but no URLs in the error", async () => {
+    const [alertId] = await seedDigests(1, 1, () => navigationOnlyEmail());
 
     const summary = await parseEmails({ limit: 20 }, { pool: stagingPool(), log: () => undefined, now: () => 0 });
 
-    expect(summary).toMatchObject({ parsedEmails: 0, extractedJobs: 0, failedEmails: 1, nonJobLinksSkipped: 16, linksSeen: 16 });
+    expect(summary).toMatchObject({
+      parsedEmails: 0, extractedJobs: 0, failedEmails: 0, noVacancyEmails: 1, noVacancyFunnelBroken: false,
+      nonJobLinksSkipped: 16, linksSeen: 16,
+    });
     const alert = await db().query<{ processed: boolean; lifecycle_status: string; last_error: string }>(
       "SELECT processed, lifecycle_status, last_error FROM raw_email_alerts WHERE id = $1",
       [alertId],
@@ -412,5 +414,31 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     expect(alert.rows[0]?.last_error).toContain("16 link(s) seen, 0 job card(s), 16 non-job skipped");
     expect(alert.rows[0]?.last_error).not.toContain("linkedin.com");
     expect((await stagingState()).observations).toBe(0);
+  });
+
+  it("flags a broken funnel when most decoded alerts have no vacancy link", async () => {
+    await seedDigests(4, 2, (options) => options.digestIndex < 3 ? navigationOnlyEmail() : digestAlertRaw(options));
+
+    const summary = await parseEmails({ limit: 20 }, { pool: stagingPool(), log: () => undefined, now: () => 0 });
+
+    expect(summary).toMatchObject({ parsedEmails: 1, failedEmails: 0, noVacancyEmails: 3, noVacancyFunnelBroken: true });
+  });
+});
+
+function navigationOnlyEmail(): string {
+  const html = LINKEDIN_NON_JOB_LINKS_PER_DIGEST.map((url) => `<a href="${url.replaceAll("&", "&amp;")}">See jobs</a>`).join(" ");
+  return Buffer.from(
+    ["MIME-Version: 1.0", 'Content-Type: text/html; charset="UTF-8"', "", html].join(String.fromCharCode(13, 10)),
+    "utf8",
+  ).toString("base64url");
+}
+
+describe("isNoVacancyFunnelBroken", () => {
+  it("tolerates a few stray non-job emails but not a majority of empty alerts", () => {
+    expect(isNoVacancyFunnelBroken(116, 1)).toBe(false);
+    expect(isNoVacancyFunnelBroken(0, 2)).toBe(false);
+    expect(isNoVacancyFunnelBroken(3, 3)).toBe(false);
+    expect(isNoVacancyFunnelBroken(2, 3)).toBe(true);
+    expect(isNoVacancyFunnelBroken(0, 3)).toBe(true);
   });
 });
