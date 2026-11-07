@@ -4,8 +4,10 @@ import dotenv from "dotenv";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { SourceBroker } from "../ingestion/sourceBroker.js";
+import type { RawJobObservation } from "../ingestion/types.js";
 import { fetchJobContent as defaultFetchJobContent } from "../ingestion/jobContentFetcher.js";
 import { searchApiLinkedInDetailsFromEnv } from "../ingestion/searchApi/searchApiClient.js";
+import { findStoredLinkedInSavedPosting, savedPostingDerivedObservation } from "../ingestion/linkedInSavedContent.js";
 import { employerBoardFallbackFromEnv } from "../ingestion/employerBoardLookup.js";
 import { runNormalization as defaultRunNormalization } from "../pipeline/normalize.js";
 import { runRequirementsExtraction as defaultRunRequirementsExtraction } from "../pipeline/requirementsExtractor.js";
@@ -1845,6 +1847,70 @@ async function lockCurrentFetchTarget(
   }
 }
 
+/**
+ * Persists a posting retrieved for a Gmail discovery card as its derived source
+ * observation and marks the card FETCH_COMPLETE, all in one transaction under
+ * the fetch task's lease. Shared by network retrieval and stored saved exports.
+ */
+async function persistRetrievedPostingObservation(
+  task: ClaimedPipelineTask,
+  observationId: string,
+  snapshot: { sourceUrl: string; title: string; companyName: string },
+  runStatus: string,
+  observation: Omit<RawJobObservation, "sourceRunId" | "rawPayloadHash">,
+  sourcePayload: unknown,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<string> {
+  const client = clientOrPool as QueryClient;
+  const broker = new SourceBroker(clientOrPool, ctx);
+  let runStarted = false;
+  let derivedObservationId: string | null = null;
+  await client.query("BEGIN");
+  try {
+    await lockCurrentFetchTarget(task, observationId, snapshot, client, ctx);
+    await broker.startRun(runStatus);
+    runStarted = true;
+    const staged = await broker.processObservation(observation, sourcePayload, clientOrPool);
+    if (!staged.observationId) throw new Error("Retrieved posting did not receive a durable source observation id.");
+    derivedObservationId = staged.observationId;
+    await client.query(
+      `UPDATE raw_job_observations
+       SET processing_status = 'FETCH_STAGED'
+       WHERE workspace_id = $1 AND id = $2::uuid AND derived_from_observation_id = $3::uuid`,
+      [ctx.workspaceId, derivedObservationId, observationId],
+    );
+    await client.query(
+      `UPDATE raw_job_observations SET processing_status = 'FETCH_COMPLETE'
+       WHERE workspace_id = $1 AND id = $2::uuid AND source_name = 'GMAIL_ALERT'`,
+      [ctx.workspaceId, observationId],
+    );
+    await client.query(
+      `UPDATE raw_email_alerts
+       SET lifecycle_status = 'SOURCE_PENDING', last_error = NULL
+       WHERE workspace_id = $1
+         AND EXISTS (
+           SELECT 1 FROM raw_job_observations observation
+           WHERE observation.workspace_id = $1 AND observation.id = $2::uuid
+             AND (
+               observation.raw_email_alert_id = raw_email_alerts.id
+               OR (raw_email_alerts.gmail_message_id IS NOT NULL AND observation.gmail_message_id = raw_email_alerts.gmail_message_id)
+             )
+         )`,
+      [ctx.workspaceId, observationId],
+    );
+    await broker.endRun("COMPLETED");
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if (runStarted) {
+      broker.recordError(error instanceof Error ? error.message : String(error));
+    }
+    throw error;
+  }
+  return derivedObservationId;
+}
+
 async function markTerminalGmailAlertsForJob(
   jobVersionId: string,
   clientOrPool: pg.Pool | pg.PoolClient,
@@ -2226,6 +2292,32 @@ async function executeStageTask(
       if (existing.rows[0]?.id) return existing.rows[0].id;
     }
 
+    const discoverySnapshot = {
+      sourceUrl: discovery.source_url,
+      title: discovery.title,
+      companyName: discovery.company_name,
+    };
+    // A LinkedIn saved-jobs export of the same job id is the posting content; no
+    // network or SearchAPI call is made for it.
+    const savedPosting = await findStoredLinkedInSavedPosting(
+      clientOrPool as QueryClient,
+      ctx.workspaceId,
+      discoverySnapshot,
+    );
+    if (savedPosting.kind === "FOUND") {
+      const derived = savedPostingDerivedObservation(observationId, savedPosting.posting);
+      return persistRetrievedPostingObservation(
+        task,
+        observationId,
+        discoverySnapshot,
+        "LINKEDIN_SAVED_CONTENT_ATTACH",
+        derived,
+        derived.rawPayload,
+        clientOrPool,
+        ctx,
+      );
+    }
+
     const expectedPosting = {
       title: discovery.title,
       companyName: discovery.company_name,
@@ -2303,20 +2395,12 @@ async function executeStageTask(
         },
       } : {}),
     };
-    const client = clientOrPool as QueryClient;
-    const broker = new SourceBroker(clientOrPool, ctx);
-    let runStarted = false;
-    let derivedObservationId: string | null = null;
-    await client.query("BEGIN");
-    try {
-      await lockCurrentFetchTarget(task, observationId, {
-        sourceUrl: discovery.source_url,
-        title: discovery.title,
-        companyName: discovery.company_name,
-      }, client, ctx);
-      await broker.startRun("POSTING_CONTENT_FETCH");
-      runStarted = true;
-      const staged = await broker.processObservation({
+    return persistRetrievedPostingObservation(
+      task,
+      observationId,
+      discoverySnapshot,
+      "POSTING_CONTENT_FETCH",
+      {
         sourceName: result.provider.key,
         sourceExternalId: result.posting.requisitionId
           ? `${result.provider.key.toLowerCase()}-${result.posting.requisitionId}`
@@ -2337,44 +2421,11 @@ async function executeStageTask(
         searchPlanVersion: "posting_fetch_v1",
         derivedFromObservationId: observationId,
         rawPayload: sourcePayload,
-      }, sourcePayload, clientOrPool);
-      if (!staged.observationId) throw new Error("Retrieved posting did not receive a durable source observation id.");
-      derivedObservationId = staged.observationId;
-      await (clientOrPool as QueryClient).query(
-        `UPDATE raw_job_observations
-         SET processing_status = 'FETCH_STAGED'
-         WHERE workspace_id = $1 AND id = $2::uuid AND derived_from_observation_id = $3::uuid`,
-        [ctx.workspaceId, derivedObservationId, observationId],
-      );
-      await (clientOrPool as QueryClient).query(
-        `UPDATE raw_job_observations SET processing_status = 'FETCH_COMPLETE'
-         WHERE workspace_id = $1 AND id = $2::uuid AND source_name = 'GMAIL_ALERT'`,
-        [ctx.workspaceId, observationId],
-      );
-      await (clientOrPool as QueryClient).query(
-        `UPDATE raw_email_alerts
-         SET lifecycle_status = 'SOURCE_PENDING', last_error = NULL
-         WHERE workspace_id = $1
-           AND EXISTS (
-             SELECT 1 FROM raw_job_observations observation
-             WHERE observation.workspace_id = $1 AND observation.id = $2::uuid
-               AND (
-                 observation.raw_email_alert_id = raw_email_alerts.id
-                 OR (raw_email_alerts.gmail_message_id IS NOT NULL AND observation.gmail_message_id = raw_email_alerts.gmail_message_id)
-               )
-           )`,
-        [ctx.workspaceId, observationId],
-      );
-      await broker.endRun("COMPLETED");
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      if (runStarted) {
-        broker.recordError(error instanceof Error ? error.message : String(error));
-      }
-      throw error;
-    }
-    return derivedObservationId;
+      },
+      sourcePayload,
+      clientOrPool,
+      ctx,
+    );
   }
 
   if (taskType === "NORMALIZE_OBSERVATION") {

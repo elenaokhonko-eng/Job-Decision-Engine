@@ -59,6 +59,16 @@ async function main(): Promise<void> {
     );
   }
 
+  const notes = plugins.filter((p) => typeof p.compliance.attribution_text === "string" && p.compliance.attribution_text.trim() !== "");
+  if (notes.length > 0) {
+    lines.push("");
+    lines.push("## Compliance notes");
+    lines.push("");
+    for (const p of notes) {
+      lines.push(`- \`${p.source_key}\`: ${String(p.compliance.attribution_text).replace(/\s+/g, " ").trim()}`);
+    }
+  }
+
   fs.writeFileSync(outPath, lines.join("\n") + "\n", "utf-8");
   console.log(`Wrote ${outPath} (${plugins.length} sources).`);
 }

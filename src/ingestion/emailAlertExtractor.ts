@@ -119,6 +119,11 @@ function unwrapForClassification(value: string): string {
     if (/(?:^|\.)outlook\.[a-z.]+$/i.test(url.hostname)) {
       return url.searchParams.get("url") ?? url.searchParams.get("redirect") ?? value;
     }
+    // Amazon SES click tracking: https://<id>.r.<region>.awstrack.me/L0/<encoded destination>/<n>/<signature>
+    if (/(?:^|\.)awstrack\.me$/i.test(url.hostname)) {
+      const encoded = url.pathname.match(/^\/L0\/([^/]+)/)?.[1];
+      return encoded ? decodeURIComponent(encoded) : value;
+    }
   } catch {
     return value;
   }
@@ -136,6 +141,7 @@ const NON_JOB_PATH_SEGMENTS = new Set([
   "search", "alerts", "alert", "job-alerts", "jobalerts", "saved-searches", "premium",
   "login", "signin", "sign-in", "signup", "sign-up", "unsubscribe", "privacy", "privacy-policy",
   "terms", "terms-of-use", "legal", "feed", "notifications", "messaging", "mynetwork",
+  "jobalert", "feedback", "contact", "contact-us",
 ]);
 
 function isNavigationOrTrackingLink(urlValue: string, text: string): boolean {
@@ -154,6 +160,11 @@ function isNavigationOrTrackingLink(urlValue: string, text: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isMyCareersFutureHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === "mycareersfuture.gov.sg" || host.endsWith(".mycareersfuture.gov.sg");
 }
 
 function isLinkedInHost(hostname: string): boolean {
@@ -195,8 +206,16 @@ function classifyLink(url: string, text: string, context: string): LinkClassific
     if (!jobId) return { kind: "NON_JOB" };
     return { kind: "JOB", key: "linkedin:" + jobId, canonicalUrl: "https://www.linkedin.com/jobs/view/" + jobId };
   }
+  // MyCareersFuture alerts also link the home page, search results, "Remove this
+  // job alert" and feedback; only /job/<category>/<slug> names one posting.
+  if (isMyCareersFutureHost(parsed.hostname)) {
+    if (!/^\/job\/[^/]+\/[^/]+\/?$/i.test(parsed.pathname)) return { kind: "NON_JOB" };
+    const canonicalUrl = "https://www.mycareersfuture.gov.sg" + parsed.pathname.replace(/\/$/, "");
+    return { kind: "JOB", key: "url:" + canonicalUrl, canonicalUrl };
+  }
   if (isNavigationOrTrackingLink(url, text) || !isLikelyVacancyLink(url, text, context)) return { kind: "NON_JOB" };
-  const canonicalUrl = withoutCampaignParameters(url);
+  // A click-tracking wrapper is not the posting's identity; stage the destination.
+  const canonicalUrl = withoutCampaignParameters(/(?:^|\.)awstrack\.me$/i.test(new URL(url).hostname) ? parsed.toString() : url);
   return { kind: "JOB", key: "url:" + canonicalUrl, canonicalUrl };
 }
 
