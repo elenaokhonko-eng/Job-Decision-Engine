@@ -1,0 +1,56 @@
+schema_version: "2.2.0"
+source_key: workable
+display_name: Workable public job boards
+kind: ats
+status: active
+capabilities:
+  discovery: true
+  pagination: true
+  incremental: false
+  location_filter: false
+  work_mode_evidence: true
+compliance:
+  access_basis: public_feed
+  terms_url: https://www.workable.com/terms
+  license: null
+  attribution_required: true
+  attribution_text: Unauthenticated public careers-widget endpoint that backs the employer's own Workable careers page (apply.workable.com/{account}); one request per board per run. Source job URL links to the employer's Workable posting.
+  authenticated_scraping: false
+  reviewed_at: "2026-11-08"
+schedule:
+  enabled: true
+  interval_minutes: 1440
+  jitter_seconds: 180
+request:
+  endpoint: https://apply.workable.com/api/v1/widget/accounts/{account}?details=true
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 3
+    base_delay_ms: 1000
+    max_delay_ms: 30000
+  rate_limit:
+    requests_per_minute: 10
+    items_per_run: null
+  pagination:
+    strategy: cursor
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: source_external_id
+  query:
+    keywords: []
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: []
+mapping:
+  external_id: $.shortcode
+  title: $.title
+  company: $context.board_name
+  description: $.description
+  url: $.url
+  location: $.locations
+  work_mode: $.telecommuting
+  employment_type: $.employment_type
+  posted_at: $.published_on
+  updated_at: null
