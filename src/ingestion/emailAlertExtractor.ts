@@ -10,11 +10,17 @@ const MAX_CONTEXT_CHARS = 3_000;
 export interface DecodedEmailBody {
   readonly text: string;
   readonly html: string;
+  /** Display name of the first From address, or "" when the message has none. */
+  readonly senderName: string;
 }
 
 export interface EmailJobCard {
   readonly sourceUrl: string;
   readonly title: string;
+  /**
+   * The employer as the email states it, or "" when the email does not name one.
+   * Never a placeholder: an unknown employer is resolved from the posting page.
+   */
   readonly companyName: string;
   readonly location: string;
   readonly descriptionRaw: string;
@@ -79,7 +85,8 @@ export async function decodeGmailRawEmail(raw: string): Promise<DecodedEmailBody
   if (!text.trim() && !html.trim()) {
     throw new EmailExtractionError("INVALID_RAW_EMAIL", "Email contains no readable text or HTML body.");
   }
-  return { text, html };
+  const senderName = (parsed.from?.value?.[0]?.name ?? "").replace(/\s+/g, " ").trim();
+  return { text, html, senderName };
 }
 
 export function decodeHtmlEntities(value: string): string {
@@ -142,7 +149,60 @@ const NON_JOB_PATH_SEGMENTS = new Set([
   "login", "signin", "sign-in", "signup", "sign-up", "unsubscribe", "privacy", "privacy-policy",
   "terms", "terms-of-use", "legal", "feed", "notifications", "messaging", "mynetwork",
   "jobalert", "feedback", "contact", "contact-us",
+  "stories", "employee-stories", "our-employee-stories", "blog", "news",
 ]);
+
+/**
+ * Anchor texts that name site navigation in employer career-site alerts
+ * ("here", "Careers website", "Employee Stories", "Manage your Job Alerts").
+ * They only mark a link as navigation when its URL carries no posting id.
+ */
+const NAVIGATION_LINK_TEXT = new RegExp(
+  "^(?:here|click here|careers? (?:website|site|page|home(?: ?page)?)|(?:our )?employee stories"
+    + "|manage (?:your )?(?:job )?alerts?|(?:view|see|browse) (?:all )?(?:jobs|openings|vacancies)|all jobs)$",
+  "i",
+);
+
+function isSuccessFactorsHost(hostname: string): boolean {
+  return /(?:^|\.)(?:successfactors|sapsf)\.(?:com|eu)$/i.test(hostname);
+}
+
+/** SAP SuccessFactors Career Site Builder posting path: `/<site>/job/<slug>/<numeric id>/`. */
+function isCareerSitePostingPath(pathname: string): boolean {
+  return /\/job\/[^/]+\/\d{4,}\/?$/i.test(pathname);
+}
+
+/** A path segment with a run of digits or an explicit job/requisition id query parameter. */
+function hasPostingIdentifier(url: URL): boolean {
+  if (url.pathname.split("/").some((segment) => /\d{3,}/.test(segment))) return true;
+  return [...url.searchParams.keys()].some((key) =>
+    /^(?:career_job_req_id|(?:job|req|requisition|posting|vacancy|position)[_-]?id|gh_jid|jobid|reqid)$/i.test(key));
+}
+
+/** Every path segment is a locale code or a careers/jobs landing name, e.g. `/`, `/en/global-careers/`. */
+function isCareersLandingPath(pathname: string): boolean {
+  return pathname.split("/").filter(Boolean).every((segment) =>
+    /^[a-z]{2}(?:[-_][a-z]{2,4})?$/i.test(segment)
+    || /^(?:[a-z0-9]+-)*(?:careers?|jobs?|job-search|opportunities|vacancies)$/i.test(segment));
+}
+
+/**
+ * Employer career-site alert navigation: the careers home page, landing pages,
+ * SuccessFactors portal links (`/careers?...navBarLevel=...`, alert management)
+ * and links whose text is navigation ("here", "Careers website"). A link that
+ * names one posting (`/job/<slug>/<id>/`, a numeric id, a requisition-id
+ * parameter) is never dropped here.
+ */
+function isCareerSiteNavigation(url: URL, text: string): boolean {
+  if (isSuccessFactorsHost(url.hostname)) return !url.searchParams.has("career_job_req_id");
+  if ([...url.searchParams.keys()].some((key) => key.toLowerCase() === "navbarlevel")) return true;
+  if (hasPostingIdentifier(url)) return false;
+  if (NAVIGATION_LINK_TEXT.test(text.replace(/\s+/g, " ").trim())) return true;
+  return isCareersLandingPath(url.pathname);
+}
+
+/** Email tracking parameters SuccessFactors career sites append to alert links; the path id selects the posting. */
+const CAREER_SITE_TRACKING_PARAMETERS = new Set(["from", "refid", "source", "eid"]);
 
 function isNavigationOrTrackingLink(urlValue: string, text: string): boolean {
   const textValue = text.toLowerCase().replace(/\s+/g, " ").trim();
@@ -172,11 +232,18 @@ function isLinkedInHost(hostname: string): boolean {
   return host === "linkedin.com" || host.endsWith(".linkedin.com");
 }
 
-/** Query parameters that only carry campaign attribution and never select a posting. */
+/**
+ * Query parameters that only carry campaign attribution and never select a
+ * posting. On a career-site posting path the numeric path id selects the
+ * posting, so the per-recipient email tracking parameters are dropped too.
+ */
 function withoutCampaignParameters(urlValue: string): string {
   const url = new URL(urlValue);
+  const careerSitePosting = isCareerSitePostingPath(url.pathname);
   for (const key of [...url.searchParams.keys()]) {
-    if (/^utm_/i.test(key)) url.searchParams.delete(key);
+    if (/^utm_/i.test(key) || (careerSitePosting && CAREER_SITE_TRACKING_PARAMETERS.has(key.toLowerCase()))) {
+      url.searchParams.delete(key);
+    }
   }
   return url.toString();
 }
@@ -213,6 +280,7 @@ function classifyLink(url: string, text: string, context: string): LinkClassific
     const canonicalUrl = "https://www.mycareersfuture.gov.sg" + parsed.pathname.replace(/\/$/, "");
     return { kind: "JOB", key: "url:" + canonicalUrl, canonicalUrl };
   }
+  if (isCareerSiteNavigation(parsed, text)) return { kind: "NON_JOB" };
   if (isNavigationOrTrackingLink(url, text) || !isLikelyVacancyLink(url, text, context)) return { kind: "NON_JOB" };
   // A click-tracking wrapper is not the posting's identity; stage the destination.
   const canonicalUrl = withoutCampaignParameters(/(?:^|\.)awstrack\.me$/i.test(new URL(url).hostname) ? parsed.toString() : url);
@@ -287,8 +355,50 @@ function extractTitle(anchorText: string, context: string): string {
   return candidate ?? "Unknown Title";
 }
 
+/** The employer the card's context names ("Company: X"), or "" when it names none. */
 function extractCompany(context: string): string {
-  return context.match(/(?:company|employer)\s*[:\-]\s*([^\n|,]{2,120})/i)?.[1]?.trim() ?? "Unknown Company";
+  return context.match(/(?:company|employer)\s*[:\-]\s*([^\n|,]{2,120})/i)?.[1]?.trim() ?? "";
+}
+
+const GENERIC_SENDER_NAME = /^(?:no[- ]?reply|do[- ]?not[- ]?reply|notifications?|alerts?|job alerts?|jobs?|careers?|recruit(?:ing|ment|er)?|talent(?: acquisition)?|hr|team|support|info|admin|mailer|linkedin|indeed|glassdoor|jobstreet|mycareersfuture)$/i;
+
+/**
+ * The employer named by the sender of an employer career-site alert, accepted
+ * only when the link's own host corroborates it: after removing "Careers",
+ * "Jobs", "Talent Acquisition" and similar wording, every word of the name must
+ * appear in the posting host (sender "Example Bank Careers" with host
+ * careers.examplebank.com gives "Example Bank"). Anything else returns "".
+ */
+export function employerFromSender(senderName: string, postingUrl: string): string {
+  let host: string;
+  try {
+    host = new URL(unwrapForClassification(postingUrl)).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+  if (isLinkedInHost(host) || isMyCareersFutureHost(host)) return "";
+  const name = senderName
+    .replace(/^["'\s]+|["'\s]+$/g, "")
+    .replace(/^(?:careers?|jobs?|job alerts?)\s+(?:at|@|with)\s+/i, "")
+    .replace(/\s*[-|:–—]\s*(?:careers?|jobs?|job alerts?|talent(?: acquisition)?|recruit(?:ing|ment)?|hr)\b.*$/i, "")
+    .replace(/(?:\s+(?:careers?|jobs?|job alerts?|talent acquisition|talent|recruiting|recruitment|hr|team))+$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (name.length < 2 || name.length > 120 || GENERIC_SENDER_NAME.test(name)) return "";
+  const tokens = name.toLowerCase().normalize("NFKC").replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean);
+  const compactHost = host.replace(/[^a-z0-9]+/g, "");
+  if (tokens.length === 0 || !tokens.every((token) => token.length >= 2 && compactHost.includes(token))) return "";
+  return name;
+}
+
+/**
+ * Whether a stored Gmail discovery link names one posting under the alert
+ * rules. Recovery tooling uses it to leave navigation observations (career
+ * home pages, alert management, "here" links) blocked.
+ */
+export function isEmailAlertPostingLink(urlValue: string, linkText: string): boolean {
+  const url = safeAbsoluteHttpUrl(urlValue);
+  return url !== null && classifyLink(url, linkText, "").kind === "JOB";
 }
 
 function extractLocation(context: string): string {
@@ -313,9 +423,13 @@ export interface EmailLinkSummary {
   readonly duplicateLinksCollapsed: number;
 }
 
+export type DiscoveredCompanySource = "EMAIL_CARD" | "EMAIL_SENDER";
+
 export interface CollapsedEmailJobCard extends EmailJobCard {
   /** How many links in the email pointed at this job (1 when it was linked once). */
   readonly linkCount: number;
+  /** Where `companyName` came from; null when it is "" (unknown). */
+  readonly companySource: DiscoveredCompanySource | null;
 }
 
 function isKnownTitle(title: string): boolean {
@@ -328,7 +442,7 @@ function isKnownTitle(title: string): boolean {
  * or location beats "Unknown", and the longest context is kept as evidence.
  * Ties keep document order, so the result is deterministic.
  */
-function mergeCardGroup(group: CardGroup): CollapsedEmailJobCard {
+function mergeCardGroup(group: CardGroup, senderName: string): CollapsedEmailJobCard {
   const scored = group.occurrences.map((occurrence) => {
     const anchorText = occurrence.text.replace(/\s+/g, " ").trim();
     const title = extractTitle(occurrence.text, occurrence.context);
@@ -344,16 +458,18 @@ function mergeCardGroup(group: CardGroup): CollapsedEmailJobCard {
   const best = <T>(values: readonly T[], rank: (value: T) => number): T =>
     values.reduce((chosen, value) => (rank(value) > rank(chosen) ? value : chosen));
   const titled = best(scored, (entry) => entry.titleRank);
-  const company = best(scored, (entry) => (entry.company === "Unknown Company" ? 0 : 1)).company;
+  const cardCompany = best(scored, (entry) => (entry.company === "" ? 0 : 1)).company;
+  const senderCompany = cardCompany ? "" : employerFromSender(senderName, group.canonicalUrl);
   const location = best(scored, (entry) => (entry.location === "Unknown" ? 0 : 1)).location;
   const evidence = best(scored, (entry) => entry.occurrence.context.length).occurrence;
   return {
     sourceUrl: group.canonicalUrl,
     title: titled.title,
-    companyName: company,
+    companyName: cardCompany || senderCompany,
     location,
     descriptionRaw: evidence.context || evidence.text || "Posting link discovered in Gmail alert; employer content retrieval is pending.",
     linkCount: group.occurrences.length,
+    companySource: cardCompany ? "EMAIL_CARD" : senderCompany ? "EMAIL_SENDER" : null,
   };
 }
 
@@ -402,7 +518,7 @@ export async function extractEmailJobCardsWithLinkSummary(
     addLink(rawUrl, "", textFromPlainAround(plain, index, rawUrl.length));
   }
 
-  const cards = [...groups.values()].map(mergeCardGroup);
+  const cards = [...groups.values()].map((group) => mergeCardGroup(group, bodies.senderName));
   return {
     cards,
     links: { linksSeen, jobCards: cards.length, nonJobLinksSkipped, duplicateLinksCollapsed },
@@ -411,5 +527,5 @@ export async function extractEmailJobCardsWithLinkSummary(
 
 export async function extractEmailJobCards(raw: string): Promise<EmailJobCard[]> {
   const { cards } = await extractEmailJobCardsWithLinkSummary(raw);
-  return cards.map(({ linkCount: _linkCount, ...card }) => card);
+  return cards.map(({ linkCount: _linkCount, companySource: _companySource, ...card }) => card);
 }
