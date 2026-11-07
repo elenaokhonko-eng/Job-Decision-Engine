@@ -1,0 +1,474 @@
+{
+  "$ref": "#/definitions/ManualDocumentJobResponse",
+  "definitions": {
+    "ManualDocumentJobResponse": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "manual_application_v1"
+        },
+        "ok": {
+          "type": "boolean",
+          "const": true
+        },
+        "job": {
+          "type": "object",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "draft_id": {
+              "$ref": "#/definitions/ManualDocumentJobResponse/properties/job/properties/job_id"
+            },
+            "approval_id": {
+              "$ref": "#/definitions/ManualDocumentJobResponse/properties/job/properties/job_id"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "QUEUED",
+                "RUNNING",
+                "SUCCEEDED",
+                "FAILED"
+              ]
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "step": {
+                    "type": "string",
+                    "enum": [
+                      "SUMMARY",
+                      "LETTER",
+                      "FILES"
+                    ]
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "PENDING",
+                      "RUNNING",
+                      "COMPLETED",
+                      "FALLBACK",
+                      "SKIPPED",
+                      "FAILED"
+                    ]
+                  },
+                  "started_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "finished_at": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "elapsed_ms": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "model": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 120
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "failure_kind": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "RATE_LIMITED",
+                          "TIMEOUT",
+                          "VALIDATION",
+                          "PROVIDER_ERROR"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "step",
+                  "status",
+                  "started_at",
+                  "finished_at",
+                  "elapsed_ms",
+                  "provider",
+                  "model",
+                  "failure_kind"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 3
+            },
+            "created_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "started_at": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "finished_at": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "deadline_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "http_status": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 400,
+                          "maximum": 599
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "http_status"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "schema_version": {
+                      "type": "string",
+                      "const": "manual_application_v1"
+                    },
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "draft_id": {
+                      "$ref": "#/definitions/ManualDocumentJobResponse/properties/job/properties/job_id"
+                    },
+                    "approval_id": {
+                      "$ref": "#/definitions/ManualDocumentJobResponse/properties/job/properties/job_id"
+                    },
+                    "comparison_fingerprint": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "preview": {
+                      "type": "object",
+                      "properties": {
+                        "cv": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "cover_letter": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "cv",
+                        "cover_letter"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "artifacts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "CV",
+                              "COVER_LETTER"
+                            ]
+                          },
+                          "format": {
+                            "type": "string",
+                            "enum": [
+                              "DOCX",
+                              "PDF"
+                            ]
+                          },
+                          "filename": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 160
+                          },
+                          "mime_type": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "format",
+                          "filename",
+                          "mime_type"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "minItems": 4,
+                      "maxItems": 4
+                    },
+                    "cover_letter": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "AI_WRITTEN",
+                            "DETERMINISTIC"
+                          ]
+                        },
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2000
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "sentences": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "text": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "evidence": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "id": {
+                                      "type": "string",
+                                      "minLength": 1
+                                    },
+                                    "label": {
+                                      "type": "string"
+                                    },
+                                    "statement": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "id",
+                                    "label",
+                                    "statement"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "minItems": 1
+                              },
+                              "requirement_keys": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              }
+                            },
+                            "required": [
+                              "text",
+                              "evidence",
+                              "requirement_keys"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "framing": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "enum": [
+                                  "OPENING",
+                                  "GAP_NOTE",
+                                  "CANDIDATE_GAP_NOTE",
+                                  "CLOSING"
+                                ]
+                              },
+                              "text": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "requirement_keys": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1
+                                }
+                              },
+                              "included": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "kind",
+                              "text",
+                              "requirement_keys",
+                              "included"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "reason",
+                        "sentences"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "summary": {
+                      "$ref": "#/definitions/ManualDocumentJobResponse/properties/job/properties/result/anyOf/0/properties/cover_letter"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "corrections_applied": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "cv_pages": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "schema_version",
+                    "ok",
+                    "draft_id",
+                    "approval_id",
+                    "comparison_fingerprint",
+                    "preview",
+                    "artifacts"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "job_id",
+            "draft_id",
+            "approval_id",
+            "status",
+            "steps",
+            "created_at",
+            "started_at",
+            "finished_at",
+            "deadline_at",
+            "error",
+            "result"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "ok",
+        "job"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

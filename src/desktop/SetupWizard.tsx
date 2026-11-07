@@ -49,8 +49,8 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
   const [preset, setPreset] = useState<"gemini" | "openai">("gemini");
   const [embeddingModel, setEmbeddingModel] = useState<string>("gemini-embedding-001");
   const [evaluationModel, setEvaluationModel] = useState<string>("gemini-3.6-flash");
-  const [documentModel, setDocumentModel] = useState<string>("gemini-3.6-flash");
-  const [extractionModel, setExtractionModel] = useState<string>("gemini-3.5-flash-lite");
+  const [documentModel, setDocumentModel] = useState<string>("gemini-3.8-flash");
+  const [extractionModel, setExtractionModel] = useState<string>("gemini-3.1-flash-lite");
 
   const [initProgress, setInitProgress] = useState<string | null>(null);
 
@@ -96,8 +96,8 @@ export function SetupWizard({ onComplete, onCancel }: SetupWizardProps) {
     if (preset === "gemini") {
       setEmbeddingModel("gemini-embedding-001");
       setEvaluationModel("gemini-3.6-flash");
-      setDocumentModel("gemini-3.6-flash");
-      setExtractionModel("gemini-3.5-flash-lite");
+      setDocumentModel("gemini-3.8-flash");
+      setExtractionModel("gemini-3.1-flash-lite");
     } else {
       setEmbeddingModel("text-embedding-3-small");
       setEvaluationModel("gpt-4o-mini");

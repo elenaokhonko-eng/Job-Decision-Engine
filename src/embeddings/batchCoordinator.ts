@@ -2,9 +2,11 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../db/pgSsl.js';
 import {
-  generateEmbeddingWithProviderAndModel,
+  generateEmbeddingsWithProviderAndModel,
+  type EmbeddingOutcome,
   type EmbeddingProvider,
 } from '../services/agent.js';
+import { isRateLimitedFailure } from '../services/modelCallResilience.js';
 import { validateEmbeddingVector } from './batchValidator.js';
 import { buildEmbeddingInputs } from './inputBuilder.js';
 import { seedEmbeddingSpaces } from './spaceRegistry.js';
@@ -30,6 +32,8 @@ export interface EmbeddingBatchSummary {
   runType: 'PRIMARY' | 'FALLBACK';
   errors: string[];
   publicationComplete?: boolean;
+  /** Inputs whose provider request failed only because of rate limiting (429). */
+  rateLimited?: number;
 }
 
 export interface EmbeddingFallbackSummary {
@@ -87,6 +91,8 @@ interface EmbeddingInvocationRecord {
   vectorChecksum?: string | null;
   errorMessage?: string | null;
   validationIssues?: string[];
+  /** RATE_LIMITED, TIMEOUT, ... for a failed provider request (drives the run's 429 count). */
+  errorKind?: string;
 }
 
 function describeEmbeddingError(error: unknown): string {
@@ -136,6 +142,7 @@ async function recordEmbeddingInvocation(
             status: input.status,
             latencyMs: input.latencyMs,
             error: input.errorMessage ?? undefined,
+            ...(input.errorKind ? { errorKind: input.errorKind } : {}),
           },
         ],
         internal_http_attempts: 1,
@@ -331,19 +338,36 @@ export async function runEmbeddingBatch(
 
     let succeeded = 0;
     let failed = 0;
+    let rateLimited = 0;
     const failedInputIds: string[] = [];
+
+    // One provider request per chunk of inputs (batch embedContent) instead of one per input; each
+    // input keeps its own outcome, validation, invocation record and batch-item status below.
+    const requestStartedAt = Date.now();
+    const outcomes: EmbeddingOutcome[] = await generateEmbeddingsWithProviderAndModel(
+      inputRes.rows.map((row) => row.content_text),
+      provider,
+      spaceModel
+    );
+    if (outcomes.length !== inputRes.rows.length) {
+      throw new Error(
+        `Embedding provider returned ${outcomes.length} outcome(s) for ${inputRes.rows.length} input(s).`
+      );
+    }
+    const requestLatencyMs = Date.now() - requestStartedAt;
+    console.log(
+      `[embeddings:${runType}] batch_id=${batchId} provider requests finished inputs=${inputRes.rows.length} elapsed_ms=${requestLatencyMs}`
+    );
 
     for (let inputIndex = 0; inputIndex < inputRes.rows.length; inputIndex += 1) {
       const input = inputRes.rows[inputIndex];
       const itemStartedAt = Date.now();
       const progressPrefix = `[embeddings:${runType}] ${inputIndex + 1}/${inputRes.rows.length} input_id=${input.id} provider=${provider} model=${spaceModel}`;
       console.log(`${progressPrefix} starting chars=${input.content_text.length}`);
+      const outcome = outcomes[inputIndex];
       try {
-        const vector = await generateEmbeddingWithProviderAndModel(
-          input.content_text,
-          provider,
-          spaceModel
-        );
+        if (!outcome.ok) throw outcome.error;
+        const vector = outcome.vector;
         const validation = validateEmbeddingVector(vector, space.dimensions);
         if (!validation.valid) {
           failed += 1;
@@ -468,6 +492,7 @@ export async function runEmbeddingBatch(
       } catch (error) {
         const message = describeEmbeddingError(error);
         failed += 1;
+        if (isRateLimitedFailure(error)) rateLimited += 1;
         failedInputIds.push(input.id);
         errors.push(`input ${input.id}: ${message}`);
         console.warn(`${progressPrefix} failed elapsed_ms=${Date.now() - itemStartedAt} error=${message}`);
@@ -483,6 +508,7 @@ export async function runEmbeddingBatch(
           contentText: input.content_text,
           latencyMs: Date.now() - itemStartedAt,
           errorMessage: message,
+          ...(isRateLimitedFailure(error) ? { errorKind: 'RATE_LIMITED' } : {}),
         });
         await client.query(
           `UPDATE embedding_batch_items
@@ -570,6 +596,7 @@ export async function runEmbeddingBatch(
       runType,
       errors,
       publicationComplete,
+      rateLimited,
     };
   } catch (error) {
     throw error;
@@ -624,6 +651,7 @@ function mergeBatchSummaries(
     failedInputIds,
     runType,
     errors: summaries.flatMap((summary) => summary.errors),
+    rateLimited: summaries.reduce((total, summary) => total + (summary.rateLimited ?? 0), 0),
     publicationComplete: summaries.every(
       (summary) => summary.publicationComplete !== false && summary.failed === 0
     ),

@@ -8,6 +8,7 @@ import { JobRequirementSchema, REQUIREMENTS_SCHEMA_VERSION } from '../requiremen
 import { resolveWorkspaceContext, type WorkspaceContext } from '../workspace/context.js';
 import { sourceContentEvidencePredicate } from './descriptionQuality.js';
 import { publicErrorSummary } from '../security/publicErrorSummary.js';
+import { isRateLimitedFailure } from '../services/modelCallResilience.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -29,6 +30,8 @@ export interface QuotedExtractorInvocation {
   clientOrPool?: pg.Pool | pg.PoolClient;
   workspaceContext?: WorkspaceContext;
   workspaceId?: string;
+  /** A user is waiting (manual flow): interactive deadline, no Flex PayGo. */
+  interactive?: boolean;
 }
 
 export interface QuotedExtractorResult {
@@ -53,6 +56,8 @@ export interface RequirementExtractionStageOptions {
   reprocess?: boolean;
   /** Durable task replay owns retry timing; do not let an old stage lease hide the target. */
   ignoreRetryWindow?: boolean;
+  /** A user is waiting for this extraction (manual application flow). */
+  interactive?: boolean;
 }
 
 export interface RequirementExtractionSummary {
@@ -67,6 +72,8 @@ export interface RequirementExtractionSummary {
     quotedSucceeded: number;
     quotedValidationFailures: number;
     quotedProviderFailures: number;
+    /** Quoted provider failures caused only by rate limiting (429); the task reschedules them. */
+    quotedRateLimited?: number;
     retryWaitTransitions: number;
     quotedPassRate: number;
     byProviderModel: Record<
@@ -469,6 +476,7 @@ export async function runRequirementsExtraction(
       quotedSucceeded: 0,
       quotedValidationFailures: 0,
       quotedProviderFailures: 0,
+      quotedRateLimited: 0,
       retryWaitTransitions: 0,
       quotedPassRate: 0,
       byProviderModel: {},
@@ -863,6 +871,7 @@ export async function runRequirementsExtraction(
                 clientOrPool: client,
                 workspaceContext: ctx,
                 workspaceId: ctx.workspaceId,
+                ...(options.interactive === true ? { interactive: true } : {}),
               });
 
               if (quotedResult?.payload) {
@@ -973,6 +982,7 @@ export async function runRequirementsExtraction(
             } catch (quotedError) {
               summary.quotedFailed += 1;
               summary.metrics.quotedProviderFailures += 1;
+              if (isRateLimitedFailure(quotedError)) summary.metrics.quotedRateLimited = (summary.metrics.quotedRateLimited ?? 0) + 1;
               const rawWarning = quotedError instanceof Error ? quotedError.message : String(quotedError);
               warning = publicErrorSummary(quotedError, "evaluation");
 

@@ -12,8 +12,9 @@ from streamlit_manual_application import (
     render_selected_documents,
 )
 
-# The automatic retry after CONCURRENT_UPDATE need not wait in tests.
+# The automatic retry after CONCURRENT_UPDATE need not wait in tests, nor document job polling.
 streamlit_manual_application.PIPELINE_RETRY_DELAY_SECONDS = 0
+streamlit_manual_application.DOCUMENT_JOB_POLL_SECONDS = 0
 
 
 SCHEMA_VERSION = "manual_application_v1"
@@ -277,6 +278,7 @@ def _comparison_response(source_content_status="COMPLETE"):
 
 def fake_api_request(method, path, params=None, body=None, timeout=30):
     st.session_state.setdefault("test_api_calls", []).append((method, path, body))
+    st.session_state.setdefault("test_api_timeouts", []).append((method, path, timeout))
     if path.endswith("/candidate-profiles"):
         return {
             "schema_version": SCHEMA_VERSION,
@@ -354,67 +356,6 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
             "approved": True,
             "comparison_fingerprint": FINGERPRINT,
         }
-    if path.endswith("/documents"):
-        artifacts = [
-            _artifact(kind, format_name)
-            for kind in ("CV", "COVER_LETTER")
-            for format_name in ("DOCX", "PDF")
-        ]
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "ok": True,
-            "draft_id": DRAFT_ID,
-            "approval_id": APPROVAL_ID,
-            "comparison_fingerprint": FINGERPRINT,
-            "preview": {
-                "cv": "# Candidate\n- Designed data systems.",
-                "cover_letter": "Dear team\n\nI designed data systems for regulated teams.",
-            },
-            "artifacts": artifacts,
-            "cv_pages": 3,
-            "cover_letter": {
-                "mode": "AI_WRITTEN",
-                "reason": None,
-                "sentences": [
-                    {
-                        "text": "I designed data systems for regulated teams.",
-                        "evidence": [
-                            {
-                                "id": "fact-data",
-                                "label": "data architecture",
-                                "statement": "Designed data systems.",
-                            }
-                        ],
-                        "requirement_keys": ["R-001"],
-                    }
-                ],
-                "framing": [
-                    {
-                        "kind": "OPENING",
-                        "text": "I am applying for the Data Architect role at Example. Its data platform focus appeals to me.",
-                        "requirement_keys": ["R-001"],
-                        "included": True,
-                    },
-                    {
-                        "kind": "GAP_NOTE",
-                        "text": "I do not yet hold AZ-305.",
-                        "requirement_keys": ["R-003"],
-                        "included": False,
-                    },
-                    {
-                        "kind": "CLOSING",
-                        "text": "Thank you for your time and consideration.",
-                        "requirement_keys": [],
-                        "included": True,
-                    },
-                ],
-            },
-            "summary": {
-                "mode": "DETERMINISTIC",
-                "reason": "The AI-written summary was not used because it failed validation.",
-                "sentences": [],
-            },
-        }
     if "/documents/" in path:
         _, _, item_type, format_name = path.rsplit("/", 3)
         item_type = item_type.upper()
@@ -429,7 +370,145 @@ def fake_api_request(method, path, params=None, body=None, timeout=30):
             "sha256": hashlib.sha256(content).hexdigest(),
             "content_base64": base64.b64encode(content).decode("ascii"),
         }
+    if path.endswith("/documents"):
+        # The API starts a generation job and answers at once; GET /document-jobs/<id> reports it.
+        jobs = st.session_state.setdefault("test_document_jobs", {})
+        job_id = f"eeeeeeee-eeee-4eee-8eee-{len(jobs) + 1:012d}"
+        jobs[job_id] = {"polls": 0}
+        return _document_job_response(job_id, "RUNNING", _running_steps())
+    if "/document-jobs/" in path:
+        job_id = path.rsplit("/", 1)[-1]
+        job = st.session_state["test_document_jobs"][job_id]
+        job["polls"] += 1
+        # The first poll still sees the summary running; the second sees the finished job.
+        if job["polls"] < 2:
+            return _document_job_response(job_id, "RUNNING", _running_steps())
+        failure = st.session_state.get("test_document_job_failure")
+        if failure:
+            return _document_job_response(
+                job_id, "FAILED", _finished_steps("FAILED"), error=failure
+            )
+        return _document_job_response(
+            job_id,
+            "SUCCEEDED",
+            _finished_steps("COMPLETED"),
+            result=_documents_result(),
+        )
     raise AssertionError(f"Unexpected API call: {method} {path}")
+
+
+def _step(name, status, failure_kind=None):
+    finished = status not in ("PENDING", "RUNNING")
+    return {
+        "step": name,
+        "status": status,
+        "started_at": None if status == "PENDING" else "2026-11-07T00:00:00.000Z",
+        "finished_at": "2026-11-07T00:00:05.000Z" if finished else None,
+        "elapsed_ms": 5000 if finished else None,
+        "provider": None,
+        "model": None,
+        "failure_kind": failure_kind,
+    }
+
+
+def _running_steps():
+    return [
+        _step("SUMMARY", "RUNNING"),
+        _step("LETTER", "PENDING"),
+        _step("FILES", "PENDING"),
+    ]
+
+
+def _finished_steps(files_status):
+    return [
+        _step("SUMMARY", "FALLBACK", "RATE_LIMITED"),
+        _step("LETTER", "COMPLETED"),
+        _step("FILES", files_status),
+    ]
+
+
+def _document_job_response(job_id, status, steps, result=None, error=None):
+    finished = status in ("SUCCEEDED", "FAILED")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "job": {
+            "job_id": job_id,
+            "draft_id": DRAFT_ID,
+            "approval_id": APPROVAL_ID,
+            "status": status,
+            "steps": steps,
+            "created_at": "2026-11-07T00:00:00.000Z",
+            "started_at": "2026-11-07T00:00:00.000Z",
+            "finished_at": "2026-11-07T00:00:10.000Z" if finished else None,
+            "deadline_at": "2026-11-07T00:05:00.000Z",
+            "error": error,
+            "result": result,
+        },
+    }
+
+
+def _documents_result():
+    artifacts = [
+        _artifact(kind, format_name)
+        for kind in ("CV", "COVER_LETTER")
+        for format_name in ("DOCX", "PDF")
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "draft_id": DRAFT_ID,
+        "approval_id": APPROVAL_ID,
+        "comparison_fingerprint": FINGERPRINT,
+        "preview": {
+            "cv": "# Candidate\n- Designed data systems.",
+            "cover_letter": "Dear team\n\nI designed data systems for regulated teams.",
+        },
+        "artifacts": artifacts,
+        "cv_pages": 3,
+        "cover_letter": {
+            "mode": "AI_WRITTEN",
+            "reason": None,
+            "sentences": [
+                {
+                    "text": "I designed data systems for regulated teams.",
+                    "evidence": [
+                        {
+                            "id": "fact-data",
+                            "label": "data architecture",
+                            "statement": "Designed data systems.",
+                        }
+                    ],
+                    "requirement_keys": ["R-001"],
+                }
+            ],
+            "framing": [
+                {
+                    "kind": "OPENING",
+                    "text": "I am applying for the Data Architect role at Example. Its data platform focus appeals to me.",
+                    "requirement_keys": ["R-001"],
+                    "included": True,
+                },
+                {
+                    "kind": "GAP_NOTE",
+                    "text": "I do not yet hold AZ-305.",
+                    "requirement_keys": ["R-003"],
+                    "included": False,
+                },
+                {
+                    "kind": "CLOSING",
+                    "text": "Thank you for your time and consideration.",
+                    "requirement_keys": [],
+                    "included": True,
+                },
+            ],
+        },
+        "summary": {
+            "mode": "DETERMINISTIC",
+            "reason": "The AI-written summary was not used because it failed validation.",
+            "sentences": [],
+        },
+    }
 
 
 st.title("Manual Application Test")

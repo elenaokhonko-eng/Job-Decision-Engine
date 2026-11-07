@@ -68,6 +68,15 @@ jobs:
     needs: validate-manual-dispatch
     runs-on: ubuntu-latest
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.validate-manual-dispatch.result == 'success') && github.ref == 'refs/heads/main' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && (vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false') }}
+    # Gemini backend: AI Studio keys (default) or Vertex AI through Workload Identity Federation.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GEMINI_BACKEND: ${{ vars.GEMINI_BACKEND || 'studio' }}
+      GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+      GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'global' }}
+      GEMINI_PIPELINE_FLEX: ${{ vars.GEMINI_PIPELINE_FLEX || 'false' }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -80,6 +89,14 @@ jobs:
 
       - name: Install Node.js dependencies
         run: npm ci
+
+      - name: Authenticate to Google Cloud for Vertex AI
+        if: ${{ vars.GEMINI_BACKEND == 'vertex' }}
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.GOOGLE_CLOUD_PROJECT }}
 
       - name: Run database migrations
         env:
@@ -118,6 +135,15 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ always() && needs.validate-manual-dispatch.result == 'success' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && vars.PILOT_MODE == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.canonical_job_id != '' && inputs.job_version_id != '' }}
     timeout-minutes: 45
+    # Gemini backend: AI Studio keys (default) or Vertex AI through Workload Identity Federation.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GEMINI_BACKEND: ${{ vars.GEMINI_BACKEND || 'studio' }}
+      GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+      GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'global' }}
+      GEMINI_PIPELINE_FLEX: ${{ vars.GEMINI_PIPELINE_FLEX || 'false' }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -130,6 +156,14 @@ jobs:
 
       - name: Install Node.js dependencies
         run: npm ci
+
+      - name: Authenticate to Google Cloud for Vertex AI
+        if: ${{ vars.GEMINI_BACKEND == 'vertex' }}
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.GOOGLE_CLOUD_PROJECT }}
 
       - name: Verify the production schema before scoped execution
         env:

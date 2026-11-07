@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { db } from "./src/db/db.ts";
 import { createApiV2Router } from "./src/api/v2/router.ts";
+import { isGeminiConfigured } from "./src/services/geminiConfig.ts";
 import { apiAuthMiddleware } from "./src/api/v2/auth.ts";
 import { legacyApiGateMiddleware } from "./src/api/legacy/access.ts";
 
@@ -43,7 +44,7 @@ async function startServer() {
     res.json({
       status: "ok",
       timestamp: new Date().toISOString(),
-      hasGeminiKey: !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY"
+      hasGeminiKey: isGeminiConfigured()
     });
   });
 
@@ -149,8 +150,8 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[Job Decision Engine Backend] Server running on http://0.0.0.0:${PORT}`);
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === "MY_GEMINI_API_KEY") {
-      console.warn("⚠️  [WARNING]: GEMINI_API_KEY is not set. Real-time evaluation requests will fail until configured in Settings.");
+    if (!isGeminiConfigured()) {
+      console.warn("⚠️  [WARNING]: Gemini is not configured (GEMINI_API_KEY, or GEMINI_BACKEND=vertex with GOOGLE_CLOUD_PROJECT). Real-time evaluation requests will fail until configured in Settings.");
     }
   });
 }

@@ -9,6 +9,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from streamlit_manual_application import (
+    _document_job_step_lines,
     _download_bytes,
     _validate_payload,
     extract_uploaded_description,
@@ -520,3 +521,86 @@ def test_python_rejects_api_payloads_that_do_not_match_versioned_zod_contracts()
                 "comparison_fingerprint": "a" * 64,
             },
         )
+
+
+def _approved_app():
+    app, fingerprint = _compared_app()
+    app.button(key="manual_approve").click().run(timeout=10)
+    assert "manual_approval" in app.session_state
+    return app, fingerprint
+
+
+def test_generation_starts_a_job_then_polls_without_any_long_request():
+    app, _ = _approved_app()
+    app.button(key="manual_generate").click().run(timeout=10)
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    # One start request, then status checks until the job finished; no request may wait 30 s+.
+    job_calls = [
+        (method, path, timeout)
+        for method, path, timeout in app.session_state["test_api_timeouts"]
+        if path.endswith("/documents") or "/document-jobs/" in path
+    ]
+    assert [method for method, _, _ in job_calls] == ["POST", "GET", "GET"]
+    assert all(timeout <= 30 for _, _, timeout in job_calls)
+    assert "manual_document_job" not in app.session_state
+    assert app.session_state["manual_generated_documents"]["artifacts"]
+    # The steps say what happened, including that the summary model was rate limited.
+    steps = " ".join(caption.value for caption in app.caption)
+    assert "AI CV summary: AI not used; built from your statements" in steps
+    assert "rate limited (429)" in steps
+    assert {button.label for button in app.download_button} == {
+        "Download CV (DOCX)",
+        "Download CV (PDF)",
+        "Download Cover Letter (DOCX)",
+        "Download Cover Letter (PDF)",
+    }
+
+
+def test_a_failed_generation_job_shows_the_api_error_message():
+    app, _ = _approved_app()
+    app.session_state["test_document_job_failure"] = {
+        "code": "APPROVAL_STALE",
+        "message": "Approved inputs changed while documents were being prepared.",
+        "http_status": 409,
+    }
+    app.button(key="manual_generate").click().run(timeout=10)
+    assert not app.exception, [(error.type, error.message) for error in app.exception]
+    assert any(
+        "APPROVAL_STALE: Approved inputs changed while documents were being prepared."
+        in error.value
+        for error in app.error
+    )
+    assert "manual_generated_documents" not in app.session_state
+    assert "manual_document_job" not in app.session_state
+    # The button is offered again so the candidate can retry.
+    assert not app.button(key="manual_generate").disabled
+
+
+def test_document_job_step_lines_describe_progress_without_model_text():
+    job = {
+        "steps": [
+            {
+                "step": "SUMMARY",
+                "status": "COMPLETED",
+                "elapsed_ms": 12000,
+                "failure_kind": None,
+            },
+            {
+                "step": "LETTER",
+                "status": "FALLBACK",
+                "elapsed_ms": 60000,
+                "failure_kind": "TIMEOUT",
+            },
+            {
+                "step": "FILES",
+                "status": "RUNNING",
+                "elapsed_ms": None,
+                "failure_kind": None,
+            },
+        ]
+    }
+    assert _document_job_step_lines(job) == [
+        "AI CV summary: done in 12 s",
+        "AI cover letter: AI not used; built from your statements (the AI call ran out of time) in 60 s",
+        "DOCX and PDF files: in progress",
+    ]

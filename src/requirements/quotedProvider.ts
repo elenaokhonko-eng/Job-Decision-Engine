@@ -15,6 +15,8 @@ export interface QuotedProviderInput {
   clientOrPool?: pg.Pool | pg.PoolClient;
   workspaceContext?: WorkspaceContext;
   workspaceId?: string;
+  /** A user is waiting (manual flow): interactive deadline, no Flex PayGo. */
+  interactive?: boolean;
 }
 
 export interface QuotedProviderOutput {
@@ -188,6 +190,9 @@ export async function runQuotedRequirementProvider(
     purpose: 'EXTRACTION',
     routeKey: 'requirements_extraction',
     model: MODEL_REGISTRY.EXTRACTION_OPENAI_MODEL,
+    // Pipeline enrichment: Vertex Flex PayGo when GEMINI_PIPELINE_FLEX=true (never interactive).
+    flex: input.interactive !== true,
+    interactive: input.interactive === true,
     contents: prompt,
     responseMimeType: 'application/json',
     responseSchema: quotedRequirementProviderSchema,

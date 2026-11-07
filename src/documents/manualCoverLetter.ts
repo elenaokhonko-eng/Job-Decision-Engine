@@ -403,15 +403,20 @@ function manualModelTimeoutMs(envName: string, fallbackMs: number): number {
 }
 
 /**
- * Per-call model settings for the manual document writers: own timeout, 2 attempts, a secondary
- * Gemini model, and one correction round in which a model whose draft fails validation is told why.
+ * Per-call model settings for the manual document writers: own request timeout, 2 attempts, a
+ * secondary Gemini model (switched to on the first 429), one correction round in which a model whose
+ * draft fails validation is told why, and the interactive per-call deadline
+ * (MODEL_INTERACTIVE_CALL_DEADLINE_MS, 60 s) across all of it. In AI Studio mode the writers use
+ * DOCUMENT_GEMINI_API_KEY when it is set, so the laptop and the pipeline can use different projects.
  */
 function manualDocumentModelOptions(timeoutEnvName: string, defaultTimeoutMs: number) {
   return {
     timeoutMs: manualModelTimeoutMs(timeoutEnvName, defaultTimeoutMs),
     maxRetries: 2,
-    secondaryGeminiModel: process.env.DOCUMENT_SECONDARY_GEMINI_MODEL || MODEL_REGISTRY.EXTRACTION_GEMINI_MODEL,
+    secondaryGeminiModel: process.env.DOCUMENT_SECONDARY_GEMINI_MODEL || MODEL_REGISTRY.DOCUMENT_SECONDARY_GEMINI_MODEL,
     correctOnValidationFailure: true,
+    interactive: true,
+    geminiCredentialScope: "document" as const,
   };
 }
 
@@ -442,7 +447,7 @@ export const writeCoverLetterWithModel: CoverLetterWriter = async (input) => {
 /** "ai" when a model key is configured and MANUAL_COVER_LETTER_AI is not "false". */
 export function manualCoverLetterMode(): "ai" | "deterministic" {
   if (process.env.MANUAL_COVER_LETTER_AI === "false") return "deterministic";
-  return checkModelRegistryPreflight().ok ? "ai" : "deterministic";
+  return checkModelRegistryPreflight("document").ok ? "ai" : "deterministic";
 }
 
 /** A sentence of the letter that is not a claim, shown in the review with whether it was included. */

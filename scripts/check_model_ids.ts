@@ -14,7 +14,7 @@ async function main(): Promise<void> {
 
   for (const entry of result.unknown) console.error(entry.message);
   for (const warning of result.warnings) console.error(`Warning: ${warning}`);
-  for (const provider of result.skipped) console.log(`Skipped ${provider}: no API key configured.`);
+  for (const provider of result.skipped) console.log(`Skipped ${provider}: no API key or backend configured.`);
 
   if (result.checked.length > 0) {
     const checkedIds = configuredModelIds().filter((entry) => result.checked.includes(entry.provider));

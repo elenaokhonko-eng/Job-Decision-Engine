@@ -1,6 +1,7 @@
 import pg from "pg";
 import dotenv from "dotenv";
 import { getGeminiClient, runAgent, generateContent, generateEmbedding } from "../src/services/agent.ts";
+import { isGeminiConfigured } from "../src/services/geminiConfig.ts";
 import { extractWithFallback } from "../src/services/llmFallback.ts";
 import { db, verifyUrlLive } from "../src/db/db.ts";
 import { applyGlobalGates, generateContentHash, LANE_VOCABULARIES, MULTI_LANE_SCORECARDS } from "../src/services/criteria.ts";
@@ -193,8 +194,8 @@ async function runPipeline() {
   let pipelineHealth: string = "HEALTHY";
 
   console.log("=== Validating Model Configuration ===");
-  if (!process.env.GEMINI_API_KEY) {
-    console.error("❌ ERROR: GEMINI_API_KEY is not set. Cannot run generative evaluation.");
+  if (!isGeminiConfigured()) {
+    console.error("❌ ERROR: Gemini is not configured (GEMINI_API_KEY or GEMINI_BACKEND=vertex). Cannot run generative evaluation.");
     process.exit(1);
   }
   

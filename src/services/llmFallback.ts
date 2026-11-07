@@ -63,7 +63,7 @@ export async function extractWithFallback(raw: string, schema?: any): Promise<st
     console.warn("Ollama extraction failed or returned invalid JSON, falling back to Gemini:", e);
   }
 
-  // 2️⃣ Gemini (requires GEMINI_API_KEY)
+  // 2️⃣ Gemini (AI Studio key or GEMINI_BACKEND=vertex)
   try {
     let geminiRes = await generateContent({
       model: process.env.GEMINI_MODEL || MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,

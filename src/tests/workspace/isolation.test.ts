@@ -7,6 +7,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from '../../workspace/
 import { runDeterministicMatcher } from '../../pipeline/deterministicMatcher.js';
 import { runEmbeddingBatchWithFallback } from '../../embeddings/batchCoordinator.js';
 import * as agent from '../../services/agent.js';
+import { batchEmbeddingFromPerInput } from '../fixtures/embeddingBatchMock.js';
 
 const DB_URL = process.env.DATABASE_URL || '';
 const isCI = isLocalPostgresConnectionString(DB_URL);
@@ -269,7 +270,9 @@ describe.skipIf(skipReal)('P2: workspace authorization + isolation', () => {
     const alphaJob = await makeJob(alphaId, 'AlphaCo');
     const betaJob = await makeJob(betaId, 'BetaCo');
 
-    vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel').mockResolvedValue(new Array(768).fill(0.1));
+    vi.spyOn(agent, 'generateEmbeddingsWithProviderAndModel').mockImplementation(
+      batchEmbeddingFromPerInput(async () => new Array(768).fill(0.1))
+    );
     await runEmbeddingBatchWithFallback(100, client, { context: alphaCtx });
     await runEmbeddingBatchWithFallback(100, client, { context: betaCtx });
 

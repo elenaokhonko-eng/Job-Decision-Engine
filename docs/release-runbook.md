@@ -34,6 +34,20 @@ Use one exact commit SHA for all runs.
 4. Continue only if the persisted decision and current readiness permit document preparation. Create one draft application through the existing workflow, generate both documents from the active profile graph, and inspect the rendered DOCX and PDF. For local Streamlit downloads of CI-generated artifacts, place the downloaded files under `scripts/exports`; the app resolves a remote manifest path by filename only when the stored SHA-256 matches.
 5. Record neither document review nor employer submission without explicit user confirmation. Keep broad processing paused after the pilot.
 
+## Model Provider Capacity: Stop Rule
+
+Every worker run prints `providerCalls` in its summary JSON, the evaluation queue prints its own, and `scripts/report_pipeline_status.ts` adds `provider_calls_by_model` (calls, 429s, timeouts, 5xx and retries per provider/model over the last `PIPELINE_PROVIDER_CALL_WINDOW_MINUTES`, default 90) to the report and the step summary.
+
+- **Stop rule: pause scaling when more than 5% of a run's model calls are rate limited (HTTP 429).** The report sets `stop_rule_triggered` and prints a `STOP RULE` line. Do not raise worker concurrency, `GEMINI_MAX_REQUESTS_PER_MINUTE`, `GEMINI_MAX_CONCURRENCY` or stage caps until a later run is back under 5%; lower the per-model limits (`GEMINI_MODEL_LIMITS_JSON`) or move the pipeline to Vertex AI first.
+- A 429 never dead-letters a task or marks a job as a processing error: the task waits in `RETRY_WAIT` (reason `RATE_LIMITED: ...`) and returns after the provider's suggested delay.
+
+## Vertex AI Cut-over (Gemini)
+
+1. In Google Cloud: enable the Vertex AI API on the project; create a service account with `roles/aiplatform.user`; create a Workload Identity pool and GitHub provider restricted to this repository and allow it to impersonate the service account.
+2. Locally: `GEMINI_BACKEND=vertex`, `GOOGLE_CLOUD_PROJECT=<project>`, `GOOGLE_CLOUD_LOCATION=global`, and `GOOGLE_APPLICATION_CREDENTIALS` pointing at a key file (or `gcloud auth application-default login`). Run `npm run models:check` (checks every configured model id with `models.get` on Vertex) and `npx tsx scripts/compare_embedding_backends.ts --run` (cosine >= 0.999 against 20 stored vectors; it writes nothing).
+3. Repository variables (no secrets needed for Vertex): `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `GOOGLE_CLOUD_PROJECT`, optionally `GOOGLE_CLOUD_LOCATION` (default `global`) and `GEMINI_PIPELINE_FLEX`. Then set `GEMINI_BACKEND=vertex`; the model-calling jobs authenticate with `google-github-actions/auth` only when it is set.
+4. Watch the first runs' `provider_calls_by_model` against the stop rule. Roll back by setting `GEMINI_BACKEND=studio` (or deleting it); the AI Studio secrets stay in place until Vertex has run cleanly.
+
 ## Release Evidence
 
 Before declaring release complete, capture:

@@ -790,6 +790,88 @@ export async function failPipelineTask(
   }
 }
 
+/**
+ * When a rate-limited task becomes claimable again: the provider's suggested delay (RetryInfo /
+ * Retry-After) when known, at least 30 s, plus up to 30 s of jitter so deferred tasks do not all
+ * return at once; capped at 15 minutes.
+ */
+export function rateLimitedRetryAt(retryAfterMs: number | null, now = Date.now(), random = Math.random): Date {
+  const base = Math.max(30_000, Number.isFinite(retryAfterMs ?? NaN) ? (retryAfterMs as number) : 0);
+  const jitter = Math.floor(Math.max(0, Math.min(1, random())) * 30_000);
+  return new Date(now + Math.min(15 * 60_000, base + jitter));
+}
+
+/**
+ * Reschedules a task whose model call failed only because of rate limiting (HTTP 429). The task
+ * returns to RETRY_WAIT at `retryAt` and max_attempts grows by one, so the attempt this claim used
+ * is not counted toward dead-lettering; the attempt row keeps the error with rate_limited=true.
+ * It never dead-letters and never marks the job as a processing error.
+ */
+export async function deferPipelineTaskForRateLimit(
+  task: ClaimedPipelineTask,
+  reason: string,
+  retryAt: Date,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
+): Promise<void> {
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const ownsClient = isPool(clientOrPool);
+  const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
+
+  try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    await client.query("BEGIN");
+    try {
+      const deferred = await client.query(
+        `
+          UPDATE pipeline_tasks
+          SET status = 'RETRY_WAIT',
+              available_at = $4::timestamptz,
+              max_attempts = max_attempts + 1,
+              lease_id = NULL,
+              lease_expires_at = NULL,
+              heartbeat_at = NULL,
+              claimed_by = NULL,
+              last_error = $5,
+              updated_at = NOW()
+          WHERE workspace_id = $1
+            AND id = $2::uuid
+            AND status = 'RUNNING'
+            AND lease_id = $3::uuid
+          RETURNING id
+        `,
+        [ctx.workspaceId, task.taskId, task.leaseId, retryAt.toISOString(), reason]
+      );
+      if (deferred.rows.length === 0) {
+        throw new Error(`Lost lease while deferring rate-limited pipeline task ${task.taskId}.`);
+      }
+      await client.query(
+        `
+          UPDATE pipeline_task_attempts
+          SET status = 'FAILED',
+              finished_at = NOW(),
+              error_message = $4,
+              metadata = COALESCE(metadata, '{}'::jsonb)
+                || jsonb_build_object('rate_limited', true, 'retry_at', $5::text)
+          WHERE workspace_id = $1
+            AND task_id = $2::uuid
+            AND attempt_number = $3
+        `,
+        [ctx.workspaceId, task.taskId, task.attemptNumber, reason, retryAt.toISOString()]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    if (ownsClient && typeof (client as any).release === "function") {
+      (client as pg.PoolClient).release();
+    }
+  }
+}
+
 /** Release an unfinished lease after a worker cancellation without dead-lettering the task. */
 export async function releasePipelineTaskForRetry(
   task: ClaimedPipelineTask,

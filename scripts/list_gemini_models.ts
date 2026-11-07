@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-import { GoogleGenAI } from "@google/genai";
+import { getGeminiClient } from "../src/services/agent.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
@@ -10,18 +10,8 @@ function normalizeModelId(modelName: string): string {
 }
 
 async function main(): Promise<void> {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
-  if (!apiKey || apiKey.trim() === "" || apiKey === "MY_GEMINI_API_KEY") {
-    throw new Error(
-      "GEMINI_API_KEY is not configured. Set it in .env.local before listing models."
-    );
-  }
-
-  const apiVersionRaw = (process.env.GEMINI_API_VERSION || "").trim();
-  const ai = new GoogleGenAI({
-    apiKey,
-    apiVersion: apiVersionRaw || undefined,
-  });
+  // AI Studio key or Vertex (GEMINI_BACKEND=vertex, ADC); throws when neither is configured.
+  const ai = getGeminiClient();
 
   const pager = await ai.models.list({ config: { queryBase: true } });
 
@@ -51,7 +41,7 @@ async function main(): Promise<void> {
     ),
   ];
 
-  console.log(`Gemini API version: ${apiVersionRaw || "(default)"}`);
+  console.log(`Gemini backend: ${process.env.GEMINI_BACKEND || "studio"}`);
   console.log(`Total models visible: ${models.length}`);
   console.log(`Models supporting embedContent: ${embeddingModels.length}`);
 

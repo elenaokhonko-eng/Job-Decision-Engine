@@ -19,6 +19,7 @@ import { htmlToPlainText } from "../../ingestion/emailAlertExtractor.js";
 import { SourceBroker } from "../../ingestion/sourceBroker.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../../contracts/jobSourceEvidence.js";
 import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenceRegistry.js";
+import { batchEmbeddingFromPerInput } from "../fixtures/embeddingBatchMock.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -336,6 +337,7 @@ describe.skipIf(skipReal)("P0-02 & P0-10: Real PostgreSQL Pipeline E2E", () => {
     vi.spyOn(agent, "generateEmbedding").mockImplementation(embedMock);
     vi.spyOn(agent, "generateEmbeddingWithProvider").mockImplementation(embedMock as any);
     vi.spyOn(agent, "generateEmbeddingWithProviderAndModel").mockImplementation(embedMock as any);
+    vi.spyOn(agent, "generateEmbeddingsWithProviderAndModel").mockImplementation(batchEmbeddingFromPerInput(embedMock));
   });
 
   afterAll(async () => {

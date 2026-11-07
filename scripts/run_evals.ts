@@ -3,6 +3,7 @@ import path from "path";
 import * as yaml from "js-yaml";
 import dotenv from "dotenv";
 import { runAgent } from "../src/services/agent.ts";
+import { geminiConfigProblem } from "../src/services/geminiConfig.ts";
 import { db } from "../src/db/db.ts";
 
 // Load environment variables
@@ -25,9 +26,9 @@ async function runEvals() {
   console.log("====================================================");
 
   // Check API Key
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
-    console.error("❌ ERROR: GEMINI_API_KEY is not configured.");
+  const geminiProblem = geminiConfigProblem();
+  if (geminiProblem) {
+    console.error(`❌ ERROR: ${geminiProblem}`);
     console.error("   Cannot run LLM evaluations without a valid API key.");
     console.error("   Configure your key in Secrets first.");
     process.exit(1);

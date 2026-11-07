@@ -167,6 +167,8 @@ export const pairEvidenceWithModel: EvidencePairer = async (input) => {
     purpose: "EXTRACTION",
     routeKey: "manual_evidence_pairing",
     model: MODEL_REGISTRY.EXTRACTION_GEMINI_MODEL,
+    // The candidate is waiting on the comparison: interactive deadline, no Flex PayGo.
+    interactive: true,
     contents: buildPairingPrompt(input),
     responseMimeType: "application/json",
     responseSchema: pairingProviderSchema,
