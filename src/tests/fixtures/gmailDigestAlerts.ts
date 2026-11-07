@@ -148,3 +148,59 @@ export function linkedInDigestAlertRaw(options: DigestFixtureOptions): string {
   ].join("\r\n");
   return Buffer.from(mime, "utf8").toString("base64url");
 }
+
+/** Synthetic employer career-site host used by the career-site alert fixture. */
+export const CAREER_SITE_HOST = "careers.examplegroupbank.example";
+
+export function careerSitePostingUrl(slug: string, jobId: number): string {
+  return `http://${CAREER_SITE_HOST}/EGB/job/${slug}/${jobId}/`;
+}
+
+/**
+ * Synthetic employer career-site job alert shaped like a SAP SuccessFactors
+ * Career Site Builder email: each posting link carries per-recipient email
+ * tracking parameters, the title is followed by a location suffix, and no
+ * card names the employer. The footer carries the navigation those emails
+ * carry: "Manage your Job Alerts" and "here" portal links, the careers home
+ * page, a "Careers website" landing page and an "Employee Stories" page.
+ * Every name, title and host is invented.
+ */
+export const CAREER_SITE_NAVIGATION_LINKS = [
+  "https://career9.successfactors.eu/careers?company=EGBSYNTH&career_ns=job_alert&navBarLevel=JOB_MGMT&locale=en_US",
+  "https://career9.successfactors.eu/careers?company=EGBSYNTH&loginFlowRequired=true",
+  `http://${CAREER_SITE_HOST}/?from=email&refid=synthrefid01&source=2&eid=synthetic01&locale=en_US`,
+  "https://www.examplegroupbank.example/en/global-careers/",
+  "https://www.examplegroupbank.example/en/global-careers/our-employee-stories/",
+] as const;
+
+export function careerSiteAlertRaw(options: { readonly senderName: string }): string {
+  const tracking = "?from=email&refid=synthrefid01&source=2&eid=synthetic01&locale=en_US";
+  const postings = [
+    { url: careerSitePostingUrl("Synthetic-Platform-Lead", 4_100_000_001), title: "Synthetic Platform Lead - Example City" },
+    { url: careerSitePostingUrl("Synthetic-Risk-Analyst", 4_100_000_002), title: "Synthetic Risk Analyst - Example City, EC (EC)" },
+  ];
+  const html = [
+    "<html><body><table>",
+    "<tr><td><h2>New jobs matching your alert</h2></td></tr>",
+    ...postings.map((posting) =>
+      `<tr><td><a href="${posting.url}${tracking.replace(/&/g, "&amp;")}">${posting.title}</a></td></tr>`),
+    `<tr><td><a href="${CAREER_SITE_NAVIGATION_LINKS[0].replace(/&/g, "&amp;")}">Manage your Job Alerts</a></td></tr>`,
+    `<tr><td>To stop receiving these emails, click <a href="${CAREER_SITE_NAVIGATION_LINKS[1].replace(/&/g, "&amp;")}">here</a>.</td></tr>`,
+    `<tr><td><a href="${CAREER_SITE_NAVIGATION_LINKS[2].replace(/&/g, "&amp;")}">${CAREER_SITE_HOST}</a></td></tr>`,
+    `<tr><td>Find more jobs on our <a href="${CAREER_SITE_NAVIGATION_LINKS[3]}">Careers website</a></td></tr>`,
+    `<tr><td>Read our <a href="${CAREER_SITE_NAVIGATION_LINKS[4]}">Employee Stories</a> about life on the job.</td></tr>`,
+    "</table></body></html>",
+  ].join("\n");
+  const mime = [
+    "MIME-Version: 1.0",
+    "Subject: New synthetic jobs matching your alert",
+    `From: "${options.senderName}" <noreply@successfactors.example>`,
+    "To: candidate@example.com",
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from(html, "utf8").toString("base64").replace(/.{76}/g, "$&\r\n"),
+    "",
+  ].join("\r\n");
+  return Buffer.from(mime, "utf8").toString("base64url");
+}

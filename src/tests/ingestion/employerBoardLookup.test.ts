@@ -158,7 +158,8 @@ describe("employer board slug derivation", () => {
     const boards = loadKnownEmployerBoards();
     expect(boards.length).toBeGreaterThan(0);
     expect(boards.every((board) => ["GREENHOUSE", "LEVER", "ASHBY"].includes(board.provider))).toBe(true);
-    expect(boards.every((board) => /^[a-z0-9][a-z0-9_-]*$/i.test(board.boardToken))).toBe(true);
+    // Registry slugs may contain dots (Ashby `mistral.ai`) but never path separators.
+    expect(boards.every((board) => /^[a-z0-9][a-z0-9._-]*$/i.test(board.boardToken))).toBe(true);
   });
 });
 

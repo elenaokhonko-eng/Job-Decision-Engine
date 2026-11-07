@@ -650,7 +650,7 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
   const at = new Date(input.retrievedAt);
   const retrievedAt = Number.isFinite(at.getTime()) ? at.toISOString() : new Date().toISOString();
   const explicitStatus = String(firstValue(records, ["status", "jobStatus", "applicationStatus"]) ?? "").toLowerCase();
-  const directAts = ["GREENHOUSE", "LEVER", "ASHBY"].includes(input.sourceName.toUpperCase());
+  const directAts = ["GREENHOUSE", "LEVER", "ASHBY", "WORKABLE", "SMARTRECRUITERS", "WORKDAY"].includes(input.sourceName.toUpperCase());
   const isClosed = /^(closed|expired|filled|inactive|not accepting applications)$/.test(explicitStatus)
     || firstValue(records, ["isClosed", "closed"]) === true;
   const isExplicitOpen = /^(open|active|published|live)$/.test(explicitStatus)

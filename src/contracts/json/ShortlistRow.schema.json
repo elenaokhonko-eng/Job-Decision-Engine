@@ -45,6 +45,8 @@
             "GREENHOUSE",
             "LEVER",
             "ASHBY",
+            "WORKABLE",
+            "SMARTRECRUITERS",
             "HIMALAYAS",
             "JOBICY",
             "REMOTIVE",
@@ -54,6 +56,8 @@
             "MANUAL_STREAMLIT",
             "LINKEDIN",
             "LINKEDIN_SAVED",
+            "WORKDAY",
+            "MCF_SAVED",
             "HACKER_NEWS"
           ],
           "default": "GMAIL_ALERT"

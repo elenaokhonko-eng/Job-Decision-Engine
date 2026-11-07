@@ -10,17 +10,33 @@ import { loadStructuredFile } from "../src/config/structuredLoader.js";
 import { GreenhouseAdapter } from "../src/ingestion/adapters/greenhouseAdapter.js";
 import { AshbyAdapter } from "../src/ingestion/adapters/ashbyAdapter.js";
 import { LeverAdapter } from "../src/ingestion/adapters/leverAdapter.js";
+import { WorkableAdapter } from "../src/ingestion/adapters/workableAdapter.js";
+import { SmartRecruitersAdapter } from "../src/ingestion/adapters/smartRecruitersAdapter.js";
 import { HimalayasAdapter } from "../src/ingestion/adapters/himalayasAdapter.js";
 import { JobicyAdapter } from "../src/ingestion/adapters/jobicyAdapter.js";
 import { RemotiveAdapter } from "../src/ingestion/adapters/remotiveAdapter.js";
 import { createWeWorkRemotelyAdapter } from "../src/ingestion/adapters/attributedRssAdapter.js";
 import { HackerNewsWhoIsHiringAdapter } from "../src/ingestion/adapters/hackerNewsWhoIsHiringAdapter.js";
 import { resolveWorkspaceWorkabilityPolicy } from "../src/pipeline/workabilityPolicy.js";
+import {
+  WORKDAY_HOST_PATTERN,
+  WORKDAY_SITE_PATTERN,
+  WORKDAY_TENANT_PATTERN,
+  WorkdayAdapter,
+  workdayDeadlineBudget,
+  type WorkdayRunBudget,
+} from "../src/ingestion/adapters/workdayAdapter.js";
 import type { AdapterResult, BaseSourceAdapter } from "../src/ingestion/adapters/baseAdapter.js";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
 import type { JobSourceEvidence } from "../src/contracts/jobSourceEvidence.js";
 import { DiscoveryScoutPlanner, type ScoutSearchPlan } from "../src/ingestion/scouts/discoveryScouts.js";
 import { assessCandidateLanes, type LaneDisposition } from "../src/ingestion/discoveryPlanExecution.js";
+import {
+  assessLocationScope,
+  loadDiscoveryLocationScope,
+  locationScopeAppliesTo,
+  type DiscoveryLocationScope,
+} from "../src/ingestion/discoveryLocationScope.js";
 import { normalizePostingUrl } from "../src/ingestion/postingIdentity.js";
 import { loadGlobalLanesConfig } from "../src/pipeline/laneConfigLoader.js";
 import {
@@ -39,15 +55,53 @@ import { pgPoolConfig } from "../src/db/pgSsl.js";
 dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
-const CompanyConfigSchema = z.object({
+export const CompanyConfigSchema = z.object({
   id: z.string().optional(),
   name: z.string().optional(),
   enabled: z.boolean().optional(),
   ats_provider: z.string().optional(),
   board_slug: z.string().nullable().optional(),
   target_lanes: z.array(z.string()).optional(),
-}).passthrough();
+  // Workday career sites are addressed by a verified host, tenant and site, not a board slug.
+  workday_host: z.string().regex(WORKDAY_HOST_PATTERN).optional(),
+  workday_tenant: z.string().regex(WORKDAY_TENANT_PATTERN).optional(),
+  workday_site: z.string().regex(WORKDAY_SITE_PATTERN).optional(),
+}).passthrough().superRefine((company, context) => {
+  const isWorkday = company.ats_provider?.trim().toLowerCase() === "workday";
+  const fields = ["workday_host", "workday_tenant", "workday_site"] as const;
+  if (isWorkday) {
+    for (const field of fields) {
+      if (!company[field]) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `Workday company ${company.id ?? company.name ?? ""} needs ${field}.` });
+    }
+    if (!company.name?.trim()) context.addIssue({ code: z.ZodIssueCode.custom, path: ["name"], message: "Workday company needs a name." });
+    if (company.workday_host && company.workday_tenant && !company.workday_host.startsWith(`${company.workday_tenant.toLowerCase()}.`)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["workday_host"], message: "workday_host must be the tenant's own myworkdayjobs.com host." });
+    }
+  } else {
+    for (const field of fields) {
+      if (company[field] !== undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is only valid when ats_provider is workday.` });
+    }
+  }
+});
 type CompanyConfig = z.infer<typeof CompanyConfigSchema>;
+
+/** Wall-clock budget shared by all Workday tenants in one run (the adapter step has a 10-minute timeout). */
+export const WORKDAY_RUN_BUDGET_MS = 240_000;
+
+/** Rotates a list by the UTC day number so a shared budget does not always favour the same entries. */
+export function rotateDaily<T>(items: readonly T[], now: Date): T[] {
+  if (items.length === 0) return [];
+  const offset = Math.floor(now.getTime() / 86_400_000) % items.length;
+  return [...items.slice(offset), ...items.slice(0, offset)];
+}
+
+/** Search terms for one Workday tenant: the role terms of its lanes plus the shared target functions. */
+export function workdaySearchTermsForLanes(
+  laneKeys: readonly string[],
+  plans: Readonly<Record<string, ScoutSearchPlan>>,
+): string[] {
+  return laneKeys.flatMap((laneKey) => [...(plans[laneKey]?.roleTerms ?? []), ...(plans[laneKey]?.targetFunctions ?? [])]);
+}
 
 function stableExternalIdForJob(resultSourceName: string, job: unknown): string | null {
   if (job === null || typeof job !== "object" || Array.isArray(job)) return null;
@@ -79,8 +133,7 @@ function asSourceName(sourceKey: string): SourceName | null {
   return parsed.success ? parsed.data : null;
 }
 
-function loadCompaniesConfig(): CompanyConfig[] {
-  const companiesPath = path.resolve(process.cwd(), "config/companies.yml");
+export function loadCompaniesConfig(companiesPath = path.resolve(process.cwd(), "config/companies.yml")): CompanyConfig[] {
   if (!fs.existsSync(companiesPath)) throw new Error(`Company source registry is missing: ${companiesPath}`);
   const fileContents = fs.readFileSync(companiesPath, "utf8");
   const document: unknown = loadYaml(fileContents);
@@ -137,6 +190,8 @@ export interface SourcePageOptions {
   readonly itemsPerRun: number;
   readonly plans: Readonly<Record<string, ScoutSearchPlan>>;
   readonly lanes: ReturnType<typeof loadGlobalLanesConfig>["lanes"];
+  /** Discovery-scope location pre-filter; applied only to the source keys it lists. */
+  readonly locationScope?: DiscoveryLocationScope | null;
 }
 
 export interface SourcePageSummary {
@@ -145,6 +200,8 @@ export interface SourcePageSummary {
   readonly newlyStaged: number;
   readonly filtered: number;
   readonly quarantined: number;
+  /** Postings not staged because they fell outside the discovery scope, by reason code. */
+  readonly skippedByReason: Readonly<Record<string, number>>;
   readonly nextCursor: string | null;
   readonly error?: string;
 }
@@ -178,7 +235,7 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
         pagesProcessed: 0, itemsSeen: 0, itemsStaged: 0, itemsFiltered: 0,
       }, [detail], options.plans[laneKey]?.coverageNote);
     }
-    return { success: false, discovered: 0, newlyStaged: 0, filtered: 0, quarantined: 0, nextCursor: cursor, error: detail };
+    return { success: false, discovered: 0, newlyStaged: 0, filtered: 0, quarantined: 0, skippedByReason: {}, nextCursor: cursor, error: detail };
   }
 
   const quarantinedCandidates = result.quarantinedCandidates ?? [];
@@ -186,10 +243,40 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
   const quarantineCount = result.quarantined ?? quarantinedCandidates.length;
   let newlyStaged = 0;
   let filtered = 0;
+  const skippedByReason: Record<string, number> = {};
+  const locationScope = locationScopeAppliesTo(options.locationScope, options.plugin.source_key) ? options.locationScope : null;
   const totalFetched = result.totalFetched;
   let nextCursor = cursor;
   try {
   for (const job of result.jobs) {
+    if (locationScope) {
+      const scopeDecision = assessLocationScope(job, locationScope);
+      if (!scopeDecision.inScope) {
+        // Discovery-scope narrowing, not a career rejection: no observation is created and every
+        // lane records a FILTERED disposition with the reason, like a lane pre-filter miss.
+        skippedByReason[scopeDecision.reasonCode] = (skippedByReason[scopeDecision.reasonCode] ?? 0) + 1;
+        const rawPayload = job.raw_payload ?? job;
+        for (const laneKey of options.laneKeys) {
+          counts.get(laneKey)!.filtered += 1;
+          filtered += 1;
+          await options.broker.recordCandidateDisposition({
+            sourcePluginKey: options.plugin.source_key,
+            planKey: `${options.checkpointTarget}:${laneKey}`,
+            laneKey,
+            sourceExternalId: stableExternalIdForJob(result.sourceName, job),
+            sourceUrl: job.employer_posting_url ?? job.canonical_apply_url,
+            rawPayloadHash: payloadHash(rawPayload),
+            rawPayload,
+            normalizedEvidence: null,
+            disposition: "FILTERED",
+            reasonCode: scopeDecision.reasonCode,
+            reasonDetail: scopeDecision.reason,
+            observationId: null,
+          }, planRunIds.get(laneKey) ?? null);
+        }
+        continue;
+      }
+    }
     const laneResults = assessCandidateLanes(job, options.laneKeys, options.plans, options.lanes, options.employerLaneKeys);
     const matchedLanes = laneResults.filter((disposition) => disposition.matched).map((disposition) => disposition.laneKey);
     const rawPayload = job.raw_payload ?? job;
@@ -335,7 +422,7 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
         itemsFiltered: laneCounts.filtered,
       }, [detail], options.plans[laneKey]?.coverageNote);
     }
-    return { success: false, discovered: totalFetched, newlyStaged, filtered, quarantined: quarantineCount, nextCursor: cursor, error: detail };
+    return { success: false, discovered: totalFetched, newlyStaged, filtered, quarantined: quarantineCount, skippedByReason, nextCursor: cursor, error: detail };
   }
 
   const parseFailure = quarantineCount > 0 && quarantinedCandidates.length === 0
@@ -374,6 +461,7 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
     newlyStaged,
     filtered,
     quarantined: result.quarantined ?? 0,
+    skippedByReason,
     nextCursor,
     error: parseFailure ?? undefined,
   };
@@ -383,6 +471,8 @@ function pickAtsAdapter(sourceKey: string, boardSlug: string): BaseSourceAdapter
   if (sourceKey === "greenhouse") return new GreenhouseAdapter(boardSlug);
   if (sourceKey === "ashby") return new AshbyAdapter(boardSlug);
   if (sourceKey === "lever") return new LeverAdapter(boardSlug);
+  if (sourceKey === "workable") return new WorkableAdapter(boardSlug);
+  if (sourceKey === "smartrecruiters") return new SmartRecruitersAdapter(boardSlug);
   return null;
 }
 
@@ -470,6 +560,7 @@ export async function runAdapters(): Promise<{
   errors: number;
   status: "HEALTHY" | "DEGRADED" | "FAILED";
   laneCoverage: Record<string, { plansExecuted: number; sourcesFailed: number; discovered: number; staged: number; filtered: number; coverageNote: string }>;
+  skippedByReason: Record<string, number>;
 }> {
   console.log("====================================================");
   console.log("   STAGE 0: EXECUTED SIX-LANE SOURCE PLAN RUNNER    ");
@@ -487,6 +578,8 @@ export async function runAdapters(): Promise<{
   const plugins = await loadSourcePluginsFromDisk();
   const companies = loadCompaniesConfig();
   const lanesConfig = loadGlobalLanesConfig();
+  const locationScope = loadDiscoveryLocationScope();
+  const skippedByReason: Record<string, number> = {};
   const companiesByLane: Record<string, string[]> = {};
   for (const company of companies.filter((candidate) => candidate.enabled !== false)) {
     for (const lane of company.target_lanes ?? []) {
@@ -500,6 +593,7 @@ export async function runAdapters(): Promise<{
   }
   const enabledPlugins = plugins.filter((plugin) => plugin.status === "active" && plugin.schedule.enabled);
   let ledgerPool: pg.Pool | null = null;
+  let workdayBudget: WorkdayRunBudget | null = null;
 
   async function runGroup(input: {
     plugin: SourcePlugin;
@@ -526,8 +620,12 @@ export async function runAdapters(): Promise<{
       itemsPerRun: itemsPerRun(input.plugin),
       plans,
       lanes: lanesConfig.lanes,
+      locationScope,
     });
     totalDiscovered += summary.discovered;
+    for (const [reason, count] of Object.entries(summary.skippedByReason)) {
+      skippedByReason[reason] = (skippedByReason[reason] ?? 0) + count;
+    }
     totalStaged += summary.newlyStaged;
     for (const laneKey of input.laneKeys) {
       laneCoverage[laneKey].discovered += summary.discovered;
@@ -537,7 +635,8 @@ export async function runAdapters(): Promise<{
     if (summary.quarantined > 0) errorCount += summary.quarantined;
     if (summary.success) {
       successfulSources.push(input.label);
-      console.log(`  -> ${input.label}: fetched ${summary.discovered}; new observations ${summary.newlyStaged}; filtered ${summary.filtered}; quarantined ${summary.quarantined}; next cursor ${summary.nextCursor ?? "cycle complete"}`);
+      const skipped = Object.entries(summary.skippedByReason).map(([reason, count]) => `${reason} ${count}`).join(", ");
+      console.log(`  -> ${input.label}: fetched ${summary.discovered}; new observations ${summary.newlyStaged}; filtered ${summary.filtered}${skipped ? ` (scope skips: ${skipped})` : ""}; quarantined ${summary.quarantined}; next cursor ${summary.nextCursor ?? "cycle complete"}`);
     } else {
       failedSources.push(input.label);
       errorCount += 1;
@@ -578,10 +677,64 @@ export async function runAdapters(): Promise<{
     }
 
     if (plugin.kind === "ats") {
-      const atsCompanies = companies.filter((company) =>
+      const matchingCompanies = companies.filter((company) =>
         company.enabled !== false && company.ats_provider?.trim().toLowerCase() === plugin.source_key
       );
+      // Workday tenants share one run budget, so start at a different tenant each day to avoid starving the tail.
+      const atsCompanies = plugin.source_key === "workday"
+        ? rotateDaily(matchingCompanies, new Date())
+        : matchingCompanies;
       for (const company of atsCompanies) {
+        if (plugin.source_key === "workday") {
+          const laneKeys = configuredCompanyLanes(company, plans);
+          const label = `workday:${company.id ?? company.name ?? company.workday_tenant}`;
+          if (laneKeys.length === 0) {
+            broker.recordError(`${label}: enabled Workday company has no configured lane plan.`);
+            failedSources.push(label);
+            errorCount += 1;
+            continue;
+          }
+          workdayBudget ??= workdayDeadlineBudget(WORKDAY_RUN_BUDGET_MS);
+          if (workdayBudget.exhausted()) {
+            // Not a failure: the tenant keeps its checkpoint, and the daily rotation puts it earlier on a later run.
+            console.log(`  DEFERRED: ${label}: the shared Workday run budget (${WORKDAY_RUN_BUDGET_MS / 1000}s) is spent; it keeps its checkpoint for a later run.`);
+            continue;
+          }
+          try {
+            const adapter = new WorkdayAdapter({
+              config: {
+                companyName: company.name ?? "",
+                host: company.workday_host ?? "",
+                tenant: company.workday_tenant ?? "",
+                site: company.workday_site ?? "",
+              },
+              searchTerms: workdaySearchTermsForLanes(laneKeys, plans),
+              budget: workdayBudget,
+            });
+            console.log(`
+Polling ${label} for lanes ${laneKeys.join(", ")}...`);
+            await runGroup({
+              plugin,
+              adapter,
+              label,
+              checkpointTarget: `ats:${company.id ?? company.workday_tenant}`,
+              laneKeys,
+              employerLaneKeys: laneKeys,
+              targetCompanyId: company.id ?? null,
+              pluginRevisionId,
+            });
+            const stats = adapter.lastRunStats;
+            if (stats) {
+              console.log(`  -> ${label} requests: search ${stats.searchRequests}, detail ${stats.detailRequests}; Singapore facet ${stats.facet ? `${stats.facet.parameter}=${stats.facet.descriptors.join("|")}` : "none (location-text filter)"}; terms completed ${stats.termsCompleted}; hits ${stats.hitsSeen}; outside Singapore ${stats.notSingapore}; gone ${stats.detailsGone}${stats.truncatedTerms.length > 0 ? `; truncated terms ${stats.truncatedTerms.join(", ")}` : ""}${stats.stoppedForBudget ? "; stopped at the run budget" : ""}`);
+            }
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            broker.recordError(`${label}: ${detail}`);
+            failedSources.push(label);
+            errorCount += 1;
+          }
+          continue;
+        }
         const boardSlug = company.board_slug?.trim() ?? "";
         const laneKeys = configuredCompanyLanes(company, plans);
         const label = `${plugin.source_key}:${company.id ?? company.name ?? boardSlug}`;
@@ -754,6 +907,7 @@ Polling ${label} for lanes ${laneKeys.join(", ")}...`);
   console.log(`Executed Six-Lane Source Plan Summary:`);
   console.log(`  Status: ${finalStatus}`);
   console.log(`  Discovered: ${totalDiscovered}, New observations staged: ${totalStaged}`);
+  console.log(`  Discovery-scope skips (not staged): ${Object.entries(skippedByReason).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none"}`);
   console.log(`  Successful plans (${successfulSources.length}): ${successfulSources.join(", ") || "None"}`);
   console.log(`  Failed plans (${failedSources.length}): ${failedSources.join(", ") || "None"}`);
   for (const [laneKey, coverage] of Object.entries(laneCoverage)) {
@@ -765,7 +919,7 @@ Polling ${label} for lanes ${laneKeys.join(", ")}...`);
   if (finalStatus === "FAILED" && enabledSourceCount > 0) {
     throw new Error(`Six-lane discovery failed: ${failedSources.join(", ") || "no source plan executed"}.`);
   }
-  return { totalDiscovered, totalStaged, errors: errorCount, status: finalStatus, laneCoverage };
+  return { totalDiscovered, totalStaged, errors: errorCount, status: finalStatus, laneCoverage, skippedByReason };
 }
 
 if (process.argv[1] && process.argv[1].includes("run_adapters")) {

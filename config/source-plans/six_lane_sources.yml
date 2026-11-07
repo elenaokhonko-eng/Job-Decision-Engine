@@ -15,26 +15,43 @@ target_functions:
   - scientific computing engineer
   - technical product manager
   - applied scientist
+# Discovery-scope location pre-filter for employer ATS boards. It runs beside the
+# lane/target-function pre-filter, before any observation is created, and only
+# narrows what is staged: it is not a career rejection and the hard gates are
+# unchanged. Authorized regions come from config/policies/workability.yml
+# (global_workability_gates.territory.authorized_regions); every authorized
+# region needs an entry under region_terms. The filter is inactive when that
+# policy does not reject explicit foreign territory.
+location_scope:
+  applies_to_source_keys: [greenhouse, lever, ashby, workable, smartrecruiters]
+  region_terms:
+    SINGAPORE: [singapore]
+  regional_terms: [apac, asia pacific, asia-pacific, southeast asia, south east asia, asia]
+  remote_terms: [remote, work from home, wfh, telecommute, telecommuting, distributed]
+  global_terms: [worldwide, global, anywhere, international, any location, all locations]
+  # Words that may accompany "remote" without naming a territory.
+  remote_filler_terms: [first, friendly, fully, only, based, from, in, within, the, any, ok, eligible, optional, possible, hybrid, or, and, of, timezone, timezones, time zone, time zones, location, locations, team, role, position, flexible, opportunity]
+  unknown_location_terms: [unknown, not specified, unspecified, tbd, tba, n/a, various, multiple locations, flexible]
 lanes:
   CORE_AI_DATA:
     domain_terms: [AI systems, machine learning, LLM, data engineering, distributed systems, MLOps, platform]
     role_terms: [AI engineer, machine learning engineer, data engineer, software architect, platform architect, research engineer]
-    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely, hacker_news]
+    source_keys: [greenhouse, ashby, lever, workable, smartrecruiters, workday, himalayas, jobicy, remotive, we_work_remotely, hacker_news]
     coverage_note: "Public employer ATS boards and configured remote-job feeds; source failures and empty pages are reported separately."
   LEGAL_REGTECH:
     domain_terms: [legal technology, legal AI, RegTech, compliance automation, contract analytics, fraud technology]
     role_terms: [legal technology, regulatory technology, software engineer, solutions architect, technical delivery]
-    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely, hacker_news]
+    source_keys: [greenhouse, ashby, lever, workable, smartrecruiters, workday, himalayas, jobicy, remotive, we_work_remotely, hacker_news]
     coverage_note: "Public employer ATS boards and configured remote-job feeds; legal practice-only roles remain subject to function gates."
   HEALTH_BIO_PHARMA:
     domain_terms: [bioinformatics, genomics, computational biology, drug discovery, healthcare data, clinical AI]
     role_terms: [research software engineer, scientific computing, data engineer, AI engineer, platform architect]
-    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely, hacker_news]
+    source_keys: [greenhouse, ashby, lever, workable, smartrecruiters, workday, himalayas, jobicy, remotive, we_work_remotely, hacker_news]
     coverage_note: "Public employer ATS boards and configured remote-job feeds; laboratory-only roles remain subject to workability gates."
   INVESTMENT_MARKETS_FINTECH:
     domain_terms: [investment technology, market data, trading systems, asset management technology, fintech platform, risk analytics]
     role_terms: [software architect, data architect, platform engineer, technical delivery, technical product]
-    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely, hacker_news]
+    source_keys: [greenhouse, ashby, lever, workable, smartrecruiters, workday, himalayas, jobicy, remotive, we_work_remotely, hacker_news]
     coverage_note: "Investment technology is searched separately from generic banking, payments, and deal advisory."
   SOCIAL_IMPACT_MULTILATERAL:
     domain_terms: [digital public infrastructure, humanitarian technology, climate data, multilateral AI, development data, civic technology]
