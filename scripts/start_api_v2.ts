@@ -24,12 +24,13 @@ async function start(): Promise<void> {
   }
 
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true, timestamp: new Date().toISOString() });
   });
 
+  // The v2 router parses its own JSON bodies (1 MB by default; the saved-jobs
+  // import routes allow a larger body, parsed only after authentication).
   app.use("/api/v2", createApiV2Router());
 
   await new Promise<void>((resolve) => {
