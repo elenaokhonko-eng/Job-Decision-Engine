@@ -29,6 +29,7 @@ def test_streamlit_entrypoint_and_all_direct_helpers_import_together():
         "streamlit_formatters",
         "streamlit_workspace_contracts",
         "streamlit_manual_application",
+        "streamlit_saved_jobs",
     ):
         importlib.import_module(module_name)
 
@@ -46,6 +47,8 @@ def test_streamlit_startup_app_test_has_no_import_or_script_exception(monkeypatc
     assert not app.exception, [(error.type, error.message) for error in app.exception]
     assert any(title.value for title in app.title)
     assert "Add job" in [tab.label for tab in app.tabs]
+    assert "Saved jobs" in [tab.label for tab in app.tabs]
+    assert "LinkedIn saved jobs" not in [tab.label for tab in app.tabs]
 
 
 def test_hosted_runtime_requires_an_authenticated_reachable_api():

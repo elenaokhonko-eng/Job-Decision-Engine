@@ -15,7 +15,7 @@ companies:
     name: OpenAI
     hq_country: US
     singapore_presence: true
-    ats_provider: greenhouse
+    ats_provider: ashby # verified 2026-11-08; the Greenhouse "openai" board is not OpenAI's
     board_slug: openai
     target_lanes: 
       - CORE_AI_DATA
@@ -28,6 +28,238 @@ companies:
     singapore_presence: false
     ats_provider: ashby
     board_slug: cohere
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  # Boards below verified read-only on 2026-11-08 (public ATS API, jobs > 0).
+  - id: mistral_ai
+    name: Mistral AI
+    hq_country: FR
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: mistral.ai
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: hugging_face
+    name: Hugging Face
+    hq_country: US
+    singapore_presence: false
+    ats_provider: workable
+    board_slug: huggingface
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  - id: together_ai
+    name: Together AI
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: togetherai
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: fireworks_ai
+    name: Fireworks AI
+    hq_country: US
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: fireworks
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: deepgram
+    name: Deepgram
+    hq_country: US
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: deepgram
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: langchain
+    name: LangChain
+    hq_country: US
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: langchain
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: databricks
+    name: Databricks
+    hq_country: US
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: databricks
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: snowflake
+    name: Snowflake
+    hq_country: US
+    singapore_presence: true
+    ats_provider: ashby
+    board_slug: snowflake
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: elastic
+    name: Elastic
+    hq_country: US
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: elastic
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: cloudflare
+    name: Cloudflare
+    hq_country: US
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: cloudflare
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: gitlab
+    name: GitLab
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: gitlab
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  - id: canonical
+    name: Canonical
+    hq_country: GB
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: canonical
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  - id: grafana_labs
+    name: Grafana Labs
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: grafanalabs
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  - id: supabase
+    name: Supabase
+    hq_country: US
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: supabase
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  - id: zapier
+    name: Zapier
+    hq_country: US
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: zapier
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  - id: posthog
+    name: PostHog
+    hq_country: US
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: posthog
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  - id: vercel
+    name: Vercel
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: vercel
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: notion
+    name: Notion
+    hq_country: US
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: notion
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: onepassword
+    name: 1Password
+    hq_country: CA
+    singapore_presence: false
+    ats_provider: ashby
+    board_slug: 1password
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  - id: tailscale
+    name: Tailscale
+    hq_country: CA
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: tailscale
+    target_lanes: 
+      - CORE_AI_DATA
+    remote_policy: remote_preferred
+    enabled: true
+
+  - id: chainguard
+    name: Chainguard
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: chainguard
     target_lanes: 
       - CORE_AI_DATA
     remote_policy: remote_preferred
@@ -56,20 +288,32 @@ companies:
       - HEALTH_BIO_PHARMA
       - CORE_AI_DATA
     remote_policy: hybrid_allowed
-    enabled: true
+    enabled: false # 2026-11-08 probe: 43 jobs, none Singapore/APAC/remote
+
+  - id: biofourmis
+    name: Biofourmis
+    hq_country: US
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: biofourmis
+    target_lanes: 
+      - HEALTH_BIO_PHARMA
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: false # 2026-11-08 probe: 0 jobs on the public board
 
   # ── LEGAL_REGTECH ─────────────────────────────────────────────────────────
   - id: ironclad
     name: Ironclad
     hq_country: US
     singapore_presence: false
-    ats_provider: greenhouse
-    board_slug: ironclad
+    ats_provider: ashby # verified 2026-11-08 (was greenhouse/ironclad)
+    board_slug: ironcladhq
     target_lanes: 
       - LEGAL_REGTECH
       - CORE_AI_DATA
     remote_policy: remote_preferred
-    enabled: false
+    enabled: true
 
   - id: harvey
     name: Harvey
@@ -81,6 +325,17 @@ companies:
       - LEGAL_REGTECH
       - CORE_AI_DATA
     remote_policy: hybrid_allowed
+    enabled: true
+
+  - id: luminance
+    name: Luminance
+    hq_country: GB
+    singapore_presence: false
+    ats_provider: workable
+    board_slug: luminance-1
+    target_lanes: 
+      - LEGAL_REGTECH
+    remote_policy: unknown
     enabled: true
 
   # ── INVESTMENT_MARKETS_FINTECH ───────────────────────────────────────────
@@ -105,6 +360,110 @@ companies:
       - INVESTMENT_MARKETS_FINTECH
     remote_policy: hybrid_allowed
     enabled: false
+
+  - id: stripe
+    name: Stripe
+    hq_country: US
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: stripe
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: airwallex
+    name: Airwallex
+    hq_country: AU
+    singapore_presence: true
+    ats_provider: ashby
+    board_slug: airwallex
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: wise
+    name: Wise
+    hq_country: GB
+    singapore_presence: true
+    ats_provider: smartrecruiters
+    board_slug: Wise
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true # SmartRecruiters ids are case-sensitive; Greenhouse "wise" is a different company
+
+  - id: coinbase
+    name: Coinbase
+    hq_country: US
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: coinbase
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: grab
+    name: Grab
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: smartrecruiters
+    board_slug: Grab
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: nium
+    name: Nium
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: lever
+    board_slug: nium
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: thunes
+    name: Thunes
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: greenhouse
+    board_slug: thunes
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: addepar
+    name: Addepar
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: addepar1
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: carta
+    name: Carta
+    hq_country: US
+    singapore_presence: false
+    ats_provider: greenhouse
+    board_slug: carta
+    target_lanes: 
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
 
   # ── Disabled Unverified Local Stubs (Preserved for manual portal routing) ──
   - id: govtech_sg

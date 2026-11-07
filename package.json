@@ -40,6 +40,7 @@
     "pipeline:worker": "tsx scripts/process_pipeline_tasks.ts",
     "email:parse": "tsx scripts/parse_emails.ts",
     "import:linkedin-saved": "tsx scripts/import_linkedin_saved.ts",
+    "import:mcf-saved": "tsx scripts/import_mcf_saved.ts",
     "pipeline:repair-content": "tsx scripts/repair_job_content.ts",
     "pipeline:repair-content-backlog": "tsx scripts/repair_job_content_backlog.ts",
     "pipeline:requeue-linkedin-blocks": "tsx scripts/requeue_linkedin_content_blocks.ts",
