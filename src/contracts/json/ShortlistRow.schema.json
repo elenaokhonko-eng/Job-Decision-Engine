@@ -53,7 +53,8 @@
             "MANUAL_IMPORT",
             "MANUAL_STREAMLIT",
             "LINKEDIN",
-            "LINKEDIN_SAVED"
+            "LINKEDIN_SAVED",
+            "MCF_SAVED"
           ],
           "default": "GMAIL_ALERT"
         },
