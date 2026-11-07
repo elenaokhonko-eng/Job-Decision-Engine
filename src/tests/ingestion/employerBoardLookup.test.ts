@@ -58,6 +58,11 @@ function transport(route: (url: URL) => Reply | undefined, extra: Partial<Postin
 }
 
 /** LinkedIn serves the sign-in wall to the posting fetcher, as it does from CI. */
+function isLinkedInRequest(url: string): boolean {
+  const host = new URL(url).hostname;
+  return host === "linkedin.com" || host.endsWith(".linkedin.com");
+}
+
 function linkedInAuthWall(url: URL): Reply | undefined {
   if (url.hostname === "www.linkedin.com") {
     return { status: 403, body: "<html>Sign in to view this job</html>", headers: { "content-type": "text/html" } };
@@ -269,7 +274,7 @@ describe("fetchJobContent employer-board fallback for LinkedIn URLs", () => {
 
     expect(result).toMatchObject({ kind: "BLOCKED", reason: "EMPLOYER_BOARD_NOT_FOUND" });
     // Greenhouse (verified) gets every candidate; Lever and Ashby only full-name slugs.
-    expect(first.requests.filter((url) => !url.includes("linkedin.com"))).toEqual([
+    expect(first.requests.filter((url) => !isLinkedInRequest(url))).toEqual([
       "https://boards-api.greenhouse.io/v1/boards/exampleanalytics",
       "https://boards-api.greenhouse.io/v1/boards/example-analytics",
       "https://api.ashbyhq.com/posting-api/job-board/exampleanalytics?includeCompensation=true",
@@ -285,7 +290,7 @@ describe("fetchJobContent employer-board fallback for LinkedIn URLs", () => {
     const second = transport(linkedInAuthWall);
     const again = await fetchJobContent(LINKEDIN_URL, EXPECTED, { ...second.deps, employerBoardFallback });
     expect(again).toMatchObject({ kind: "BLOCKED", reason: "EMPLOYER_BOARD_NOT_FOUND" });
-    expect(second.requests.every((url) => url.includes("linkedin.com"))).toBe(true);
+    expect(second.requests.every((url) => isLinkedInRequest(url))).toBe(true);
   });
 
   it("keeps network, HTTP and parse failures retryable and caches nothing", async () => {
@@ -376,7 +381,7 @@ describe("fetchJobContent employer-board fallback for LinkedIn URLs", () => {
       requisitionId: job.id,
     });
     expect(result.employerBoardLookup).toMatchObject({ resolutionMethod: "CONFIG", boardToken: "example-board" });
-    expect(requests.filter((url) => !url.includes("linkedin.com"))).toHaveLength(1);
+    expect(requests.filter((url) => !isLinkedInRequest(url))).toHaveLength(1);
     expect(cache.entries.get("example analytics")?.candidatesTried).toEqual(["ASHBY:example-board"]);
   });
 
@@ -441,6 +446,6 @@ describe("fetchJobContent employer-board fallback for LinkedIn URLs", () => {
       ...fallback(),
     });
     expect(result).toMatchObject({ kind: "BLOCKED", reason: "EMPLOYER_BOARD_NOT_FOUND" });
-    expect(requests.every((url) => url.includes("linkedin.com"))).toBe(true);
+    expect(requests.every((url) => isLinkedInRequest(url))).toBe(true);
   });
 });
