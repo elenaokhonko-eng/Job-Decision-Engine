@@ -1,0 +1,63 @@
+schema_version: "2.2.0"
+source_key: linkedin_saved
+display_name: LinkedIn saved jobs (user browser export, manual)
+kind: manual_import
+status: active
+capabilities:
+  discovery: false
+  pagination: false
+  incremental: false
+  location_filter: false
+  work_mode_evidence: false
+compliance:
+  access_basis: user_supplied
+  terms_url: https://www.linkedin.com/legal/user-agreement
+  license: null
+  attribution_required: true
+  attribution_text: >-
+    The user's own saved-job selections, exported manually and at human pace in their own
+    signed-in browser tab with scripts/linkedin/export_saved_jobs.console.js (it reads the
+    rendered Saved-jobs list and opens each saved job page sequentially about 2 seconds apart,
+    stopping on a rate limit or checkpoint), then imported with npm run import:linkedin-saved.
+    The repository never signs in to LinkedIn, stores or reads no LinkedIn cookie, runs no
+    headless browser or scheduled LinkedIn access, and never unsaves jobs. The LinkedIn job URL
+    is kept for attribution; imported content does not establish that a job is still open.
+  authenticated_scraping: false
+  reviewed_at: "2026-11-07"
+schedule:
+  enabled: false
+  interval_minutes: 1440
+  jitter_seconds: 0
+request:
+  endpoint: https://example.invalid/linkedin-saved-export
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 0
+    base_delay_ms: 1000
+    max_delay_ms: 1000
+  rate_limit:
+    requests_per_minute: 1
+    items_per_run: null
+  pagination:
+    strategy: none
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: null
+  query:
+    keywords: []
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: []
+mapping:
+  external_id: $context.linkedin_job_id
+  title: $.title
+  company: $.company
+  description: $.description
+  url: $.url
+  location: $.location
+  work_mode: $context.location_label
+  employment_type: $context.unknown
+  posted_at: $.postedAt
+  updated_at: null

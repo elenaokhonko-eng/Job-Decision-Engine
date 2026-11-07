@@ -39,6 +39,7 @@
     "sources:sync": "tsx scripts/load_source_plugins.ts",
     "pipeline:worker": "tsx scripts/process_pipeline_tasks.ts",
     "email:parse": "tsx scripts/parse_emails.ts",
+    "import:linkedin-saved": "tsx scripts/import_linkedin_saved.ts",
     "pipeline:repair-content": "tsx scripts/repair_job_content.ts",
     "pipeline:repair-content-backlog": "tsx scripts/repair_job_content_backlog.ts",
     "embeddings:repair-profile": "tsx scripts/repair_profile_embeddings.ts",
