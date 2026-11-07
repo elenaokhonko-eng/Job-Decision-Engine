@@ -119,8 +119,11 @@ export abstract class BaseSourceAdapter {
     return readResponseTextBounded(response, maxBytes, "Source response");
   }
 
-  protected async readJsonResponse(response: Response): Promise<unknown> {
-    return readJsonResponseBounded(response, MAX_SOURCE_RESPONSE_BYTES, "Source response");
+  protected async readJsonResponse(
+    response: Response,
+    maxBytes = MAX_SOURCE_RESPONSE_BYTES,
+  ): Promise<unknown> {
+    return readJsonResponseBounded(response, maxBytes, "Source response");
   }
 
   protected assertRecordCount(records: readonly unknown[], maxRecords = MAX_SOURCE_RECORDS): void {
