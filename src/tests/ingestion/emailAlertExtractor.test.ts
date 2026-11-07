@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   decodeGmailRawEmail,
   extractEmailJobCards,
+  extractEmailJobCardsWithLinkSummary,
   type EmailJobCard,
 } from "../../ingestion/emailAlertExtractor.js";
+import { linkedInDigestAlertRaw, linkedInJobId } from "../fixtures/gmailDigestAlerts.js";
 
 function gmailRaw(mime: string): string {
   return Buffer.from(mime, "utf8").toString("base64url");
@@ -107,5 +109,103 @@ describe("decodeGmailRawEmail", () => {
     await expect(extractEmailJobCards("")).rejects.toThrow(/no raw RFC 5322/i);
     const oversized = "A".repeat(10 * 1024 * 1024 + 1);
     await expect(extractEmailJobCards(oversized)).rejects.toThrow(/bounded input limit|10 MiB/i);
+  });
+});
+
+describe("job-card link classification and collapsing", () => {
+  // An HTML-only email is decoded with a generated text alternative that
+  // repeats each link once, so every anchor is seen twice.
+  function htmlRaw(html: string): string {
+    return gmailRaw(["MIME-Version: 1.0", "Content-Type: text/html; charset=utf-8", "", html].join("\r\n"));
+  }
+
+  it("stages one canonical card per LinkedIn job id and accounts for every skipped or collapsed link", async () => {
+    const { cards, links } = await extractEmailJobCardsWithLinkSummary(linkedInDigestAlertRaw({ digestIndex: 4, cardsPerDigest: 3 }));
+
+    expect(cards.map((card) => card.sourceUrl)).toEqual([0, 1, 2].map(
+      (card) => `https://www.linkedin.com/jobs/view/${linkedInJobId(4, card)}`,
+    ));
+    expect(cards.map((card) => card.title)).toEqual([0, 1, 2].map((card) => `Synthetic LinkedIn Architect 4-${card}`));
+    // Logo, title and "View job" links in HTML plus the text/plain link.
+    expect(cards.map((card) => card.linkCount)).toEqual([4, 4, 4]);
+    expect(links).toEqual({
+      // 3 cards x (3 job + 1 company) + 8 footer links in HTML; 3 job + 2 footer links in text.
+      linksSeen: 25,
+      jobCards: 3,
+      // 3 company pages + 8 footer links + 2 text footer links.
+      nonJobLinksSkipped: 13,
+      duplicateLinksCollapsed: 9,
+    });
+    expect(links.linksSeen).toBe(links.jobCards + links.nonJobLinksSkipped + links.duplicateLinksCollapsed);
+  });
+
+  it("never treats LinkedIn search, alert, help, premium or Job Alert Manager links as jobs", async () => {
+    const urls = [
+      "https://www.linkedin.com/comm/jobs/search?keywords=architect",
+      "https://www.linkedin.com/comm/jobs/alerts",
+      "https://www.linkedin.com/help/linkedin/answer/67",
+      "https://www.linkedin.com/comm/premium/products/",
+      "https://www.linkedin.com/jobs/jam/manage",
+      "https://www.linkedin.com/comm/jobs/jam",
+      "https://www.linkedin.com/jobs/search/?currentJobId=4300000999",
+      "https://www.linkedin.com/jobs/collections/recommended/",
+    ];
+    const html = urls.map((url) => `<p>New job for you: <a href="${url}">View jobs</a></p>`).join("");
+    const { cards, links } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
+
+    expect(cards).toEqual([]);
+    expect(links.jobCards).toBe(0);
+    expect(links.nonJobLinksSkipped).toBe(links.linksSeen);
+  });
+
+  it("recognises a LinkedIn job link behind a Google redirect and slugged job paths", async () => {
+    const wrapped = "https://www.google.com/url?q=" + encodeURIComponent("https://www.linkedin.com/comm/jobs/view/4300000123/?trackingId=a");
+    const html = `<a href="${wrapped}">Synthetic Platform Lead</a>`
+      + '<a href="https://sg.linkedin.com/jobs/view/synthetic-platform-lead-at-example-4300000123?trk=b">View job</a>';
+    const { cards, links } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
+
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      sourceUrl: "https://www.linkedin.com/jobs/view/4300000123",
+      title: "Synthetic Platform Lead",
+      linkCount: 4,
+    });
+    expect(links).toEqual({ linksSeen: 4, jobCards: 1, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 3 });
+  });
+
+  it("drops non-LinkedIn navigation by whole path segment while keeping posting slugs", async () => {
+    const html = [
+      '<a href="https://careers.example.com/jobs/customer-support-lead-77">Customer Support Lead</a>',
+      '<a href="https://careers.example.com/jobs/research-scientist-78">Research Scientist</a>',
+      '<a href="https://careers.example.com/help/jobs">Job help</a>',
+      '<a href="https://careers.example.com/jobs/search?q=data">Search jobs</a>',
+      '<a href="https://careers.example.com/account/settings/job-alerts">Job alert settings</a>',
+      '<a href="https://careers.example.com/premium/jobs">Premium jobs</a>',
+    ].join("");
+    const { cards, links } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
+
+    expect(cards.map((card) => card.sourceUrl)).toEqual([
+      "https://careers.example.com/jobs/customer-support-lead-77",
+      "https://careers.example.com/jobs/research-scientist-78",
+    ]);
+    expect(links).toMatchObject({ linksSeen: 12, jobCards: 2, nonJobLinksSkipped: 8, duplicateLinksCollapsed: 2 });
+  });
+
+  it("collapses campaign-tagged variants of one posting and keeps the richest title", async () => {
+    const html = [
+      '<table><tr><td><a href="https://careers.example.com/jobs/55?utm_source=alert&amp;utm_campaign=a">Apply now</a></td></tr></table>',
+      '<table><tr><td><a href="https://careers.example.com/jobs/55?utm_source=alert&amp;utm_campaign=b">Principal Data Engineer</a>'
+        + "<p>Company: Example Analytics</p><p>Location: Example City</p></td></tr></table>",
+    ].join("");
+    const { cards, links } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
+
+    expect(cards).toEqual([expect.objectContaining({
+      sourceUrl: "https://careers.example.com/jobs/55",
+      title: "Principal Data Engineer",
+      companyName: "Example Analytics",
+      location: "Example City",
+      linkCount: 4,
+    })]);
+    expect(links).toEqual({ linksSeen: 4, jobCards: 1, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 3 });
   });
 });
