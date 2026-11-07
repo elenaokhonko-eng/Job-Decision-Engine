@@ -225,6 +225,37 @@ async function statementBuffers(sql: string, params: unknown[]): Promise<number>
   }
 }
 
+interface PlanNode {
+  "Node Type": string;
+  "Relation Name"?: string;
+  "Actual Loops"?: number;
+  Plans?: PlanNode[];
+}
+
+function planNodes(node: PlanNode): PlanNode[] {
+  return [node, ...(node.Plans ?? []).flatMap(planNodes)];
+}
+
+/**
+ * EXPLAIN ANALYZE inside a rolled-back transaction. `setup` runs first in the
+ * same transaction, e.g. to reproduce a production plan.
+ */
+async function analyzedPlan(sql: string, params: unknown[], setup: string[] = []): Promise<PlanNode> {
+  await db().query("BEGIN");
+  try {
+    for (const statement of setup) await db().query(statement);
+    const { rows } = await db().query<{ "QUERY PLAN": Array<{ Plan: PlanNode }> }>(
+      `EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`,
+      params,
+    );
+    const plan = rows[0]?.["QUERY PLAN"]?.[0]?.Plan;
+    if (!plan) throw new Error("EXPLAIN returned no plan.");
+    return plan;
+  } finally {
+    await db().query("ROLLBACK");
+  }
+}
+
 describe.skipIf(skipReal)("pipeline worker throughput (PostgreSQL)", () => {
   beforeAll(async () => {
     for (const key of ["EMBEDDING_PRIMARY_PROVIDER", "EMBEDDING_PRIMARY_MODEL", "EMBEDDING_PRIMARY_DIMENSIONS"]) {
@@ -320,6 +351,44 @@ describe.skipIf(skipReal)("pipeline worker throughput (PostgreSQL)", () => {
     console.info("Worker queries per claimed task:", JSON.stringify(perTask));
   }, 300_000);
 
+  it("never scans canonical_jobs once per task when no job is archived", async () => {
+    const taskType = "FETCH_JOB_CONTENT";
+    const live = await insertSyntheticJobs(60, false);
+    for (const job of live) await insertPendingTask(taskType, { observation_id: job.observationId });
+    await db().query("ANALYZE");
+    const archived = await db().query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM canonical_jobs WHERE archived_at IS NOT NULL`,
+    );
+    expect(archived.rows[0]?.count).toBe(0);
+
+    // Production (no archived jobs) planned the old predicate as a sequential
+    // scan of canonical_jobs repeated for every task row, because the
+    // `id::text = payload->>...` comparison cannot use an index. Dropping the
+    // partial archived_at index inside the rolled-back transaction reproduces
+    // that plan shape locally; the keyed predicate must still touch
+    // canonical_jobs by key or at most once per statement.
+    for (const setup of [[], [`DROP INDEX ${schemaName}.idx_canonical_jobs_archived_workspace`]]) {
+      const claimPlan = await analyzedPlan(
+        CLAIM_PIPELINE_TASKS_SQL,
+        [workspace().workspaceId, taskType, 1, 300, "throughput-test", null, null],
+        setup,
+      );
+      const healthPlan = await analyzedPlan(
+        `SELECT task_type, status, task_count FROM v_pipeline_task_queue_health WHERE workspace_id = $1`,
+        [workspace().workspaceId],
+        setup,
+      );
+      for (const plan of [claimPlan, healthPlan]) {
+        const repeatedSeqScans = planNodes(plan).filter((node) =>
+          node["Node Type"] === "Seq Scan" &&
+          node["Relation Name"] === "canonical_jobs" &&
+          (node["Actual Loops"] ?? 0) > 1,
+        );
+        expect(repeatedSeqScans).toEqual([]);
+      }
+    }
+  }, 120_000);
+
   it("rebuilds unchanged embedding inputs with a constant number of queries", async () => {
     const { result, queries } = await countQueries(() => buildEmbeddingInputs(db(), 500, {
       context: workspace(),
@@ -406,9 +475,16 @@ describe.skipIf(skipReal)("pipeline worker throughput (PostgreSQL)", () => {
       [workspace().workspaceId],
     );
     const taskCount = totalTasks.rows[0]?.count ?? 0;
-    console.info("Archive scaling buffers:", JSON.stringify({ claimSmall, claimLarge, healthSmall, healthLarge, taskCount }));
+    const pendingOfType = await db().query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM pipeline_tasks
+       WHERE workspace_id = $1 AND task_type = $2 AND status = 'PENDING'`,
+      [workspace().workspaceId, taskType],
+    );
+    const candidates = pendingOfType.rows[0]?.count ?? 0;
+    expect(candidates).toBeGreaterThanOrEqual(live.length);
+    console.info("Archive scaling buffers:", JSON.stringify({ claimSmall, claimLarge, healthSmall, healthLarge, taskCount, candidates }));
     for (const claimBuffers of [claimSmall, claimLarge]) {
-      expect(claimBuffers).toBeLessThanOrEqual(15 * live.length + 150);
+      expect(claimBuffers).toBeLessThanOrEqual(15 * candidates + 150);
     }
     for (const healthBuffers of [healthSmall, healthLarge]) {
       expect(healthBuffers).toBeLessThanOrEqual(15 * taskCount + 300);
