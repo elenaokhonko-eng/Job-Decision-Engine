@@ -95,7 +95,7 @@ const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
     current_decision.readiness_fingerprint AS decision_readiness_fingerprint,
     current_decision.evidence_revision_hash AS decision_evidence_revision_hash,
     job_version.evidence_revision_hash AS current_evidence_revision_hash,
-    culture_source.source_type AS culture_source_name,
+    culture_source.source_name AS culture_source_name,
     culture_source.source_url AS culture_source_url,
     COALESCE(job_version.source_published_at, job_version.first_seen_at) AS culture_source_observed_at,
     current_match.job_content_hash AS match_job_content_hash,
@@ -186,7 +186,7 @@ const CURRENT_APPLY_NOW_CONTEXT_QUERY = `
     LIMIT 1
   ) AS current_evaluation ON TRUE
   LEFT JOIN LATERAL (
-    SELECT observation.source_type, observation.source_url
+    SELECT observation.source_name, observation.source_url
     FROM raw_job_observations AS observation
     WHERE observation.workspace_id = job.workspace_id
       AND observation.job_version_id = job_version.id
