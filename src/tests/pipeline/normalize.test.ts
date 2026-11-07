@@ -197,8 +197,8 @@ describe('Pipeline Stage: Normalization', () => {
           derived_from_observation_id: 'gmail-observation-id',
         }] };
       }
-      if (sql.includes('SELECT version.canonical_job_id, version.id AS job_version_id')) {
-        return { rows: [{ canonical_job_id: 'canonical-job-id', job_version_id: 'stub-version-id', content_hash: 'stub-content-hash' }] };
+      if (sql.includes('SELECT discovery.title, version.canonical_job_id, version.id AS job_version_id')) {
+        return { rows: [{ title: 'Director, AI Solution Architect', canonical_job_id: 'canonical-job-id', job_version_id: 'stub-version-id', content_hash: 'stub-content-hash' }] };
       }
       if (sql.includes('FROM job_versions version') && sql.includes('source_posting_identity_hash =')) return { rows: [] };
       if (sql.includes('FROM job_versions version') && sql.includes('source_posting_identity_hash IS NULL')) return { rows: [] };
@@ -223,7 +223,8 @@ describe('Pipeline Stage: Normalization', () => {
 
     expect(summary.totalProcessed).toBe(1);
     expect(summary.totalErrors).toBe(0);
-    expect(parentIdentityCheck?.[1]).toEqual([context.workspaceId, 'gmail-observation-id', 'Director, AI Solution Architect']);
+    // The parent is loaded by tenant and id; its title is then matched in code with the fetcher's rule.
+    expect(parentIdentityCheck?.[1]).toEqual([context.workspaceId, 'gmail-observation-id']);
     expect(updateCanonical?.[1][0]).toBe('complete-version-id');
     expect(updateCanonical?.[1][7]).toBe('COMPLETE');
     expect(updateCanonical?.[1][9]).toBe(false);
