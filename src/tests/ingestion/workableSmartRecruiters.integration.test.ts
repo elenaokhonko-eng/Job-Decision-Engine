@@ -10,6 +10,7 @@ import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pg
 import { SourcePluginSchema, type SourcePlugin } from "../../contracts/index.js";
 import { WorkableAdapter } from "../../ingestion/adapters/workableAdapter.js";
 import { SmartRecruitersAdapter } from "../../ingestion/adapters/smartRecruitersAdapter.js";
+import { loadDiscoveryLocationScope } from "../../ingestion/discoveryLocationScope.js";
 import { DiscoveryScoutPlanner } from "../../ingestion/scouts/discoveryScouts.js";
 import { SourceBroker } from "../../ingestion/sourceBroker.js";
 import { loadGlobalLanesConfig } from "../../pipeline/laneConfigLoader.js";
@@ -106,6 +107,15 @@ describe.skipIf(skipReal)("Workable and SmartRecruiters discovery staging (Postg
           locations: [{ country: "Singapore", city: "Singapore", hidden: false }],
           description: "<p>Coordinate office supplies and visitor schedules.</p>",
         },
+        {
+          shortcode: "SYNWK0003",
+          title: "Synthetic Platform Architect",
+          employment_type: "Full-time",
+          telecommuting: false,
+          url: "https://apply.workable.com/j/SYNWK0003",
+          locations: [{ country: "United Kingdom", city: "London", hidden: false }],
+          description: DESCRIPTION_HTML,
+        },
       ],
     })));
 
@@ -121,9 +131,13 @@ describe.skipIf(skipReal)("Workable and SmartRecruiters discovery staging (Postg
       itemsPerRun: 50,
       plans,
       lanes,
+      locationScope: loadDiscoveryLocationScope(),
     };
     const summary = await processSourcePage(pageOptions);
-    expect(summary).toMatchObject({ success: true, discovered: 2, newlyStaged: 1, filtered: 1, quarantined: 0, nextCursor: null });
+    expect(summary).toMatchObject({
+      success: true, discovered: 3, newlyStaged: 1, filtered: 2, quarantined: 0, nextCursor: null,
+      skippedByReason: { LOCATION_OUT_OF_SCOPE: 1 },
+    });
 
     const observations = await database.query<{
       source_name: string; source_plugin_key: string; source_external_id: string; source_url: string;
@@ -150,14 +164,15 @@ describe.skipIf(skipReal)("Workable and SmartRecruiters discovery staging (Postg
     expect(row.raw_payload_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(row.description_raw).not.toContain("<");
 
-    const dispositions = await database.query<{ source_external_id: string; disposition: string }>(
-      `SELECT source_external_id, disposition FROM source_candidate_dispositions
+    const dispositions = await database.query<{ source_external_id: string; disposition: string; reason_code: string }>(
+      `SELECT source_external_id, disposition, reason_code FROM source_candidate_dispositions
        WHERE workspace_id = $1 AND source_plugin_key = 'workable' ORDER BY source_external_id`,
       [getContext().workspaceId],
     );
     expect(dispositions.rows).toEqual([
-      { source_external_id: "SYNWK0001", disposition: "STAGED" },
-      { source_external_id: "SYNWK0002", disposition: "FILTERED" },
+      { source_external_id: "SYNWK0001", disposition: "STAGED", reason_code: "LANE_MATCHED" },
+      { source_external_id: "SYNWK0002", disposition: "FILTERED", reason_code: "LANE_DOMAIN_MISS" },
+      { source_external_id: "SYNWK0003", disposition: "FILTERED", reason_code: "LOCATION_OUT_OF_SCOPE" },
     ]);
 
     // A second identical run stages nothing new.

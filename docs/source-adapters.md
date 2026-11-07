@@ -21,6 +21,14 @@ npm run sources:sync
 - We Work Remotely: attributed RSS feed.
 - Gmail: alerts from sources without supported public APIs.
 
+## Discovery-Scope Location Pre-Filter (employer ATS boards)
+
+`config/source-plans/six_lane_sources.yml` `location_scope` narrows what the runner stages from the ATS sources it lists (Greenhouse, Lever, Ashby, Workable, SmartRecruiters). It runs in `processSourcePage` beside the lane/target-function pre-filter, using `src/ingestion/discoveryLocationScope.ts`. Authorized regions come from `config/policies/workability.yml` (`territory.authorized_regions`); the filter is inactive when that policy does not reject explicit foreign territory.
+
+- Kept: the location (or title) mentions an authorized region or regional term (Singapore, APAC, Asia-Pacific, Southeast Asia, Asia); any location segment is remote without naming a territory ("Remote", "Remote - Worldwide"); the posting is flagged remote and its location does not restrict the remote territory; the location is empty or unknown (the hard gates then decide, usually `NEEDS_VERIFICATION`). A multi-location posting is kept if any location qualifies.
+- Skipped: the location names only other places, or restricts remote work to them ("Remote - US", "Remote, Canada only").
+- A skipped posting creates no observation. Each lane records a `FILTERED` candidate disposition with reason `LOCATION_OUT_OF_SCOPE`, it counts toward the plan run's `items_filtered`, and the run summary prints skips by reason. This is discovery scope, not a career rejection; hard gates are unchanged. Workspace work-authorization overrides do not widen this discovery scope.
+
 ## Failure Semantics
 
 A source may return a successful empty result. HTTP errors, timeouts, rate limits, and malformed records are distinct outcomes. Invalid records are quarantined by validation; failed sources make the unified run `DEGRADED` when another source succeeds, or `FAILED` when every enabled source fails.

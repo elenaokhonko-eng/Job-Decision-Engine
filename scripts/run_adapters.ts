@@ -21,6 +21,12 @@ import { SourceBroker } from "../src/ingestion/sourceBroker.js";
 import type { JobSourceEvidence } from "../src/contracts/jobSourceEvidence.js";
 import { DiscoveryScoutPlanner, type ScoutSearchPlan } from "../src/ingestion/scouts/discoveryScouts.js";
 import { assessCandidateLanes, type LaneDisposition } from "../src/ingestion/discoveryPlanExecution.js";
+import {
+  assessLocationScope,
+  loadDiscoveryLocationScope,
+  locationScopeAppliesTo,
+  type DiscoveryLocationScope,
+} from "../src/ingestion/discoveryLocationScope.js";
 import { normalizePostingUrl } from "../src/ingestion/postingIdentity.js";
 import { loadGlobalLanesConfig } from "../src/pipeline/laneConfigLoader.js";
 import {
@@ -137,6 +143,8 @@ export interface SourcePageOptions {
   readonly itemsPerRun: number;
   readonly plans: Readonly<Record<string, ScoutSearchPlan>>;
   readonly lanes: ReturnType<typeof loadGlobalLanesConfig>["lanes"];
+  /** Discovery-scope location pre-filter; applied only to the source keys it lists. */
+  readonly locationScope?: DiscoveryLocationScope | null;
 }
 
 export interface SourcePageSummary {
@@ -145,6 +153,8 @@ export interface SourcePageSummary {
   readonly newlyStaged: number;
   readonly filtered: number;
   readonly quarantined: number;
+  /** Postings not staged because they fell outside the discovery scope, by reason code. */
+  readonly skippedByReason: Readonly<Record<string, number>>;
   readonly nextCursor: string | null;
   readonly error?: string;
 }
@@ -178,17 +188,47 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
         pagesProcessed: 0, itemsSeen: 0, itemsStaged: 0, itemsFiltered: 0,
       }, [detail], options.plans[laneKey]?.coverageNote);
     }
-    return { success: false, discovered: 0, newlyStaged: 0, filtered: 0, quarantined: 0, nextCursor: cursor, error: detail };
+    return { success: false, discovered: 0, newlyStaged: 0, filtered: 0, quarantined: 0, skippedByReason: {}, nextCursor: cursor, error: detail };
   }
 
   const quarantinedCandidates = result.quarantinedCandidates ?? [];
   const quarantineCount = result.quarantined ?? quarantinedCandidates.length;
   let newlyStaged = 0;
   let filtered = 0;
+  const skippedByReason: Record<string, number> = {};
+  const locationScope = locationScopeAppliesTo(options.locationScope, options.plugin.source_key) ? options.locationScope : null;
   const totalFetched = result.totalFetched;
   let nextCursor = cursor;
   try {
   for (const job of result.jobs) {
+    if (locationScope) {
+      const scopeDecision = assessLocationScope(job, locationScope);
+      if (!scopeDecision.inScope) {
+        // Discovery-scope narrowing, not a career rejection: no observation is created and every
+        // lane records a FILTERED disposition with the reason, like a lane pre-filter miss.
+        skippedByReason[scopeDecision.reasonCode] = (skippedByReason[scopeDecision.reasonCode] ?? 0) + 1;
+        const rawPayload = job.raw_payload ?? job;
+        for (const laneKey of options.laneKeys) {
+          counts.get(laneKey)!.filtered += 1;
+          filtered += 1;
+          await options.broker.recordCandidateDisposition({
+            sourcePluginKey: options.plugin.source_key,
+            planKey: `${options.checkpointTarget}:${laneKey}`,
+            laneKey,
+            sourceExternalId: stableExternalIdForJob(result.sourceName, job),
+            sourceUrl: job.employer_posting_url ?? job.canonical_apply_url,
+            rawPayloadHash: payloadHash(rawPayload),
+            rawPayload,
+            normalizedEvidence: null,
+            disposition: "FILTERED",
+            reasonCode: scopeDecision.reasonCode,
+            reasonDetail: scopeDecision.reason,
+            observationId: null,
+          }, planRunIds.get(laneKey) ?? null);
+        }
+        continue;
+      }
+    }
     const laneResults = assessCandidateLanes(job, options.laneKeys, options.plans, options.lanes, options.employerLaneKeys);
     const matchedLanes = laneResults.filter((disposition) => disposition.matched).map((disposition) => disposition.laneKey);
     const rawPayload = job.raw_payload ?? job;
@@ -313,7 +353,7 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
         itemsFiltered: laneCounts.filtered,
       }, [detail], options.plans[laneKey]?.coverageNote);
     }
-    return { success: false, discovered: totalFetched, newlyStaged, filtered, quarantined: quarantineCount, nextCursor: cursor, error: detail };
+    return { success: false, discovered: totalFetched, newlyStaged, filtered, quarantined: quarantineCount, skippedByReason, nextCursor: cursor, error: detail };
   }
 
   const parseFailure = quarantineCount > 0 && quarantinedCandidates.length === 0
@@ -352,6 +392,7 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
     newlyStaged,
     filtered,
     quarantined: result.quarantined ?? 0,
+    skippedByReason,
     nextCursor,
     error: parseFailure ?? undefined,
   };
@@ -450,6 +491,7 @@ export async function runAdapters(): Promise<{
   errors: number;
   status: "HEALTHY" | "DEGRADED" | "FAILED";
   laneCoverage: Record<string, { plansExecuted: number; sourcesFailed: number; discovered: number; staged: number; filtered: number; coverageNote: string }>;
+  skippedByReason: Record<string, number>;
 }> {
   console.log("====================================================");
   console.log("   STAGE 0: EXECUTED SIX-LANE SOURCE PLAN RUNNER    ");
@@ -467,6 +509,8 @@ export async function runAdapters(): Promise<{
   const plugins = await loadSourcePluginsFromDisk();
   const companies = loadCompaniesConfig();
   const lanesConfig = loadGlobalLanesConfig();
+  const locationScope = loadDiscoveryLocationScope();
+  const skippedByReason: Record<string, number> = {};
   const companiesByLane: Record<string, string[]> = {};
   for (const company of companies.filter((candidate) => candidate.enabled !== false)) {
     for (const lane of company.target_lanes ?? []) {
@@ -506,8 +550,12 @@ export async function runAdapters(): Promise<{
       itemsPerRun: itemsPerRun(input.plugin),
       plans,
       lanes: lanesConfig.lanes,
+      locationScope,
     });
     totalDiscovered += summary.discovered;
+    for (const [reason, count] of Object.entries(summary.skippedByReason)) {
+      skippedByReason[reason] = (skippedByReason[reason] ?? 0) + count;
+    }
     totalStaged += summary.newlyStaged;
     for (const laneKey of input.laneKeys) {
       laneCoverage[laneKey].discovered += summary.discovered;
@@ -517,7 +565,8 @@ export async function runAdapters(): Promise<{
     if (summary.quarantined > 0) errorCount += summary.quarantined;
     if (summary.success) {
       successfulSources.push(input.label);
-      console.log(`  -> ${input.label}: fetched ${summary.discovered}; new observations ${summary.newlyStaged}; filtered ${summary.filtered}; quarantined ${summary.quarantined}; next cursor ${summary.nextCursor ?? "cycle complete"}`);
+      const skipped = Object.entries(summary.skippedByReason).map(([reason, count]) => `${reason} ${count}`).join(", ");
+      console.log(`  -> ${input.label}: fetched ${summary.discovered}; new observations ${summary.newlyStaged}; filtered ${summary.filtered}${skipped ? ` (scope skips: ${skipped})` : ""}; quarantined ${summary.quarantined}; next cursor ${summary.nextCursor ?? "cycle complete"}`);
     } else {
       failedSources.push(input.label);
       errorCount += 1;
@@ -691,6 +740,7 @@ export async function runAdapters(): Promise<{
   console.log(`Executed Six-Lane Source Plan Summary:`);
   console.log(`  Status: ${finalStatus}`);
   console.log(`  Discovered: ${totalDiscovered}, New observations staged: ${totalStaged}`);
+  console.log(`  Discovery-scope skips (not staged): ${Object.entries(skippedByReason).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none"}`);
   console.log(`  Successful plans (${successfulSources.length}): ${successfulSources.join(", ") || "None"}`);
   console.log(`  Failed plans (${failedSources.length}): ${failedSources.join(", ") || "None"}`);
   for (const [laneKey, coverage] of Object.entries(laneCoverage)) {
@@ -702,7 +752,7 @@ export async function runAdapters(): Promise<{
   if (finalStatus === "FAILED" && enabledSourceCount > 0) {
     throw new Error(`Six-lane discovery failed: ${failedSources.join(", ") || "no source plan executed"}.`);
   }
-  return { totalDiscovered, totalStaged, errors: errorCount, status: finalStatus, laneCoverage };
+  return { totalDiscovered, totalStaged, errors: errorCount, status: finalStatus, laneCoverage, skippedByReason };
 }
 
 if (process.argv[1] && process.argv[1].includes("run_adapters")) {
