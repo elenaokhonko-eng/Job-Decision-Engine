@@ -529,3 +529,360 @@ companies:
       - Worldwide
       - APAC
       - Singapore
+
+  # ── Workday career sites (verified 2026-11-08) ─────────────────────────
+  # Each tenant was verified with read-only CXS requests: the host returned jobs whose
+  # hiringOrganization/host belongs to the employer, and the counts are from that check.
+  # Not found on Workday (skipped): FactSet, MSCI, Moody's, HSBC (site names not verified),
+  # BNY (Eightfold), Franklin Templeton (empty site), Schroders, Allianz GI, UBS, Prudential,
+  # ServiceNow. SuccessFactors/own portals (Standard Chartered, SMBC, Zurich, SAP, EY, DBS, GIC) are out of scope.
+  - id: uob
+    name: UOB
+    hq_country: SG
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: uobgroup.wd3.myworkdayjobs.com
+    workday_tenant: uobgroup
+    workday_site: "UOBExternal"
+    # Evidence: locationCountry=Singapore (348 of 1021)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: dxc_technology
+    name: DXC Technology
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: dxctechnology.wd1.myworkdayjobs.com
+    workday_tenant: dxctechnology
+    workday_site: "DXCJobs"
+    # Evidence: locationCountry=Singapore (25 of 1259); location 'DXC Singapore Campus'
+    target_lanes:
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: illumina
+    name: Illumina
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: illumina.wd1.myworkdayjobs.com
+    workday_tenant: illumina
+    workday_site: "illumina-careers"
+    # Evidence: hiringOrganization 'Illumina, Inc.'; locationCountry=Singapore (43 of 172)
+    target_lanes:
+      - HEALTH_BIO_PHARMA
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: roche
+    name: Roche
+    hq_country: CH
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: roche.wd3.myworkdayjobs.com
+    workday_tenant: roche
+    workday_site: "roche-ext"
+    # Evidence: hiringOrganization 'Roche ...'; Singapore location values (22 of 1266)
+    target_lanes:
+      - HEALTH_BIO_PHARMA
+    remote_policy: unknown
+    enabled: true
+
+  - id: novartis
+    name: Novartis
+    hq_country: CH
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: novartis.wd3.myworkdayjobs.com
+    workday_tenant: novartis
+    workday_site: "Novartis_Careers"
+    # Evidence: hiringOrganization 'Novartis ...'; locationCountry=Singapore (4 of 873)
+    target_lanes:
+      - HEALTH_BIO_PHARMA
+    remote_policy: unknown
+    enabled: true
+
+  - id: gsk
+    name: GSK
+    hq_country: GB
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: gsk.wd5.myworkdayjobs.com
+    workday_tenant: gsk
+    workday_site: "GSKCareers"
+    # Evidence: hiringOrganization 'GlaxoSmithKline ...'; Location_Country=Singapore (27 of 952)
+    target_lanes:
+      - HEALTH_BIO_PHARMA
+    remote_policy: unknown
+    enabled: true
+
+  - id: sanofi
+    name: Sanofi
+    hq_country: FR
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: sanofi.wd3.myworkdayjobs.com
+    workday_tenant: sanofi
+    workday_site: "SanofiCareers"
+    # Evidence: hiringOrganization 'Sanofi-Aventis ...'; locationCountry=Singapore (24 of 1090)
+    target_lanes:
+      - HEALTH_BIO_PHARMA
+    remote_policy: unknown
+    enabled: true
+
+  - id: msd
+    name: MSD
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: msd.wd5.myworkdayjobs.com
+    workday_tenant: msd
+    workday_site: "SearchJobs"
+    # Evidence: hiringOrganization 'Merck Sharp & Dohme ...'; Singapore location values (37 of 859)
+    target_lanes:
+      - HEALTH_BIO_PHARMA
+    remote_policy: unknown
+    enabled: true
+
+  - id: thomson_reuters
+    name: Thomson Reuters
+    hq_country: CA
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: thomsonreuters.wd5.myworkdayjobs.com
+    workday_tenant: thomsonreuters
+    workday_site: "External_Career_Site"
+    # Evidence: hiringOrganization 'Thomson Reuters Holdings Inc.'; Location_Country=Singapore (15 of 494)
+    target_lanes:
+      - LEGAL_REGTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: relx
+    name: "RELX (LexisNexis, Elsevier, LexisNexis Risk)"
+    hq_country: GB
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: relx.wd3.myworkdayjobs.com
+    workday_tenant: relx
+    workday_site: "relx"
+    # Evidence: hiringOrganization 'RELX India ...'; Country___Territory=Singapore (17 of 796)
+    target_lanes:
+      - LEGAL_REGTECH
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: sp_global
+    name: "S&P Global"
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: spgi.wd5.myworkdayjobs.com
+    workday_tenant: spgi
+    workday_site: "SPGI_Careers"
+    # Evidence: hiringOrganization 'STANDARD & POOR'S FINANCIAL SERVICE'; Location_Country=Singapore (13 of 338)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: lseg
+    name: LSEG
+    hq_country: GB
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: lseg.wd3.myworkdayjobs.com
+    workday_tenant: lseg
+    workday_site: "Careers"
+    # Evidence: hiringOrganization 'Refinitiv ...' (LSEG); locationCountry=Singapore (16 of 698)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: blackrock
+    name: BlackRock
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: blackrock.wd1.myworkdayjobs.com
+    workday_tenant: blackrock
+    workday_site: "BlackRock_Professional"
+    # Evidence: BlackRock host and site; Singapore location value (7 of 275)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: state_street
+    name: State Street
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: statestreet.wd1.myworkdayjobs.com
+    workday_tenant: statestreet
+    workday_site: "Global"
+    # Evidence: hiringOrganization 'SSB&T'; Location_Country=Singapore (27 of 1185)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: northern_trust
+    name: Northern Trust
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: ntrs.wd1.myworkdayjobs.com
+    workday_tenant: ntrs
+    workday_site: "northerntrust"
+    # Evidence: hiringOrganization 'The Northern Trust Company'; locationCountry=Singapore (2 of 642)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: manulife
+    name: Manulife
+    hq_country: CA
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: manulife.wd3.myworkdayjobs.com
+    workday_tenant: manulife
+    workday_site: "MFCJH_Jobs"
+    # Evidence: hiringOrganization 'The Manufacturers Life Insurance Co. ...'; Location_Country=Singapore (30 of 617)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: aia
+    name: AIA
+    hq_country: HK
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: aia.wd3.myworkdayjobs.com
+    workday_tenant: aia
+    workday_site: "External"
+    # Evidence: hiringOrganization 'AIA Global Financial Solutions ...'; locationCountry=Singapore (87 of 960)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: fidelity_international
+    name: Fidelity International
+    hq_country: GB
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: fil.wd3.myworkdayjobs.com
+    workday_tenant: fil
+    workday_site: "001"
+    # Evidence: linked from careers.fidelityinternational.com; hiringOrganization 'FIL India ...'; locationCountry=Singapore (2 of 75)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: deutsche_bank
+    name: Deutsche Bank
+    hq_country: DE
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: db.wd3.myworkdayjobs.com
+    workday_tenant: db
+    workday_site: "DBWebsite"
+    # Evidence: hiringOrganization 'Deutsche Bank Aktiengesellschaft ...'; Country=Singapore (23 of 1143)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: citi
+    name: Citi
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: citi.wd5.myworkdayjobs.com
+    workday_tenant: citi
+    workday_site: "2"
+    # Evidence: hiringOrganization 'Citicorp Services India ...'; Country_and_Jurisdiction=Singapore (259; search capped at 2000)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: visa
+    name: Visa
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: visa.wd5.myworkdayjobs.com
+    workday_tenant: visa
+    workday_site: "Visa"
+    # Evidence: linked from Visa careers page; hiringOrganization 'Visa International Asia Pacific ...'; locationCountry=Singapore (74 of 827)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: mastercard
+    name: Mastercard
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: mastercard.wd1.myworkdayjobs.com
+    workday_tenant: mastercard
+    workday_site: "CorporateCareers"
+    # Evidence: hiringOrganization 'Mastercard International ...'; Singapore location values (30 of 945)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: salesforce
+    name: Salesforce
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: salesforce.wd12.myworkdayjobs.com
+    workday_tenant: salesforce
+    workday_site: "External_Career_Site"
+    # Evidence: hiringOrganization 'salesforce.com India ...'; country facet=Singapore (38 of 1549)
+    target_lanes:
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  # ── End Workday career sites ──────────────────────────────────────────

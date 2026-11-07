@@ -26,6 +26,7 @@ npm run docs:compliance
 | smartrecruiters | SmartRecruiters public job boards (Posting API) | ats | official_api | https://developers.smartrecruiters.com/docs/posting-api | yes | no | 2026-11-08 | 1440 |
 | we_work_remotely | We Work Remotely RSS feed | rss | public_feed | https://weworkremotely.com/ | yes | no | 2026-09-06 | 60 |
 | workable | Workable public job boards | ats | public_feed | https://www.workable.com/terms | yes | no | 2026-11-08 | 1440 |
+| workday | Workday employer career sites (CXS JSON) | ats | undocumented_public_endpoint | https://www.workday.com/en-us/legal.html | yes | no | 2026-11-08 | 1440 |
 
 ## Compliance notes
 
@@ -42,3 +43,4 @@ npm run docs:compliance
 - `smartrecruiters`: SmartRecruiters' documented public Posting API (no API key). One list page plus one detail request per listed posting, sequential with a 1-second pause, bounded by items_per_run. Source job URL links to the employer's SmartRecruiters posting.
 - `we_work_remotely`: Use the canonical posting URL from We Work Remotely; link back where possible.
 - `workable`: Unauthenticated public careers-widget endpoint that backs the employer's own Workable careers page (apply.workable.com/{account}); one request per board per run. Source job URL links to the employer's Workable posting.
+- `workday`: Public, unauthenticated but undocumented JSON (/wday/cxs/{tenant}/{site}) that powers each employer's own Workday careers site; no login, cookie or API key is used. Only tenants verified from the employer's careers page are configured in config/companies.yml. Tenant robots.txt files (checked 2026-11-08) do not disallow the CXS path. Requests are sequential with at least 1.1 s between calls, use the source plan's search terms and a Singapore location facet instead of enumerating every job, and are bounded per tenant and per run; 403/429 or a bot page fails the source run. Each posting keeps the employer's Workday job URL for attribution.
