@@ -191,6 +191,29 @@ describe("job-card link classification and collapsing", () => {
     expect(links).toMatchObject({ linksSeen: 12, jobCards: 2, nonJobLinksSkipped: 8, duplicateLinksCollapsed: 2 });
   });
 
+  it("keeps only MyCareersFuture posting links and unwraps SES click tracking", async () => {
+    const ses = (destination: string) =>
+      `https://abc123.r.ap-southeast-1.awstrack.me/L0/${encodeURIComponent(destination)}/1/0100-synthetic-signature`;
+    const html = [
+      '<a href="https://www.mycareersfuture.gov.sg/job/information-technology/synthetic-data-architect-example-0123456789abcdef0123456789abcdef">Synthetic Data Architect</a>',
+      '<a href="https://www.mycareersfuture.gov.sg/job/banking-finance/synthetic-risk-lead-example-fedcba9876543210fedcba9876543210?source=alert">Synthetic Risk Lead</a>',
+      '<a href="https://www.mycareersfuture.gov.sg/">MyCareersFuture job portal</a>',
+      '<a href="https://www.mycareersfuture.gov.sg/search?search=architect&amp;sortBy=new_posting_date">View more jobs</a>',
+      '<a href="https://www.mycareersfuture.gov.sg/jobalert/remove/0123456789abcdef0123456789abcdef">synthetic alert, IT Project Manager</a>',
+      `<a href="${ses("https://www.mycareersfuture.gov.sg/jobalert/remove/0123456789abcdef0123456789abcdef")}">Remove this job alert</a>`,
+      `<a href="${ses("https://service-portal.example.gov.sg/s/feedback")}">contact us</a>`,
+      `<a href="${ses("https://careers.example.com/jobs/synthetic-quant-lead-91")}">Synthetic Quant Lead</a>`,
+    ].join("");
+    const { cards, links } = await extractEmailJobCardsWithLinkSummary(htmlRaw(html));
+
+    expect(cards.map((card) => card.sourceUrl)).toEqual([
+      "https://www.mycareersfuture.gov.sg/job/information-technology/synthetic-data-architect-example-0123456789abcdef0123456789abcdef",
+      "https://www.mycareersfuture.gov.sg/job/banking-finance/synthetic-risk-lead-example-fedcba9876543210fedcba9876543210",
+      "https://careers.example.com/jobs/synthetic-quant-lead-91",
+    ]);
+    expect(links).toMatchObject({ linksSeen: 16, jobCards: 3, nonJobLinksSkipped: 10, duplicateLinksCollapsed: 3 });
+  });
+
   it("collapses campaign-tagged variants of one posting and keeps the richest title", async () => {
     const html = [
       '<table><tr><td><a href="https://careers.example.com/jobs/55?utm_source=alert&amp;utm_campaign=a">Apply now</a></td></tr></table>',
