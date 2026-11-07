@@ -24,6 +24,12 @@ import { createTaskIntentV2, TaskIntentV2Schema } from "./taskIntent.js";
 import { archivedJobForPipelineTask } from "./jobArchiveGuard.js";
 import { forcedTaskRerouteIntent, forcedTaskReroutePayload } from "./forcedTaskReroute.js";
 import { planPipelineStageRound } from "./pipelineStageScheduler.js";
+import {
+  KeyedMutex,
+  MAX_PIPELINE_WORKER_CONCURRENCY,
+  SERIAL_PIPELINE_TASK_TYPES,
+  pipelineTaskTargetKey,
+} from "./pipelineWorkerLanes.js";
 import { scopeSeedQuery } from "./seedQueryScope.js";
 import {
   pipelineTaskStageVersion,
@@ -176,6 +182,12 @@ export interface PipelineStageWorkerOptions {
   maxStalePendingReconciliation?: number;
   stalePendingReconciliationTimeBudgetMs?: number;
   claimBatchSize?: number;
+  /**
+   * Tasks processed at the same time (lanes), each on its own pooled
+   * connection with its own claim, lease, heartbeat and attempt record.
+   * Default 1 keeps the sequential worker.
+   */
+  concurrency?: number;
   leaseSeconds?: number;
   heartbeatSeconds?: number;
   wallClockMs?: number;
@@ -2870,6 +2882,13 @@ export async function runPipelineStageTaskWorker(
 ): Promise<PipelineStageWorkerSummary> {
   const pool = clientOrPool || defaultPool;
   const ownsClient = isPool(pool);
+  const concurrency = Math.max(1, Math.floor(options.concurrency ?? 1));
+  if (concurrency > MAX_PIPELINE_WORKER_CONCURRENCY) {
+    throw new Error(`Pipeline worker concurrency must not exceed ${MAX_PIPELINE_WORKER_CONCURRENCY}.`);
+  }
+  if (concurrency > 1 && !ownsClient) {
+    throw new Error("Pipeline worker concurrency above 1 requires a pg.Pool so each lane has its own connection.");
+  }
   const client = ownsClient ? await pool.connect() : pool;
   const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
   const taskTypes = options.taskTypes ?? [...PIPELINE_STAGE_TASK_TYPES];
@@ -2964,150 +2983,271 @@ export async function runPipelineStageTaskWorker(
       );
     }
 
-    while (summary.claimed < maxTasks && canStartAnotherTask()) {
-      throwIfWorkerCancelled(options.abortSignal);
-      let madeProgress = false;
+    type RoundEntry = {
+      taskType: PipelineStageTaskType;
+      claimLimit: number;
+      reserved: number;
+      exhausted: boolean;
+    };
+    type ClaimSlot = { entry: RoundEntry; limit: number };
+    type Round = {
+      entries: RoundEntry[];
+      index: number;
+      openClaims: number;
+      madeProgress: boolean;
+      settled: Array<() => void>;
+    };
+    let round: Round | null = null;
+    let dispatchDone = false;
+    let reservedTotal = 0;
+    const reservedByType: Partial<Record<PipelineStageTaskType, number>> = {};
+    let fatalError: unknown = null;
+    let stopping = false;
+    const stageLimitFor = (taskType: PipelineStageTaskType) =>
+      Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks));
+    const committedForType = (taskType: PipelineStageTaskType) =>
+      (claimedByType[taskType] ?? 0) + (reservedByType[taskType] ?? 0);
 
-      const roundPlan = planPipelineStageRound(
-        taskTypes,
-        stageQuantum,
-        claimedByType,
-        options.maxTasksByType ?? {},
-        maxTasks,
-        maxTasks - summary.claimed,
-      );
-      for (const { taskType, claimLimit: stagePassLimit } of roundPlan) {
-        const stageLimit = Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks));
-        let claimedThisPass = 0;
-        while (
-          summary.claimed < maxTasks &&
-          claimedThisPass < stagePassLimit &&
-          (claimedByType[taskType] ?? 0) < stageLimit &&
-          canStartAnotherTask()
-        ) {
-          throwIfWorkerCancelled(options.abortSignal);
-          const claimLimit = Math.min(
-            claimBatchSize,
-            stagePassLimit - claimedThisPass,
+    // Hands out claim slots in the order of the former sequential loop: one
+    // round-robin pass over the stage plan, at most `claimLimit` per stage, a
+    // stage is skipped for the pass once it returns no work, and the run ends
+    // after a round without progress or once every stage limit is reached.
+    // Several lanes may hold slots at once; all bookkeeping is synchronous
+    // between awaits, so the global and per-stage budgets cannot be overshot.
+    const nextClaimSlot = (): ClaimSlot | "WAIT" | null => {
+      while (true) {
+        if (dispatchDone || stopping) return null;
+        if (summary.claimed + reservedTotal >= maxTasks || !canStartAnotherTask()) return null;
+        if (!round) {
+          const plan = planPipelineStageRound(
+            taskTypes,
+            stageQuantum,
+            claimedByType,
+            options.maxTasksByType ?? {},
+            maxTasks,
             maxTasks - summary.claimed,
-            stageLimit - (claimedByType[taskType] ?? 0),
           );
-          const claimedTasks = await claimPipelineTasks(
+          round = {
+            entries: plan.map(({ taskType, claimLimit }) => ({ taskType, claimLimit, reserved: 0, exhausted: false })),
+            index: 0,
+            openClaims: 0,
+            madeProgress: false,
+            settled: [],
+          };
+        }
+        const currentRound: Round = round;
+        while (currentRound.index < currentRound.entries.length) {
+          const entry = currentRound.entries[currentRound.index];
+          const stageLimit = stageLimitFor(entry.taskType);
+          if (entry.exhausted || entry.reserved >= entry.claimLimit || committedForType(entry.taskType) >= stageLimit) {
+            currentRound.index += 1;
+            continue;
+          }
+          const limit = Math.min(
+            claimBatchSize,
+            entry.claimLimit - entry.reserved,
+            maxTasks - summary.claimed - reservedTotal,
+            stageLimit - committedForType(entry.taskType),
+          );
+          entry.reserved += limit;
+          reservedTotal += limit;
+          reservedByType[entry.taskType] = (reservedByType[entry.taskType] ?? 0) + limit;
+          currentRound.openClaims += 1;
+          return { entry, limit };
+        }
+        if (currentRound.openClaims > 0) return "WAIT";
+        if (!currentRound.madeProgress || taskTypes.every((taskType) => (claimedByType[taskType] ?? 0) >= stageLimitFor(taskType))) {
+          dispatchDone = true;
+          return null;
+        }
+        round = null;
+      }
+    };
+
+    const wakeRoundWaiters = () => {
+      const currentRound: Round | null = round;
+      if (currentRound) for (const wake of currentRound.settled.splice(0)) wake();
+    };
+
+    const settleClaimSlot = (slot: ClaimSlot, claimedCount: number) => {
+      slot.entry.reserved -= slot.limit - claimedCount;
+      reservedTotal -= slot.limit;
+      reservedByType[slot.entry.taskType] = (reservedByType[slot.entry.taskType] ?? 0) - slot.limit;
+      // Claimed tasks count against the run and stage budgets as soon as they
+      // are leased, even before their lane starts processing them.
+      summary.claimed += claimedCount;
+      claimedByType[slot.entry.taskType] = (claimedByType[slot.entry.taskType] ?? 0) + claimedCount;
+      if (claimedCount === 0) slot.entry.exhausted = true;
+      const currentRound: Round | null = round;
+      if (!currentRound) return;
+      if (claimedCount > 0) currentRound.madeProgress = true;
+      currentRound.openClaims -= 1;
+      if (currentRound.openClaims === 0) wakeRoundWaiters();
+    };
+
+    const waitForRoundToSettle = () => new Promise<void>((resolve) => {
+      const currentRound: Round | null = round;
+      if (!currentRound || currentRound.openClaims === 0 || stopping) resolve();
+      else currentRound.settled.push(resolve);
+    });
+
+    const typeMutex = new KeyedMutex();
+    const jobMutex = new KeyedMutex();
+
+    const processTaskInLane = async (task: ClaimedPipelineTask, laneClient: pg.PoolClient) => {
+      incrementWorker(summary, task.taskType, "claimed");
+      const taskMetrics: PipelineTaskRunMetrics = { successorTasksCreated: 0, rerouted: false };
+      const taskStartedAt = Date.now();
+      try {
+        // Keep the cancellation check inside the lease-release catch:
+        // aborting immediately after claim must never strand a RUNNING
+        // task until its lease expires.
+        throwIfWorkerCancelled(options.abortSignal);
+        await processClaimedTask(
+          task,
+          laneClient as any,
+          ctx,
+          {
+            heartbeatSeconds,
+            budgetRunId,
+            includeTestFixtures: options.includeTestFixtures === true,
+          },
+          dependencies,
+          taskMetrics,
+        );
+        summary.completed += 1;
+        incrementWorker(summary, task.taskType, "completed");
+        throwIfWorkerCancelled(options.abortSignal);
+      } catch (error) {
+        if (error instanceof PipelineWorkerCancelledError) {
+          await releasePipelineTaskForRetry(
+            task,
+            error.message,
+            laneClient as any,
+            { context: ctx }
+          ).catch((releaseError) => {
+            summary.errors.push({
+              taskType: task.taskType,
+              taskKey: task.taskKey,
+              error: `Cancellation lease release failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+            });
+          });
+          throw error;
+        }
+        if (error instanceof PipelineTaskDependencyBlockedError) {
+          await blockPipelineTask(
+            task,
             {
-              taskType,
-              limit: claimLimit,
-              leaseSeconds,
-              claimedBy,
-              jobVersionIds: options.jobVersionIds,
-              observationIds: options.observationIds,
+              blockedOn: error.blockedOn,
+              reason: error.message,
+              repairAction: error.repairAction,
             },
-            client as any,
+            laneClient as any,
             { context: ctx }
           );
-
-          if (claimedTasks.length === 0) break;
-          madeProgress = true;
-          claimedThisPass += claimedTasks.length;
-
-          for (const task of claimedTasks) {
-            summary.claimed += 1;
-            claimedByType[taskType] = (claimedByType[taskType] ?? 0) + 1;
-            incrementWorker(summary, task.taskType, "claimed");
-            const taskMetrics: PipelineTaskRunMetrics = { successorTasksCreated: 0, rerouted: false };
-            const taskStartedAt = Date.now();
-            try {
-              // Keep the cancellation check inside the lease-release catch:
-              // aborting immediately after claim must never strand a RUNNING
-              // task until its lease expires.
-              throwIfWorkerCancelled(options.abortSignal);
-              await processClaimedTask(
-                task,
-                client as any,
-                ctx,
-                {
-                  heartbeatSeconds,
-                  budgetRunId,
-                  includeTestFixtures: options.includeTestFixtures === true,
-                },
-                dependencies,
-                taskMetrics,
-              );
-              summary.completed += 1;
-              incrementWorker(summary, task.taskType, "completed");
-              throwIfWorkerCancelled(options.abortSignal);
-            } catch (error) {
-              if (error instanceof PipelineWorkerCancelledError) {
-                await releasePipelineTaskForRetry(
-                  task,
-                  error.message,
-                  client as any,
-                  { context: ctx }
-                ).catch((releaseError) => {
-                  summary.errors.push({
-                    taskType: task.taskType,
-                    taskKey: task.taskKey,
-                    error: `Cancellation lease release failed: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
-                  });
-                });
-                throw error;
-              }
-              if (error instanceof PipelineTaskDependencyBlockedError) {
-                await blockPipelineTask(
-                  task,
-                  {
-                    blockedOn: error.blockedOn,
-                    reason: error.message,
-                    repairAction: error.repairAction,
-                  },
-                  client as any,
-                  { context: ctx }
-                );
-                summary.blocked += 1;
-                incrementWorker(summary, task.taskType, "blocked");
-                continue;
-              }
-              const message = error instanceof Error ? error.message : String(error);
-              const exhausted = task.attemptNumber >= task.maxAttempts;
-              await failPipelineTask(task, message, client as any, {
-                context: ctx,
-                ...(error instanceof PipelineTaskRetryAtError && error.retryAt
-                  ? { retryAt: error.retryAt }
-                  : {}),
-              });
-              if (task.taskType === "FETCH_JOB_CONTENT") {
-                await markGmailFetchOutcome(
-                  requireStringPayload(task, "observation_id"),
-                  client as any,
-                  ctx,
-                  exhausted ? "FETCH_FAILED" : "FETCH_PENDING",
-                  exhausted ? "SOURCE_BLOCKED" : "SOURCE_PENDING",
-                  message,
-                );
-              }
-              if (exhausted) {
-                if (task.taskType !== "FETCH_JOB_CONTENT") {
-                  await markTaskTargetProcessingError(task, client as any, ctx, message);
-                }
-                summary.deadLettered += 1;
-                incrementWorker(summary, task.taskType, "deadLettered");
-              }
-              summary.failed += 1;
-              incrementWorker(summary, task.taskType, "failed");
-              summary.errors.push({ taskType: task.taskType, taskKey: task.taskKey, error: message });
-            } finally {
-              summary.successorTasksCreated += taskMetrics.successorTasksCreated;
-              summary.byType[task.taskType].executionDurationMs += Date.now() - taskStartedAt;
-            }
-          }
+          summary.blocked += 1;
+          incrementWorker(summary, task.taskType, "blocked");
+          return;
         }
+        const message = error instanceof Error ? error.message : String(error);
+        const exhausted = task.attemptNumber >= task.maxAttempts;
+        await failPipelineTask(task, message, laneClient as any, {
+          context: ctx,
+          ...(error instanceof PipelineTaskRetryAtError && error.retryAt
+            ? { retryAt: error.retryAt }
+            : {}),
+        });
+        if (task.taskType === "FETCH_JOB_CONTENT") {
+          await markGmailFetchOutcome(
+            requireStringPayload(task, "observation_id"),
+            laneClient as any,
+            ctx,
+            exhausted ? "FETCH_FAILED" : "FETCH_PENDING",
+            exhausted ? "SOURCE_BLOCKED" : "SOURCE_PENDING",
+            message,
+          );
+        }
+        if (exhausted) {
+          if (task.taskType !== "FETCH_JOB_CONTENT") {
+            await markTaskTargetProcessingError(task, laneClient as any, ctx, message);
+          }
+          summary.deadLettered += 1;
+          incrementWorker(summary, task.taskType, "deadLettered");
+        }
+        summary.failed += 1;
+        incrementWorker(summary, task.taskType, "failed");
+        summary.errors.push({ taskType: task.taskType, taskKey: task.taskKey, error: message });
+      } finally {
+        summary.successorTasksCreated += taskMetrics.successorTasksCreated;
+        summary.byType[task.taskType].executionDurationMs += Date.now() - taskStartedAt;
       }
+    };
 
-      if (!madeProgress || taskTypes.every((taskType) =>
-        (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
-      )) {
-        break;
+    // One lane = one connection running claim -> process -> complete exactly
+    // like the former sequential loop. Task failures take the retry and
+    // dead-letter path above. Any other error (claim, lease bookkeeping,
+    // cancellation) stops new claims, lets the other lanes finish their
+    // in-flight tasks, and is rethrown so the worker exits non-zero.
+    const runLane = async (laneClient: pg.PoolClient) => {
+      try {
+        while (!stopping) {
+          throwIfWorkerCancelled(options.abortSignal);
+          const slot = nextClaimSlot();
+          if (slot === null) return;
+          if (slot === "WAIT") {
+            await waitForRoundToSettle();
+            continue;
+          }
+          const taskType = slot.entry.taskType;
+          const runSlot = async () => {
+            let claimedTasks: ClaimedPipelineTask[] = [];
+            try {
+              if (!stopping) {
+                claimedTasks = await claimPipelineTasks(
+                  {
+                    taskType,
+                    limit: slot.limit,
+                    leaseSeconds,
+                    claimedBy,
+                    jobVersionIds: options.jobVersionIds,
+                    observationIds: options.observationIds,
+                  },
+                  laneClient as any,
+                  { context: ctx }
+                );
+              }
+            } finally {
+              settleClaimSlot(slot, claimedTasks.length);
+            }
+            for (const task of claimedTasks) {
+              const targetKey = pipelineTaskTargetKey(task.payload);
+              if (targetKey) await jobMutex.run(targetKey, () => processTaskInLane(task, laneClient));
+              else await processTaskInLane(task, laneClient);
+            }
+          };
+          // Stages with shared state (see SERIAL_PIPELINE_TASK_TYPES) hold
+          // their type lock from claim to completion, so at most one of their
+          // tasks is leased at a time.
+          if (SERIAL_PIPELINE_TASK_TYPES.has(taskType)) await typeMutex.run(`type:${taskType}`, runSlot);
+          else await runSlot();
+        }
+      } catch (error) {
+        if (fatalError === null) fatalError = error;
+        stopping = true;
+        wakeRoundWaiters();
       }
+    };
+
+    const laneClients: pg.PoolClient[] = [client as pg.PoolClient];
+    try {
+      for (let lane = 1; lane < concurrency; lane += 1) {
+        laneClients.push(await (pool as pg.Pool).connect());
+      }
+      await Promise.all(laneClients.map((laneClient) => runLane(laneClient)));
+    } finally {
+      for (const laneClient of laneClients.slice(1)) laneClient.release();
     }
+    if (fatalError !== null) throw fatalError;
 
     const durationMs = Date.now() - startedAt;
     for (const stageSummary of Object.values(summary.byType)) {
