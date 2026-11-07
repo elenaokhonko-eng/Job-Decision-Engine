@@ -37,7 +37,8 @@
             "STARTUP_JOBS",
             "MANUAL_IMPORT",
             "MANUAL_STREAMLIT",
-            "LINKEDIN"
+            "LINKEDIN",
+            "LINKEDIN_SAVED"
           ]
         },
         "source_id": {

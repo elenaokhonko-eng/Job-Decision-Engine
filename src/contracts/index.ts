@@ -62,7 +62,8 @@ export const SourceNameSchema = z.enum([
   "STARTUP_JOBS",
   "MANUAL_IMPORT",
   "MANUAL_STREAMLIT",
-  "LINKEDIN"
+  "LINKEDIN",
+  "LINKEDIN_SAVED"
 ]);
 export type SourceName = z.infer<typeof SourceNameSchema>;
 
