@@ -43,6 +43,8 @@ interface TaskHealthRow {
   status: string;
   task_count: number;
   oldest_age_seconds: number | null;
+  /** Seconds since the longest-held task entered this status (v_pipeline_task_status_age). */
+  oldest_status_age_seconds?: number | null;
   actionable_dead_letter_count?: number;
   stale_historical_dead_letter_count?: number;
 }
@@ -197,7 +199,11 @@ export function summarizeTaskStages(rows: readonly TaskHealthRow[], maxPendingAg
       summary.oldest_age_seconds = Math.max(summary.oldest_age_seconds, oldestAgeSeconds);
     }
     if (row.status === "RETRY_WAIT") {
-      summary.oldest_retry_wait_age_seconds = Math.max(summary.oldest_retry_wait_age_seconds, oldestAgeSeconds);
+      // Retry age counts from entry into RETRY_WAIT, not from task creation.
+      summary.oldest_retry_wait_age_seconds = Math.max(
+        summary.oldest_retry_wait_age_seconds,
+        Number(row.oldest_status_age_seconds ?? oldestAgeSeconds),
+      );
     }
     if (row.status === "DEAD_LETTER") {
       summary.oldest_dead_letter_age_seconds = Math.max(summary.oldest_dead_letter_age_seconds, oldestAgeSeconds);
@@ -278,7 +284,7 @@ function toMarkdown(report: Record<string, unknown>): string {
     "",
     "| Task type | State | Count | Actionable dead letters | Stale historical dead letters | Oldest pending (s) | Oldest retry (s) | Oldest dead letter (s) |",
     "|---|---|---:|---:|---:|---:|---:|---:|",
-    ...taskRows.map((row) => `| ${markdownText(row.task_type)} | ${markdownText(row.status)} | ${row.task_count} | ${row.actionable_dead_letter_count ?? 0} | ${row.stale_historical_dead_letter_count ?? 0} | ${row.status === "PENDING" ? row.oldest_age_seconds ?? 0 : 0} | ${row.status === "RETRY_WAIT" ? row.oldest_age_seconds ?? 0 : 0} | ${row.status === "DEAD_LETTER" ? row.oldest_age_seconds ?? 0 : 0} |`),
+    ...taskRows.map((row) => `| ${markdownText(row.task_type)} | ${markdownText(row.status)} | ${row.task_count} | ${row.actionable_dead_letter_count ?? 0} | ${row.stale_historical_dead_letter_count ?? 0} | ${row.status === "PENDING" ? row.oldest_age_seconds ?? 0 : 0} | ${row.status === "RETRY_WAIT" ? row.oldest_status_age_seconds ?? row.oldest_age_seconds ?? 0 : 0} | ${row.status === "DEAD_LETTER" ? row.oldest_age_seconds ?? 0 : 0} |`),
     "",
     `Retry reasons: ${formatCounts(retryReasons)}`,
     "",
@@ -324,11 +330,14 @@ async function run(): Promise<void> {
       providerCallRows,
     ] = await Promise.all([
       pool.query<TaskHealthRow>(
-        `SELECT task_type, status, task_count, oldest_age_seconds
-         FROM v_pipeline_task_queue_health
-         WHERE workspace_id = $1
-           AND status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY', 'DEAD_LETTER')
-         ORDER BY task_type, status`,
+        `SELECT health.task_type, health.status, health.task_count, health.oldest_age_seconds,
+                status_age.oldest_status_age_seconds
+         FROM v_pipeline_task_queue_health AS health
+         LEFT JOIN v_pipeline_task_status_age AS status_age
+           USING (workspace_id, task_type, status)
+         WHERE health.workspace_id = $1
+           AND health.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY', 'DEAD_LETTER')
+         ORDER BY health.task_type, health.status`,
         [context.workspaceId],
       ),
       pool.query<SourceConnectorRow>(

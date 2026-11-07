@@ -76,6 +76,19 @@ interface QueueHealthRow {
   status: string;
   task_count: number;
   oldest_age_seconds: number | null;
+  /** Seconds since the longest-held task entered its current status (updated_at). */
+  oldest_status_age_seconds: number | null;
+}
+
+/**
+ * Longest time any task of `status` has held that status. Retry-wait age must be measured from
+ * entry into RETRY_WAIT, not from task creation: a weeks-old task that failed a minute ago is a
+ * fresh retry, not a stale one.
+ */
+export function oldestStatusAgeSeconds(rows: readonly QueueHealthRow[], status: string): number {
+  return rows
+    .filter((row) => row.status === status)
+    .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_status_age_seconds ?? 0)), 0);
 }
 
 interface QueueHealth {
@@ -175,7 +188,8 @@ async function readQueueHealth(
         `SELECT task.task_type,
                 task.status,
                 COUNT(*)::INTEGER AS task_count,
-                EXTRACT(EPOCH FROM NOW() - MIN(task.created_at))::INTEGER AS oldest_age_seconds
+                EXTRACT(EPOCH FROM NOW() - MIN(task.created_at))::INTEGER AS oldest_age_seconds,
+                EXTRACT(EPOCH FROM NOW() - MIN(task.updated_at))::INTEGER AS oldest_status_age_seconds
          FROM pipeline_tasks AS task
          WHERE task.workspace_id = $1
            AND task.task_type = ANY($2::text[])
@@ -243,16 +257,19 @@ async function readQueueHealth(
         actionableCurrentDeadLetter,
         staleHistoricalDeadLetter,
         oldestPendingAgeSeconds: oldestAge("PENDING"),
-        oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
+        oldestRetryWaitAgeSeconds: oldestStatusAgeSeconds(queueResult.rows, "RETRY_WAIT"),
         byType: queueResult.rows,
       };
     }
 
     const queueResult = await client.query<QueueHealthRow>(
-      `SELECT task_type, status, task_count, oldest_age_seconds
-       FROM v_pipeline_task_queue_health
-       WHERE workspace_id = $1
-       ORDER BY task_type, status`,
+      `SELECT health.task_type, health.status, health.task_count, health.oldest_age_seconds,
+              status_age.oldest_status_age_seconds
+       FROM v_pipeline_task_queue_health AS health
+       LEFT JOIN v_pipeline_task_status_age AS status_age
+         USING (workspace_id, task_type, status)
+       WHERE health.workspace_id = $1
+       ORDER BY health.task_type, health.status`,
       [workspaceId],
     );
     const deadLetterHealth = await readDeadLetterTaskHealth(client, workspaceId);
@@ -279,7 +296,7 @@ async function readQueueHealth(
       actionableCurrentDeadLetter,
       staleHistoricalDeadLetter,
       oldestPendingAgeSeconds: oldestAge("PENDING"),
-      oldestRetryWaitAgeSeconds: oldestAge("RETRY_WAIT"),
+      oldestRetryWaitAgeSeconds: oldestStatusAgeSeconds(queueResult.rows, "RETRY_WAIT"),
       byType: queueResult.rows,
     };
   } finally {
