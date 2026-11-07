@@ -3,7 +3,7 @@ import pg from "pg";
 import { z } from "zod";
 import { buildPipelineTaskContextFingerprint } from "../pipeline/artifactContext.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
-import { archivedJobForPipelineTask } from "./jobArchiveGuard.js";
+import { archivedJobForPipelineTask, pipelineTaskTargetsArchivedJobSql } from "./jobArchiveGuard.js";
 import {
   createTaskIntentV2,
   TaskIntentV2Schema,
@@ -346,26 +346,13 @@ export interface ClaimedPipelineTask {
   maxAttempts: number;
 }
 
-export async function claimPipelineTasks(
-  input: ClaimPipelineTasksInput,
-  clientOrPool: pg.Pool | pg.PoolClient,
-  options?: { context?: WorkspaceContext }
-): Promise<ClaimedPipelineTask[]> {
-  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
-    typeof (value as pg.Pool).connect === "function" && !("release" in value);
-  const ownsClient = isPool(clientOrPool);
-  const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
-
-  const limit = input.limit ?? 25;
-  const leaseSeconds = input.leaseSeconds ?? 120;
-  const claimedBy = input.claimedBy ?? `worker:${process.pid}`;
-
-  try {
-    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
-    await client.query("BEGIN");
-    try {
-      const { rows } = await (client as QueryClient).query<PipelineTaskRow>(
-        `
+/**
+ * Claims due tasks of one type. Parameters: $1 workspace, $2 task type, $3
+ * limit, $4 lease seconds, $5 claimed_by, $6 job-version scope, $7 observation
+ * scope. The archive exclusion uses keyed lookups so claim cost does not grow
+ * with the number of archived jobs (see pipelineTaskTargetsArchivedJobSql).
+ */
+export const CLAIM_PIPELINE_TASKS_SQL = `
           WITH claimable AS (
             SELECT candidate.id
             FROM pipeline_tasks AS candidate
@@ -373,27 +360,7 @@ export async function claimPipelineTasks(
               AND candidate.task_type = $2
               AND (
                 candidate.task_type = 'NORMALIZE_OBSERVATION'
-                OR NOT EXISTS (
-                  SELECT 1
-                  FROM canonical_jobs archived_job
-                  LEFT JOIN job_versions archived_version
-                    ON archived_version.workspace_id = archived_job.workspace_id
-                   AND archived_version.canonical_job_id = archived_job.id
-                  WHERE archived_job.workspace_id = candidate.workspace_id
-                    AND archived_job.archived_at IS NOT NULL
-                    AND (candidate.payload->>'canonical_job_id' = archived_job.id::text
-                      OR candidate.payload->>'job_version_id' = archived_version.id::text
-                      OR EXISTS (
-                        SELECT 1
-                        FROM raw_job_observations archived_observation
-                        JOIN job_versions observation_version
-                          ON observation_version.workspace_id = archived_observation.workspace_id
-                         AND observation_version.id = archived_observation.job_version_id
-                        WHERE archived_observation.workspace_id = candidate.workspace_id
-                          AND archived_observation.id::text = candidate.payload->>'observation_id'
-                          AND observation_version.canonical_job_id = archived_job.id
-                      ))
-                )
+                OR NOT ${pipelineTaskTargetsArchivedJobSql("candidate")}
               )
               AND (
                 ($6::text[] IS NULL AND $7::text[] IS NULL)
@@ -450,7 +417,28 @@ export async function claimPipelineTasks(
           FROM claimable
           WHERE t.id = claimable.id
           RETURNING t.*
-        `,
+        `;
+
+export async function claimPipelineTasks(
+  input: ClaimPipelineTasksInput,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  options?: { context?: WorkspaceContext }
+): Promise<ClaimedPipelineTask[]> {
+  const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
+    typeof (value as pg.Pool).connect === "function" && !("release" in value);
+  const ownsClient = isPool(clientOrPool);
+  const client = ownsClient ? await clientOrPool.connect() : clientOrPool;
+
+  const limit = input.limit ?? 25;
+  const leaseSeconds = input.leaseSeconds ?? 120;
+  const claimedBy = input.claimedBy ?? `worker:${process.pid}`;
+
+  try {
+    const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
+    await client.query("BEGIN");
+    try {
+      const { rows } = await (client as QueryClient).query<PipelineTaskRow>(
+        CLAIM_PIPELINE_TASKS_SQL,
         [
           ctx.workspaceId,
           input.taskType,

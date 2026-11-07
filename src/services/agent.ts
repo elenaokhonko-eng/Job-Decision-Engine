@@ -1701,6 +1701,11 @@ export function geminiEmbeddingBatchSize(env: NodeJS.ProcessEnv = process.env): 
   return currentGeminiBackend() === "vertex" ? 1 : 100;
 }
 
+/** Inputs per provider embedding request: Gemini as above, OpenAI up to 100. */
+export function embeddingRequestBatchSize(provider: EmbeddingProvider, env: NodeJS.ProcessEnv = process.env): number {
+  return provider === "gemini" ? geminiEmbeddingBatchSize(env) : 100;
+}
+
 /**
  * One embedContent request for `texts` (in order), with the same rate-limit handling as text
  * generation: limiter slot first; 429 retried with jittered backoff or the server's RetryInfo;
@@ -1837,7 +1842,7 @@ export async function generateEmbeddingsWithProviderAndModel(
       return texts.map(() => ({ ok: false as const, error }));
     }
   }
-  const chunkSize = provider === "gemini" ? geminiEmbeddingBatchSize() : 100;
+  const chunkSize = embeddingRequestBatchSize(provider);
   const outcomes: EmbeddingOutcome[] = [];
   for (let start = 0; start < texts.length; start += chunkSize) {
     const chunk = texts.slice(start, start + chunkSize);

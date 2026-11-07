@@ -62,7 +62,7 @@ jobs:
         timeout-minutes: 10
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npx tsx scripts/parse_emails.ts
+        run: npx tsx scripts/parse_emails.ts --concurrency 4 --max-runtime-seconds 420
 
   public_source_ingestion:
     name: Ingest public job sources
@@ -235,6 +235,7 @@ jobs:
           PIPELINE_TASK_WORKER_LEASE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_LEASE_SECONDS || '300' }}
           PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS || '60' }}
           PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE: ${{ vars.PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE || '1' }}
+          PIPELINE_TASK_WORKER_CONCURRENCY: ${{ vars.PIPELINE_TASK_WORKER_CONCURRENCY || '1' }}
           PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE: ${{ vars.PIPELINE_TASK_WORKER_MAX_SEED_PER_TYPE || '200' }}
           PIPELINE_TASK_WORKER_SEED_BUDGET_MS: ${{ vars.PIPELINE_TASK_WORKER_SEED_BUDGET_MS || '15000' }}
           PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'

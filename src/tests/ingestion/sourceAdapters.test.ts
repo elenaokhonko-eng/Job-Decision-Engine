@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobicyAdapter } from "../../ingestion/adapters/jobicyAdapter.js";
-import { GreenhouseAdapter } from "../../ingestion/adapters/greenhouseAdapter.js";
+import { GREENHOUSE_MAX_RESPONSE_BYTES, GreenhouseAdapter } from "../../ingestion/adapters/greenhouseAdapter.js";
+import { MAX_SOURCE_RESPONSE_BYTES } from "../../ingestion/adapters/baseAdapter.js";
 import { LeverAdapter } from "../../ingestion/adapters/leverAdapter.js";
 import { AshbyAdapter } from "../../ingestion/adapters/ashbyAdapter.js";
 import { HimalayasAdapter } from "../../ingestion/adapters/himalayasAdapter.js";
@@ -79,6 +80,30 @@ describe("public source adapters", () => {
     expect(allIds).toHaveLength(61);
     expect(new Set(allIds).size).toBe(61);
     expect(allIds).toContain("0061");
+  });
+
+  it("reads Greenhouse boards larger than the generic source bound but still enforces its own bound", async () => {
+    const content = "x".repeat(10_000);
+    const records = Array.from({ length: 1_000 }, (_, index) => ({
+      id: String(index + 1),
+      title: `Technical Platform Role ${index + 1}`,
+      location: { name: "Singapore" },
+      absolute_url: `https://boards.greenhouse.io/example/jobs/${index + 1}`,
+      content,
+    }));
+    const body = JSON.stringify({ jobs: records });
+    expect(body.length).toBeGreaterThan(MAX_SOURCE_RESPONSE_BYTES);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const large = await new GreenhouseAdapter("example").fetchJobs({ limit: 5 });
+    expect(large.success).toBe(true);
+    expect(large.jobs).toHaveLength(5);
+
+    const oversized = JSON.stringify({ jobs: [], padding: "y".repeat(GREENHOUSE_MAX_RESPONSE_BYTES) });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(oversized, { status: 200, headers: { "Content-Type": "application/json" } })));
+    const rejected = await new GreenhouseAdapter("example").fetchJobs({ limit: 5 });
+    expect(rejected.success).toBe(false);
+    expect(rejected.error).toContain("exceeds");
   });
 
   it("keeps Lever posting and application URLs distinct", async () => {

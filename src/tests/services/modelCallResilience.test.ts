@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   diffProviderCalls,
   fullJitterBackoffMs,
+  getModelLimiter,
   googleRetryInfoDelayMs,
   isRateLimitedFailure,
   ModelCallDeadlineError,
@@ -95,6 +96,20 @@ describe("per-model limiter", () => {
     // 900 of 1000 used: a 200-token request cannot start before the deadline in this minute.
     now = 1000;
     await expect(limiter.acquire(200, 30_000)).rejects.toBeInstanceOf(ModelCallDeadlineError);
+  });
+
+  it("is one process-wide limiter per model, so every worker lane shares its concurrency cap", async () => {
+    const env = { GEMINI_MAX_CONCURRENCY: "2" } as NodeJS.ProcessEnv;
+    const laneA = getModelLimiter("shared-model", env);
+    const laneB = getModelLimiter("shared-model", env);
+    expect(laneB).toBe(laneA);
+    const first = await laneA.acquire(1, Date.now() + 60_000);
+    const second = await laneB.acquire(1, Date.now() + 60_000);
+    expect(laneA.inFlight).toBe(2);
+    // A third lane cannot start before the deadline while both slots are held.
+    await expect(getModelLimiter("shared-model", env).acquire(1, Date.now() + 1)).rejects.toBeInstanceOf(ModelCallDeadlineError);
+    first.release();
+    second.release();
   });
 
   it("caps concurrent requests and starts the next one when a slot is released", async () => {

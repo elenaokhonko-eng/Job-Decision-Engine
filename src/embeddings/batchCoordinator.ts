@@ -2,8 +2,8 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../db/pgSsl.js';
 import {
+  embeddingRequestBatchSize,
   generateEmbeddingsWithProviderAndModel,
-  type EmbeddingOutcome,
   type EmbeddingProvider,
 } from '../services/agent.js';
 import { isRateLimitedFailure } from '../services/modelCallResilience.js';
@@ -156,6 +156,12 @@ async function recordEmbeddingInvocation(
     client,
     context ? { context } : undefined
   );
+}
+
+function embeddingProviderConcurrency(): number {
+  const parsed = Number.parseInt(String(process.env.EMBEDDING_PROVIDER_CONCURRENCY || ''), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 4;
+  return Math.min(parsed, 16);
 }
 
 export async function runEmbeddingBatch(
@@ -312,23 +318,24 @@ export async function runEmbeddingBatch(
         `[embeddings:${runType}] batch_id=${batchId} creating ${inputRes.rows.length} batch item(s)`
       );
 
-      for (const input of inputRes.rows) {
-        await client.query(
-          `INSERT INTO embedding_batch_items (
-             workspace_id,
-             embedding_batch_id,
-             embedding_input_id,
-             status,
-             attempt_count,
-             error_message,
-             updated_at
-           )
-           VALUES ($1, $2, $3, 'PENDING', 1, NULL, NOW())
-           ON CONFLICT (embedding_batch_id, embedding_input_id)
-           DO NOTHING`,
-          [workspaceId, batchId, input.id]
-        );
-      }
+      // One statement for all batch items instead of one round trip per input.
+      await client.query(
+        `INSERT INTO embedding_batch_items (
+           workspace_id,
+           embedding_batch_id,
+           embedding_input_id,
+           status,
+           attempt_count,
+           error_message,
+           updated_at
+         )
+         SELECT $1, $2, input_id, 'PENDING', 1, NULL, NOW()
+         FROM unnest($3::uuid[]) WITH ORDINALITY AS input(input_id, position)
+         ORDER BY position
+         ON CONFLICT (embedding_batch_id, embedding_input_id)
+         DO NOTHING`,
+        [workspaceId, batchId, inputRes.rows.map((input) => input.id)]
+      );
 
       await client.query('COMMIT');
     } catch (error) {
@@ -338,44 +345,180 @@ export async function runEmbeddingBatch(
 
     let succeeded = 0;
     let failed = 0;
-    let rateLimited = 0;
     const failedInputIds: string[] = [];
 
-    // One provider request per chunk of inputs (batch embedContent) instead of one per input; each
-    // input keeps its own outcome, validation, invocation record and batch-item status below.
-    const requestStartedAt = Date.now();
-    const outcomes: EmbeddingOutcome[] = await generateEmbeddingsWithProviderAndModel(
-      inputRes.rows.map((row) => row.content_text),
-      provider,
-      spaceModel
-    );
-    if (outcomes.length !== inputRes.rows.length) {
-      throw new Error(
-        `Embedding provider returned ${outcomes.length} outcome(s) for ${inputRes.rows.length} input(s).`
-      );
-    }
-    const requestLatencyMs = Date.now() - requestStartedAt;
-    console.log(
-      `[embeddings:${runType}] batch_id=${batchId} provider requests finished inputs=${inputRes.rows.length} elapsed_ms=${requestLatencyMs}`
-    );
+    let rateLimited = 0;
+    // Inputs go to the provider in chunks (one batch embedContent / embeddings request per chunk),
+    // with up to EMBEDDING_PROVIDER_CONCURRENCY chunk requests in flight. Every input still gets its
+    // own outcome, validation, invocation record and batch-item status; persistence below stays
+    // sequential and in input order on this client. Gemini requests also pass the process-wide
+    // per-model limiter, shared by every worker lane.
+    const concurrency = embeddingProviderConcurrency();
+    const chunkSize = embeddingRequestBatchSize(provider);
+    const windowSize = concurrency * chunkSize;
+    for (let windowStart = 0; windowStart < inputRes.rows.length; windowStart += windowSize) {
+      const window = inputRes.rows.slice(windowStart, windowStart + windowSize);
+      const chunks: Array<typeof window> = [];
+      for (let offset = 0; offset < window.length; offset += chunkSize) chunks.push(window.slice(offset, offset + chunkSize));
+      const chunkOutcomes = await Promise.all(chunks.map(async (chunk, chunkIndex) => {
+        const chunkStartedAt = Date.now();
+        for (const [offset, input] of chunk.entries()) {
+          const inputIndex = windowStart + chunkIndex * chunkSize + offset;
+          console.log(`[embeddings:${runType}] ${inputIndex + 1}/${inputRes.rows.length} input_id=${input.id} provider=${provider} model=${spaceModel} starting chars=${input.content_text.length}`);
+        }
+        let results;
+        try {
+          results = await generateEmbeddingsWithProviderAndModel(chunk.map((input) => input.content_text), provider, spaceModel);
+        } catch (providerError) {
+          results = chunk.map(() => ({ ok: false as const, error: providerError }));
+        }
+        if (results.length !== chunk.length) {
+          const mismatch = new Error(`Embedding provider returned ${results.length} outcome(s) for ${chunk.length} input(s).`);
+          results = chunk.map(() => ({ ok: false as const, error: mismatch }));
+        }
+        const providerLatencyMs = Date.now() - chunkStartedAt;
+        return chunk.map((input, offset) => {
+          const inputIndex = windowStart + chunkIndex * chunkSize + offset;
+          const progressPrefix = `[embeddings:${runType}] ${inputIndex + 1}/${inputRes.rows.length} input_id=${input.id} provider=${provider} model=${spaceModel}`;
+          const result = results[offset];
+          return result.ok
+            ? { input, progressPrefix, providerLatencyMs, vector: result.vector, providerFailed: false, providerError: null as unknown }
+            : { input, progressPrefix, providerLatencyMs, vector: [] as number[], providerFailed: true, providerError: result.error };
+        });
+      }));
+      const outcomes = chunkOutcomes.flat();
 
-    for (let inputIndex = 0; inputIndex < inputRes.rows.length; inputIndex += 1) {
-      const input = inputRes.rows[inputIndex];
-      const itemStartedAt = Date.now();
-      const progressPrefix = `[embeddings:${runType}] ${inputIndex + 1}/${inputRes.rows.length} input_id=${input.id} provider=${provider} model=${spaceModel}`;
-      console.log(`${progressPrefix} starting chars=${input.content_text.length}`);
-      const outcome = outcomes[inputIndex];
-      try {
-        if (!outcome.ok) throw outcome.error;
-        const vector = outcome.vector;
-        const validation = validateEmbeddingVector(vector, space.dimensions);
-        if (!validation.valid) {
-          failed += 1;
-          failedInputIds.push(input.id);
-          errors.push(`input ${input.id}: ${validation.issues.join('; ')}`);
-          console.warn(
-            `${progressPrefix} validation_failed issues=${validation.issues.join('; ')} elapsed_ms=${Date.now() - itemStartedAt}`
+      for (const { input, progressPrefix, providerLatencyMs, vector, providerFailed, providerError } of outcomes) {
+        try {
+          if (providerFailed) throw providerError;
+          const validation = validateEmbeddingVector(vector, space.dimensions);
+          if (!validation.valid) {
+            failed += 1;
+            failedInputIds.push(input.id);
+            errors.push(`input ${input.id}: ${validation.issues.join('; ')}`);
+            console.warn(
+              `${progressPrefix} validation_failed issues=${validation.issues.join('; ')} elapsed_ms=${providerLatencyMs}`
+            );
+            await recordEmbeddingInvocation(client as pg.PoolClient, options?.context, {
+              status: 'FAILED',
+              workspaceId,
+              embeddingSpaceId: space.id,
+              embeddingBatchId: batchId,
+              embeddingInputId: input.id,
+              provider,
+              model: spaceModel,
+              runType,
+              contentText: input.content_text,
+              latencyMs: providerLatencyMs,
+              vectorDimensions: validation.dimensions,
+              vectorChecksum: validation.checksum,
+              errorMessage: validation.issues.join('; '),
+              validationIssues: validation.issues,
+            });
+            await client.query(
+              `UPDATE embedding_batch_items
+               SET status = 'FAILED',
+                   error_message = $4,
+                   updated_at = NOW()
+               WHERE workspace_id = $1 AND embedding_batch_id = $2 AND embedding_input_id = $3`,
+              [workspaceId, batchId, input.id, validation.issues.join('; ')]
+            );
+            continue;
+          }
+
+          try {
+            await client.query(
+              `INSERT INTO semantic_embeddings (
+                 workspace_id,
+                 embedding_space_id,
+                 embedding_input_id,
+                 embedding_batch_id,
+                 vector_dimensions,
+                 embedding_values,
+                 embedding_vector,
+                 vector_checksum
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, ($6::float8[])::vector, $7)
+               ON CONFLICT (embedding_space_id, embedding_input_id)
+               DO NOTHING`,
+              [
+                workspaceId,
+                space.id,
+                input.id,
+                batchId,
+                validation.dimensions,
+                vector,
+                validation.checksum,
+              ]
+            );
+          } catch (writeErr: any) {
+            if (
+              writeErr?.code !== '42703' && // undefined_column
+              writeErr?.code !== '42704' && // undefined_object
+              writeErr?.code !== '42883' && // undefined_function
+              writeErr?.code !== '42846' && // cannot_coerce
+              writeErr?.code !== '22P02' // invalid_text_representation
+            ) {
+              throw writeErr;
+            }
+            await client.query(
+              `INSERT INTO semantic_embeddings (
+                 workspace_id,
+                 embedding_space_id,
+                 embedding_input_id,
+                 embedding_batch_id,
+                 vector_dimensions,
+                 embedding_values,
+                 vector_checksum
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT (embedding_space_id, embedding_input_id)
+               DO NOTHING`,
+              [
+                workspaceId,
+                space.id,
+                input.id,
+                batchId,
+                validation.dimensions,
+                vector,
+                validation.checksum,
+              ]
+            );
+          }
+
+          succeeded += 1;
+          console.log(
+            `${progressPrefix} completed dimensions=${validation.dimensions} elapsed_ms=${providerLatencyMs}`
           );
+          await recordEmbeddingInvocation(client as pg.PoolClient, options?.context, {
+            status: 'COMPLETED',
+            workspaceId,
+            embeddingSpaceId: space.id,
+            embeddingBatchId: batchId,
+            embeddingInputId: input.id,
+            provider,
+            model: spaceModel,
+            runType,
+            contentText: input.content_text,
+            latencyMs: providerLatencyMs,
+            vectorDimensions: validation.dimensions,
+            vectorChecksum: validation.checksum,
+          });
+          await client.query(
+            `UPDATE embedding_batch_items
+             SET status = 'COMPLETED',
+                 error_message = NULL,
+                 updated_at = NOW()
+             WHERE workspace_id = $1 AND embedding_batch_id = $2 AND embedding_input_id = $3`,
+            [workspaceId, batchId, input.id]
+          );
+        } catch (error) {
+          const message = describeEmbeddingError(error);
+          failed += 1;
+          if (isRateLimitedFailure(error)) rateLimited += 1;
+          failedInputIds.push(input.id);
+          errors.push(`input ${input.id}: ${message}`);
+          console.warn(`${progressPrefix} failed elapsed_ms=${providerLatencyMs} error=${message}`);
           await recordEmbeddingInvocation(client as pg.PoolClient, options?.context, {
             status: 'FAILED',
             workspaceId,
@@ -386,11 +529,9 @@ export async function runEmbeddingBatch(
             model: spaceModel,
             runType,
             contentText: input.content_text,
-            latencyMs: Date.now() - itemStartedAt,
-            vectorDimensions: validation.dimensions,
-            vectorChecksum: validation.checksum,
-            errorMessage: validation.issues.join('; '),
-            validationIssues: validation.issues,
+            latencyMs: providerLatencyMs,
+            errorMessage: message,
+            ...(isRateLimitedFailure(error) ? { errorKind: 'RATE_LIMITED' } : {}),
           });
           await client.query(
             `UPDATE embedding_batch_items
@@ -398,126 +539,9 @@ export async function runEmbeddingBatch(
                  error_message = $4,
                  updated_at = NOW()
              WHERE workspace_id = $1 AND embedding_batch_id = $2 AND embedding_input_id = $3`,
-            [workspaceId, batchId, input.id, validation.issues.join('; ')]
-          );
-          continue;
-        }
-
-        try {
-          await client.query(
-            `INSERT INTO semantic_embeddings (
-               workspace_id,
-               embedding_space_id,
-               embedding_input_id,
-               embedding_batch_id,
-               vector_dimensions,
-               embedding_values,
-               embedding_vector,
-               vector_checksum
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, ($6::float8[])::vector, $7)
-             ON CONFLICT (embedding_space_id, embedding_input_id)
-             DO NOTHING`,
-            [
-              workspaceId,
-              space.id,
-              input.id,
-              batchId,
-              validation.dimensions,
-              vector,
-              validation.checksum,
-            ]
-          );
-        } catch (writeErr: any) {
-          if (
-            writeErr?.code !== '42703' && // undefined_column
-            writeErr?.code !== '42704' && // undefined_object
-            writeErr?.code !== '42883' && // undefined_function
-            writeErr?.code !== '42846' && // cannot_coerce
-            writeErr?.code !== '22P02' // invalid_text_representation
-          ) {
-            throw writeErr;
-          }
-          await client.query(
-            `INSERT INTO semantic_embeddings (
-               workspace_id,
-               embedding_space_id,
-               embedding_input_id,
-               embedding_batch_id,
-               vector_dimensions,
-               embedding_values,
-               vector_checksum
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (embedding_space_id, embedding_input_id)
-             DO NOTHING`,
-            [
-              workspaceId,
-              space.id,
-              input.id,
-              batchId,
-              validation.dimensions,
-              vector,
-              validation.checksum,
-            ]
+            [workspaceId, batchId, input.id, message]
           );
         }
-
-        succeeded += 1;
-        console.log(
-          `${progressPrefix} completed dimensions=${validation.dimensions} elapsed_ms=${Date.now() - itemStartedAt}`
-        );
-        await recordEmbeddingInvocation(client as pg.PoolClient, options?.context, {
-          status: 'COMPLETED',
-          workspaceId,
-          embeddingSpaceId: space.id,
-          embeddingBatchId: batchId,
-          embeddingInputId: input.id,
-          provider,
-          model: spaceModel,
-          runType,
-          contentText: input.content_text,
-          latencyMs: Date.now() - itemStartedAt,
-          vectorDimensions: validation.dimensions,
-          vectorChecksum: validation.checksum,
-        });
-        await client.query(
-          `UPDATE embedding_batch_items
-           SET status = 'COMPLETED',
-               error_message = NULL,
-               updated_at = NOW()
-           WHERE workspace_id = $1 AND embedding_batch_id = $2 AND embedding_input_id = $3`,
-          [workspaceId, batchId, input.id]
-        );
-      } catch (error) {
-        const message = describeEmbeddingError(error);
-        failed += 1;
-        if (isRateLimitedFailure(error)) rateLimited += 1;
-        failedInputIds.push(input.id);
-        errors.push(`input ${input.id}: ${message}`);
-        console.warn(`${progressPrefix} failed elapsed_ms=${Date.now() - itemStartedAt} error=${message}`);
-        await recordEmbeddingInvocation(client as pg.PoolClient, options?.context, {
-          status: 'FAILED',
-          workspaceId,
-          embeddingSpaceId: space.id,
-          embeddingBatchId: batchId,
-          embeddingInputId: input.id,
-          provider,
-          model: spaceModel,
-          runType,
-          contentText: input.content_text,
-          latencyMs: Date.now() - itemStartedAt,
-          errorMessage: message,
-          ...(isRateLimitedFailure(error) ? { errorKind: 'RATE_LIMITED' } : {}),
-        });
-        await client.query(
-          `UPDATE embedding_batch_items
-           SET status = 'FAILED',
-               error_message = $4,
-               updated_at = NOW()
-           WHERE workspace_id = $1 AND embedding_batch_id = $2 AND embedding_input_id = $3`,
-          [workspaceId, batchId, input.id, message]
-        );
       }
     }
 
