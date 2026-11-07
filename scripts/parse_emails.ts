@@ -28,6 +28,16 @@ export interface ParseEmailsSummary {
   parsedEmails: number;
   extractedJobs: number;
   failedEmails: number;
+  /**
+   * Alerts that decoded but contain no vacancy link (e.g. a non-job email filed under the alerts label).
+   * They are recorded as SOURCE_BLOCKED with MISSING_POSTING_URL and do not fail the run on their own.
+   */
+  noVacancyEmails: number;
+  /**
+   * True when no-vacancy alerts are at least NO_VACANCY_FUNNEL_MIN_ALERTS and more than half of the decoded
+   * alerts: that pattern means the extractor no longer recognises real alerts, so the run fails.
+   */
+  noVacancyFunnelBroken: boolean;
   /** Link accounting across the alerts that were parsed (staged, blocked or failed); counts only. */
   linksSeen: number;
   nonJobLinksSkipped: number;
@@ -54,8 +64,16 @@ interface AlertRow {
   readonly body: unknown;
 }
 
+export const NO_VACANCY_FUNNEL_MIN_ALERTS = 3;
+
+/** A run is a broken funnel when most decoded alerts yield no vacancy link (see ParseEmailsSummary). */
+export function isNoVacancyFunnelBroken(parsedEmails: number, noVacancyEmails: number): boolean {
+  return noVacancyEmails >= NO_VACANCY_FUNNEL_MIN_ALERTS && noVacancyEmails * 2 > parsedEmails + noVacancyEmails;
+}
+
 type EmailOutcome =
   | { readonly kind: "STAGED"; readonly links: number; readonly linkSummary: EmailLinkSummary }
+  | { readonly kind: "NO_VACANCY"; readonly linkSummary: EmailLinkSummary }
   | { readonly kind: "BLOCKED"; readonly linkSummary: EmailLinkSummary | null }
   | { readonly kind: "FAILED"; readonly linkSummary: EmailLinkSummary };
 
@@ -130,6 +148,9 @@ async function stageEmail(
       throw stageError;
     } finally {
       client.release();
+    }
+    if (error instanceof EmailExtractionError && error.code === "MISSING_POSTING_URL" && linkSummary) {
+      return { kind: "NO_VACANCY", linkSummary };
     }
     broker.recordError(message);
     return { kind: "BLOCKED", linkSummary };
@@ -319,6 +340,7 @@ export async function parseEmails(
   let parsedEmails = 0;
   let extractedJobs = 0;
   let failedEmails = 0;
+  let noVacancyEmails = 0;
   let deferredEmails = 0;
   let linksSeen = 0;
   let nonJobLinksSkipped = 0;
@@ -361,13 +383,17 @@ export async function parseEmails(
         parsedEmails += 1;
         extractedJobs += outcome.links;
         detail = `staged ${outcome.links} vacancy link(s)`;
+      } else if (outcome.kind === "NO_VACANCY") {
+        noVacancyEmails += 1;
+        detail = "recorded as SOURCE_BLOCKED (no vacancy link in this email)";
       } else {
         failedEmails += 1;
         detail = outcome.kind === "BLOCKED" ? "blocked (no stageable vacancy link)" : "failed; left unprocessed for retry";
       }
       log(
-        `Gmail extraction progress: batch ${batch} alert ${parsedEmails + failedEmails} ${detail}${links}; ` +
-        `totals: ${parsedEmails} parsed, ${extractedJobs} links, ${failedEmails} failed, ${elapsed()} elapsed.`,
+        `Gmail extraction progress: batch ${batch} alert ${parsedEmails + noVacancyEmails + failedEmails} ${detail}${links}; ` +
+        `totals: ${parsedEmails} parsed, ${extractedJobs} links, ${noVacancyEmails} without vacancies, ` +
+        `${failedEmails} failed, ${elapsed()} elapsed.`,
       );
     });
 
@@ -387,12 +413,22 @@ export async function parseEmails(
         : "No eligible email alerts found.",
     );
     return {
-      parsedEmails: 0, extractedJobs: 0, failedEmails: 0, linksSeen: 0, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 0,
+      parsedEmails: 0, extractedJobs: 0, failedEmails: 0, noVacancyEmails: 0, noVacancyFunnelBroken: false,
+      linksSeen: 0, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 0,
       batches: 0, deferredEmails: 0, remainingBacklog, stoppedForRuntimeBudget,
     };
   }
 
-  await broker.endRun(failedEmails === 0 ? "COMPLETED" : parsedEmails > 0 ? "DEGRADED" : "FAILED");
+  const noVacancyFunnelBroken = isNoVacancyFunnelBroken(parsedEmails, noVacancyEmails);
+  if (noVacancyFunnelBroken) {
+    log(
+      `Gmail extraction found no vacancy link in ${noVacancyEmails} of ${parsedEmails + noVacancyEmails} decoded alerts; ` +
+      "the extractor may no longer recognise the alert format.",
+    );
+  }
+  await broker.endRun(
+    failedEmails === 0 && !noVacancyFunnelBroken ? "COMPLETED" : parsedEmails > 0 ? "DEGRADED" : "FAILED",
+  );
   if (stoppedForRuntimeBudget) {
     log(
       `Gmail extraction reached its ${maxRuntimeSeconds}s runtime budget; ${deferredEmails} selected alert(s) were not started. ` +
@@ -401,12 +437,12 @@ export async function parseEmails(
   }
   log(
     "Email discovery complete. Parsed alerts: " + parsedEmails + ", vacancy links staged: " + extractedJobs +
-    ", failed alerts: " + failedEmails + ", links seen: " + linksSeen + ", non-job links skipped: " + nonJobLinksSkipped +
+    ", alerts without vacancies: " + noVacancyEmails + ", failed alerts: " + failedEmails + ", links seen: " + linksSeen + ", non-job links skipped: " + nonJobLinksSkipped +
     ", duplicate links collapsed: " + duplicateLinksCollapsed + ", batches: " + batches + ", unprocessed alerts remaining: " + remainingBacklog +
     ", elapsed: " + elapsed(),
   );
   return {
-    parsedEmails, extractedJobs, failedEmails, linksSeen, nonJobLinksSkipped, duplicateLinksCollapsed,
+    parsedEmails, extractedJobs, failedEmails, noVacancyEmails, noVacancyFunnelBroken, linksSeen, nonJobLinksSkipped, duplicateLinksCollapsed,
     batches, deferredEmails, remainingBacklog, stoppedForRuntimeBudget,
   };
 }
@@ -422,7 +458,7 @@ if (process.argv[1] && process.argv[1].includes("parse_emails")) {
   if (args) {
     void parseEmails(args)
       .then((summary) => {
-        if (summary.failedEmails > 0) process.exitCode = 1;
+        if (summary.failedEmails > 0 || summary.noVacancyFunnelBroken) process.exitCode = 1;
       })
       .catch((error) => {
         console.error("Fatal email discovery failure:", error instanceof Error ? error.message : "unknown error");
