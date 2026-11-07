@@ -31,8 +31,30 @@ describe("Gmail parser replay", () => {
       userKey: "owner",
       replayBlocked: true,
       limit: 12,
+      concurrency: 4,
+      maxRuntimeSeconds: 420,
     });
     expect(() => parseEmailParseArguments(["--limit", "21"])).toThrow("--limit must be an integer");
+  });
+
+  it("bounds extraction concurrency and the run's wall-clock budget", () => {
+    expect(parseEmailParseArguments(["--concurrency", "8", "--max-runtime-seconds", "300"])).toEqual({
+      replayBlocked: false,
+      limit: 20,
+      concurrency: 8,
+      maxRuntimeSeconds: 300,
+    });
+    expect(() => parseEmailParseArguments(["--concurrency", "0"])).toThrow("--concurrency must be an integer from 1 to 8.");
+    expect(() => parseEmailParseArguments(["--concurrency", "9"])).toThrow("--concurrency must be an integer from 1 to 8.");
+    expect(() => parseEmailParseArguments(["--max-runtime-seconds", "1.5"])).toThrow("--max-runtime-seconds must be an integer");
+    expect(() => parseEmailParseArguments(["--max-runtime-seconds", "3601"])).toThrow("--max-runtime-seconds must be an integer");
+  });
+
+  it("excludes alerts already attempted in this run only when asked", () => {
+    expect(buildEmailAlertSelectionQuery(false)).not.toContain("$3");
+    expect(buildEmailAlertSelectionQuery(true)).not.toContain("$3");
+    expect(buildEmailAlertSelectionQuery(false, { excludeAttempted: true })).toContain("AND NOT (id = ANY($3::uuid[]))");
+    expect(buildEmailAlertSelectionQuery(true, { excludeAttempted: true })).toContain("AND NOT (id = ANY($3::uuid[]))");
   });
 
   it("prints a scoped replay command without shell injection", () => {
