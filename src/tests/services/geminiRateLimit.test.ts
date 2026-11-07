@@ -278,6 +278,24 @@ describe('Gemini backend selection', () => {
     ]);
   });
 
+  it('reuses a studio client for the same key and rebuilds it when the key or backend changes', async () => {
+    for (const key of ENV_KEYS) delete process.env[key];
+    process.env.GEMINI_API_KEY = 'first-test-key';
+    const { getGeminiClient } = await import('../../services/agent.js');
+    getGeminiClient();
+    getGeminiClient();
+    process.env.GEMINI_API_KEY = 'second-test-key';
+    getGeminiClient();
+    process.env.GEMINI_BACKEND = 'vertex';
+    process.env.GOOGLE_CLOUD_PROJECT = 'example-project';
+    getGeminiClient();
+    expect(geminiMock.constructed.map((options: any) => options.apiKey ?? `vertex:${options.project}`)).toEqual([
+      'first-test-key',
+      'second-test-key',
+      'vertex:example-project',
+    ]);
+  });
+
   it('rejects a single-region Vertex location unless explicitly allowed', async () => {
     const { geminiConfigProblem, isGeminiConfigured } = await import('../../services/geminiConfig.js');
     const env = { GEMINI_BACKEND: 'vertex', GOOGLE_CLOUD_PROJECT: 'p', GOOGLE_CLOUD_LOCATION: 'us-central1' } as NodeJS.ProcessEnv;

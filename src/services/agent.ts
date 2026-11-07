@@ -27,6 +27,7 @@ import {
   isGeminiConfigured,
   resolveGeminiClientConfig,
   type GeminiBackend,
+  type GeminiClientConfig,
   type GeminiCredentialScope,
 } from "./geminiConfig.js";
 import {
@@ -365,9 +366,17 @@ export function checkModelRegistryPreflight(
   };
 }
 
-// Lazily initialised Gemini SDK clients, one per backend configuration. A missing or incomplete
-// configuration throws ("loud fail") instead of silently skipping the provider.
-const geminiClients = new Map<string, GoogleGenAI>();
+// Lazily initialised Gemini SDK clients, one per backend and credential scope, rebuilt when that
+// slot's configuration changes. Credentials are compared directly and never hashed or used as a
+// map key. A missing or incomplete configuration throws ("loud fail") instead of silently skipping
+// the provider.
+const geminiClients = new Map<string, { config: GeminiClientConfig; client: GoogleGenAI }>();
+
+function sameGeminiClientConfig(a: GeminiClientConfig, b: GeminiClientConfig): boolean {
+  if (a.backend === "vertex" && b.backend === "vertex") return a.project === b.project && a.location === b.location;
+  if (a.backend === "studio" && b.backend === "studio") return a.apiKey === b.apiKey && a.apiVersion === b.apiVersion;
+  return false;
+}
 
 /**
  * The Gemini client for this environment.
@@ -378,31 +387,29 @@ const geminiClients = new Map<string, GoogleGenAI>();
  *   configured project and location (default "global"). No AI Studio headers or apiVersion.
  */
 export function getGeminiClient(options: { scope?: GeminiCredentialScope } = {}): GoogleGenAI {
-  const config = resolveGeminiClientConfig(process.env, options.scope ?? "default");
-  const cacheKey = config.backend === "vertex"
-    ? `vertex\u0000${config.project}\u0000${config.location}`
-    : `studio\u0000${sha256Hex(config.apiKey)}\u0000${config.apiVersion ?? ""}`;
-  let client = geminiClients.get(cacheKey);
-  if (!client) {
-    client = config.backend === "vertex"
-      ? new GoogleGenAI({
-          vertexai: true,
-          project: config.project,
-          location: config.location,
-          httpOptions: { timeout: 45000 },
-        })
-      : new GoogleGenAI({
-          apiKey: config.apiKey,
-          apiVersion: config.apiVersion,
-          httpOptions: {
-            headers: {
-              "User-Agent": "aistudio-build",
-            },
-            timeout: 45000,
+  const scope = options.scope ?? "default";
+  const config = resolveGeminiClientConfig(process.env, scope);
+  const slot = `${config.backend}:${scope}`;
+  const cached = geminiClients.get(slot);
+  if (cached && sameGeminiClientConfig(cached.config, config)) return cached.client;
+  const client = config.backend === "vertex"
+    ? new GoogleGenAI({
+        vertexai: true,
+        project: config.project,
+        location: config.location,
+        httpOptions: { timeout: 45000 },
+      })
+    : new GoogleGenAI({
+        apiKey: config.apiKey,
+        apiVersion: config.apiVersion,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
           },
-        });
-    geminiClients.set(cacheKey, client);
-  }
+          timeout: 45000,
+        },
+      });
+  geminiClients.set(slot, { config, client });
   return client;
 }
 
