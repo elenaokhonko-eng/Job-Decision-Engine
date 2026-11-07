@@ -1096,7 +1096,7 @@ function isLocationSuffix(suffix: string, pageLocation: string | null): boolean 
  * to the posting title. Up to two such trailing suffixes are removed from the
  * expected title; nothing else is relaxed, so a different role still conflicts.
  */
-function employerTitleMatches(expected: string, actual: string, pageLocation: string | null): boolean {
+export function employerTitleMatches(expected: string, actual: string, pageLocation: string | null): boolean {
   if (titleMatches(expected, actual)) return true;
   if (!normalizeIdentity(actual)) return false;
   let remaining = expected.trim();

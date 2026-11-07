@@ -553,6 +553,47 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
       employerIdentityCheck: "TITLE_ONLY_EXPECTED_EMPLOYER_UNKNOWN",
       structuredJobPostingSource: "MICRODATA",
     });
+
+    // Normalization accepts the Gmail parent despite its " - Example City" suffix,
+    // using the same title rule the fetcher applied.
+    const normalized = await runNormalization(getClient(), {
+      context: getContext(),
+      observationIds: [derived!.id],
+      limit: 1,
+    });
+    expect(normalized).toMatchObject({ totalProcessed: 1, totalErrors: 0 });
+    const versions = await getClient().query<{ id: string; processing_status: string; has_version: boolean }>(
+      `SELECT id::text AS id, processing_status, job_version_id IS NOT NULL AS has_version
+       FROM raw_job_observations WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+      [getContext().workspaceId, [observationId, derived!.id]],
+    );
+    for (const row of versions.rows) expect(row).toMatchObject({ processing_status: "PROCESSED", has_version: true });
+  });
+
+  it("still refuses to link a retrieved posting to a Gmail parent for a different role", async () => {
+    const parentId = await insertGmailObservation({
+      title: "Synthetic Platform Lead - Example City",
+      url: "https://careers.examplegroupbank.example/EGB/job/Synthetic-Platform-Lead/4100000002/",
+      messageId: `career-site-mismatch-${randomUUID()}`,
+      companyName: "",
+    });
+    const derivedId = randomUUID();
+    await getClient().query(
+      `INSERT INTO raw_job_observations (
+         id, workspace_id, source_name, source_external_id, source_url, retrieved_at, company_name, title,
+         description_raw, raw_payload, raw_payload_hash, processing_status, location_raw, derived_from_observation_id
+       ) VALUES ($1, $2, 'EMPLOYER_WEBSITE', $3, $4, NOW(), 'Example Group Bank', 'Synthetic Platform Operations Lead',
+         $5, '{}'::jsonb, $6, 'PENDING', 'Example City, EC', $7)`,
+      [derivedId, getContext().workspaceId, `employer-${derivedId}`,
+        "https://careers.examplegroupbank.example/EGB/job/Synthetic-Platform-Lead/4100000002/",
+        postingDescription, createHash("sha256").update(derivedId).digest("hex"), parentId],
+    );
+    const normalized = await runNormalization(getClient(), {
+      context: getContext(),
+      observationIds: [derivedId],
+      limit: 1,
+    });
+    expect(normalized).toMatchObject({ totalProcessed: 0, totalErrors: 1 });
   });
 
   it("blocks non-posting source text without creating a version or gate result", async () => {
