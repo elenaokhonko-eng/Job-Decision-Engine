@@ -291,7 +291,7 @@ export function parseLinkedInSavedExport(document: unknown): LinkedInSavedExport
 export function parseLinkedInSavedExportText(text: string): LinkedInSavedExportParseResult {
   let document: unknown;
   try {
-    document = JSON.parse(text.replace(/^﻿/, ""));
+    document = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   } catch (error) {
     throw new LinkedInSavedExportFileError(`The export is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }

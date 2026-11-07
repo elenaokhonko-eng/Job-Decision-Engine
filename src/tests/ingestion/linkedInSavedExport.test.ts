@@ -146,7 +146,7 @@ describe("LinkedIn saved-jobs export parsing", () => {
     expect(() => parseLinkedInSavedExport({ jobs: [] })).toThrow(LinkedInSavedExportFileError);
     expect(() => parseLinkedInSavedExport([])).toThrow(/no saved jobs/);
     expect(() => parseLinkedInSavedExportText("{not json")).toThrow(/not valid JSON/);
-    expect(parseLinkedInSavedExportText(`﻿${JSON.stringify([item()])}`).valid).toHaveLength(1);
+    expect(parseLinkedInSavedExportText(String.fromCharCode(0xfeff) + JSON.stringify([item()])).valid).toHaveLength(1);
   });
 
   it("matches a Gmail card only when title and employer agree", () => {
