@@ -98,7 +98,7 @@ function dependencies(
   };
 }
 
-async function insertGmailObservation(input: { title: string; url: string; messageId: string }): Promise<string> {
+async function insertGmailObservation(input: { title: string; url: string; messageId: string; companyName?: string }): Promise<string> {
   const observationId = randomUUID();
   const rawPayload = {
     message_id: input.messageId,
@@ -111,10 +111,10 @@ async function insertGmailObservation(input: { title: string; url: string; messa
        id, workspace_id, source_name, source_external_id, source_url, retrieved_at,
        company_name, title, description_raw, raw_payload, raw_payload_hash, processing_status,
        gmail_message_id
-     ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, NOW(), 'CFGI', $5, 'short Gmail alert snippet',
+     ) VALUES ($1, $2, 'GMAIL_ALERT', $3, $4, NOW(), $9, $5, 'short Gmail alert snippet',
        $6::jsonb, $7, 'FETCH_PENDING', $8)`,
     [observationId, getContext().workspaceId, `gmail-${input.messageId}`, input.url, input.title,
-      JSON.stringify(rawPayload), rawPayloadHash, input.messageId],
+      JSON.stringify(rawPayload), rawPayloadHash, input.messageId, input.companyName ?? "CFGI"],
   );
   return observationId;
 }
@@ -498,6 +498,61 @@ describe.skipIf(skipReal)("Gmail posting retrieval persistence (PostgreSQL)", ()
       [crossWorkspaceId, secondWorkspace.rows[0]?.id, postingTitle, postingDescription,
         createHash("sha256").update(crossWorkspaceId).digest("hex"), observationId],
     )).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("resolves an alert card without an employer from the employer page's own JobPosting microdata", async () => {
+    const observationId = await insertGmailObservation({
+      title: "Synthetic Platform Lead - Example City",
+      url: "https://careers.examplegroupbank.example/EGB/job/Synthetic-Platform-Lead/4100000001/?locale=en_US",
+      messageId: `career-site-${randomUUID()}`,
+      companyName: "",
+    });
+    const taskId = await enqueueFetch(observationId, `career-site-${randomUUID()}`);
+    const page = [
+      "<html><head><title>Synthetic Platform Lead Job Details | Example Group Bank</title></head><body>",
+      '<div class="jobDisplayShell" itemscope="itemscope" itemtype="http://schema.org/JobPosting">',
+      '<span itemprop="jobLocation" itemscope itemtype="http://schema.org/Place">',
+      '<span itemprop="address" itemscope itemtype="http://schema.org/PostalAddress">',
+      '<meta itemprop="streetAddress" content="Example City, EC"></span></span>',
+      '<meta itemprop="datePosted" content="Sun Oct 25 02:00:00 UTC 2026">',
+      '<meta itemprop="hiringOrganization" content="Example Group Bank">',
+      '<h1><span itemprop="title">Synthetic Platform Lead</span></h1>',
+      '<span itemprop="description"><p>Responsibilities</p><p>' + postingDescription + "</p><p>Requirements</p>",
+      "<p>Ten years of platform engineering experience and stakeholder management.</p></span>",
+      "</div></body></html>",
+    ].join("");
+    const workerDependencies = dependencies(async (url, expected) => fetchJobContent(url, expected, {
+      resolveAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetchOnce: async (target) => ({
+        url: target.toString(),
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+        body: Buffer.from(page, "utf8"),
+      }),
+      now: () => new Date("2026-11-08T00:00:00.000Z"),
+    }));
+
+    const result = await runBoundedStages(observationId, workerDependencies);
+    expect(result.byType.FETCH_JOB_CONTENT).toMatchObject({ claimed: 1 });
+    const task = await getClient().query<{ status: string }>("SELECT status FROM pipeline_tasks WHERE id = $1", [taskId]);
+    expect(task.rows[0]?.status).toBe("COMPLETED");
+    const rows = await getClient().query<{
+      id: string; company_name: string; title: string; processing_status: string; raw_payload: Record<string, any>;
+    }>(
+      `SELECT id::text AS id, company_name, title, processing_status, raw_payload
+       FROM raw_job_observations
+       WHERE workspace_id = $1 AND (id = $2::uuid OR derived_from_observation_id = $2::uuid)`,
+      [getContext().workspaceId, observationId],
+    );
+    const discovery = rows.rows.find((row) => row.id === observationId);
+    const derived = rows.rows.find((row) => row.id !== observationId);
+    expect(discovery).toMatchObject({ company_name: "", processing_status: "FETCH_COMPLETE" });
+    expect(derived).toMatchObject({ company_name: "Example Group Bank", title: "Synthetic Platform Lead" });
+    expect(derived?.raw_payload.posting.rawPayload).toMatchObject({
+      companySource: "EMPLOYER_PAGE_STRUCTURED_DATA",
+      employerIdentityCheck: "TITLE_ONLY_EXPECTED_EMPLOYER_UNKNOWN",
+      structuredJobPostingSource: "MICRODATA",
+    });
   });
 
   it("blocks non-posting source text without creating a version or gate result", async () => {

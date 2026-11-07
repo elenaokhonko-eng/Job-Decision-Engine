@@ -1071,22 +1071,171 @@ export function parseGreenhousePosting(
   }, evidence);
 }
 
+/** A discovery card without an employer ("", or the legacy "Unknown Company" placeholder). */
+function expectedEmployerUnknown(companyName: string): boolean {
+  const key = normalizeIdentity(companyName);
+  return !key || key === "unknown company" || key === "unknown";
+}
+
+/**
+ * A trailing " - <place>" suffix on an alert title is a location only when it
+ * has the "<City>, <CC>" / "<City>, <CC> (<CC>)" shape, or when its first part
+ * is named by the page's own location.
+ */
+function isLocationSuffix(suffix: string, pageLocation: string | null): boolean {
+  const trimmed = suffix.trim();
+  if (/^[A-Za-z][A-Za-z .'-]{1,60},\s*[A-Z]{2}(?:\s*\([A-Z]{2}\))?$/.test(trimmed)) return true;
+  const place = normalizeIdentity(trimmed.split(",")[0] ?? "");
+  const location = normalizeIdentity(pageLocation ?? "");
+  return place !== "" && location !== "" && (" " + location + " ").includes(" " + place + " ");
+}
+
+/**
+ * Employer career-site title identity. Alert emails append the location
+ * ("Role - City", "Role - City, CC (CC)") or a requisition id ("Role (REQ-123)")
+ * to the posting title. Up to two such trailing suffixes are removed from the
+ * expected title; nothing else is relaxed, so a different role still conflicts.
+ */
+function employerTitleMatches(expected: string, actual: string, pageLocation: string | null): boolean {
+  if (titleMatches(expected, actual)) return true;
+  if (!normalizeIdentity(actual)) return false;
+  let remaining = expected.trim();
+  for (let step = 0; step < 2; step += 1) {
+    const requisition = remaining.match(/^(.*\S)\s*\(\s*([A-Za-z0-9][A-Za-z0-9_./-]{2,39})\s*\)$/);
+    const location = remaining.match(/^(.*\S)\s+[-\u2013\u2014|]\s+([^-\u2013\u2014|]{2,80})$/);
+    if (requisition && /\d/.test(requisition[2] ?? "")) {
+      remaining = requisition[1] ?? "";
+    } else if (location && isLocationSuffix(location[2] ?? "", pageLocation)) {
+      remaining = location[1] ?? "";
+    } else {
+      return false;
+    }
+    if (titleMatches(remaining, actual)) return true;
+  }
+  return false;
+}
+
+const VOID_ELEMENTS = new Set(["meta", "link", "img", "br", "hr", "input", "source", "area", "base", "col", "embed", "wbr"]);
+
+/** The element opening at `start`: its attributes, inner HTML and end offset, with nested same-name tags balanced. */
+function elementAt(html: string, start: number): { tag: string; attributes: string; inner: string; end: number } | null {
+  const open = /^<([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>/.exec(html.slice(start, start + 8_192));
+  if (!open) return null;
+  const tag = (open[1] ?? "").toLowerCase();
+  const attributes = open[2] ?? "";
+  const innerStart = start + open[0].length;
+  if (VOID_ELEMENTS.has(tag) || attributes.trim().endsWith("/")) return { tag, attributes, inner: "", end: innerStart };
+  const pattern = new RegExp("<(/?)" + tag + "\\b[^>]*>", "gi");
+  pattern.lastIndex = innerStart;
+  let depth = 1;
+  for (let match = pattern.exec(html); match; match = pattern.exec(html)) {
+    depth += match[1] ? -1 : 1;
+    if (depth === 0) return { tag, attributes, inner: html.slice(innerStart, match.index), end: match.index + match[0].length };
+  }
+  return { tag, attributes, inner: html.slice(innerStart), end: html.length };
+}
+
+/** First element in `region` whose `attribute` lists `name` (itemprop="a b" lists a and b). */
+function elementWithAttribute(region: string, attribute: string, name: string) {
+  const pattern = new RegExp(
+    "<[a-zA-Z][a-zA-Z0-9-]*\\b[^>]*\\b" + attribute + "\\s*=\\s*[\"'](?:[^\"']*\\s)?" + name + "(?:\\s[^\"']*)?[\"'][^>]*>",
+    "i",
+  );
+  const match = pattern.exec(region);
+  return match ? elementAt(region, match.index) : null;
+}
+
+function microdataValue(region: string, name: string): { text: string | null; html: string | null; scope: string | null } {
+  const element = elementWithAttribute(region, "itemprop", name)
+    ?? elementWithAttribute(region, "data-careersite-propertyid", name);
+  if (!element) return { text: null, html: null, scope: null };
+  const explicit = htmlAttribute(element.attributes, "content") ?? htmlAttribute(element.attributes, "datetime");
+  if (explicit !== null) return { text: explicit.trim() || null, html: null, scope: null };
+  const isScope = /\bitemscope\b/i.test(element.attributes);
+  const text = htmlToPlainText(element.inner).replace(/\s+/g, " ").trim();
+  return { text: text || null, html: element.inner, scope: isScope ? element.inner : null };
+}
+
+/**
+ * schema.org JobPosting microdata (itemscope itemtype=".../JobPosting" with
+ * itemprop title, description, hiringOrganization, datePosted, jobLocation),
+ * as SAP SuccessFactors career sites publish it, converted to the JSON-LD
+ * shape so one matching and completeness path serves both. A
+ * `data-careersite-propertyid` field stands in for a missing itemprop.
+ */
+function microdataJobPostings(html: string): Record<string, unknown>[] {
+  const regions: string[] = [];
+  const scopePattern = /<[a-zA-Z][a-zA-Z0-9-]*\b[^>]*\bitemtype\s*=\s*["']https?:\/\/schema\.org\/JobPosting\/?["'][^>]*>/gi;
+  for (const match of html.matchAll(scopePattern)) {
+    const element = elementAt(html, match.index ?? 0);
+    if (element) regions.push(element.inner);
+  }
+  return regions.map((region) => {
+    const title = microdataValue(region, "title").text;
+    const descriptionValue = microdataValue(region, "description");
+    const description = descriptionValue.html ?? descriptionValue.text;
+    const organization = microdataValue(region, "hiringOrganization");
+    const employer = organization.scope ? microdataValue(organization.scope, "name").text ?? organization.text : organization.text;
+    const place = microdataValue(region, "jobLocation").scope;
+    const address = place ? microdataValue(place, "address").scope ?? place : null;
+    const addressParts = address
+      ? ["addressLocality", "addressRegion", "addressCountry"].map((key) => microdataValue(address, key).text)
+      : [];
+    // Career sites often publish the whole location as streetAddress ("City, CC").
+    const locality = addressParts.some(Boolean)
+      ? addressParts[0]
+      : (address ? microdataValue(address, "streetAddress").text : null)
+        ?? microdataValue(region, "location").text;
+    const identifier = microdataValue(region, "identifier").text;
+    return {
+      "@type": "JobPosting",
+      title,
+      description,
+      hiringOrganization: employer ? { name: employer } : null,
+      datePosted: microdataValue(region, "datePosted").text,
+      validThrough: microdataValue(region, "validThrough").text,
+      employmentType: microdataValue(region, "employmentType").text,
+      jobLocation: { address: { addressLocality: locality, addressRegion: addressParts[1] ?? null, addressCountry: addressParts[2] ?? null } },
+      identifier: identifier ? { value: identifier } : null,
+    };
+  }).filter((posting) => Boolean(posting.title));
+}
+
+/** The employer named after the last " | " of the page `<title>` ("Role Job Details | Example Bank"). */
+function documentTitleEmployer(html: string): string | null {
+  const title = html.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1];
+  if (!title) return null;
+  const parts = htmlToPlainText(title).split(/\s+\|\s+/);
+  if (parts.length < 2) return null;
+  const employer = (parts[parts.length - 1] ?? "").trim();
+  if (employer.length < 2 || employer.length > 120 || /^(?:careers?|jobs?|home|job details)$/i.test(employer)) return null;
+  return employer;
+}
+
+/** Page copy stating that the posting is closed or no longer available. */
+const POSTING_UNAVAILABLE_TEXT = /\b(?:not available at this time|no longer (?:available|accepting applications|open)|(?:job|position|posting|vacancy) (?:has been filled|has expired|has closed|is closed|is no longer)|this (?:job|position|posting) (?:has )?(?:expired|closed))\b/i;
+
 function findMatchingJsonLd(
   html: string,
   expected: ExpectedPostingIdentity,
   hostname: string,
-): { posting: Record<string, unknown>; employer: string; title: string; description: string } | JobContentResult | null {
-  const postings = jsonLdJobPostings(html);
+): { posting: Record<string, unknown>; employer: string; title: string; description: string; structuredSource: "JSON_LD" | "MICRODATA" } | JobContentResult | null {
+  const jsonLd = jsonLdJobPostings(html);
+  const structuredSource = jsonLd.length ? "JSON_LD" : "MICRODATA";
+  const postings = jsonLd.length ? jsonLd : microdataJobPostings(html);
   if (!postings.length) return null;
+  const unknownEmployer = expectedEmployerUnknown(expected.companyName);
   const matching = postings.filter((posting) => {
     const title = stringValue(posting.title) ?? "";
     const employer = stringOrNestedName(posting.hiringOrganization) ?? "";
-    return titleMatches(expected.title, title) && companyMatches(expected.companyName, employer, hostname);
+    return employerTitleMatches(expected.title, title, jsonLocation(posting.jobLocation))
+      && (unknownEmployer || companyMatches(expected.companyName, employer, hostname));
   });
+  const label = structuredSource === "JSON_LD" ? "JobPosting JSON-LD" : "JobPosting microdata";
   if (matching.length !== 1) {
     return { kind: "IDENTITY_CONFLICT", reason: matching.length === 0
-      ? "No JobPosting JSON-LD record matched both title and employer."
-      : "More than one JobPosting JSON-LD record matched the expected title and employer." };
+      ? `No ${label} record matched ${unknownEmployer ? "the title" : "both title and employer"}.`
+      : `More than one ${label} record matched the expected title and employer.` };
   }
   const posting = matching[0];
   if (!posting) return null;
@@ -1098,7 +1247,7 @@ function findMatchingJsonLd(
   if (expected.requisitionId && providerId && expected.requisitionId !== providerId) {
     return { kind: "IDENTITY_CONFLICT", reason: "Structured requisition ID did not match the discovered posting identity." };
   }
-  return { posting, employer, title, description };
+  return { posting, employer, title, description, structuredSource };
 }
 
 function parseEmployerHtml(
@@ -1114,11 +1263,43 @@ function parseEmployerHtml(
   const main = cleanJobRegion(html);
   const pageText = htmlToPlainText(main);
   const title = matchedJsonLd?.title ?? h1;
-  const employer = matchedJsonLd?.employer ?? "";
-  const employerVerified = companyMatches(expected.companyName, employer, sourceUrl.hostname)
-    || companyMatches(expected.companyName, pageText, sourceUrl.hostname);
-  if (!titleMatches(expected.title, title) || !employerVerified) {
+  if (!matchedJsonLd && !normalizeIdentity(title)) {
+    // No posting markup and no heading: a closed posting or a page this fetcher cannot read.
+    if (POSTING_UNAVAILABLE_TEXT.test(htmlToPlainText(html))) {
+      return { kind: "UNAVAILABLE", reason: "Employer page shows no posting and states the job is not available.", evidence };
+    }
+    return { kind: "BLOCKED", reason: "UNSUPPORTED_SOURCE" };
+  }
+  const pageLocation = matchedJsonLd
+    ? jsonLocation(matchedJsonLd.posting.jobLocation)
+    : pageText.match(/\bLocation\s*:\s*([^\n]{2,100})/i)?.[1]?.trim() ?? null;
+  if (!employerTitleMatches(expected.title, title, pageLocation)) {
     return { kind: "IDENTITY_CONFLICT", reason: "Employer page title or employer identity did not match the discovered posting." };
+  }
+  // The alert card may not name the employer. The link came from the employer's
+  // own alert email, so the title alone identifies the posting and the employer
+  // is taken from the page (structured hiringOrganization, then the <title>
+  // "| Employer" suffix); when the page names none either, identity stays unverified.
+  const unknownEmployer = expectedEmployerUnknown(expected.companyName);
+  const structuredEmployer = matchedJsonLd?.employer ?? "";
+  const titleEmployer = unknownEmployer && !structuredEmployer ? documentTitleEmployer(html) : null;
+  const companySource = structuredEmployer
+    ? "EMPLOYER_PAGE_STRUCTURED_DATA"
+    : titleEmployer ? "EMPLOYER_PAGE_TITLE" : unknownEmployer ? null : "DISCOVERY_CARD";
+  const employer = structuredEmployer || titleEmployer || (unknownEmployer ? "" : expected.companyName);
+  if (unknownEmployer) {
+    if (!employer) {
+      return {
+        kind: "IDENTITY_CONFLICT",
+        reason: "Employer page does not name its employer and the alert card named none.",
+      };
+    }
+  } else {
+    const employerVerified = companyMatches(expected.companyName, structuredEmployer, sourceUrl.hostname)
+      || companyMatches(expected.companyName, pageText, sourceUrl.hostname);
+    if (!employerVerified) {
+      return { kind: "IDENTITY_CONFLICT", reason: "Employer page title or employer identity did not match the discovered posting." };
+    }
   }
 
   const description = matchedJsonLd?.description || pageText;
@@ -1132,9 +1313,7 @@ function parseEmployerHtml(
     return { kind: "BLOCKED", reason: "UNSUPPORTED_SOURCE" };
   }
 
-  const location = matchedJsonLd
-    ? jsonLocation(matchedJsonLd.posting.jobLocation)
-    : pageText.match(/\bLocation\s*:\s*([^\n]{2,100})/i)?.[1]?.trim() ?? null;
+  const location = pageLocation;
   const sourceUrlId = requisitionFromUrl(sourceUrl);
   const structuredId = matchedJsonLd ? record(matchedJsonLd.posting.identifier) : null;
   const requisitionId = stringValue(structuredId?.value) ?? sourceUrlId;
@@ -1158,7 +1337,7 @@ function parseEmployerHtml(
     : stringValue(jsonLdEmploymentType);
   const posting: VerifiedPosting = {
     title,
-    companyName: employer || expected.companyName,
+    companyName: employer,
     description,
     requisitionId,
     canonicalUrl: stringValue(matchedJsonLd?.posting.url) ?? sourceUrl.toString(),
@@ -1173,12 +1352,16 @@ function parseEmployerHtml(
     availability: "UNKNOWN",
     rawPayload: {
       title,
-      companyName: employer || expected.companyName,
+      companyName: employer,
+      // Where companyName came from, and whether it was checked against the alert card.
+      companySource,
+      employerIdentityCheck: unknownEmployer ? "TITLE_ONLY_EXPECTED_EMPLOYER_UNKNOWN" : "VERIFIED_AGAINST_DISCOVERY_CARD",
       requisitionId,
       sourceUrl: sourceUrl.toString(),
       responseHash: evidence.responseHash,
       description,
       structuredJobPosting: matchedJsonLd?.posting ?? null,
+      structuredJobPostingSource: matchedJsonLd?.structuredSource ?? null,
     },
   };
   return makeCompleteResult(posting, {

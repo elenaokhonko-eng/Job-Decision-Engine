@@ -172,7 +172,7 @@ export const ObservationPersistenceSchema = z.object({
   source_external_id: z.string().min(1).nullable(),
   source_url: z.string().min(1).nullable(),
   retrieved_at: z.string().datetime(),
-  company_name_raw: z.string().min(1),
+  company_name_raw: z.string(),
   title_raw: z.string().min(1),
   description_text: z.string().min(1),
   location_raw: z.string().nullable(),
@@ -184,6 +184,24 @@ export const ObservationPersistenceSchema = z.object({
   search_plan_version: z.string().min(1),
   raw_payload: z.unknown(),
   raw_payload_hash: z.string().min(1),
+}).superRefine((value, ctx) => {
+  // Only a Gmail discovery card (a link awaiting retrieval, never normalized)
+  // may leave the employer unknown; the posting fetch resolves it from the
+  // employer's page. Every other observation must name its employer.
+  const payload = value.raw_payload as { source_content_status?: unknown } | null;
+  const unknownEmployerAllowed = value.source_type === "GMAIL_ALERT"
+    && typeof payload === "object" && payload !== null
+    && payload.source_content_status === "DISCOVERY_ONLY";
+  if (value.company_name_raw.trim() === "" && !unknownEmployerAllowed) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.too_small,
+      minimum: 1,
+      type: "string",
+      inclusive: true,
+      path: ["company_name_raw"],
+      message: "company_name_raw may be empty only on a Gmail discovery-only observation.",
+    });
+  }
 });
 export type ObservationPersistence = z.infer<typeof ObservationPersistenceSchema>;
 
