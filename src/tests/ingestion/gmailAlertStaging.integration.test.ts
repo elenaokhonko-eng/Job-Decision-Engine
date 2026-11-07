@@ -6,7 +6,13 @@ import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { parseEmails, type ParseEmailsDependencies } from "../../../scripts/parse_emails.js";
-import { digestAlertRaw, digestVacancyUrl } from "../fixtures/gmailDigestAlerts.js";
+import {
+  digestAlertRaw,
+  digestVacancyUrl,
+  LINKEDIN_NON_JOB_LINKS_PER_DIGEST,
+  linkedInDigestAlertRaw,
+  linkedInJobId,
+} from "../fixtures/gmailDigestAlerts.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
@@ -35,14 +41,18 @@ function stagingPool(): pg.Pool {
   return schemaPool;
 }
 
-async function seedDigests(count: number, cardsPerDigest: number): Promise<string[]> {
+async function seedDigests(
+  count: number,
+  cardsPerDigest: number,
+  build: (options: { digestIndex: number; cardsPerDigest: number }) => string = digestAlertRaw,
+): Promise<string[]> {
   const ids: string[] = [];
   for (let digestIndex = 0; digestIndex < count; digestIndex += 1) {
     const { rows } = await db().query<{ id: string }>(
       `INSERT INTO raw_email_alerts (workspace_id, subject, body, gmail_message_id, processed, lifecycle_status, received_at)
        VALUES ($1, $2, $3, $4, FALSE, 'IN_PROCESSING', TIMESTAMPTZ '2026-11-01T00:00:00Z' + ($5 || ' minutes')::interval)
        RETURNING id`,
-      [workspaceId(), `${cardsPerDigest} new synthetic jobs for you`, digestAlertRaw({ digestIndex, cardsPerDigest }),
+      [workspaceId(), `${cardsPerDigest} new synthetic jobs for you`, build({ digestIndex, cardsPerDigest }),
         `synthetic-message-${digestIndex}`, String(digestIndex)],
     );
     ids.push(rows[0]!.id);
@@ -123,6 +133,11 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
       parsedEmails: 5,
       extractedJobs: 15,
       failedEmails: 0,
+      // Per 3-card digest: 26 links seen (anchors plus the generated text
+      // alternative), 8 navigation/image links skipped, 15 repeats collapsed.
+      linksSeen: 130,
+      nonJobLinksSkipped: 40,
+      duplicateLinksCollapsed: 75,
       batches: 3,
       deferredEmails: 0,
       remainingBacklog: 0,
@@ -135,8 +150,12 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
     ]);
     const progress = lines.filter((line) => line.startsWith("Gmail extraction progress"));
     expect(progress).toHaveLength(5);
-    expect(progress[0]).toContain("batch 1 alert 1 staged 3 vacancy link(s); totals: 1 parsed, 3 links, 0 failed");
-    expect(progress[4]).toContain("batch 3 alert 5 staged 3 vacancy link(s); totals: 5 parsed, 15 links, 0 failed");
+    expect(progress[0]).toContain(
+      "batch 1 alert 1 staged 3 vacancy link(s) [26 link(s) seen, 3 job card(s), 8 non-job skipped, 15 duplicate(s) collapsed]; totals",
+    );
+    expect(progress[0]).toContain("totals: 1 parsed, 3 links, 0 failed");
+    expect(progress[4]).toContain("batch 3 alert 5 staged 3 vacancy link(s)");
+    expect(progress[4]).toContain("totals: 5 parsed, 15 links, 0 failed");
     expect(lines.at(-1)).toContain("unprocessed alerts remaining: 0");
     // Progress lines carry counts only, never email content or vacancy URLs.
     expect(lines.join("\n")).not.toContain("careers.example.com");
@@ -207,6 +226,9 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
       parsedEmails: 2,
       extractedJobs: 6,
       failedEmails: 0,
+      linksSeen: 52,
+      nonJobLinksSkipped: 16,
+      duplicateLinksCollapsed: 30,
       batches: 1,
       deferredEmails: 1,
       remainingBacklog: 3,
@@ -317,5 +339,78 @@ describe.skipIf(skipReal)("Gmail alert staging throughput and resume (PostgreSQL
       [alertIds[1]],
     );
     expect(recovered.rows[0]).toEqual({ last_error: null, lifecycle_status: "SOURCE_PENDING" });
+  });
+
+  it("stages one canonical observation per LinkedIn job and records the email's link accounting", async () => {
+    const alertIds = await seedDigests(2, 3, linkedInDigestAlertRaw);
+    const { lines, log } = recordingLog();
+
+    const summary = await parseEmails({ limit: 20, concurrency: 2 }, { pool: stagingPool(), log, now: () => 0 });
+
+    expect(summary).toMatchObject({
+      parsedEmails: 2,
+      extractedJobs: 6,
+      failedEmails: 0,
+      linksSeen: 50,
+      nonJobLinksSkipped: 26,
+      duplicateLinksCollapsed: 18,
+    });
+    expect(await stagingState()).toEqual({
+      observations: 6,
+      distinctSources: 6,
+      fetchPending: 6,
+      fetchTasks: 6,
+      orphanTasks: 0,
+      processedAlerts: 2,
+    });
+    const staged = await db().query<{ source_url: string; canonical_apply_url: string; title: string; raw_payload: Record<string, unknown> }>(
+      `SELECT source_url, canonical_apply_url, title, raw_payload
+       FROM raw_job_observations WHERE workspace_id = $1 AND raw_email_alert_id = $2 ORDER BY source_url`,
+      [workspaceId(), alertIds[1]],
+    );
+    expect(staged.rows.map((row) => row.source_url)).toEqual(
+      [0, 1, 2].map((card) => `https://www.linkedin.com/jobs/view/${linkedInJobId(1, card)}`),
+    );
+    expect(staged.rows.map((row) => row.canonical_apply_url)).toEqual(staged.rows.map((row) => row.source_url));
+    expect(staged.rows.map((row) => row.title)).toEqual([0, 1, 2].map((card) => `Synthetic LinkedIn Architect 1-${card}`));
+    for (const row of staged.rows) {
+      expect(row.raw_payload).toMatchObject({
+        collapsed_link_count: 4,
+        email_link_summary: { links_seen: 25, job_cards: 3, non_job_links_skipped: 13, duplicate_links_collapsed: 9 },
+      });
+    }
+    const allUrls = await db().query<{ url: string }>(
+      "SELECT source_url AS url FROM raw_job_observations WHERE workspace_id = $1",
+      [workspaceId()],
+    );
+    for (const nonJob of LINKEDIN_NON_JOB_LINKS_PER_DIGEST) {
+      expect(allUrls.rows.map((row) => row.url)).not.toContain(nonJob);
+    }
+    expect(allUrls.rows.every((row) => !row.url.includes("trackingId"))).toBe(true);
+    expect(lines.join(" ")).not.toContain("linkedin.com");
+    expect(lines.filter((line) => line.includes("[25 link(s) seen, 3 job card(s), 13 non-job skipped, 9 duplicate(s) collapsed]")))
+      .toHaveLength(2);
+  });
+
+  it("blocks a LinkedIn email that links only navigation, with counts but no URLs in the error", async () => {
+    const html = LINKEDIN_NON_JOB_LINKS_PER_DIGEST.map((url) => `<a href="${url.replaceAll("&", "&amp;")}">See jobs</a>`).join(" ");
+    const raw = Buffer.from(
+      ["MIME-Version: 1.0", 'Content-Type: text/html; charset="UTF-8"', "", html].join(String.fromCharCode(13, 10)),
+      "utf8",
+    ).toString("base64url");
+    const [alertId] = await seedDigests(1, 1, () => raw);
+
+    const summary = await parseEmails({ limit: 20 }, { pool: stagingPool(), log: () => undefined, now: () => 0 });
+
+    expect(summary).toMatchObject({ parsedEmails: 0, extractedJobs: 0, failedEmails: 1, nonJobLinksSkipped: 16, linksSeen: 16 });
+    const alert = await db().query<{ processed: boolean; lifecycle_status: string; last_error: string }>(
+      "SELECT processed, lifecycle_status, last_error FROM raw_email_alerts WHERE id = $1",
+      [alertId],
+    );
+    expect(alert.rows[0]).toMatchObject({ processed: true, lifecycle_status: "SOURCE_BLOCKED" });
+    expect(alert.rows[0]?.last_error).toMatch(/^MISSING_POSTING_URL: /);
+    expect(alert.rows[0]?.last_error).toContain("16 link(s) seen, 0 job card(s), 16 non-job skipped");
+    expect(alert.rows[0]?.last_error).not.toContain("linkedin.com");
+    expect((await stagingState()).observations).toBe(0);
   });
 });

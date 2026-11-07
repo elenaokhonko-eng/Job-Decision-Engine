@@ -2,7 +2,12 @@ import pg from "pg";
 import dotenv from "dotenv";
 import crypto from "node:crypto";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
-import { extractEmailJobCards, EmailExtractionError, type EmailJobCard } from "../src/ingestion/emailAlertExtractor.js";
+import {
+  extractEmailJobCardsWithLinkSummary,
+  EmailExtractionError,
+  type CollapsedEmailJobCard,
+  type EmailLinkSummary,
+} from "../src/ingestion/emailAlertExtractor.js";
 import { ExtractedJobSchema, SCHEMA_VERSION } from "../src/contracts/index.js";
 import { enqueuePipelineTask } from "../src/tasks/pipelineTasks.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
@@ -23,6 +28,10 @@ export interface ParseEmailsSummary {
   parsedEmails: number;
   extractedJobs: number;
   failedEmails: number;
+  /** Link accounting across the alerts that were parsed (staged, blocked or failed); counts only. */
+  linksSeen: number;
+  nonJobLinksSkipped: number;
+  duplicateLinksCollapsed: number;
   /** Selection batches started in this run. */
   batches: number;
   /** Alerts selected but not started because the runtime budget ran out; they stay unprocessed. */
@@ -46,9 +55,23 @@ interface AlertRow {
 }
 
 type EmailOutcome =
-  | { readonly kind: "STAGED"; readonly links: number }
-  | { readonly kind: "BLOCKED" }
-  | { readonly kind: "FAILED" };
+  | { readonly kind: "STAGED"; readonly links: number; readonly linkSummary: EmailLinkSummary }
+  | { readonly kind: "BLOCKED"; readonly linkSummary: EmailLinkSummary | null }
+  | { readonly kind: "FAILED"; readonly linkSummary: EmailLinkSummary };
+
+function linkSummaryPayload(summary: EmailLinkSummary): Record<string, number> {
+  return {
+    links_seen: summary.linksSeen,
+    job_cards: summary.jobCards,
+    non_job_links_skipped: summary.nonJobLinksSkipped,
+    duplicate_links_collapsed: summary.duplicateLinksCollapsed,
+  };
+}
+
+function describeLinks(summary: EmailLinkSummary): string {
+  return `${summary.linksSeen} link(s) seen, ${summary.jobCards} job card(s), ` +
+    `${summary.nonJobLinksSkipped} non-job skipped, ${summary.duplicateLinksCollapsed} duplicate(s) collapsed`;
+}
 
 function stableLinkId(url: string): string {
   return crypto.createHash("sha256").update(url, "utf8").digest("hex").slice(0, 32);
@@ -81,13 +104,16 @@ async function stageEmail(
   email: AlertRow,
 ): Promise<EmailOutcome> {
   const alertId = String(email.id);
-  let cards: EmailJobCard[];
+  let cards: CollapsedEmailJobCard[];
+  let linkSummary: EmailLinkSummary | null = null;
   try {
-    cards = await extractEmailJobCards(String(email.body ?? ""));
+    const extraction = await extractEmailJobCardsWithLinkSummary(String(email.body ?? ""));
+    cards = extraction.cards;
+    linkSummary = extraction.links;
     if (cards.length === 0) {
       throw new EmailExtractionError(
         "MISSING_POSTING_URL",
-        "MISSING_POSTING_URL: no genuine vacancy link was found in the decoded email.",
+        "MISSING_POSTING_URL: no genuine vacancy link was found in the decoded email (" + describeLinks(extraction.links) + ").",
       );
     }
   } catch (error) {
@@ -106,8 +132,10 @@ async function stageEmail(
       client.release();
     }
     broker.recordError(message);
-    return { kind: "BLOCKED" };
+    return { kind: "BLOCKED", linkSummary };
   }
+  const extractedLinks: EmailLinkSummary = linkSummary;
+  const emailLinkSummary = linkSummaryPayload(extractedLinks);
 
   const gmailMessageId = email.gmail_message_id ? String(email.gmail_message_id) : null;
   const client = await pool.connect();
@@ -163,6 +191,8 @@ async function stageEmail(
             discovered_title: job.title,
             discovered_company: job.company_name,
             email_context: job.description_raw,
+            collapsed_link_count: card.linkCount,
+            email_link_summary: emailLinkSummary,
           },
         },
         {
@@ -171,6 +201,8 @@ async function stageEmail(
           raw_email_alert_id: alertId,
           gmail_message_id: gmailMessageId,
           source_url: card.sourceUrl,
+          collapsed_link_count: card.linkCount,
+          email_link_summary: emailLinkSummary,
         },
         client,
       );
@@ -212,7 +244,7 @@ async function stageEmail(
       [ctx.workspaceId, alertId],
     );
     await client.query("COMMIT");
-    return { kind: "STAGED", links: observationIds.length };
+    return { kind: "STAGED", links: observationIds.length, linkSummary: extractedLinks };
   } catch (error) {
     await client.query("ROLLBACK");
     const message = error instanceof Error ? error.message : String(error);
@@ -221,7 +253,7 @@ async function stageEmail(
       [message, ctx.workspaceId, alertId],
     );
     broker.recordError("Email discovery staging failed: " + message);
-    return { kind: "FAILED" };
+    return { kind: "FAILED", linkSummary: extractedLinks };
   } finally {
     client.release();
   }
@@ -288,6 +320,9 @@ export async function parseEmails(
   let extractedJobs = 0;
   let failedEmails = 0;
   let deferredEmails = 0;
+  let linksSeen = 0;
+  let nonJobLinksSkipped = 0;
+  let duplicateLinksCollapsed = 0;
   let stoppedForRuntimeBudget = false;
 
   while (true) {
@@ -315,6 +350,12 @@ export async function parseEmails(
         return;
       }
       const outcome = await stageEmail(pool, ctx, runBroker, email);
+      if (outcome.linkSummary) {
+        linksSeen += outcome.linkSummary.linksSeen;
+        nonJobLinksSkipped += outcome.linkSummary.nonJobLinksSkipped;
+        duplicateLinksCollapsed += outcome.linkSummary.duplicateLinksCollapsed;
+      }
+      const links = outcome.linkSummary ? " [" + describeLinks(outcome.linkSummary) + "]" : "";
       let detail: string;
       if (outcome.kind === "STAGED") {
         parsedEmails += 1;
@@ -325,7 +366,7 @@ export async function parseEmails(
         detail = outcome.kind === "BLOCKED" ? "blocked (no stageable vacancy link)" : "failed; left unprocessed for retry";
       }
       log(
-        `Gmail extraction progress: batch ${batch} alert ${parsedEmails + failedEmails} ${detail}; ` +
+        `Gmail extraction progress: batch ${batch} alert ${parsedEmails + failedEmails} ${detail}${links}; ` +
         `totals: ${parsedEmails} parsed, ${extractedJobs} links, ${failedEmails} failed, ${elapsed()} elapsed.`,
       );
     });
@@ -345,7 +386,10 @@ export async function parseEmails(
         ? `Gmail extraction reached its ${maxRuntimeSeconds}s runtime budget before selecting alerts; ${remainingBacklog} remain queued.`
         : "No eligible email alerts found.",
     );
-    return { parsedEmails: 0, extractedJobs: 0, failedEmails: 0, batches: 0, deferredEmails: 0, remainingBacklog, stoppedForRuntimeBudget };
+    return {
+      parsedEmails: 0, extractedJobs: 0, failedEmails: 0, linksSeen: 0, nonJobLinksSkipped: 0, duplicateLinksCollapsed: 0,
+      batches: 0, deferredEmails: 0, remainingBacklog, stoppedForRuntimeBudget,
+    };
   }
 
   await broker.endRun(failedEmails === 0 ? "COMPLETED" : parsedEmails > 0 ? "DEGRADED" : "FAILED");
@@ -357,10 +401,14 @@ export async function parseEmails(
   }
   log(
     "Email discovery complete. Parsed alerts: " + parsedEmails + ", vacancy links staged: " + extractedJobs +
-    ", failed alerts: " + failedEmails + ", batches: " + batches + ", unprocessed alerts remaining: " + remainingBacklog +
+    ", failed alerts: " + failedEmails + ", links seen: " + linksSeen + ", non-job links skipped: " + nonJobLinksSkipped +
+    ", duplicate links collapsed: " + duplicateLinksCollapsed + ", batches: " + batches + ", unprocessed alerts remaining: " + remainingBacklog +
     ", elapsed: " + elapsed(),
   );
-  return { parsedEmails, extractedJobs, failedEmails, batches, deferredEmails, remainingBacklog, stoppedForRuntimeBudget };
+  return {
+    parsedEmails, extractedJobs, failedEmails, linksSeen, nonJobLinksSkipped, duplicateLinksCollapsed,
+    batches, deferredEmails, remainingBacklog, stoppedForRuntimeBudget,
+  };
 }
 
 if (process.argv[1] && process.argv[1].includes("parse_emails")) {
