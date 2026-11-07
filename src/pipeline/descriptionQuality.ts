@@ -35,9 +35,9 @@ export function completeRetrievedPostingPredicate(observationAlias: string): str
   if (!/^[a-z_][a-z0-9_]*$/i.test(observationAlias)) {
     throw new Error("Retrieved-posting SQL aliases must be trusted identifiers.");
   }
-  // A LinkedIn saved-jobs export attached to its Gmail discovery card is persisted
-  // content without an HTTP fetch receipt: it completes the content fetch but never
-  // establishes availability (see jobSourceEvidence).
+  // A LinkedIn or MyCareersFuture saved-jobs export attached to its Gmail discovery
+  // card is persisted content without an HTTP fetch receipt: it completes the content
+  // fetch but never establishes availability (see jobSourceEvidence).
   return `
     (
       (
@@ -47,8 +47,12 @@ export function completeRetrievedPostingPredicate(observationAlias: string): str
         AND NULLIF(BTRIM(${observationAlias}.raw_payload#>>'{source_evidence,resolvedUrl}'), '') IS NOT NULL
       )
       OR (
-        ${observationAlias}.source_name = 'LINKEDIN_SAVED'
-        AND ${observationAlias}.raw_payload->>'content_provenance' = 'LINKEDIN_SAVED_EXPORT'
+        (
+          (${observationAlias}.source_name = 'LINKEDIN_SAVED'
+            AND ${observationAlias}.raw_payload->>'content_provenance' = 'LINKEDIN_SAVED_EXPORT')
+          OR (${observationAlias}.source_name = 'MCF_SAVED'
+            AND ${observationAlias}.raw_payload->>'content_provenance' = 'MCF_SAVED_EXPORT')
+        )
         AND ${observationAlias}.raw_payload->>'saved_export_observation_id' ~ '^[0-9a-f-]{36}$'
       )
     )

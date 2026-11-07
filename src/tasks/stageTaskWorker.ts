@@ -8,6 +8,7 @@ import type { RawJobObservation } from "../ingestion/types.js";
 import { fetchJobContent as defaultFetchJobContent } from "../ingestion/jobContentFetcher.js";
 import { searchApiLinkedInDetailsFromEnv } from "../ingestion/searchApi/searchApiClient.js";
 import { findStoredLinkedInSavedPosting, savedPostingDerivedObservation } from "../ingestion/linkedInSavedContent.js";
+import { findStoredMcfSavedPosting, mcfSavedPostingDerivedObservation } from "../ingestion/mcfSavedContent.js";
 import { runNormalization as defaultRunNormalization } from "../pipeline/normalize.js";
 import { runRequirementsExtraction as defaultRunRequirementsExtraction } from "../pipeline/requirementsExtractor.js";
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
@@ -2309,6 +2310,26 @@ async function executeStageTask(
         observationId,
         discoverySnapshot,
         "LINKEDIN_SAVED_CONTENT_ATTACH",
+        derived,
+        derived.rawPayload,
+        clientOrPool,
+        ctx,
+      );
+    }
+    // Likewise a MyCareersFuture saved-jobs export of the same MCF job UUID; MCF
+    // pages are not fetched for it.
+    const mcfSavedPosting = await findStoredMcfSavedPosting(
+      clientOrPool as QueryClient,
+      ctx.workspaceId,
+      discoverySnapshot,
+    );
+    if (mcfSavedPosting.kind === "FOUND") {
+      const derived = mcfSavedPostingDerivedObservation(observationId, mcfSavedPosting.posting);
+      return persistRetrievedPostingObservation(
+        task,
+        observationId,
+        discoverySnapshot,
+        "MCF_SAVED_CONTENT_ATTACH",
         derived,
         derived.rawPayload,
         clientOrPool,
