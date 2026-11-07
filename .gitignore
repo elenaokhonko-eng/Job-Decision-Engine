@@ -23,3 +23,7 @@ my_profile.md
 *.pdf
 scripts/exports/
 _closeout_pack_*/
+
+# Python bytecode
+__pycache__/
+*.pyc
