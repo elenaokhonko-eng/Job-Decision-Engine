@@ -44,7 +44,7 @@ Job Decision Engine connects only to services that you explicitly configure:
 - Data sent to your AI provider is subject to the terms and privacy policy of that provider (e.g., Google Cloud / Google AI Studio Terms, OpenAI API Terms). Neither provider trains base models on API requests under standard developer API terms.
 
 ### C. Job Sources & Ingestion
-- **Public Job Feeds & Web Endpoints**: When enabled, local collectors fetch public job postings from configured board APIs (e.g. Greenhouse, Ashby, Lever, Himalayas, Jobicy, Remotive, We Work Remotely) via HTTPS. No personal data is sent in these requests.
+- **Public Job Feeds & Web Endpoints**: When enabled, local collectors fetch public job postings from configured board APIs (e.g. Greenhouse, Ashby, Lever, Himalayas, Jobicy, Remotive, We Work Remotely, the Hacker News "Who is hiring?" thread) via HTTPS. No personal data is sent in these requests.
 - **Gmail Job Alerts (Optional)**: If you configure Gmail ingestion, the application uses your personal Google OAuth 2.0 credentials to read emails from your specified job alert folder over HTTPS. Email content remains inside your private database and is never shared externally.
 
 ---

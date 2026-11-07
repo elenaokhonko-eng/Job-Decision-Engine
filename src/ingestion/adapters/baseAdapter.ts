@@ -19,6 +19,20 @@ export interface QuarantinedSourceCandidate {
   readonly error: string;
 }
 
+/**
+ * A fetched source record the adapter deliberately did not return as a job
+ * (for example a deleted item or a deterministic volume pre-filter). The runner
+ * records it as a FILTERED disposition with its raw payload so it never
+ * disappears silently.
+ */
+export interface FilteredSourceCandidate {
+  readonly identity: string;
+  readonly sourceUrl: string | null;
+  readonly rawPayload: unknown;
+  readonly reasonCode: string;
+  readonly reasonDetail: string;
+}
+
 export interface AdapterResult {
   sourceName: SourceName;
   success: boolean;
@@ -29,6 +43,7 @@ export interface AdapterResult {
   isRateLimited?: boolean;
   quarantined?: number;
   quarantinedCandidates?: QuarantinedSourceCandidate[];
+  filteredCandidates?: FilteredSourceCandidate[];
   nextCursor?: string | null;
   hasMore?: boolean;
   snapshotId?: string | null;

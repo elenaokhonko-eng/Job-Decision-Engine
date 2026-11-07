@@ -16,6 +16,8 @@ import { HimalayasAdapter } from "../src/ingestion/adapters/himalayasAdapter.js"
 import { JobicyAdapter } from "../src/ingestion/adapters/jobicyAdapter.js";
 import { RemotiveAdapter } from "../src/ingestion/adapters/remotiveAdapter.js";
 import { createWeWorkRemotelyAdapter } from "../src/ingestion/adapters/attributedRssAdapter.js";
+import { HackerNewsWhoIsHiringAdapter } from "../src/ingestion/adapters/hackerNewsWhoIsHiringAdapter.js";
+import { resolveWorkspaceWorkabilityPolicy } from "../src/pipeline/workabilityPolicy.js";
 import {
   WORKDAY_HOST_PATTERN,
   WORKDAY_SITE_PATTERN,
@@ -237,6 +239,7 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
   }
 
   const quarantinedCandidates = result.quarantinedCandidates ?? [];
+  const filteredCandidates = result.filteredCandidates ?? [];
   const quarantineCount = result.quarantined ?? quarantinedCandidates.length;
   let newlyStaged = 0;
   let filtered = 0;
@@ -382,6 +385,27 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
         disposition: "QUARANTINED",
         reasonCode: "SOURCE_SCHEMA_INVALID",
         reasonDetail: candidate.error,
+      }, planRunIds.get(laneKey) ?? null);
+    }
+  }
+
+  // Records the adapter skipped on purpose (deleted, non-conforming, pre-filtered) stay auditable.
+  for (const candidate of filteredCandidates) {
+    const rawPayloadHash = payloadHash(candidate.rawPayload);
+    for (const laneKey of options.laneKeys) {
+      counts.get(laneKey)!.filtered += 1;
+      filtered += 1;
+      await options.broker.recordCandidateDisposition({
+        sourcePluginKey: options.plugin.source_key,
+        planKey: `${options.checkpointTarget}:${laneKey}`,
+        laneKey,
+        sourceExternalId: candidate.identity || null,
+        sourceUrl: candidate.sourceUrl,
+        rawPayloadHash,
+        rawPayload: candidate.rawPayload,
+        disposition: "FILTERED",
+        reasonCode: candidate.reasonCode,
+        reasonDetail: candidate.reasonDetail,
       }, planRunIds.get(laneKey) ?? null);
     }
   }
@@ -788,6 +812,49 @@ Polling ${label} for lanes ${laneKeys.join(", ")}...`);
       const stats = setup.adapter.lastRunStats;
       if (stats) {
         console.log(`  -> ${label} credits: searches ${stats.searchesSent} (failed ${stats.searchesFailed}); candidates ${stats.candidates}; already observed ${stats.alreadyObserved}; details ${stats.detailsFetched} (failed ${stats.detailsFailed}); deferred ${stats.deferredForBudget}${stats.budgetExhausted ? "; daily credit cap reached" : ""}`);
+      }
+      continue;
+    }
+    if (plugin.source_key === "hacker_news") {
+      // The volume pre-filter follows the workspace's active workability policy, as the hard gate does.
+      let hackerNews: HackerNewsWhoIsHiringAdapter;
+      try {
+        ledgerPool ??= new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
+        const workability = await resolveWorkspaceWorkabilityPolicy(ledgerPool);
+        hackerNews = new HackerNewsWhoIsHiringAdapter(plugin.request.endpoint, {
+          workabilityPolicy: workability.policy,
+          requestTimeoutMs: plugin.request.timeout_ms,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        broker.recordError(`${label}: workability policy for the pre-filter could not be resolved: ${detail}`);
+        failedSources.push(label);
+        errorCount += 1;
+        continue;
+      }
+      console.log(`
+Polling ${label} for lanes ${laneKeys.join(", ")}...`);
+      try {
+        await runGroup({
+          plugin,
+          adapter: hackerNews,
+          label,
+          checkpointTarget: `feed:${plugin.source_key}`,
+          laneKeys,
+          employerLaneKeys: [],
+          targetCompanyId: null,
+          pluginRevisionId,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        broker.recordError(`${label}: ${detail}`);
+        failedSources.push(label);
+        errorCount += 1;
+      }
+      const stats = hackerNews.lastRunStats;
+      if (stats) {
+        const skipped = Object.entries(stats.skipped).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none";
+        console.log(`  -> ${label} thread ${stats.threadId} (${stats.threadComments} comments): read ${stats.commentsFetched}; postings ${stats.postingsReturned}; skipped ${skipped}; cursor ${stats.cursorOut}${stats.cursorReset === "NONE" ? "" : ` (reset: ${stats.cursorReset})`}`);
       }
       continue;
     }

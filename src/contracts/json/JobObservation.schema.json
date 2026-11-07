@@ -42,7 +42,8 @@
             "LINKEDIN",
             "LINKEDIN_SAVED",
             "WORKDAY",
-            "MCF_SAVED"
+            "MCF_SAVED",
+            "HACKER_NEWS"
           ]
         },
         "source_id": {
