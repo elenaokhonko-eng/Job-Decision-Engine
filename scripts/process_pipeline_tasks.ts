@@ -11,6 +11,7 @@ import {
 } from "../src/tasks/stageTaskWorker.js";
 import type { PipelineTaskReconciliationSummary } from "../src/tasks/pipelineTaskCurrentness.js";
 import { enforcePipelineWorkerExitPolicy } from "../src/tasks/pipelineWorkerExitPolicy.js";
+import { parsePipelineWorkerConcurrency } from "../src/tasks/pipelineWorkerLanes.js";
 import { recordPipelineWorkerProgressSnapshot } from "../src/tasks/pipelineWorkerProgress.js";
 import {
   DEAD_LETTER_CLASSIFICATION_SQL,
@@ -38,7 +39,10 @@ if (isPooledPostgresConnectionString(lockDatabaseUrl)) {
   );
 }
 
-const pool = new pg.Pool(pgConnectionConfig(databaseUrl));
+// Each worker lane holds one pooled connection for its claim/process/complete
+// cycle; keep headroom for the queue-health and progress reads.
+const workerConcurrency = parsePipelineWorkerConcurrency(process.env.PIPELINE_TASK_WORKER_CONCURRENCY);
+const pool = new pg.Pool({ ...pgConnectionConfig(databaseUrl), max: Math.max(10, workerConcurrency + 2) });
 const lockPool = new pg.Pool(pgConnectionConfig(lockDatabaseUrl));
 const shutdownController = new AbortController();
 let shutdownSignal: NodeJS.Signals | null = null;
@@ -509,6 +513,7 @@ export async function processPipelineTasks(): Promise<void> {
       maxStalePendingReconciliation: parsePositiveIntEnv("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_LIMIT", 100, 1000),
       stalePendingReconciliationTimeBudgetMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_STALE_PENDING_RECONCILIATION_BUDGET_MS", 10000, 60000),
       claimBatchSize: parsePositiveIntEnv("PIPELINE_TASK_WORKER_CLAIM_BATCH_SIZE", 1, 25),
+      concurrency: workerConcurrency,
       leaseSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_LEASE_SECONDS", 300, 3600),
       heartbeatSeconds: parsePositiveIntEnv("PIPELINE_TASK_WORKER_HEARTBEAT_SECONDS", 60, 600),
       wallClockMs: parsePositiveIntEnv("PIPELINE_TASK_WORKER_WALL_CLOCK_MS", 10 * 60 * 1000, 23 * 60 * 60 * 1000),
