@@ -385,7 +385,13 @@ async function runSnippet(
   }
   class FakeDOMParser {
     parseFromString(html: string) {
-      const text = html.replace(/<\/(p|li)>/g, "\n").replace(/<[^>]+>/g, "");
+      // Repeat until stable so nested or split tags cannot survive a single pass.
+      let text = html.replace(/<\/(p|li)>/g, "\n");
+      let previous: string;
+      do {
+        previous = text;
+        text = text.replace(/<[^>]*>/g, "");
+      } while (text !== previous);
       return { querySelectorAll: () => ({ forEach: () => undefined }), body: { textContent: text } };
     }
   }
