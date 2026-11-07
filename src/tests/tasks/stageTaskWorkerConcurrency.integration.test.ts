@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
+import { ModelRateLimitedError } from "../../services/modelCallResilience.js";
 import { enqueuePipelineTask } from "../../tasks/pipelineTasks.js";
 import {
   runPipelineStageTaskWorker,
@@ -352,4 +353,50 @@ describe.skipIf(skipReal)("pipeline stage worker lanes (PostgreSQL)", () => {
       client.release();
     }
   });
+  it("defers rate-limited tasks in parallel lanes without consuming an attempt, while the rest complete once", async () => {
+    const jobs = await createDecisionJobs(12);
+    const limited = new Set(jobs.filter((_, index) => index % 3 === 0).map((job) => job.jobVersionId));
+    const probe = deciderProbe(async (jobVersionId) => {
+      if (limited.has(jobVersionId)) {
+        throw new ModelRateLimitedError("Gemini rate limited (429 RESOURCE_EXHAUSTED)",
+          { provider: "gemini", model: "fixture", retryAfterMs: null, attempts: 5 });
+      }
+    });
+
+    const summary = await runPipelineStageTaskWorker(db(), workerOptions({ concurrency: 4, claimedBy: "lanes-429" }), probe.dependencies);
+
+    expect(summary).toMatchObject({ claimed: 12, completed: 8, failed: 0, deadLettered: 0, rateLimitDeferred: 4 });
+    expect(summary.errors).toEqual([]);
+    expect(probe.maxInFlight()).toBeGreaterThan(1);
+    // Nothing was claimed twice.
+    expect(probe.calls()).toHaveLength(12);
+    expect(new Set(probe.calls()).size).toBe(12);
+
+    const states = await taskStates(jobs.map((job) => job.taskId));
+    const { rows } = await db().query<{ id: string; max_attempts: number; available_at: Date; rate_limited: boolean | null }>(
+      `SELECT task.id::text AS id, task.max_attempts, task.available_at,
+              (SELECT (attempt.metadata->>'rate_limited')::boolean FROM pipeline_task_attempts attempt
+               WHERE attempt.task_id = task.id AND attempt.attempt_number = 1) AS rate_limited
+       FROM pipeline_tasks task WHERE task.id = ANY($1::uuid[])`,
+      [jobs.map((job) => job.taskId)],
+    );
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    for (const job of jobs) {
+      if (limited.has(job.jobVersionId)) {
+        expect(states.get(job.taskId)).toEqual({ status: "RETRY_WAIT", attempts: 1, attemptRows: 1 });
+        // The attempt is returned: 1 used of 9 instead of 1 of 8.
+        expect(byId.get(job.taskId)).toMatchObject({ max_attempts: 9, rate_limited: true });
+        expect(new Date(byId.get(job.taskId)!.available_at).getTime()).toBeGreaterThan(Date.now() + 25_000);
+      } else {
+        expect(states.get(job.taskId)).toEqual({ status: "COMPLETED", attempts: 1, attemptRows: 1 });
+        expect(byId.get(job.taskId)).toMatchObject({ max_attempts: 8 });
+      }
+    }
+    const processingErrors = await db().query(
+      `SELECT 1 FROM canonical_jobs WHERE id = ANY($1::uuid[]) AND processing_state = 'PROCESSING_ERROR'`,
+      [jobs.map((job) => job.canonicalJobId)],
+    );
+    expect(processingErrors.rowCount).toBe(0);
+  }, 120_000);
 });
+

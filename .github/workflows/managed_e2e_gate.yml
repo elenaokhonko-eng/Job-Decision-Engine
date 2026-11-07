@@ -20,6 +20,9 @@ jobs:
       DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_FLASH_API_KEY: ${{ secrets.GEMINI_FLASH_API_KEY }}
+      GEMINI_BACKEND: ${{ vars.GEMINI_BACKEND || 'studio' }}
+      GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+      GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'global' }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       JDEC_API_BASE_URL: ${{ secrets.JDEC_API_BASE_URL }}
       JDEC_API_TOKEN: ${{ secrets.JDEC_API_TOKEN }}

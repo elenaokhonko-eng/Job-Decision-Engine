@@ -9,7 +9,7 @@ import {
 const GEMINI_KEY = 'gemini-secret-key-123';
 const OPENAI_KEY = 'sk-openai-secret-456';
 
-const GEMINI_DEFAULT_IDS = ['gemini-3.6-flash', 'gemini-embedding-001', 'gemini-3.5-flash-lite'];
+const GEMINI_DEFAULT_IDS = ['gemini-3.6-flash', 'gemini-embedding-001', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'];
 const OPENAI_DEFAULT_IDS = ['gpt-4o-mini', 'text-embedding-3-small', 'gpt-5.6-luna'];
 
 function json(body: unknown, status = 200): Response {
@@ -87,12 +87,12 @@ describe('model id preflight', () => {
 
   it('labels an unknown code default "(default)" and names every env var sharing an id', async () => {
     const result = await checkConfiguredModelIds({
-      env: { ...bothKeys, DOCUMENT_SECONDARY_GEMINI_MODEL: 'gemini-typo', EXTRACTION_GEMINI_MODEL: 'gemini-typo' },
+      env: { ...bothKeys, DOCUMENT_SECONDARY_GEMINI_MODEL: 'gemini-typo', REQUIREMENTS_GEMINI_MODEL: 'gemini-typo' },
       fetchImpl: providerFetch({ openaiIds: ['gpt-4o-mini', 'text-embedding-3-small'] }) as unknown as typeof fetch,
     });
 
     expect(result.unknown.map((entry) => [entry.id, entry.sources])).toEqual([
-      ['gemini-typo', ['EXTRACTION_GEMINI_MODEL', 'DOCUMENT_SECONDARY_GEMINI_MODEL']],
+      ['gemini-typo', ['REQUIREMENTS_GEMINI_MODEL', 'DOCUMENT_SECONDARY_GEMINI_MODEL']],
       ['gpt-5.6-luna', ['(default)']],
     ]);
     expect(result.unknown[1].message).toBe(
@@ -148,5 +148,61 @@ describe('model id preflight', () => {
       '[models] Model id "gpt-6-Luna" (OPENAI_MODEL) is not available on your OpenAI account; fix it in .env.local or remove the line to use the default.',
       '[models] could not check Gemini models: response has no models array',
     ]);
+  });
+});
+
+describe('model id preflight on Vertex AI', () => {
+  const vertexEnv = {
+    GEMINI_BACKEND: 'vertex',
+    GOOGLE_CLOUD_PROJECT: 'example-project',
+    OPENAI_API_KEY: OPENAI_KEY,
+  } as NodeJS.ProcessEnv;
+
+  function vertexClient(available: string[], failure?: Error) {
+    return {
+      models: {
+        get: vi.fn(async ({ model }: { model: string }) => {
+          if (failure) throw failure;
+          if (available.includes(model)) return { name: `publishers/google/models/${model}` };
+          throw Object.assign(new Error(JSON.stringify({ error: { code: 404, status: 'NOT_FOUND' } })), { status: 404 });
+        }),
+      },
+    };
+  }
+
+  it('checks every configured Gemini id with models.get and never calls the AI Studio list', async () => {
+    const fetchMock = providerFetch();
+    const client = vertexClient(GEMINI_DEFAULT_IDS);
+    const result = await checkConfiguredModelIds({ env: vertexEnv, fetchImpl: fetchMock as unknown as typeof fetch, vertexClient: client });
+    expect(result.unknown).toEqual([]);
+    expect(result.checked).toEqual(['gemini', 'openai']);
+    expect(client.models.get.mock.calls.map(([params]) => params.model).sort()).toEqual([...GEMINI_DEFAULT_IDS].sort());
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('generativelanguage'))).toBe(false);
+  });
+
+  it('reports an id that Vertex does not serve at the configured location', async () => {
+    const client = vertexClient(GEMINI_DEFAULT_IDS.filter((id) => id !== 'gemini-3.8-flash'));
+    const result = await checkConfiguredModelIds({
+      env: vertexEnv,
+      fetchImpl: providerFetch() as unknown as typeof fetch,
+      vertexClient: client,
+    });
+    expect(result.unknown).toHaveLength(1);
+    expect(result.unknown[0]).toMatchObject({ provider: 'gemini', id: 'gemini-3.8-flash', sources: ['(default)'] });
+    expect(result.unknown[0].message).toContain('not available on Vertex AI at location "global"');
+  });
+
+  it('turns an auth failure into a warning and a regional location without override into a config warning', async () => {
+    const authFailure = vertexClient([], Object.assign(new Error('Could not load the default credentials'), { status: 401 }));
+    const failed = await checkConfiguredModelIds({ env: vertexEnv, fetchImpl: providerFetch() as unknown as typeof fetch, vertexClient: authFailure });
+    expect(failed.warnings).toEqual(['could not check Gemini models on Vertex AI: Could not load the default credentials']);
+    expect(failed.checked).toEqual(['openai']);
+
+    const regional = await checkConfiguredModelIds({
+      env: { ...vertexEnv, GOOGLE_CLOUD_LOCATION: 'us-central1' },
+      fetchImpl: providerFetch() as unknown as typeof fetch,
+      vertexClient: vertexClient(GEMINI_DEFAULT_IDS),
+    });
+    expect(regional.warnings[0]).toContain('GEMINI_ALLOW_REGIONAL_LOCATION=true');
   });
 });

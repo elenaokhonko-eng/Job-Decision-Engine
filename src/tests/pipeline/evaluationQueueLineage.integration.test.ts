@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import crypto from "node:crypto";
 import pg from "pg";
 import dotenv from "dotenv";
@@ -460,4 +460,69 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
       else process.env.GEMINI_API_KEY = priorGeminiKey;
     }
   });
+  it("reschedules a rate-limited (429) evaluation without spending its last attempt or sending it to manual review", async () => {
+    const fixture = bulkFixtures[0];
+    const priorDatabaseUrl = process.env.DATABASE_URL;
+    const priorUnpooledDatabaseUrl = process.env.DATABASE_URL_UNPOOLED;
+    let closeQueuePool: (() => Promise<void>) | undefined;
+    const evaluatorUrl = new URL(databaseUrl);
+    evaluatorUrl.searchParams.set("options", `-c search_path=${schemaName},public`);
+    process.env.DATABASE_URL = evaluatorUrl.toString();
+    process.env.DATABASE_URL_UNPOOLED = evaluatorUrl.toString();
+    const evaluateMock = vi.fn(async () => {
+      const { ModelRateLimitedError } = await import("../../services/modelCallResilience.js");
+      throw new ModelRateLimitedError("All model API calls failed. gemini rate limited (429 RESOURCE_EXHAUSTED)",
+        { provider: "gemini", model: "gemini-3.6-flash", retryAfterMs: 120_000, attempts: 5 });
+    });
+    // A fresh evaluate_queue module (its pool was closed by the previous test) that sees the mock.
+    vi.resetModules();
+    vi.doMock("../../services/agent.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../../services/agent.js")>()),
+      evaluateSingleCanonicalJob: evaluateMock,
+      checkModelRegistryPreflight: () => ({ ok: true, warnings: [], primaryAvailable: true, fallbackAvailable: true }),
+    }));
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      // This is the queue row's last allowed attempt.
+      const before = await getClient().query<{ max_attempts: number }>(
+        `UPDATE evaluation_queue SET attempt_count = COALESCE(max_attempts, 3) - 1
+         WHERE workspace_id = $1 AND id = $2 RETURNING COALESCE(max_attempts, 3) AS max_attempts`,
+        [getContext().workspaceId, fixture.queueId],
+      );
+      const maxAttempts = before.rows[0].max_attempts;
+      const { evaluateQueue, closeEvaluationQueuePool } = await import("../../../scripts/evaluate_queue.js");
+      closeQueuePool = closeEvaluationQueuePool;
+
+      const result = await evaluateQueue({ context: getContext(), profileVersionId, jobVersionIds: [fixture.jobVersionId] });
+
+      expect(evaluateMock).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ eligible: 1, processed: 0, failed: 0, manualReview: 0, rateLimited: 1 });
+      const queue = await getClient().query<{ status: string; attempt_count: number; max_attempts: number; available_at: Date; last_error: string }>(
+        `SELECT status, attempt_count, max_attempts, available_at, last_error FROM evaluation_queue WHERE workspace_id = $1 AND id = $2`,
+        [getContext().workspaceId, fixture.queueId],
+      );
+      expect(queue.rows[0]).toMatchObject({ status: "RETRY_WAIT", attempt_count: maxAttempts, max_attempts: maxAttempts + 1 });
+      expect(queue.rows[0].last_error).toMatch(/^RATE_LIMITED: /);
+      // The provider's 120 s RetryInfo is honoured.
+      expect(new Date(queue.rows[0].available_at).getTime()).toBeGreaterThan(Date.now() + 115_000);
+      const attempts = await getClient().query<{ provider: string; status: string }>(
+        `SELECT provider, status FROM evaluation_attempts WHERE workspace_id = $1 AND canonical_job_id = $2`,
+        [getContext().workspaceId, fixture.canonicalJobId],
+      );
+      expect(attempts.rows).toEqual([{ provider: "rate-limited", status: "FAILED" }]);
+      const canonical = await getClient().query<{ processing_state: string | null }>(
+        `SELECT processing_state FROM canonical_jobs WHERE id = $1`, [fixture.canonicalJobId]);
+      expect(canonical.rows[0].processing_state).not.toBe("NEEDS_MANUAL_REVIEW");
+      await closeEvaluationQueuePool();
+      closeQueuePool = undefined;
+    } finally {
+      vi.doUnmock("../../services/agent.js");
+      if (closeQueuePool) await closeQueuePool();
+      if (priorDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = priorDatabaseUrl;
+      if (priorUnpooledDatabaseUrl === undefined) delete process.env.DATABASE_URL_UNPOOLED;
+      else process.env.DATABASE_URL_UNPOOLED = priorUnpooledDatabaseUrl;
+    }
+  });
 });
+

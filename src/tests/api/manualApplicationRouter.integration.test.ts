@@ -17,6 +17,8 @@ import {
 } from "../../api/v2/manualApplicationRouter.js";
 import { COVER_LETTER_CLOSING, type CoverLetterWriter, type CoverLetterWriterInput, type SummaryWriter } from "../../documents/manualCoverLetter.js";
 import { runMigrations } from "../../db/migrate.js";
+import { ManualDocumentJobResponseSchema } from "../../contracts/manualApplication.js";
+import { ModelCallDeadlineError, ModelRateLimitedError } from "../../services/modelCallResilience.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { importLoadedProfile, type ProfileImportSummary } from "../../profile/importer.js";
 import { loadProfile } from "../../profile/loader.js";
@@ -31,7 +33,10 @@ import { runRequirementsExtraction } from "../../pipeline/requirementsExtractor.
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
 const routerPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../api/v2/manualApplicationRouter.ts");
-const MODEL_KEY_ENV = ["GEMINI_API_KEY", "GEMINI_FLASH_API_KEY", "OPENAI_API_KEY", "REQUIREMENTS_ENABLE_QUOTED", "MANUAL_COVER_LETTER_AI"] as const;
+const MODEL_KEY_ENV = [
+  "GEMINI_API_KEY", "GEMINI_FLASH_API_KEY", "DOCUMENT_GEMINI_API_KEY", "GEMINI_BACKEND", "GOOGLE_CLOUD_PROJECT",
+  "OPENAI_API_KEY", "REQUIREMENTS_ENABLE_QUOTED", "MANUAL_COVER_LETTER_AI",
+] as const;
 const FULL_DESCRIPTION = [
   "About the role: Example Bank is hiring a Derivatives Operating Model Lead in Singapore.",
   "Responsibilities: design target operating models and lead front office transformation programmes.",
@@ -163,7 +168,40 @@ async function withModelEnv<T>(env: Partial<Record<(typeof MODEL_KEY_ENV)[number
   }
 }
 
+/**
+ * POST /:draftId/documents starts a durable job; this polls it to the end and returns what the
+ * synchronous endpoint used to: the documents response, or the API error with its HTTP status.
+ */
+async function generateDocuments(route: string, body: object, expectedStatus = 200): Promise<Record<string, any>> {
+  const response = await fetch(`${baseUrl}${route}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const started = await response.json() as Record<string, any>;
+  if (response.status >= 400) {
+    expect(response.status, JSON.stringify(started)).toBe(expectedStatus);
+    return started;
+  }
+  expect([200, 202], JSON.stringify(started)).toContain(response.status);
+  let job = ManualDocumentJobResponseSchema.parse(started).job;
+  const draftId = route.split("/")[1];
+  for (let poll = 0; poll < 1200 && (job.status === "QUEUED" || job.status === "RUNNING"); poll++) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const polled = await fetch(`${baseUrl}/${draftId}/document-jobs/${job.job_id}`);
+    const polledBody = await polled.json() as Record<string, any>;
+    expect(polled.status, JSON.stringify(polledBody)).toBe(200);
+    job = ManualDocumentJobResponseSchema.parse(polledBody).job;
+  }
+  if (job.status === "SUCCEEDED") {
+    expect(200, "document job succeeded").toBe(expectedStatus);
+    return job.result as Record<string, any>;
+  }
+  expect(job.status).toBe("FAILED");
+  expect(job.error?.http_status ?? 500, JSON.stringify(job.error)).toBe(expectedStatus);
+  return { ok: false, code: job.error?.code, error: job.error?.code, message: job.error?.message };
+}
+
 async function post(route: string, body: object, expectedStatus = 200): Promise<Record<string, any>> {
+  if (route.endsWith("/documents")) return generateDocuments(route, body, expectedStatus);
   const response = await fetch(`${baseUrl}${route}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
@@ -607,6 +645,7 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     for (const key of MODEL_KEY_ENV) delete process.env[key];
     try {
       const post = async (route: string, body: object, expectedStatus = 200) => {
+        if (route.endsWith("/documents")) return generateDocuments(route, body, expectedStatus);
         const response = await fetch(`${baseUrl}${route}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const json = await response.json() as Record<string, any>;
         expect(response.status, JSON.stringify(json)).toBe(expectedStatus);
@@ -704,6 +743,7 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     for (const key of MODEL_KEY_ENV) delete process.env[key];
     try {
       const post = async (route: string, body: object, expectedStatus = 200) => {
+        if (route.endsWith("/documents")) return generateDocuments(route, body, expectedStatus);
         const response = await fetch(`${baseUrl}${route}`, {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
         });
@@ -758,6 +798,7 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     process.env.REQUIREMENTS_ENABLE_QUOTED = "false";
     try {
       const post = async (route: string, body: object, expectedStatus = 200) => {
+        if (route.endsWith("/documents")) return generateDocuments(route, body, expectedStatus);
         const response = await fetch(`${baseUrl}${route}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const json = await response.json() as Record<string, any>;
         expect(response.status, JSON.stringify(json)).toBe(expectedStatus);
@@ -1121,4 +1162,92 @@ describe.skipIf(skipReal)("manual application router (PostgreSQL)", () => {
     const drafts = await pool.query(`SELECT id FROM manual_application_drafts WHERE workspace_id = $1 AND job_version_id = $2`, [context.workspaceId, detail.versionId]);
     expect(drafts.rowCount).toBe(0);
   });
+  it("runs generation as one durable job per approval: progress steps, a 429 recorded as RATE_LIMITED, no duplicates, interrupted jobs fail and can be retried", async () => {
+    if (!pool) throw new Error("The manual router test pool is not initialized.");
+    await withModelEnv({ OPENAI_API_KEY: "configured-for-mode-check", REQUIREMENTS_ENABLE_QUOTED: "false" }, async () => {
+      summaryCalls.length = 0;
+      writerCalls.length = 0;
+      let releaseSummary: () => void = () => undefined;
+      const summaryGate = new Promise<void>((resolve) => { releaseSummary = resolve; });
+      // The summary model is rate limited (after the test lets it run); the letter writer fails too.
+      summaryImpl = async () => {
+        await summaryGate;
+        throw new ModelRateLimitedError("Gemini gemini-3.8-flash rate limited (429 RESOURCE_EXHAUSTED) after 1 attempt(s)",
+          { provider: "gemini", model: "gemini-3.8-flash", retryAfterMs: 2000, attempts: 1 });
+      };
+      writerImpl = async () => { throw new ModelCallDeadlineError("call deadline passed", { model: "gemini-3.1-flash-lite", deadlineMs: 60000, rateLimited: false, retryAfterMs: null }); };
+      try {
+        const compared = await post("/compare", posting("https://careers.example.test/async-documents", FULL_DESCRIPTION, "Async Documents Lead"));
+        const approved = await post(`/${compared.draft_id}/approve`, { approved: true, comparison_fingerprint: compared.comparison_fingerprint });
+        const route = `/${compared.draft_id}/documents`;
+        const start = async () => {
+          const response = await fetch(`${baseUrl}${route}`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approval_id: approved.approval_id }),
+          });
+          return { status: response.status, body: ManualDocumentJobResponseSchema.parse(await response.json()) };
+        };
+        // Two requests for the same approval share one job.
+        const [first, second] = await Promise.all([start(), start()]);
+        expect(first.status).toBe(202);
+        expect(second.status).toBe(202);
+        expect(second.body.job.job_id).toBe(first.body.job.job_id);
+        const jobs = await pool!.query(`SELECT id FROM manual_document_generation_jobs WHERE approval_id = $1`, [approved.approval_id]);
+        expect(jobs.rowCount).toBe(1);
+
+        // While the summary is running the job reports it.
+        const jobUrl = `${baseUrl}/${compared.draft_id}/document-jobs/${first.body.job.job_id}`;
+        let job = first.body.job;
+        for (let poll = 0; poll < 400 && job.steps[0].status !== "RUNNING"; poll++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          job = ManualDocumentJobResponseSchema.parse(await (await fetch(jobUrl)).json()).job;
+        }
+        expect(job.status).toBe("RUNNING");
+        expect(job.steps.map((step) => [step.step, step.status])).toEqual([["SUMMARY", "RUNNING"], ["LETTER", "PENDING"], ["FILES", "PENDING"]]);
+        releaseSummary();
+
+        const generated = await generateDocuments(route, { approval_id: approved.approval_id });
+        expect(summaryCalls).toHaveLength(1);
+        expect(generated.summary).toMatchObject({ mode: "DETERMINISTIC" });
+        const finished = ManualDocumentJobResponseSchema.parse(await (await fetch(jobUrl)).json()).job;
+        expect(finished.status).toBe("SUCCEEDED");
+        expect(finished.steps.map((step) => [step.step, step.status, step.failure_kind])).toEqual([
+          ["SUMMARY", "FALLBACK", "RATE_LIMITED"], ["LETTER", "FALLBACK", "TIMEOUT"], ["FILES", "COMPLETED", null],
+        ]);
+        expect(finished.result?.artifacts).toHaveLength(4);
+        // Nothing was recorded as submitted.
+        const applications = await pool!.query(`SELECT 1 FROM application_records WHERE job_version_id = $1`, [compared.comparison.job_version_id]);
+        expect(applications.rowCount).toBe(0);
+
+        // A job left RUNNING by a restarted API is reported FAILED once past its deadline; generating again is allowed.
+        const revision = await post(`/${compared.draft_id}/approve`, {
+          approved: true, comparison_fingerprint: compared.comparison_fingerprint, new_revision: true,
+        });
+        const orphan = await pool!.query<{ id: string }>(
+          `INSERT INTO manual_document_generation_jobs (workspace_id, user_id, draft_id, approval_id, comparison_fingerprint,
+             status, steps, deadline_at, started_at)
+           SELECT workspace_id, user_id, draft_id, id, comparison_fingerprint, 'RUNNING',
+             '[{"step":"SUMMARY","status":"RUNNING","started_at":null,"finished_at":null,"elapsed_ms":null,"provider":null,"model":null,"failure_kind":null}]'::jsonb,
+             NOW() - INTERVAL '1 minute', NOW() - INTERVAL '6 minutes'
+           FROM manual_application_preparation_approvals WHERE id = $1 RETURNING id`, [revision.approval_id]);
+        const interrupted = ManualDocumentJobResponseSchema.parse(
+          await (await fetch(`${baseUrl}/${compared.draft_id}/document-jobs/${orphan.rows[0].id}`)).json()).job;
+        expect(interrupted.status).toBe("FAILED");
+        expect(interrupted.error).toMatchObject({ code: "GENERATION_INTERRUPTED", http_status: 503 });
+        expect(interrupted.steps[0].status).toBe("FAILED");
+        const retried = await generateDocuments(route, { approval_id: revision.approval_id });
+        expect(retried.artifacts).toHaveLength(4);
+        const revisionJobs = await pool!.query<{ status: string }>(
+          `SELECT status FROM manual_document_generation_jobs WHERE approval_id = $1 ORDER BY created_at`, [revision.approval_id]);
+        expect(revisionJobs.rows.map((row) => row.status)).toEqual(["FAILED", "SUCCEEDED"]);
+
+        // An unknown job is a 404, not a guess.
+        const missing = await fetch(`${baseUrl}/${compared.draft_id}/document-jobs/${crypto.randomUUID()}`);
+        expect(missing.status).toBe(404);
+      } finally {
+        summaryImpl = undefined;
+        writerImpl = undefined;
+      }
+    });
+  });
 });
+

@@ -2,9 +2,11 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { pgPoolConfig } from '../db/pgSsl.js';
 import {
-  generateEmbeddingWithProviderAndModel,
+  embeddingRequestBatchSize,
+  generateEmbeddingsWithProviderAndModel,
   type EmbeddingProvider,
 } from '../services/agent.js';
+import { isRateLimitedFailure } from '../services/modelCallResilience.js';
 import { validateEmbeddingVector } from './batchValidator.js';
 import { buildEmbeddingInputs } from './inputBuilder.js';
 import { seedEmbeddingSpaces } from './spaceRegistry.js';
@@ -30,6 +32,8 @@ export interface EmbeddingBatchSummary {
   runType: 'PRIMARY' | 'FALLBACK';
   errors: string[];
   publicationComplete?: boolean;
+  /** Inputs whose provider request failed only because of rate limiting (429). */
+  rateLimited?: number;
 }
 
 export interface EmbeddingFallbackSummary {
@@ -87,6 +91,8 @@ interface EmbeddingInvocationRecord {
   vectorChecksum?: string | null;
   errorMessage?: string | null;
   validationIssues?: string[];
+  /** RATE_LIMITED, TIMEOUT, ... for a failed provider request (drives the run's 429 count). */
+  errorKind?: string;
 }
 
 function describeEmbeddingError(error: unknown): string {
@@ -136,6 +142,7 @@ async function recordEmbeddingInvocation(
             status: input.status,
             latencyMs: input.latencyMs,
             error: input.errorMessage ?? undefined,
+            ...(input.errorKind ? { errorKind: input.errorKind } : {}),
           },
         ],
         internal_http_attempts: 1,
@@ -340,29 +347,46 @@ export async function runEmbeddingBatch(
     let failed = 0;
     const failedInputIds: string[] = [];
 
-    // Provider calls are independent per input, so a small window runs them
-    // concurrently. Every input still gets exactly one provider call, its own
-    // validation, invocation record and batch-item outcome; persistence below
-    // stays sequential and in input order on this client.
+    let rateLimited = 0;
+    // Inputs go to the provider in chunks (one batch embedContent / embeddings request per chunk),
+    // with up to EMBEDDING_PROVIDER_CONCURRENCY chunk requests in flight. Every input still gets its
+    // own outcome, validation, invocation record and batch-item status; persistence below stays
+    // sequential and in input order on this client. Gemini requests also pass the process-wide
+    // per-model limiter, shared by every worker lane.
     const concurrency = embeddingProviderConcurrency();
-    for (let windowStart = 0; windowStart < inputRes.rows.length; windowStart += concurrency) {
-      const window = inputRes.rows.slice(windowStart, windowStart + concurrency);
-      const outcomes = await Promise.all(window.map(async (input, offset) => {
-        const inputIndex = windowStart + offset;
-        const itemStartedAt = Date.now();
-        const progressPrefix = `[embeddings:${runType}] ${inputIndex + 1}/${inputRes.rows.length} input_id=${input.id} provider=${provider} model=${spaceModel}`;
-        console.log(`${progressPrefix} starting chars=${input.content_text.length}`);
-        try {
-          const vector = await generateEmbeddingWithProviderAndModel(
-            input.content_text,
-            provider,
-            spaceModel
-          );
-          return { input, progressPrefix, providerLatencyMs: Date.now() - itemStartedAt, vector, providerFailed: false, providerError: null as unknown };
-        } catch (providerError) {
-          return { input, progressPrefix, providerLatencyMs: Date.now() - itemStartedAt, vector: [] as number[], providerFailed: true, providerError };
+    const chunkSize = embeddingRequestBatchSize(provider);
+    const windowSize = concurrency * chunkSize;
+    for (let windowStart = 0; windowStart < inputRes.rows.length; windowStart += windowSize) {
+      const window = inputRes.rows.slice(windowStart, windowStart + windowSize);
+      const chunks: Array<typeof window> = [];
+      for (let offset = 0; offset < window.length; offset += chunkSize) chunks.push(window.slice(offset, offset + chunkSize));
+      const chunkOutcomes = await Promise.all(chunks.map(async (chunk, chunkIndex) => {
+        const chunkStartedAt = Date.now();
+        for (const [offset, input] of chunk.entries()) {
+          const inputIndex = windowStart + chunkIndex * chunkSize + offset;
+          console.log(`[embeddings:${runType}] ${inputIndex + 1}/${inputRes.rows.length} input_id=${input.id} provider=${provider} model=${spaceModel} starting chars=${input.content_text.length}`);
         }
+        let results;
+        try {
+          results = await generateEmbeddingsWithProviderAndModel(chunk.map((input) => input.content_text), provider, spaceModel);
+        } catch (providerError) {
+          results = chunk.map(() => ({ ok: false as const, error: providerError }));
+        }
+        if (results.length !== chunk.length) {
+          const mismatch = new Error(`Embedding provider returned ${results.length} outcome(s) for ${chunk.length} input(s).`);
+          results = chunk.map(() => ({ ok: false as const, error: mismatch }));
+        }
+        const providerLatencyMs = Date.now() - chunkStartedAt;
+        return chunk.map((input, offset) => {
+          const inputIndex = windowStart + chunkIndex * chunkSize + offset;
+          const progressPrefix = `[embeddings:${runType}] ${inputIndex + 1}/${inputRes.rows.length} input_id=${input.id} provider=${provider} model=${spaceModel}`;
+          const result = results[offset];
+          return result.ok
+            ? { input, progressPrefix, providerLatencyMs, vector: result.vector, providerFailed: false, providerError: null as unknown }
+            : { input, progressPrefix, providerLatencyMs, vector: [] as number[], providerFailed: true, providerError: result.error };
+        });
       }));
+      const outcomes = chunkOutcomes.flat();
 
       for (const { input, progressPrefix, providerLatencyMs, vector, providerFailed, providerError } of outcomes) {
         try {
@@ -491,6 +515,7 @@ export async function runEmbeddingBatch(
         } catch (error) {
           const message = describeEmbeddingError(error);
           failed += 1;
+          if (isRateLimitedFailure(error)) rateLimited += 1;
           failedInputIds.push(input.id);
           errors.push(`input ${input.id}: ${message}`);
           console.warn(`${progressPrefix} failed elapsed_ms=${providerLatencyMs} error=${message}`);
@@ -506,6 +531,7 @@ export async function runEmbeddingBatch(
             contentText: input.content_text,
             latencyMs: providerLatencyMs,
             errorMessage: message,
+            ...(isRateLimitedFailure(error) ? { errorKind: 'RATE_LIMITED' } : {}),
           });
           await client.query(
             `UPDATE embedding_batch_items
@@ -594,6 +620,7 @@ export async function runEmbeddingBatch(
       runType,
       errors,
       publicationComplete,
+      rateLimited,
     };
   } catch (error) {
     throw error;
@@ -648,6 +675,7 @@ function mergeBatchSummaries(
     failedInputIds,
     runType,
     errors: summaries.flatMap((summary) => summary.errors),
+    rateLimited: summaries.reduce((total, summary) => total + (summary.rateLimited ?? 0), 0),
     publicationComplete: summaries.every(
       (summary) => summary.publicationComplete !== false && summary.failed === 0
     ),

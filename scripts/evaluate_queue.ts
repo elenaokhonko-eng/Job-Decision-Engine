@@ -11,6 +11,14 @@ import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
 import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
 import {
+  diffProviderCalls,
+  isRateLimitedFailure,
+  rateLimitRetryAfterMs,
+  snapshotProviderCalls,
+  summarizeProviderCalls,
+} from "../src/services/modelCallResilience.js";
+import { rateLimitedRetryAt } from "../src/tasks/pipelineTasks.js";
+import {
   selectEligibleEvaluationQueueRows,
   supersedeStaleEvaluationQueueRows,
   type EvaluationQueueCandidate,
@@ -46,6 +54,8 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
   const client = await pool.connect();
   let processedCount = 0;
   let failedCount = 0;
+  let rateLimitedCount = 0;
+  const providerCallsAtStart = snapshotProviderCalls();
   let manualReviewCount = 0;
   let eligibleCount = 0;
 
@@ -382,6 +392,40 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
       } catch (err: any) {
         clearInterval(heartbeat);
         const safeError = publicErrorSummary(err, "evaluation");
+        if (isRateLimitedFailure(err)) {
+          // A 429 is capacity, not an evaluation outcome: record it, reschedule after the provider's
+          // suggested delay, and grow max_attempts so it never counts toward NEEDS_MANUAL_REVIEW.
+          rateLimitedCount++;
+          const retryAt = rateLimitedRetryAt(rateLimitRetryAfterMs(err));
+          console.warn(`⏳ Evaluation rate limited for queue item ${item.id}; rescheduled for ${retryAt.toISOString()}.`);
+          await client.query(
+            `INSERT INTO evaluation_attempts (
+               workspace_id, canonical_job_id, job_version_id, attempt_number, provider, model, status, error_message, latency_ms
+             )
+             SELECT $1, $2, $3, $4, 'rate-limited', 'unknown', 'FAILED', $5, NULL
+             WHERE EXISTS (
+               SELECT 1 FROM evaluation_queue WHERE workspace_id = $1 AND id = $6 AND lease_id = $7
+             )`,
+            [ctx.workspaceId, item.canonical_job_id, jobVersionId, attemptNum, `RATE_LIMITED: ${safeError}`, item.id, activeLeaseId]
+          );
+          const deferred = await client.query<{ id: string }>(
+            `UPDATE evaluation_queue
+             SET status = 'RETRY_WAIT',
+                 last_error = $1,
+                 available_at = $5::timestamptz,
+                 max_attempts = COALESCE(max_attempts, 3) + 1,
+                 lease_id = NULL,
+                 lease_expires_at = NULL,
+                 updated_at = NOW()
+             WHERE workspace_id = $2 AND id = $3 AND lease_id = $4
+             RETURNING id`,
+            [`RATE_LIMITED: ${safeError}`, ctx.workspaceId, item.id, activeLeaseId, retryAt.toISOString()]
+          );
+          if ((deferred.rowCount ?? 0) === 0) {
+            console.warn(`Lease fence lost while deferring rate-limited evaluation queue item ${item.id}.`);
+          }
+          continue;
+        }
         console.error(`❌ Evaluation failed for queue item ${item.id}: ${safeError}`);
         failedCount++;
 
@@ -431,13 +475,17 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
     client.release();
   }
 
-  const summary = `\n✅ Queue evaluation complete. Processed: ${processedCount}, Retrying: ${failedCount}, Manual Review: ${manualReviewCount}`;
+  const summary = `\n✅ Queue evaluation complete. Processed: ${processedCount}, Retrying: ${failedCount}, Rate limited (rescheduled): ${rateLimitedCount}, Manual Review: ${manualReviewCount}`;
   console.log(summary);
+  const providerCalls = summarizeProviderCalls(diffProviderCalls(providerCallsAtStart, snapshotProviderCalls()));
+  console.log(`Evaluation provider calls this run: ${JSON.stringify(providerCalls)}`);
   return {
     processed: processedCount,
     failed: failedCount,
     manualReview: manualReviewCount,
     eligible: eligibleCount,
+    rateLimited: rateLimitedCount,
+    providerCalls,
   };
 }
 

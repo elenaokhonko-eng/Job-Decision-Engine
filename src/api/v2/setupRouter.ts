@@ -9,6 +9,7 @@ import {
   type ModelRoutePurpose,
 } from "../../modelRoutes/registry.js";
 import { DEFAULT_USER_KEY, DEFAULT_WORKSPACE_KEY, resolveWorkspaceContext } from "../../workspace/context.js";
+import { isGeminiConfigured } from "../../services/geminiConfig.js";
 
 function asyncHandler(
   handler: (req: express.Request, res: express.Response, next: express.NextFunction) => Promise<void> | void
@@ -87,7 +88,7 @@ export function createSetupRouter(deps: SetupRouterDeps = {}): express.Router {
         }
       }
 
-      const geminiConfigured = Boolean(process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY);
+      const geminiConfigured = isGeminiConfigured();
       const openaiConfigured = Boolean(process.env.OPENAI_API_KEY);
 
       let modelRoutesConfigured = false;

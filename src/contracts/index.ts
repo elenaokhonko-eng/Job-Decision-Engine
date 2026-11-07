@@ -642,6 +642,8 @@ export {
   ManualGenerateRequestSchema,
   ManualArtifactSchema,
   ManualDocumentsResponseSchema,
+  ManualDocumentJobStepSchema,
+  ManualDocumentJobResponseSchema,
   ManualDownloadResponseSchema,
   ManualApiErrorSchema,
   ManualFetchDescriptionRequestSchema,

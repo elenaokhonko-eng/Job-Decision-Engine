@@ -8,6 +8,7 @@ import {
 } from "../src/tasks/deadLetterPolicy.js";
 import { resolveWorkspaceContext, DEFAULT_WORKSPACE_KEY, DEFAULT_USER_KEY } from "../src/workspace/context.js";
 import { verifyDesktopPackaging } from "./verify_desktop_packaging.js";
+import { isGeminiConfigured } from "../src/services/geminiConfig.js";
 import { startLocalServer } from "../src/desktop/localServer.js";
 
 dotenv.config();
@@ -155,9 +156,7 @@ export async function checkDesktopE2EGate(): Promise<{
     }
   }
 
-  const aiConfigured = Boolean(
-    process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY || process.env.OPENAI_API_KEY
-  );
+  const aiConfigured = isGeminiConfigured() || Boolean(process.env.OPENAI_API_KEY);
 
   const input: DesktopE2EGateInput = {
     packagingPassed: packaging.ok,

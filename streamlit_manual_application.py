@@ -30,6 +30,31 @@ PIPELINE_FINAL_CODES = {"JOB_VERSION_CHANGED", "DESCRIPTION_INSUFFICIENT"}
 # Another request was staging the same comparison; one automatic retry returns its draft.
 PIPELINE_RETRYABLE_CODES = {"CONCURRENT_UPDATE"}
 PIPELINE_RETRY_DELAY_SECONDS = 3
+# Document generation runs as a job on the API: start it, then poll. No single request waits long.
+DOCUMENT_JOB_START_TIMEOUT_SECONDS = 30
+DOCUMENT_JOB_POLL_TIMEOUT_SECONDS = 15
+DOCUMENT_JOB_POLL_SECONDS = 2
+# Stop polling after this long; the API marks a job past its own deadline as interrupted.
+DOCUMENT_JOB_CLIENT_MAX_SECONDS = 420
+DOCUMENT_JOB_STEP_LABELS = {
+    "SUMMARY": "AI CV summary",
+    "LETTER": "AI cover letter",
+    "FILES": "DOCX and PDF files",
+}
+DOCUMENT_JOB_STEP_STATUS = {
+    "PENDING": "waiting",
+    "RUNNING": "in progress",
+    "COMPLETED": "done",
+    "FALLBACK": "AI not used; built from your statements",
+    "SKIPPED": "not needed",
+    "FAILED": "failed",
+}
+DOCUMENT_JOB_FAILURE_KINDS = {
+    "RATE_LIMITED": "the AI provider was rate limited (429)",
+    "TIMEOUT": "the AI call ran out of time",
+    "VALIDATION": "the AI draft did not pass the evidence checks",
+    "PROVIDER_ERROR": "the AI provider returned an error",
+}
 
 
 def _validate_payload(schema_name, payload):
@@ -451,19 +476,117 @@ def _render_written_review(review, section):
                 st.text(f"{label}: {item.get('text', '')}")
 
 
-def _generate_documents(api_request, draft_id, body):
-    """Generates (or returns the stored) document pair for one approval, validated against the contract."""
-    result = api_request(
+def _document_job_step_lines(job):
+    lines = []
+    for step in job.get("steps") or []:
+        label = DOCUMENT_JOB_STEP_LABELS.get(step.get("step"), step.get("step"))
+        status = DOCUMENT_JOB_STEP_STATUS.get(step.get("status"), step.get("status"))
+        line = f"{label}: {status}"
+        kind = DOCUMENT_JOB_FAILURE_KINDS.get(step.get("failure_kind"))
+        if kind:
+            line += f" ({kind})"
+        if step.get("elapsed_ms") is not None and step.get("status") != "RUNNING":
+            line += f" in {step['elapsed_ms'] / 1000:.0f} s"
+        lines.append(line)
+    return lines
+
+
+def _start_document_job(api_request, draft_id, body, on_success=None):
+    """Starts (or rejoins) the API's document job for one approval; polling continues on rerun."""
+    response = api_request(
         "POST",
         f"/api/v2/application-drafts/{draft_id}/documents",
         body=body,
-        timeout=180,
+        timeout=DOCUMENT_JOB_START_TIMEOUT_SECONDS,
     )
+    _validate_payload("ManualDocumentJobResponse", response)
+    job = response["job"]
+    st.session_state["manual_document_job"] = {
+        "job_id": job["job_id"],
+        "draft_id": draft_id,
+        "started_at": time.time(),
+        "on_success": on_success or {},
+    }
+    if not _finish_document_job(job):
+        st.rerun()
+
+
+def _finish_document_job(job):
+    """Applies a finished job (documents or the API's error); False while it is still running."""
+    status = job.get("status")
+    if status not in ("SUCCEEDED", "FAILED"):
+        return False
+    state = st.session_state.pop("manual_document_job", None) or {}
+    if status == "FAILED":
+        error = job.get("error") or {}
+        code = error.get("code") or "GENERATION_FAILED"
+        message = error.get("message") or "Document generation failed."
+        st.session_state["manual_document_job_error"] = f"{code}: {message}"
+        return True
+    result = job.get("result") or {}
     _validate_payload("ManualDocumentsResponse", result)
     _validate_document_pair(result.get("artifacts") or [])
-    if not result.get("ok"):
-        raise RuntimeError(result.get("error") or "Document generation failed.")
-    return result
+    on_success = state.get("on_success") or {}
+    if on_success.get("approval"):
+        st.session_state["manual_approval"] = on_success["approval"]
+    st.session_state["manual_generated_documents"] = result
+    st.session_state["manual_document_job_steps"] = _document_job_step_lines(job)
+    if (
+        on_success.get("retry_summary")
+        and (result.get("summary") or {}).get("mode") == "AI_WRITTEN"
+    ):
+        st.session_state["manual_document_job_notice"] = (
+            "The AI summary is in place; the cover letter is unchanged."
+        )
+    return True
+
+
+def _poll_document_job(api_request):
+    """One status check per run while a document job is running; shows progress, then reruns."""
+    state = st.session_state.get("manual_document_job")
+    if not state:
+        return
+    try:
+        response = api_request(
+            "GET",
+            f"/api/v2/application-drafts/{state['draft_id']}/document-jobs/{state['job_id']}",
+            timeout=DOCUMENT_JOB_POLL_TIMEOUT_SECONDS,
+        )
+        _validate_payload("ManualDocumentJobResponse", response)
+    except API_CALL_ERRORS as error:
+        st.session_state.pop("manual_document_job", None)
+        st.session_state["manual_document_job_error"] = (
+            f"Could not check document generation: {error}"
+        )
+        return
+    job = response["job"]
+    if _finish_document_job(job):
+        return
+    st.info(
+        "Generating your CV and cover letter. This page updates by itself.\n\n"
+        + "\n".join(f"- {line}" for line in _document_job_step_lines(job))
+    )
+    if (
+        time.time() - state.get("started_at", time.time())
+        > DOCUMENT_JOB_CLIENT_MAX_SECONDS
+    ):
+        st.session_state.pop("manual_document_job", None)
+        st.session_state["manual_document_job_error"] = (
+            "Document generation is taking longer than expected. Press Generate again in a moment: "
+            "the API returns the finished documents, or reports why it stopped."
+        )
+        return
+    time.sleep(DOCUMENT_JOB_POLL_SECONDS)
+    st.rerun()
+
+
+def _show_document_job_messages():
+    error = st.session_state.pop("manual_document_job_error", None)
+    if error:
+        st.error(f"Could not generate the document pair: {error}")
+    notice = st.session_state.pop("manual_document_job_notice", None)
+    if notice:
+        st.success(notice)
 
 
 def _retry_summary(api_request, draft_id, fingerprint, approval, generated):
@@ -494,11 +617,12 @@ def _retry_summary(api_request, draft_id, fingerprint, approval, generated):
         }
         if (generated.get("cover_letter") or {}).get("mode") == "AI_WRITTEN":
             generate["reuse_cover_letter_from"] = approval.get("approval_id")
-        result = _generate_documents(api_request, draft_id, generate)
-        st.session_state["manual_approval"] = revision
-        st.session_state["manual_generated_documents"] = result
-        if (result.get("summary") or {}).get("mode") == "AI_WRITTEN":
-            st.success("The AI summary is in place; the cover letter is unchanged.")
+        _start_document_job(
+            api_request,
+            draft_id,
+            generate,
+            on_success={"approval": revision, "retry_summary": True},
+        )
     except API_CALL_ERRORS as error:
         st.error(f"Could not retry the AI summary: {error}")
 
@@ -995,8 +1119,15 @@ def render_manual_application_flow(api_request):
         help="Off by default: the cover letter already maps your record to the requirements, "
         "and the section repeats your Experience bullets.",
     )
+    # Check a running generation job first, so its outcome decides what the buttons offer.
+    _poll_document_job(api_request)
+    _show_document_job_messages()
+    job_running = bool(st.session_state.get("manual_document_job"))
     if st.button(
-        "Generate customised CV and cover letter", type="primary", key="manual_generate"
+        "Generate customised CV and cover letter",
+        type="primary",
+        key="manual_generate",
+        disabled=job_running,
     ):
         try:
             body = {"approval_id": approval.get("approval_id")}
@@ -1009,17 +1140,18 @@ def render_manual_application_flow(api_request):
             st.session_state["manual_generate_options"] = {
                 key: value for key, value in body.items() if key != "approval_id"
             }
-            st.session_state["manual_generated_documents"] = _generate_documents(
-                api_request, draft_id, body
-            )
+            _start_document_job(api_request, draft_id, body)
         except API_CALL_ERRORS as error:
             st.error(f"Could not generate the document pair: {error}")
 
     generated = st.session_state.get("manual_generated_documents")
     if not generated:
         return
+    steps = st.session_state.get("manual_document_job_steps")
+    if steps:
+        st.caption("Generation steps: " + "; ".join(steps) + ".")
     if (generated.get("summary") or {}).get("mode") == "DETERMINISTIC" and st.button(
-        "Retry AI summary", key="manual_retry_summary"
+        "Retry AI summary", key="manual_retry_summary", disabled=job_running
     ):
         _retry_summary(api_request, draft_id, fingerprint, approval, generated)
         generated = st.session_state.get("manual_generated_documents")

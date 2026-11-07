@@ -17,7 +17,12 @@ const { generateEmbeddingMock } = vi.hoisted(() => ({
 
 vi.mock("../../services/agent.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/agent.js")>();
-  return { ...actual, generateEmbeddingWithProviderAndModel: generateEmbeddingMock };
+  const { batchEmbeddingFromPerInput } = await import("../fixtures/embeddingBatchMock.js");
+  return {
+    ...actual,
+    generateEmbeddingWithProviderAndModel: generateEmbeddingMock,
+    generateEmbeddingsWithProviderAndModel: batchEmbeddingFromPerInput(generateEmbeddingMock as any),
+  };
 });
 
 import { runMigrations } from "../../db/migrate.js";

@@ -7,6 +7,7 @@ import pg from 'pg';
 
 import { isPooledPostgresConnectionString, pgPoolConfig } from '../src/db/pgSsl.js';
 import { resolveWorkspaceContext } from '../src/workspace/context.js';
+import { isGeminiConfigured } from '../src/services/geminiConfig.js';
 
 dotenv.config();
 dotenv.config({ path: '.env.local' });
@@ -278,8 +279,8 @@ async function main(): Promise<void> {
       console.log('All requested current-context embeddings are already published; no provider call is needed.');
       return;
     }
-    if (!process.env.GEMINI_API_KEY && !process.env.GEMINI_FLASH_API_KEY) {
-      throw new Error('Gemini API credentials are not configured in the local environment.');
+    if (!isGeminiConfigured()) {
+      throw new Error('Gemini credentials (AI Studio key or Vertex configuration) are not configured in the local environment.');
     }
 
     process.env.DATABASE_URL = databaseUrl;

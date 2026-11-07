@@ -395,6 +395,49 @@ export const ManualDocumentsResponseSchema = z.object({
   cv_pages: z.number().int().min(1).optional(),
 }).strict();
 
+/** One step of an asynchronous document generation job (no prompt or document text). */
+export const ManualDocumentJobStepSchema = z.object({
+  step: z.enum(["SUMMARY", "LETTER", "FILES"]),
+  // FALLBACK: the AI writer failed and the section was assembled from the candidate's statements.
+  // SKIPPED: not needed (documents already stored, or the letter reused from an earlier revision).
+  status: z.enum(["PENDING", "RUNNING", "COMPLETED", "FALLBACK", "SKIPPED", "FAILED"]),
+  started_at: z.string().datetime({ offset: true }).nullable(),
+  finished_at: z.string().datetime({ offset: true }).nullable(),
+  elapsed_ms: z.number().int().min(0).nullable(),
+  provider: z.string().max(40).nullable(),
+  model: z.string().max(120).nullable(),
+  failure_kind: z.enum(["RATE_LIMITED", "TIMEOUT", "VALIDATION", "PROVIDER_ERROR"]).nullable(),
+}).strict();
+
+export const ManualDocumentJobStatusSchema = z.enum(["QUEUED", "RUNNING", "SUCCEEDED", "FAILED"]);
+
+/**
+ * POST /:draftId/documents (202/200) and GET /:draftId/document-jobs/:jobId. `result` is the
+ * ManualDocumentsResponse once SUCCEEDED; `error` is the API's error once FAILED. A RUNNING job past
+ * deadline_at is reported FAILED with code GENERATION_INTERRUPTED and may be started again.
+ */
+export const ManualDocumentJobResponseSchema = z.object({
+  schema_version: z.literal(MANUAL_APPLICATION_SCHEMA_VERSION),
+  ok: z.literal(true),
+  job: z.object({
+    job_id: Uuid,
+    draft_id: Uuid,
+    approval_id: Uuid,
+    status: ManualDocumentJobStatusSchema,
+    steps: z.array(ManualDocumentJobStepSchema).max(3),
+    created_at: z.string().datetime({ offset: true }),
+    started_at: z.string().datetime({ offset: true }).nullable(),
+    finished_at: z.string().datetime({ offset: true }).nullable(),
+    deadline_at: z.string().datetime({ offset: true }),
+    error: z.object({
+      code: z.string().min(1).max(64),
+      message: z.string().min(1).max(2000),
+      http_status: z.number().int().min(400).max(599).nullable(),
+    }).strict().nullable(),
+    result: ManualDocumentsResponseSchema.nullable(),
+  }).strict(),
+}).strict();
+
 export const ManualDownloadResponseSchema = z.object({
   schema_version: z.literal(MANUAL_APPLICATION_SCHEMA_VERSION),
   ok: z.literal(true),

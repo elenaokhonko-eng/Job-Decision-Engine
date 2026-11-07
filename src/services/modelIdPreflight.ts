@@ -1,4 +1,7 @@
+import { GoogleGenAI } from "@google/genai";
+
 import { readJsonResponseBounded } from "../security/boundedResponse.js";
+import { geminiBackend, geminiConfigProblem, resolveGeminiClientConfig } from "./geminiConfig.js";
 
 /**
  * Model-id preflight: compares every configured model id against the ids the provider account
@@ -8,6 +11,10 @@ import { readJsonResponseBounded } from "../security/boundedResponse.js";
  * The resolution chains below mirror MODEL_REGISTRY in src/services/agent.ts (first non-empty
  * env var wins, then the code default). src/tests/services/modelIdPreflight.test.ts checks that
  * they resolve to the same ids.
+ *
+ * With GEMINI_BACKEND=vertex the Gemini ids are checked one by one with the SDK's models.get on
+ * Vertex AI (publisher models at GOOGLE_CLOUD_LOCATION, default "global") instead of the AI Studio
+ * model list.
  */
 
 export type ModelIdProvider = "gemini" | "openai";
@@ -23,16 +30,12 @@ const MODEL_ID_SETTINGS: readonly ModelIdSetting[] = [
   { provider: "openai", envChain: ["EVALUATION_FALLBACK_MODEL", "OPENAI_MODEL"], defaultId: "gpt-4o-mini" },
   { provider: "gemini", envChain: ["EMBEDDING_PRIMARY_MODEL"], defaultId: "gemini-embedding-001" },
   { provider: "openai", envChain: ["EMBEDDING_FALLBACK_MODEL"], defaultId: "text-embedding-3-small" },
-  { provider: "gemini", envChain: ["DOCUMENT_PRIMARY_MODEL", "GEMINI_MODEL"], defaultId: "gemini-3.6-flash" },
+  { provider: "gemini", envChain: ["DOCUMENT_PRIMARY_MODEL"], defaultId: "gemini-3.8-flash" },
   { provider: "openai", envChain: ["DOCUMENT_FALLBACK_MODEL", "OPENAI_MODEL"], defaultId: "gpt-4o-mini" },
-  { provider: "gemini", envChain: ["REQUIREMENTS_GEMINI_MODEL", "EXTRACTION_GEMINI_MODEL"], defaultId: "gemini-3.5-flash-lite" },
+  { provider: "gemini", envChain: ["REQUIREMENTS_GEMINI_MODEL", "EXTRACTION_GEMINI_MODEL"], defaultId: "gemini-3.1-flash-lite" },
   { provider: "openai", envChain: ["REQUIREMENTS_OPENAI_MODEL", "EXTRACTION_OPENAI_MODEL"], defaultId: "gpt-5.6-luna" },
-  // Manual document writers: DOCUMENT_SECONDARY_GEMINI_MODEL, else the extraction Gemini model.
-  {
-    provider: "gemini",
-    envChain: ["DOCUMENT_SECONDARY_GEMINI_MODEL", "REQUIREMENTS_GEMINI_MODEL", "EXTRACTION_GEMINI_MODEL"],
-    defaultId: "gemini-3.5-flash-lite",
-  },
+  // Manual document writers' secondary Gemini model (used after a 429 or failure on the primary).
+  { provider: "gemini", envChain: ["DOCUMENT_SECONDARY_GEMINI_MODEL"], defaultId: "gemini-3.1-flash-lite" },
 ];
 
 export const DEFAULT_MODEL_ID_SOURCE = "(default)";
@@ -77,9 +80,16 @@ export interface ModelIdPreflightResult {
   skipped: ModelIdProvider[];
 }
 
+/** The part of the @google/genai client the Vertex check uses (injected in tests). */
+export interface VertexModelLookup {
+  models: { get(params: { model: string }): Promise<unknown> };
+}
+
 export interface ModelIdPreflightOptions {
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
+  /** Vertex mode only: the client used for models.get; defaults to an ADC-authenticated client. */
+  vertexClient?: VertexModelLookup;
   /** Per-request timeout for the model listing calls. */
   timeoutMs?: number;
 }
@@ -90,9 +100,64 @@ const MAX_GEMINI_PAGES = 50;
 const DEFAULT_LIST_TIMEOUT_MS = 15000;
 
 function geminiKey(env: NodeJS.ProcessEnv): string | null {
-  const key = env.GEMINI_API_KEY || env.GEMINI_FLASH_API_KEY;
-  if (!key || key.trim() === "" || key === "MY_GEMINI_API_KEY") return null;
-  return key;
+  const config = geminiConfigProblem(env) === null ? resolveGeminiClientConfig(env) : null;
+  return config?.backend === "studio" ? config.apiKey : null;
+}
+
+function isVertexBackend(env: NodeJS.ProcessEnv): boolean {
+  try {
+    return geminiBackend(env) === "vertex";
+  } catch {
+    return false;
+  }
+}
+
+function errorStatus(error: unknown): number | null {
+  const status = Number((error as { status?: unknown } | null)?.status);
+  if (Number.isFinite(status)) return status;
+  const message = String((error as { message?: unknown } | null)?.message ?? "");
+  if (/"code"\s*:\s*404\b|NOT_FOUND/.test(message)) return 404;
+  return null;
+}
+
+/**
+ * Vertex mode: models.get for each configured Gemini id at the configured location. A 404 means
+ * the id is not available there; any other failure stops the check with a warning.
+ */
+async function checkVertexModelIds(
+  env: NodeJS.ProcessEnv,
+  configured: ConfiguredModelId[],
+  result: ModelIdPreflightResult,
+  injected: VertexModelLookup | undefined,
+): Promise<void> {
+  const problem = geminiConfigProblem(env);
+  if (problem) {
+    result.warnings.push(`could not check Gemini models on Vertex AI: ${problem}`);
+    return;
+  }
+  const config = resolveGeminiClientConfig(env);
+  if (config.backend !== "vertex") return;
+  const client: VertexModelLookup = injected ??
+    new GoogleGenAI({ vertexai: true, project: config.project, location: config.location });
+  for (const entry of configured) {
+    if (entry.provider !== "gemini") continue;
+    try {
+      await client.models.get({ model: entry.id });
+    } catch (error) {
+      if (errorStatus(error) === 404) {
+        result.unknown.push({ ...entry, message: unknownVertexModelIdMessage(entry, config.location) });
+        continue;
+      }
+      result.warnings.push(`could not check Gemini models on Vertex AI: ${shortReason(error, "", DEFAULT_LIST_TIMEOUT_MS)}`);
+      return;
+    }
+  }
+  result.checked.push("gemini");
+}
+
+export function unknownVertexModelIdMessage(entry: ConfiguredModelId, location: string): string {
+  return `Model id "${entry.id}" (${entry.sources.join(", ")}) is not available on Vertex AI at location "${location}"; ` +
+    "choose a Vertex publisher model id or change GOOGLE_CLOUD_LOCATION.";
 }
 
 function openaiKey(env: NodeJS.ProcessEnv): string | null {
@@ -186,8 +251,11 @@ export async function checkConfiguredModelIds(options: ModelIdPreflightOptions =
   const configured = configuredModelIds(env);
   const result: ModelIdPreflightResult = { unknown: [], warnings: [], checked: [], skipped: [] };
 
+  const vertex = isVertexBackend(env);
+  if (vertex) await checkVertexModelIds(env, configured, result, options.vertexClient);
+
   const providers: Array<{ provider: ModelIdProvider; key: string | null; list: typeof listGeminiModelIds }> = [
-    { provider: "gemini", key: geminiKey(env), list: listGeminiModelIds },
+    ...(vertex ? [] : [{ provider: "gemini" as const, key: geminiKey(env), list: listGeminiModelIds }]),
     { provider: "openai", key: openaiKey(env), list: listOpenAIModelIds },
   ];
 

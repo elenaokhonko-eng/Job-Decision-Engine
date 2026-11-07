@@ -42,10 +42,21 @@ import {
   completePipelineTaskAndRun,
   enqueuePipelineTask,
   failPipelineTask,
+  deferPipelineTaskForRateLimit,
+  rateLimitedRetryAt,
   heartbeatPipelineTask,
   releasePipelineTaskForRetry,
   type ClaimedPipelineTask,
 } from "./pipelineTasks.js";
+import {
+  diffProviderCalls,
+  isRateLimitedFailure,
+  ModelRateLimitedError,
+  rateLimitRetryAfterMs,
+  snapshotProviderCalls,
+  summarizeProviderCalls,
+  type ProviderCallSummary,
+} from "../services/modelCallResilience.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
 dotenv.config();
@@ -145,6 +156,10 @@ export interface PipelineStageWorkerSummary {
   blocked: number;
   failed: number;
   deadLettered: number;
+  /** Tasks rescheduled because their model call was rate limited (429); no attempt consumed. */
+  rateLimitDeferred: number;
+  /** Model calls made by this run, by provider/model, with 429/timeout/retry counts. */
+  providerCalls?: ProviderCallSummary;
   exitReason: PipelineWorkerExitReason;
   durationMs: number;
   byType: Record<string, {
@@ -2503,13 +2518,20 @@ async function executeStageTask(
   }
 
   if (taskType === "EXTRACT_QUOTED_REQUIREMENTS") {
-    await dependencies.runRequirementsExtraction(clientOrPool, {
+    const quotedSummary = await dependencies.runRequirementsExtraction(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
       quotedMode: "with_quoted",
       ignoreRetryWindow: true,
     });
+    // A rate-limited (429) quoted run is capacity, not a result: reschedule the enrichment.
+    if ((quotedSummary?.metrics?.quotedRateLimited ?? 0) > 0) {
+      throw new ModelRateLimitedError(
+        `Quoted requirement extraction was rate limited for job_version_id=${jobVersionId}; rescheduling.`,
+        { provider: "model", model: null, retryAfterMs: null, attempts: 1 },
+      );
+    }
     // Quoted extraction is optional enrichment. The deterministic run is the
     // gate for continuing the pipeline; quoted provider/validation failures
     // remain in the extraction audit and do not create manual-review state.
@@ -2531,6 +2553,20 @@ async function executeStageTask(
       }
     );
     const fallbackFailed = summary.fallback?.failed ?? 0;
+    const onlyRateLimited = (batch: { failed: number; rateLimited?: number } | undefined) =>
+      !batch || batch.failed === 0 || (batch.rateLimited ?? 0) === batch.failed;
+    if (
+      summary.primary.failed > 0 &&
+      (summary.primary.rateLimited ?? 0) > 0 &&
+      onlyRateLimited(summary.primary) &&
+      onlyRateLimited(summary.fallback) &&
+      (fallbackFailed > 0 || !summary.fallback)
+    ) {
+      throw new ModelRateLimitedError(
+        `Embedding publication was rate limited for ${summary.primary.failed + fallbackFailed} input(s); rescheduling.`,
+        { provider: "embedding", model: null, retryAfterMs: null, attempts: 1 },
+      );
+    }
     if (summary.primary.failed > 0 && fallbackFailed > 0) {
       throw new Error(
         `Embedding publication failed for ${summary.primary.failed + fallbackFailed} input(s).`
@@ -2920,6 +2956,7 @@ export async function runPipelineStageTaskWorker(
     60_000,
   ));
   const canStartAnotherTask = () => Date.now() + minTimeToStartTaskMs < deadlineAt;
+  const providerCallsAtStart = snapshotProviderCalls();
   const summary: PipelineStageWorkerSummary = {
     seeded: null,
     stalePendingReconciliation: {
@@ -2941,6 +2978,7 @@ export async function runPipelineStageTaskWorker(
     blocked: 0,
     failed: 0,
     deadLettered: 0,
+    rateLimitDeferred: 0,
     exitReason: "QUEUE_DRAINED",
     durationMs: 0,
     byType: {},
@@ -3150,6 +3188,20 @@ export async function runPipelineStageTaskWorker(
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
+        if (isRateLimitedFailure(error)) {
+          // Capacity, not a job outcome: reschedule without consuming an attempt, never
+          // dead-letter and never mark the job PROCESSING_ERROR. The claim was already counted
+          // once against this lane's budget; the deferral adds nothing to it.
+          await deferPipelineTaskForRateLimit(
+            task,
+            `RATE_LIMITED: ${message}`,
+            rateLimitedRetryAt(rateLimitRetryAfterMs(error)),
+            laneClient as any,
+            { context: ctx },
+          );
+          summary.rateLimitDeferred += 1;
+          return;
+        }
         const exhausted = task.attemptNumber >= task.maxAttempts;
         await failPipelineTask(task, message, laneClient as any, {
           context: ctx,
@@ -3259,6 +3311,10 @@ export async function runPipelineStageTaskWorker(
       (claimedByType[taskType] ?? 0) >= Math.max(1, Math.floor(options.maxTasksByType?.[taskType] ?? maxTasks))
     );
     summary.durationMs = durationMs;
+    summary.providerCalls = summarizeProviderCalls(diffProviderCalls(providerCallsAtStart, snapshotProviderCalls()));
+    if (summary.providerCalls.total_calls > 0) {
+      console.log(`[pipeline-worker] provider calls this run: ${JSON.stringify(summary.providerCalls)}`);
+    }
     summary.exitReason = summary.claimed >= maxTasks
       ? "MAX_TASKS_REACHED"
       : durationMs >= wallClockMs || !canStartAnotherTask()

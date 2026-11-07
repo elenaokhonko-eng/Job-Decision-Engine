@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runEmbeddingBatch, runEmbeddingBatchWithFallback } from '../../embeddings/batchCoordinator.js';
 import * as agent from '../../services/agent.js';
 import type { WorkspaceContext } from '../../workspace/context.js';
+import { batchEmbeddingFromPerInput } from '../fixtures/embeddingBatchMock.js';
 
 describe('runEmbeddingBatch', () => {
   const context: WorkspaceContext = {
@@ -56,7 +57,9 @@ describe('runEmbeddingBatch', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel').mockResolvedValue([0.1, 0.2, 0.3, 0.4]);
+    vi.spyOn(agent, 'generateEmbeddingsWithProviderAndModel').mockImplementation(
+      batchEmbeddingFromPerInput(async () => [0.1, 0.2, 0.3, 0.4])
+    );
 
     const result = await runEmbeddingBatch(
       '11111111-1111-4111-8111-111111111111',
@@ -220,7 +223,8 @@ describe('runEmbeddingBatch', () => {
     const fakeClient = { query, release: vi.fn() } as any;
     const fakePool = { connect: vi.fn().mockResolvedValue(fakeClient) } as any;
 
-    const spy = vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel');
+    const spy = vi.fn<(text: string, provider: string, model: string) => Promise<number[]>>();
+    vi.spyOn(agent, 'generateEmbeddingsWithProviderAndModel').mockImplementation(batchEmbeddingFromPerInput(spy));
     spy
       .mockResolvedValueOnce([0.1, 0.2, 0.3, 0.4])
       .mockResolvedValueOnce([0.2, 0.3, 0.4, 0.5]);
@@ -273,9 +277,11 @@ describe('runEmbeddingBatch', () => {
   });
 
   it.each([
-    { concurrency: '3', expectedMaxInFlight: 3 },
-    { concurrency: '1', expectedMaxInFlight: 1 },
-  ])('bounds concurrent provider calls to EMBEDDING_PROVIDER_CONCURRENCY=$concurrency and keeps per-input outcomes', async ({ concurrency, expectedMaxInFlight }) => {
+    { concurrency: '3', chunkSize: 1, expectedMaxInFlight: 3, expectedRequests: 7 },
+    { concurrency: '1', chunkSize: 1, expectedMaxInFlight: 1, expectedRequests: 7 },
+    { concurrency: '2', chunkSize: 2, expectedMaxInFlight: 2, expectedRequests: 4 },
+  ])('bounds concurrent chunk requests to EMBEDDING_PROVIDER_CONCURRENCY=$concurrency (chunk $chunkSize) and keeps per-input outcomes', async ({ concurrency, chunkSize, expectedMaxInFlight, expectedRequests }) => {
+    vi.spyOn(agent, 'embeddingRequestBatchSize').mockReturnValue(chunkSize);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const saved = process.env.EMBEDDING_PROVIDER_CONCURRENCY;
@@ -305,14 +311,18 @@ describe('runEmbeddingBatch', () => {
     });
     let inFlight = 0;
     let maxInFlight = 0;
-    const spy = vi.spyOn(agent, 'generateEmbeddingWithProviderAndModel').mockImplementation(async (text: string) => {
+    const perInput = vi.fn(async (text: string) => {
+      // One input fails at the provider; the others succeed independently.
+      if (text === 'text 4') throw new Error('provider rejected one input');
+      return [0.1, 0.2, 0.3, 0.4];
+    });
+    const toBatch = batchEmbeddingFromPerInput(perInput);
+    const spy = vi.spyOn(agent, 'generateEmbeddingsWithProviderAndModel').mockImplementation(async (texts, provider, model) => {
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
       await new Promise((resolve) => setTimeout(resolve, 5));
       inFlight -= 1;
-      // One input fails at the provider; the others succeed independently.
-      if (text === 'text 4') throw new Error('provider rejected one input');
-      return [0.1, 0.2, 0.3, 0.4];
+      return toBatch(texts, provider, model);
     });
 
     try {
@@ -329,7 +339,9 @@ describe('runEmbeddingBatch', () => {
       );
 
       expect(maxInFlight).toBe(expectedMaxInFlight);
-      expect(spy.mock.calls.map((call) => call[0])).toEqual(inputs.map((input) => input.content_text));
+      expect(spy).toHaveBeenCalledTimes(expectedRequests);
+      expect(spy.mock.calls.every((call) => call[0].length <= chunkSize)).toBe(true);
+      expect(spy.mock.calls.flatMap((call) => call[0])).toEqual(inputs.map((input) => input.content_text));
       expect(result).toMatchObject({ processed: 7, succeeded: 6, failed: 1 });
       expect(result.failedInputIds).toEqual([inputs[4].id]);
       const sql = query.mock.calls.map((call) => String(call[0]));

@@ -71,6 +71,7 @@ import {
   ManualComparisonSchema,
   ManualCoverLetterReviewSchema,
   ManualDocumentsResponseSchema,
+  ManualDocumentJobResponseSchema,
   ManualDownloadResponseSchema,
   ManualExistingJobCompareRequestSchema,
   ManualGenerateRequestSchema,
@@ -88,6 +89,17 @@ import {
 } from "../../contracts/manualApplication.js";
 import { isCurrentReadyApplicationReadiness, loadCurrentApplicationReadiness } from "../../services/currentApplicationReadiness.js";
 import { fetchJobContent, type JobContentResult } from "../../ingestion/jobContentFetcher.js";
+import { publicErrorSummary } from "../../security/publicErrorSummary.js";
+import {
+  createOrGetDocumentJob,
+  documentJobResponse,
+  DocumentJobTracker,
+  finishDocumentJobFailed,
+  finishDocumentJobSucceeded,
+  loadDocumentJob,
+  markDocumentJobRunning,
+  saveDocumentJobSteps,
+} from "../../documents/manualDocumentJobs.js";
 import { linkedInJobIdFromUrl, searchApiLinkedInDetailsFromEnv } from "../../ingestion/searchApi/searchApiClient.js";
 
 function errorPayload(code: "INVALID_REQUEST" | "DESCRIPTION_INSUFFICIENT" | "FORBIDDEN" | "NOT_FOUND" | "JOB_VERSION_CHANGED" | "IDENTITY_CONFLICT" | "APPROVAL_STALE" | "DEPENDENCY_UNAVAILABLE" | "INTERNAL_ERROR" | "CONCURRENT_UPDATE", message: string, retryAfter?: string) {
@@ -683,6 +695,7 @@ async function stageComparisonDraft(
   // and the failure surfaces as a comparison warning via quotedRequirementExtractionWarning.
   const requirementSummary = await runRequirementsExtraction(pool, {
     context: ctx, jobVersionIds: [selected.jobVersionId], quotedMode: requirementMode, failFastOnQuotedProviderFailure: false,
+    interactive: true,
   });
   const reqDetail = requirementSummary.details.find((item) => item.jobVersionId === selected.jobVersionId);
   if (reqDetail?.error) {
@@ -879,6 +892,11 @@ export interface ManualApplicationRouterDeps {
   coverLetterWriter?: CoverLetterWriter;
   /** Writes the CV summary; defaults to the document model route. */
   summaryWriter?: SummaryWriter;
+  /**
+   * Starts a document generation job in the background (default: in this process, not awaited).
+   * Tests inject one to await the job.
+   */
+  startDocumentJob?: (run: () => Promise<void>) => void;
 }
 
 type ManualWrittenReview = z.infer<typeof ManualCoverLetterReviewSchema>;
@@ -1119,9 +1137,231 @@ async function prepareWrittenSections(
   }
 }
 
+type ManualGenerateRequestData = z.infer<typeof ManualGenerateRequestSchema>;
+
+/** The checks every generation request passes before work starts; throws ManualFlowError. */
+async function documentGenerationPreconditions(pool: pg.Pool, ctx: WorkspaceContext, draftId: string, approvalId: string) {
+  if (!(await hasWritableMembership(pool, ctx))) {
+    throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to generate documents.");
+  }
+  const selected = await loadPersistedApproval(pool, ctx, draftId, approvalId);
+  if (!selected) throw new ManualFlowError(403, "FORBIDDEN", "No matching explicit approval exists for this workspace and draft.");
+  const current = await loadCurrentInputs(pool, ctx, selectedPostingFromApproval(selected.approval));
+  if (!current) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "The exact approved job version is no longer current. Compare and approve the current posting again.");
+  const currentFingerprint = assertCurrentApproval(selected.approval, selected.comparison, current);
+  const contact = current.contact;
+  const fullName = contact.full_name?.trim();
+  const phone = contact.phone?.trim();
+  if (!fullName || !phone) {
+    throw new ManualFlowError(409, "APPROVAL_STALE", "The current private contact graph must contain a candidate name and phone before documents can be generated.");
+  }
+  return { selected, current, currentFingerprint, contact, fullName, phone };
+}
+
+/**
+ * Generates (or returns the stored) CV and cover letter for one approval: the AI summary, the AI
+ * letter, then the four files, stored in one serializable transaction. Records progress on
+ * `tracker` when given. Never records an application or a submission.
+ */
+async function generateManualDocuments(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  draftId: string,
+  requestData: ManualGenerateRequestData,
+  writers: { summary: SummaryWriter; coverLetter: CoverLetterWriter },
+  tracker?: DocumentJobTracker,
+): Promise<z.infer<typeof ManualDocumentsResponseSchema>> {
+  const approvalId = requestData.approval_id;
+  const { selected, current, currentFingerprint, contact, fullName, phone } =
+    await documentGenerationPreconditions(pool, ctx, draftId, approvalId);
+  // Documents are built from the comparison as the candidate corrected it when approving.
+  const reviewed = applyManualCorrections(selected.comparison, selected.approval.corrections);
+  const roleLayout = requestData.role_layout ?? {};
+  const plannedRoles = new Set(planRoles(reviewed).map((plan) => plan.engagement_id));
+  const unknownRoles = Object.keys(roleLayout).filter((id) => !plannedRoles.has(id));
+  if (unknownRoles.length > 0) {
+    throw new ManualFlowError(400, "INVALID_REQUEST", `Role choices name roles that are not in the approved comparison: ${unknownRoles.join(", ")}.`);
+  }
+  const documentContact = { ...contact, full_name: fullName, phone };
+  const documentOptions: ControlledDocumentOptions = {
+    roleLayout, includeGapNotes: requestData.include_gap_note !== false, includeMatchSection: requestData.include_match_section === true,
+  };
+  // Documents already generated for this approval are returned as stored, without calling the model again.
+  const alreadyGenerated = await pool.query(
+    `SELECT 1 FROM manual_application_document_artifacts WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 LIMIT 1`,
+    [ctx.workspaceId, ctx.userId, approvalId]);
+  const reusedLetter = alreadyGenerated.rows.length === 0 && requestData.reuse_cover_letter_from
+    ? await loadReusableCoverLetter(pool, ctx, draftId, requestData.reuse_cover_letter_from, selected.approval, evidenceOf(reviewed))
+    : undefined;
+  const letter = alreadyGenerated.rows.length > 0
+    ? null
+    : await prepareWrittenSections(pool, ctx, selected.approval, reviewed, documentContact,
+      tracker
+        ? { summary: tracker.wrap("SUMMARY", writers.summary), coverLetter: tracker.wrap("LETTER", writers.coverLetter) }
+        : writers,
+      documentOptions, { includeGapNote: requestData.include_gap_note }, reusedLetter);
+  // Writers not called (documents already stored, AI writing off, or a reused letter) are SKIPPED.
+  await tracker?.skipPending();
+  await tracker?.start("FILES");
+  const docs = letter?.docs ?? buildControlledDocuments(reviewed, documentContact, documentOptions);
+  const cvDocx = await renderControlledDocx(docs.cv);
+  const cvPdf = renderControlledPdf(docs.cv);
+  const letterDocx = await renderControlledDocx(docs.coverLetter);
+  const letterPdf = renderControlledPdf(docs.coverLetter);
+  const artifacts = [
+    { type: "CV", format: "DOCX", filename: `${safeFilename(current.input.title)}_CV.docx`, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: cvDocx },
+    { type: "CV", format: "PDF", filename: `${safeFilename(current.input.title)}_CV.pdf`, mime: "application/pdf", content: cvPdf },
+    { type: "COVER_LETTER", format: "DOCX", filename: `${safeFilename(current.input.company)}_Cover_Letter.docx`, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: letterDocx },
+    { type: "COVER_LETTER", format: "PDF", filename: `${safeFilename(current.input.company)}_Cover_Letter.pdf`, mime: "application/pdf", content: letterPdf },
+  ];
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    if (!(await hasWritableMembership(client, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "Workspace membership no longer permits document generation.");
+    const locked = await loadPersistedApproval(client, ctx, draftId, approvalId, true);
+    if (!locked) throw new ManualFlowError(403, "FORBIDDEN", "The approved comparison is no longer available.");
+    const lockedCurrent = await loadCurrentInputs(client, ctx, selectedPostingFromApproval(locked.approval));
+    if (!lockedCurrent) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "The exact approved job version is no longer current.");
+    const lockedFingerprint = assertCurrentApproval(locked.approval, locked.comparison, lockedCurrent);
+    if (lockedFingerprint !== currentFingerprint) throw new ManualFlowError(409, "APPROVAL_STALE", "Approved inputs changed while documents were being prepared.");
+    const existing = await client.query<{ document_type: "CV" | "COVER_LETTER"; format: "DOCX" | "PDF"; filename: string; mime_type: string; document_run_id: string }>(
+      `SELECT document_type,format,filename,mime_type,document_run_id FROM manual_application_document_artifacts
+       WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 ORDER BY document_type,format`,
+      [ctx.workspaceId, ctx.userId, approvalId],
+    );
+    if (existing.rows.length !== 0) {
+      validateManualArtifactPair(existing.rows);
+      const storedRuns = await client.query<{ document_type: "CV" | "COVER_LETTER"; output_manifest: Record<string, any> }>(
+        `SELECT document_type,output_manifest FROM manual_application_document_runs WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`,
+        [ctx.workspaceId, ctx.userId, approvalId]);
+      await client.query("COMMIT");
+      // Runs stored before preview_markdown existed were deterministic, so rebuilding them reproduces the same text.
+      const stored = (type: "CV" | "COVER_LETTER") => storedRuns.rows.find((run) => run.document_type === type)?.output_manifest ?? {};
+      const storedPreview = (type: "CV" | "COVER_LETTER", rebuilt: string) =>
+        typeof stored(type).preview_markdown === "string" ? stored(type).preview_markdown as string : rebuilt;
+      const storedReview = ManualCoverLetterReviewSchema.safeParse(stored("COVER_LETTER").cover_letter_review);
+      const storedSummaryReview = ManualCoverLetterReviewSchema.safeParse(stored("CV").summary_review);
+      const response = ManualDocumentsResponseSchema.parse({
+        schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, draft_id: draftId, approval_id: approvalId,
+        comparison_fingerprint: currentFingerprint,
+        preview: { cv: storedPreview("CV", docs.cv), cover_letter: storedPreview("COVER_LETTER", docs.coverLetter) },
+        artifacts: existing.rows.map(({ document_type, format, filename, mime_type }) => ({ type: document_type, format, filename, mime_type })),
+        ...(storedReview.success ? { cover_letter: storedReview.data } : {}),
+        ...(storedSummaryReview.success ? { summary: storedSummaryReview.data } : {}),
+        revision: locked.approval.revision, corrections_applied: locked.approval.corrections.length,
+      });
+      await tracker?.finish("FILES", "COMPLETED");
+      return response;
+    }
+    const runIds: Record<string, string> = {};
+    for (const type of ["CV", "COVER_LETTER"] as const) {
+      const content = type === "CV" ? docs.cv : docs.coverLetter;
+      const claimSet = docs.claims.filter((claim) => (claim.section === "Cover letter") === (type === "COVER_LETTER"));
+      const sectionRun = letter ? (type === "COVER_LETTER" ? letter.letter : letter.summary) : null;
+      const run = await client.query<{ id: string }>(
+        `INSERT INTO manual_application_document_runs (
+          workspace_id,user_id,approval_id,canonical_job_id,job_version_id,source_observation_id,job_content_hash,
+          candidate_profile_id,profile_version_id,profile_contact_fact_ids,profile_contact_fingerprint,
+          preference_context_fingerprint,requirement_set_id,comparator_version,context_fingerprint,
+          comparison_fingerprint,document_type,status,generator_version,output_manifest
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'COMPLETED',$19,$18::jsonb)
+         RETURNING id`,
+        [ctx.workspaceId, ctx.userId, approvalId, locked.approval.canonical_job_id, locked.approval.job_version_id,
+          locked.approval.source_observation_id, locked.approval.job_content_hash, locked.approval.candidate_profile_id,
+          locked.approval.profile_version_id, locked.approval.profile_contact_fact_ids, locked.approval.profile_contact_fingerprint,
+          locked.approval.preference_context_fingerprint, locked.approval.requirement_set_id, locked.approval.comparator_version,
+          locked.approval.context_fingerprint, currentFingerprint, type,
+          JSON.stringify({ manual_preparation: true, draft_id: draftId, approval_id: approvalId,
+            requirement_set_id: locked.approval.requirement_set_id, comparison_fingerprint: currentFingerprint,
+            factual_template: true, automatic_readiness_mutated: false, role_layout: roleLayout, preview_markdown: content,
+            revision: locked.approval.revision, corrections: locked.approval.corrections,
+            corrections_fingerprint: locked.approval.corrections_fingerprint,
+            ...(sectionRun ? { ...sectionRun.manifest, [type === "COVER_LETTER" ? "cover_letter_review" : "summary_review"]: sectionRun.review } : {}) }),
+          sectionRun ? sectionRun.generatorVersion : "manual_preparation_v1"]);
+      runIds[type] = run.rows[0].id;
+      for (const claim of claimSet) {
+        await client.query(
+          `INSERT INTO manual_application_document_claims (
+            workspace_id,manual_document_run_id,section_label,claim_text,evidence_ids,requirement_keys
+           ) VALUES ($1,$2,$3,$4,$5,$6)`,
+          [ctx.workspaceId, runIds[type], claim.section, claim.text, claim.evidenceIds, claim.requirementKeys]);
+      }
+    }
+    for (const artifact of artifacts) {
+      await client.query(
+        `INSERT INTO manual_application_document_artifacts (
+          workspace_id,user_id,approval_id,document_run_id,document_type,format,filename,mime_type,content,sha256
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (approval_id,document_type,format) DO NOTHING`,
+        [ctx.workspaceId, ctx.userId, approvalId, runIds[artifact.type], artifact.type, artifact.format,
+          artifact.filename, artifact.mime, artifact.content, sha256Buffer(artifact.content)]);
+    }
+    const pair = await client.query<{ document_type: "CV" | "COVER_LETTER"; format: "DOCX" | "PDF"; document_run_id: string }>(
+      `SELECT document_type,format,document_run_id FROM manual_application_document_artifacts
+       WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`, [ctx.workspaceId, ctx.userId, approvalId]);
+    validateManualArtifactPair(pair.rows);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally { client.release(); }
+  const response = ManualDocumentsResponseSchema.parse({
+    schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, draft_id: draftId, approval_id: approvalId,
+    comparison_fingerprint: currentFingerprint, preview: { cv: docs.cv, cover_letter: docs.coverLetter },
+    artifacts: artifacts.map(({ type, format, filename, mime }) => ({ type, format, filename, mime_type: mime })),
+    ...(letter ? { cover_letter: letter.letter.review, summary: letter.summary.review } : {}),
+    revision: selected.approval.revision, corrections_applied: selected.approval.corrections.length,
+    cv_pages: pdfPageCount(cvPdf),
+  });
+  await tracker?.finish("FILES", "COMPLETED");
+  return response;
+}
+
+/**
+ * Runs one generation job in this process: RUNNING, then SUCCEEDED with the documents response or
+ * FAILED with the API error. A job another request already claimed is left alone.
+ */
+async function runManualDocumentJob(
+  pool: pg.Pool,
+  ctx: WorkspaceContext,
+  jobId: string,
+  draftId: string,
+  requestData: ManualGenerateRequestData,
+  writers: { summary: SummaryWriter; coverLetter: CoverLetterWriter },
+): Promise<void> {
+  if (!(await markDocumentJobRunning(pool, ctx, jobId))) return;
+  const tracker = new DocumentJobTracker(jobId, (steps) => saveDocumentJobSteps(pool, ctx, jobId, steps));
+  const startedAt = Date.now();
+  try {
+    const response = await generateManualDocuments(pool, ctx, draftId, requestData, writers, tracker);
+    if (!(await finishDocumentJobSucceeded(pool, ctx, jobId, response, tracker.steps))) {
+      console.warn(`[manual-documents] job=${jobId} finished after it was marked interrupted; the stored documents remain available.`);
+    }
+    console.log(`[manual-documents] job=${jobId} SUCCEEDED elapsed_ms=${Date.now() - startedAt}`);
+  } catch (error) {
+    tracker.failRunning();
+    const flowError = error instanceof ManualFlowError ? error : null;
+    const code = flowError ? flowError.code : error instanceof ZodError ? "INTERNAL_ERROR" : "GENERATION_FAILED";
+    const message = flowError
+      ? flowError.message
+      : error instanceof ZodError
+        ? "Persisted manual application data failed runtime contract validation."
+        : `Document generation failed: ${publicErrorSummary(error, "documents")}`;
+    console.warn(`[manual-documents] job=${jobId} FAILED code=${code} elapsed_ms=${Date.now() - startedAt}`);
+    await finishDocumentJobFailed(pool, ctx, jobId, { code, message, httpStatus: flowError ? flowError.status : 500 }, tracker.steps);
+  }
+}
+
 export function createManualApplicationRouter({
   pool, resolveContext, evidencePairer = pairEvidenceWithModel, coverLetterWriter = writeCoverLetterWithModel,
   summaryWriter = writeSummaryWithModel,
+  startDocumentJob = (run) => {
+    // runManualDocumentJob records every failure on the job row; this only guards against a lost
+    // database connection while recording it.
+    void run().catch((error: unknown) => {
+      console.error(`[manual-documents] document job could not record its outcome: ${publicErrorSummary(error, "documents")}`);
+    });
+  },
 }: ManualApplicationRouterDeps): express.Router {
   const router = express.Router();
   const handler = (fn: (req: express.Request, res: express.Response) => Promise<void>): express.RequestHandler =>
@@ -1611,6 +1851,8 @@ export function createManualApplicationRouter({
       throw error;
     } finally { client.release(); }
   }));
+  // Starts (or returns) the durable generation job for this approval and answers at once; the client
+  // polls GET /:draftId/document-jobs/:jobId. Invalid, forbidden or stale requests fail here directly.
   router.post("/:draftId/documents", handler(async (req, res) => {
     const ctx = resolveContext(req);
     const draftId = String(req.params.draftId || "");
@@ -1618,157 +1860,41 @@ export function createManualApplicationRouter({
     if (!z.string().uuid().safeParse(draftId).success || !request.success) {
       throw new ManualFlowError(400, "INVALID_REQUEST", "A valid draft and its explicit approval ID are required.");
     }
-    const approvalId = request.data.approval_id;
-    if (!(await hasWritableMembership(pool, ctx))) {
-      throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to generate documents.");
-    }
-    const selected = await loadPersistedApproval(pool, ctx, draftId, approvalId);
-    if (!selected) throw new ManualFlowError(403, "FORBIDDEN", "No matching explicit approval exists for this workspace and draft.");
-    const current = await loadCurrentInputs(pool, ctx, selectedPostingFromApproval(selected.approval));
-    if (!current) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "The exact approved job version is no longer current. Compare and approve the current posting again.");
-    const currentFingerprint = assertCurrentApproval(selected.approval, selected.comparison, current);
-    const contact = current.contact;
-    const fullName = contact.full_name?.trim();
-    const phone = contact.phone?.trim();
-    if (!fullName || !phone) {
-      throw new ManualFlowError(409, "APPROVAL_STALE", "The current private contact graph must contain a candidate name and phone before documents can be generated.");
-    }
-    // Documents are built from the comparison as the candidate corrected it when approving.
-    const reviewed = applyManualCorrections(selected.comparison, selected.approval.corrections);
-    const roleLayout = request.data.role_layout ?? {};
-    const plannedRoles = new Set(planRoles(reviewed).map((plan) => plan.engagement_id));
-    const unknownRoles = Object.keys(roleLayout).filter((id) => !plannedRoles.has(id));
-    if (unknownRoles.length > 0) {
-      throw new ManualFlowError(400, "INVALID_REQUEST", `Role choices name roles that are not in the approved comparison: ${unknownRoles.join(", ")}.`);
-    }
-    const documentContact = { ...contact, full_name: fullName, phone };
-    const documentOptions: ControlledDocumentOptions = {
-      roleLayout, includeGapNotes: request.data.include_gap_note !== false, includeMatchSection: request.data.include_match_section === true,
-    };
-    // Documents already generated for this approval are returned as stored, without calling the model again.
-    const alreadyGenerated = await pool.query(
-      `SELECT 1 FROM manual_application_document_artifacts WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 LIMIT 1`,
-      [ctx.workspaceId, ctx.userId, approvalId]);
-    const reusedLetter = alreadyGenerated.rows.length === 0 && request.data.reuse_cover_letter_from
-      ? await loadReusableCoverLetter(pool, ctx, draftId, request.data.reuse_cover_letter_from, selected.approval, evidenceOf(reviewed))
-      : undefined;
-    const letter = alreadyGenerated.rows.length > 0
-      ? null
-      : await prepareWrittenSections(pool, ctx, selected.approval, reviewed, documentContact,
-        { summary: summaryWriter, coverLetter: coverLetterWriter }, documentOptions, { includeGapNote: request.data.include_gap_note }, reusedLetter);
-    const docs = letter?.docs ?? buildControlledDocuments(reviewed, documentContact, documentOptions);
-    const cvDocx = await renderControlledDocx(docs.cv);
-    const cvPdf = renderControlledPdf(docs.cv);
-    const letterDocx = await renderControlledDocx(docs.coverLetter);
-    const letterPdf = renderControlledPdf(docs.coverLetter);
-    const artifacts = [
-      { type: "CV", format: "DOCX", filename: `${safeFilename(current.input.title)}_CV.docx`, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: cvDocx },
-      { type: "CV", format: "PDF", filename: `${safeFilename(current.input.title)}_CV.pdf`, mime: "application/pdf", content: cvPdf },
-      { type: "COVER_LETTER", format: "DOCX", filename: `${safeFilename(current.input.company)}_Cover_Letter.docx`, mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", content: letterDocx },
-      { type: "COVER_LETTER", format: "PDF", filename: `${safeFilename(current.input.company)}_Cover_Letter.pdf`, mime: "application/pdf", content: letterPdf },
-    ];
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
-      if (!(await hasWritableMembership(client, ctx))) throw new ManualFlowError(403, "FORBIDDEN", "Workspace membership no longer permits document generation.");
-      const locked = await loadPersistedApproval(client, ctx, draftId, approvalId, true);
-      if (!locked) throw new ManualFlowError(403, "FORBIDDEN", "The approved comparison is no longer available.");
-      const lockedCurrent = await loadCurrentInputs(client, ctx, selectedPostingFromApproval(locked.approval));
-      if (!lockedCurrent) throw new ManualFlowError(409, "JOB_VERSION_CHANGED", "The exact approved job version is no longer current.");
-      const lockedFingerprint = assertCurrentApproval(locked.approval, locked.comparison, lockedCurrent);
-      if (lockedFingerprint !== currentFingerprint) throw new ManualFlowError(409, "APPROVAL_STALE", "Approved inputs changed while documents were being prepared.");
-      const existing = await client.query<{ document_type: "CV" | "COVER_LETTER"; format: "DOCX" | "PDF"; filename: string; mime_type: string; document_run_id: string }>(
-        `SELECT document_type,format,filename,mime_type,document_run_id FROM manual_application_document_artifacts
-         WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3 ORDER BY document_type,format`,
-        [ctx.workspaceId, ctx.userId, approvalId],
-      );
-      if (existing.rows.length !== 0) {
-        validateManualArtifactPair(existing.rows);
-        const storedRuns = await client.query<{ document_type: "CV" | "COVER_LETTER"; output_manifest: Record<string, any> }>(
-          `SELECT document_type,output_manifest FROM manual_application_document_runs WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`,
-          [ctx.workspaceId, ctx.userId, approvalId]);
-        await client.query("COMMIT");
-        // Runs stored before preview_markdown existed were deterministic, so rebuilding them reproduces the same text.
-        const stored = (type: "CV" | "COVER_LETTER") => storedRuns.rows.find((run) => run.document_type === type)?.output_manifest ?? {};
-        const storedPreview = (type: "CV" | "COVER_LETTER", rebuilt: string) =>
-          typeof stored(type).preview_markdown === "string" ? stored(type).preview_markdown as string : rebuilt;
-        const storedReview = ManualCoverLetterReviewSchema.safeParse(stored("COVER_LETTER").cover_letter_review);
-        const storedSummaryReview = ManualCoverLetterReviewSchema.safeParse(stored("CV").summary_review);
-        const response = ManualDocumentsResponseSchema.parse({
-          schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, draft_id: draftId, approval_id: approvalId,
-          comparison_fingerprint: currentFingerprint,
-          preview: { cv: storedPreview("CV", docs.cv), cover_letter: storedPreview("COVER_LETTER", docs.coverLetter) },
-          artifacts: existing.rows.map(({ document_type, format, filename, mime_type }) => ({ type: document_type, format, filename, mime_type })),
-          ...(storedReview.success ? { cover_letter: storedReview.data } : {}),
-          ...(storedSummaryReview.success ? { summary: storedSummaryReview.data } : {}),
-          revision: locked.approval.revision, corrections_applied: locked.approval.corrections.length,
-        });
-        res.setHeader("Cache-Control", "private, no-store");
-        res.json(response);
-        return;
+    const { selected, currentFingerprint } = await documentGenerationPreconditions(pool, ctx, draftId, request.data.approval_id);
+    if (request.data.role_layout) {
+      const reviewed = applyManualCorrections(selected.comparison, selected.approval.corrections);
+      const plannedRoles = new Set(planRoles(reviewed).map((plan) => plan.engagement_id));
+      const unknownRoles = Object.keys(request.data.role_layout).filter((id) => !plannedRoles.has(id));
+      if (unknownRoles.length > 0) {
+        throw new ManualFlowError(400, "INVALID_REQUEST", `Role choices name roles that are not in the approved comparison: ${unknownRoles.join(", ")}.`);
       }
-      const runIds: Record<string, string> = {};
-      for (const type of ["CV", "COVER_LETTER"] as const) {
-        const content = type === "CV" ? docs.cv : docs.coverLetter;
-        const claimSet = docs.claims.filter((claim) => (claim.section === "Cover letter") === (type === "COVER_LETTER"));
-        const sectionRun = letter ? (type === "COVER_LETTER" ? letter.letter : letter.summary) : null;
-        const run = await client.query<{ id: string }>(
-          `INSERT INTO manual_application_document_runs (
-            workspace_id,user_id,approval_id,canonical_job_id,job_version_id,source_observation_id,job_content_hash,
-            candidate_profile_id,profile_version_id,profile_contact_fact_ids,profile_contact_fingerprint,
-            preference_context_fingerprint,requirement_set_id,comparator_version,context_fingerprint,
-            comparison_fingerprint,document_type,status,generator_version,output_manifest
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'COMPLETED',$19,$18::jsonb)
-           RETURNING id`,
-          [ctx.workspaceId, ctx.userId, approvalId, locked.approval.canonical_job_id, locked.approval.job_version_id,
-            locked.approval.source_observation_id, locked.approval.job_content_hash, locked.approval.candidate_profile_id,
-            locked.approval.profile_version_id, locked.approval.profile_contact_fact_ids, locked.approval.profile_contact_fingerprint,
-            locked.approval.preference_context_fingerprint, locked.approval.requirement_set_id, locked.approval.comparator_version,
-            locked.approval.context_fingerprint, currentFingerprint, type,
-            JSON.stringify({ manual_preparation: true, draft_id: draftId, approval_id: approvalId,
-              requirement_set_id: locked.approval.requirement_set_id, comparison_fingerprint: currentFingerprint,
-              factual_template: true, automatic_readiness_mutated: false, role_layout: roleLayout, preview_markdown: content,
-              revision: locked.approval.revision, corrections: locked.approval.corrections,
-              corrections_fingerprint: locked.approval.corrections_fingerprint,
-              ...(sectionRun ? { ...sectionRun.manifest, [type === "COVER_LETTER" ? "cover_letter_review" : "summary_review"]: sectionRun.review } : {}) }),
-            sectionRun ? sectionRun.generatorVersion : "manual_preparation_v1"]);
-        runIds[type] = run.rows[0].id;
-        for (const claim of claimSet) {
-          await client.query(
-            `INSERT INTO manual_application_document_claims (
-              workspace_id,manual_document_run_id,section_label,claim_text,evidence_ids,requirement_keys
-             ) VALUES ($1,$2,$3,$4,$5,$6)`,
-            [ctx.workspaceId, runIds[type], claim.section, claim.text, claim.evidenceIds, claim.requirementKeys]);
-        }
-      }
-      for (const artifact of artifacts) {
-        await client.query(
-          `INSERT INTO manual_application_document_artifacts (
-            workspace_id,user_id,approval_id,document_run_id,document_type,format,filename,mime_type,content,sha256
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-           ON CONFLICT (approval_id,document_type,format) DO NOTHING`,
-          [ctx.workspaceId, ctx.userId, approvalId, runIds[artifact.type], artifact.type, artifact.format,
-            artifact.filename, artifact.mime, artifact.content, sha256Buffer(artifact.content)]);
-      }
-      const pair = await client.query<{ document_type: "CV" | "COVER_LETTER"; format: "DOCX" | "PDF"; document_run_id: string }>(
-        `SELECT document_type,format,document_run_id FROM manual_application_document_artifacts
-         WHERE workspace_id=$1 AND user_id=$2 AND approval_id=$3`, [ctx.workspaceId, ctx.userId, approvalId]);
-      validateManualArtifactPair(pair.rows);
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally { client.release(); }
-    const response = ManualDocumentsResponseSchema.parse({
-      schema_version: MANUAL_APPLICATION_SCHEMA_VERSION, ok: true, draft_id: draftId, approval_id: approvalId,
-      comparison_fingerprint: currentFingerprint, preview: { cv: docs.cv, cover_letter: docs.coverLetter },
-      artifacts: artifacts.map(({ type, format, filename, mime }) => ({ type, format, filename, mime_type: mime })),
-      ...(letter ? { cover_letter: letter.letter.review, summary: letter.summary.review } : {}),
-      revision: selected.approval.revision, corrections_applied: selected.approval.corrections.length,
-      cv_pages: pdfPageCount(cvPdf),
+    }
+    const { approval_id: _approvalId, ...requestOptions } = request.data;
+    const { job, created } = await createOrGetDocumentJob(pool, ctx, {
+      draftId, approvalId: request.data.approval_id, comparisonFingerprint: currentFingerprint, requestOptions,
     });
+    if (created) {
+      startDocumentJob(() => runManualDocumentJob(pool, ctx, job.id, draftId, request.data,
+        { summary: summaryWriter, coverLetter: coverLetterWriter }));
+    }
     res.setHeader("Cache-Control", "private, no-store");
-    res.json(response);
+    res.status(job.status === "SUCCEEDED" ? 200 : 202).json(ManualDocumentJobResponseSchema.parse(documentJobResponse(job)));
+  }));
+
+  router.get("/:draftId/document-jobs/:jobId", handler(async (req, res) => {
+    const ctx = resolveContext(req);
+    const draftId = String(req.params.draftId || "");
+    const jobId = String(req.params.jobId || "");
+    if (!z.string().uuid().safeParse(draftId).success || !z.string().uuid().safeParse(jobId).success) {
+      throw new ManualFlowError(400, "INVALID_REQUEST", "A valid draft and document job ID are required.");
+    }
+    if (!(await hasWritableMembership(pool, ctx))) {
+      throw new ManualFlowError(403, "FORBIDDEN", "An active owner or member role is required to read document jobs.");
+    }
+    const job = await loadDocumentJob(pool, ctx, draftId, jobId);
+    if (!job) throw new ManualFlowError(404, "NOT_FOUND", "No document job with this ID exists for this draft.");
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json(ManualDocumentJobResponseSchema.parse(documentJobResponse(job)));
   }));
 
   // "Use these documents for my application": only on the user's explicit request. Pins the chosen

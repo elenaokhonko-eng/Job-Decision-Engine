@@ -1,0 +1,112 @@
+{
+  "$ref": "#/definitions/ManualDocumentJobStep",
+  "definitions": {
+    "ManualDocumentJobStep": {
+      "type": "object",
+      "properties": {
+        "step": {
+          "type": "string",
+          "enum": [
+            "SUMMARY",
+            "LETTER",
+            "FILES"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "PENDING",
+            "RUNNING",
+            "COMPLETED",
+            "FALLBACK",
+            "SKIPPED",
+            "FAILED"
+          ]
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "elapsed_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 40
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 120
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failure_kind": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "RATE_LIMITED",
+                "TIMEOUT",
+                "VALIDATION",
+                "PROVIDER_ERROR"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "step",
+        "status",
+        "started_at",
+        "finished_at",
+        "elapsed_ms",
+        "provider",
+        "model",
+        "failure_kind"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

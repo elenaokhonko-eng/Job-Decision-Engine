@@ -5,6 +5,11 @@ import pg from "pg";
 
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { readDeadLetterTaskHealth } from "../src/tasks/deadLetterPolicy.js";
+import {
+  summarizeProviderCalls,
+  type ProviderCallCounts,
+  type ProviderCallSummary,
+} from "../src/services/modelCallResilience.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
 
 dotenv.config();
@@ -90,6 +95,84 @@ function initialStageSummary(stage: PipelineStage): StageSummary {
   };
 }
 
+interface ProviderCallRow {
+  provider: string;
+  model: string;
+  calls: number;
+  succeeded: number;
+  rate_limited: number;
+  daily_quota: number;
+  timeouts: number;
+  server_errors: number;
+  retries: number;
+}
+
+/**
+ * Per-model provider HTTP attempts recorded in model_route_invocations.response_metadata
+ * .provider_attempts over the last window (one row per attempt; no prompt text is read).
+ * Embedding invocations are recorded per input, so batched embedding requests count once per input.
+ */
+export const PROVIDER_CALLS_SQL = `
+  WITH attempts AS (
+    SELECT attempt
+    FROM model_route_invocations inv
+    CROSS JOIN LATERAL jsonb_array_elements(
+      CASE WHEN jsonb_typeof(inv.response_metadata->'provider_attempts') = 'array'
+           THEN inv.response_metadata->'provider_attempts'
+           ELSE '[]'::jsonb END
+    ) AS attempt
+    WHERE inv.workspace_id = $1
+      AND inv.created_at >= NOW() - make_interval(mins => $2::int)
+  )
+  SELECT COALESCE(attempt->>'provider', 'unknown') AS provider,
+         COALESCE(attempt->>'model', 'unknown') AS model,
+         COUNT(*)::int AS calls,
+         COUNT(*) FILTER (WHERE attempt->>'status' = 'COMPLETED')::int AS succeeded,
+         COUNT(*) FILTER (
+           WHERE attempt->>'errorKind' = 'RATE_LIMITED'
+              OR (attempt->>'errorKind' IS NULL AND attempt->>'httpStatus' = '429')
+         )::int AS rate_limited,
+         COUNT(*) FILTER (WHERE attempt->>'errorKind' = 'DAILY_QUOTA')::int AS daily_quota,
+         COUNT(*) FILTER (WHERE attempt->>'errorKind' IN ('TIMEOUT', 'DEADLINE'))::int AS timeouts,
+         COUNT(*) FILTER (WHERE attempt->>'errorKind' = 'SERVER_ERROR')::int AS server_errors,
+         COUNT(*) FILTER (
+           WHERE attempt->>'attempt' ~ '^[0-9]+$' AND (attempt->>'attempt')::int > 1
+         )::int AS retries
+  FROM attempts
+  GROUP BY 1, 2
+  ORDER BY 1, 2
+`;
+
+/** Provider call counts for the report, with the ">5% of calls rate limited" stop rule. */
+export function summarizeProviderCallRows(rows: readonly ProviderCallRow[]): ProviderCallSummary {
+  const byModel: ProviderCallCounts[] = rows.map((row) => {
+    const calls = Number(row.calls);
+    const succeeded = Number(row.succeeded);
+    const rateLimited = Number(row.rate_limited);
+    const dailyQuota = Number(row.daily_quota);
+    const timeouts = Number(row.timeouts);
+    const serverErrors = Number(row.server_errors);
+    return {
+      provider: row.provider,
+      model: row.model,
+      calls,
+      succeeded,
+      rate_limited: rateLimited,
+      daily_quota: dailyQuota,
+      timeouts,
+      server_errors: serverErrors,
+      other_failures: Math.max(0, calls - succeeded - rateLimited - dailyQuota - timeouts - serverErrors),
+      retries: Number(row.retries),
+    };
+  });
+  return summarizeProviderCalls(byModel);
+}
+
+export function providerCallWindowMinutes(value = process.env.PIPELINE_PROVIDER_CALL_WINDOW_MINUTES): number {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 7 * 24 * 60) : 90;
+}
+
 export function summarizeTaskStages(rows: readonly TaskHealthRow[], maxPendingAgeSeconds = 7200): StageSummary[] {
   const stages = new Map<PipelineStage, StageSummary>(
     STAGES.map((stage) => [stage, initialStageSummary(stage)]),
@@ -150,6 +233,21 @@ function toMarkdown(report: Record<string, unknown>): string {
   const routingRows = report.routing_disposition_counts as CountRow[];
   const retryReasons = report.retry_wait_reasons as CountRow[];
   const blockedReasons = report.blocked_dependency_reasons as CountRow[];
+  const providerCalls = report.provider_calls_by_model as ProviderCallSummary | undefined;
+  const providerLines = providerCalls
+    ? [
+        `### Model provider calls (last ${report.provider_call_window_minutes} min)`,
+        "",
+        ...(providerCalls.stop_rule_triggered
+          ? [`⚠️ **Stop rule: ${(providerCalls.rate_limited_share * 100).toFixed(1)}% of calls were rate limited (429), above ${providerCalls.stop_rule_threshold * 100}%. Pause scaling.**`, ""]
+          : []),
+        "| Provider | Model | Calls | Succeeded | 429 | Timeouts | 5xx | Retries |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+        ...providerCalls.by_model.map((row) =>
+          `| ${markdownText(row.provider)} | ${markdownText(row.model)} | ${row.calls} | ${row.succeeded} | ${row.rate_limited} | ${row.timeouts} | ${row.server_errors} | ${row.retries} |`),
+        "",
+      ]
+    : [];
   const killSwitchWarning = report.workflow_kill_switch_on === true
     ? ["⚠️ **WORKFLOW_KILL_SWITCH is ON: all pipeline processing is paused.**", ""]
     : [];
@@ -194,6 +292,7 @@ function toMarkdown(report: Record<string, unknown>): string {
     "",
     `Routing dispositions: ${formatCounts(routingRows)}`,
     "",
+    ...providerLines,
   ];
   return lines.join("\n");
 }
@@ -210,6 +309,7 @@ async function run(): Promise<void> {
   try {
     // resolveWorkspaceContext accepts the pool query surface at this script boundary.
     const context = await resolveWorkspaceContext(pool as unknown as pg.PoolClient);
+    const providerWindowMinutes = providerCallWindowMinutes();
     const [
       taskHealth,
       sources,
@@ -221,6 +321,7 @@ async function run(): Promise<void> {
       retryReasons,
       blockedReasons,
       deadLetterHealth,
+      providerCallRows,
     ] = await Promise.all([
       pool.query<TaskHealthRow>(
         `SELECT task_type, status, task_count, oldest_age_seconds
@@ -326,6 +427,7 @@ async function run(): Promise<void> {
         [context.workspaceId],
       ),
       readDeadLetterTaskHealth(pool, context.workspaceId),
+      pool.query<ProviderCallRow>(PROVIDER_CALLS_SQL, [context.workspaceId, providerWindowMinutes]),
     ]);
 
     const deadLetterHealthByType = new Map(
@@ -388,7 +490,15 @@ async function run(): Promise<void> {
       retry_wait_reasons: retryReasons.rows,
       blocked_dependency_reasons: blockedReasons.rows,
       requires_user_action_count: Number(userActions.rows[0]?.count ?? 0),
+      provider_call_window_minutes: providerWindowMinutes,
+      provider_calls_by_model: summarizeProviderCallRows(providerCallRows.rows),
     };
+    if (report.provider_calls_by_model.stop_rule_triggered) {
+      console.error(
+        `!!! STOP RULE: ${(report.provider_calls_by_model.rate_limited_share * 100).toFixed(1)}% of model calls in the last ` +
+          `${providerWindowMinutes} min were rate limited (429); pause scaling. !!!`
+      );
+    }
     const workflowName = process.env.PIPELINE_WORKFLOW_NAME?.trim() || "Pipeline Worker";
     const runKey = process.env.GITHUB_RUN_ID?.trim() || `local:${process.pid}:${Date.now()}`;
     await pool.query(

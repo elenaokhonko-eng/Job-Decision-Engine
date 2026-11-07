@@ -107,6 +107,15 @@ jobs:
     # An ingestion error will be surfaced at the end so partial work is processed.
     if: ${{ github.ref == 'refs/heads/main' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && (vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false') && !cancelled() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success' || needs.gmail_ingestion.result == 'failure' || needs.public_source_ingestion.result == 'failure') }}
     timeout-minutes: 60
+    # Gemini backend: AI Studio keys (default) or Vertex AI through Workload Identity Federation.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GEMINI_BACKEND: ${{ vars.GEMINI_BACKEND || 'studio' }}
+      GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+      GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'global' }}
+      GEMINI_PIPELINE_FLEX: ${{ vars.GEMINI_PIPELINE_FLEX || 'false' }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -117,6 +126,13 @@ jobs:
           cache: npm
       - name: Install Node.js dependencies
         run: npm ci
+      - name: Authenticate to Google Cloud for Vertex AI
+        if: ${{ vars.GEMINI_BACKEND == 'vertex' }}
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.GOOGLE_CLOUD_PROJECT }}
       - name: Run database migrations
         id: database_migrations
         env:
@@ -139,7 +155,7 @@ jobs:
           EMBEDDING_FALLBACK_PROVIDER: ${{ vars.EMBEDDING_FALLBACK_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
           REQUIREMENTS_OPENAI_MODEL: ${{ vars.REQUIREMENTS_OPENAI_MODEL || 'gpt-5.6-luna' }}
-          REQUIREMENTS_GEMINI_MODEL: ${{ vars.REQUIREMENTS_GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
+          REQUIREMENTS_GEMINI_MODEL: ${{ vars.REQUIREMENTS_GEMINI_MODEL || 'gemini-3.1-flash-lite' }}
           EVALUATION_PRIMARY_MODEL: ${{ vars.EVALUATION_PRIMARY_MODEL }}
           EVALUATION_FALLBACK_MODEL: ${{ vars.EVALUATION_FALLBACK_MODEL }}
           EMBEDDING_PRIMARY_MODEL: ${{ vars.EMBEDDING_PRIMARY_MODEL || 'gemini-embedding-001' }}
@@ -201,7 +217,7 @@ jobs:
           EMBEDDING_FALLBACK_DIMENSIONS: ${{ vars.EMBEDDING_FALLBACK_DIMENSIONS || '1536' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
           REQUIREMENTS_OPENAI_MODEL: ${{ vars.REQUIREMENTS_OPENAI_MODEL || 'gpt-5.6-luna' }}
-          REQUIREMENTS_GEMINI_MODEL: ${{ vars.REQUIREMENTS_GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
+          REQUIREMENTS_GEMINI_MODEL: ${{ vars.REQUIREMENTS_GEMINI_MODEL || 'gemini-3.1-flash-lite' }}
           MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
           REQUIREMENTS_PROVIDER_FAILURE_LIMIT: ${{ vars.REQUIREMENTS_PROVIDER_FAILURE_LIMIT || '1' }}
