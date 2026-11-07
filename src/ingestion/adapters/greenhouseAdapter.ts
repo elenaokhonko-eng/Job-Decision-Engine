@@ -11,6 +11,10 @@ function textValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+// Greenhouse returns every posting's full HTML in one response (?content=true); large boards
+// exceed the generic 8 MiB bound (Anthropic's board was 10.3 MB for 675 jobs on 2026-11-07).
+export const GREENHOUSE_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+
 export class GreenhouseAdapter extends BaseSourceAdapter {
   sourceName = "GREENHOUSE" as const;
   private boardToken: string;
@@ -34,7 +38,7 @@ export class GreenhouseAdapter extends BaseSourceAdapter {
         return this.errorResult(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const payload = await this.readJsonResponse(response);
+      const payload = await this.readJsonResponse(response, GREENHOUSE_MAX_RESPONSE_BYTES);
       const data = asRecord(payload);
       const rawJobs = Array.isArray(data?.jobs) ? data.jobs : [];
       this.assertRecordCount(rawJobs);
