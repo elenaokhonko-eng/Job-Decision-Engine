@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { simpleParser } from "mailparser";
 import { decodeHTML } from "entities";
+import { linkedInJobIdFromUrl } from "./searchApi/searchApiClient.js";
 
 const MAX_EMAIL_BYTES = 10 * 1024 * 1024;
 const MAX_MIME_PARTS = 256;
@@ -124,14 +125,79 @@ function unwrapForClassification(value: string): string {
   return value;
 }
 
+/**
+ * Whole path segments that identify site navigation rather than a single
+ * posting (help centre, account settings, saved searches, alert management,
+ * upsell pages). Matched against complete `/`-separated segments only, so a
+ * posting slug such as `customer-support-lead` or `research-scientist` is kept.
+ */
+const NON_JOB_PATH_SEGMENTS = new Set([
+  "help", "support", "settings", "email-settings", "preferences", "account", "accounts",
+  "search", "alerts", "alert", "job-alerts", "jobalerts", "saved-searches", "premium",
+  "login", "signin", "sign-in", "signup", "sign-up", "unsubscribe", "privacy", "privacy-policy",
+  "terms", "terms-of-use", "legal", "feed", "notifications", "messaging", "mynetwork",
+]);
+
 function isNavigationOrTrackingLink(urlValue: string, text: string): boolean {
   const textValue = text.toLowerCase().replace(/\s+/g, " ").trim();
   const urlLower = urlValue.toLowerCase();
   if (/\b(unsubscribe|manage preferences|email preferences|view in browser|privacy policy|terms of use)\b/.test(textValue)) {
     return true;
   }
-  return /(?:^|[\/?&=_-])(unsubscribe|preferences|email-settings|privacy-policy|terms-of-use|tracking-pixel)(?:[\/?&=_-]|$)/i.test(urlLower)
-    || /\.(?:png|jpe?g|gif|svg|webp)(?:[?#]|$)/i.test(urlLower);
+  if (/(?:^|[\/?&=_-])(unsubscribe|preferences|email-settings|privacy-policy|terms-of-use|tracking-pixel)(?:[\/?&=_-]|$)/i.test(urlLower)
+    || /\.(?:png|jpe?g|gif|svg|webp)(?:[?#]|$)/i.test(urlLower)) {
+    return true;
+  }
+  try {
+    const segments = new URL(unwrapForClassification(urlValue)).pathname.toLowerCase().split("/").filter(Boolean);
+    return segments.some((segment) => NON_JOB_PATH_SEGMENTS.has(segment));
+  } catch {
+    return false;
+  }
+}
+
+function isLinkedInHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === "linkedin.com" || host.endsWith(".linkedin.com");
+}
+
+/** Query parameters that only carry campaign attribution and never select a posting. */
+function withoutCampaignParameters(urlValue: string): string {
+  const url = new URL(urlValue);
+  for (const key of [...url.searchParams.keys()]) {
+    if (/^utm_/i.test(key)) url.searchParams.delete(key);
+  }
+  return url.toString();
+}
+
+type LinkClassification =
+  | { readonly kind: "JOB"; readonly key: string; readonly canonicalUrl: string }
+  | { readonly kind: "NON_JOB" };
+
+/**
+ * A LinkedIn link is a job card only when its path names one posting
+ * (`/jobs/view/<numeric id>`, with or without `/comm`); every other LinkedIn
+ * link (search, alerts, Job Alert Manager, help, premium, profile) is
+ * navigation. Its identity is the job id, so the title link, logo link, "View
+ * job" button and every tracking-parameter variant collapse into one card with
+ * the canonical `https://www.linkedin.com/jobs/view/<id>` URL. Other senders
+ * keep their existing vacancy rules minus clear navigation.
+ */
+function classifyLink(url: string, text: string, context: string): LinkClassification {
+  let parsed: URL;
+  try {
+    parsed = new URL(unwrapForClassification(url));
+  } catch {
+    return { kind: "NON_JOB" };
+  }
+  if (isLinkedInHost(parsed.hostname)) {
+    const jobId = /\/(?:comm\/)?jobs\/view\//i.test(parsed.pathname) ? linkedInJobIdFromUrl(parsed.toString()) : null;
+    if (!jobId) return { kind: "NON_JOB" };
+    return { kind: "JOB", key: "linkedin:" + jobId, canonicalUrl: "https://www.linkedin.com/jobs/view/" + jobId };
+  }
+  if (isNavigationOrTrackingLink(url, text) || !isLikelyVacancyLink(url, text, context)) return { kind: "NON_JOB" };
+  const canonicalUrl = withoutCampaignParameters(url);
+  return { kind: "JOB", key: "url:" + canonicalUrl, canonicalUrl };
 }
 
 function isLikelyVacancyLink(urlValue: string, text: string, context: string): boolean {
@@ -210,23 +276,96 @@ function extractLocation(context: string): string {
   return context.match(/(?:location|based in)\s*[:\-]\s*([^\n|]{2,100})/i)?.[1]?.trim() ?? "Unknown";
 }
 
-interface LinkCandidate {
-  readonly url: string;
+interface LinkOccurrence {
   readonly text: string;
   readonly context: string;
 }
 
-export async function extractEmailJobCards(raw: string): Promise<EmailJobCard[]> {
-  const bodies = await decodeGmailRawEmail(raw);
-  const candidates: LinkCandidate[] = [];
-  const seen = new Set<string>();
+interface CardGroup {
+  readonly canonicalUrl: string;
+  readonly occurrences: LinkOccurrence[];
+}
 
-  const addCandidate = (urlValue: string, visibleText: string, context: string): void => {
+/** Per-email link accounting: `linksSeen = jobCards + nonJobLinksSkipped + duplicateLinksCollapsed`. */
+export interface EmailLinkSummary {
+  readonly linksSeen: number;
+  readonly jobCards: number;
+  readonly nonJobLinksSkipped: number;
+  readonly duplicateLinksCollapsed: number;
+}
+
+export interface CollapsedEmailJobCard extends EmailJobCard {
+  /** How many links in the email pointed at this job (1 when it was linked once). */
+  readonly linkCount: number;
+}
+
+function isKnownTitle(title: string): boolean {
+  return title !== "Unknown Title" && !genericAnchorText(title);
+}
+
+/**
+ * Picks the richest facts across every link to one job: a title taken from a
+ * real anchor text beats one inferred from surrounding markup, a known company
+ * or location beats "Unknown", and the longest context is kept as evidence.
+ * Ties keep document order, so the result is deterministic.
+ */
+function mergeCardGroup(group: CardGroup): CollapsedEmailJobCard {
+  const scored = group.occurrences.map((occurrence) => {
+    const anchorText = occurrence.text.replace(/\s+/g, " ").trim();
+    const title = extractTitle(occurrence.text, occurrence.context);
+    const fromAnchor = anchorText !== "" && title === anchorText && isKnownTitle(title);
+    return {
+      occurrence,
+      title,
+      titleRank: fromAnchor ? 2 : isKnownTitle(title) ? 1 : 0,
+      company: extractCompany(occurrence.context),
+      location: extractLocation(occurrence.context),
+    };
+  });
+  const best = <T>(values: readonly T[], rank: (value: T) => number): T =>
+    values.reduce((chosen, value) => (rank(value) > rank(chosen) ? value : chosen));
+  const titled = best(scored, (entry) => entry.titleRank);
+  const company = best(scored, (entry) => (entry.company === "Unknown Company" ? 0 : 1)).company;
+  const location = best(scored, (entry) => (entry.location === "Unknown" ? 0 : 1)).location;
+  const evidence = best(scored, (entry) => entry.occurrence.context.length).occurrence;
+  return {
+    sourceUrl: group.canonicalUrl,
+    title: titled.title,
+    companyName: company,
+    location,
+    descriptionRaw: evidence.context || evidence.text || "Posting link discovered in Gmail alert; employer content retrieval is pending.",
+    linkCount: group.occurrences.length,
+  };
+}
+
+/**
+ * Extracts one card per job posting linked from the email, and accounts for
+ * every link it saw so nothing is dropped silently.
+ */
+export async function extractEmailJobCardsWithLinkSummary(
+  raw: string,
+): Promise<{ readonly cards: CollapsedEmailJobCard[]; readonly links: EmailLinkSummary }> {
+  const bodies = await decodeGmailRawEmail(raw);
+  const groups = new Map<string, CardGroup>();
+  let linksSeen = 0;
+  let nonJobLinksSkipped = 0;
+  let duplicateLinksCollapsed = 0;
+
+  const addLink = (urlValue: string, visibleText: string, context: string): void => {
+    linksSeen += 1;
     const url = safeAbsoluteHttpUrl(urlValue);
-    if (!url || seen.has(url) || isNavigationOrTrackingLink(url, visibleText)) return;
-    if (!isLikelyVacancyLink(url, visibleText, context)) return;
-    seen.add(url);
-    candidates.push({ url, text: visibleText, context });
+    const classification: LinkClassification = url ? classifyLink(url, visibleText, context) : { kind: "NON_JOB" };
+    if (classification.kind === "NON_JOB") {
+      nonJobLinksSkipped += 1;
+      return;
+    }
+    const existing = groups.get(classification.key);
+    if (existing) {
+      duplicateLinksCollapsed += 1;
+      existing.occurrences.push({ text: visibleText, context });
+      return;
+    }
+    groups.set(classification.key, { canonicalUrl: classification.canonicalUrl, occurrences: [{ text: visibleText, context }] });
   };
 
   for (const match of bodies.html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)) {
@@ -234,21 +373,24 @@ export async function extractEmailJobCards(raw: string): Promise<EmailJobCard[]>
     if (!rawHref) continue;
     const index = match.index ?? 0;
     const context = htmlToPlainText(nearestMarkupBlock(bodies.html, index));
-    addCandidate(rawHref, htmlToPlainText(match[2] ?? ""), context);
+    addLink(rawHref, htmlToPlainText(match[2] ?? ""), context);
   }
 
   const plain = bodies.text || htmlToPlainText(bodies.html);
   for (const match of plain.matchAll(/https?:\/\/[^\s<>"')\]]+/gi)) {
     const rawUrl = (match[0] ?? "").replace(/[.,;:!?]+$/, "");
     const index = match.index ?? 0;
-    addCandidate(rawUrl, "", textFromPlainAround(plain, index, rawUrl.length));
+    addLink(rawUrl, "", textFromPlainAround(plain, index, rawUrl.length));
   }
 
-  return candidates.map(({ url, text, context }) => ({
-    sourceUrl: url,
-    title: extractTitle(text, context),
-    companyName: extractCompany(context),
-    location: extractLocation(context),
-    descriptionRaw: context || text || "Posting link discovered in Gmail alert; employer content retrieval is pending.",
-  }));
+  const cards = [...groups.values()].map(mergeCardGroup);
+  return {
+    cards,
+    links: { linksSeen, jobCards: cards.length, nonJobLinksSkipped, duplicateLinksCollapsed },
+  };
+}
+
+export async function extractEmailJobCards(raw: string): Promise<EmailJobCard[]> {
+  const { cards } = await extractEmailJobCardsWithLinkSummary(raw);
+  return cards.map(({ linkCount: _linkCount, ...card }) => card);
 }

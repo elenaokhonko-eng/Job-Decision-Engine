@@ -9,6 +9,7 @@ import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { SourcePluginSchema } from "../../contracts/sourcePlugin.js";
 import { HimalayasAdapter } from "../../ingestion/adapters/himalayasAdapter.js";
+import { loadSixLaneSourcePlanConfig } from "../../ingestion/discoveryPlanConfig.js";
 import { SourceBroker } from "../../ingestion/sourceBroker.js";
 import { refreshCanonicalJobSourceEvidence } from "../../ingestion/sourceEvidenceRefresh.js";
 import { runNormalization } from "../../pipeline/normalize.js";
@@ -190,6 +191,44 @@ describe.skipIf(skipReal)("source plugin availability policy (PostgreSQL)", () =
       verification_method: "NONE",
       reason_code: "AVAILABILITY_NOT_VERIFIED",
     });
+    await broker.endRun("COMPLETED");
+  });
+
+  it("stages public-source observations whose plan version carries the plugin revision id", async () => {
+    const database = getClient();
+    const sourcePlugin = SourcePluginSchema.parse(load(readFileSync(
+      path.resolve(process.cwd(), "config", "source-plugins", "himalayas.yml"),
+      "utf8",
+    )));
+    const broker = new SourceBroker(database, getContext());
+    await broker.startRun("SOURCE_PLAN_VERSION_INTEGRATION");
+    const revisionId = await broker.ensureSourcePluginRevision(sourcePlugin);
+    // Composed exactly as scripts/run_adapters.ts does for every public-source page.
+    const searchPlanVersion = `${loadSixLaneSourcePlanConfig().plan_version}:${revisionId}`;
+    expect(searchPlanVersion.length).toBeGreaterThan(50);
+    const externalId = `himalayas-${randomUUID()}`;
+    const payload = { id: externalId, title: "Platform Architect" };
+
+    const staged = await broker.processObservation({
+      sourceName: "HIMALAYAS",
+      sourcePluginKey: sourcePlugin.source_key,
+      sourcePluginRevisionId: revisionId,
+      sourceExternalId: externalId,
+      sourceUrl: `https://www.himalayas.app/jobs/${externalId}`,
+      retrievedAt: "2026-11-07T00:00:00.000Z",
+      companyName: "Fixture Systems",
+      title: "Platform Architect",
+      descriptionRaw: "Design and operate production data platform services for engineering teams.",
+      sourceLane: "CORE_AI_DATA",
+      searchPlanVersion,
+      rawPayload: payload,
+    }, payload);
+
+    const stored = await database.query<{ search_plan_version: string }>(
+      `SELECT search_plan_version FROM raw_job_observations WHERE workspace_id = $1 AND id = $2::uuid`,
+      [getContext().workspaceId, staged.observationId],
+    );
+    expect(stored.rows).toEqual([{ search_plan_version: searchPlanVersion }]);
     await broker.endRun("COMPLETED");
   });
 });
