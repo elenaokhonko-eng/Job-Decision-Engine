@@ -150,6 +150,12 @@ export abstract class BaseSourceAdapter {
     return result.data;
   }
 
+  /** Quarantine a provider record that cannot be mapped, preserving its raw payload. */
+  protected quarantine(sourceRef: string, raw: unknown, error: string): void {
+    this.quarantinedCandidates.push({ identity: sourceRef, rawPayload: raw, error });
+    console.warn(`⚠️ [${this.sourceName}] Item quarantined (${sourceRef}): ${error}`);
+  }
+
   /** Helper to build a consistent error result */
   protected errorResult(error: string, opts?: { isRateLimited?: boolean }): AdapterResult {
     return {

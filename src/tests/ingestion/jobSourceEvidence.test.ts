@@ -101,7 +101,7 @@ describe("job source evidence builder", () => {
     });
   });
 
-  it.each(["GREENHOUSE", "LEVER", "ASHBY"])(
+  it.each(["GREENHOUSE", "LEVER", "ASHBY", "WORKABLE", "SMARTRECRUITERS"])(
     "gives a complete %s ATS posting a seven-day availability window",
     (sourceName) => {
       const completeDescription = [

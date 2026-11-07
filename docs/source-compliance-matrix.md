@@ -22,7 +22,9 @@ npm run docs:compliance
 | manual_streamlit | Streamlit manual entry | manual_import | manual_import | https://example.invalid/manual-streamlit | no | no | 2026-09-06 | 1440 |
 | remotive | Remotive remote jobs feed | json_api | public_feed | https://remotive.com/ | yes | no | 2026-09-06 | 1440 |
 | searchapi_linkedin | LinkedIn jobs via SearchAPI (search + full job details) | json_api | official_api | https://www.searchapi.io/legal/terms | yes | no | 2026-11-07 | 1440 |
+| smartrecruiters | SmartRecruiters public job boards (Posting API) | ats | official_api | https://developers.smartrecruiters.com/docs/posting-api | yes | no | 2026-11-08 | 1440 |
 | we_work_remotely | We Work Remotely RSS feed | rss | public_feed | https://weworkremotely.com/ | yes | no | 2026-09-06 | 60 |
+| workable | Workable public job boards | ats | public_feed | https://www.workable.com/terms | yes | no | 2026-11-08 | 1440 |
 
 ## Compliance notes
 
@@ -35,4 +37,6 @@ npm run docs:compliance
 - `linkedin_saved`: The user's own saved-job selections, exported manually and at human pace in their own signed-in browser tab with scripts/linkedin/export_saved_jobs.console.js (it reads the rendered Saved-jobs list and opens each saved job page sequentially about 2 seconds apart, stopping on a rate limit or checkpoint), then imported with npm run import:linkedin-saved. The repository never signs in to LinkedIn, stores or reads no LinkedIn cookie, runs no headless browser or scheduled LinkedIn access, and never unsaves jobs. The LinkedIn job URL is kept for attribution; imported content does not establish that a job is still open.
 - `remotive`: Remotive feed is delayed and may require link-back attribution; use canonical job URL for attribution.
 - `searchapi_linkedin`: LinkedIn postings retrieved through the SearchAPI LinkedIn Jobs and Job Details APIs; the LinkedIn job URL is stored for attribution. No LinkedIn session cookie is used.
+- `smartrecruiters`: SmartRecruiters' documented public Posting API (no API key). One list page plus one detail request per listed posting, sequential with a 1-second pause, bounded by items_per_run. Source job URL links to the employer's SmartRecruiters posting.
 - `we_work_remotely`: Use the canonical posting URL from We Work Remotely; link back where possible.
+- `workable`: Unauthenticated public careers-widget endpoint that backs the employer's own Workable careers page (apply.workable.com/{account}); one request per board per run. Source job URL links to the employer's Workable posting.

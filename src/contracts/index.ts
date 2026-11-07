@@ -55,6 +55,8 @@ export const SourceNameSchema = z.enum([
   "GREENHOUSE",
   "LEVER",
   "ASHBY",
+  "WORKABLE",
+  "SMARTRECRUITERS",
   "HIMALAYAS",
   "JOBICY",
   "REMOTIVE",

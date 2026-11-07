@@ -14,7 +14,7 @@ npm run sources:sync
 
 `config/source-plugins/*.yml` is the runtime source manifest. Sync it with `npm run sources:sync`; the active revision in PostgreSQL is what the source runner uses. `config/sources.yml` is retained only as a legacy config-registry import and is not read by the live adapter runner.
 
-- Greenhouse, Ashby, Lever: employer ATS boards.
+- Greenhouse, Ashby, Lever, Workable, SmartRecruiters: employer ATS boards. Workable reads the public careers widget (one request per board, full snapshot paged locally). SmartRecruiters reads the documented Posting API: one list page of `items_per_run` (max 100) per company per run, then one sequential detail request per listed posting (1 s apart) for the job-ad sections; an unknown company identifier (HTTP 200, `totalFound: 0`) and any list or detail failure fail the source run without advancing the checkpoint.
 - Himalayas: public remote job API.
 - Jobicy: public remote job API; attribution retained.
 - Remotive: public remote job API; link-back attribution and 24-hour feed delay recorded.

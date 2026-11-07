@@ -10,6 +10,8 @@ import { loadStructuredFile } from "../src/config/structuredLoader.js";
 import { GreenhouseAdapter } from "../src/ingestion/adapters/greenhouseAdapter.js";
 import { AshbyAdapter } from "../src/ingestion/adapters/ashbyAdapter.js";
 import { LeverAdapter } from "../src/ingestion/adapters/leverAdapter.js";
+import { WorkableAdapter } from "../src/ingestion/adapters/workableAdapter.js";
+import { SmartRecruitersAdapter } from "../src/ingestion/adapters/smartRecruitersAdapter.js";
 import { HimalayasAdapter } from "../src/ingestion/adapters/himalayasAdapter.js";
 import { JobicyAdapter } from "../src/ingestion/adapters/jobicyAdapter.js";
 import { RemotiveAdapter } from "../src/ingestion/adapters/remotiveAdapter.js";
@@ -359,6 +361,8 @@ function pickAtsAdapter(sourceKey: string, boardSlug: string): BaseSourceAdapter
   if (sourceKey === "greenhouse") return new GreenhouseAdapter(boardSlug);
   if (sourceKey === "ashby") return new AshbyAdapter(boardSlug);
   if (sourceKey === "lever") return new LeverAdapter(boardSlug);
+  if (sourceKey === "workable") return new WorkableAdapter(boardSlug);
+  if (sourceKey === "smartrecruiters") return new SmartRecruitersAdapter(boardSlug);
   return null;
 }
 

@@ -19,22 +19,22 @@ lanes:
   CORE_AI_DATA:
     domain_terms: [AI systems, machine learning, LLM, data engineering, distributed systems, MLOps, platform]
     role_terms: [AI engineer, machine learning engineer, data engineer, software architect, platform architect, research engineer]
-    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely]
+    source_keys: [greenhouse, ashby, lever, workable, smartrecruiters, himalayas, jobicy, remotive, we_work_remotely]
     coverage_note: "Public employer ATS boards and configured remote-job feeds; source failures and empty pages are reported separately."
   LEGAL_REGTECH:
     domain_terms: [legal technology, legal AI, RegTech, compliance automation, contract analytics, fraud technology]
     role_terms: [legal technology, regulatory technology, software engineer, solutions architect, technical delivery]
-    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely]
+    source_keys: [greenhouse, ashby, lever, workable, smartrecruiters, himalayas, jobicy, remotive, we_work_remotely]
     coverage_note: "Public employer ATS boards and configured remote-job feeds; legal practice-only roles remain subject to function gates."
   HEALTH_BIO_PHARMA:
     domain_terms: [bioinformatics, genomics, computational biology, drug discovery, healthcare data, clinical AI]
     role_terms: [research software engineer, scientific computing, data engineer, AI engineer, platform architect]
-    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely]
+    source_keys: [greenhouse, ashby, lever, workable, smartrecruiters, himalayas, jobicy, remotive, we_work_remotely]
     coverage_note: "Public employer ATS boards and configured remote-job feeds; laboratory-only roles remain subject to workability gates."
   INVESTMENT_MARKETS_FINTECH:
     domain_terms: [investment technology, market data, trading systems, asset management technology, fintech platform, risk analytics]
     role_terms: [software architect, data architect, platform engineer, technical delivery, technical product]
-    source_keys: [greenhouse, ashby, lever, himalayas, jobicy, remotive, we_work_remotely]
+    source_keys: [greenhouse, ashby, lever, workable, smartrecruiters, himalayas, jobicy, remotive, we_work_remotely]
     coverage_note: "Investment technology is searched separately from generic banking, payments, and deal advisory."
   SOCIAL_IMPACT_MULTILATERAL:
     domain_terms: [digital public infrastructure, humanitarian technology, climate data, multilateral AI, development data, civic technology]

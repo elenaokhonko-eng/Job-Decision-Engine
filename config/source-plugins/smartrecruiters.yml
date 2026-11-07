@@ -1,0 +1,56 @@
+schema_version: "2.2.0"
+source_key: smartrecruiters
+display_name: SmartRecruiters public job boards (Posting API)
+kind: ats
+status: active
+capabilities:
+  discovery: true
+  pagination: true
+  incremental: false
+  location_filter: false
+  work_mode_evidence: true
+compliance:
+  access_basis: official_api
+  terms_url: https://developers.smartrecruiters.com/docs/posting-api
+  license: null
+  attribution_required: true
+  attribution_text: SmartRecruiters' documented public Posting API (no API key). One list page plus one detail request per listed posting, sequential with a 1-second pause, bounded by items_per_run. Source job URL links to the employer's SmartRecruiters posting.
+  authenticated_scraping: false
+  reviewed_at: "2026-11-08"
+schedule:
+  enabled: true
+  interval_minutes: 1440
+  jitter_seconds: 180
+request:
+  endpoint: https://api.smartrecruiters.com/v1/companies/{company_identifier}/postings
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 3
+    base_delay_ms: 1000
+    max_delay_ms: 30000
+  rate_limit:
+    requests_per_minute: 60
+    items_per_run: 50
+  pagination:
+    strategy: page
+    page_parameter: offset
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: offset
+  query:
+    keywords: []
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: []
+mapping:
+  external_id: $.id
+  title: $.name
+  company: $.company.name
+  description: $.jobAd.sections
+  url: $.postingUrl
+  location: $.location.fullLocation
+  work_mode: $.location.remote
+  employment_type: $.typeOfEmployment.label
+  posted_at: $.releasedDate
+  updated_at: null
