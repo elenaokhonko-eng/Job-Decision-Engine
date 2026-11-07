@@ -32,7 +32,8 @@
             "MANUAL_IMPORT",
             "MANUAL_STREAMLIT",
             "LINKEDIN",
-            "LINKEDIN_SAVED"
+            "LINKEDIN_SAVED",
+            "MCF_SAVED"
           ]
         },
         "source_id": {

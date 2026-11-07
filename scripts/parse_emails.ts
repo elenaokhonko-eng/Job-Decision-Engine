@@ -1,4 +1,5 @@
 import pg from "pg";
+import { z } from "zod";
 import dotenv from "dotenv";
 import crypto from "node:crypto";
 import { SourceBroker } from "../src/ingestion/sourceBroker.js";
@@ -23,6 +24,9 @@ dotenv.config();
 dotenv.config({ path: ".env.local", override: true });
 
 const defaultPool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
+
+/** A Gmail discovery card is an ExtractedJob whose employer may still be unknown (""). */
+const GmailDiscoveryCardSchema = ExtractedJobSchema.extend({ company_name: z.string() });
 
 export interface ParseEmailsSummary {
   parsedEmails: number;
@@ -166,9 +170,11 @@ async function stageEmail(
     for (const card of cards) {
       const messageIdentity = String(email.gmail_message_id || alertId);
       const sourceExternalId = "gmail-" + messageIdentity + "-" + stableLinkId(card.sourceUrl);
-      const validated = ExtractedJobSchema.safeParse({
+      // A discovery card may not name its employer: it stays "" (never a placeholder)
+      // and the posting fetch takes the employer from the employer's own page.
+      const validated = GmailDiscoveryCardSchema.safeParse({
         schema_version: SCHEMA_VERSION,
-        company_name: card.companyName || "Unknown Company",
+        company_name: card.companyName,
         title: card.title || "Unknown Title",
         location_raw: card.location || "Unknown",
         workplace_type_raw: "UNKNOWN",
@@ -211,6 +217,7 @@ async function stageEmail(
             source_url: card.sourceUrl,
             discovered_title: job.title,
             discovered_company: job.company_name,
+            ...(card.companySource ? { discovered_company_source: card.companySource } : {}),
             email_context: job.description_raw,
             collapsed_link_count: card.linkCount,
             email_link_summary: emailLinkSummary,
@@ -224,6 +231,7 @@ async function stageEmail(
           source_url: card.sourceUrl,
           collapsed_link_count: card.linkCount,
           email_link_summary: emailLinkSummary,
+          ...(card.companySource ? { discovered_company_source: card.companySource } : {}),
         },
         client,
       );

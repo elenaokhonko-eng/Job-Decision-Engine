@@ -241,6 +241,16 @@ describe("P0-01: Data Contract Validation & Schema Drift Baseline", () => {
       return rest;
     };
     expect(() => ObservationPersistenceSchema.parse(withoutVersion(observationPersistence))).toThrow();
+    // Only a Gmail discovery-only card may leave the employer unknown ("", never a placeholder).
+    expect(() => ObservationPersistenceSchema.parse({ ...observationPersistence, company_name_raw: "" })).toThrow(/company_name_raw/);
+    expect(() => ObservationPersistenceSchema.parse({
+      ...observationPersistence, source_type: "GMAIL_ALERT", company_name_raw: " ",
+      raw_payload: { source_content_status: "COMPLETE" },
+    })).toThrow(/company_name_raw/);
+    expect(() => ObservationPersistenceSchema.parse({
+      ...observationPersistence, source_type: "GMAIL_ALERT", company_name_raw: "",
+      raw_payload: { source_content_status: "DISCOVERY_ONLY" },
+    })).not.toThrow();
     expect(() => PersistedGateDecisionSchema.parse(withoutVersion(sampleHardRejectGate))).toThrow();
     expect(() => PersistedLaneDecisionSchema.parse(withoutVersion(laneDecision))).toThrow();
     expect(() => PersistedEvaluationQueueItemSchema.parse(withoutVersion(samplePendingQueueItem))).toThrow();

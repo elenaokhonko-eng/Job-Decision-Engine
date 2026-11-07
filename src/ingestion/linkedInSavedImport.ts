@@ -33,7 +33,8 @@ import {
 import { SourceBroker } from "./sourceBroker.js";
 
 const LINKEDIN_ID_PATTERN = "(?:linkedin\\.com/(?:comm/)?jobs/view/(?:[^/?#]*-)?)(\\d{5,20})";
-const WAITING_FETCH_STATUSES = ["FETCH_PENDING", "FETCH_BLOCKED", "FETCH_FAILED"] as const;
+/** Gmail card states that still wait for posting content (FETCH_BLOCKED includes cards parked for a saved-job export). */
+export const WAITING_FETCH_STATUSES = ["FETCH_PENDING", "FETCH_BLOCKED", "FETCH_FAILED"] as const;
 
 export type SavedItemOutcome = "NEW" | "ALREADY_IMPORTED" | "WOULD_STAGE" | "WOULD_SKIP_ALREADY_IMPORTED" | "FAILED";
 
@@ -170,11 +171,21 @@ function classifyDiscovery(job: LinkedInSavedJob, discovery: DiscoveryRow): Gmai
   return "ATTACHABLE";
 }
 
-/** Makes the discovery card's content fetch runnable again so the worker attaches the stored export. */
-async function queueContentAttach(
+/**
+ * Makes the discovery card's content fetch runnable again so the worker attaches
+ * the stored export. Any FETCH_JOB_CONTENT task blocked on JOB_CONTENT is
+ * reactivated whatever its repair action (PROVIDE_EMPLOYER_URL_OR_FULL_JD after
+ * an auth wall, IMPORT_SAVED_JOB_EXPORT when parked for a retired alert source).
+ * Shared by the LinkedIn and MyCareersFuture saved-jobs imports.
+ */
+export async function queueContentAttach(
   client: pg.PoolClient,
   ctx: WorkspaceContext,
-  discovery: DiscoveryRow,
+  discovery: Pick<DiscoveryRow, "id" | "raw_email_alert_id" | "gmail_message_id">,
+  source: { readonly producer: string; readonly pluginKey: string } = {
+    producer: "import_linkedin_saved",
+    pluginKey: LINKEDIN_SAVED_PLUGIN_KEY,
+  },
 ): Promise<{ reactivated: number; enqueued: boolean }> {
   await client.query(
     `UPDATE raw_job_observations
@@ -225,13 +236,13 @@ async function queueContentAttach(
   let enqueued = false;
   if (active.rows.length === 0) {
     // Dead-lettered or missing fetch task: queue one dedicated content-attach fetch.
-    const taskKey = `FETCH_JOB_CONTENT:${discovery.id}:posting_fetch_v1:linkedin_saved`;
+    const taskKey = `FETCH_JOB_CONTENT:${discovery.id}:posting_fetch_v1:${source.pluginKey}`;
     const task = await enqueuePipelineTask({
       taskType: "FETCH_JOB_CONTENT",
       taskKey,
       payload: { observation_id: discovery.id },
       maxAttempts: 8,
-      producer: "import_linkedin_saved",
+      producer: source.producer,
       stageVersion: "posting_fetch_v1",
       requestId: taskKey,
     }, client, { context: ctx });
@@ -240,7 +251,7 @@ async function queueContentAttach(
   return { reactivated: reactivated.rowCount ?? 0, enqueued };
 }
 
-async function inTransaction<T>(client: pg.PoolClient, work: () => Promise<T>): Promise<T> {
+export async function inTransaction<T>(client: pg.PoolClient, work: () => Promise<T>): Promise<T> {
   await client.query("BEGIN");
   try {
     const result = await work();

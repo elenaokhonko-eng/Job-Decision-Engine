@@ -68,3 +68,54 @@ What the import does:
 - Items are validated strictly (`LinkedInSavedJobItemSchema`). Invalid items are reported with their index and reason; the valid ones are still staged and the command exits 1. Missing company or description, `descriptionStatus` `MISSING`/`FETCH_FAILED`/`null`, and the earlier snippet's placeholders (`Unknown Company`, "Full description not available...", "Failed to fetch description automatically.") are invalid. In files from the earlier snippet (no `descriptionStatus`), a location of exactly `Singapore` was its default and is read as unknown.
 - When a Gmail LinkedIn alert card for the same job id is waiting on posting content (`FETCH_PENDING`/`FETCH_BLOCKED`/`FETCH_FAILED`) and the title and employer agree, its blocked `FETCH_JOB_CONTENT` task is reactivated (or a `...:linkedin_saved` fetch task is queued when none is active). The worker then uses the stored export instead of a LinkedIn page fetch: it stages a `LINKEDIN_SAVED` posting derived from the card with `content_provenance = LINKEDIN_SAVED_EXPORT`, `imported_at` and `content_hash`, marks the card `FETCH_COMPLETE` and normalizes it. The export carries no HTTP fetch receipt, so it never makes a job's availability `OPEN`.
 - Location, salary and work mode are kept only as exported (work mode only from an explicit "(Remote)/(Hybrid)/(On-site)" label); unknown facts stay unknown and surface downstream as `NEEDS_VERIFICATION`.
+
+## MyCareersFuture Saved Jobs (manual browser export)
+
+MyCareersFuture (MCF) Gmail alerts are retired. Jobs you save on https://www.mycareersfuture.gov.sg reach the pipeline only through a file you export yourself. The repository never signs in to MCF, holds an MCF session or cookie, drives a headless browser, or accesses MCF on a schedule.
+
+Compliance: MCF's Terms of Use give visitors a personal licence but do not allow storing site content in a retrieval system without written permission from SWDA, which runs MCF. That permission has not been obtained, so this source is recorded as **user-accepted risk, pending SWDA permission** (see `docs/source-compliance-matrix.md`). Use it only for your own saved jobs and personal job search. To ask for permission, use the SWDA feedback portal: https://service-portal.swda.gov.sg/s/feedback.
+
+1. Export in your own browser.
+   1. Sign in to https://www.mycareersfuture.gov.sg and open **Saved Jobs** (https://www.mycareersfuture.gov.sg/saved-jobs).
+   2. Leave the filter on **All Job Status** and stay on page 1.
+   3. Open the developer console (Chrome/Edge: F12 or Ctrl+Shift+J; Firefox: Ctrl+Shift+K), paste the whole of `scripts/mcf/export_saved_jobs.console.js` and press Enter.
+
+   The snippet walks the list pages with the list's own Next button, waiting for the job set to change after each click. For each saved job it then requests the job's public details the way the MCF job page does (`GET https://api.mycareersfuture.gov.sg/v2/jobs/<job id>`, no cookies), one at a time about 2 seconds apart. It stops on HTTP 429, a server error or a non-JSON error page; `await jdeMcfExport.resume()` continues later. It prints expected vs collected counts and downloads `mcf_saved_jobs.json`.
+
+   MCF does not show a saved-jobs total, so "expected" is the range implied by the pagination; a page with fewer cards than page 1 (other than the last) is reported. Only the importer's fields are written. Recruiter contact data such as `metadata.emailRecipient` is dropped in the browser. A hidden employer, salary or address stays `null`.
+2. Dry run. This writes nothing; it validates every item and reports matches with existing jobs and with parked Gmail MCF alert cards:
+
+   ```bash
+   npm run import:mcf-saved -- path/to/mcf_saved_jobs.json --dry-run
+   ```
+
+3. Import:
+
+   ```bash
+   npm run import:mcf-saved -- path/to/mcf_saved_jobs.json
+   ```
+
+   Optional `--workspace-key KEY` / `--user-key KEY` select the workspace (default: the environment's workspace). The command prints counts and job ids only. It exits 1 if any item is invalid or fails to stage; the valid items are still staged.
+4. Let the pipeline worker run (`npm run pipeline:worker`, or the scheduled pipeline).
+
+What the import does:
+
+- Each valid item becomes an `MCF_SAVED` observation through `SourceBroker`:
+  - plugin `mcf_saved`, external id `mcf-job:<uuid>`;
+  - URL `https://www.mycareersfuture.gov.sg/job/<category>/<slug>-<uuid>` as exported, without its query string;
+  - raw payload and SHA-256 hash, status `PENDING`.
+
+  Its `NORMALIZE_OBSERVATION` task is seeded by the standard scoped seeder. Re-importing the same file stages nothing new; `exportedAt` is not hashed, so a later re-export of unchanged jobs also deduplicates.
+- Items are validated strictly (`McfSavedJobItemSchema`); unknown fields, including any raw MCF API field, are rejected. These are invalid:
+  - a missing or placeholder company (`Company Undisclosed`, `Unknown`);
+  - a missing or placeholder description;
+  - `descriptionStatus` `MISSING`, `FETCH_FAILED` or `null`;
+  - a URL that is not an MCF `/job/...-<32-hex id>` link, or an `mcfJobUuid` that differs from the id in the URL.
+- When a Gmail MCF alert card for the same job id is waiting on content, and its title and employer agree, its `FETCH_JOB_CONTENT` task is reactivated. Waiting cards include those parked by `scripts/park_retired_alert_sources.ts`: `BLOCKED_DEPENDENCY` on `JOB_CONTENT`, repair action `IMPORT_SAVED_JOB_EXPORT`, observation `FETCH_BLOCKED`. Links wrapped in SES click tracking (`awstrack.me`) are unwrapped to find the id.
+- The worker then uses the stored export instead of fetching the MCF page:
+  - it stages an `MCF_SAVED` posting derived from the card, with `content_provenance = MCF_SAVED_EXPORT`, `imported_at` and `content_hash`;
+  - it marks the card `FETCH_COMPLETE` and normalizes it.
+
+  The export carries no HTTP fetch receipt, so it never makes a job's availability `OPEN`. The exported expiry date is kept as evidence only. A title or employer mismatch leaves the card parked and is reported.
+- Salary becomes `compensation_raw` (for example `SGD 6,500 - 9,000 per month`) only when MCF shows both bounds. Employment type maps to `PERMANENT`/`CONTRACT` only when MCF lists exactly that kind. Work mode stays `UNKNOWN`. Unknown facts surface downstream as `NEEDS_VERIFICATION`.
+- LinkedIn alert cards parked with `IMPORT_SAVED_JOB_EXPORT` are revived the same way by `npm run import:linkedin-saved`.
