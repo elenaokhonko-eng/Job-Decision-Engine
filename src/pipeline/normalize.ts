@@ -11,6 +11,13 @@ import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jo
 import { assessJobArchiveAge, referenceIsOlderThanCutoff, subtractCalendarMonths } from "../services/jobArchivePolicy.js";
 import { reactivateGenuineRepost } from "../services/jobArchive.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
+import { employerTitleMatches } from "../ingestion/jobContentFetcher.js";
+
+/** Title equality after lowercasing and collapsing non-alphanumerics, as the parent check always used. */
+function sameNormalizedTitle(a: string, b: string): boolean {
+  const key = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return key(a) !== "" && key(a) === key(b);
+}
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -148,10 +155,18 @@ export async function runNormalization(
         let sourcePostingIdentitySeen = false;
         
         if (obs.derived_from_observation_id) {
-          const parent = await client.query<{ canonical_job_id: string | null; job_version_id: string | null; content_hash: string | null }>(
-            "SELECT version.canonical_job_id, version.id AS job_version_id, version.content_hash FROM raw_job_observations discovery LEFT JOIN job_versions version ON version.workspace_id = discovery.workspace_id AND version.id = discovery.job_version_id WHERE discovery.workspace_id = $1 AND discovery.id = $2 AND discovery.source_name = 'GMAIL_ALERT' AND BTRIM(regexp_replace(lower(discovery.title), '[^a-z0-9]+', ' ', 'g')) = BTRIM(regexp_replace(lower($3), '[^a-z0-9]+', ' ', 'g')) LIMIT 1",
-            [ctx.workspaceId, obs.derived_from_observation_id, obs.title],
+          const parentCandidates = await client.query<{ title: string; canonical_job_id: string | null; job_version_id: string | null; content_hash: string | null }>(
+            "SELECT discovery.title, version.canonical_job_id, version.id AS job_version_id, version.content_hash FROM raw_job_observations discovery LEFT JOIN job_versions version ON version.workspace_id = discovery.workspace_id AND version.id = discovery.job_version_id WHERE discovery.workspace_id = $1 AND discovery.id = $2 AND discovery.source_name = 'GMAIL_ALERT' LIMIT 1",
+            [ctx.workspaceId, obs.derived_from_observation_id],
           );
+          // The same title rule the fetcher applied when it accepted this posting:
+          // an alert card may add a trailing location or requisition suffix
+          // ("Role - Singapore", "Role (REQ-1)") that the page title lacks.
+          const parent = {
+            rows: parentCandidates.rows.filter((row) =>
+              sameNormalizedTitle(row.title, obs.title)
+              || employerTitleMatches(row.title, obs.title, obs.location_raw ?? null)),
+          };
           if (!parent.rows[0]) {
             throw new Error("Retrieved posting could not prove a tenant-scoped Gmail parent with the same title.");
           }
