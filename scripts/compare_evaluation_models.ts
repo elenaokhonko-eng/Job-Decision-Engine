@@ -169,7 +169,19 @@ interface SampleRow {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const pool = new pg.Pool(pgConnectionConfig(process.env.DATABASE_URL));
+  // The model calls below take minutes; a server-side close of an idle pooled connection must not
+  // crash the process with an unhandled 'error' event.
+  pool.on("error", (error) => {
+    console.warn("Idle database connection closed:", publicErrorSummary(error, "evaluation"));
+  });
   const client = await pool.connect();
+  let released = false;
+  const releaseClient = () => {
+    if (!released) {
+      released = true;
+      client.release();
+    }
+  };
   try {
     await client.query("BEGIN READ ONLY");
     const ctx = await resolveWorkspaceContext(client as any);
@@ -207,11 +219,15 @@ async function main(): Promise<void> {
       verified_profile_facts: facts.rows.filter(isProfileFactModelShareable),
     });
     await client.query("ROLLBACK");
+    // Every database read is done; don't hold a connection open across the model calls.
+    releaseClient();
 
     // Gemini first and no OpenAI fallback, so each column is the named model's own answer.
+    // agent.js loads .env/.env.local with override on import, so these overrides must come after
+    // the import, or the OpenAI fallback silently answers for a Gemini model that failed.
+    const { evaluateSingleCanonicalJob } = await import("../src/services/agent.js");
     process.env.EVALUATION_PRIMARY_PROVIDER = "gemini";
     delete process.env.OPENAI_API_KEY;
-    const { evaluateSingleCanonicalJob } = await import("../src/services/agent.js");
 
     const evaluate = async (row: SampleRow, model: string): Promise<ModelRun> => {
       try {
@@ -260,7 +276,7 @@ async function main(): Promise<void> {
       })),
     }, null, 2));
   } finally {
-    client.release();
+    releaseClient();
     await pool.end();
   }
 }
