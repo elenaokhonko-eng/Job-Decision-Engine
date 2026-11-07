@@ -19,7 +19,19 @@ npm run sources:sync
 - Jobicy: public remote job API; attribution retained.
 - Remotive: public remote job API; link-back attribution and 24-hour feed delay recorded.
 - We Work Remotely: attributed RSS feed.
+- Hacker News (`hacker_news`, source `HACKER_NEWS`): the monthly "Ask HN: Who is hiring?" thread through the official HN Firebase API (free, no key). See below.
 - Gmail: alerts from sources without supported public APIs.
+
+## Hacker News "Who is hiring?"
+
+`src/ingestion/adapters/hackerNewsWhoIsHiringAdapter.ts` reads `user/whoishiring.json`, inspects the newest submissions (at most 6) and takes the newest story titled `Ask HN: Who is hiring?`; "Who wants to be hired?" and "Freelancer?" threads are skipped. No hiring thread is a source failure.
+
+- One observation per top-level comment. Identity is the HN comment id; the posting URL is `https://news.ycombinator.com/item?id=<id>`; the raw payload is the HN item without its `kids` reply list (so new replies do not change the hash; an edit does) plus the thread id and title.
+- The first line follows `Company | Role(s) | Location | REMOTE/ONSITE | Salary | URL`. Several roles stay in one title (`; `-joined). When the header only says "Multiple roles", short title lines or a `Roles:` line in the body supply the titles. A post without pipes is accepted only as `<Company> is hiring <role>`. Salary is kept only when written in the header (a funding amount is not salary); the apply URL is the header URL, else the first non-HN link.
+- Deleted, dead, non-conforming and pre-filtered comments are returned as `filteredCandidates`; `scripts/run_adapters.ts` records each as a `FILTERED` disposition with its reason code (`HN_COMMENT_DELETED`, `HN_COMMENT_DEAD`, `HN_NON_CONFORMING_POST`, `HN_ITEM_UNAVAILABLE`, `HN_NOT_TOP_LEVEL_COMMENT`, `HN_EMPTY_COMMENT`, `PREFILTER_ONSITE_ONLY`, `PREFILTER_WORK_TERRITORY_INCOMPATIBLE`) and raw payload.
+- Volume pre-filter, using the workspace's active workability policy: drop a post only when the header says on-site with no attendance qualifier and the post never mentions remote or hybrid work while the policy disallows on-site-only roles, or when the header carries an explicitly exclusive worker territory ("Remote (US only)", "US citizenship required") that the hard gate's own territory evaluation finds incompatible. Unknown or ambiguous facts pass to the gates. Lane terms and target functions are then applied by the runner's normal lane assessment.
+- Bounds: at most 200 comments per run, 4 concurrent requests, 15 s per request, 180 s per run, one retry for 5xx/timeouts/network errors, a thread of more than 3,000 comments is refused. Any HTTP, timeout or JSON failure fails the page: nothing is staged and the cursor stays.
+- Cursor `hn:<threadId>:<lastSettledCommentId>`: HN ids are monotonic, so later runs read only newer comments; the cursor never passes a comment younger than 3 hours (HN's edit window is 2 hours), so edits are re-read. A new monthly thread restarts at its first comment.
 
 ## Failure Semantics
 

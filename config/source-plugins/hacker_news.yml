@@ -1,0 +1,64 @@
+schema_version: "2.3.0"
+source_key: hacker_news
+display_name: Hacker News "Ask HN Who is hiring?" monthly thread
+kind: json_api
+status: active
+capabilities:
+  discovery: true
+  pagination: true
+  incremental: true
+  location_filter: false
+  work_mode_evidence: true
+compliance:
+  access_basis: official_api
+  terms_url: https://github.com/HackerNews/API
+  license: null
+  attribution_required: true
+  attribution_text: >-
+    Postings are top-level comments by their authors in the monthly "Ask HN: Who is hiring?" thread,
+    read through the official public HN Firebase API (hacker-news.firebaseio.com; free, no key, no login).
+    The HN comment URL (news.ycombinator.com/item?id=<comment id>) is stored as the posting URL for attribution.
+    Comment content belongs to its author under the Y Combinator / Hacker News terms of use; news.ycombinator.com
+    pages are never crawled, so its robots.txt crawl rules are not exercised.
+  authenticated_scraping: false
+  reviewed_at: "2026-11-08"
+schedule:
+  enabled: true
+  interval_minutes: 1440
+  jitter_seconds: 0
+request:
+  endpoint: https://hacker-news.firebaseio.com/v0
+  timeout_ms: 15000
+  headers_from_secret_keys: []
+  retry:
+    max_attempts: 2
+    base_delay_ms: 500
+    max_delay_ms: 5000
+  rate_limit:
+    # The adapter reads at most 4 items concurrently and at most 200 comments per run.
+    requests_per_minute: 240
+    items_per_run: 200
+  pagination:
+    strategy: cursor
+    page_parameter: null
+    cursor_json_path: null
+    next_link_json_path: null
+    checkpoint_field: cursor
+  query:
+    keywords: []
+    locations: []
+    work_modes: [REMOTE, HYBRID, ONSITE, UNKNOWN]
+    lane_keys: [CORE_AI_DATA, LEGAL_REGTECH, HEALTH_BIO_PHARMA, INVESTMENT_MARKETS_FINTECH]
+mapping:
+  external_id: $.hn_item.id
+  title: $derive.header_role_segments
+  company: $derive.header_first_segment
+  description: $.hn_item.text
+  url: $derive.hn_comment_url
+  location: $derive.header_location_segments
+  work_mode: $derive.header_remote_onsite_hybrid_tokens
+  employment_type: $derive.header_employment_segment
+  posted_at: $.hn_item.time
+  updated_at: null
+availability:
+  full_posting_hosts: [news.ycombinator.com]

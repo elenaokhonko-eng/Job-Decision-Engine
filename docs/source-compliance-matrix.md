@@ -13,6 +13,7 @@ npm run docs:compliance
 | ashby | Ashby public job boards | ats | public_feed | https://ashbyhq.com/ | yes | no | 2026-09-06 | 1440 |
 | gmail_alert | User-provided Gmail alerts (Gmail API) | email_alert | user_supplied | https://policies.google.com/terms | no | no | 2026-09-06 | 1440 |
 | greenhouse | Greenhouse public job boards | ats | official_api | https://developers.greenhouse.io/job-board.html | yes | no | 2026-09-06 | 1440 |
+| hacker_news | Hacker News "Ask HN Who is hiring?" monthly thread | json_api | official_api | https://github.com/HackerNews/API | yes | no | 2026-11-08 | 1440 |
 | himalayas | Himalayas jobs feed | json_api | public_feed | https://himalayas.app/ | yes | no | 2026-09-06 | 60 |
 | jobicy | Jobicy remote jobs feed | json_api | public_feed | https://jobicy.com/ | yes | no | 2026-09-06 | 60 |
 | lever | Lever public job boards | ats | public_feed | https://www.lever.co/ | yes | no | 2026-09-06 | 1440 |
@@ -28,6 +29,7 @@ npm run docs:compliance
 
 - `ashby`: Source job URL links to the employer's Ashby board.
 - `greenhouse`: Source job URL links to the employer's Greenhouse board.
+- `hacker_news`: Postings are top-level comments by their authors in the monthly "Ask HN: Who is hiring?" thread, read through the official public HN Firebase API (hacker-news.firebaseio.com; free, no key, no login). The HN comment URL (news.ycombinator.com/item?id=<comment id>) is stored as the posting URL for attribution. Comment content belongs to its author under the Y Combinator / Hacker News terms of use; news.ycombinator.com pages are never crawled, so its robots.txt crawl rules are not exercised.
 - `himalayas`: Use canonical Himalayas URL attribution for each posting.
 - `jobicy`: Source postings are attributed to Jobicy; include canonical apply URL attribution where feasible.
 - `lever`: Source job URL links to the employer's Lever board.
