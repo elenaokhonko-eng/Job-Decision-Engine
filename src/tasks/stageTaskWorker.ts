@@ -6,6 +6,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/con
 import { SourceBroker } from "../ingestion/sourceBroker.js";
 import { fetchJobContent as defaultFetchJobContent } from "../ingestion/jobContentFetcher.js";
 import { searchApiLinkedInDetailsFromEnv } from "../ingestion/searchApi/searchApiClient.js";
+import { employerBoardFallbackFromEnv } from "../ingestion/employerBoardLookup.js";
 import { runNormalization as defaultRunNormalization } from "../pipeline/normalize.js";
 import { runRequirementsExtraction as defaultRunRequirementsExtraction } from "../pipeline/requirementsExtractor.js";
 import { runHardGates as defaultRunHardGates } from "../pipeline/hardGate.js";
@@ -2198,9 +2199,10 @@ async function executeStageTask(
       source_url: string | null;
       company_name: string;
       title: string;
+      location_raw: string | null;
       processing_status: string | null;
     }>(
-      `SELECT source_name, source_url, company_name, title, processing_status
+      `SELECT source_name, source_url, company_name, title, location_raw, processing_status
        FROM raw_job_observations
        WHERE workspace_id = $1 AND id = $2::uuid
        LIMIT 1`,
@@ -2224,11 +2226,21 @@ async function executeStageTask(
       if (existing.rows[0]?.id) return existing.rows[0].id;
     }
 
-    const expectedPosting = { title: discovery.title, companyName: discovery.company_name };
+    const expectedPosting = {
+      title: discovery.title,
+      companyName: discovery.company_name,
+      location: discovery.location_raw,
+    };
     const linkedInJobDetails = searchApiLinkedInDetailsFromEnv(process.env, clientOrPool as QueryClient);
+    // Without SearchAPI, a blocked LinkedIn page is looked up on the employer's public ATS board.
+    const employerBoardFallback = linkedInJobDetails
+      ? undefined
+      : employerBoardFallbackFromEnv(process.env, clientOrPool as QueryClient);
     const result = linkedInJobDetails
       ? await dependencies.fetchJobContent(discovery.source_url, expectedPosting, { linkedInJobDetails })
-      : await dependencies.fetchJobContent(discovery.source_url, expectedPosting);
+      : employerBoardFallback
+        ? await dependencies.fetchJobContent(discovery.source_url, expectedPosting, { employerBoardFallback })
+        : await dependencies.fetchJobContent(discovery.source_url, expectedPosting);
     if (result.kind === "RETRYABLE_FAILURE") {
       throw new PipelineTaskRetryAtError(
         `Posting retrieval is retryable: ${result.reason}`,
@@ -2240,7 +2252,7 @@ async function executeStageTask(
         ? "POSTING_IDENTITY_CONFLICT: " + result.reason
         : result.kind === "UNAVAILABLE"
           ? "POSTING_CONTENT_UNAVAILABLE: " + result.reason
-          : "POSTING_CONTENT_BLOCKED: " + result.reason;
+          : "POSTING_CONTENT_BLOCKED: " + result.reason + (result.detail ? ` (${result.detail})` : "");
       const client = clientOrPool as QueryClient;
       await client.query("BEGIN");
       try {
@@ -2280,6 +2292,16 @@ async function executeStageTask(
       source_evidence: result.evidence,
       posting: result.posting,
       content_hash: result.contentHash,
+      ...(result.employerBoardLookup ? {
+        employer_board_lookup: {
+          linkedin_job_id: result.employerBoardLookup.linkedInJobId,
+          provider: result.employerBoardLookup.provider,
+          board_token: result.employerBoardLookup.boardToken,
+          employer_key: result.employerBoardLookup.employerKey,
+          resolution_method: result.employerBoardLookup.resolutionMethod,
+          resolution_cached: result.employerBoardLookup.resolutionCached,
+        },
+      } : {}),
     };
     const client = clientOrPool as QueryClient;
     const broker = new SourceBroker(clientOrPool, ctx);

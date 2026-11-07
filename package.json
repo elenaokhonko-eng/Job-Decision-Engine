@@ -41,6 +41,7 @@
     "email:parse": "tsx scripts/parse_emails.ts",
     "pipeline:repair-content": "tsx scripts/repair_job_content.ts",
     "pipeline:repair-content-backlog": "tsx scripts/repair_job_content_backlog.ts",
+    "pipeline:requeue-linkedin-blocks": "tsx scripts/requeue_linkedin_content_blocks.ts",
     "embeddings:repair-profile": "tsx scripts/repair_profile_embeddings.ts",
     "pipeline:reconcile": "tsx scripts/reconcile_pipeline.ts",
     "pipeline:repair": "tsx scripts/repair_pipeline_funnel.ts",
