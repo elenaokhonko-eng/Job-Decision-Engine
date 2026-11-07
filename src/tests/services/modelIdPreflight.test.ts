@@ -158,26 +158,42 @@ describe('model id preflight on Vertex AI', () => {
     OPENAI_API_KEY: OPENAI_KEY,
   } as NodeJS.ProcessEnv;
 
+  const notFound = () => Object.assign(new Error(JSON.stringify({ error: { code: 404, status: 'NOT_FOUND' } })), { status: 404 });
+
+  // Mirrors the global endpoint: models.get 404s for embedding models even when embedContent serves them.
   function vertexClient(available: string[], failure?: Error) {
     return {
       models: {
         get: vi.fn(async ({ model }: { model: string }) => {
           if (failure) throw failure;
-          if (available.includes(model)) return { name: `publishers/google/models/${model}` };
-          throw Object.assign(new Error(JSON.stringify({ error: { code: 404, status: 'NOT_FOUND' } })), { status: 404 });
+          if (available.includes(model) && !model.includes('embedding')) return { name: `publishers/google/models/${model}` };
+          throw notFound();
+        }),
+        embedContent: vi.fn(async ({ model }: { model: string }) => {
+          if (failure) throw failure;
+          if (available.includes(model)) return { embeddings: [{ values: new Array(8).fill(0) }] };
+          throw notFound();
         }),
       },
     };
   }
 
-  it('checks every configured Gemini id with models.get and never calls the AI Studio list', async () => {
+  it('checks generation ids with models.get and the embedding id with embedContent, never the AI Studio list', async () => {
     const fetchMock = providerFetch();
     const client = vertexClient(GEMINI_DEFAULT_IDS);
     const result = await checkConfiguredModelIds({ env: vertexEnv, fetchImpl: fetchMock as unknown as typeof fetch, vertexClient: client });
     expect(result.unknown).toEqual([]);
     expect(result.checked).toEqual(['gemini', 'openai']);
-    expect(client.models.get.mock.calls.map(([params]) => params.model).sort()).toEqual([...GEMINI_DEFAULT_IDS].sort());
+    expect(client.models.get.mock.calls.map(([params]) => params.model).sort())
+      .toEqual(GEMINI_DEFAULT_IDS.filter((id) => id !== 'gemini-embedding-001').sort());
+    expect(client.models.embedContent.mock.calls.map(([params]) => params.model)).toEqual(['gemini-embedding-001']);
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('generativelanguage'))).toBe(false);
+  });
+
+  it('reports an embedding id that Vertex does not serve', async () => {
+    const client = vertexClient(GEMINI_DEFAULT_IDS.filter((id) => id !== 'gemini-embedding-001'));
+    const result = await checkConfiguredModelIds({ env: vertexEnv, fetchImpl: providerFetch() as unknown as typeof fetch, vertexClient: client });
+    expect(result.unknown.map((entry) => entry.id)).toEqual(['gemini-embedding-001']);
   });
 
   it('reports an id that Vertex does not serve at the configured location', async () => {
