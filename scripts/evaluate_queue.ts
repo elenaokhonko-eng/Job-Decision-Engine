@@ -12,10 +12,13 @@ import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy
 import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
 import {
   diffProviderCalls,
+  diffProviderMix,
   isRateLimitedFailure,
   rateLimitRetryAfterMs,
   snapshotProviderCalls,
+  snapshotProviderMix,
   summarizeProviderCalls,
+  summarizeProviderMix,
 } from "../src/services/modelCallResilience.js";
 import { rateLimitedRetryAt } from "../src/tasks/pipelineTasks.js";
 import {
@@ -35,6 +38,29 @@ export interface EvaluateQueueOptions {
   readonly profileVersionId?: string;
   readonly jobVersionIds?: readonly string[];
   readonly limit?: number;
+  /**
+   * Stop starting new evaluations once this much time has passed since the run started. An item
+   * that is not started stays queued, unchanged, for the next run. The evaluation in flight still
+   * finishes within its own call deadline (900 s by default on Flex), so a run takes at most
+   * wallClockMs + one call deadline.
+   */
+  readonly wallClockMs?: number;
+  /** Clock for the run budget (tests); defaults to Date.now. */
+  readonly now?: () => number;
+}
+
+/** EVALUATION_QUEUE_WALL_CLOCK_MS: unset means no run budget; otherwise 60 s .. 6 h. */
+export function evaluationQueueWallClockMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = String(env.EVALUATION_QUEUE_WALL_CLOCK_MS ?? "").trim();
+  if (raw === "") return undefined;
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`EVALUATION_QUEUE_WALL_CLOCK_MS must be a whole number of milliseconds (got "${raw.slice(0, 40)}").`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 60_000 || value > 6 * 60 * 60 * 1000) {
+    throw new Error("EVALUATION_QUEUE_WALL_CLOCK_MS must be from 60000 to 21600000.");
+  }
+  return value;
 }
 
 /** Exponential backoff: 30s, 60s, 120s, … capped at 30 minutes */
@@ -56,8 +82,12 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
   let failedCount = 0;
   let rateLimitedCount = 0;
   const providerCallsAtStart = snapshotProviderCalls();
+  const providerMixAtStart = snapshotProviderMix();
+  const now = options.now ?? Date.now;
+  const runStartedAt = now();
   let manualReviewCount = 0;
   let eligibleCount = 0;
+  let notStartedCount = 0;
 
   try {
     const preflight = checkModelRegistryPreflight();
@@ -72,6 +102,9 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
     }
     if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 1000)) {
       throw new Error('Evaluation queue limit must be an integer from 1 to 1000.');
+    }
+    if (options.wallClockMs !== undefined && (!Number.isInteger(options.wallClockMs) || options.wallClockMs < 1)) {
+      throw new Error('Evaluation queue wall clock must be a positive whole number of milliseconds.');
     }
     let queueItems: EvaluationQueueCandidate[];
     let supersededQueueCount = 0;
@@ -165,7 +198,14 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
       });
     }
 
-    for (const item of queueItems) {
+    for (const [itemIndex, item] of queueItems.entries()) {
+      if (options.wallClockMs !== undefined && now() - runStartedAt >= options.wallClockMs) {
+        notStartedCount = queueItems.length - itemIndex;
+        console.log(
+          `Run time budget of ${Math.round(options.wallClockMs / 1000)}s reached; ${notStartedCount} eligible item(s) stay queued for the next run.`
+        );
+        break;
+      }
       console.log(`\nEvaluating: [${item.lane}] ${item.normalized_title} at ${item.company_name}`);
 
       // Check max attempts → NEEDS_MANUAL_REVIEW
@@ -304,7 +344,7 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
 
         const validatedResult: EvaluationResult = EvaluationResultSchema.parse(evalExecution.evaluatedJob);
 
-        console.log(`  -> Evaluation persisted: Provider = ${validatedResult.provider} (${validatedResult.model}), Fallback = ${validatedResult.is_fallback}`);
+        console.log(`  -> Evaluation persisted: Provider = ${validatedResult.provider} (${validatedResult.model}), Path = ${validatedResult.served_path ?? "unknown"}, Fallback = ${validatedResult.is_fallback}`);
 
         await client.query("BEGIN");
         try {
@@ -330,8 +370,8 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
               canonical_job_id, job_version_id, gate_decision, gate_version,
               lane_matches, workability_facts, unknown_fields, profile_version, evaluation_schema_version,
               profile_version_id, match_run_id, deterministic_decision_id, job_content_hash, context_fingerprint,
-              provider, model, attempt, is_fallback, degraded_state, full_evaluation_payload, evaluated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())`,
+              provider, model, attempt, is_fallback, degraded_state, full_evaluation_payload, served_path, evaluated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW())`,
             [
               ctx.workspaceId,
               item.canonical_job_id,
@@ -353,7 +393,8 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
               validatedResult.attempt,
               validatedResult.is_fallback,
               validatedResult.degraded_state,
-              JSON.stringify(validatedResult)
+              JSON.stringify(validatedResult),
+              validatedResult.served_path ?? null,
             ]
           );
 
@@ -475,17 +516,24 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
     client.release();
   }
 
-  const summary = `\n✅ Queue evaluation complete. Processed: ${processedCount}, Retrying: ${failedCount}, Rate limited (rescheduled): ${rateLimitedCount}, Manual Review: ${manualReviewCount}`;
+  const summary = `\n✅ Queue evaluation complete. Processed: ${processedCount}, Retrying: ${failedCount}, Rate limited (rescheduled): ${rateLimitedCount}, Manual Review: ${manualReviewCount}, Not started (run budget): ${notStartedCount}`;
   console.log(summary);
   const providerCalls = summarizeProviderCalls(diffProviderCalls(providerCallsAtStart, snapshotProviderCalls()));
   console.log(`Evaluation provider calls this run: ${JSON.stringify(providerCalls)}`);
+  const providerMix = summarizeProviderMix(diffProviderMix(providerMixAtStart, snapshotProviderMix()));
+  console.log(`Evaluation provider mix this run: ${JSON.stringify(providerMix)}`);
+  if (providerMix.stop_rule_triggered) {
+    console.warn(`!!! STOP RULE: ${providerMix.stop_rule_reasons.join("; ")}. Pause scaling and review the provider mix.`);
+  }
   return {
     processed: processedCount,
     failed: failedCount,
     manualReview: manualReviewCount,
     eligible: eligibleCount,
     rateLimited: rateLimitedCount,
+    notStarted: notStartedCount,
     providerCalls,
+    providerMix,
   };
 }
 
@@ -499,7 +547,11 @@ export function closeEvaluationQueuePool(): Promise<void> {
 async function runEvaluationQueueCli(): Promise<void> {
   const exitOnRetryWait = process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false";
   try {
-    const outcome = await runEvaluationQueueWithExitPolicy(evaluateQueue, exitOnRetryWait);
+    const wallClockMs = evaluationQueueWallClockMs();
+    const outcome = await runEvaluationQueueWithExitPolicy(
+      () => evaluateQueue(wallClockMs !== undefined ? { wallClockMs } : {}),
+      exitOnRetryWait,
+    );
     if (!outcome.ok) {
       console.error("Fatal queue evaluation error:", publicErrorSummary(outcome.error, "evaluation"));
       process.exitCode = outcome.exitCode;

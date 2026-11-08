@@ -462,6 +462,11 @@ export const EvaluationResultSchema = z.object({
   attempt: z.number().int().positive().default(1),
   is_fallback: z.boolean().default(false),
   degraded_state: z.boolean().default(false),
+  /**
+   * The path that served the evaluation: FLEX / STANDARD (Gemini; not degraded), OPENAI (primary)
+   * or OPENAI_FALLBACK (degraded). Null for results recorded before the path was tracked.
+   */
+  served_path: z.enum(["FLEX", "STANDARD", "OPENAI", "OPENAI_FALLBACK"]).nullable().default(null),
   evaluation_summary: z.string().min(1),
   primary_lane: LaneKeySchema.nullable(),
   secondary_lanes: z.array(LaneKeySchema).default([]),

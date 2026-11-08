@@ -48,7 +48,9 @@ describe("evaluation queue workflow", () => {
     const exitPolicy = readFileSync(resolve("src/pipeline/evaluationQueueExitPolicy.ts"), "utf8");
 
     expect(script).toContain('process.env.EVALUATION_EXIT_ON_RETRY_WAIT !== "false"');
-    expect(script).toContain('runEvaluationQueueWithExitPolicy(evaluateQueue, exitOnRetryWait)');
+    expect(script).toContain('runEvaluationQueueWithExitPolicy(');
+    expect(script).toContain('() => evaluateQueue(wallClockMs !== undefined ? { wallClockMs } : {}),');
+    expect(script).toContain('exitOnRetryWait,');
     expect(script).toContain('process.exitCode = 1');
     expect(script).toContain('await closeEvaluationQueuePool();');
     expect(script).toContain('poolClosePromise = Promise.resolve().then(() => pool.end());');

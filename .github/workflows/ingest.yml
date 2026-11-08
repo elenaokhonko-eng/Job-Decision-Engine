@@ -109,7 +109,9 @@ jobs:
     # Drain staged work whenever at least one discovery source ran without cancellation.
     # An ingestion error will be surfaced at the end so partial work is processed.
     if: ${{ github.ref == 'refs/heads/main' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && (vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false') && !cancelled() && (needs.gmail_ingestion.result == 'success' || needs.public_source_ingestion.result == 'success' || needs.gmail_ingestion.result == 'failure' || needs.public_source_ingestion.result == 'failure') }}
-    timeout-minutes: 60
+    # Sum of the step limits below (worker 30, evaluation 30, Gmail reconciliation 20, preflight 5,
+    # plus setup and reports) stays under 95.
+    timeout-minutes: 95
     # Gemini backend: AI Studio keys (default) or Vertex AI through Workload Identity Federation.
     permissions:
       contents: read
@@ -119,6 +121,10 @@ jobs:
       GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
       GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'global' }}
       GEMINI_PIPELINE_FLEX: ${{ vars.GEMINI_PIPELINE_FLEX || 'false' }}
+      # Flex PayGo calls only: per-request timeout (sent to Vertex as X-Server-Timeout) and the
+      # per-call deadline covering Flex, one standard PayGo retry and the OpenAI fallback.
+      GEMINI_FLEX_REQUEST_TIMEOUT_MS: ${{ vars.GEMINI_FLEX_REQUEST_TIMEOUT_MS || '600000' }}
+      GEMINI_FLEX_CALL_DEADLINE_MS: ${{ vars.GEMINI_FLEX_CALL_DEADLINE_MS || '900000' }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -199,7 +205,11 @@ jobs:
           --batch-size 25 --apply
       - name: Process discovery pipeline
         id: process_pipeline_worker
-        timeout-minutes: 15
+        # The worker stops claiming tasks after PIPELINE_TASK_WORKER_WALL_CLOCK_MS (10 min), but a
+        # quoted-requirements task claimed just before that may make one Flex call that runs to its
+        # 15 min deadline (10 min Flex request, 1 min standard retry, then OpenAI). 10 + 15 + up to
+        # 2 min of seeding/reconciliation + shutdown grace + slack = 30.
+        timeout-minutes: 30
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
@@ -251,7 +261,9 @@ jobs:
           PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS: ${{ vars.PIPELINE_TASK_WORKER_SHUTDOWN_GRACE_MS || '10000' }}
         run: npx tsx scripts/process_pipeline_tasks.ts
       - name: Run AI evaluation queue processor
-        timeout-minutes: 15
+        # Stops starting evaluations after EVALUATION_QUEUE_WALL_CLOCK_MS (10 min); the one in flight
+        # ends within its 15 min Flex call deadline. 10 + 15 + 5 min setup/persistence = 30.
+        timeout-minutes: 30
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -262,6 +274,7 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
           MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
+          EVALUATION_QUEUE_WALL_CLOCK_MS: ${{ vars.INGEST_EVALUATION_QUEUE_WALL_CLOCK_MS || '600000' }}
         run: npx tsx scripts/evaluate_queue.ts
       - name: Reconcile terminal Gmail job alerts
         if: ${{ always() && steps.database_migrations.outcome == 'success' }}

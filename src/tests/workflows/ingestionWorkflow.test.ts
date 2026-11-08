@@ -15,7 +15,7 @@ describe("discovery ingestion workflow", () => {
     const gmailCleanupStep = workflow.split("name: Reconcile terminal Gmail job alerts")[1] ?? "";
     expect(gmailCleanupStep.slice(0, 220)).toContain("timeout-minutes: 20");
     expect(gmailCleanupStep).toContain("GMAIL_RECONCILIATION_LIMIT: ${{ vars.GMAIL_RECONCILIATION_LIMIT || '2000' }}");
-    expect(workflow).toContain("timeout-minutes: 60");
+    expect(workflow).toContain("timeout-minutes: 95");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_STAGE_MAX_TASKS');
     expect(workflow).toContain("PIPELINE_TASK_WORKER_STAGE_QUANTUM: ${{ vars.PIPELINE_TASK_WORKER_STAGE_QUANTUM || '1' }}");
     expect(workflow).toContain('pipeline-task-reconciliation-ingestion-${{ github.run_id }}');

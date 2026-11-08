@@ -28,7 +28,9 @@ jobs:
     name: Drain saved discovery backlog
     runs-on: ubuntu-latest
     if: ${{ github.ref == 'refs/heads/main' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && (vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false') && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled') }}
-    timeout-minutes: 55
+    # Sum of the step limits below that can run in one job (worker 30, Gmail reconciliation 20,
+    # preflight/reconcile/materialize 5 each, plus setup) stays under 80.
+    timeout-minutes: 80
     # Gemini backend: AI Studio keys (default) or Vertex AI through Workload Identity Federation.
     permissions:
       contents: read
@@ -38,6 +40,10 @@ jobs:
       GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
       GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'global' }}
       GEMINI_PIPELINE_FLEX: ${{ vars.GEMINI_PIPELINE_FLEX || 'false' }}
+      # Flex PayGo calls only: per-request timeout (sent to Vertex as X-Server-Timeout) and the
+      # per-call deadline covering Flex, one standard PayGo retry and the OpenAI fallback.
+      GEMINI_FLEX_REQUEST_TIMEOUT_MS: ${{ vars.GEMINI_FLEX_REQUEST_TIMEOUT_MS || '600000' }}
+      GEMINI_FLEX_CALL_DEADLINE_MS: ${{ vars.GEMINI_FLEX_CALL_DEADLINE_MS || '900000' }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -104,7 +110,11 @@ jobs:
 
       - name: Process saved discovery backlog
         id: process_pipeline_worker
-        timeout-minutes: 15
+        # The worker stops claiming tasks after PIPELINE_TASK_WORKER_WALL_CLOCK_MS (10 min), but a
+        # quoted-requirements task claimed just before that may make one Flex call that runs to its
+        # 15 min deadline (10 min Flex request, 1 min standard retry, then OpenAI). 10 + 15 + up to
+        # 2 min of seeding/reconciliation + 1 min shutdown grace + slack = 30.
+        timeout-minutes: 30
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}

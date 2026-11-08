@@ -6,6 +6,7 @@ import pg from "pg";
 import { pgPoolConfig } from "../src/db/pgSsl.js";
 import { readDeadLetterTaskHealth } from "../src/tasks/deadLetterPolicy.js";
 import {
+  GEMINI_FLEX_PROVIDER_LABEL,
   summarizeProviderCalls,
   type ProviderCallCounts,
   type ProviderCallSummary,
@@ -112,6 +113,8 @@ interface ProviderCallRow {
 /**
  * Per-model provider HTTP attempts recorded in model_route_invocations.response_metadata
  * .provider_attempts over the last window (one row per attempt; no prompt text is read).
+ * Attempts sent on Vertex Flex PayGo are reported as provider "gemini-flex" and are not part of
+ * the 429 stop-rule share (the standard retry after Flex covers them).
  * Embedding invocations are recorded per input, so batched embedding requests count once per input.
  */
 export const PROVIDER_CALLS_SQL = `
@@ -126,7 +129,8 @@ export const PROVIDER_CALLS_SQL = `
     WHERE inv.workspace_id = $1
       AND inv.created_at >= NOW() - make_interval(mins => $2::int)
   )
-  SELECT COALESCE(attempt->>'provider', 'unknown') AS provider,
+  SELECT CASE WHEN attempt->>'path' = 'FLEX' THEN '${GEMINI_FLEX_PROVIDER_LABEL}'
+              ELSE COALESCE(attempt->>'provider', 'unknown') END AS provider,
          COALESCE(attempt->>'model', 'unknown') AS model,
          COUNT(*)::int AS calls,
          COUNT(*) FILTER (WHERE attempt->>'status' = 'COMPLETED')::int AS succeeded,

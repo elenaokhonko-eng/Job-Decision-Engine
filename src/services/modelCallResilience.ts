@@ -181,6 +181,61 @@ export function pipelineCallDeadlineMs(env: NodeJS.ProcessEnv = process.env): nu
   return envInt(env, "MODEL_PIPELINE_CALL_DEADLINE_MS", 300_000, 5_000, 1_800_000);
 }
 
+// ---------------------------------------------------------------------------
+// Vertex Flex PayGo timeouts
+// ---------------------------------------------------------------------------
+
+/** Default client request timeout for one Flex PayGo request (Google's Flex samples use 10 min). */
+export const GEMINI_FLEX_REQUEST_TIMEOUT_DEFAULT_MS = 600_000;
+/** Vertex accepts a Flex request timeout of at most 30 minutes. */
+export const GEMINI_FLEX_REQUEST_TIMEOUT_MAX_MS = 1_800_000;
+/** Default per-call deadline for a Flex pipeline call: one Flex request, one standard retry, OpenAI. */
+export const GEMINI_FLEX_CALL_DEADLINE_DEFAULT_MS = 900_000;
+export const GEMINI_FLEX_CALL_DEADLINE_MAX_MS = 3_600_000;
+
+/** A malformed Flex timeout setting: a configuration error, never a model or job failure. */
+export class FlexTimeoutConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FlexTimeoutConfigError";
+  }
+}
+
+function strictMsSetting(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number {
+  const raw = String(env[name] ?? "").trim();
+  if (raw === "") return fallback;
+  if (!/^\d+$/.test(raw)) {
+    throw new FlexTimeoutConfigError(`${name} must be a whole number of milliseconds (got "${raw.slice(0, 40)}").`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min) {
+    throw new FlexTimeoutConfigError(`${name} must be at least ${min} ms (got ${raw.slice(0, 40)}).`);
+  }
+  return Math.min(value, max);
+}
+
+/**
+ * Client request timeout for one Vertex Flex PayGo request: GEMINI_FLEX_REQUEST_TIMEOUT_MS,
+ * default 600 s, at least 60 s, capped at 1800 s (the Vertex maximum). The SDK sends the same
+ * value to Vertex as X-Server-Timeout (seconds). Non-Flex requests keep MODEL_REQUEST_TIMEOUT_MS.
+ */
+export function geminiFlexRequestTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  return strictMsSetting(
+    env, "GEMINI_FLEX_REQUEST_TIMEOUT_MS", GEMINI_FLEX_REQUEST_TIMEOUT_DEFAULT_MS, 60_000, GEMINI_FLEX_REQUEST_TIMEOUT_MAX_MS,
+  );
+}
+
+/**
+ * Per-call deadline for a pipeline call that starts on Flex PayGo: GEMINI_FLEX_CALL_DEADLINE_MS,
+ * default 900 s (one 600 s Flex request, one 60 s standard retry, then the OpenAI fallback), at
+ * least 60 s, capped at 3600 s. Non-Flex pipeline calls keep MODEL_PIPELINE_CALL_DEADLINE_MS.
+ */
+export function geminiFlexCallDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
+  return strictMsSetting(
+    env, "GEMINI_FLEX_CALL_DEADLINE_MS", GEMINI_FLEX_CALL_DEADLINE_DEFAULT_MS, 60_000, GEMINI_FLEX_CALL_DEADLINE_MAX_MS,
+  );
+}
+
 /** Attempts per model when every failure is a 429. Default 5. */
 export function rateLimitMaxAttempts(env: NodeJS.ProcessEnv = process.env): number {
   return envInt(env, "GEMINI_RATE_LIMIT_MAX_ATTEMPTS", 5, 1, 10);
@@ -462,25 +517,198 @@ export function diffProviderCalls(before: ProviderCallCounts[], after: ProviderC
 /** Operator stop rule: pause scaling when more than 5% of a run's calls were rate limited. */
 export const RATE_LIMITED_STOP_RULE_SHARE = 0.05;
 
+/**
+ * Provider label for HTTP attempts sent with Vertex Flex PayGo headers. Flex trades throttling for
+ * price and a throttled Flex request is retried once on standard PayGo, so Flex attempts are
+ * reported on their own row and left out of the per-attempt 429 share. Flex failures that the
+ * standard retry did not absorb count in the run-level provider mix (summarizeProviderMix).
+ */
+export const GEMINI_FLEX_PROVIDER_LABEL = "gemini-flex";
+
 export interface ProviderCallSummary {
   total_calls: number;
   rate_limited: number;
   rate_limited_share: number;
+  /** 429s on Flex PayGo attempts: reported, but not in rate_limited or the share. */
+  flex_rate_limited: number;
   stop_rule_threshold: number;
   stop_rule_triggered: boolean;
   by_model: ProviderCallCounts[];
 }
 
 export function summarizeProviderCalls(byModel: ProviderCallCounts[]): ProviderCallSummary {
-  const totalCalls = byModel.reduce((sum, counts) => sum + counts.calls, 0);
-  const rateLimited = byModel.reduce((sum, counts) => sum + counts.rate_limited, 0);
-  const share = totalCalls > 0 ? rateLimited / totalCalls : 0;
+  const isFlex = (counts: ProviderCallCounts) => counts.provider === GEMINI_FLEX_PROVIDER_LABEL;
+  const sum = (rows: ProviderCallCounts[], field: "calls" | "rate_limited") =>
+    rows.reduce((total, counts) => total + counts[field], 0);
+  const standardRows = byModel.filter((counts) => !isFlex(counts));
+  const standardCalls = sum(standardRows, "calls");
+  const rateLimited = sum(standardRows, "rate_limited");
+  const share = standardCalls > 0 ? rateLimited / standardCalls : 0;
   return {
-    total_calls: totalCalls,
+    total_calls: sum(byModel, "calls"),
     rate_limited: rateLimited,
     rate_limited_share: Math.round(share * 10000) / 10000,
+    flex_rate_limited: sum(byModel.filter(isFlex), "rate_limited"),
     stop_rule_threshold: RATE_LIMITED_STOP_RULE_SHARE,
     stop_rule_triggered: share > RATE_LIMITED_STOP_RULE_SHARE,
     by_model: byModel,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Per-run provider mix: which path served each logical AI call
+// ---------------------------------------------------------------------------
+
+/**
+ * How one logical AI call was served:
+ * - FLEX: Gemini on Vertex Flex PayGo.
+ * - STANDARD: Gemini on standard PayGo (a non-Flex call, or the one standard retry after Flex).
+ * - OPENAI: OpenAI as the route's primary provider.
+ * - OPENAI_FALLBACK: OpenAI after Gemini failed (degraded).
+ */
+export type ModelServedPath = "FLEX" | "STANDARD" | "OPENAI" | "OPENAI_FALLBACK";
+export const MODEL_SERVED_PATHS = ["FLEX", "STANDARD", "OPENAI", "OPENAI_FALLBACK"] as const;
+
+/** Go-live stop rule: pause when more than 20% of a run's AI calls hit a provider error. */
+export const PROVIDER_ERROR_STOP_RULE_SHARE = 0.2;
+
+export interface ModelCallRouteRecord {
+  /** The path that served the call; null when every provider failed. */
+  servedPath: ModelServedPath | null;
+  /** True when a fallback provider or model answered (the call is degraded). */
+  fallbackUsed: boolean;
+  flexAttempted: boolean;
+  /** Flex failed for capacity (timeout, 429, unavailable) and the standard retry answered. */
+  flexRecoveredByStandard: boolean;
+  /** HTTP attempts of this call that timed out / were rate limited, on any path. */
+  timeouts: number;
+  rateLimited: number;
+  /** The subset of those attempts that were sent with Flex headers. */
+  flexTimeouts: number;
+  flexRateLimited: number;
+}
+
+const MIX_FIELDS = [
+  "ai_calls", "served_flex", "served_standard", "served_openai", "served_openai_fallback", "failed",
+  "flex_attempted", "flex_to_standard_recoveries", "timeouts", "rate_limited", "flex_timeouts",
+  "flex_rate_limited", "provider_error_calls", "rate_limited_calls",
+] as const;
+
+/**
+ * Logical AI calls by served path. provider_error_calls are calls that failed or were answered by
+ * a fallback provider/model; rate_limited_calls are calls with a 429 that the Flex-to-standard
+ * retry did not absorb.
+ */
+export type ProviderMixCounts = Record<(typeof MIX_FIELDS)[number], number>;
+
+function emptyMix(): ProviderMixCounts {
+  return Object.fromEntries(MIX_FIELDS.map((field) => [field, 0])) as ProviderMixCounts;
+}
+
+let providerMix: ProviderMixCounts = emptyMix();
+
+/**
+ * Records one logical AI call (all of its HTTP attempts across paths and providers). A Flex call
+ * recovered by the standard retry is reported as a recovery but is not a provider error, and its
+ * Flex 429s do not count toward the 429 stop rule.
+ */
+export function recordModelCallRoute(record: ModelCallRouteRecord): void {
+  const mix = providerMix;
+  mix.ai_calls += 1;
+  switch (record.servedPath) {
+    case "FLEX": mix.served_flex += 1; break;
+    case "STANDARD": mix.served_standard += 1; break;
+    case "OPENAI": mix.served_openai += 1; break;
+    case "OPENAI_FALLBACK": mix.served_openai_fallback += 1; break;
+    default: mix.failed += 1;
+  }
+  if (record.flexAttempted) mix.flex_attempted += 1;
+  if (record.flexRecoveredByStandard) mix.flex_to_standard_recoveries += 1;
+  mix.timeouts += record.timeouts;
+  mix.rate_limited += record.rateLimited;
+  mix.flex_timeouts += record.flexTimeouts;
+  mix.flex_rate_limited += record.flexRateLimited;
+  if (record.servedPath === null || record.fallbackUsed) mix.provider_error_calls += 1;
+  const countedRateLimits = record.rateLimited - (record.flexRecoveredByStandard ? record.flexRateLimited : 0);
+  if (countedRateLimits > 0) mix.rate_limited_calls += 1;
+}
+
+export function snapshotProviderMix(): ProviderMixCounts {
+  return { ...providerMix };
+}
+
+export function resetProviderMixForTests(): void {
+  providerMix = emptyMix();
+}
+
+/** Calls recorded between two snapshots (a run's own calls). */
+export function diffProviderMix(before: ProviderMixCounts, after: ProviderMixCounts): ProviderMixCounts {
+  const delta = emptyMix();
+  for (const field of MIX_FIELDS) delta[field] = after[field] - before[field];
+  return delta;
+}
+
+export interface ProviderMixSummary {
+  ai_calls: number;
+  served: Record<ModelServedPath, number>;
+  failed: number;
+  flex_attempted: number;
+  flex_to_standard_recoveries: number;
+  timeouts: number;
+  rate_limited: number;
+  flex_timeouts: number;
+  flex_rate_limited: number;
+  provider_error_calls: number;
+  provider_error_share: number;
+  provider_error_threshold: number;
+  rate_limited_calls: number;
+  rate_limited_share: number;
+  rate_limited_threshold: number;
+  stop_rule_triggered: boolean;
+  stop_rule_reasons: string[];
+}
+
+function roundedShare(part: number, whole: number): number {
+  return whole > 0 ? Math.round((part / whole) * 10000) / 10000 : 0;
+}
+
+/** The run's provider mix with the go-live stop rules (provider errors > 20%, 429s > 5% of AI calls). */
+export function summarizeProviderMix(mix: ProviderMixCounts): ProviderMixSummary {
+  const reasons: string[] = [];
+  const providerErrorShare = roundedShare(mix.provider_error_calls, mix.ai_calls);
+  const rateLimitedShare = roundedShare(mix.rate_limited_calls, mix.ai_calls);
+  if (mix.ai_calls > 0 && mix.provider_error_calls / mix.ai_calls > PROVIDER_ERROR_STOP_RULE_SHARE) {
+    reasons.push(
+      `provider errors on ${mix.provider_error_calls}/${mix.ai_calls} AI calls (${(providerErrorShare * 100).toFixed(1)}%) exceed ${PROVIDER_ERROR_STOP_RULE_SHARE * 100}%`,
+    );
+  }
+  if (mix.ai_calls > 0 && mix.rate_limited_calls / mix.ai_calls > RATE_LIMITED_STOP_RULE_SHARE) {
+    reasons.push(
+      `429s on ${mix.rate_limited_calls}/${mix.ai_calls} AI calls (${(rateLimitedShare * 100).toFixed(1)}%) exceed ${RATE_LIMITED_STOP_RULE_SHARE * 100}%`,
+    );
+  }
+  return {
+    ai_calls: mix.ai_calls,
+    served: {
+      FLEX: mix.served_flex,
+      STANDARD: mix.served_standard,
+      OPENAI: mix.served_openai,
+      OPENAI_FALLBACK: mix.served_openai_fallback,
+    },
+    failed: mix.failed,
+    flex_attempted: mix.flex_attempted,
+    flex_to_standard_recoveries: mix.flex_to_standard_recoveries,
+    timeouts: mix.timeouts,
+    rate_limited: mix.rate_limited,
+    flex_timeouts: mix.flex_timeouts,
+    flex_rate_limited: mix.flex_rate_limited,
+    provider_error_calls: mix.provider_error_calls,
+    provider_error_share: providerErrorShare,
+    provider_error_threshold: PROVIDER_ERROR_STOP_RULE_SHARE,
+    rate_limited_calls: mix.rate_limited_calls,
+    rate_limited_share: rateLimitedShare,
+    rate_limited_threshold: RATE_LIMITED_STOP_RULE_SHARE,
+    stop_rule_triggered: reasons.length > 0,
+    stop_rule_reasons: reasons,
   };
 }

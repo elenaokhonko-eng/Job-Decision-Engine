@@ -52,6 +52,23 @@
           "type": "boolean",
           "default": false
         },
+        "served_path": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "FLEX",
+                "STANDARD",
+                "OPENAI",
+                "OPENAI_FALLBACK"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "evaluation_summary": {
           "type": "string",
           "minLength": 1
