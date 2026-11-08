@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../../db/migrate.js";
 import { isLocalPostgresConnectionString, pgConnectionConfig } from "../../db/pgSsl.js";
 import { enforcePipelineWorkerExitPolicy } from "../../tasks/pipelineWorkerExitPolicy.js";
+import { claimPipelineTasks } from "../../tasks/pipelineTasks.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { oldestStatusAgeSeconds } from "../../../scripts/process_pipeline_tasks.js";
 
@@ -75,5 +76,37 @@ describe.skipIf(skipReal)("v_pipeline_task_status_age (PostgreSQL)", () => {
     expect(() => enforcePipelineWorkerExitPolicy({ ...policyInput, oldestRetryWaitAgeSeconds: retryAge })).not.toThrow();
     expect(() => enforcePipelineWorkerExitPolicy({ ...policyInput, oldestRetryWaitAgeSeconds: Number(rows[0].oldest_age_seconds) }))
       .toThrow(/Retry backlog age exceeded SLO/);
+  });
+
+  it("claims a due retry before an older PENDING backlog of the same type", async () => {
+    if (!client || !context) throw new Error("The queue health test database is not initialized.");
+    const taskType = "DECIDE_RECOMMENDATION";
+    // Three PENDING tasks due for weeks, then one retry that became due a minute ago.
+    for (let index = 0; index < 3; index += 1) {
+      await client.query(
+        `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, available_at, created_at, updated_at)
+         VALUES ($1, $2, $3, '{}'::jsonb, 'PENDING', NOW() - INTERVAL '20 days', NOW() - INTERVAL '20 days', NOW() - INTERVAL '20 days')`,
+        [context.workspaceId, taskType, `${taskType}:backlog-${index}:${randomUUID()}`],
+      );
+    }
+    const retryKey = `${taskType}:retry:${randomUUID()}`;
+    await client.query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, available_at, attempt_count, created_at, updated_at)
+       VALUES ($1, $2, $3, '{}'::jsonb, 'RETRY_WAIT', NOW() - INTERVAL '1 minute', 1, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 minute')`,
+      [context.workspaceId, taskType, retryKey],
+    );
+    // A retry whose backoff has not elapsed is still not claimable.
+    await client.query(
+      `INSERT INTO pipeline_tasks (workspace_id, task_type, task_key, payload, status, available_at, attempt_count, created_at, updated_at)
+       VALUES ($1, $2, $3, '{}'::jsonb, 'RETRY_WAIT', NOW() + INTERVAL '1 hour', 1, NOW() - INTERVAL '1 hour', NOW())`,
+      [context.workspaceId, taskType, `${taskType}:future-retry:${randomUUID()}`],
+    );
+
+    const first = await claimPipelineTasks({ taskType, limit: 1, claimedBy: "retry-priority-test" }, client, { context });
+    expect(first.map((task) => task.taskKey)).toEqual([retryKey]);
+
+    const rest = await claimPipelineTasks({ taskType, limit: 10, claimedBy: "retry-priority-test" }, client, { context });
+    expect(rest).toHaveLength(3);
+    expect(rest.every((task) => task.taskKey.includes(":backlog-"))).toBe(true);
   });
 });
