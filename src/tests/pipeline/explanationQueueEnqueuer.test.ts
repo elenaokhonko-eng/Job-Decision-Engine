@@ -118,7 +118,9 @@ describe("Pipeline Stage: Explanation Queue Enqueuer (P1)", () => {
     expect(mainQuery?.[0]).not.toContain("SET processing_state = 'DEFERRED_BUDGET'");
     expect(mainQuery?.[0]).not.toMatch(/\),\s*SELECT/);
     expect(mainQuery?.[0]).toContain("LEFT JOIN lane_budgets lb");
-    expect(mainQuery?.[0]).toContain("'TRACK'");
+    // TRACK outcomes are deterministic only; AI evaluation is for PRIORITY and REVIEW.
+    expect(mainQuery?.[0]).toContain("c.recommendation_outcome IN ('PRIORITY', 'REVIEW')");
+    expect(mainQuery?.[0]).not.toContain("'TRACK'");
     expect(mainQuery?.[0]).toContain("AI_BUDGET_UNCONFIGURED_LANE");
     expect(mainQuery?.[0]).toContain("budget_configured");
     expect(mainQuery?.[0]).toContain("ON CONFLICT DO NOTHING");

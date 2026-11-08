@@ -592,7 +592,7 @@ export async function runDeterministicMatcher(
                OR (
                  $${explicitTargetsParam}::boolean
                  AND COALESCE(c.processing_state, c.processing_status) IN (
-                   'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
+                   'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'
                  )
                )
              )

@@ -8,6 +8,7 @@ import { loadWorkspaceLanesConfig } from "./laneConfigLoader.js";
 import { PersistedEvaluationQueueItemSchema } from "../contracts/index.js";
 import { supersedeStaleEvaluationQueueRows } from "./evaluationQueueLineage.js";
 import { laneRoutingCurrentSql } from "../lanes/laneRoutingCurrency.js";
+import { AI_EVALUATION_OUTCOMES_SQL } from "./profileMatchCurrency.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -366,7 +367,8 @@ export async function runExplanationQueueEnqueuer(
             AND c.primary_lane IS NOT NULL
             AND c.primary_lane <> 'UNCLASSIFIED'
             AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
-            AND COALESCE(c.recommendation_outcome, 'TRACK') IN ('PRIORITY', 'REVIEW', 'TRACK')
+            -- Only Apply Now outcomes are AI-evaluated; TRACK is excluded (see profileMatchCurrency.ts).
+            AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
             AND COALESCE(c.processing_state, c.processing_status) <> 'MANUALLY_REMOVED'
             AND NOT EXISTS (
               SELECT 1
