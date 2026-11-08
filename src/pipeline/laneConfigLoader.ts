@@ -8,6 +8,7 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/con
 import { stableStringify, sha256Hex } from "../config/structuredLoader.js";
 import { LaneFileConfigSchema, type LaneFileConfig } from "../lanes/contracts.js";
 import { listActiveLaneRevisions, upsertLaneRevision, type ActiveLaneRevision } from "../lanes/registry.js";
+import { laneRoutingVersion } from "../lanes/laneRoutingCurrency.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -156,6 +157,11 @@ export async function loadWorkspaceLanesConfig(
   config: GlobalLanesConfig;
   source: "LANE_REGISTRY_DB" | "FILES";
   activeLaneRevisions?: ActiveLaneRevision[];
+  /**
+   * Registry source only: identifies the routing content of the active lanes, ignoring budget
+   * fields. Unchanged by budget-only revisions, unlike config.version.
+   */
+  routingVersion?: string;
 }> {
   const isPool = (value: pg.Pool | pg.PoolClient): value is pg.Pool =>
     typeof (value as pg.Pool).connect === "function" && !("release" in value);
@@ -226,6 +232,7 @@ export async function loadWorkspaceLanesConfig(
         return {
           source: "LANE_REGISTRY_DB",
           activeLaneRevisions: active,
+          routingVersion: laneRoutingVersion(active),
           config: {
             version,
             description: "Workspace lane revisions (registry-backed)",

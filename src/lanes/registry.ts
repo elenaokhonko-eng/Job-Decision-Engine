@@ -14,6 +14,8 @@ export interface ActiveLaneRevision {
   status: 'ACTIVE' | 'INACTIVE';
   revisionNumber: number;
   contentHash: string;
+  /** SHA-256 of the content without budget (migration 101); equal hashes route identically. */
+  routingContentHash: string;
   content: LaneFileConfig;
   activatedAt: string;
 }
@@ -37,6 +39,7 @@ export async function listActiveLaneRevisions(
       status: 'ACTIVE' | 'INACTIVE';
       revision_number: number;
       content_hash: string;
+      routing_content_hash: string;
       content: unknown;
       activated_at: string;
     }>(
@@ -48,6 +51,7 @@ export async function listActiveLaneRevisions(
           li.status AS status,
           lr.revision_number AS revision_number,
           lr.content_hash AS content_hash,
+          lr.routing_content_hash AS routing_content_hash,
           lr.content AS content,
           lar.activated_at AS activated_at
         FROM lane_identities li
@@ -67,6 +71,7 @@ export async function listActiveLaneRevisions(
       status: r.status,
       revisionNumber: r.revision_number,
       contentHash: r.content_hash,
+      routingContentHash: r.routing_content_hash,
       content: LaneFileConfigSchema.parse(r.content),
       activatedAt: r.activated_at,
     }));
@@ -95,6 +100,7 @@ export interface UpsertLaneRevisionResult {
   laneRevisionId: string;
   revisionNumber: number;
   contentHash: string;
+  routingContentHash: string;
   activated: boolean;
   inserted: boolean;
 }
@@ -144,9 +150,10 @@ export async function upsertLaneRevision(
     const existing = await (client as QueryClient).query<{
       id: string;
       revision_number: number;
+      routing_content_hash: string;
     }>(
       `
-        SELECT id, revision_number
+        SELECT id, revision_number, routing_content_hash
         FROM lane_revisions
         WHERE lane_identity_id = $1
           AND content_hash = $2
@@ -157,11 +164,13 @@ export async function upsertLaneRevision(
 
     let laneRevisionId: string;
     let revisionNumber: number;
+    let routingContentHash: string;
     let inserted = false;
 
     if (existing.rows.length > 0) {
       laneRevisionId = existing.rows[0].id;
       revisionNumber = existing.rows[0].revision_number;
+      routingContentHash = existing.rows[0].routing_content_hash;
     } else {
       const nextRes = await (client as QueryClient).query<{ next: number }>(
         `
@@ -173,7 +182,7 @@ export async function upsertLaneRevision(
       );
       revisionNumber = nextRes.rows[0].next;
 
-      const revRes = await (client as QueryClient).query<{ id: string }>(
+      const revRes = await (client as QueryClient).query<{ id: string; routing_content_hash: string }>(
         `
           INSERT INTO lane_revisions (
             lane_identity_id,
@@ -184,7 +193,7 @@ export async function upsertLaneRevision(
             created_by_user_id
           )
           VALUES ($1, $2, $3, $4, $5, $6)
-          RETURNING id
+          RETURNING id, routing_content_hash
         `,
         [
           laneIdentityId,
@@ -196,6 +205,7 @@ export async function upsertLaneRevision(
         ]
       );
       laneRevisionId = revRes.rows[0].id;
+      routingContentHash = revRes.rows[0].routing_content_hash;
       inserted = true;
     }
 
@@ -258,6 +268,7 @@ export async function upsertLaneRevision(
       laneRevisionId,
       revisionNumber,
       contentHash,
+      routingContentHash,
       activated,
       inserted,
     };

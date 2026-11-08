@@ -17,6 +17,7 @@ import { runEmbeddingBatchWithFallback as defaultRunEmbeddingBatchWithFallback }
 import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegistry.js";
 import { runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
+import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
@@ -84,6 +85,25 @@ export const PIPELINE_STAGE_TASK_TYPES = [
 const SEMANTIC_MATCH_REPAIR_GENERATION = "semantic_match_repair_v2";
 const ROUTABLE_VERIFICATION_SQL = routableWorkabilityVerificationSql("c");
 
+/**
+ * Canonical jobs (alias c, latest lane decision LEFT JOINed as ld) that the explanation enqueuer
+ * would consider but whose latest lane decision was not routed under the routing content of the
+ * live active lane revisions. Budget-only lane revisions never match this predicate (see
+ * migrations/101_lane_revision_routing_content_hash.sql); a routing-content change does.
+ */
+const SUPERSEDED_LANE_ROUTING_SQL = `(
+  c.archived_at IS NULL
+  AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'DEFERRED_BUDGET')
+  AND c.primary_lane IS NOT NULL
+  AND c.primary_lane <> 'UNCLASSIFIED'
+  AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
+  AND COALESCE(c.recommendation_outcome, 'TRACK') IN ('PRIORITY', 'REVIEW', 'TRACK')
+  AND (
+    ld.id IS NULL
+    OR NOT ${laneRoutingCurrentSql("ld.lane_snapshot", workspaceActiveLaneRoutingSql("c.workspace_id"))}
+  )
+)`;
+
 export type PipelineStageTaskType = (typeof PIPELINE_STAGE_TASK_TYPES)[number];
 
 export function parsePipelineTaskTypes(raw: string | undefined): PipelineStageTaskType[] {
@@ -143,6 +163,11 @@ export interface SeedPipelineTasksSummary {
   deferredByBudget: number;
   timeBudgetExceeded: boolean;
   byType: Record<string, { inserted: number; existing: number }>;
+  /**
+   * Eligible routed jobs found with a lane decision from superseded lane routing content in
+   * this seeding pass; each gets a ROUTE_LANE re-route task (inserted or already existing).
+   */
+  supersededLaneRouting?: number;
 }
 
 export type PipelineWorkerExitReason =
@@ -162,6 +187,11 @@ export interface PipelineStageWorkerSummary {
   deadLettered: number;
   /** Tasks rescheduled because their model call was rate limited (429); no attempt consumed. */
   rateLimitDeferred: number;
+  /**
+   * ENQUEUE_EXPLANATION tasks blocked because the job was routed under superseded lane routing
+   * content; each one has a ROUTE_LANE re-route queued and is reactivated when it completes.
+   */
+  laneRoutingSuperseded: number;
   /** Model calls made by this run, by provider/model, with 429/timeout/retry counts. */
   providerCalls?: ProviderCallSummary;
   exitReason: PipelineWorkerExitReason;
@@ -290,6 +320,22 @@ export class PipelineTaskDependencyBlockedError extends Error {
   ) {
     super(message);
     this.name = "PipelineTaskDependencyBlockedError";
+  }
+}
+
+/**
+ * The job's latest lane decision predates the active lane routing content. A ROUTE_LANE re-route
+ * has been queued; this task stays BLOCKED_DEPENDENCY until that re-route completes.
+ */
+export class LaneRoutingSupersededError extends PipelineTaskDependencyBlockedError {
+  constructor(jobVersionId: string, laneRoutingVersion: string) {
+    super(
+      `LANE_ROUTING_SUPERSEDED:${jobVersionId}`,
+      "ROUTE_LANE",
+      `Lane routing for job_version_id=${jobVersionId} predates the active lane routing content ` +
+        `(${laneRoutingVersion}); a ROUTE_LANE re-route was queued before AI enqueue.`,
+    );
+    this.name = "LaneRoutingSupersededError";
   }
 }
 
@@ -464,9 +510,17 @@ async function enqueueStageTask(
       taskPayload.reprocess_existing_state === true) ||
     (taskType === "DECIDE_RECOMMENDATION" &&
       taskPayload.repair_existing_state === true);
+  const laneRoutingRerouteVersion =
+    taskType === "ROUTE_LANE" &&
+    typeof taskPayload.lane_routing_version === "string" &&
+    taskPayload.lane_routing_version.trim() !== ""
+      ? taskPayload.lane_routing_version.trim()
+      : null;
   const taskVariant = routingReplayVersion
     ? `repair-${routingReplayVersion}`
-    : isRepairTask ? "repair" : undefined;
+    : laneRoutingRerouteVersion
+      ? `reroute-${laneRoutingRerouteVersion}`
+      : isRepairTask ? "repair" : undefined;
   const taskVersion = stageVersion(taskType);
   const taskKey = buildPipelineTaskKey(taskType, id, taskVersion, profileVersionId, taskVariant);
   const intent = createTaskIntentV2({
@@ -603,9 +657,16 @@ export async function seedRecoverablePipelineTasks(
 
   try {
     const ctx = options.context ?? (await resolveWorkspaceContext(client as any));
-    if (!routingDeferredReplayVersion) {
+    const laneRoutingSeedTypes: PipelineStageTaskType[] = ["ROUTE_LANE", "ENQUEUE_EXPLANATION"];
+    const needsLaneRoutingVersion = !enabledTypes || laneRoutingSeedTypes.some((type) => enabledTypes.has(type));
+    // Registry-backed routing version, independent of lane budgets. Null when lanes come from FILES.
+    let laneRoutingVersion: string | null = null;
+    if (!routingDeferredReplayVersion || needsLaneRoutingVersion) {
       const lanes = await loadWorkspaceLanesConfig(client as any, { context: ctx, seedIfEmpty: true });
-      routingDeferredReplayVersion = lanes.config.version || "routing_deferred_replay_v1";
+      if (!routingDeferredReplayVersion) {
+        routingDeferredReplayVersion = lanes.config.version || "routing_deferred_replay_v1";
+      }
+      laneRoutingVersion = lanes.source === "LANE_REGISTRY_DB" ? lanes.routingVersion ?? null : null;
     }
     const readinessViewAvailable = !enabledTypes || enabledTypes.has("DECIDE_RECOMMENDATION")
       ? await applicationReadinessViewAvailable(client as pg.PoolClient)
@@ -1021,6 +1082,57 @@ export async function seedRecoverablePipelineTasks(
     maxPerType,
     );
 
+    if (laneRoutingVersion) {
+      // Eligible jobs routed under superseded lane routing content are re-routed, so a
+      // routing-content change never leaves them stranded before AI enqueue. Budget-only lane
+      // revisions keep routing current and seed nothing here.
+      const routeCountsBefore = summary.byType.ROUTE_LANE ?? { inserted: 0, existing: 0 };
+      const routeSeenBefore = routeCountsBefore.inserted + routeCountsBefore.existing;
+      const rerouteVersion = laneRoutingVersion;
+      await selectAndEnqueue(
+        client as any,
+        ctx,
+        summary,
+        "ROUTE_LANE",
+        `SELECT c.id AS canonical_job_id, jv.id AS job_version_id
+         FROM canonical_jobs c
+         JOIN job_versions jv
+           ON jv.workspace_id = c.workspace_id
+          AND jv.id = c.latest_job_version_id
+         LEFT JOIN lane_decisions ld
+           ON ld.workspace_id = c.workspace_id
+          AND ld.id = c.latest_lane_decision_id
+          AND ld.job_version_id = jv.id
+         WHERE c.workspace_id = $1
+           AND ${SUPERSEDED_LANE_ROUTING_SQL}
+         ORDER BY c.updated_at ASC, c.id ASC
+         LIMIT $2`,
+        [ctx.workspaceId, maxPerType],
+        (row) => ({
+          id: requiredSeedValue(row, "job_version_id"),
+          payload: {
+            canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+            job_version_id: requiredSeedValue(row, "job_version_id"),
+            reprocess_existing_state: true,
+            lane_routing_version: rerouteVersion,
+          },
+        }),
+        enabledTypes,
+        includeTestFixtures,
+        deadlineAt,
+        seedScope,
+        maxPerType,
+      );
+      const routeCountsAfter = summary.byType.ROUTE_LANE ?? { inserted: 0, existing: 0 };
+      summary.supersededLaneRouting = routeCountsAfter.inserted + routeCountsAfter.existing - routeSeenBefore;
+      if (summary.supersededLaneRouting > 0) {
+        console.warn(
+          `Lane routing superseded for ${summary.supersededLaneRouting} eligible job(s); ` +
+            `ROUTE_LANE re-routes queued for ${rerouteVersion}.`
+        );
+      }
+    }
+
     await selectAndEnqueue(
       client as any,
       ctx,
@@ -1280,6 +1392,9 @@ export async function seedRecoverablePipelineTasks(
         payload: {
           canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
           job_version_id: requiredSeedValue(row, "job_version_id"),
+          // The routing version is part of the task identity, so enqueue is retried once per
+          // lane routing content and never after a budget-only lane revision.
+          ...(laneRoutingVersion ? { lane_routing_version: laneRoutingVersion } : {}),
         },
       }),
       enabledTypes,
@@ -1719,8 +1834,58 @@ async function enqueueDependencyRepair(
   return enqueueStageTask(dependency.repairTaskType, jobVersionId, repairPayload, clientOrPool, ctx);
 }
 
+async function findSupersededLaneRouting(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<string | null> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ canonical_job_id: string }>(
+    `SELECT c.id::text AS canonical_job_id
+     FROM canonical_jobs c
+     LEFT JOIN lane_decisions ld
+       ON ld.workspace_id = c.workspace_id
+      AND ld.id = c.latest_lane_decision_id
+      AND ld.job_version_id = c.latest_job_version_id
+     WHERE c.workspace_id = $1
+       AND c.latest_job_version_id = $2::uuid
+       AND ${SUPERSEDED_LANE_ROUTING_SQL}
+     LIMIT 1`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return rows[0]?.canonical_job_id ?? null;
+}
+
+/**
+ * Before AI enqueue, a job whose lane decision predates the active lane routing content is sent
+ * back to ROUTE_LANE instead of failing or being silently skipped. Budget-only lane revisions
+ * keep the routing current and pass straight through.
+ */
+async function requireCurrentLaneRouting(
+  jobVersionId: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<void> {
+  const lanes = await loadWorkspaceLanesConfig(clientOrPool, { context: ctx, seedIfEmpty: false });
+  if (lanes.source !== "LANE_REGISTRY_DB" || !lanes.routingVersion) return;
+  const canonicalJobId = await findSupersededLaneRouting(clientOrPool, ctx, jobVersionId);
+  if (!canonicalJobId) return;
+  await enqueueStageTask(
+    "ROUTE_LANE",
+    jobVersionId,
+    {
+      canonical_job_id: canonicalJobId,
+      job_version_id: jobVersionId,
+      reprocess_existing_state: true,
+      lane_routing_version: lanes.routingVersion,
+    },
+    clientOrPool,
+    ctx,
+  );
+  throw new LaneRoutingSupersededError(jobVersionId, lanes.routingVersion);
+}
+
 async function reactivateBlockedDependencyTasks(
-  repairTaskType: AutomaticDependency["repairTaskType"],
+  repairTaskType: AutomaticDependency["repairTaskType"] | "ROUTE_LANE",
   jobVersionId: string,
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
@@ -2207,6 +2372,29 @@ async function maybeEnqueueAfterTask(
   }
 
   if (taskType === "ROUTE_LANE") {
+    await reactivateBlockedDependencyTasks("ROUTE_LANE", jobVersionId, clientOrPool, ctx);
+    const laneRoutingVersion = typeof payload.lane_routing_version === "string" && payload.lane_routing_version.trim() !== ""
+      ? payload.lane_routing_version.trim()
+      : null;
+    if (laneRoutingVersion) {
+      // Re-routing under new lane routing content does not change the match or decision
+      // inputs, so the current match and decision stay authoritative. Resume AI enqueue for an
+      // eligible job; the payload's routing version gives the task a fresh identity.
+      if (
+        state.processingState === "LANE_ROUTED" &&
+        state.recommendationEligibility === "ELIGIBLE" &&
+        (state.recommendationOutcome === "PRIORITY" || state.recommendationOutcome === "REVIEW")
+      ) {
+        await enqueueSuccessor("ENQUEUE_EXPLANATION", jobVersionId, {
+          canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
+          job_version_id: jobVersionId,
+          lane_routing_version: laneRoutingVersion,
+        });
+      } else if (state.processingState === "ROUTING_DEFERRED") {
+        await enqueueSuccessor("DECIDE_RECOMMENDATION", jobVersionId, stagePayload);
+      }
+      return insertedSuccessors;
+    }
     if (state.processingState === "LANE_ROUTED") {
       await enqueueSuccessor("MATCH_PROFILE_EVIDENCE", jobVersionId, stagePayload);
     } else if (state.processingState === "ROUTING_DEFERRED") {
@@ -2687,10 +2875,14 @@ async function executeStageTask(
     ) {
       return;
     }
+    // A re-route of a job routed under superseded lane routing content must replay the existing
+    // lane decision; the router only replays decisions made under an older lanes version.
+    const rerouteSupersededLaneRouting = optionalStringPayload(task, "lane_routing_version") !== undefined;
     const summary = await dependencies.runLaneRouting(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
       limit: 1,
+      ...(rerouteSupersededLaneRouting ? { reprocessExisting: true } : {}),
     });
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
     // A duplicate or late route task can arrive after a concurrent worker has
@@ -2708,7 +2900,16 @@ async function executeStageTask(
         "AI_EVALUATED",
         "EVALUATED",
       ].includes(processingState ?? "")
-    ) return;
+    ) {
+      if (rerouteSupersededLaneRouting && await findSupersededLaneRouting(clientOrPool, ctx, jobVersionId)) {
+        // The router selected nothing (for example the posting lost its source-content
+        // evidence), so the job would stay blocked from AI enqueue. Fail visibly instead.
+        throw new Error(
+          `Lane re-route left job_version_id=${jobVersionId} on superseded lane routing content; state=${processingState}.`
+        );
+      }
+      return;
+    }
     if (isTechnicalRoutingDeferral(state)) {
       const dependency = classifyRoutingDependency(state.laneEvidence);
       await enqueueDependencyRepair(dependency, task, jobVersionId, clientOrPool, ctx);
@@ -2869,6 +3070,7 @@ async function executeStageTask(
   }
 
   if (taskType === "ENQUEUE_EXPLANATION") {
+    await requireCurrentLaneRouting(jobVersionId, clientOrPool, ctx);
     await dependencies.runExplanationQueueEnqueuer(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
@@ -3073,6 +3275,7 @@ export async function runPipelineStageTaskWorker(
     failed: 0,
     deadLettered: 0,
     rateLimitDeferred: 0,
+    laneRoutingSuperseded: 0,
     exitReason: "QUEUE_DRAINED",
     durationMs: 0,
     byType: {},
@@ -3278,6 +3481,7 @@ export async function runPipelineStageTaskWorker(
             { context: ctx }
           );
           summary.blocked += 1;
+          if (error instanceof LaneRoutingSupersededError) summary.laneRoutingSuperseded += 1;
           incrementWorker(summary, task.taskType, "blocked");
           return;
         }
