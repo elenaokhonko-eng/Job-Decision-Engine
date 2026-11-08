@@ -398,7 +398,12 @@ export const CLAIM_PIPELINE_TASKS_SQL = `
                   AND candidate.lease_expires_at <= NOW()
                 )
               )
-            ORDER BY candidate.available_at ASC, candidate.created_at ASC
+            -- Due retries and expired leases go first: a task that already failed once
+            -- must not starve behind an old PENDING backlog of the same type, or the
+            -- retry-age SLO fails runs that are otherwise healthy. Retries stay bounded
+            -- by max_attempts and their backoff (available_at), so PENDING work still runs.
+            ORDER BY CASE WHEN candidate.status = 'PENDING' THEN 1 ELSE 0 END ASC,
+                     candidate.available_at ASC, candidate.created_at ASC
             LIMIT $3
             FOR UPDATE SKIP LOCKED
           )
