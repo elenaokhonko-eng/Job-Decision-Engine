@@ -77,6 +77,10 @@ jobs:
       GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
       GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'global' }}
       GEMINI_PIPELINE_FLEX: ${{ vars.GEMINI_PIPELINE_FLEX || 'false' }}
+      # Flex PayGo calls only: per-request timeout (sent to Vertex as X-Server-Timeout) and the
+      # per-call deadline covering Flex, one standard PayGo retry and the OpenAI fallback.
+      GEMINI_FLEX_REQUEST_TIMEOUT_MS: ${{ vars.GEMINI_FLEX_REQUEST_TIMEOUT_MS || '600000' }}
+      GEMINI_FLEX_CALL_DEADLINE_MS: ${{ vars.GEMINI_FLEX_CALL_DEADLINE_MS || '900000' }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -108,6 +112,10 @@ jobs:
 
       - name: Run AI Evaluation Queue Processor
         if: ${{ github.event_name != 'workflow_dispatch' || (inputs.canonical_job_id == '' && inputs.job_version_id == '') }}
+        # The processor stops starting evaluations after EVALUATION_QUEUE_WALL_CLOCK_MS (30 min); the
+        # one in flight ends within its call deadline (15 min on Flex: a 10 min Flex request, a 1 min
+        # standard retry, then OpenAI). 30 + 15 + 5 min for startup and persistence = 50.
+        timeout-minutes: 50
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
@@ -117,8 +125,11 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          EVALUATION_FALLBACK_MODEL: ${{ vars.EVALUATION_FALLBACK_MODEL || '' }}
+          DOCUMENT_FALLBACK_MODEL: ${{ vars.DOCUMENT_FALLBACK_MODEL || '' }}
           MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
+          EVALUATION_QUEUE_WALL_CLOCK_MS: ${{ vars.EVALUATION_QUEUE_WALL_CLOCK_MS || '1800000' }}
           EVALUATION_EXIT_ON_RETRY_WAIT: "false"
         run: npx tsx scripts/evaluate_queue.ts
 
@@ -134,7 +145,7 @@ jobs:
     needs: validate-manual-dispatch
     runs-on: ubuntu-latest
     if: ${{ always() && needs.validate-manual-dispatch.result == 'success' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && vars.PILOT_MODE == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.canonical_job_id != '' && inputs.job_version_id != '' }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     # Gemini backend: AI Studio keys (default) or Vertex AI through Workload Identity Federation.
     permissions:
       contents: read
@@ -144,6 +155,10 @@ jobs:
       GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
       GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'global' }}
       GEMINI_PIPELINE_FLEX: ${{ vars.GEMINI_PIPELINE_FLEX || 'false' }}
+      # Flex PayGo calls only: per-request timeout (sent to Vertex as X-Server-Timeout) and the
+      # per-call deadline covering Flex, one standard PayGo retry and the OpenAI fallback.
+      GEMINI_FLEX_REQUEST_TIMEOUT_MS: ${{ vars.GEMINI_FLEX_REQUEST_TIMEOUT_MS || '600000' }}
+      GEMINI_FLEX_CALL_DEADLINE_MS: ${{ vars.GEMINI_FLEX_CALL_DEADLINE_MS || '900000' }}
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -174,6 +189,9 @@ jobs:
           npx tsx scripts/verify_migration_status.ts
 
       - name: Process only the selected job version
+        # Stage worker: 15 min budget plus one in-flight Flex call (15 min deadline); then one
+        # evaluation (15 min deadline on Flex); plus 5 min of setup = 50.
+        timeout-minutes: 50
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
@@ -187,6 +205,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EVALUATION_PRIMARY_PROVIDER: ${{ vars.EVALUATION_PRIMARY_PROVIDER || 'openai' }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6-sol' }}
+          EVALUATION_FALLBACK_MODEL: ${{ vars.EVALUATION_FALLBACK_MODEL || '' }}
+          DOCUMENT_FALLBACK_MODEL: ${{ vars.DOCUMENT_FALLBACK_MODEL || '' }}
           MODEL_REQUEST_MAX_RETRIES: ${{ vars.MODEL_REQUEST_MAX_RETRIES || '3' }}
           MODEL_REQUEST_TIMEOUT_MS: ${{ vars.MODEL_REQUEST_TIMEOUT_MS || '60000' }}
         run: npx tsx scripts/run_scoped_pilot.ts --canonical-job-id "$PILOT_CANONICAL_JOB_ID" --job-version-id "$PILOT_JOB_VERSION_ID"

@@ -2,6 +2,11 @@ import { GoogleGenAI } from "@google/genai";
 
 import { readJsonResponseBounded } from "../security/boundedResponse.js";
 import { geminiBackend, geminiConfigProblem, resolveGeminiClientConfig } from "./geminiConfig.js";
+import {
+  DEFAULT_OPENAI_FALLBACK_MODEL,
+  DOCUMENT_OPENAI_MODEL_CHAIN,
+  EVALUATION_OPENAI_MODEL_CHAIN,
+} from "./openAiModelRoles.js";
 
 /**
  * Model-id preflight: compares every configured model id against the ids the provider account
@@ -29,11 +34,11 @@ interface ModelIdSetting {
 
 const MODEL_ID_SETTINGS: readonly ModelIdSetting[] = [
   { provider: "gemini", envChain: ["EVALUATION_PRIMARY_MODEL", "GEMINI_MODEL"], defaultId: "gemini-3.6-flash" },
-  { provider: "openai", envChain: ["EVALUATION_FALLBACK_MODEL", "OPENAI_MODEL"], defaultId: "gpt-4o-mini" },
+  { provider: "openai", envChain: EVALUATION_OPENAI_MODEL_CHAIN, defaultId: DEFAULT_OPENAI_FALLBACK_MODEL },
   { provider: "gemini", envChain: ["EMBEDDING_PRIMARY_MODEL"], defaultId: "gemini-embedding-001", kind: "embedding" },
   { provider: "openai", envChain: ["EMBEDDING_FALLBACK_MODEL"], defaultId: "text-embedding-3-small" },
   { provider: "gemini", envChain: ["DOCUMENT_PRIMARY_MODEL"], defaultId: "gemini-3.8-flash" },
-  { provider: "openai", envChain: ["DOCUMENT_FALLBACK_MODEL", "OPENAI_MODEL"], defaultId: "gpt-4o-mini" },
+  { provider: "openai", envChain: DOCUMENT_OPENAI_MODEL_CHAIN, defaultId: DEFAULT_OPENAI_FALLBACK_MODEL },
   { provider: "gemini", envChain: ["REQUIREMENTS_GEMINI_MODEL", "EXTRACTION_GEMINI_MODEL"], defaultId: "gemini-3.1-flash-lite" },
   { provider: "openai", envChain: ["REQUIREMENTS_OPENAI_MODEL", "EXTRACTION_OPENAI_MODEL"], defaultId: "gpt-5.6-luna" },
   // Manual document writers' secondary Gemini model (used after a 429 or failure on the primary).

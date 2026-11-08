@@ -65,12 +65,16 @@ import {
 } from "./pipelineTasks.js";
 import {
   diffProviderCalls,
+  diffProviderMix,
   isRateLimitedFailure,
   ModelRateLimitedError,
   rateLimitRetryAfterMs,
   snapshotProviderCalls,
+  snapshotProviderMix,
   summarizeProviderCalls,
+  summarizeProviderMix,
   type ProviderCallSummary,
+  type ProviderMixSummary,
 } from "../services/modelCallResilience.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 
@@ -234,6 +238,8 @@ export interface PipelineStageWorkerSummary {
   decisionSuperseded: number;
   /** Model calls made by this run, by provider/model, with 429/timeout/retry counts. */
   providerCalls?: ProviderCallSummary;
+  /** Logical AI calls by served path (FLEX/STANDARD/OPENAI/OPENAI_FALLBACK) with the go-live stop rules. */
+  providerMix?: ProviderMixSummary;
   exitReason: PipelineWorkerExitReason;
   durationMs: number;
   byType: Record<string, {
@@ -3561,6 +3567,7 @@ export async function runPipelineStageTaskWorker(
   ));
   const canStartAnotherTask = () => Date.now() + minTimeToStartTaskMs < deadlineAt;
   const providerCallsAtStart = snapshotProviderCalls();
+  const providerMixAtStart = snapshotProviderMix();
   const summary: PipelineStageWorkerSummary = {
     seeded: null,
     stalePendingReconciliation: {
@@ -3924,6 +3931,13 @@ export async function runPipelineStageTaskWorker(
     summary.providerCalls = summarizeProviderCalls(diffProviderCalls(providerCallsAtStart, snapshotProviderCalls()));
     if (summary.providerCalls.total_calls > 0) {
       console.log(`[pipeline-worker] provider calls this run: ${JSON.stringify(summary.providerCalls)}`);
+    }
+    summary.providerMix = summarizeProviderMix(diffProviderMix(providerMixAtStart, snapshotProviderMix()));
+    if (summary.providerMix.ai_calls > 0) {
+      console.log(`[pipeline-worker] provider mix this run: ${JSON.stringify(summary.providerMix)}`);
+    }
+    if (summary.providerMix.stop_rule_triggered) {
+      console.warn(`[pipeline-worker] !!! STOP RULE: ${summary.providerMix.stop_rule_reasons.join("; ")}. Pause scaling and review the provider mix.`);
     }
     summary.exitReason = summary.claimed >= maxTasks
       ? "MAX_TASKS_REACHED"

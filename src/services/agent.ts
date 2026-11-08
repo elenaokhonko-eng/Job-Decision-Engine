@@ -34,6 +34,9 @@ import {
   backoffOptionsFromEnv,
   estimateTokens,
   fullJitterBackoffMs,
+  GEMINI_FLEX_PROVIDER_LABEL,
+  geminiFlexCallDeadlineMs,
+  geminiFlexRequestTimeoutMs,
   getModelLimiter,
   interactiveCallDeadlineMs,
   isRateLimitedFailure,
@@ -42,10 +45,14 @@ import {
   pipelineCallDeadlineMs,
   rateLimitMaxAttempts,
   rateLimitRetryAfterMs,
+  recordModelCallRoute,
   recordProviderCall,
   serverSuggestedDelayMs,
   type ModelFailureKind,
+  type ModelServedPath,
 } from "./modelCallResilience.js";
+import { ensureFetchDispatcherTimeouts } from "./fetchDispatcherTimeouts.js";
+import { documentOpenAiModel, evaluationOpenAiModel } from "./openAiModelRoles.js";
 import {
   MULTI_LANE_SCORECARDS,
   ND_FRIENDLY_DIMENSIONS,
@@ -57,11 +64,13 @@ dotenv.config({ path: ".env.local" });
 
 export const MODEL_REGISTRY = {
   EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-3.6-flash",
-  EVALUATION_FALLBACK_MODEL: process.env.EVALUATION_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
+  /** Import-time snapshot; call sites resolve evaluationOpenAiModel() when the call is made. */
+  EVALUATION_FALLBACK_MODEL: evaluationOpenAiModel(),
   EMBEDDING_PRIMARY_MODEL: process.env.EMBEDDING_PRIMARY_MODEL || "gemini-embedding-001",
   EMBEDDING_FALLBACK_MODEL: process.env.EMBEDDING_FALLBACK_MODEL || "text-embedding-3-small",
   DOCUMENT_PRIMARY_MODEL: process.env.DOCUMENT_PRIMARY_MODEL || "gemini-3.8-flash",
-  DOCUMENT_FALLBACK_MODEL: process.env.DOCUMENT_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
+  /** Import-time snapshot; call sites resolve documentOpenAiModel() when the call is made. */
+  DOCUMENT_FALLBACK_MODEL: documentOpenAiModel(),
   EXTRACTION_GEMINI_MODEL: process.env.REQUIREMENTS_GEMINI_MODEL || process.env.EXTRACTION_GEMINI_MODEL || "gemini-3.1-flash-lite",
   /** Interactive document calls switch to this Gemini model after a 429 or failure on the primary. */
   DOCUMENT_SECONDARY_GEMINI_MODEL: process.env.DOCUMENT_SECONDARY_GEMINI_MODEL || "gemini-3.1-flash-lite",
@@ -136,6 +145,12 @@ export interface GeminiErrorClassification {
 }
 
 const GEMINI_RETRYABLE_HTTP_STATUSES = new Set([500, 502, 503, 504]);
+/** undici/Node error codes for a request that ran out of time (headers, body or connect). */
+const FETCH_TIMEOUT_CAUSE_CODES = new Set([
+  "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT",
+]);
+/** undici/Node error codes for a dropped or refused connection: the service is unavailable. */
+const FETCH_CONNECTION_CAUSE_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "EPIPE", "UND_ERR_SOCKET"]);
 
 /**
  * A per-day quota metric named in a 429 body (AI Studio free tier and per-day request caps). The
@@ -163,11 +178,15 @@ export function classifyGeminiError(error: any, backend: GeminiBackend = current
   const status = Number(error?.status);
   const rateLimit = status === 429 || message.includes("RESOURCE_EXHAUSTED") || /"code"\s*:\s*429\b/.test(message);
   const dailyQuota = backend === "studio" && rateLimit && GEMINI_DAILY_QUOTA_PATTERN.test(message);
+  // Node's fetch reports transport failures as TypeError("fetch failed") with the reason in `cause`.
+  const causeCode = String(error?.cause?.code ?? error?.code ?? "");
   const timeout =
     error?.name === "AbortError" ||
     error?.name === "TimeoutError" ||
+    FETCH_TIMEOUT_CAUSE_CODES.has(causeCode) ||
     /timeout|timed out|aborted/i.test(message);
   const serverError =
+    FETCH_CONNECTION_CAUSE_CODES.has(causeCode) ||
     GEMINI_RETRYABLE_HTTP_STATUSES.has(status) ||
     message.includes("DEADLINE_EXCEEDED") ||
     message.includes("UNAVAILABLE") ||
@@ -202,10 +221,31 @@ interface ModelTokenUsage {
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
+  /** Reasoning/thinking tokens, when the provider reports them. */
+  reasoningTokens?: number;
+  /**
+   * True when completionTokens already includes the reasoning tokens (OpenAI); false when they
+   * are reported separately (Gemini thoughtsTokenCount).
+   */
+  reasoningIncludedInCompletion?: boolean;
 }
+
+/** Token usage of a successful call. */
+export interface ModelCallUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  reasoningTokens?: number;
+  reasoningIncludedInCompletion?: boolean;
+}
+
+/** Which Gemini billing path one request used. */
+type GeminiPath = "FLEX" | "STANDARD";
 
 interface ModelProviderAttemptTelemetry extends ModelTokenUsage {
   provider: TextProvider | "kimi";
+  /** Gemini only: FLEX when the request carried Vertex Flex PayGo headers. */
+  path?: GeminiPath;
   model: string;
   attempt: number;
   maxAttempts: number;
@@ -241,6 +281,17 @@ function extractTokenUsage(value: any): ModelTokenUsage {
   const totalTokens = finiteUsageNumber(
     usage.total_tokens ?? usage.totalTokenCount ?? usage.total_tokens_count
   );
+  // OpenAI counts reasoning inside completion/output tokens; Gemini reports thoughts separately.
+  const openAiReasoning = finiteUsageNumber(
+    usage.completion_tokens_details?.reasoning_tokens ?? usage.output_tokens_details?.reasoning_tokens
+  );
+  const geminiThoughts = finiteUsageNumber(usage.thoughtsTokenCount);
+  if (openAiReasoning !== undefined) {
+    return { promptTokens, completionTokens, totalTokens, reasoningTokens: openAiReasoning, reasoningIncludedInCompletion: true };
+  }
+  if (geminiThoughts !== undefined) {
+    return { promptTokens, completionTokens, totalTokens, reasoningTokens: geminiThoughts, reasoningIncludedInCompletion: false };
+  }
   return { promptTokens, completionTokens, totalTokens };
 }
 
@@ -254,7 +305,7 @@ function summarizeSuccessfulUsage(
   attempts: ModelProviderAttemptTelemetry[],
   provider: TextProvider,
   model: string
-): Required<ModelTokenUsage> | null {
+): ModelCallUsage | null {
   const success = [...attempts]
     .reverse()
     .find((attempt) =>
@@ -267,7 +318,14 @@ function summarizeSuccessfulUsage(
   const completionTokens = success.completionTokens ?? 0;
   const totalTokens = success.totalTokens ?? promptTokens + completionTokens;
   if (promptTokens === 0 && completionTokens === 0 && totalTokens === 0) return null;
-  return { promptTokens, completionTokens, totalTokens };
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    ...(success.reasoningTokens !== undefined
+      ? { reasoningTokens: success.reasoningTokens, reasoningIncludedInCompletion: success.reasoningIncludedInCompletion === true }
+      : {}),
+  };
 }
 
 function configuredModelPricing(provider: string, model: string): { inputPer1M: number; outputPer1M: number } | null {
@@ -301,7 +359,7 @@ function configuredModelPricing(provider: string, model: string): { inputPer1M: 
 function estimateCostUsd(
   provider: string,
   model: string,
-  usage: Required<ModelTokenUsage> | null
+  usage: ModelCallUsage | null
 ): number | null {
   if (!usage) return null;
   const pricing = configuredModelPricing(provider, model);
@@ -419,18 +477,53 @@ export function resetGeminiClientsForTests(): void {
 }
 
 /**
- * Vertex Flex PayGo headers for pipeline calls when GEMINI_PIPELINE_FLEX=true and the backend is
- * Vertex (global endpoint only). Flex-only mode: "shared" request type plus "flex" shared request
- * type. Never applied to interactive document calls: Flex trades latency for price.
+ * True when a call starts on Vertex Flex PayGo: a pipeline call flagged `flex`, with
+ * GEMINI_PIPELINE_FLEX=true and the Vertex backend (global endpoint only). Never for interactive
+ * document calls: Flex trades latency for price.
+ */
+function geminiFlexEligible(options: any): boolean {
+  if (options?.interactive === true || options?.flex !== true) return false;
+  if (process.env.GEMINI_PIPELINE_FLEX !== "true") return false;
+  return currentGeminiBackend() === "vertex";
+}
+
+/**
+ * The Gemini path of one request: FLEX for a Flex-eligible call unless the caller asked for the
+ * standard retry (`__geminiPath: "STANDARD"`); STANDARD otherwise.
+ */
+function geminiRequestPath(options: any): GeminiPath {
+  if (options?.__geminiPath === "STANDARD") return "STANDARD";
+  return geminiFlexEligible(options) ? "FLEX" : "STANDARD";
+}
+
+/**
+ * Vertex Flex PayGo headers (Flex-only mode: "shared" request type plus "flex" shared request
+ * type) for a FLEX request. The server-side timeout header (X-Server-Timeout, seconds) is added by
+ * `@google/genai` from httpOptions.timeout, so it is not repeated here: a second copy would be
+ * appended to the same header.
  */
 function geminiFlexHeaders(options: any): Record<string, string> | undefined {
-  if (options?.interactive === true || options?.flex !== true) return undefined;
-  if (process.env.GEMINI_PIPELINE_FLEX !== "true") return undefined;
-  if (currentGeminiBackend() !== "vertex") return undefined;
+  if (geminiRequestPath(options) !== "FLEX") return undefined;
   return {
     "X-Vertex-AI-LLM-Request-Type": "shared",
     "X-Vertex-AI-LLM-Shared-Request-Type": "flex",
   };
+}
+
+/**
+ * A Flex failure that the standard PayGo retry may absorb: timeout, 429 / RESOURCE_EXHAUSTED, or
+ * the service being unavailable (5xx, UNAVAILABLE, dropped connection, call deadline).
+ */
+function isFlexCapacityFailure(error: unknown): boolean {
+  if (error instanceof ModelRateLimitedError || error instanceof ModelCallDeadlineError) return true;
+  const classification = classifyGeminiError(error, "vertex");
+  return classification.rateLimit || classification.timeout || classification.serverError;
+}
+
+/** The per-call deadline a pipeline call of this kind gets by default (for run time budgets). */
+export function defaultModelCallDeadlineMs(options: { interactive?: boolean; flex?: boolean } = {}): number {
+  if (options.interactive === true) return interactiveCallDeadlineMs();
+  return geminiFlexEligible(options) ? geminiFlexCallDeadlineMs() : pipelineCallDeadlineMs();
 }
 
 // Defining our tools as FunctionDeclarations
@@ -508,7 +601,7 @@ export async function runAgentWithFallback<T>(
   let attempts = 0;
 
   const order = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
-  const openaiEvalModel = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+  const openaiEvalModel = evaluationOpenAiModel();
   const geminiEvalModel = MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
   const PRIMARY_MODEL = order[0] === "openai"
     ? openaiEvalModel
@@ -712,8 +805,11 @@ function callDeadlineAt(options: any, startedAt = Date.now()): number {
   if (typeof options?.deadlineMs === "number" && Number.isFinite(options.deadlineMs) && options.deadlineMs > 0) {
     return startedAt + options.deadlineMs;
   }
-  return startedAt + (options?.interactive === true ? interactiveCallDeadlineMs() : pipelineCallDeadlineMs());
+  return startedAt + defaultModelCallDeadlineMs(options ?? {});
 }
+
+/** Headroom on the fetch dispatcher above a Flex request timeout, so the request timeout fires first. */
+const FLEX_DISPATCHER_HEADROOM_MS = 30_000;
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -729,15 +825,21 @@ function sleepMs(ms: number): Promise<void> {
  * - Timeouts and 5xx: up to `maxRetries` attempts with the same jittered backoff.
  * - A per-day quota (AI Studio only) is thrown immediately.
  * - No attempt or wait runs past the deadline: ModelCallDeadlineError is thrown instead.
+ * - `singleAttempt` (the Flex request and the standard retry after it): exactly one HTTP attempt;
+ *   any failure is thrown to the caller, which decides the next path.
+ * A FLEX request uses the Flex request timeout (GEMINI_FLEX_REQUEST_TIMEOUT_MS, default 600 s);
+ * every other request keeps MODEL_REQUEST_TIMEOUT_MS or the per-call `timeoutMs`.
  * Every request first takes a slot from the process-wide per-model limiter.
  */
 async function tryGemini(options: any): Promise<string> {
   const scope: GeminiCredentialScope = options.geminiCredentialScope === "document" ? "document" : "default";
   const ai = getGeminiClient({ scope });
   const backend = currentGeminiBackend();
-  const maxRetries = effectiveMaxRetries(options.maxRetries);
-  const maxRateLimitAttempts = rateLimitMaxAttempts();
-  const timeoutMs = effectiveTimeoutMs(options.timeoutMs);
+  const singleAttempt = options.singleAttempt === true;
+  const maxRetries = singleAttempt ? 1 : effectiveMaxRetries(options.maxRetries);
+  const maxRateLimitAttempts = singleAttempt ? 1 : rateLimitMaxAttempts();
+  const path = geminiRequestPath(options);
+  const timeoutMs = path === "FLEX" ? geminiFlexRequestTimeoutMs() : effectiveTimeoutMs(options.timeoutMs);
   const model = options.model || MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
   const deadlineAt = callDeadlineAt(options);
   const deadlineMs = Math.max(0, deadlineAt - Date.now());
@@ -745,6 +847,11 @@ async function tryGemini(options: any): Promise<string> {
   const estimatedTokens = estimateTokens(options.contents, options.systemInstruction) +
     (options.maxOutputTokens ?? MODEL_MAX_OUTPUT_TOKENS);
   const flexHeaders = geminiFlexHeaders(options);
+  const statsProvider = path === "FLEX" ? GEMINI_FLEX_PROVIDER_LABEL : "gemini";
+  if (path === "FLEX") {
+    // Node's fetch would otherwise stop waiting for the response headers after 300 s.
+    await ensureFetchDispatcherTimeouts(timeoutMs + FLEX_DISPATCHER_HEADROOM_MS);
+  }
   // Telemetry keeps maxAttempts as the non-429 attempt limit; 429 attempts are marked by errorKind.
   const maxAttempts = maxRetries;
   let otherFailures = 0;
@@ -763,7 +870,7 @@ async function tryGemini(options: any): Promise<string> {
     const startedAt = Date.now();
     try {
       console.log(
-        `[model:gemini] backend=${backend} model=${model} attempt=${attempt} starting timeout=${Math.round(callTimeoutMs / 1000)}s`
+        `[model:gemini] backend=${backend} path=${path} model=${model} attempt=${attempt} starting timeout=${Math.round(callTimeoutMs / 1000)}s`
       );
       const response = await ai.models.generateContent({
         model,
@@ -780,11 +887,12 @@ async function tryGemini(options: any): Promise<string> {
       const usage = extractTokenUsage(response);
       permit.release(usage.totalTokens ?? null);
       console.log(
-        `[model:gemini] model=${model} attempt=${attempt} completed elapsed_ms=${Date.now() - startedAt}`
+        `[model:gemini] path=${path} model=${model} attempt=${attempt} completed elapsed_ms=${Date.now() - startedAt}`
       );
-      recordProviderCall({ provider: "gemini", model, outcome: "OK", retry: attempt > 1 });
+      recordProviderCall({ provider: statsProvider, model, outcome: "OK", retry: attempt > 1 });
       recordProviderAttempt(options, {
         provider: "gemini",
+        path,
         model,
         attempt,
         maxAttempts,
@@ -804,10 +912,14 @@ async function tryGemini(options: any): Promise<string> {
       const exhausted = classification.rateLimit
         ? rateLimitFailures >= maxRateLimitAttempts || options.switchModelOnRateLimit === true
         : otherFailures >= maxRetries;
+      if (singleAttempt && classification.timeout) {
+        console.warn(`[model:gemini] path=${path} model=${model} TIMEOUT attempt=${attempt} after ${Math.round(callTimeoutMs / 1000)}s.`);
+      }
       const willRetry = classification.retryable && !exhausted;
-      recordProviderCall({ provider: "gemini", model, outcome: kind, retry: attempt > 1 });
+      recordProviderCall({ provider: statsProvider, model, outcome: kind, retry: attempt > 1 });
       recordProviderAttempt(options, {
         provider: "gemini",
+        path,
         model,
         attempt,
         maxAttempts,
@@ -821,8 +933,10 @@ async function tryGemini(options: any): Promise<string> {
 
       const suggestedMs = serverSuggestedDelayMs(gErr);
       if (classification.rateLimit && !willRetry) {
-        const reason = options.switchModelOnRateLimit === true ? "switching model after the first 429" : `${rateLimitFailures} rate-limited attempt(s)`;
-        console.warn(`[model:gemini] model=${model} rate limited (429); ${reason}.`);
+        const reason = singleAttempt
+          ? "single-attempt path; the caller picks the next path"
+          : options.switchModelOnRateLimit === true ? "switching model after the first 429" : `${rateLimitFailures} rate-limited attempt(s)`;
+        console.warn(`[model:gemini] path=${path} model=${model} rate limited (429); ${reason}.`);
         throw new ModelRateLimitedError(
           `Gemini ${model} rate limited (429 RESOURCE_EXHAUSTED) after ${rateLimitFailures} attempt(s): ${publicErrorSummary(gErr, "gemini")}`,
           { provider: "gemini", model, retryAfterMs: suggestedMs, attempts: attempt },
@@ -848,6 +962,23 @@ async function tryGemini(options: any): Promise<string> {
       await sleepMs(backoffMs);
     }
   }
+}
+
+/** The failure kind of one OpenAI-compatible HTTP attempt (for telemetry and the provider mix). */
+function openAiCompatibleFailureKind(error: any): ModelFailureKind {
+  const status = Number(error?.status);
+  if (status === 429) return "RATE_LIMITED";
+  const causeCode = String(error?.cause?.code ?? error?.code ?? "");
+  if (
+    error?.name === "AbortError" ||
+    error?.name === "TimeoutError" ||
+    FETCH_TIMEOUT_CAUSE_CODES.has(causeCode) ||
+    /timeout|timed out/i.test(String(error?.message ?? ""))
+  ) {
+    return "TIMEOUT";
+  }
+  if (Number.isFinite(status) && status >= 500) return "SERVER_ERROR";
+  return "OTHER";
 }
 
 async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: string, options: any, isKimi: boolean = false): Promise<string> {
@@ -939,6 +1070,7 @@ async function tryOpenAICompatible(apiKey: string, baseUrl: string, model: strin
         retryable: retryable && attempt < maxRetries,
         latencyMs: Date.now() - startedAt,
         error: publicErrorSummary(err, providerLabel),
+        errorKind: openAiCompatibleFailureKind(err),
       });
       if (attempt === maxRetries || !retryable) throw err;
       
@@ -958,7 +1090,7 @@ async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
   const requestedModel = typeof options.model === "string" ? options.model : "";
   const model = requestedModel && !requestedModel.toLowerCase().startsWith("gemini")
     ? requestedModel
-    : (process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL);
+    : evaluationOpenAiModel();
   return tryOpenAICompatible(openaiKey, baseUrl, model, options, false);
 }
 
@@ -1021,7 +1153,7 @@ export async function callLLM(
       const openaiKey = process.env.OPENAI_API_KEY || "";
       return await tryOpenAI(openaiKey, {
         contents: prompt,
-        model: MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
+        model: documentOpenAiModel(),
         responseMimeType: "application/json"
       });
     }
@@ -1044,7 +1176,7 @@ export async function generateContent(options: {
   const openaiKey = process.env.OPENAI_API_KEY;
   const isDocumentRoute =
     options.model === MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL ||
-    options.model === MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL;
+    options.model === documentOpenAiModel();
   const primaryProvider = isDocumentRoute
     ? (process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER)
     : process.env.EVALUATION_PRIMARY_PROVIDER;
@@ -1090,7 +1222,43 @@ export interface GenerateContentAuditedResult {
   invocationId?: string | null;
   validatedPayload?: unknown;
   /** Token usage of the successful call, when the provider reported it. */
-  usage?: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
+  usage?: ModelCallUsage | null;
+  /** Which path served the call: FLEX, STANDARD, OPENAI (primary) or OPENAI_FALLBACK. */
+  servedPath?: ModelServedPath;
+}
+
+export type ModelCallFailureKind =
+  | "RATE_LIMITED" | "DEADLINE" | "NOT_CONFIGURED" | "CORRECTED" | "FLEX_CAPACITY" | "VALIDATION" | "OTHER";
+
+/**
+ * Every provider/model of a call failed. `failures` lists each one with its kind (VALIDATION for
+ * an answer that failed schema or identity validation) and a public error summary only.
+ */
+export class ModelCallFailedError extends Error {
+  constructor(
+    message: string,
+    readonly failures: ReadonlyArray<{ provider: string; model: string; kind: ModelCallFailureKind | null; error: string }>,
+  ) {
+    super(message);
+    this.name = "ModelCallFailedError";
+  }
+}
+
+/** Marks an error thrown by a response validator so it is told apart from a provider error. */
+const VALIDATION_FAILURE = Symbol("modelResponseValidationFailure");
+
+function markValidationFailure(error: unknown): unknown {
+  if (error && typeof error === "object") {
+    (error as Record<symbol, unknown>)[VALIDATION_FAILURE] = true;
+    return error;
+  }
+  const wrapped = new Error(String(error));
+  (wrapped as unknown as Record<symbol, unknown>)[VALIDATION_FAILURE] = true;
+  return wrapped;
+}
+
+function isValidationFailure(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as Record<symbol, unknown>)[VALIDATION_FAILURE] === true);
 }
 
 export interface GenerateContentResponseValidationContext {
@@ -1108,7 +1276,7 @@ export type GenerateContentResponseValidator<T = unknown> = (
 function inferPurposeFromModel(model: string): ModelRoutePurpose {
   if (
     model === MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL ||
-    model === MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL
+    model === documentOpenAiModel()
   ) {
     return "DOCUMENT";
   }
@@ -1125,7 +1293,7 @@ function buildRouteDefaults(purpose: ModelRoutePurpose): {
       primaryProviderRaw:
         process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER,
       geminiModel: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
-      openaiModel: MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
+      openaiModel: documentOpenAiModel(),
     };
   }
   if (purpose === "EMBEDDING") {
@@ -1145,7 +1313,7 @@ function buildRouteDefaults(purpose: ModelRoutePurpose): {
   return {
     primaryProviderRaw: process.env.EVALUATION_PRIMARY_PROVIDER,
     geminiModel: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
-    openaiModel: process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+    openaiModel: evaluationOpenAiModel(),
   };
 }
 
@@ -1247,13 +1415,26 @@ export async function generateContentAudited(options: {
   deadlineMs?: number;
   /** "document" lets manual document generation use DOCUMENT_GEMINI_API_KEY (AI Studio only). */
   geminiCredentialScope?: GeminiCredentialScope;
-  /** Pipeline extraction/evaluation only: request Vertex Flex PayGo when GEMINI_PIPELINE_FLEX=true. */
+  /**
+   * Pipeline extraction/evaluation only: start on Vertex Flex PayGo when GEMINI_PIPELINE_FLEX=true
+   * and the backend is Vertex. Order: Gemini Flex (GEMINI_FLEX_REQUEST_TIMEOUT_MS, one attempt);
+   * on a Flex timeout, 429 or unavailability, one standard PayGo attempt on the same model; only
+   * then the fallback provider. The call deadline defaults to GEMINI_FLEX_CALL_DEADLINE_MS.
+   */
   flex?: boolean;
+  /**
+   * Offline model comparison only: call just this provider (with the requested model), with no
+   * fallback provider, so each result is that model's own answer.
+   */
+  onlyProvider?: "gemini" | "openai";
 }): Promise<GenerateContentAuditedResult> {
   const startedAt = Date.now();
   const geminiScope: GeminiCredentialScope = options.geminiCredentialScope === "document" ? "document" : "default";
   const geminiProblem = geminiConfigProblem(process.env, geminiScope);
   const openaiKey = process.env.OPENAI_API_KEY;
+  const flexEligible = geminiFlexEligible(options);
+  // Validate the Flex settings before any request: a malformed value is a configuration error.
+  const flexRequestTimeoutMs = flexEligible ? geminiFlexRequestTimeoutMs() : null;
   const deadlineAt = callDeadlineAt(options, startedAt);
 
   const purpose = options.purpose ?? inferPurposeFromModel(options.model);
@@ -1312,17 +1493,31 @@ export async function generateContentAudited(options: {
     }
   }
 
+  if (options.onlyProvider) {
+    const onlyModel = options.onlyProvider === "gemini" ? geminiModelForCall : openaiModelForCall;
+    routeContent = {
+      primary_provider: options.onlyProvider,
+      primary_model: onlyModel,
+      fallback_provider: options.onlyProvider,
+      fallback_model: onlyModel,
+    };
+  }
+
   const attemptedErrors: Array<{
     provider: string;
     model: string;
     error: string;
     publicError?: string;
     /** Why this provider/model failed; drives the rate-limit outcome of the whole call. */
-    kind?: "RATE_LIMITED" | "DEADLINE" | "NOT_CONFIGURED" | "CORRECTED" | "OTHER";
+    kind?: ModelCallFailureKind;
+    /** Gemini only: the path this failure happened on. */
+    path?: GeminiPath;
     retryAfterMs?: number | null;
   }> = [];
-  const failureKindOf = (err: unknown): "RATE_LIMITED" | "DEADLINE" | "OTHER" =>
-    isRateLimitedFailure(err) ? "RATE_LIMITED" : err instanceof ModelCallDeadlineError ? "DEADLINE" : "OTHER";
+  const failureKindOf = (err: unknown): ModelCallFailureKind =>
+    isValidationFailure(err)
+      ? "VALIDATION"
+      : isRateLimitedFailure(err) ? "RATE_LIMITED" : err instanceof ModelCallDeadlineError ? "DEADLINE" : "OTHER";
   const providers: Array<"gemini" | "openai"> = [
     routeContent.primary_provider,
     routeContent.fallback_provider,
@@ -1353,6 +1548,8 @@ export async function generateContentAudited(options: {
     model_request_timeout_ms: effectiveTimeoutMs(options.timeoutMs),
     call_deadline_ms: deadlineAt - startedAt,
     interactive: options.interactive === true,
+    gemini_flex: flexEligible,
+    ...(flexRequestTimeoutMs !== null ? { gemini_flex_request_timeout_ms: flexRequestTimeoutMs } : {}),
   };
   const secondaryGeminiModel = String(options.secondaryGeminiModel || "").trim();
   if (secondaryGeminiModel) {
@@ -1363,6 +1560,8 @@ export async function generateContentAudited(options: {
   let successValidatedPayload: unknown = undefined;
   let successProvider: "gemini" | "openai" = "gemini";
   let successModel = options.model;
+  let successGeminiPath: GeminiPath | null = null;
+  let flexFailedForCapacity = false;
   let attempts = 0;
   const providerAttemptTelemetry: ModelProviderAttemptTelemetry[] = [];
   const correctionRounds =
@@ -1390,7 +1589,7 @@ export async function generateContentAudited(options: {
         );
         return { text, validatedPayload };
       } catch (err: any) {
-        if (round >= correctionRounds) throw err;
+        if (round >= correctionRounds) throw markValidationFailure(err);
         const message = err?.message || String(err);
         console.warn(`[model:${provider}] model=${model} response failed validation; asking it to correct once.`);
         attemptedErrors.push({
@@ -1430,40 +1629,60 @@ export async function generateContentAudited(options: {
         geminiModels.push(secondaryGeminiModel);
       }
       for (const [geminiIndex, geminiModel] of geminiModels.entries()) {
-        if (Date.now() >= deadlineAt) {
-          attemptedErrors.push({ provider, model: geminiModel, error: "Call deadline passed before this model was tried.",
-            publicError: "Call deadline passed before this model was tried.", kind: "DEADLINE" });
-          continue;
+        // A Flex-eligible call tries the route's Gemini model on Flex first and, only after a Flex
+        // capacity failure, once on standard PayGo. Each of those is a single HTTP attempt.
+        const paths: GeminiPath[] = flexEligible && geminiIndex === 0 ? ["FLEX", "STANDARD"] : ["STANDARD"];
+        const flexSequence = paths.length > 1;
+        for (const path of paths) {
+          if (Date.now() >= deadlineAt) {
+            attemptedErrors.push({ provider, model: geminiModel, error: "Call deadline passed before this model was tried.",
+              publicError: "Call deadline passed before this model was tried.", kind: "DEADLINE", path });
+            break;
+          }
+          if (flexSequence && path === "STANDARD") {
+            console.warn(`[model:gemini] model=${geminiModel} Flex PayGo failed for capacity; retrying once on standard PayGo.`);
+          }
+          try {
+            const { text, validatedPayload } = await callAndValidate(provider, geminiModel, (contents) => tryGemini({
+              ...options,
+              contents,
+              model: geminiModel,
+              deadlineAt,
+              geminiCredentialScope: geminiScope,
+              __geminiPath: path,
+              singleAttempt: flexSequence,
+              // Interactive calls move to the secondary model on the first 429 instead of waiting.
+              switchModelOnRateLimit: options.interactive === true && geminiIndex < geminiModels.length - 1,
+              __providerAttemptTelemetry: providerAttemptTelemetry,
+            }));
+            successText = text;
+            successValidatedPayload = validatedPayload;
+            successProvider = "gemini";
+            successModel = geminiModel;
+            successGeminiPath = path;
+            break;
+          } catch (err: any) {
+            const message = err?.message || String(err);
+            const safeMessage = publicErrorSummary(err, "gemini");
+            const flexCapacity = path === "FLEX" && !isValidationFailure(err) && isFlexCapacityFailure(err);
+            console.warn(`Gemini model request failed (path=${path}): ${safeMessage}.`);
+            attemptedErrors.push({
+              provider,
+              model: geminiModel,
+              error: message,
+              publicError: safeMessage,
+              kind: flexCapacity ? "FLEX_CAPACITY" : failureKindOf(err),
+              path,
+              retryAfterMs: rateLimitRetryAfterMs(err),
+            });
+            if (path === "FLEX") {
+              flexFailedForCapacity = flexCapacity;
+              // Only a capacity failure moves to standard PayGo; anything else goes to the next provider.
+              if (!flexCapacity) break;
+            }
+          }
         }
-        try {
-          const { text, validatedPayload } = await callAndValidate(provider, geminiModel, (contents) => tryGemini({
-            ...options,
-            contents,
-            model: geminiModel,
-            deadlineAt,
-            geminiCredentialScope: geminiScope,
-            // Interactive calls move to the secondary model on the first 429 instead of waiting.
-            switchModelOnRateLimit: options.interactive === true && geminiIndex < geminiModels.length - 1,
-            __providerAttemptTelemetry: providerAttemptTelemetry,
-          }));
-          successText = text;
-          successValidatedPayload = validatedPayload;
-          successProvider = "gemini";
-          successModel = geminiModel;
-          break;
-        } catch (err: any) {
-          const message = err?.message || String(err);
-          const safeMessage = publicErrorSummary(err, "gemini");
-          console.warn(`Gemini model request failed: ${safeMessage}.`);
-          attemptedErrors.push({
-            provider,
-            model: geminiModel,
-            error: message,
-            publicError: safeMessage,
-            kind: failureKindOf(err),
-            retryAfterMs: rateLimitRetryAfterMs(err),
-          });
-        }
+        if (successText !== null) break;
       }
       if (successText !== null) break;
     }
@@ -1500,7 +1719,7 @@ export async function generateContentAudited(options: {
         const message = err?.message || String(err);
         const safeMessage = publicErrorSummary(err, "openai");
         console.warn(`OpenAI model request failed: ${safeMessage}.`);
-        const openAiRateLimited = Number(err?.status) === 429;
+        const openAiRateLimited = Number(err?.status) === 429 && !isValidationFailure(err);
         attemptedErrors.push({
           provider,
           model: modelForProvider,
@@ -1525,12 +1744,37 @@ export async function generateContentAudited(options: {
     (successProvider !== routeContent.primary_provider || successModel !== routeContent.primary_model);
   const successfulUsage = summarizeSuccessfulUsage(providerAttemptTelemetry, successProvider, successModel);
   const costUsd = estimateCostUsd(successProvider, successModel, successfulUsage);
-  const safeAttemptedErrors = attemptedErrors.map(({ provider, model, error, publicError, kind }) => ({
+  const safeAttemptedErrors = attemptedErrors.map(({ provider, model, error, publicError, kind, path }) => ({
     provider,
     model,
     error: publicError ?? publicErrorSummary(error, provider),
     ...(kind ? { kind } : {}),
+    ...(path ? { path } : {}),
   }));
+  const servedPath: ModelServedPath | null = successText === null
+    ? null
+    : successProvider === "gemini"
+      ? (successGeminiPath ?? "STANDARD")
+      : successProvider === routeContent.primary_provider ? "OPENAI" : "OPENAI_FALLBACK";
+  const flexRecoveredByStandard = servedPath === "STANDARD" && flexFailedForCapacity;
+  const attemptCount = (predicate: (attempt: ModelProviderAttemptTelemetry) => boolean) =>
+    providerAttemptTelemetry.filter(predicate).length;
+  const isTimeoutAttempt = (attempt: ModelProviderAttemptTelemetry) =>
+    attempt.errorKind === "TIMEOUT" || attempt.errorKind === "DEADLINE";
+  const isRateLimitedAttempt = (attempt: ModelProviderAttemptTelemetry) => attempt.errorKind === "RATE_LIMITED";
+  recordModelCallRoute({
+    servedPath,
+    fallbackUsed,
+    flexAttempted: attemptCount((attempt) => attempt.path === "FLEX") > 0,
+    flexRecoveredByStandard,
+    timeouts: attemptCount(isTimeoutAttempt),
+    rateLimited: attemptCount(isRateLimitedAttempt),
+    flexTimeouts: attemptCount((attempt) => attempt.path === "FLEX" && isTimeoutAttempt(attempt)),
+    flexRateLimited: attemptCount((attempt) => attempt.path === "FLEX" && isRateLimitedAttempt(attempt)),
+  });
+  if (flexRecoveredByStandard) {
+    console.log(`[model:gemini] model=${successModel} served by standard PayGo after a Flex capacity failure (not degraded).`);
+  }
   // The whole call failed only for capacity reasons when at least one model was rate limited and
   // every other model was rate limited, ran out of call deadline, or was not configured. Such a
   // failure is an operational one: callers reschedule it and never count it as a job failure.
@@ -1538,7 +1782,8 @@ export async function generateContentAudited(options: {
     successText === null &&
     attemptedErrors.some((entry) => entry.kind === "RATE_LIMITED") &&
     attemptedErrors.every((entry) =>
-      entry.kind === "RATE_LIMITED" || entry.kind === "DEADLINE" || entry.kind === "NOT_CONFIGURED" || entry.kind === "CORRECTED");
+      entry.kind === "RATE_LIMITED" || entry.kind === "DEADLINE" || entry.kind === "NOT_CONFIGURED" ||
+      entry.kind === "CORRECTED" || entry.kind === "FLEX_CAPACITY");
 
   if (successText === null) {
     const errorMessage = `All model API calls failed. Purpose=${purpose}, route=${routeKey}, errors=${attemptedErrors
@@ -1558,9 +1803,12 @@ export async function generateContentAudited(options: {
           model: attemptedErrors[attemptedErrors.length - 1]?.model ?? null,
           status: "FAILED",
           fallbackUsed: attemptedErrors.length > 1,
+          servedPath: null,
           requestHash,
           requestMetadata,
           responseMetadata: {
+            served_path: null,
+            flex_to_standard_recovery: false,
             errors: safeAttemptedErrors,
             provider_attempts: providerAttemptTelemetry,
             internal_http_attempts: providerAttemptTelemetry.length,
@@ -1588,7 +1836,10 @@ export async function generateContentAudited(options: {
         attempts: providerAttemptTelemetry.length,
       });
     }
-    throw new Error(errorMessage);
+    throw new ModelCallFailedError(
+      errorMessage,
+      safeAttemptedErrors.map(({ provider, model, kind, error }) => ({ provider, model, kind: kind ?? null, error })),
+    );
   }
 
   let invocationId: string | null | undefined = null;
@@ -1602,9 +1853,12 @@ export async function generateContentAudited(options: {
         model: successModel,
         status: "COMPLETED",
         fallbackUsed,
+        servedPath,
         requestHash,
         requestMetadata,
         responseMetadata: {
+          served_path: servedPath,
+          flex_to_standard_recovery: flexRecoveredByStandard,
           response_length: successText.length,
           validated_payload: successValidatedPayload !== undefined,
           errors: safeAttemptedErrors,
@@ -1635,6 +1889,7 @@ export async function generateContentAudited(options: {
     invocationId,
     validatedPayload: successValidatedPayload,
     usage: successfulUsage,
+    servedPath: servedPath ?? undefined,
   };
 }
 
@@ -2174,14 +2429,14 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
     "evaluation",
     "EVALUATION",
     MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
-    process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+    evaluationOpenAiModel(),
     process.env.EVALUATION_PRIMARY_PROVIDER
   );
   const document = await checkTextRoute(
     "document",
     "DOCUMENT",
     MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
-    process.env.OPENAI_MODEL || MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
+    documentOpenAiModel(),
     process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER
   );
   const extraction = await checkTextRoute(
@@ -2472,7 +2727,7 @@ You MUST return a JSON object matching this schema exactly.
 }`;
 
   const order = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
-  const openaiEvalModel = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+  const openaiEvalModel = evaluationOpenAiModel();
 
   const tried = new Set<string>();
   let parsedResult: AgentResult | null = null;
@@ -2613,7 +2868,9 @@ export interface SingleEvaluationExecutionResult {
   degraded: boolean;
   trace: string[];
   /** Token usage of the successful call, when the provider reported it. */
-  usage?: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
+  usage?: ModelCallUsage | null;
+  /** Which path served the evaluation (FLEX, STANDARD, OPENAI, OPENAI_FALLBACK). */
+  servedPath?: ModelServedPath;
 }
 
 interface ValidatedSingleEvaluationPayload {
@@ -2780,7 +3037,7 @@ function buildEvaluationResultFromValidatedPayload(
   job: SingleEvaluationJobInput,
   pipelineRunId: string,
   attemptNum: number,
-  response: Pick<GenerateContentAuditedResult, "provider" | "model" | "fallbackUsed">
+  response: Pick<GenerateContentAuditedResult, "provider" | "model" | "fallbackUsed" | "servedPath">
 ): EvaluationResult {
   const { root, jobPayload } = validated;
   const evaluationSummary =
@@ -2851,8 +3108,10 @@ function buildEvaluationResultFromValidatedPayload(
     provider: response.provider,
     model: response.model,
     attempt: attemptNum,
+    // Only a fallback provider/model is degraded; the standard retry after Flex is not.
     is_fallback: response.fallbackUsed,
     degraded_state: response.fallbackUsed,
+    served_path: response.servedPath ?? null,
     evaluation_summary: evaluationSummary,
     primary_lane: jobPayload.primary_lane,
     secondary_lanes: jobPayload.secondary_lanes,
@@ -2918,8 +3177,11 @@ export async function evaluateSingleCanonicalJob(
   job: SingleEvaluationJobInput,
   pipelineRunId: string = crypto.randomUUID(),
   attemptNum: number = 1,
-  /** Offline comparison only (scripts/compare_evaluation_models.ts): evaluate with this model id. */
-  options: { modelOverride?: string } = {},
+  /**
+   * Offline comparison only (scripts/compare_evaluation_models.ts): evaluate with this model id,
+   * on this provider alone (no fallback provider).
+   */
+  options: { modelOverride?: string; onlyProvider?: "gemini" | "openai" } = {},
 ): Promise<SingleEvaluationExecutionResult> {
   if (!job.candidateProfileContext || job.candidateProfileContext.trim().length === 0) {
     throw new Error(
@@ -3019,13 +3281,14 @@ ${job.descriptionText}
 
   const systemInstruction = `You are an AI decision engine evaluating a single canonical job. Return a single JSON object.`;
 
-  const openaiEvalModelForRoute = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+  const openaiEvalModelForRoute = evaluationOpenAiModel();
   trace.push("Attempting strict single-job evaluation through audited model routing...");
   const response = await generateContentAudited({
     purpose: "EVALUATION",
     routeKey: "single_job_evaluation",
     model: options.modelOverride?.trim() || openaiEvalModelForRoute,
     flex: true,
+    ...(options.onlyProvider ? { onlyProvider: options.onlyProvider } : {}),
     contents: prompt,
     responseMimeType: "application/json",
     systemInstruction,
@@ -3071,6 +3334,7 @@ ${job.descriptionText}
     degraded: response.fallbackUsed,
     trace,
     usage: response.usage ?? null,
+    servedPath: response.servedPath,
   };
 
 }

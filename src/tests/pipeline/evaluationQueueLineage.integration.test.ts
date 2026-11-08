@@ -524,5 +524,161 @@ describe.skipIf(skipReal)("evaluation queue lineage reconciliation (PostgreSQL)"
       else process.env.DATABASE_URL_UNPOOLED = priorUnpooledDatabaseUrl;
     }
   });
+
+  async function withMockedEvaluator<T>(
+    evaluateMock: ReturnType<typeof vi.fn>,
+    body: (evaluateQueue: typeof import("../../../scripts/evaluate_queue.js").evaluateQueue) => Promise<T>,
+  ): Promise<T> {
+    const priorDatabaseUrl = process.env.DATABASE_URL;
+    const priorUnpooledDatabaseUrl = process.env.DATABASE_URL_UNPOOLED;
+    let closeQueuePool: (() => Promise<void>) | undefined;
+    const evaluatorUrl = new URL(databaseUrl);
+    evaluatorUrl.searchParams.set("options", `-c search_path=${schemaName},public`);
+    process.env.DATABASE_URL = evaluatorUrl.toString();
+    process.env.DATABASE_URL_UNPOOLED = evaluatorUrl.toString();
+    vi.resetModules();
+    vi.doMock("../../services/agent.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../../services/agent.js")>()),
+      evaluateSingleCanonicalJob: evaluateMock,
+      checkModelRegistryPreflight: () => ({ ok: true, warnings: [], primaryAvailable: true, fallbackAvailable: true }),
+    }));
+    try {
+      const { evaluateQueue, closeEvaluationQueuePool } = await import("../../../scripts/evaluate_queue.js");
+      closeQueuePool = closeEvaluationQueuePool;
+      const result = await body(evaluateQueue);
+      await closeEvaluationQueuePool();
+      closeQueuePool = undefined;
+      return result;
+    } finally {
+      vi.doUnmock("../../services/agent.js");
+      if (closeQueuePool) await closeQueuePool();
+      if (priorDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = priorDatabaseUrl;
+      if (priorUnpooledDatabaseUrl === undefined) delete process.env.DATABASE_URL_UNPOOLED;
+      else process.env.DATABASE_URL_UNPOOLED = priorUnpooledDatabaseUrl;
+    }
+  }
+
+  /** A synthetic, schema-valid evaluation as evaluateSingleCanonicalJob returns it for one path. */
+  function syntheticEvaluation(
+    input: { canonicalJobId: string; jobVersionId: string },
+    pipelineRunId: string,
+    attempt: number,
+    path: "STANDARD" | "OPENAI_FALLBACK",
+  ) {
+    const fallback = path === "OPENAI_FALLBACK";
+    const evaluatedJob = {
+      canonical_job_id: input.canonicalJobId,
+      job_version_id: input.jobVersionId,
+      pipeline_run_id: pipelineRunId,
+      provider: fallback ? "openai" : "gemini",
+      model: fallback ? "gpt-test-fallback" : "gemini-3.6-flash",
+      attempt,
+      is_fallback: fallback,
+      degraded_state: fallback,
+      served_path: path,
+      evaluation_summary: "Synthetic evaluation.",
+      primary_lane: "CORE_AI_DATA",
+      lane_confidence: "High",
+      nd_score: null,
+      nd_friendly_score: null,
+      politics_stress_score: null,
+      sensory_overload_index: null,
+      building_research_ratio: null,
+      interaction_load: null,
+      next_action: "PRIORITY_APPLY",
+      evaluated_at: new Date().toISOString(),
+    };
+    return {
+      evaluatedJob, provider: evaluatedJob.provider, model: evaluatedJob.model, fallbackUsed: fallback,
+      attempts: 1, errors: [], degraded: fallback, trace: [], usage: null, servedPath: path,
+    };
+  }
+
+  it("persists the served path: a standard retry after Flex is not degraded, the OpenAI fallback is", async () => {
+    const standardFixture = bulkFixtures[1];
+    const fallbackFixture = bulkFixtures[2];
+    const evaluateMock = vi.fn(async (input: { canonicalJobId: string; jobVersionId: string }, runId: string, attempt: number) =>
+      syntheticEvaluation(input, runId, attempt, input.jobVersionId === fallbackFixture.jobVersionId ? "OPENAI_FALLBACK" : "STANDARD"));
+
+    const result = await withMockedEvaluator(evaluateMock, (evaluateQueue) => evaluateQueue({
+      context: getContext(), profileVersionId, jobVersionIds: [standardFixture.jobVersionId, fallbackFixture.jobVersionId],
+    }));
+
+    expect(result).toMatchObject({ eligible: 2, processed: 2, failed: 0, notStarted: 0 });
+    expect(result.providerMix).toMatchObject({ ai_calls: 0, stop_rule_triggered: false });
+    const rows = await getClient().query<{ job_version_id: string; provider: string; served_path: string; is_fallback: boolean; degraded_state: boolean; payload_path: string }>(
+      `SELECT job_version_id::text, provider, served_path, is_fallback, degraded_state,
+              full_evaluation_payload->>'served_path' AS payload_path
+       FROM ai_evaluations WHERE workspace_id = $1 AND job_version_id::text = ANY($2::text[])`,
+      [getContext().workspaceId, [standardFixture.jobVersionId, fallbackFixture.jobVersionId]],
+    );
+    const byVersion = new Map(rows.rows.map((row) => [row.job_version_id, row]));
+    expect(byVersion.get(standardFixture.jobVersionId)).toMatchObject({
+      provider: "gemini", served_path: "STANDARD", is_fallback: false, degraded_state: false, payload_path: "STANDARD",
+    });
+    expect(byVersion.get(fallbackFixture.jobVersionId)).toMatchObject({
+      provider: "openai", served_path: "OPENAI_FALLBACK", is_fallback: true, degraded_state: true, payload_path: "OPENAI_FALLBACK",
+    });
+
+    // The column only accepts the four paths.
+    await expect(getClient().query(
+      `UPDATE ai_evaluations SET served_path = 'SOMETHING_ELSE' WHERE workspace_id = $1 AND job_version_id::text = $2`,
+      [getContext().workspaceId, standardFixture.jobVersionId],
+    )).rejects.toThrow(/ai_evaluations_served_path_check/);
+  });
+
+  it("records the served path on model_route_invocations and rejects unknown paths", async () => {
+    const { recordModelRouteInvocation } = await import("../../modelRoutes/registry.js");
+    const invocationId = await recordModelRouteInvocation({
+      purpose: "EXTRACTION", provider: "gemini", model: "gemini-3.1-flash-lite", status: "COMPLETED",
+      fallbackUsed: false, servedPath: "STANDARD", requestHash: `synthetic-${crypto.randomUUID()}`,
+      responseMetadata: { served_path: "STANDARD", flex_to_standard_recovery: true },
+    }, getClient(), { context: getContext() });
+    const failedId = await recordModelRouteInvocation({
+      purpose: "EXTRACTION", status: "FAILED", servedPath: null, requestHash: `synthetic-${crypto.randomUUID()}`,
+    }, getClient(), { context: getContext() });
+
+    const rows = await getClient().query<{ id: string; served_path: string | null; fallback_used: boolean }>(
+      `SELECT id::text, served_path, fallback_used FROM model_route_invocations WHERE id::text = ANY($1::text[])`,
+      [[invocationId, failedId]],
+    );
+    const byId = new Map(rows.rows.map((row) => [row.id, row]));
+    expect(byId.get(invocationId!)).toMatchObject({ served_path: "STANDARD", fallback_used: false });
+    expect(byId.get(failedId!)).toMatchObject({ served_path: null });
+    await expect(getClient().query(
+      `UPDATE model_route_invocations SET served_path = 'GEMINI' WHERE id = $1`, [invocationId],
+    )).rejects.toThrow(/model_route_invocations_served_path_check/);
+  });
+
+  it("stops starting evaluations when the run budget is spent and leaves the rest queued, untouched", async () => {
+    const first = bulkFixtures[3];
+    const second = bulkFixtures[4];
+    let clock = 1_000_000;
+    const evaluateMock = vi.fn(async (input: { canonicalJobId: string; jobVersionId: string }, runId: string, attempt: number) => {
+      clock += 120_000; // one slow (Flex) evaluation uses up the 60 s budget
+      return syntheticEvaluation(input, runId, attempt, "STANDARD");
+    });
+    const before = await getClient().query<{ id: string; status: string; attempt_count: number }>(
+      `SELECT id::text, status, attempt_count FROM evaluation_queue WHERE workspace_id = $1 AND id::text = ANY($2::text[])`,
+      [getContext().workspaceId, [first.queueId, second.queueId]],
+    );
+
+    const result = await withMockedEvaluator(evaluateMock, (evaluateQueue) => evaluateQueue({
+      context: getContext(), profileVersionId, jobVersionIds: [first.jobVersionId, second.jobVersionId],
+      wallClockMs: 60_000, now: () => clock,
+    }));
+
+    expect(evaluateMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ eligible: 2, processed: 1, failed: 0, notStarted: 1 });
+    const after = await getClient().query<{ id: string; status: string; attempt_count: number }>(
+      `SELECT id::text, status, attempt_count FROM evaluation_queue WHERE workspace_id = $1 AND id::text = ANY($2::text[])`,
+      [getContext().workspaceId, [first.queueId, second.queueId]],
+    );
+    const statuses = after.rows.map((row) => row.status).sort();
+    expect(statuses).toEqual(["COMPLETED", "PENDING"]);
+    const untouched = after.rows.find((row) => row.status === "PENDING")!;
+    expect(untouched.attempt_count).toBe(before.rows.find((row) => row.id === untouched.id)!.attempt_count);
+  });
 });
 

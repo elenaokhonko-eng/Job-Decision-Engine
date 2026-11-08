@@ -23,7 +23,7 @@ describe('process backlog workflow', () => {
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-before.json');
     expect(workflow).toContain('npx tsx scripts/reconcile_pipeline.ts --json > pipeline-reconciliation-after.json');
     expect(workflow).toContain('actions/upload-artifact@v4');
-    expect(workflow).toContain('timeout-minutes: 15');
+    expect(workflow).toContain('timeout-minutes: 30');
     expect(workflow).toContain("if: ${{ always() && steps.database_migrations.outcome == 'success' }}");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_MAX_TASKS: ${{ vars.PIPELINE_TASK_WORKER_MAX_TASKS || '2500' }}");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_STAGE_MAX_TASKS');
@@ -41,7 +41,7 @@ describe('process backlog workflow', () => {
     const gmailCleanupStep = workflow.split("name: Reconcile terminal Gmail job alerts")[1] ?? "";
     expect(gmailCleanupStep.slice(0, 220)).toContain("timeout-minutes: 20");
     expect(gmailCleanupStep).toContain("GMAIL_RECONCILIATION_LIMIT: ${{ vars.GMAIL_RECONCILIATION_LIMIT || '2000' }}");
-    expect(workflow).toContain("timeout-minutes: 55");
+    expect(workflow).toContain("timeout-minutes: 80");
     expect(workflow).toContain('PIPELINE_TASK_WORKER_WALL_CLOCK_MS');
     expect(workflow).toContain("PIPELINE_TASK_WORKER_EXIT_ON_RETRY_WAIT: 'false'");
     expect(workflow).toContain("PIPELINE_TASK_WORKER_INCLUDE_TEST_FIXTURES: 'false'");

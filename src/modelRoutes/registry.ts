@@ -349,6 +349,8 @@ export async function recordModelRouteInvocation(
     model?: string | null;
     status: "COMPLETED" | "FAILED";
     fallbackUsed?: boolean;
+    /** FLEX, STANDARD, OPENAI or OPENAI_FALLBACK for a completed call; null when it failed. */
+    servedPath?: "FLEX" | "STANDARD" | "OPENAI" | "OPENAI_FALLBACK" | null;
     requestHash: string;
     requestMetadata?: Record<string, unknown> | null;
     responseMetadata?: Record<string, unknown> | null;
@@ -401,9 +403,10 @@ export async function recordModelRouteInvocation(
           tokens_completion,
           tokens_total,
           error_message,
+          served_path,
           created_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW())
         RETURNING id
       `,
       [
@@ -424,6 +427,7 @@ export async function recordModelRouteInvocation(
         input.tokensCompletion ?? null,
         input.tokensTotal ?? null,
         input.errorMessage ?? null,
+        input.servedPath ?? null,
       ]
     );
     return res.rows[0].id;
