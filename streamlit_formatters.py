@@ -98,3 +98,51 @@ def format_percent(value: object, *, fraction: bool = False, decimals: int = 1) 
     if fraction:
         number *= 100
     return f"{number:.{decimals}f}%"
+
+
+CAREER_TRACK_LABELS = {
+    "DATA_MANAGEMENT": "Data management",
+    "ARCHITECTURE": "Architecture",
+    "PRODUCT": "Product",
+    "HANDS_ON_AI_DATA": "Hands-on AI / data",
+    "AI_BRIDGE": "AI bridge",
+    "GENERIC_SOFTWARE": "Generic software",
+    "UNCLASSIFIED": "Unclassified",
+}
+CAREER_TRACK_TAG_LABELS = {
+    "BRIDGE": "bridge",
+    "TRANSITION": "transition",
+    "STRETCH": "stretch",
+    "STEP_DOWN": "step down",
+    "OFF_TRACK": "off track",
+    "TRACK_UNCLASSIFIED": "no matching track",
+    "TRACK_EXPERIENCE_MISSING": "no profile years for this track",
+}
+
+
+def format_career_track(track: object, level: object, tags: object) -> str | None:
+    """Format the track-aware seniority result for a job card.
+
+    Args:
+        track: The career_track code from the read model.
+        level: The career_track_level code (ENTRY, MID, SENIOR, LEADERSHIP).
+        tags: The career_track_tags list.
+
+    Returns:
+        A plain-text label such as ``Hands-on AI / data · mid · transition``, or
+        ``None`` when the job has no track assessment. Unknown codes are dropped,
+        so only known labels are ever rendered.
+
+    Example:
+        >>> format_career_track("HANDS_ON_AI_DATA", "MID", ["TRANSITION"])
+        'Hands-on AI / data · mid · transition'
+    """
+    label = CAREER_TRACK_LABELS.get(track) if isinstance(track, str) else None
+    if label is None:
+        return None
+    parts = [label]
+    if isinstance(level, str) and level in {"ENTRY", "MID", "SENIOR", "LEADERSHIP"}:
+        parts.append(level.lower())
+    if isinstance(tags, list):
+        parts.extend(CAREER_TRACK_TAG_LABELS[tag] for tag in tags if isinstance(tag, str) and tag in CAREER_TRACK_TAG_LABELS)
+    return " · ".join(parts)

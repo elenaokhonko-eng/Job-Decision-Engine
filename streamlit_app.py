@@ -19,6 +19,7 @@ from streamlit_application_workflow import (
 from streamlit_archive import render_archive_hold_form, render_archive_jobs
 from streamlit_database import read_only_database_ssl_options
 from streamlit_formatters import as_number, format_percent, format_score, format_signal
+from streamlit_formatters import format_career_track
 from streamlit_workspace_contracts import (
     validate_application_row,
     validate_application_workspace_summary,
@@ -369,7 +370,8 @@ APPLY_NOW_JOBS_QUERY = """
            country_flexibility_score, office_requirement_score,
            timezone_compatibility_score, employment_verifiability_score,
            stage3_preference_context_id, ranking_component_availability,
-           ranking_component_provenance, current_readiness.application_readiness,
+           ranking_component_provenance, career_track, career_track_level,
+           career_track_tags, career_track_rationale, current_readiness.application_readiness,
            current_readiness.readiness_status,
            current_readiness.readiness_fingerprint, current_readiness.readiness_expires_at,
            current_readiness.readiness_reason_codes, current_readiness.availability_status,
@@ -634,6 +636,8 @@ def verification_question_for_job(job):
         questions.append("Ask whether the role is remote, hybrid, or on-site.")
     if "NEEDS_VERIFICATION_LOCATION_DETAIL" in codes:
         questions.append("Confirm the work location and any residency requirement.")
+    if "NEEDS_VERIFICATION_HIRING_TERRITORY" in codes:
+        questions.append("Ask whether this remote role can hire someone based in Singapore.")
     if "NEEDS_VERIFICATION_OFFICE_DAYS" in codes:
         questions.append("Confirm how many days per week are required in the office.")
     if "NEEDS_VERIFICATION_TRAVEL" in codes:
@@ -2423,6 +2427,11 @@ with tab_dashboard:
                         env_str = format_percent(env, decimals=0)
 
                         st.markdown(f"**Workplace signals:** Autonomy {aut_str} | Politics {pol_str} | Sensory {env_str}")
+                        career_track_label = format_career_track(
+                            job.get("career_track"), job.get("career_track_level"), job.get("career_track_tags")
+                        )
+                        if career_track_label:
+                            st.markdown(f"**Career track:** `{career_track_label}`")
                         if outcome == "TRACK":
                             trace_notes = job.get("deterministic_trace_notes")
                             if isinstance(trace_notes, list) and trace_notes:

@@ -70,6 +70,21 @@ export const RecommendationDecisionOutputsSchema = z.object({
   recommendation_evidence_completeness: z.number().min(0).max(1).nullable(),
 });
 
+/** Track-aware seniority result (src/pipeline/careerTrack.ts); it can only lower an outcome. */
+export const CareerTrackAssessmentSchema = z.object({
+  policy_version: z.string().min(1).max(100),
+  track: z.enum(["DATA_MANAGEMENT", "ARCHITECTURE", "PRODUCT", "HANDS_ON_AI_DATA", "AI_BRIDGE", "GENERIC_SOFTWARE", "UNCLASSIFIED"]),
+  track_basis: z.string().max(300),
+  level: z.enum(["ENTRY", "MID", "SENIOR", "LEADERSHIP"]),
+  level_basis: z.string().max(300),
+  candidate_years: z.number().nullable(),
+  required_min_years: z.number().nullable(),
+  fit: z.enum(["OUT", "STEP_DOWN", "FIT", "STRETCH"]).nullable(),
+  tags: z.array(z.enum(["BRIDGE", "TRANSITION", "STRETCH", "STEP_DOWN", "OFF_TRACK", "TRACK_UNCLASSIFIED", "TRACK_EXPERIENCE_MISSING"])),
+  outcome_cap: z.enum(["REVIEW", "SKIP"]).nullable(),
+  rationale: z.string().max(1000),
+}).strict();
+
 export const RecommendationDecisionTraceSchema = z.object({
   policy_version: z.string().min(1).max(100),
   policy_hash: z.string().min(1).max(200),
@@ -81,6 +96,7 @@ export const RecommendationDecisionTraceSchema = z.object({
   availability_evidence_hash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
   fx_rate_observation_id: z.string().uuid().nullable().optional(),
   qualification_comparator_version: z.string().min(1).nullable().optional(),
+  career_track: CareerTrackAssessmentSchema.optional(),
   notes: z.array(z.string()).default([]),
 });
 

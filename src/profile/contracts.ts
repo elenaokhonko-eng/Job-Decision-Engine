@@ -327,6 +327,35 @@ export const ProfileFactEvidenceSourceSchema = z.object({
 // JSON file input schemas (without database IDs)
 // ============================================================================
 
+/**
+ * Career tracks a candidate can state experience for. Bridge roles (AI architecture, AI product,
+ * forward-deployed, AI governance) are derived from these; generic software uses HANDS_ON_AI_DATA.
+ */
+export const ProfileExperienceTrackSchema = z.enum([
+  'DATA_MANAGEMENT',
+  'ARCHITECTURE',
+  'PRODUCT',
+  'HANDS_ON_AI_DATA',
+]);
+
+export const ExperienceByTrackSchema = z.array(
+  z.object({
+    track: ProfileExperienceTrackSchema,
+    years: z.number().min(0).max(60),
+    /** How the candidate describes this track, e.g. "Data, reference data, MDM, data governance". */
+    label: z.string().min(1).max(200),
+  }).strict()
+).max(8).superRefine((entries, ctx) => {
+  const seen = new Set<string>();
+  for (const [index, entry] of entries.entries()) {
+    if (seen.has(entry.track)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, 'track'], message: `Duplicate experience track ${entry.track}.` });
+    }
+    seen.add(entry.track);
+  }
+});
+export type ExperienceByTrack = z.infer<typeof ExperienceByTrackSchema>;
+
 export const ProfileJsonSchema = z.object({
   schema_version: SchemaVersionSchema.default(SCHEMA_VERSION),
   profile_key: z.string().regex(/^[a-z_][a-z0-9_]{0,63}$/),
@@ -334,6 +363,7 @@ export const ProfileJsonSchema = z.object({
   display_name: z.string().min(1).max(256),
   professional_headline: z.string().max(500).optional(),
   career_objectives: z.string().max(256).array().max(10).optional(),
+  experience_by_track: ExperienceByTrackSchema.optional(),
   status: ProfileVersionStatusSchema,
 });
 

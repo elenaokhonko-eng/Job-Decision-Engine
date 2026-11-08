@@ -164,4 +164,65 @@ describe.skipIf(skipReal)("Recommendation Decider: legacy gate_decision normaliz
     expect(after.rows[0].readiness_fingerprint).not.toBe(before.rows[0].readiness_fingerprint);
     expect(after.rows[0].evidence_revision_hash).toBe("a".repeat(64));
   });
+
+  it("records the career-track assessment from the active profile's experience_by_track", async () => {
+    const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
+    const latestTrack = async () => {
+      const res = await q(
+        `SELECT decision_json FROM deterministic_decisions
+         WHERE canonical_job_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [JOB_ID],
+      );
+      const json = typeof res.rows[0].decision_json === "string" ? JSON.parse(res.rows[0].decision_json) : res.rows[0].decision_json;
+      return json.trace.career_track;
+    };
+
+    await q(`UPDATE canonical_jobs SET normalized_title = 'software engineer ii' WHERE id = $1`, [JOB_ID]);
+    expect((await runRecommendationDecider(client)).errors).toBe(0);
+    const withoutProfile = await latestTrack();
+    expect(withoutProfile).toMatchObject({ track: "GENERIC_SOFTWARE", level: "MID", candidate_years: null, tags: ["TRACK_EXPERIENCE_MISSING"] });
+
+    const workspace = await q(`SELECT workspace_id FROM canonical_jobs WHERE id = $1`, [JOB_ID]);
+    const workspaceId = workspace.rows[0].workspace_id;
+    const profile = await q(
+      `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name)
+       VALUES ($1, 'track_fixture', 'Track Fixture') RETURNING id`,
+      [workspaceId],
+    );
+    await q(
+      `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status, experience_by_track)
+       VALUES ($1, $2, 1, '2.3.0', $3, 'ACTIVE', $4::jsonb)`,
+      [workspaceId, profile.rows[0].id, "b".repeat(64), JSON.stringify([
+        { track: "HANDS_ON_AI_DATA", years: 1.5, label: "Synthetic hands-on track" },
+        { track: "DATA_MANAGEMENT", years: 16, label: "Synthetic data track" },
+      ])],
+    );
+
+    const second = await runRecommendationDecider(client);
+    expect(second.errors).toBe(0);
+    expect(second.decisionsInserted).toBe(1);
+    const withProfile = await latestTrack();
+    expect(withProfile).toMatchObject({
+      track: "GENERIC_SOFTWARE",
+      level: "MID",
+      candidate_years: 1.5,
+      fit: "FIT",
+      tags: ["OFF_TRACK"],
+      outcome_cap: "REVIEW",
+    });
+  });
+
+  it("refuses a stored experience_by_track that is not an array", async () => {
+    const workspace = await q(`SELECT workspace_id FROM canonical_jobs WHERE id = $1`, [JOB_ID]);
+    const profile = await q(
+      `INSERT INTO candidate_profiles (workspace_id, profile_key, display_name)
+       VALUES ($1, 'track_fixture_malformed', 'Track Fixture') RETURNING id`,
+      [workspace.rows[0].workspace_id],
+    );
+    await expect(q(
+      `INSERT INTO profile_versions (workspace_id, candidate_profile_id, version_number, schema_version, source_hash, status, experience_by_track)
+       VALUES ($1, $2, 1, '2.3.0', $3, 'DRAFT', '{"track":"PRODUCT"}'::jsonb)`,
+      [workspace.rows[0].workspace_id, profile.rows[0].id, "c".repeat(64)],
+    )).rejects.toThrow(/profile_versions_experience_by_track_array_check/);
+  });
 });

@@ -7,6 +7,7 @@ import { GATE_VERSION, PROFILE_SCHEMA_VERSION } from "../src/contracts/version.j
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { isProfileFactModelShareable } from "../src/profile/privacy.js";
+import { ExperienceByTrackSchema } from "../src/profile/contracts.js";
 import { publicErrorSummary } from "../src/security/publicErrorSummary.js";
 import type { EvaluationQueueStats } from "../src/pipeline/evaluationQueuePolicy.js";
 import { runEvaluationQueueWithExitPolicy } from "../src/pipeline/evaluationQueueExitPolicy.js";
@@ -138,8 +139,9 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
       const profileVersionRes = await client.query<{
         id: string;
         source_hash: string;
+        experience_by_track: unknown;
       }>(
-        `SELECT pv.id, pv.source_hash
+        `SELECT pv.id, pv.source_hash, pv.experience_by_track
          FROM profile_versions pv
          WHERE pv.workspace_id = $1
            AND pv.status = 'ACTIVE'
@@ -194,6 +196,9 @@ export async function evaluateQueue(options: EvaluateQueueOptions = {}): Promise
         profile_source_hash: profileVersion.source_hash,
         verified_profile_facts: modelShareableFacts,
         verified_credentials: credentialsRes.rows,
+        // Years of experience per career track, so the evaluator judges seniority against the
+        // job's track rather than the candidate's longest career.
+        experience_by_track: profileVersion.experience_by_track ? ExperienceByTrackSchema.parse(profileVersion.experience_by_track) : [],
         active_workability_preference_mode: preferenceRes.rows[0] ?? null,
       });
     }

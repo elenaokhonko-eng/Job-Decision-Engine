@@ -12,6 +12,7 @@ describe("verification routing eligibility", () => {
     ["NEEDS_VERIFICATION_OFFICE_DAYS", "Unspecified office days"],
     ["NEEDS_VERIFICATION_TRAVEL", "Travel cap is unknown"],
     ["NEEDS_VERIFICATION_LOCATION_DETAIL", "Location detail is missing"],
+    ["NEEDS_VERIFICATION_HIRING_TERRITORY", "Remote hiring territory is unclear"],
   ])("routes unresolved workability fact %s", (code) => {
     expect(isRoutableWorkabilityVerification("NEEDS_VERIFICATION", [
       "NEEDS_VERIFICATION",

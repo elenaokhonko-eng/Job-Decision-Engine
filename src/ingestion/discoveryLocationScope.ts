@@ -127,6 +127,17 @@ function territoryPolicy(policyPath: string): TerritoryPolicy {
   };
 }
 
+/** The `location_scope` block of the source plan, or null when the plan has none. */
+export function loadLocationScopeConfig(
+  planPath = path.resolve(process.cwd(), "config/source-plans/six_lane_sources.yml"),
+): LocationScopeConfig | null {
+  const plan = readYaml(planPath);
+  const block = plan !== null && typeof plan === "object" && !Array.isArray(plan)
+    ? (plan as Record<string, unknown>).location_scope
+    : undefined;
+  return block === undefined ? null : LocationScopeConfigSchema.parse(block);
+}
+
 /**
  * Load the scope from config. Returns null when the source plan has no `location_scope` block
  * (no pre-filter). A malformed block or policy throws: a misconfigured filter must not silently
@@ -136,12 +147,9 @@ export function loadDiscoveryLocationScope(
   planPath = path.resolve(process.cwd(), "config/source-plans/six_lane_sources.yml"),
   policyPath = path.resolve(process.cwd(), "config/policies/workability.yml"),
 ): DiscoveryLocationScope | null {
-  const plan = readYaml(planPath);
-  const block = plan !== null && typeof plan === "object" && !Array.isArray(plan)
-    ? (plan as Record<string, unknown>).location_scope
-    : undefined;
-  if (block === undefined) return null;
-  return buildDiscoveryLocationScope(LocationScopeConfigSchema.parse(block), territoryPolicy(policyPath));
+  const config = loadLocationScopeConfig(planPath);
+  if (config === null) return null;
+  return buildDiscoveryLocationScope(config, territoryPolicy(policyPath));
 }
 
 export function locationScopeAppliesTo(scope: DiscoveryLocationScope | null | undefined, sourceKey: string): scope is DiscoveryLocationScope {

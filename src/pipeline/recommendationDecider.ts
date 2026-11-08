@@ -25,6 +25,7 @@ import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { resolveWorkspaceWorkabilityPolicy } from "./workabilityPolicy.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
+import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -252,6 +253,7 @@ export async function runRecommendationDecider(
       match_context_fingerprint: string | null;
       active_profile_version_id: string | null;
       active_profile_source_hash: string | null;
+      active_profile_experience_by_track: unknown;
       active_requirement_set_id: string | null;
       job_content_hash: string | null;
       source_posting_identity_hash: string | null;
@@ -306,6 +308,7 @@ export async function runRecommendationDecider(
         mr.context_fingerprint AS match_context_fingerprint,
         active_profile.id AS active_profile_version_id,
         active_profile.source_hash AS active_profile_source_hash,
+        active_profile.experience_by_track AS active_profile_experience_by_track,
         lv.active_requirement_set_id,
         lv.content_hash AS job_content_hash,
         lv.source_posting_identity_hash,
@@ -339,7 +342,7 @@ export async function runRecommendationDecider(
         ON mr.workspace_id = c.workspace_id
        AND mr.id = c.latest_match_run_id
       LEFT JOIN LATERAL (
-        SELECT pv.id, pv.source_hash
+        SELECT pv.id, pv.source_hash, pv.experience_by_track
         FROM profile_versions pv
         WHERE pv.workspace_id = c.workspace_id
           AND pv.status = 'ACTIVE'
@@ -528,6 +531,30 @@ export async function runRecommendationDecider(
         ) {
           adjustedOutcome = "REVIEW";
           adjustedNotes.push("priority_downgraded_semantic_pending");
+        }
+
+        // Track-aware seniority: compare the job's level with the candidate's years in the job's
+        // career track. It only lowers the outcome and is recorded in the trace.
+        const trackExperience = parseTrackExperience(job.active_profile_experience_by_track);
+        const { rows: trackRequirementRows } = job.active_requirement_set_id
+          ? await client.query<TrackRequirement>(
+            `SELECT jr.requirement_type, jr.importance, jr.requirement_text, jr.structured_value
+             FROM job_requirements jr
+             WHERE jr.workspace_id = $1 AND jr.job_version_id = $2 AND jr.requirement_set_id = $3
+             ORDER BY jr.requirement_key ASC`,
+            [ctx.workspaceId, job.job_version_id, job.active_requirement_set_id],
+          )
+          : { rows: [] as TrackRequirement[] };
+        const careerTrack = assessCareerTrack({
+          title: job.normalized_title,
+          requirements: trackRequirementRows,
+          experience: trackExperience,
+        });
+        const trackCappedOutcome = capOutcome(adjustedOutcome, careerTrack.outcome_cap);
+        adjustedNotes.push(`career_track:${careerTrack.track}:${careerTrack.level}${careerTrack.fit ? `:${careerTrack.fit}` : ""}`);
+        if (trackCappedOutcome !== adjustedOutcome) {
+          adjustedNotes.push(`career_track_cap:${adjustedOutcome}->${trackCappedOutcome}`);
+          adjustedOutcome = trackCappedOutcome;
         }
 
         if (fxRateFailure) adjustedNotes.push("FX_RATE_RETRIEVAL_INCOMPLETE");
@@ -897,6 +924,7 @@ export async function runRecommendationDecider(
             availability_evidence_hash: availabilityEvidenceHash,
             fx_rate_observation_id: fxRateObservationId,
             qualification_comparator_version: QUALIFICATION_COMPARATOR_VERSION,
+            career_track: careerTrack,
             notes: adjustedNotes,
           },
         });
@@ -927,6 +955,8 @@ export async function runRecommendationDecider(
             fx_rate_observation_id: fxRateObservationId,
             qualification_comparator_version: QUALIFICATION_COMPARATOR_VERSION,
             workability_policy_hash: workabilityPolicyResolution.policyHash,
+            career_track_policy_version: CAREER_TRACK_POLICY_VERSION,
+            career_track_assessment_hash: sha256Json(careerTrack),
           },
         });
 
