@@ -1,11 +1,14 @@
 import { callLLM, generateContent, MODEL_REGISTRY } from "./agent.js";
 import { OpenAI } from "openai";
+import { evaluationOpenAiModel } from "./openAiModelRoles.js";
 
 /** Helper to call OpenAI as the final fallback */
 async function callOpenAI(raw: string, schema?: any): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY not set – cannot use OpenAI fallback.");
-  const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+  // Serves the legacy alert evaluator (scripts/evaluate_jobs.ts), whose Gemini step uses the
+  // evaluation model: the evaluation chain applies (EVALUATION_FALLBACK_MODEL -> OPENAI_MODEL).
+  const model = evaluationOpenAiModel();
   const client = new OpenAI({ apiKey });
   
   const payload: any = {

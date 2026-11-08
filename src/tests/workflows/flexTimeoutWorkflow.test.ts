@@ -55,6 +55,22 @@ describe("Flex PayGo timeouts in the pipeline workflows", () => {
     }
   });
 
+  it("passes the role-specific OpenAI fallback models next to the shared OPENAI_MODEL", () => {
+    let checked = 0;
+    for (const workflow of WORKFLOWS) {
+      for (const [name, job] of Object.entries(jobs(workflow))) {
+        for (const step of job.steps ?? []) {
+          if (!step.env?.OPENAI_MODEL) continue;
+          const label = `${workflow}.${name}: ${step.name}`;
+          expect(step.env.EVALUATION_FALLBACK_MODEL, label).toBe("${{ vars.EVALUATION_FALLBACK_MODEL || '' }}");
+          expect(step.env.DOCUMENT_FALLBACK_MODEL, label).toBe("${{ vars.DOCUMENT_FALLBACK_MODEL || '' }}");
+          checked += 1;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThanOrEqual(7);
+  });
+
   it("gives every Flex-capable step room for its run budget plus one full Flex call deadline", () => {
     const flexCallMinutes = minutes(GEMINI_FLEX_CALL_DEADLINE_DEFAULT_MS);
     // One Flex request plus the standard retry must fit inside the call deadline.

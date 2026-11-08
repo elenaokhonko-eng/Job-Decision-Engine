@@ -52,6 +52,7 @@ import {
   type ModelServedPath,
 } from "./modelCallResilience.js";
 import { ensureFetchDispatcherTimeouts } from "./fetchDispatcherTimeouts.js";
+import { documentOpenAiModel, evaluationOpenAiModel } from "./openAiModelRoles.js";
 import {
   MULTI_LANE_SCORECARDS,
   ND_FRIENDLY_DIMENSIONS,
@@ -63,11 +64,13 @@ dotenv.config({ path: ".env.local" });
 
 export const MODEL_REGISTRY = {
   EVALUATION_PRIMARY_MODEL: process.env.EVALUATION_PRIMARY_MODEL || process.env.GEMINI_MODEL || "gemini-3.6-flash",
-  EVALUATION_FALLBACK_MODEL: process.env.EVALUATION_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
+  /** Import-time snapshot; call sites resolve evaluationOpenAiModel() when the call is made. */
+  EVALUATION_FALLBACK_MODEL: evaluationOpenAiModel(),
   EMBEDDING_PRIMARY_MODEL: process.env.EMBEDDING_PRIMARY_MODEL || "gemini-embedding-001",
   EMBEDDING_FALLBACK_MODEL: process.env.EMBEDDING_FALLBACK_MODEL || "text-embedding-3-small",
   DOCUMENT_PRIMARY_MODEL: process.env.DOCUMENT_PRIMARY_MODEL || "gemini-3.8-flash",
-  DOCUMENT_FALLBACK_MODEL: process.env.DOCUMENT_FALLBACK_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
+  /** Import-time snapshot; call sites resolve documentOpenAiModel() when the call is made. */
+  DOCUMENT_FALLBACK_MODEL: documentOpenAiModel(),
   EXTRACTION_GEMINI_MODEL: process.env.REQUIREMENTS_GEMINI_MODEL || process.env.EXTRACTION_GEMINI_MODEL || "gemini-3.1-flash-lite",
   /** Interactive document calls switch to this Gemini model after a 429 or failure on the primary. */
   DOCUMENT_SECONDARY_GEMINI_MODEL: process.env.DOCUMENT_SECONDARY_GEMINI_MODEL || "gemini-3.1-flash-lite",
@@ -598,7 +601,7 @@ export async function runAgentWithFallback<T>(
   let attempts = 0;
 
   const order = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
-  const openaiEvalModel = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+  const openaiEvalModel = evaluationOpenAiModel();
   const geminiEvalModel = MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL;
   const PRIMARY_MODEL = order[0] === "openai"
     ? openaiEvalModel
@@ -1087,7 +1090,7 @@ async function tryOpenAI(openaiKey: string, options: any): Promise<string> {
   const requestedModel = typeof options.model === "string" ? options.model : "";
   const model = requestedModel && !requestedModel.toLowerCase().startsWith("gemini")
     ? requestedModel
-    : (process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL);
+    : evaluationOpenAiModel();
   return tryOpenAICompatible(openaiKey, baseUrl, model, options, false);
 }
 
@@ -1150,7 +1153,7 @@ export async function callLLM(
       const openaiKey = process.env.OPENAI_API_KEY || "";
       return await tryOpenAI(openaiKey, {
         contents: prompt,
-        model: MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
+        model: documentOpenAiModel(),
         responseMimeType: "application/json"
       });
     }
@@ -1173,7 +1176,7 @@ export async function generateContent(options: {
   const openaiKey = process.env.OPENAI_API_KEY;
   const isDocumentRoute =
     options.model === MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL ||
-    options.model === MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL;
+    options.model === documentOpenAiModel();
   const primaryProvider = isDocumentRoute
     ? (process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER)
     : process.env.EVALUATION_PRIMARY_PROVIDER;
@@ -1273,7 +1276,7 @@ export type GenerateContentResponseValidator<T = unknown> = (
 function inferPurposeFromModel(model: string): ModelRoutePurpose {
   if (
     model === MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL ||
-    model === MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL
+    model === documentOpenAiModel()
   ) {
     return "DOCUMENT";
   }
@@ -1290,7 +1293,7 @@ function buildRouteDefaults(purpose: ModelRoutePurpose): {
       primaryProviderRaw:
         process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER,
       geminiModel: MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
-      openaiModel: MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
+      openaiModel: documentOpenAiModel(),
     };
   }
   if (purpose === "EMBEDDING") {
@@ -1310,7 +1313,7 @@ function buildRouteDefaults(purpose: ModelRoutePurpose): {
   return {
     primaryProviderRaw: process.env.EVALUATION_PRIMARY_PROVIDER,
     geminiModel: MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
-    openaiModel: process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+    openaiModel: evaluationOpenAiModel(),
   };
 }
 
@@ -2426,14 +2429,14 @@ export async function preflightModelRoutes(): Promise<ModelRoutePreflight> {
     "evaluation",
     "EVALUATION",
     MODEL_REGISTRY.EVALUATION_PRIMARY_MODEL,
-    process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL,
+    evaluationOpenAiModel(),
     process.env.EVALUATION_PRIMARY_PROVIDER
   );
   const document = await checkTextRoute(
     "document",
     "DOCUMENT",
     MODEL_REGISTRY.DOCUMENT_PRIMARY_MODEL,
-    process.env.OPENAI_MODEL || MODEL_REGISTRY.DOCUMENT_FALLBACK_MODEL,
+    documentOpenAiModel(),
     process.env.DOCUMENT_PRIMARY_PROVIDER || process.env.EVALUATION_PRIMARY_PROVIDER
   );
   const extraction = await checkTextRoute(
@@ -2724,7 +2727,7 @@ You MUST return a JSON object matching this schema exactly.
 }`;
 
   const order = resolveProviderOrder(process.env.EVALUATION_PRIMARY_PROVIDER);
-  const openaiEvalModel = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+  const openaiEvalModel = evaluationOpenAiModel();
 
   const tried = new Set<string>();
   let parsedResult: AgentResult | null = null;
@@ -3278,7 +3281,7 @@ ${job.descriptionText}
 
   const systemInstruction = `You are an AI decision engine evaluating a single canonical job. Return a single JSON object.`;
 
-  const openaiEvalModelForRoute = process.env.OPENAI_MODEL || MODEL_REGISTRY.EVALUATION_FALLBACK_MODEL;
+  const openaiEvalModelForRoute = evaluationOpenAiModel();
   trace.push("Attempting strict single-job evaluation through audited model routing...");
   const response = await generateContentAudited({
     purpose: "EVALUATION",
