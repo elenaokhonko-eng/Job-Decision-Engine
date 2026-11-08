@@ -7,11 +7,17 @@ import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/con
 import { loadWorkspaceLanesConfig } from "./laneConfigLoader.js";
 import { PersistedEvaluationQueueItemSchema } from "../contracts/index.js";
 import { supersedeStaleEvaluationQueueRows } from "./evaluationQueueLineage.js";
+import { laneRoutingCurrentSql } from "../lanes/laneRoutingCurrency.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
 
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
+
+const ROUTE_IS_CURRENT_SQL = laneRoutingCurrentSql(
+  "ld.lane_snapshot",
+  "(SELECT lane_key, routing_content_hash FROM active_lane_routing)"
+);
 
 export interface ExplanationQueueEnqueuerSummary {
   enqueued: number;
@@ -231,6 +237,14 @@ export async function runExplanationQueueEnqueuer(
             value->>'lane_config_version' AS lane_config_version
           FROM jsonb_each($3::jsonb)
         ),
+        -- Routing content of the lane revisions pinned by this budget run. A lane decision is
+        -- current when it was routed under routing-identical content, so a budget-only lane
+        -- revision (set-budget) does not strand already-routed jobs.
+        active_lane_routing AS (
+          SELECT lb.lane AS lane_key, lr.routing_content_hash
+          FROM lane_budgets lb
+          LEFT JOIN lane_revisions lr ON lr.id::text = lb.lane_revision_id
+        ),
         budget_usage AS (
           SELECT lane, budget_limit, selected_count
           FROM ai_evaluation_budget_usage
@@ -257,19 +271,16 @@ export async function runExplanationQueueEnqueuer(
               )
               WHEN lb.lane IS NULL THEN COALESCE(
                 ld.lane_snapshot->>'source' = $5::text
-                AND (ld.lane_snapshot->>'lanes_version') IS NOT DISTINCT FROM $6::text
                 AND ld.decision_json->>'primary_lane' = c.primary_lane
-                AND jsonb_typeof(ld.lane_snapshot->'active_lane_revisions') = 'array'
-                AND route_lane.lane_revision_id IS NULL,
+                AND route_lane.lane_revision_id IS NULL
+                AND ${ROUTE_IS_CURRENT_SQL},
                 FALSE
               )
               ELSE COALESCE(
                 ld.lane_snapshot->>'source' = lb.lane_config_source
-                AND (ld.lane_snapshot->>'lanes_version') IS NOT DISTINCT FROM lb.lane_config_version
                 AND ld.decision_json->>'primary_lane' = c.primary_lane
-                AND jsonb_typeof(ld.lane_snapshot->'active_lane_revisions') = 'array'
                 AND route_lane.lane_revision_id IS NOT NULL
-                AND route_lane.lane_revision_id = lb.lane_revision_id,
+                AND ${ROUTE_IS_CURRENT_SQL},
                 FALSE
               )
             END AS lane_revision_matches,
@@ -552,7 +563,7 @@ export async function runExplanationQueueEnqueuer(
       const laneRevisionMismatchCount = Number(summary.lane_revision_mismatch_count ?? 0);
       if (laneRevisionMismatchCount > 0) {
         throw new Error(
-          `Cannot enqueue ${laneRevisionMismatchCount} job(s): their latest lane decision does not use the active lane revision. Re-run lane routing before AI enqueue.`
+          `Cannot enqueue ${laneRevisionMismatchCount} job(s): their latest lane decision does not use the active lane revision's routing content. Re-run lane routing before AI enqueue.`
         );
       }
       const queueContractItems = Array.isArray(summary.queue_contract_items)

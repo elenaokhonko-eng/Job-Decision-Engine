@@ -4,7 +4,7 @@ import * as yaml from "js-yaml";
 import dotenv from "dotenv";
 import pg from "pg";
 import { pgConnectionConfig } from "../src/db/pgSsl.js";
-import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import { resolveWorkspaceContext, type WorkspaceContext } from "../src/workspace/context.js";
 import { LaneFileConfigSchema, type LaneFileConfig } from "../src/lanes/contracts.js";
 import { withMaximumAiInterpretationsPerRun } from "../src/lanes/evaluationBudgetConfig.js";
 import {
@@ -14,10 +14,6 @@ import {
   upsertLaneRevision,
 } from "../src/lanes/registry.js";
 
-dotenv.config();
-dotenv.config({ path: ".env.local", override: true });
-
-const databaseUrl = process.env.DATABASE_URL;
 
 type LaneRegistryEntry = {
   lane_key: string;
@@ -159,11 +155,41 @@ async function cmdSetPreference(
   );
 }
 
-async function cmdSetBudget(
-  pool: pg.Pool,
-  laneKeyArg?: string,
-  budgetRaw?: string,
-): Promise<void> {
+export interface SetLaneBudgetChange {
+  laneKey: string;
+  activeRevision: number;
+  previousMaximumAiInterpretationsPerRun: number;
+  nextMaximumAiInterpretationsPerRun: number;
+  changed: boolean;
+  /** Set when applied: the revision now active for the lane. */
+  appliedRevision?: number;
+  /**
+   * Set when applied: whether the new revision has the same routing content as the one it
+   * replaced. A budget-only change always keeps routing content, so jobs already routed stay
+   * eligible for AI enqueue (see migrations/101_lane_revision_routing_content_hash.sql).
+   */
+  routingContentUnchanged?: boolean;
+}
+
+export interface SetLaneBudgetResult {
+  mode: "APPLY" | "DRY_RUN";
+  workspace: string;
+  target: string;
+  maximumAiInterpretationsPerRun: number;
+  changes: SetLaneBudgetChange[];
+}
+
+/**
+ * Sets maximum_ai_interpretations_per_run for one lane or all lanes. Applying it activates a new
+ * lane revision per changed lane (revisions stay the audit trail of every budget), whose
+ * routing_content_hash equals the previous revision's, so existing lane routing stays current.
+ */
+export async function setLaneBudget(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  laneKeyArg: string | undefined,
+  budgetRaw: string | undefined,
+  options: { apply: boolean; context?: WorkspaceContext },
+): Promise<SetLaneBudgetResult> {
   if (!laneKeyArg || !budgetRaw) {
     throw new Error("set-budget requires a LANE_KEY or 'all', and MAXIMUM_PER_RUN.");
   }
@@ -172,8 +198,8 @@ async function cmdSetBudget(
     throw new Error("MAXIMUM_PER_RUN must be an integer from 0 to 1000.");
   }
 
-  const ctx = await resolveWorkspaceContext(pool as any);
-  const active = await listActiveLaneRevisions(pool, { context: ctx });
+  const ctx = options.context ?? await resolveWorkspaceContext(clientOrPool as any);
+  const active = await listActiveLaneRevisions(clientOrPool, { context: ctx });
   const laneKey = laneKeyArg.toUpperCase();
   const targets = laneKey === "ALL" ? active : active.filter((lane) => lane.laneKey === laneKey);
   if (targets.length === 0) {
@@ -182,41 +208,66 @@ async function cmdSetBudget(
       : `No active lane revision found for ${laneKey}.`);
   }
 
-  const changes = targets.map((lane) => ({
-    lane,
-    previous: lane.content.budget?.maximum_ai_interpretations_per_run ?? 0,
-    content: withMaximumAiInterpretationsPerRun(lane.content, maximum),
-  }));
-  const pending = changes.filter((change) => change.previous !== maximum);
-  const apply = process.argv.includes("--apply");
-  console.log(JSON.stringify({
-    mode: apply ? "APPLY" : "DRY_RUN",
+  const result: SetLaneBudgetResult = {
+    mode: options.apply ? "APPLY" : "DRY_RUN",
     workspace: ctx.workspaceKey,
     target: laneKey,
     maximumAiInterpretationsPerRun: maximum,
-    changes: changes.map(({ lane, previous }) => ({
+    changes: [],
+  };
+  for (const lane of targets) {
+    const previous = lane.content.budget?.maximum_ai_interpretations_per_run ?? 0;
+    const change: SetLaneBudgetChange = {
       laneKey: lane.laneKey,
       activeRevision: lane.revisionNumber,
       previousMaximumAiInterpretationsPerRun: previous,
       nextMaximumAiInterpretationsPerRun: maximum,
       changed: previous !== maximum,
-    })),
-  }, null, 2));
+    };
+    if (options.apply && change.changed) {
+      const applied = await upsertLaneRevision({
+        laneKey: lane.laneKey,
+        content: withMaximumAiInterpretationsPerRun(lane.content, maximum),
+      }, clientOrPool, {
+        context: ctx,
+        note: `Set maximum AI interpretations per run to ${maximum}.`,
+      });
+      change.appliedRevision = applied.revisionNumber;
+      change.routingContentUnchanged = applied.routingContentHash === lane.routingContentHash;
+      if (!change.routingContentUnchanged) {
+        throw new Error(
+          `Budget change for ${lane.laneKey} altered its routing content; refusing to continue. ` +
+            "Revision " + String(applied.revisionNumber) + " is active; inspect it before retrying."
+        );
+      }
+    }
+    result.changes.push(change);
+  }
+  return result;
+}
 
-  if (!apply || pending.length === 0) return;
-  for (const change of pending) {
-    const result = await upsertLaneRevision({
-      laneKey: change.lane.laneKey,
-      content: change.content,
-    }, pool, {
-      context: ctx,
-      note: `Set maximum AI interpretations per run to ${maximum}.`,
-    });
-    console.log(`Activated ${change.lane.laneKey} lane revision ${result.revisionNumber}.`);
+async function cmdSetBudget(
+  pool: pg.Pool,
+  laneKeyArg?: string,
+  budgetRaw?: string,
+): Promise<void> {
+  const result = await setLaneBudget(pool, laneKeyArg, budgetRaw, {
+    apply: process.argv.includes("--apply"),
+  });
+  console.log(JSON.stringify(result, null, 2));
+  for (const change of result.changes) {
+    if (change.appliedRevision === undefined) continue;
+    console.log(
+      `Activated ${change.laneKey} lane revision ${change.appliedRevision} (budget only; routing content unchanged).`
+    );
   }
 }
 
 async function main(): Promise<void> {
+  // Loaded here, not at import time, so importing setLaneBudget never rewrites the environment.
+  dotenv.config();
+  dotenv.config({ path: ".env.local", override: true });
+  const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required.");
   }
