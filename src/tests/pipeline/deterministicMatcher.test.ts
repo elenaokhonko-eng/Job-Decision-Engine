@@ -318,7 +318,7 @@ describe('Pipeline Stage: Deterministic Matcher', () => {
     const jobSelect = (mPool.query as any).mock.calls.find(
       (call: any[]) => typeof call[0] === 'string' && call[0].includes('FROM canonical_jobs c')
     );
-    expect(jobSelect?.[0]).toContain("'MATCHED', 'QUEUED_FOR_AI', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'");
+    expect(jobSelect?.[0]).toContain("'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET', 'EVALUATING', 'AI_EVALUATED', 'EVALUATED'");
     expect(jobSelect?.[1]).toContain(true);
   });
 

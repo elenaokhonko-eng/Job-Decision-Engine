@@ -18,6 +18,16 @@ import { getEmbeddingSpaceRegistryConfiguration } from "../embeddings/spaceRegis
 import { runLaneRouting as defaultRunLaneRouting } from "../pipeline/laneRouter.js";
 import { loadWorkspaceLanesConfig } from "../pipeline/laneConfigLoader.js";
 import { laneRoutingCurrentSql, workspaceActiveLaneRoutingSql } from "../lanes/laneRoutingCurrency.js";
+import {
+  AI_EVALUATION_OUTCOMES_SQL,
+  PROFILE_REMATCH_OUTCOMES,
+  currentProfileMatchSql,
+  decisionOnLatestMatchSql,
+  eligibleRoutedJobSql,
+  isAiEvaluationOutcome,
+  profileMatchSupersededSql,
+  uniqueActiveProfileSql,
+} from "../pipeline/profileMatchCurrency.js";
 import { runDeterministicMatcher as defaultRunDeterministicMatcher } from "../pipeline/deterministicMatcher.js";
 import { runRecommendationDecider as defaultRunRecommendationDecider } from "../pipeline/recommendationDecider.js";
 import { runExplanationQueueEnqueuer as defaultRunExplanationQueueEnqueuer } from "../pipeline/explanationQueueEnqueuer.js";
@@ -97,11 +107,23 @@ const SUPERSEDED_LANE_ROUTING_SQL = `(
   AND c.primary_lane IS NOT NULL
   AND c.primary_lane <> 'UNCLASSIFIED'
   AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
-  AND COALESCE(c.recommendation_outcome, 'TRACK') IN ('PRIORITY', 'REVIEW', 'TRACK')
+  AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
   AND (
     ld.id IS NULL
     OR NOT ${laneRoutingCurrentSql("ld.lane_snapshot", workspaceActiveLaneRoutingSql("c.workspace_id"))}
   )
+)`;
+
+/**
+ * Canonical jobs (alias c, latest match run LEFT JOINed as mr) that are eligible, routed and in a
+ * PRIORITY, REVIEW or TRACK outcome, but whose latest match run was made against a profile version
+ * that is no longer the unique active one. Each gets a MATCH_PROFILE_EVIDENCE re-match for the
+ * active profile; DECIDE_RECOMMENDATION and (for PRIORITY/REVIEW) ENQUEUE_EXPLANATION follow as
+ * normal successors. Hard gates and lane routing are not replayed.
+ */
+const SUPERSEDED_PROFILE_MATCH_SQL = `(
+  ${eligibleRoutedJobSql("c", PROFILE_REMATCH_OUTCOMES)}
+  AND ${profileMatchSupersededSql("c", "mr")}
 )`;
 
 export type PipelineStageTaskType = (typeof PIPELINE_STAGE_TASK_TYPES)[number];
@@ -168,6 +190,12 @@ export interface SeedPipelineTasksSummary {
    * this seeding pass; each gets a ROUTE_LANE re-route task (inserted or already existing).
    */
   supersededLaneRouting?: number;
+  /**
+   * Eligible PRIORITY/REVIEW/TRACK jobs found with a latest match run made against a superseded
+   * profile version in this seeding pass; each gets a MATCH_PROFILE_EVIDENCE re-match for the
+   * active profile (inserted or already existing).
+   */
+  supersededProfileMatch?: number;
 }
 
 export type PipelineWorkerExitReason =
@@ -192,6 +220,18 @@ export interface PipelineStageWorkerSummary {
    * content; each one has a ROUTE_LANE re-route queued and is reactivated when it completes.
    */
   laneRoutingSuperseded: number;
+  /**
+   * ENQUEUE_EXPLANATION tasks blocked because the job's latest match used a superseded profile
+   * version; each one has a MATCH_PROFILE_EVIDENCE re-match queued and is reactivated once the
+   * re-match and the following recommendation decision complete.
+   */
+  profileMatchSuperseded: number;
+  /**
+   * ENQUEUE_EXPLANATION tasks blocked because the job's latest deterministic decision was not made
+   * from its current match; each one has a DECIDE_RECOMMENDATION queued and is reactivated when
+   * that decision completes.
+   */
+  decisionSuperseded: number;
   /** Model calls made by this run, by provider/model, with 429/timeout/retry counts. */
   providerCalls?: ProviderCallSummary;
   exitReason: PipelineWorkerExitReason;
@@ -336,6 +376,41 @@ export class LaneRoutingSupersededError extends PipelineTaskDependencyBlockedErr
         `(${laneRoutingVersion}); a ROUTE_LANE re-route was queued before AI enqueue.`,
     );
     this.name = "LaneRoutingSupersededError";
+  }
+}
+
+/**
+ * The job's latest match run used a profile version that is no longer active. A
+ * MATCH_PROFILE_EVIDENCE re-match for the active profile has been queued; this task stays
+ * BLOCKED_DEPENDENCY until the re-match and its recommendation decision complete.
+ */
+export class ProfileMatchSupersededError extends PipelineTaskDependencyBlockedError {
+  constructor(jobVersionId: string, matchProfileVersionId: string, activeProfileVersionId: string) {
+    super(
+      `PROFILE_MATCH_SUPERSEDED:${jobVersionId}`,
+      "MATCH_PROFILE_EVIDENCE",
+      `The latest match for job_version_id=${jobVersionId} used profile_version_id=${matchProfileVersionId}, ` +
+        `not the active profile_version_id=${activeProfileVersionId}; a MATCH_PROFILE_EVIDENCE re-match ` +
+        `was queued before AI enqueue.`,
+    );
+    this.name = "ProfileMatchSupersededError";
+  }
+}
+
+/**
+ * The job's latest deterministic decision was not made from its current match (for example the
+ * job was re-matched but not yet re-decided). A DECIDE_RECOMMENDATION has been queued; this task
+ * stays BLOCKED_DEPENDENCY until it completes.
+ */
+export class DecisionSupersededError extends PipelineTaskDependencyBlockedError {
+  constructor(jobVersionId: string, matchRunId: string) {
+    super(
+      `DECISION_SUPERSEDED:${jobVersionId}`,
+      "DECIDE_RECOMMENDATION",
+      `The latest deterministic decision for job_version_id=${jobVersionId} was not made from the current ` +
+        `match_run_id=${matchRunId}; a DECIDE_RECOMMENDATION was queued before AI enqueue.`,
+    );
+    this.name = "DecisionSupersededError";
   }
 }
 
@@ -516,11 +591,21 @@ async function enqueueStageTask(
     taskPayload.lane_routing_version.trim() !== ""
       ? taskPayload.lane_routing_version.trim()
       : null;
+  // A profile re-match is identified by the superseded match run it replaces, so a later
+  // profile change (even back to an earlier version) gets its own re-match task.
+  const supersededMatchRunId =
+    taskType === "MATCH_PROFILE_EVIDENCE" &&
+    typeof taskPayload.superseded_match_run_id === "string" &&
+    taskPayload.superseded_match_run_id.trim() !== ""
+      ? taskPayload.superseded_match_run_id.trim()
+      : null;
   const taskVariant = routingReplayVersion
     ? `repair-${routingReplayVersion}`
     : laneRoutingRerouteVersion
       ? `reroute-${laneRoutingRerouteVersion}`
-      : isRepairTask ? "repair" : undefined;
+      : supersededMatchRunId
+        ? `rematch-${supersededMatchRunId}`
+        : isRepairTask ? "repair" : undefined;
   const taskVersion = stageVersion(taskType);
   const taskKey = buildPipelineTaskKey(taskType, id, taskVersion, profileVersionId, taskVariant);
   const intent = createTaskIntentV2({
@@ -1133,6 +1218,55 @@ export async function seedRecoverablePipelineTasks(
       }
     }
 
+    // Eligible jobs whose latest match used a superseded profile version are re-matched against
+    // the active profile, PRIORITY and REVIEW first. The re-match is ENSURE_CURRENT and keyed by
+    // the superseded match run, so it runs once per profile change and is bounded per pass.
+    const matchCountsBefore = summary.byType.MATCH_PROFILE_EVIDENCE ?? { inserted: 0, existing: 0 };
+    const matchSeenBefore = matchCountsBefore.inserted + matchCountsBefore.existing;
+    await selectAndEnqueue(
+      client as any,
+      ctx,
+      summary,
+      "MATCH_PROFILE_EVIDENCE",
+      `SELECT c.id AS canonical_job_id,
+              c.latest_job_version_id AS job_version_id,
+              mr.id AS superseded_match_run_id
+       FROM canonical_jobs c
+       JOIN match_runs mr
+         ON mr.workspace_id = c.workspace_id
+        AND mr.id = c.latest_match_run_id
+       WHERE c.workspace_id = $1
+         AND ${SUPERSEDED_PROFILE_MATCH_SQL}
+       ORDER BY CASE c.recommendation_outcome WHEN 'PRIORITY' THEN 0 WHEN 'REVIEW' THEN 1 ELSE 2 END,
+                c.updated_at ASC,
+                c.id ASC
+       LIMIT $2`,
+      [ctx.workspaceId, maxPerType],
+      (row) => ({
+        id: requiredSeedValue(row, "job_version_id"),
+        payload: {
+          canonical_job_id: requiredSeedValue(row, "canonical_job_id"),
+          job_version_id: requiredSeedValue(row, "job_version_id"),
+          superseded_match_run_id: requiredSeedValue(row, "superseded_match_run_id"),
+        },
+      }),
+      enabledTypes,
+      includeTestFixtures,
+      deadlineAt,
+      seedScope,
+      maxPerType,
+    );
+    if (!enabledTypes || enabledTypes.has("MATCH_PROFILE_EVIDENCE")) {
+      const matchCountsAfter = summary.byType.MATCH_PROFILE_EVIDENCE ?? { inserted: 0, existing: 0 };
+      summary.supersededProfileMatch = matchCountsAfter.inserted + matchCountsAfter.existing - matchSeenBefore;
+      if (summary.supersededProfileMatch > 0) {
+        console.warn(
+          `Profile match superseded for ${summary.supersededProfileMatch} eligible job(s); ` +
+            "MATCH_PROFILE_EVIDENCE re-matches queued for the active profile version."
+        );
+      }
+    }
+
     await selectAndEnqueue(
       client as any,
       ctx,
@@ -1182,6 +1316,13 @@ export async function seedRecoverablePipelineTasks(
              AND ps.job_version_id = target_jv.id
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
              AND ps.stage_status = 'COMPLETED'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM match_runs mr
+           WHERE mr.workspace_id = c.workspace_id
+             AND mr.id = c.latest_match_run_id
+             AND ${SUPERSEDED_PROFILE_MATCH_SQL}
          )
          AND (
            COALESCE(c.processing_state, c.processing_status) = 'LANE_ROUTED'
@@ -1320,7 +1461,9 @@ export async function seedRecoverablePipelineTasks(
       ctx,
       summary,
       "ENQUEUE_EXPLANATION",
-      `SELECT c.id AS canonical_job_id, COALESCE(c.latest_job_version_id, jv.id) AS job_version_id
+      `SELECT c.id AS canonical_job_id,
+              COALESCE(c.latest_job_version_id, jv.id) AS job_version_id,
+              last_deferral.budget_run_id::text AS deferred_budget_run_id
        FROM canonical_jobs c
        LEFT JOIN LATERAL (
          SELECT id
@@ -1329,10 +1472,20 @@ export async function seedRecoverablePipelineTasks(
          ORDER BY observed_at DESC
          LIMIT 1
        ) jv ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT deferral.budget_run_id
+         FROM evaluation_budget_deferrals deferral
+         WHERE deferral.workspace_id = c.workspace_id
+           AND deferral.canonical_job_id = c.id
+           AND deferral.job_version_id = COALESCE(c.latest_job_version_id, jv.id)
+         ORDER BY deferral.created_at DESC, deferral.id DESC
+         LIMIT 1
+       ) last_deferral ON TRUE
        WHERE c.workspace_id = $1
-         AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI')
+         AND COALESCE(c.processing_state, c.processing_status) IN ('LANE_ROUTED', 'MATCHED', 'QUEUED_FOR_AI', 'DEFERRED_BUDGET')
          AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
-         AND COALESCE(c.recommendation_outcome, 'TRACK') IN ('PRIORITY', 'REVIEW')
+         -- AI evaluation is for Apply Now outcomes only; TRACK is excluded by design.
+         AND c.recommendation_outcome IN (${AI_EVALUATION_OUTCOMES_SQL})
          AND COALESCE(c.latest_job_version_id, jv.id) IS NOT NULL
          AND EXISTS (
            SELECT 1
@@ -1350,13 +1503,8 @@ export async function seedRecoverablePipelineTasks(
             AND current_match.job_content_hash = target_jv.content_hash
             AND current_match.context_fingerprint IS NOT NULL
             AND current_match.status = 'COMPLETED'
-           JOIN deterministic_decisions current_decision
-             ON current_decision.workspace_id = c.workspace_id
-            AND current_decision.id = c.latest_deterministic_decision_id
-            AND current_decision.canonical_job_id = c.id
-            AND current_decision.job_version_id = target_jv.id
-            AND current_decision.match_run_id = current_match.id
-            AND current_decision.context_fingerprint IS NOT NULL
+           -- A decision that predates the current match is allowed: the ENQUEUE task queues a
+           -- DECIDE_RECOMMENDATION and waits for it instead of enqueueing nothing.
            WHERE target_jv.workspace_id = c.workspace_id
              AND target_jv.id = COALESCE(c.latest_job_version_id, jv.id)
          )
@@ -1395,6 +1543,13 @@ export async function seedRecoverablePipelineTasks(
           // The routing version is part of the task identity, so enqueue is retried once per
           // lane routing content and never after a budget-only lane revision.
           ...(laneRoutingVersion ? { lane_routing_version: laneRoutingVersion } : {}),
+          // The job's latest AI budget deferral is part of the task context (queue_budget_run_id
+          // is a context-fingerprint key): a job deferred for budget gets one new enqueue attempt
+          // in a later pass (a new budget run) instead of being stranded behind its completed
+          // task. The enqueuer still applies the lane budget to that attempt.
+          ...(typeof row.deferred_budget_run_id === "string" && row.deferred_budget_run_id !== ""
+            ? { queue_budget_run_id: row.deferred_budget_run_id }
+            : {}),
         },
       }),
       enabledTypes,
@@ -1884,8 +2039,132 @@ async function requireCurrentLaneRouting(
   throw new LaneRoutingSupersededError(jobVersionId, lanes.routingVersion);
 }
 
+const OUTSTANDING_TASK_STATUSES = ["PENDING", "RUNNING", "RETRY_WAIT", "BLOCKED_DEPENDENCY"] as const;
+
+async function hasOutstandingStageTask(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  taskType: PipelineStageTaskType,
+  jobVersionId: string,
+): Promise<boolean> {
+  const { rows } = await (clientOrPool as QueryClient).query<{ outstanding: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM pipeline_tasks
+       WHERE workspace_id = $1
+         AND task_type = $2
+         AND payload->>'job_version_id' = $3
+         AND status = ANY($4::text[])
+     ) AS outstanding`,
+    [ctx.workspaceId, taskType, jobVersionId, [...OUTSTANDING_TASK_STATUSES]],
+  );
+  return rows[0]?.outstanding === true;
+}
+
+interface ProfileMatchCurrencyRow {
+  canonical_job_id: string;
+  match_run_id: string | null;
+  match_profile_version_id: string | null;
+  active_profile_version_id: string | null;
+  profile_superseded: boolean;
+  match_current: boolean;
+  decision_current: boolean;
+}
+
+async function findProfileMatchCurrency(
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+  jobVersionId: string,
+): Promise<ProfileMatchCurrencyRow | null> {
+  const { rows } = await (clientOrPool as QueryClient).query<ProfileMatchCurrencyRow>(
+    `SELECT c.id::text AS canonical_job_id,
+            mr.id::text AS match_run_id,
+            mr.profile_version_id::text AS match_profile_version_id,
+            ${uniqueActiveProfileSql("c")}::text AS active_profile_version_id,
+            COALESCE(${profileMatchSupersededSql("c", "mr")}, FALSE) AS profile_superseded,
+            COALESCE(${currentProfileMatchSql("c", "mr", "jv")}, FALSE) AS match_current,
+            COALESCE(${decisionOnLatestMatchSql("c", "dd")}, FALSE) AS decision_current
+     FROM canonical_jobs c
+     JOIN job_versions jv
+       ON jv.workspace_id = c.workspace_id
+      AND jv.id = c.latest_job_version_id
+     LEFT JOIN match_runs mr
+       ON mr.workspace_id = c.workspace_id
+      AND mr.id = c.latest_match_run_id
+     LEFT JOIN deterministic_decisions dd
+       ON dd.workspace_id = c.workspace_id
+      AND dd.id = c.latest_deterministic_decision_id
+     WHERE c.workspace_id = $1
+       AND c.latest_job_version_id = $2::uuid
+       AND ${eligibleRoutedJobSql("c")}
+     LIMIT 1`,
+    [ctx.workspaceId, jobVersionId],
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Before AI enqueue, a PRIORITY/REVIEW job whose latest match used a superseded profile version
+ * is sent back to MATCH_PROFILE_EVIDENCE for the active profile, and a job whose decision predates
+ * its current match is sent back to DECIDE_RECOMMENDATION, instead of the enqueuer silently
+ * selecting nothing. Hard gates and lane routing are never replayed here; the deterministic
+ * decider, not this guard, sets the outcome.
+ */
+async function requireCurrentProfileMatchAndDecision(
+  jobVersionId: string,
+  clientOrPool: pg.Pool | pg.PoolClient,
+  ctx: WorkspaceContext,
+): Promise<void> {
+  const currency = await findProfileMatchCurrency(clientOrPool, ctx, jobVersionId);
+  if (!currency) return;
+  if (currency.profile_superseded && currency.match_run_id) {
+    await enqueueStageTask(
+      "MATCH_PROFILE_EVIDENCE",
+      jobVersionId,
+      {
+        canonical_job_id: currency.canonical_job_id,
+        job_version_id: jobVersionId,
+        superseded_match_run_id: currency.match_run_id,
+      },
+      clientOrPool,
+      ctx,
+    );
+    if (!(await hasOutstandingStageTask(clientOrPool, ctx, "MATCH_PROFILE_EVIDENCE", jobVersionId))) {
+      throw new Error(
+        `Profile re-match for job_version_id=${jobVersionId} already ran without replacing match_run_id=` +
+          `${currency.match_run_id}; inspect its MATCH_PROFILE_EVIDENCE task before AI enqueue.`
+      );
+    }
+    throw new ProfileMatchSupersededError(
+      jobVersionId,
+      currency.match_profile_version_id ?? "unknown",
+      currency.active_profile_version_id ?? "unknown",
+    );
+  }
+  if (currency.match_current && !currency.decision_current && currency.match_run_id) {
+    await enqueueStageTask(
+      "DECIDE_RECOMMENDATION",
+      jobVersionId,
+      { canonical_job_id: currency.canonical_job_id, job_version_id: jobVersionId },
+      clientOrPool,
+      ctx,
+    );
+    if (!(await hasOutstandingStageTask(clientOrPool, ctx, "DECIDE_RECOMMENDATION", jobVersionId))) {
+      throw new Error(
+        `Recommendation decision for job_version_id=${jobVersionId} already ran without using the current ` +
+          `match_run_id=${currency.match_run_id}; inspect its DECIDE_RECOMMENDATION task before AI enqueue.`
+      );
+    }
+    throw new DecisionSupersededError(jobVersionId, currency.match_run_id);
+  }
+}
+
 async function reactivateBlockedDependencyTasks(
-  repairTaskType: AutomaticDependency["repairTaskType"] | "ROUTE_LANE",
+  repairTaskType:
+    | AutomaticDependency["repairTaskType"]
+    | "ROUTE_LANE"
+    | "MATCH_PROFILE_EVIDENCE"
+    | "DECIDE_RECOMMENDATION",
   jobVersionId: string,
   clientOrPool: pg.Pool | pg.PoolClient,
   ctx: WorkspaceContext,
@@ -2383,7 +2662,7 @@ async function maybeEnqueueAfterTask(
       if (
         state.processingState === "LANE_ROUTED" &&
         state.recommendationEligibility === "ELIGIBLE" &&
-        (state.recommendationOutcome === "PRIORITY" || state.recommendationOutcome === "REVIEW")
+        isAiEvaluationOutcome(state.recommendationOutcome)
       ) {
         await enqueueSuccessor("ENQUEUE_EXPLANATION", jobVersionId, {
           canonical_job_id: state.canonicalJobId ?? payload.canonical_job_id,
@@ -2417,7 +2696,9 @@ async function maybeEnqueueAfterTask(
       // A match is meaningful only after semantic lane routing has produced a
       // lane. Deferred and gate-verification states are valid terminal/holding
       // outcomes for this stage; stale matcher tasks must not retry or create
-      // manual review noise for them.
+      // manual review noise for them. No decision follows, so an AI enqueue
+      // waiting on this re-match resumes now and re-checks the job.
+      await reactivateBlockedDependencyTasks("MATCH_PROFILE_EVIDENCE", jobVersionId, clientOrPool, ctx);
       return insertedSuccessors;
     }
     await enqueueSuccessor("DECIDE_RECOMMENDATION", jobVersionId, stagePayload);
@@ -2427,11 +2708,15 @@ async function maybeEnqueueAfterTask(
   if (
     taskType === "DECIDE_RECOMMENDATION" &&
     state.recommendationEligibility === "ELIGIBLE" &&
-    (state.recommendationOutcome === "PRIORITY" || state.recommendationOutcome === "REVIEW")
+    isAiEvaluationOutcome(state.recommendationOutcome)
   ) {
     await enqueueSuccessor("ENQUEUE_EXPLANATION", jobVersionId, stagePayload);
   }
   if (taskType === "DECIDE_RECOMMENDATION") {
+    // AI enqueue tasks blocked on a profile re-match or a re-decision resume now; they re-check
+    // the job and enqueue it only if the new deterministic outcome is PRIORITY or REVIEW.
+    await reactivateBlockedDependencyTasks("MATCH_PROFILE_EVIDENCE", jobVersionId, clientOrPool, ctx);
+    await reactivateBlockedDependencyTasks("DECIDE_RECOMMENDATION", jobVersionId, clientOrPool, ctx);
     await markTerminalGmailAlertsForJob(jobVersionId, clientOrPool, ctx);
   }
   return insertedSuccessors;
@@ -2937,6 +3222,7 @@ async function executeStageTask(
         "MATCHED",
         "UNMATCHED",
         "QUEUED_FOR_AI",
+        "DEFERRED_BUDGET",
         "EVALUATING",
         "AI_EVALUATED",
         "EVALUATED",
@@ -2947,9 +3233,19 @@ async function executeStageTask(
       // verification state into a retry/manual-review failure.
       return;
     }
-    if (["MATCHED", "UNMATCHED"].includes(matchState.processingState || "")) {
+    if (matchState.processingState === "UNMATCHED") {
       return;
     }
+    // A MATCHED job is done only when its latest match is current for the active profile. After
+    // the active profile changes, a MATCHED job still points at the superseded profile's match and
+    // must be re-matched; returning here made every re-match a silent no-op.
+    if (
+      matchState.processingState === "MATCHED" &&
+      (await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId))
+    ) {
+      return;
+    }
+    const supersededMatchRunId = optionalStringPayload(task, "superseded_match_run_id");
     const hasCompletedDeterministicRun = await jobVersionHasCompletedRequirementsExtraction(
       clientOrPool,
       ctx,
@@ -2984,7 +3280,18 @@ async function executeStageTask(
       throw new Error(`Deterministic matching reported ${summary.errors} error(s).`);
     }
     const state = await lookupJobState(clientOrPool, ctx, jobVersionId);
-    if (["MATCHED", "UNMATCHED"].includes(state.processingState || "")) {
+    if (state.processingState === "UNMATCHED") {
+      return;
+    }
+    if (state.processingState === "MATCHED") {
+      if (supersededMatchRunId && !(await jobVersionHasCurrentMatch(clientOrPool, ctx, jobVersionId))) {
+        // The matcher selected nothing (for example the posting lost its source-content
+        // evidence), so the job would keep its superseded-profile match. Fail visibly instead.
+        throw new Error(
+          `Profile re-match left job_version_id=${jobVersionId} without a current match for the active profile ` +
+            `(superseded match_run_id=${supersededMatchRunId}).`
+        );
+      }
       return;
     }
     if (state.processingState === "LANE_ROUTED" && state.profileMatchStatus === "UNKNOWN") {
@@ -3071,6 +3378,7 @@ async function executeStageTask(
 
   if (taskType === "ENQUEUE_EXPLANATION") {
     await requireCurrentLaneRouting(jobVersionId, clientOrPool, ctx);
+    await requireCurrentProfileMatchAndDecision(jobVersionId, clientOrPool, ctx);
     await dependencies.runExplanationQueueEnqueuer(clientOrPool, {
       context: ctx,
       jobVersionIds: [jobVersionId],
@@ -3276,6 +3584,8 @@ export async function runPipelineStageTaskWorker(
     deadLettered: 0,
     rateLimitDeferred: 0,
     laneRoutingSuperseded: 0,
+    profileMatchSuperseded: 0,
+    decisionSuperseded: 0,
     exitReason: "QUEUE_DRAINED",
     durationMs: 0,
     byType: {},
@@ -3482,6 +3792,8 @@ export async function runPipelineStageTaskWorker(
           );
           summary.blocked += 1;
           if (error instanceof LaneRoutingSupersededError) summary.laneRoutingSuperseded += 1;
+          if (error instanceof ProfileMatchSupersededError) summary.profileMatchSuperseded += 1;
+          if (error instanceof DecisionSupersededError) summary.decisionSuperseded += 1;
           incrementWorker(summary, task.taskType, "blocked");
           return;
         }

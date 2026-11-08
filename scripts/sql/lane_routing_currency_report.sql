@@ -7,7 +7,8 @@
 --   BEGIN READ ONLY; \i scripts/sql/lane_routing_currency_report.sql ROLLBACK;
 --
 -- Candidates match the explanation enqueuer: not archived, state LANE_ROUTED or MATCHED, a
--- routed primary lane, recommendation_eligibility ELIGIBLE, outcome PRIORITY, REVIEW or TRACK.
+-- routed primary lane, recommendation_eligibility ELIGIBLE, outcome PRIORITY or REVIEW. TRACK is
+-- not AI-evaluated (src/pipeline/profileMatchCurrency.ts), so it does not qualify.
 
 WITH active_lane AS (
   SELECT li.workspace_id,
@@ -34,7 +35,7 @@ candidate AS (
     AND c.primary_lane IS NOT NULL
     AND c.primary_lane <> 'UNCLASSIFIED'
     AND COALESCE(c.recommendation_eligibility, 'VERIFY') = 'ELIGIBLE'
-    AND COALESCE(c.recommendation_outcome, 'TRACK') IN ('PRIORITY', 'REVIEW', 'TRACK')
+    AND c.recommendation_outcome IN ('PRIORITY', 'REVIEW')
 ),
 routed_lane AS (
   SELECT candidate.canonical_job_id,
