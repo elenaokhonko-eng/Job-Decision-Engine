@@ -40,4 +40,13 @@ describe("track seniority replay plan", () => {
     expect(restricted.territory_reason).toContain("CANADA");
     expect(unclear).toMatchObject({ after: "NEEDS_VERIFICATION", territory: "NEEDS_VERIFICATION" });
   });
+
+  it("re-gates an in-flight job that has no outcome yet without inventing one", () => {
+    const [restricted, open] = planTrackSeniorityReplay([
+      job({ outcome: null, description: "The base pay ranges from $75,000 to $100,000 CAD within any geographic market in Canada." }),
+      job({ outcome: null }),
+    ], SCOPE, EXPERIENCE);
+    expect(restricted).toMatchObject({ before: null, after: "HARD_REJECTED", territory: "HARD_REJECT" });
+    expect(open).toMatchObject({ before: null, after: null, territory: "PASS" });
+  });
 });

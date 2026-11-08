@@ -1,15 +1,16 @@
 /**
  * Replay the remote hiring-territory gate and track-aware seniority against current jobs.
  *
- * Dry run (default) is read-only: it computes, in memory, how every gate-passed job with a
- * PRIORITY/REVIEW/TRACK outcome would change and prints Apply Now before and after.
+ * Dry run (default) is read-only: it computes, in memory, how every gate-passed job (including
+ * jobs still in flight with no outcome yet) would change and prints Apply Now before and after.
  *
  *   npx tsx scripts/replay_track_seniority.ts [--experience-file <profile.json or array>] [--json <out>]
  *   npx tsx scripts/replay_track_seniority.ts --apply
  *
  * --experience-file previews a profile's experience_by_track before it is imported; otherwise the
  * active profile version's stored value is used. --apply re-gates only the jobs whose territory
- * result changed and re-runs the decider for the rest; it never uses --experience-file.
+ * result changed and re-runs the decider for the PRIORITY/REVIEW/TRACK rest; it never uses
+ * --experience-file.
  */
 import fs from "node:fs";
 import pg from "pg";
@@ -37,7 +38,7 @@ export interface ReplayJob {
   readonly canonical_job_id: string;
   readonly company_name: string;
   readonly title: string;
-  readonly outcome: string;
+  readonly outcome: string | null;
   readonly source_name: string | null;
   readonly location: string | null;
   readonly workplace_type: string | null;
@@ -49,14 +50,15 @@ export interface ReplayRow {
   readonly canonical_job_id: string;
   readonly company_name: string;
   readonly title: string;
-  readonly before: string;
-  readonly after: string;
+  readonly before: string | null;
+  readonly after: string | null;
   readonly territory: "PASS" | "HARD_REJECT" | "NEEDS_VERIFICATION";
   readonly territory_reason: string | null;
   readonly career_track: CareerTrackAssessment;
 }
 
-const APPLY_NOW = new Set(["PRIORITY", "REVIEW"]);
+const APPLY_NOW = new Set<string | null>(["PRIORITY", "REVIEW"]);
+const MATCHED = new Set<string | null>(["PRIORITY", "REVIEW", "TRACK"]);
 
 /** Pure replay: the new gate result and capped outcome for each job. */
 export function planTrackSeniorityReplay(
@@ -76,7 +78,7 @@ export function planTrackSeniorityReplay(
       ? "HARD_REJECTED"
       : gate.status === "NEEDS_VERIFICATION"
         ? "NEEDS_VERIFICATION"
-        : capOutcome(job.outcome, careerTrack.outcome_cap);
+        : job.outcome === null ? null : capOutcome(job.outcome, careerTrack.outcome_cap);
     return {
       canonical_job_id: job.canonical_job_id,
       company_name: job.company_name,
@@ -153,8 +155,8 @@ async function main(): Promise<void> {
          ORDER BY o.retrieved_at DESC, o.id DESC LIMIT 1
        ) observation ON TRUE
        WHERE c.workspace_id = $1 AND c.archived_at IS NULL AND c.gate_decision = 'PASS'
-         AND c.recommendation_outcome IN ('PRIORITY', 'REVIEW', 'TRACK')
-       ORDER BY c.recommendation_outcome, c.company_name`,
+         AND c.processing_state <> 'MANUALLY_REMOVED'
+       ORDER BY c.recommendation_outcome NULLS LAST, c.company_name`,
       [ctx.workspaceId],
     );
     const plan = planTrackSeniorityReplay(rows.map((row) => ({ ...row, requirements: row.requirements ?? [] })), scope, experience);
@@ -164,16 +166,19 @@ async function main(): Promise<void> {
     const count = (list: ReplayRow[], outcome: string) => list.filter((row) => row[list === before ? "before" : "after"] === outcome).length;
     console.log(`\nApply Now candidates (gate PASS, PRIORITY/REVIEW): before ${before.length} (PRIORITY ${count(before, "PRIORITY")}), after ${after.length} (PRIORITY ${count(after, "PRIORITY")}).`);
     const transitions: Record<string, number> = {};
-    for (const row of plan) transitions[`${row.before} -> ${row.after}`] = (transitions[`${row.before} -> ${row.after}`] ?? 0) + 1;
-    console.log("Outcome transitions across all PRIORITY/REVIEW/TRACK jobs:", transitions);
+    for (const row of plan) {
+      const key = `${row.before ?? "<no outcome yet>"} -> ${row.after ?? "<no outcome yet>"}`;
+      transitions[key] = (transitions[key] ?? 0) + 1;
+    }
+    console.log(`Outcome transitions across all ${plan.length} gate-passed jobs:`, transitions);
 
     console.log("\nCurrent Apply Now jobs, before -> after:");
     for (const row of before) {
       const why = row.territory !== "PASS" ? row.territory_reason : row.after !== row.before ? row.career_track.rationale : "";
       console.log(`- ${row.before} -> ${row.after} | ${row.company_name} | ${row.title} | ${describeTrack(row)}${why ? ` | ${why}` : ""}`);
     }
-    const handsOnMid = plan.filter((row) => row.career_track.track === "HANDS_ON_AI_DATA" && row.career_track.level === "MID");
-    console.log(`\nHands-on AI/ML/data mid-level roles: ${handsOnMid.length}; kept or unchanged ${handsOnMid.filter((row) => row.after === row.before).length}; changed ${handsOnMid.filter((row) => row.after !== row.before).length}.`);
+    const handsOnMid = plan.filter((row) => MATCHED.has(row.before) && row.career_track.track === "HANDS_ON_AI_DATA" && row.career_track.level === "MID");
+    console.log(`\nHands-on AI/ML/data mid-level roles (PRIORITY/REVIEW/TRACK): ${handsOnMid.length}; kept or unchanged ${handsOnMid.filter((row) => row.after === row.before).length}; changed ${handsOnMid.filter((row) => row.after !== row.before).length}.`);
     for (const row of handsOnMid.filter((item) => item.after !== item.before)) {
       console.log(`  - ${row.before} -> ${row.after} | ${row.company_name} | ${row.title} | ${row.territory_reason ?? row.career_track.rationale}`);
     }
@@ -188,7 +193,8 @@ async function main(): Promise<void> {
     const regate = plan.filter((row) => row.territory !== "PASS").map((row) => row.canonical_job_id);
     console.log(`\nRe-gating ${regate.length} job(s) whose remote hiring territory changed...`);
     if (regate.length > 0) await runHardGates(client, { context: ctx, canonicalJobIds: regate, reprocess: true });
-    const redecide = plan.filter((row) => row.territory === "PASS").map((row) => row.canonical_job_id);
+    // Jobs without an outcome yet get the new policy from the normal pipeline run.
+    const redecide = plan.filter((row) => row.territory === "PASS" && MATCHED.has(row.before)).map((row) => row.canonical_job_id);
     console.log(`Re-deciding ${redecide.length} gate-passed job(s) with track-aware seniority...`);
     if (redecide.length > 0) {
       const summary = await runRecommendationDecider(client, { context: ctx, canonicalJobIds: redecide });
