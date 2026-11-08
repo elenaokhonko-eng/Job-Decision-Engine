@@ -85,8 +85,24 @@ export const CompanyConfigSchema = z.object({
 });
 type CompanyConfig = z.infer<typeof CompanyConfigSchema>;
 
-/** Wall-clock budget shared by all Workday tenants in one run (the adapter step has a 10-minute timeout). */
+/** Wall-clock budget shared by all Workday tenants in one run (inside the overall adapter run budget). */
 export const WORKDAY_RUN_BUDGET_MS = 240_000;
+
+/**
+ * Default wall-clock budget for one adapter run. The workflow step timeout is set
+ * above it, so a slow day defers the remaining sources instead of killing the step.
+ */
+export const ADAPTER_RUN_BUDGET_DEFAULT_SECONDS = 1_800;
+
+/** ADAPTER_RUN_BUDGET_SECONDS, when set, must be a whole number of seconds between 60 and 3600. */
+export function adapterRunBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.ADAPTER_RUN_BUDGET_SECONDS?.trim();
+  if (!raw) return ADAPTER_RUN_BUDGET_DEFAULT_SECONDS * 1000;
+  if (!/^\d+$/.test(raw)) throw new Error("ADAPTER_RUN_BUDGET_SECONDS must be a whole number of seconds.");
+  const seconds = Number(raw);
+  if (seconds < 60 || seconds > 3_600) throw new Error("ADAPTER_RUN_BUDGET_SECONDS must be between 60 and 3600.");
+  return seconds * 1000;
+}
 
 /** Rotates a list by the UTC day number so a shared budget does not always favour the same entries. */
 export function rotateDaily<T>(items: readonly T[], now: Date): T[] {
@@ -561,6 +577,7 @@ export async function runAdapters(): Promise<{
   status: "HEALTHY" | "DEGRADED" | "FAILED";
   laneCoverage: Record<string, { plansExecuted: number; sourcesFailed: number; discovered: number; staged: number; filtered: number; coverageNote: string }>;
   skippedByReason: Record<string, number>;
+  deferredSources: string[];
 }> {
   console.log("====================================================");
   console.log("   STAGE 0: EXECUTED SIX-LANE SOURCE PLAN RUNNER    ");
@@ -594,6 +611,10 @@ export async function runAdapters(): Promise<{
   const enabledPlugins = plugins.filter((plugin) => plugin.status === "active" && plugin.schedule.enabled);
   let ledgerPool: pg.Pool | null = null;
   let workdayBudget: WorkdayRunBudget | null = null;
+  const runBudgetMs = adapterRunBudgetMs();
+  const runDeadline = Date.now() + runBudgetMs;
+  const deferredSources: string[] = [];
+  const deferredLanes = new Set<string>();
 
   async function runGroup(input: {
     plugin: SourcePlugin;
@@ -605,6 +626,14 @@ export async function runAdapters(): Promise<{
     targetCompanyId: string | null;
     pluginRevisionId: string;
   }): Promise<void> {
+    if (Date.now() >= runDeadline) {
+      // Not a failure: the source keeps its checkpoint, and the daily rotation of
+      // sources and boards puts it earlier on a later run.
+      deferredSources.push(input.label);
+      for (const laneKey of input.laneKeys) deferredLanes.add(laneKey);
+      console.log(`  DEFERRED: ${input.label}: the adapter run budget (${runBudgetMs / 1000}s) is spent; it keeps its checkpoint for a later run.`);
+      return;
+    }
     const planVersion = `${plans[input.laneKeys[0]].planVersion}:${input.pluginRevisionId}`;
     enabledSourceCount += 1;
     for (const laneKey of input.laneKeys) laneCoverage[laneKey].plansExecuted += 1;
@@ -646,7 +675,8 @@ export async function runAdapters(): Promise<{
     }
   }
 
-  for (const plugin of enabledPlugins) {
+  // Rotate sources (and boards below) daily so the run budget never always favours the same ones.
+  for (const plugin of rotateDaily(enabledPlugins, new Date())) {
     const sourceName = asSourceName(plugin.source_key);
     if (!sourceName) {
       const detail = `Unknown source key ${plugin.source_key}; source plan cannot execute.`;
@@ -680,10 +710,8 @@ export async function runAdapters(): Promise<{
       const matchingCompanies = companies.filter((company) =>
         company.enabled !== false && company.ats_provider?.trim().toLowerCase() === plugin.source_key
       );
-      // Workday tenants share one run budget, so start at a different tenant each day to avoid starving the tail.
-      const atsCompanies = plugin.source_key === "workday"
-        ? rotateDaily(matchingCompanies, new Date())
-        : matchingCompanies;
+      // Boards share the run budget (and Workday tenants their own), so start at a different one each day.
+      const atsCompanies = rotateDaily(matchingCompanies, new Date());
       for (const company of atsCompanies) {
         if (plugin.source_key === "workday") {
           const laneKeys = configuredCompanyLanes(company, plans);
@@ -889,7 +917,7 @@ Polling ${label} for lanes ${laneKeys.join(", ")}...`);
   await ledgerPool?.end();
 
   const missingLanePlans = Object.entries(laneCoverage)
-    .filter(([, coverage]) => coverage.plansExecuted === 0)
+    .filter(([lane, coverage]) => coverage.plansExecuted === 0 && !deferredLanes.has(lane))
     .map(([lane]) => lane);
   if (missingLanePlans.length > 0) {
     const detail = `No executable configured source plan ran for lanes: ${missingLanePlans.join(", ")}.`;
@@ -910,6 +938,7 @@ Polling ${label} for lanes ${laneKeys.join(", ")}...`);
   console.log(`  Discovery-scope skips (not staged): ${Object.entries(skippedByReason).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none"}`);
   console.log(`  Successful plans (${successfulSources.length}): ${successfulSources.join(", ") || "None"}`);
   console.log(`  Failed plans (${failedSources.length}): ${failedSources.join(", ") || "None"}`);
+  console.log(`  Deferred plans, run budget ${runBudgetMs / 1000}s spent (${deferredSources.length}): ${deferredSources.join(", ") || "None"}`);
   for (const [laneKey, coverage] of Object.entries(laneCoverage)) {
     console.log(`  ${laneKey}: plans=${coverage.plansExecuted}, failed=${coverage.sourcesFailed}, discovered=${coverage.discovered}, staged=${coverage.staged}, filtered=${coverage.filtered}; ${coverage.coverageNote}`);
   }
@@ -919,7 +948,7 @@ Polling ${label} for lanes ${laneKeys.join(", ")}...`);
   if (finalStatus === "FAILED" && enabledSourceCount > 0) {
     throw new Error(`Six-lane discovery failed: ${failedSources.join(", ") || "no source plan executed"}.`);
   }
-  return { totalDiscovered, totalStaged, errors: errorCount, status: finalStatus, laneCoverage, skippedByReason };
+  return { totalDiscovered, totalStaged, errors: errorCount, status: finalStatus, laneCoverage, skippedByReason, deferredSources };
 }
 
 if (process.argv[1] && process.argv[1].includes("run_adapters")) {
