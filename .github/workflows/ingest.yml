@@ -68,7 +68,7 @@ jobs:
     name: Ingest public job sources
     runs-on: ubuntu-latest
     if: ${{ github.ref == 'refs/heads/main' && (vars.WORKFLOW_KILL_SWITCH == '' || vars.WORKFLOW_KILL_SWITCH == 'false') && (vars.PILOT_MODE == '' || vars.PILOT_MODE == 'false') }}
-    timeout-minutes: 20
+    timeout-minutes: 50
     steps:
       - name: Checkout repository code
         uses: actions/checkout@v5
@@ -91,9 +91,12 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npx tsx scripts/load_source_plugins.ts
       - name: Run unified ATS and job-board adapters
-        timeout-minutes: 10
+        # The runner defers remaining sources at ADAPTER_RUN_BUDGET_SECONDS (default 1800);
+        # this limit only catches a hung process.
+        timeout-minutes: 40
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ADAPTER_RUN_BUDGET_SECONDS: ${{ vars.ADAPTER_RUN_BUDGET_SECONDS || '1800' }}
           SEARCHAPI_API_KEY: ${{ secrets.SEARCHAPI_API_KEY }}
           SEARCHAPI_LINKEDIN_ENABLED: ${{ vars.SEARCHAPI_LINKEDIN_ENABLED || 'false' }}
           SEARCHAPI_DAILY_CREDIT_CAP: ${{ vars.SEARCHAPI_DAILY_CREDIT_CAP || '60' }}
