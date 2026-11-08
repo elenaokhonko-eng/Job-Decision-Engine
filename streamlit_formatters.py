@@ -144,5 +144,9 @@ def format_career_track(track: object, level: object, tags: object) -> str | Non
     if isinstance(level, str) and level in {"ENTRY", "MID", "SENIOR", "LEADERSHIP"}:
         parts.append(level.lower())
     if isinstance(tags, list):
-        parts.extend(CAREER_TRACK_TAG_LABELS[tag] for tag in tags if isinstance(tag, str) and tag in CAREER_TRACK_TAG_LABELS)
+        parts.extend(
+            CAREER_TRACK_TAG_LABELS[tag]
+            for tag in tags
+            if isinstance(tag, str) and tag in CAREER_TRACK_TAG_LABELS
+        )
     return " · ".join(parts)

@@ -1,7 +1,13 @@
 from decimal import Decimal
 
 import pytest
-from streamlit_formatters import as_number, format_career_track, format_percent, format_score, format_signal
+from streamlit_formatters import (
+    as_number,
+    format_career_track,
+    format_percent,
+    format_score,
+    format_signal,
+)
 
 
 @pytest.mark.parametrize(
@@ -48,10 +54,20 @@ def test_format_signal_keeps_missing_culture_data_unknown():
 @pytest.mark.parametrize(
     ("track", "level", "tags", "expected"),
     [
-        ("HANDS_ON_AI_DATA", "MID", ["TRANSITION"], "Hands-on AI / data · mid · transition"),
+        (
+            "HANDS_ON_AI_DATA",
+            "MID",
+            ["TRANSITION"],
+            "Hands-on AI / data · mid · transition",
+        ),
         ("AI_BRIDGE", "SENIOR", ["BRIDGE"], "AI bridge · senior · bridge"),
         ("DATA_MANAGEMENT", "MID", ["STEP_DOWN"], "Data management · mid · step down"),
-        ("GENERIC_SOFTWARE", "MID", ["OFF_TRACK", "<script>"], "Generic software · mid · off track"),
+        (
+            "GENERIC_SOFTWARE",
+            "MID",
+            ["OFF_TRACK", "<script>"],
+            "Generic software · mid · off track",
+        ),
         (None, "MID", [], None),
         ("<b>x</b>", "MID", [], None),
     ],
