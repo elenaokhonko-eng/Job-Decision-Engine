@@ -52,7 +52,10 @@ export class AshbyAdapter extends BaseSourceAdapter {
         }
         const compensation = asRecord(item.compensation);
         const structuredMode = item.workplaceType ?? item.workplace_type ?? item.workplaceTypeRaw;
-        const workplaceType = item.isRemote === true ? "REMOTE" : normalizeWorkMode(structuredMode);
+        // Ashby sets isRemote on hybrid postings too, so the structured workplace type wins;
+        // the flag only fills in when the posting states no workplace type.
+        const structuredWorkMode = normalizeWorkMode(structuredMode);
+        const workplaceType = structuredWorkMode === "UNKNOWN" && item.isRemote === true ? "REMOTE" : structuredWorkMode;
         const title = textValue(item.title, "Unknown Title");
         const stableId = item.id === null || item.id === undefined ? null : String(item.id);
         const postingUrl = textValue(item.jobUrl, url);
