@@ -550,7 +550,8 @@ companies:
       - INVESTMENT_MARKETS_FINTECH
       - CORE_AI_DATA
     remote_policy: unknown
-    enabled: true
+    # Disabled: excluded employer in the workspace preferences.
+    enabled: false
 
   - id: dxc_technology
     name: DXC Technology
@@ -793,7 +794,8 @@ companies:
     target_lanes:
       - INVESTMENT_MARKETS_FINTECH
     remote_policy: unknown
-    enabled: true
+    # Disabled: excluded employer in the workspace preferences.
+    enabled: false
 
   - id: fidelity_international
     name: Fidelity International
