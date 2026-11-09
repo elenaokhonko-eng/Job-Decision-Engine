@@ -12,6 +12,21 @@ function textValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+/**
+ * The posting's location label with its postal region and country appended when the label omits
+ * them. Ashby labels are often a bare city ("San Mateo"), which hides the country from the
+ * location gate; the structured postal address carries it.
+ */
+function locationWithCountry(item: Record<string, unknown>): string {
+  const label = textValue(item.location, "Unknown");
+  const postal = asRecord(asRecord(item.address)?.postalAddress);
+  const parts = [postal?.addressRegion, postal?.addressCountry]
+    .map((value) => typeof value === "string" ? value.trim() : "")
+    .filter((value) => value && !label.toLowerCase().includes(value.toLowerCase()));
+  if (parts.length === 0) return label;
+  return label === "Unknown" ? parts.join(", ") : [label, ...parts].join(", ");
+}
+
 export class AshbyAdapter extends BaseSourceAdapter {
   sourceName = "ASHBY" as const;
   private orgSlug: string;
@@ -65,7 +80,7 @@ export class AshbyAdapter extends BaseSourceAdapter {
           ...(stableId ? { source_external_id: stableId } : {}),
           company_name: this.orgSlug.toUpperCase(),
           title,
-          location_raw: textValue(item.location, "Unknown"),
+          location_raw: locationWithCountry(item),
           workplace_type_raw: workplaceType,
           employment_type_raw: textValue(item.employmentType, "FULL_TIME"),
           compensation_raw: textValue(compensation?.text, "UNKNOWN"),

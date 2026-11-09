@@ -17,6 +17,12 @@ describe("workspace workability policy", () => {
     expect(hasExplicitTerritoryRestriction("Serve U.S. clients from anywhere", "UNITED_STATES")).toBe(false);
   });
 
+  it("recognizes Saudi Arabia and Qatar locations", () => {
+    expect(extractTerritories("Dammam, Saudi Arabia")).toEqual(["SAUDI_ARABIA"]);
+    expect(extractTerritories("Riyadh")).toEqual(["SAUDI_ARABIA"]);
+    expect(extractTerritories("Doha, Qatar")).toEqual(["QATAR"]);
+  });
+
   it("normalizes the owner and posting territories to the same canonical country code", () => {
     expect(normalizeTerritories(["Singapore", "Australia"])).toEqual(["SINGAPORE", "AUSTRALIA"]);
     expect(normalizeTerritories(["SINGAPORE"])).toEqual(["SINGAPORE"]);
