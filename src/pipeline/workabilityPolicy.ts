@@ -137,6 +137,8 @@ const TERRITORY_ALIASES: Array<[string, string[]]> = [
   ["SOUTH_KOREA", ["south korea", "korean", "seoul"]],
   ["ISRAEL", ["israel", "israeli", "tel aviv"]],
   ["UNITED_ARAB_EMIRATES", ["united arab emirates", "uae", "dubai", "abu dhabi"]],
+  ["SAUDI_ARABIA", ["saudi arabia", "ksa", "riyadh", "jeddah", "dammam"]],
+  ["QATAR", ["qatar", "doha"]],
   ["SOUTH_AFRICA", ["south africa", "south african", "johannesburg", "cape town"]],
   ["BRAZIL", ["brazil", "brazilian", "sao paulo", "rio de janeiro"]],
   ["MEXICO", ["mexico", "mexican", "mexico city"]],

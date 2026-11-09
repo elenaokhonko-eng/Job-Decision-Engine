@@ -157,6 +157,25 @@ describe("public source adapters", () => {
     });
   });
 
+  it("appends the Ashby postal region and country to a bare city location", async () => {
+    const address = (region: string, country: string) => ({ postalAddress: { addressLocality: "x", addressRegion: region, addressCountry: country } });
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [
+      { id: "ashby-city", title: "Architect", location: "San Mateo", address: address("California", "United States"), description: "Architect." },
+      { id: "ashby-named", title: "Architect", location: "London, United Kingdom", address: address("England", "United Kingdom"), description: "Architect." },
+      { id: "ashby-no-address", title: "Architect", location: "Remote", description: "Architect." },
+      { id: "ashby-no-label", title: "Architect", address: address("", "Saudi Arabia"), description: "Architect." },
+    ] })));
+
+    const result = await new AshbyAdapter("example").fetchJobs();
+
+    expect(Object.fromEntries(result.jobs.map((job) => [job.source_external_id, job.location_raw]))).toEqual({
+      "ashby-city": "San Mateo, California, United States",
+      "ashby-named": "London, United Kingdom, England",
+      "ashby-no-address": "Remote",
+      "ashby-no-label": "Saudi Arabia",
+    });
+  });
+
   it("quarantines malformed Jobicy records", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [{ id: 1, companyName: "Bad" }] })));
     const result = await new JobicyAdapter("https://jobicy.example/api").fetchJobs();
