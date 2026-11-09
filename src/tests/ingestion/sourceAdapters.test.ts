@@ -139,6 +139,24 @@ describe("public source adapters", () => {
     expect(result.jobs[0].canonical_apply_url).toBe("https://apply.ashbyhq.com/example/ashby-42");
   });
 
+  it("keeps an Ashby hybrid posting hybrid even when isRemote is set", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [
+      { id: "ashby-hybrid", title: "Platform Architect", location: "San Mateo", workplaceType: "Hybrid", isRemote: true, description: "Architect platforms." },
+      { id: "ashby-remote", title: "Platform Architect", location: "Remote", workplaceType: "Remote", isRemote: true, description: "Architect platforms." },
+      { id: "ashby-flag-only", title: "Platform Architect", location: "Remote", isRemote: true, description: "Architect platforms." },
+      { id: "ashby-onsite", title: "Platform Architect", location: "London", workplaceType: "OnSite", isRemote: false, description: "Architect platforms." },
+    ] })));
+
+    const result = await new AshbyAdapter("example").fetchJobs();
+
+    expect(Object.fromEntries(result.jobs.map((job) => [job.source_external_id, job.workplace_type_raw]))).toEqual({
+      "ashby-hybrid": "HYBRID",
+      "ashby-remote": "REMOTE",
+      "ashby-flag-only": "REMOTE",
+      "ashby-onsite": "ONSITE",
+    });
+  });
+
   it("quarantines malformed Jobicy records", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ jobs: [{ id: 1, companyName: "Bad" }] })));
     const result = await new JobicyAdapter("https://jobicy.example/api").fetchJobs();
