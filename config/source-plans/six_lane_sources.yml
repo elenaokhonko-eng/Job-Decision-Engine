@@ -23,7 +23,7 @@ target_functions:
 # region needs an entry under region_terms. The filter is inactive when that
 # policy does not reject explicit foreign territory.
 location_scope:
-  applies_to_source_keys: [greenhouse, lever, ashby, workable, smartrecruiters]
+  applies_to_source_keys: [greenhouse, lever, ashby, workable, smartrecruiters, jobicy, himalayas, remotive, we_work_remotely]
   region_terms:
     SINGAPORE: [singapore]
   regional_terms: [apac, asia pacific, asia-pacific, southeast asia, south east asia, asia]

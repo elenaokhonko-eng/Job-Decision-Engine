@@ -44,6 +44,8 @@ const CONTEXT_PAYLOAD_KEYS = [
   "availability_evidence_hash",
   "fx_rate_observation_id",
   "qualification_comparator_version",
+  "career_track_policy_version",
+  "career_track_assessment_hash",
   "evaluation_schema_version",
   "prompt_hash",
   "model_route",

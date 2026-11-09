@@ -106,7 +106,7 @@ describe("discovery location scope", () => {
     const scope = loadDiscoveryLocationScope();
     expect(scope).not.toBeNull();
     expect(scope).toMatchObject({ active: true, authorizedRegions: ["SINGAPORE"] });
-    expect([...scope!.sourceKeys].sort()).toEqual(["ashby", "greenhouse", "lever", "smartrecruiters", "workable"]);
+    expect([...scope!.sourceKeys].sort()).toEqual(["ashby", "greenhouse", "himalayas", "jobicy", "lever", "remotive", "smartrecruiters", "we_work_remotely", "workable"]);
     expect(scope!.inScopeTerms).toContain("singapore");
   });
 

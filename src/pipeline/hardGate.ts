@@ -44,6 +44,14 @@ import type { Stage3PolicyPreferences } from "../policy/stage3Contracts.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
+import {
+  assessRemoteHiringTerritory,
+  REMOTE_TERRITORY_REJECT_CODE,
+  REMOTE_TERRITORY_VERIFY_CODE,
+  type RemoteTerritoryInput,
+  type RemoteTerritoryScope,
+} from "../eligibility/remoteHiringTerritory.js";
+import { buildDiscoveryLocationScope, loadLocationScopeConfig } from "../ingestion/discoveryLocationScope.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -575,6 +583,43 @@ export function applyPersistedRequirementGates(
   });
 }
 
+/**
+ * Remote postings: a board's candidate-region field or a clear territory statement in the
+ * description that excludes the authorized regions is a deterministic workability conflict.
+ * Weak or contradicted territory evidence is NEEDS_VERIFICATION, never a guessed rejection.
+ */
+export function applyRemoteTerritoryGate(input: RemoteTerritoryInput, scope: RemoteTerritoryScope | null): GateResult {
+  if (!scope || scope.authorizedRegions.length === 0) return makePass();
+  const assessment = assessRemoteHiringTerritory(input, scope);
+  const evidence = [assessment.rationale, ...assessment.signals.map((signal) => signal.evidence)];
+  if (assessment.status === "RESTRICTED_FOREIGN") {
+    return makeReject(
+      ["WORK_AUTHORIZATION_INCOMPATIBLE", REMOTE_TERRITORY_REJECT_CODE],
+      evidence,
+      { location_restriction: assessment.territories[0] ?? "UNKNOWN" },
+    );
+  }
+  if (assessment.status === "UNCLEAR") {
+    return makeVerification(
+      ["NEEDS_VERIFICATION", REMOTE_TERRITORY_VERIFY_CODE],
+      [...evidence, ...assessment.counterEvidence],
+      { location_restriction: null },
+    );
+  }
+  return makePass();
+}
+
+/** The remote-territory scope for a workability policy, or null when foreign territory is not rejected. */
+export function remoteTerritoryScopeForPolicy(policy: Pick<WorkabilityPolicy, "authorizedRegions" | "rejectExplicitForeignTerritory">): RemoteTerritoryScope | null {
+  const config = loadLocationScopeConfig();
+  if (!config) return null;
+  const scope = buildDiscoveryLocationScope(config, {
+    authorizedRegions: policy.authorizedRegions,
+    rejectExplicitForeignTerritory: policy.rejectExplicitForeignTerritory,
+  });
+  return scope.active ? scope : null;
+}
+
 function combineGateResults(results: GateResult[]): GateResult {
   const hardReject = results.find((result) => result.status === "HARD_REJECT");
   const verification = results.find((result) => result.status === "NEEDS_VERIFICATION");
@@ -737,6 +782,7 @@ export async function runHardGates(
   const stage3Preferences: Stage3PolicyPreferences = preferenceContext.stage3 ?? {};
   const pipelineRunId = crypto.randomUUID();
   const policyResolution = await resolveWorkspaceWorkabilityPolicy(client as any, { context: ctx });
+  const territoryScope = remoteTerritoryScopeForPolicy(policyResolution.policy);
   console.log(
     `Hard Gate workability policy: ${policyResolution.source}` +
       `${policyResolution.modeKey ? ` mode=${policyResolution.modeKey}` : ""}` +
@@ -784,7 +830,9 @@ export async function runHardGates(
              jv.freshness_basis,
              jv.first_seen_at,
              jv.last_seen_at,
-             source_observation.compensation_raw
+             source_observation.compensation_raw,
+             source_observation.source_name AS source_observation_name,
+             source_observation.location_raw AS source_location_raw
       FROM canonical_jobs c
       JOIN job_versions jv ON jv.id = COALESCE(
         c.latest_job_version_id,
@@ -798,7 +846,7 @@ export async function runHardGates(
         )
       )
       LEFT JOIN LATERAL (
-        SELECT observation.compensation_raw
+        SELECT observation.compensation_raw, observation.source_name, observation.location_raw
         FROM raw_job_observations AS observation
         WHERE observation.workspace_id = jv.workspace_id
           AND observation.job_version_id = jv.id
@@ -970,7 +1018,13 @@ export async function runHardGates(
           profileFacts,
           jobAnswerContext,
         );
-        const gateResult = combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult]);
+        const remoteTerritoryGateResult = applyRemoteTerritoryGate({
+          sourceName: job.source_observation_name ?? null,
+          location: job.source_location_raw ?? rawJobAdapter.location ?? null,
+          workplaceType: rawJobAdapter.workplace_type ?? null,
+          description: rawJobAdapter.raw_description ?? null,
+        }, territoryScope);
+        const gateResult = combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult, remoteTerritoryGateResult]);
 
         let processingStatus: string;
         switch (gateResult.status) {

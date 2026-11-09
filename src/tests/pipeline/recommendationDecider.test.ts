@@ -94,6 +94,7 @@ describe("Recommendation Decider: Exact-only and Semantic Matching (R01)", () =>
               deterministic_match_coverage: "100.00",
               profile_match_status: "POSITIVE_MATCH",
               match_matched_count: 5,
+              normalized_title: "machine learning engineer",
               match_embedding_space_id: null, // Semantic embedding pending / exact-only mode
             },
           ],
@@ -179,6 +180,7 @@ describe("Recommendation Decider: Exact-only and Semantic Matching (R01)", () =>
               deterministic_match_coverage: "60.00",
               profile_match_status: "POSITIVE_MATCH",
               match_matched_count: 3,
+              normalized_title: "machine learning engineer",
               match_embedding_space_id: null, // Semantic embedding pending
             },
           ],

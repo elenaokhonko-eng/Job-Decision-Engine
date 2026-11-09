@@ -173,9 +173,10 @@ export async function importLoadedProfile(
          version_number,
          schema_version,
          source_hash,
-         status
+         status,
+         experience_by_track
        )
-       VALUES ($1, $2, $3, $4, $5, 'DRAFT')
+       VALUES ($1, $2, $3, $4, $5, 'DRAFT', $6::jsonb)
        RETURNING id`,
       [
         context.workspaceId,
@@ -183,6 +184,7 @@ export async function importLoadedProfile(
         profile.profile_version,
         profile.schema_version || SCHEMA_VERSION,
         sourceHash,
+        profile.experience_by_track ? JSON.stringify(profile.experience_by_track) : null,
       ]
     );
     const profileVersionId = profileVersionRes.rows[0].id;
