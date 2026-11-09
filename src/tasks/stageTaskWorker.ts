@@ -1225,8 +1225,11 @@ export async function seedRecoverablePipelineTasks(
     }
 
     // Eligible jobs whose latest match used a superseded profile version are re-matched against
-    // the active profile, PRIORITY and REVIEW first. The re-match is ENSURE_CURRENT and keyed by
-    // the superseded match run, so it runs once per profile change and is bounded per pass.
+    // the active profile, PRIORITY and REVIEW first, then the strongest previous matches. The
+    // re-match is ENSURE_CURRENT and keyed by the superseded match run, so it runs once per profile
+    // change and is bounded per pass. A re-match for that run that is no longer outstanding (for
+    // example blocked on incomplete job content) is skipped: re-selecting it cannot progress it
+    // and would take a bounded seed slot from a job that can.
     const matchCountsBefore = summary.byType.MATCH_PROFILE_EVIDENCE ?? { inserted: 0, existing: 0 };
     const matchSeenBefore = matchCountsBefore.inserted + matchCountsBefore.existing;
     await selectAndEnqueue(
@@ -1243,7 +1246,16 @@ export async function seedRecoverablePipelineTasks(
         AND mr.id = c.latest_match_run_id
        WHERE c.workspace_id = $1
          AND ${SUPERSEDED_PROFILE_MATCH_SQL}
+         AND NOT EXISTS (
+           SELECT 1
+           FROM pipeline_tasks rematch
+           WHERE rematch.workspace_id = c.workspace_id
+             AND rematch.task_type = 'MATCH_PROFILE_EVIDENCE'
+             AND rematch.task_key LIKE 'MATCH_PROFILE_EVIDENCE:%:rematch-' || mr.id::text || ':%'
+             AND rematch.status <> ALL (${RESELECTABLE_TASK_STATUSES_SQL})
+         )
        ORDER BY CASE c.recommendation_outcome WHEN 'PRIORITY' THEN 0 WHEN 'REVIEW' THEN 1 ELSE 2 END,
+                mr.overall_match_score DESC NULLS LAST,
                 c.updated_at ASC,
                 c.id ASC
        LIMIT $2`,
@@ -2046,6 +2058,11 @@ async function requireCurrentLaneRouting(
 }
 
 const OUTSTANDING_TASK_STATUSES = ["PENDING", "RUNNING", "RETRY_WAIT", "BLOCKED_DEPENDENCY"] as const;
+/** Outstanding statuses a re-seed can still progress; a BLOCKED_DEPENDENCY task waits on its blocker. */
+const RESELECTABLE_TASK_STATUSES_SQL = `ARRAY[${OUTSTANDING_TASK_STATUSES
+  .filter((status) => status !== "BLOCKED_DEPENDENCY")
+  .map((status) => `'${status}'`)
+  .join(", ")}]::text[]`;
 
 async function hasOutstandingStageTask(
   clientOrPool: pg.Pool | pg.PoolClient,

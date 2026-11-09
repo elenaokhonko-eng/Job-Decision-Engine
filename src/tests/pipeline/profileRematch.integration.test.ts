@@ -543,6 +543,35 @@ describe.skipIf(skipReal)("profile re-match after the active profile version cha
     });
     expect(bounded.supersededProfileMatch).toBe(1);
     expect((await profileMatchReport()).ALL).toMatchObject({ needs_rematch: 3, rematch_task_queued: 3 });
+
+    // A re-match blocked on its job content cannot progress by re-seeding, so it must not take
+    // a bounded seed slot: the next superseded job is selected instead.
+    const blockedRematchKey = (await tasksFor(jobs.reviewA, "MATCH_PROFILE_EVIDENCE"))[0].task_key;
+    await db().query(
+      `UPDATE pipeline_tasks SET status = 'BLOCKED_DEPENDENCY', blocked_on = 'JOB_CONTENT'
+       WHERE workspace_id = $1 AND task_key = $2`,
+      [ctx().workspaceId, blockedRematchKey],
+    );
+    try {
+      const skipping = await seedRecoverablePipelineTasks(db(), {
+        context: ctx(),
+        taskTypes: ["MATCH_PROFILE_EVIDENCE"],
+        includeTestFixtures: true,
+      });
+      expect(skipping.supersededProfileMatch).toBe(2);
+      expect(skipping.byType.MATCH_PROFILE_EVIDENCE).toEqual({ inserted: 0, existing: 2 });
+      expect(await tasksFor(jobs.reviewA, "MATCH_PROFILE_EVIDENCE")).toEqual([expect.objectContaining({
+        task_key: blockedRematchKey,
+        status: "BLOCKED_DEPENDENCY",
+        blocked_on: "JOB_CONTENT",
+      })]);
+    } finally {
+      await db().query(
+        `UPDATE pipeline_tasks SET status = 'PENDING', blocked_on = NULL
+         WHERE workspace_id = $1 AND task_key = $2`,
+        [ctx().workspaceId, blockedRematchKey],
+      );
+    }
   }, 120_000);
 
   it("re-matches through tasks, re-decides, then enqueues within the AI budget", async () => {
