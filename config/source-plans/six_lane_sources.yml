@@ -26,6 +26,10 @@ location_scope:
   applies_to_source_keys: [greenhouse, lever, ashby, workable, smartrecruiters, jobicy, himalayas, remotive, we_work_remotely]
   region_terms:
     SINGAPORE: [singapore]
+  # ISO country codes, read only by the structured geo-field check of the discovery pre-screen
+  # (DISCOVERY_PRESCREEN_ENABLED) for ATS payloads that carry a code instead of a name.
+  region_country_codes:
+    SINGAPORE: [SG]
   regional_terms: [apac, asia pacific, asia-pacific, southeast asia, south east asia, asia]
   remote_terms: [remote, work from home, wfh, telecommute, telecommuting, distributed]
   global_terms: [worldwide, global, anywhere, international, any location, all locations]

@@ -33,10 +33,22 @@ import { DiscoveryScoutPlanner, type ScoutSearchPlan } from "../src/ingestion/sc
 import { assessCandidateLanes, type LaneDisposition } from "../src/ingestion/discoveryPlanExecution.js";
 import {
   assessLocationScope,
+  assessStructuredGeoScope,
   loadDiscoveryLocationScope,
   locationScopeAppliesTo,
+  structuredGeoFromPayload,
   type DiscoveryLocationScope,
 } from "../src/ingestion/discoveryLocationScope.js";
+import {
+  discoveryPrescreenEnabled,
+  filteredPayloadDedupeEnabled,
+  matchTitleDenyList,
+  PRESCREEN_TIER1_DEFAULTS,
+  PRESCREEN_TITLE_DENY,
+  PRESCREEN_TITLE_ROLE_SOURCES,
+} from "../src/ingestion/discoveryPrescreen.js";
+import type { SourceCandidateDispositionInput } from "../src/ingestion/sourceBroker.js";
+import type { ExtractedJob } from "../src/contracts/index.js";
 import { normalizePostingUrl } from "../src/ingestion/postingIdentity.js";
 import { loadGlobalLanesConfig } from "../src/pipeline/laneConfigLoader.js";
 import {
@@ -161,7 +173,7 @@ export function loadCompaniesConfig(companiesPath = path.resolve(process.cwd(), 
   return companies.map((company) => CompanyConfigSchema.parse(company));
 }
 
-async function loadSourcePluginsFromDisk(): Promise<SourcePlugin[]> {
+export async function loadSourcePluginsFromDisk(): Promise<SourcePlugin[]> {
   const pluginsDir = path.resolve(process.cwd(), "config/source-plugins");
   if (!fs.existsSync(pluginsDir)) {
     console.warn(`WARNING: Source plugin directory not found: ${pluginsDir}`);
@@ -208,6 +220,72 @@ export interface SourcePageOptions {
   readonly lanes: ReturnType<typeof loadGlobalLanesConfig>["lanes"];
   /** Discovery-scope location pre-filter; applied only to the source keys it lists. */
   readonly locationScope?: DiscoveryLocationScope | null;
+  /**
+   * Discovery pre-screen (DISCOVERY_PRESCREEN_ENABLED, off by default): title deny-list,
+   * structured geo fields, Tier 1 lane role/negative terms and the Jobicy title rule.
+   */
+  readonly prescreen?: boolean;
+  /**
+   * Store a FILTERED posting's raw payload once instead of once per lane
+   * (DISCOVERY_FILTERED_PAYLOAD_DEDUPE_ENABLED, off by default; migration 105).
+   */
+  readonly dedupeFilteredPayload?: boolean;
+}
+
+type PayloadFields = Pick<SourceCandidateDispositionInput, "rawPayload" | "rawPayloadDispositionId" | "postingTitle" | "postingLocation">;
+
+/**
+ * Per posting: the first FILTERED disposition keeps the raw payload and later FILTERED
+ * dispositions of the same posting point at it. With sharing off every row keeps its payload.
+ */
+function payloadSharer(enabled: boolean, rawPayload: unknown, posting: { title?: string | null; location?: string | null }) {
+  let holderId: string | null = null;
+  return {
+    fields(disposition: SourceCandidateDispositionInput["disposition"]): PayloadFields {
+      if (!enabled || disposition !== "FILTERED" || !holderId) return { rawPayload };
+      return {
+        rawPayload: null,
+        rawPayloadDispositionId: holderId,
+        postingTitle: posting.title ?? null,
+        postingLocation: posting.location ?? null,
+      };
+    },
+    recorded(disposition: SourceCandidateDispositionInput["disposition"], id: string | null): void {
+      if (enabled && disposition === "FILTERED" && !holderId && id) holderId = id;
+    },
+  };
+}
+
+interface ScopeSkip {
+  readonly reasonCode: string;
+  readonly reason: string;
+}
+
+/**
+ * Why a fetched posting is not staged before lane matching, or null to continue. Order: Tier 0
+ * title deny-list (pre-screen), structured geo fields (pre-screen), then the free-text location
+ * scope. Unclear structured fields fall through to the free-text scope, as before.
+ */
+export function discoveryScopeSkip(
+  job: ExtractedJob,
+  rawPayload: unknown,
+  sourceKey: string,
+  locationScope: DiscoveryLocationScope | null,
+  prescreen: boolean,
+): ScopeSkip | null {
+  if (prescreen) {
+    const deny = matchTitleDenyList(job.title);
+    if (deny) {
+      return { reasonCode: PRESCREEN_TITLE_DENY, reason: `Title matched the discovery deny-list term "${deny.term}" ("${deny.matchedText}").` };
+    }
+  }
+  if (!locationScope) return null;
+  if (prescreen) {
+    const geo = assessStructuredGeoScope(job, structuredGeoFromPayload(sourceKey, rawPayload), locationScope);
+    if (geo) return geo.inScope ? null : { reasonCode: geo.reasonCode, reason: geo.reason };
+  }
+  const decision = assessLocationScope(job, locationScope);
+  return decision.inScope ? null : { reasonCode: decision.reasonCode, reason: decision.reason };
 }
 
 export interface SourcePageSummary {
@@ -261,41 +339,46 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
   let filtered = 0;
   const skippedByReason: Record<string, number> = {};
   const locationScope = locationScopeAppliesTo(options.locationScope, options.plugin.source_key) ? options.locationScope : null;
+  const prescreen = options.prescreen === true;
+  const dedupe = options.dedupeFilteredPayload === true;
   const totalFetched = result.totalFetched;
   let nextCursor = cursor;
   try {
   for (const job of result.jobs) {
-    if (locationScope) {
-      const scopeDecision = assessLocationScope(job, locationScope);
-      if (!scopeDecision.inScope) {
-        // Discovery-scope narrowing, not a career rejection: no observation is created and every
-        // lane records a FILTERED disposition with the reason, like a lane pre-filter miss.
-        skippedByReason[scopeDecision.reasonCode] = (skippedByReason[scopeDecision.reasonCode] ?? 0) + 1;
-        const rawPayload = job.raw_payload ?? job;
-        for (const laneKey of options.laneKeys) {
-          counts.get(laneKey)!.filtered += 1;
-          filtered += 1;
-          await options.broker.recordCandidateDisposition({
-            sourcePluginKey: options.plugin.source_key,
-            planKey: `${options.checkpointTarget}:${laneKey}`,
-            laneKey,
-            sourceExternalId: stableExternalIdForJob(result.sourceName, job),
-            sourceUrl: job.employer_posting_url ?? job.canonical_apply_url,
-            rawPayloadHash: payloadHash(rawPayload),
-            rawPayload,
-            normalizedEvidence: null,
-            disposition: "FILTERED",
-            reasonCode: scopeDecision.reasonCode,
-            reasonDetail: scopeDecision.reason,
-            observationId: null,
-          }, planRunIds.get(laneKey) ?? null);
-        }
-        continue;
-      }
-    }
-    const laneResults = assessCandidateLanes(job, options.laneKeys, options.plans, options.lanes, options.employerLaneKeys);
-    const matchedLanes = laneResults.filter((disposition) => disposition.matched).map((disposition) => disposition.laneKey);
     const rawPayload = job.raw_payload ?? job;
+    const sharer = payloadSharer(dedupe, rawPayload, { title: job.title, location: job.location_raw });
+    const scopeSkip = discoveryScopeSkip(job, rawPayload, options.plugin.source_key, locationScope, prescreen);
+    if (scopeSkip) {
+      // Discovery-scope narrowing, not a career rejection: no observation is created and every
+      // lane records a FILTERED disposition with the reason, like a lane pre-filter miss.
+      skippedByReason[scopeSkip.reasonCode] = (skippedByReason[scopeSkip.reasonCode] ?? 0) + 1;
+      const skipHash = payloadHash(rawPayload);
+      for (const laneKey of options.laneKeys) {
+        counts.get(laneKey)!.filtered += 1;
+        filtered += 1;
+        const id = await options.broker.recordCandidateDisposition({
+          sourcePluginKey: options.plugin.source_key,
+          planKey: `${options.checkpointTarget}:${laneKey}`,
+          laneKey,
+          sourceExternalId: stableExternalIdForJob(result.sourceName, job),
+          sourceUrl: job.employer_posting_url ?? job.canonical_apply_url,
+          rawPayloadHash: skipHash,
+          ...sharer.fields("FILTERED"),
+          normalizedEvidence: null,
+          disposition: "FILTERED",
+          reasonCode: scopeSkip.reasonCode,
+          reasonDetail: scopeSkip.reason,
+          observationId: null,
+        }, planRunIds.get(laneKey) ?? null);
+        sharer.recorded("FILTERED", id);
+      }
+      continue;
+    }
+    const laneResults = assessCandidateLanes(
+      job, options.laneKeys, options.plans, options.lanes, options.employerLaneKeys,
+      prescreen ? { ...PRESCREEN_TIER1_DEFAULTS, roleInTitleOnly: PRESCREEN_TITLE_ROLE_SOURCES.has(options.plugin.source_key) } : undefined,
+    );
+    const matchedLanes = laneResults.filter((disposition) => disposition.matched).map((disposition) => disposition.laneKey);
     const rawPayloadHash = payloadHash(rawPayload);
     const externalId = stableExternalIdForJob(result.sourceName, job);
     const completedDispositions = new Set<string>();
@@ -337,20 +420,22 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
           filtered += 1;
         }
         countedLanes.add(laneDisposition.laneKey);
-        await options.broker.recordCandidateDisposition({
+        const disposition = laneDisposition.matched ? inserted ? "STAGED" : "DUPLICATE" : "FILTERED";
+        const id = await options.broker.recordCandidateDisposition({
           sourcePluginKey: options.plugin.source_key,
           planKey: `${options.checkpointTarget}:${laneDisposition.laneKey}`,
           laneKey: laneDisposition.laneKey,
           sourceExternalId: externalId,
           sourceUrl: job.employer_posting_url ?? job.canonical_apply_url,
           rawPayloadHash,
-          rawPayload,
+          ...sharer.fields(disposition),
           normalizedEvidence,
-          disposition: laneDisposition.matched ? inserted ? "STAGED" : "DUPLICATE" : "FILTERED",
+          disposition,
           reasonCode: laneDisposition.reasonCode,
           reasonDetail: laneDisposition.reason,
           observationId,
         }, planRunIds.get(laneDisposition.laneKey) ?? null);
+        sharer.recorded(disposition, id);
         completedDispositions.add(laneDisposition.laneKey);
       }
     } catch (error) {
@@ -366,6 +451,7 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
         }
         if (completedDispositions.has(laneDisposition.laneKey)) continue;
         const failedStage = laneDisposition.matched;
+        const fallbackDisposition = failedStage ? "ERROR" : "FILTERED";
         await options.broker.recordCandidateDisposition({
           sourcePluginKey: options.plugin.source_key,
           planKey: `${options.checkpointTarget}:${laneDisposition.laneKey}`,
@@ -373,9 +459,9 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
           sourceExternalId: externalId,
           sourceUrl: job.employer_posting_url ?? job.canonical_apply_url,
           rawPayloadHash,
-          rawPayload,
+          ...sharer.fields(fallbackDisposition),
           normalizedEvidence,
-          disposition: failedStage ? "ERROR" : "FILTERED",
+          disposition: fallbackDisposition,
           reasonCode: failedStage ? "CANDIDATE_PROCESSING_FAILED" : laneDisposition.reasonCode,
           reasonDetail: failedStage ? detail : laneDisposition.reason,
           observationId,
@@ -408,21 +494,23 @@ export async function processSourcePage(options: SourcePageOptions): Promise<Sou
   // Records the adapter skipped on purpose (deleted, non-conforming, pre-filtered) stay auditable.
   for (const candidate of filteredCandidates) {
     const rawPayloadHash = payloadHash(candidate.rawPayload);
+    const sharer = payloadSharer(dedupe, candidate.rawPayload, {});
     for (const laneKey of options.laneKeys) {
       counts.get(laneKey)!.filtered += 1;
       filtered += 1;
-      await options.broker.recordCandidateDisposition({
+      const id = await options.broker.recordCandidateDisposition({
         sourcePluginKey: options.plugin.source_key,
         planKey: `${options.checkpointTarget}:${laneKey}`,
         laneKey,
         sourceExternalId: candidate.identity || null,
         sourceUrl: candidate.sourceUrl,
         rawPayloadHash,
-        rawPayload: candidate.rawPayload,
+        ...sharer.fields("FILTERED"),
         disposition: "FILTERED",
         reasonCode: candidate.reasonCode,
         reasonDetail: candidate.reasonDetail,
       }, planRunIds.get(laneKey) ?? null);
+      sharer.recorded("FILTERED", id);
     }
   }
 
@@ -549,7 +637,7 @@ export function searchApiLinkedInSetup(input: {
   }
 }
 
-function configuredFeedLanes(
+export function configuredFeedLanes(
   plugin: SourcePlugin,
   plans: Readonly<Record<string, ScoutSearchPlan>>,
   lanes: ReturnType<typeof loadGlobalLanesConfig>["lanes"],
@@ -561,7 +649,7 @@ function configuredFeedLanes(
   return [...new Set(laneKeys.filter((laneKey) => Boolean(plans[laneKey])))].sort();
 }
 
-function configuredCompanyLanes(company: CompanyConfig, plans: Readonly<Record<string, ScoutSearchPlan>>): string[] {
+export function configuredCompanyLanes(company: CompanyConfig, plans: Readonly<Record<string, ScoutSearchPlan>>): string[] {
   return [...new Set((company.target_lanes ?? []).filter((laneKey) => Boolean(plans[laneKey])))].sort();
 }
 
@@ -596,6 +684,10 @@ export async function runAdapters(): Promise<{
   const companies = loadCompaniesConfig();
   const lanesConfig = loadGlobalLanesConfig();
   const locationScope = loadDiscoveryLocationScope();
+  // Both default to off; an unparseable value fails the run rather than guessing.
+  const prescreen = discoveryPrescreenEnabled();
+  const dedupeFilteredPayload = filteredPayloadDedupeEnabled();
+  console.log(`  Discovery pre-screen: ${prescreen ? "ON" : "off"}; FILTERED payload sharing: ${dedupeFilteredPayload ? "ON" : "off"}`);
   const skippedByReason: Record<string, number> = {};
   const companiesByLane: Record<string, string[]> = {};
   for (const company of companies.filter((candidate) => candidate.enabled !== false)) {
@@ -650,6 +742,8 @@ export async function runAdapters(): Promise<{
       plans,
       lanes: lanesConfig.lanes,
       locationScope,
+      prescreen,
+      dedupeFilteredPayload,
     });
     totalDiscovered += summary.discovered;
     for (const [reason, count] of Object.entries(summary.skippedByReason)) {

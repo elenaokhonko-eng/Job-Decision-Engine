@@ -652,6 +652,23 @@ function requiredSeedValue(row: Record<string, unknown>, field: string): string 
   return value;
 }
 
+/**
+ * Excludes a job version whose task of this type is blocked on missing posting content. Such a
+ * task resumes when the content is normalized into a new version; re-selecting it only fills a
+ * bounded seed slot, so later stages (re-matching included) would never be reached.
+ */
+function notBlockedOnJobContentSql(taskType: PipelineStageTaskType): string {
+  return `NOT EXISTS (
+           SELECT 1
+           FROM pipeline_tasks blocked
+           WHERE blocked.workspace_id = c.workspace_id
+             AND blocked.task_type = '${taskType}'
+             AND blocked.status = 'BLOCKED_DEPENDENCY'
+             AND blocked.blocked_on = 'JOB_CONTENT'
+             AND blocked.payload->>'job_version_id' = jv.id::text
+         )`;
+}
+
 async function selectAndEnqueue(
   client: QueryClient,
   ctx: WorkspaceContext,
@@ -956,6 +973,7 @@ export async function seedRecoverablePipelineTasks(
              AND ps.current_stage = 'REQUIREMENTS_EXTRACTED'
              AND ps.stage_status = 'COMPLETED'
          )
+         AND ${notBlockedOnJobContentSql("EXTRACT_QUOTED_REQUIREMENTS")}
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
       [ctx.workspaceId, maxPerType],
@@ -1079,6 +1097,7 @@ export async function seedRecoverablePipelineTasks(
              AND LOWER(es.provider) = LOWER($3)
              AND es.model = $4
          )
+         AND ${notBlockedOnJobContentSql("PUBLISH_EMBEDDING")}
        ORDER BY jv.observed_at ASC
        LIMIT $2`,
       [
@@ -1148,6 +1167,7 @@ export async function seedRecoverablePipelineTasks(
              AND ei.source_type = 'JOB_VERSION'
              AND ei.source_id = jv.id
          )
+         AND ${notBlockedOnJobContentSql("ROUTE_LANE")}
        ORDER BY jv.observed_at ASC
        LIMIT $4`,
       [ctx.workspaceId, includeRoutingDeferred, routingDeferredReplayVersion, maxPerType],

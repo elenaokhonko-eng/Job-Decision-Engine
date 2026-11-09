@@ -23,6 +23,7 @@ vi.mock('../../services/criteria.js', () => ({
   extractHybridAttendance: vi.fn(() => null),
   extractTravelRequirement: vi.fn(() => null),
   GLOBAL_TITLE_EXCLUSIONS: [],
+  nonTechnicalFunctionTitle: vi.fn(() => null),
   isTechnicalRole: vi.fn(() => ({ isTechnical: true, hasBuildingEvidence: true }))
 }));
 
