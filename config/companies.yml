@@ -536,6 +536,8 @@ companies:
   # Not found on Workday (skipped): FactSet, MSCI, Moody's, HSBC (site names not verified),
   # BNY (Eightfold), Franklin Templeton (empty site), Schroders, Allianz GI, UBS, Prudential,
   # ServiceNow. SuccessFactors/own portals (Standard Chartered, SMBC, Zurich, SAP, EY, DBS, GIC) are out of scope.
+  # 2026-11-09: Morgan Stanley, IQVIA, Barclays, Thermo Fisher and J&J added after the same check.
+  # Not on Workday: Nomura, Bayer, Swiss Re (SuccessFactors), Chubb (Oracle).
   - id: uob
     name: UOB
     hq_country: SG
@@ -884,6 +886,82 @@ companies:
     # Evidence: hiringOrganization 'salesforce.com India ...'; country facet=Singapore (38 of 1549)
     target_lanes:
       - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: morgan_stanley
+    name: Morgan Stanley
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: ms.wd5.myworkdayjobs.com
+    workday_tenant: ms
+    workday_site: "External"
+    # Evidence: hiringOrganization 'MS Capital Grp Pte Singapore'; location 'Singapore, Singapore' (10 of first 20; searchText Singapore=27 of 1209)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: iqvia
+    name: IQVIA
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: iqvia.wd1.myworkdayjobs.com
+    workday_tenant: iqvia
+    workday_site: "IQVIA"
+    # Evidence: hiringOrganization 'IQVIA Laboratories Asia Pte. Ltd.'; location 'Singapore' (13 of 18; searchText Singapore=18 of 1881)
+    target_lanes:
+      - HEALTH_BIO_PHARMA
+      - CORE_AI_DATA
+    remote_policy: unknown
+    enabled: true
+
+  - id: barclays
+    name: Barclays
+    hq_country: GB
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: barclays.wd3.myworkdayjobs.com
+    workday_tenant: barclays
+    workday_site: "External_Career_Site_Barclays"
+    # Evidence: hiringOrganization 'BBPLC Singapore Branch'; location 'Singapore, Marina Bay Financial Tower 2' (18 of 19; of 608)
+    target_lanes:
+      - INVESTMENT_MARKETS_FINTECH
+    remote_policy: unknown
+    enabled: true
+
+  - id: thermo_fisher
+    name: Thermo Fisher Scientific
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: thermofisher.wd5.myworkdayjobs.com
+    workday_tenant: thermofisher
+    workday_site: "ThermoFisherCareers"
+    # Evidence: hiringOrganization 'Life Technologies Holdings PTE Ltd' (Thermo Fisher subsidiary); location 'Singapore, Singapore' (17 of first 20; searchText Singapore=85 of 3201)
+    target_lanes:
+      - HEALTH_BIO_PHARMA
+    remote_policy: unknown
+    enabled: true
+
+  - id: johnson_and_johnson
+    name: Johnson & Johnson
+    hq_country: US
+    singapore_presence: true
+    ats_provider: workday
+    board_slug: null
+    workday_host: jj.wd5.myworkdayjobs.com
+    workday_tenant: jj
+    workday_site: "JJ"
+    # Evidence: hiringOrganization 'Johnson & Johnson International (Singapore) Pte. Ltd.'; location 'Singapore, Singapore' (9 of first 20; searchText Singapore=25 of 1727)
+    target_lanes:
+      - HEALTH_BIO_PHARMA
     remote_policy: unknown
     enabled: true
 
