@@ -22,6 +22,27 @@ describe("Criteria Title Taxonomy & Exclusions", () => {
       }
     });
 
+    it("excludes data infrastructure titles but keeps data platform, analytics and pipeline titles", () => {
+      const excludedTitles = [
+        "Member of Technical Staff, Data Infrastructure",
+        "Senior Data Infra Engineer",
+        "Market Data Infrastructure Lead",
+      ];
+      const allowedTitles = [
+        "Data Platform Engineer",
+        "Senior Analytics Engineer",
+        "Data Pipeline Engineer",
+        "Platform Infrastructure Architect",
+      ];
+
+      for (const title of excludedTitles) {
+        expect(GLOBAL_TITLE_EXCLUSIONS.some((regex) => regex.test(title)), `Expected title to be excluded: ${title}`).toBe(true);
+      }
+      for (const title of allowedTitles) {
+        expect(GLOBAL_TITLE_EXCLUSIONS.some((regex) => regex.test(title)), `Expected title to be allowed: ${title}`).toBe(false);
+      }
+    });
+
     it("excludes non-AI academic postdocs and professors", () => {
       const excludedTitles = [
         "Postdoctoral Fellow in Medieval History",

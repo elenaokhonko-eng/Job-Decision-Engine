@@ -50,6 +50,8 @@ export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\b(postdoctoral\s+(?:fellow|researcher|associate)|postdoc)\b(?!.*?\b(ai|ml|machine\s+learning|artificial\s+intelligence|data|computing|computer\s+science|nlp|robotics|computational)\b)/i,
   /\b(adjunct\s+professor|tenure\s+track|assistant\s+professor|associate\s+professor)\b/i,
   /\b(store\s+manager|cashier|retail\s+associate)\b/i,
+  // Data infrastructure is out of scope; data platform, analytics and pipeline titles stay in.
+  /\bdata\s+infra(?:structure)?\b/i,
 ];
 
 // 1b. Non-technical function titles that passed the technical-function check on description
