@@ -73,7 +73,7 @@ export const RecommendationDecisionOutputsSchema = z.object({
 /** Track-aware seniority result (src/pipeline/careerTrack.ts); it can only lower an outcome. */
 export const CareerTrackAssessmentSchema = z.object({
   policy_version: z.string().min(1).max(100),
-  track: z.enum(["DATA_MANAGEMENT", "ARCHITECTURE", "PRODUCT", "HANDS_ON_AI_DATA", "AI_BRIDGE", "GENERIC_SOFTWARE", "UNCLASSIFIED"]),
+  track: z.enum(["DATA_MANAGEMENT", "ARCHITECTURE", "PRODUCT", "PROGRAM_MANAGEMENT", "HANDS_ON_AI_DATA", "AI_BRIDGE", "GENERIC_SOFTWARE", "UNCLASSIFIED"]),
   track_basis: z.string().max(300),
   level: z.enum(["ENTRY", "MID", "SENIOR", "LEADERSHIP"]),
   level_basis: z.string().max(300),

@@ -670,6 +670,13 @@ export function compareStructuredRequirement(
           : Math.max(...undatedCandidates.map((candidate) => candidate.years));
       }
     }
+    // An attested total for this scope (for example years in asset management) also counts when
+    // dated engagements match: their union undercounts work that the role titles do not name.
+    const attestedTotals = undatedCandidates.filter((candidate) => candidate.aggregationKind === "AGGREGATE_TOTAL"
+      && (candidate.attestedTotal || candidate.attestedComponent));
+    if (attestedTotals.length > 0) {
+      totalYears = Math.max(totalYears, ...attestedTotals.map((candidate) => candidate.years));
+    }
 
     const representative = [...candidates].sort((left, right) => right.years - left.years)[0];
     const scopeIsComplete = candidates.some((candidate) => candidate.scopeComplete || candidate.attestedTotal);

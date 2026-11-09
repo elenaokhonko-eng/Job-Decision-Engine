@@ -143,6 +143,48 @@ describe("structured requirement comparators", () => {
     expect(result.rationale).toContain("2.0 years");
   });
 
+  it("counts an attested domain total even when a shorter dated engagement also matches the scope", () => {
+    const requirement = {
+      requirement_type: "EXPERIENCE_YEARS",
+      requirement_text: "At least 8 years of asset management experience",
+      quote_text: "8 years of experience in asset management",
+      structured_value: {
+        minimum_years: 8,
+        scope_schema_version: "experience_scope_v2",
+        role_families: [],
+        domain_families: ["INVESTMENT_MARKETS_FINTECH"],
+        operator: "ANY",
+        duration_basis: "PROFESSIONAL_PRODUCTION",
+      },
+    };
+    const datedEngagement = fact("Investment platform role", {
+      experience_years: 3,
+      domain_families: ["INVESTMENT_MARKETS_FINTECH"],
+      duration_basis: "PROFESSIONAL_PRODUCTION",
+      experience_start_date: "2020-01-01",
+      experience_end_date: "2023-01-01",
+    });
+    const attestedTotal = (attestation_status: string) => fact("10 years across asset management and wealth advisory", {
+      professional_years: 10,
+      scope_schema_version: "experience_scope_v2",
+      domain_families: ["INVESTMENT_MARKETS_FINTECH"],
+      duration_basis: "PROFESSIONAL_PRODUCTION",
+      aggregation_kind: "AGGREGATE_TOTAL",
+      evidence_basis: "ATTESTED_COMPONENT_DURATION",
+      attestation_status,
+    });
+
+    const attested = compareStructuredRequirement(requirement, [datedEngagement, attestedTotal("SELF_ATTESTED")]);
+    expect(attested.status).toBe("MATCH");
+    expect(attested.evidencedYears).toBe(10);
+
+    // An unattested total does not override the dated evidence, and a component total never
+    // makes the ledger complete enough to declare a shortfall.
+    const unattested = compareStructuredRequirement(requirement, [datedEngagement, attestedTotal("UNVERIFIED")]);
+    expect(unattested.status).toBe("UNKNOWN");
+    expect(unattested.evidencedYears).toBeCloseTo(3, 1);
+  });
+
   it("accepts an OR-scoped architecture alternative without requiring coding tenure", () => {
     const result = compareStructuredRequirement(
       {

@@ -104,6 +104,7 @@ CAREER_TRACK_LABELS = {
     "DATA_MANAGEMENT": "Data management",
     "ARCHITECTURE": "Architecture",
     "PRODUCT": "Product",
+    "PROGRAM_MANAGEMENT": "Programme management",
     "HANDS_ON_AI_DATA": "Hands-on AI / data",
     "AI_BRIDGE": "AI bridge",
     "GENERIC_SOFTWARE": "Generic software",

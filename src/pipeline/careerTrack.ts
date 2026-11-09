@@ -15,12 +15,13 @@
 
 import { ExperienceByTrackSchema } from "../profile/contracts.js";
 
-export const CAREER_TRACK_POLICY_VERSION = "career_track_v2";
+export const CAREER_TRACK_POLICY_VERSION = "career_track_v3";
 
 export const CAREER_TRACKS = [
   "DATA_MANAGEMENT",
   "ARCHITECTURE",
   "PRODUCT",
+  "PROGRAM_MANAGEMENT",
   "HANDS_ON_AI_DATA",
   "AI_BRIDGE",
   "GENERIC_SOFTWARE",
@@ -73,6 +74,7 @@ const ARCHITECTURE = /\barchitect(?:ure)?\b/i;
 const PRODUCT = /\b(?:product (?:manager|owner|lead|director|management|head)|head of product|chief product officer|cpo|group product manager)\b/i;
 // A data or platform product is a bridge into AI work for a senior product career.
 const PRODUCT_BRIDGE_SCOPE = /\b(?:data|analytics|platforms?)\b/i;
+const PROGRAM = /\b(?:(?:technical )?program(?:me)? (?:manager|management|director|lead|head)|project (?:manager|management|director|lead)|delivery (?:manager|lead|director|head)|head of (?:delivery|programmes?|programs?|pmo)|pmo (?:manager|lead|head))\b/i;
 const ENGINEERING = /\b(?:engineer(?:ing)?|developer|programmer|swe|sre|devops|dev ops|site reliability|full[- ]?stack|front[- ]?end|back[- ]?end|mobile|ios|android|qa|quality assurance|tester|coder)\b/i;
 
 const LEADERSHIP_LEVEL = /\b(?:director|head of|head,|vice president|vp|chief|cto|cdo|cio|cao|cpo|svp|evp|managing director|executive director)\b/i;
@@ -115,10 +117,12 @@ export function classifyCareerTrack(title: string, requirements: readonly TrackR
   if (hasAi) return { track: "HANDS_ON_AI_DATA", basis: "AI, ML or data-science title" };
   if (ARCHITECTURE.test(text)) return { track: "ARCHITECTURE", basis: "architect title" };
   if (PRODUCT.test(text) && PRODUCT_BRIDGE_SCOPE.test(text)) return { track: "PRODUCT", basis: "data or platform product management title" };
+  if (PROGRAM.test(text) && PRODUCT_BRIDGE_SCOPE.test(text)) return { track: "PROGRAM_MANAGEMENT", basis: "data or platform programme management title" };
   // "Analytics engineer" and "data engineer" are hands-on coding even with "data analytics" in the title.
   if (DATA_ENGINEERING.test(text) && !DATA_GOVERNANCE.test(text)) return { track: "HANDS_ON_AI_DATA", basis: "data engineering title" };
   if (DATA_MANAGEMENT.test(text)) return { track: "DATA_MANAGEMENT", basis: "data management, governance or analytics title" };
   if (PRODUCT.test(text)) return { track: "PRODUCT", basis: "product management title" };
+  if (PROGRAM.test(text)) return { track: "PROGRAM_MANAGEMENT", basis: "programme, project or delivery management title" };
   if (ENGINEERING.test(text)) {
     const aiRequirements = mustRequirements(requirements)
       .filter((requirement) => !["EXPERIENCE_YEARS", "WORK_AUTH", "OFFICE_DAYS", "WORK_MODE", "TRAVEL", "EMPLOYMENT_TYPE"].includes(requirement.requirement_type))
@@ -172,7 +176,7 @@ function yearsFor(experience: readonly TrackExperience[], track: CareerTrack): n
 
 /** Bridge roles draw on the candidate's senior non-AI experience, so they use the strongest of those tracks. */
 function bridgeYears(experience: readonly TrackExperience[]): number | null {
-  const candidates = (["DATA_MANAGEMENT", "ARCHITECTURE", "PRODUCT"] as const)
+  const candidates = (["DATA_MANAGEMENT", "ARCHITECTURE", "PRODUCT", "PROGRAM_MANAGEMENT"] as const)
     .map((track) => yearsFor(experience, track))
     .filter((value): value is number => value !== null);
   return candidates.length > 0 ? Math.max(...candidates) : null;
@@ -223,11 +227,13 @@ export function assessCareerTrack(input: {
     };
   }
 
-  // A mid-level product role is a bridge when the product is AI, data or a platform; an
-  // associate or junior product role is out at any product tenure.
-  const productTitle = PRODUCT.test(normalizedTitle(input.title));
-  const productBridge = level === "MID" && productTitle && (track === "AI_BRIDGE" || (track === "PRODUCT" && PRODUCT_BRIDGE_SCOPE.test(input.title)));
-  const fit = track === "PRODUCT" && level === "ENTRY"
+  // A mid-level product or programme role is a bridge when the product or programme is AI, data
+  // or a platform; an associate or junior one is out at any tenure in that track.
+  const title = normalizedTitle(input.title);
+  const managementTitle = PRODUCT.test(title) || PROGRAM.test(title);
+  const managementTrack = track === "PRODUCT" || track === "PROGRAM_MANAGEMENT";
+  const productBridge = level === "MID" && managementTitle && (track === "AI_BRIDGE" || (managementTrack && PRODUCT_BRIDGE_SCOPE.test(title)));
+  const fit = managementTrack && level === "ENTRY"
     ? "OUT"
     : (track === "AI_BRIDGE" && level === "MID") || productBridge ? "FIT" : levelFit(years, level);
   const tags: CareerTrackTag[] = [];

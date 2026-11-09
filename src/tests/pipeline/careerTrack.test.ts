@@ -153,6 +153,29 @@ describe("track-aware seniority", () => {
     expect(longProduct("Senior Data Product Manager").tags).not.toContain("TRANSITION");
   });
 
+  it("classifies programme, project and delivery management as its own track with the product rules", () => {
+    const longProgramme = (title: string) => assessCareerTrack({ title, experience: [{ track: "PROGRAM_MANAGEMENT", years: 14 }] });
+    for (const title of ["Program Manager", "Technical Programme Manager", "Senior Project Manager", "Delivery Lead", "Head of PMO"]) {
+      expect(classifyCareerTrack(title).track, title).toBe("PROGRAM_MANAGEMENT");
+    }
+    expect(classifyCareerTrack("AI Programme Manager").track).toBe("AI_BRIDGE");
+    expect(longProgramme("Senior Program Manager")).toMatchObject({ fit: "FIT", outcome_cap: null, candidate_years: 14 });
+    expect(longProgramme("Director, Programme Management")).toMatchObject({ level: "LEADERSHIP", fit: "FIT" });
+    expect(longProgramme("Program Manager")).toMatchObject({ fit: "STEP_DOWN", outcome_cap: "REVIEW" });
+    const dataProgramme = longProgramme("Program Manager, Data Platform");
+    expect(dataProgramme).toMatchObject({ track: "PROGRAM_MANAGEMENT", fit: "FIT", outcome_cap: null });
+    expect(dataProgramme.tags).toEqual(expect.arrayContaining(["BRIDGE", "TRANSITION"]));
+    expect(longProgramme("Junior Project Manager")).toMatchObject({ fit: "OUT", outcome_cap: "SKIP" });
+  });
+
+  it("uses programme-management years for AI bridge roles when they are the longest track", () => {
+    const result = assessCareerTrack({
+      title: "AI Programme Manager",
+      experience: [{ track: "PRODUCT", years: 6 }, { track: "PROGRAM_MANAGEMENT", years: 14 }],
+    });
+    expect(result).toMatchObject({ track: "AI_BRIDGE", candidate_years: 14, fit: "FIT" });
+  });
+
   it("prefers bridge roles, including unmarked ones", () => {
     const result = assess("AI Solutions Architect");
     expect(result).toMatchObject({ track: "AI_BRIDGE", fit: "FIT", outcome_cap: null, candidate_years: 16 });
