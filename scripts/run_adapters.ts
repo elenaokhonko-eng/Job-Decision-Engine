@@ -98,7 +98,7 @@ export const CompanyConfigSchema = z.object({
 type CompanyConfig = z.infer<typeof CompanyConfigSchema>;
 
 /** Wall-clock budget shared by all Workday tenants in one run (inside the overall adapter run budget). */
-export const WORKDAY_RUN_BUDGET_MS = 240_000;
+export const WORKDAY_RUN_BUDGET_MS = 420_000;
 
 /**
  * Default wall-clock budget for one adapter run. The workflow step timeout is set
