@@ -100,6 +100,9 @@ jobs:
           SEARCHAPI_API_KEY: ${{ secrets.SEARCHAPI_API_KEY }}
           SEARCHAPI_LINKEDIN_ENABLED: ${{ vars.SEARCHAPI_LINKEDIN_ENABLED || 'false' }}
           SEARCHAPI_DAILY_CREDIT_CAP: ${{ vars.SEARCHAPI_DAILY_CREDIT_CAP || '60' }}
+          # Discovery pre-screen and FILTERED payload sharing stay off until the repository variables are set to true.
+          DISCOVERY_PRESCREEN_ENABLED: ${{ vars.DISCOVERY_PRESCREEN_ENABLED || 'false' }}
+          DISCOVERY_FILTERED_PAYLOAD_DEDUPE_ENABLED: ${{ vars.DISCOVERY_FILTERED_PAYLOAD_DEDUPE_ENABLED || 'false' }}
         run: npx tsx scripts/run_adapters.ts
 
   process_pipeline:
@@ -301,6 +304,8 @@ jobs:
           PIPELINE_DEAD_LETTERED_THIS_RUN: ${{ steps.process_pipeline_worker.outputs.dead_lettered_this_run }}
           PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS: ${{ vars.PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS || '7200' }}
           PIPELINE_STATUS_REPORT_FILE: pipeline-status-ingestion.json
+          # Seven-day board-yield table; off until the repository variable is set to true.
+          PIPELINE_BOARD_YIELD_REPORT_ENABLED: ${{ vars.PIPELINE_BOARD_YIELD_REPORT_ENABLED || 'false' }}
         run: npx tsx scripts/report_pipeline_status.ts
       - name: Upload pipeline status report
         if: ${{ always() }}
