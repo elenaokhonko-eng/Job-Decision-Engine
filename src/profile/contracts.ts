@@ -335,6 +335,7 @@ export const ProfileExperienceTrackSchema = z.enum([
   'DATA_MANAGEMENT',
   'ARCHITECTURE',
   'PRODUCT',
+  'PROGRAM_MANAGEMENT',
   'HANDS_ON_AI_DATA',
 ]);
 
