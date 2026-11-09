@@ -12,6 +12,14 @@ import {
   type ProviderCallSummary,
 } from "../src/services/modelCallResilience.js";
 import { resolveWorkspaceContext } from "../src/workspace/context.js";
+import {
+  BOARD_YIELD_SQL,
+  BOARD_YIELD_WINDOW_DAYS,
+  boardYieldReportEnabled,
+  summarizeBoardYield,
+  type BoardYieldRow,
+  type BoardYieldSummary,
+} from "../src/reporting/boardYield.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -235,6 +243,23 @@ function markdownText(value: unknown): string {
     .replace(/([\\`*_{}\[\]()<>|])/g, "\\$1");
 }
 
+/** Markdown lines for the weekly board-yield table (empty when the section is off). */
+export function boardYieldMarkdown(summary: BoardYieldSummary | null | undefined): string[] {
+  if (!summary) return [];
+  return [
+    `### Board yield (jobs first seen in the last ${summary.window_days} days)`,
+    "",
+    ...(summary.flagged_boards.length > 0
+      ? [`⚠️ **${summary.flagged_boards.length} board(s) with no gate pass after ${summary.zero_pass_min_staged}+ staged jobs:** ${summary.flagged_boards.map(markdownText).join(", ")}`, ""]
+      : []),
+    "| Source | Board | Staged | Hard-rejected | Passed gates | Evaluated | PRIORITY/REVIEW | Flag |",
+    "|---|---|---:|---:|---:|---:|---:|---|",
+    ...summary.boards.map((row) =>
+      `| ${markdownText(row.source)} | ${markdownText(row.board)} | ${row.staged} | ${row.hard_rejected} | ${row.passed_gates} | ${row.evaluated} | ${row.priority_review} | ${row.zero_pass_flag ? "0 passes" : ""} |`),
+    "",
+  ];
+}
+
 function toMarkdown(report: Record<string, unknown>): string {
   const stages = report.stages as StageSummary[];
   const taskRows = report.pending_queue_by_task_type as TaskHealthRow[];
@@ -303,6 +328,7 @@ function toMarkdown(report: Record<string, unknown>): string {
     `Routing dispositions: ${formatCounts(routingRows)}`,
     "",
     ...providerLines,
+    ...boardYieldMarkdown(report.board_yield as BoardYieldSummary | null | undefined),
   ];
   return lines.join("\n");
 }
@@ -443,6 +469,13 @@ async function run(): Promise<void> {
       pool.query<ProviderCallRow>(PROVIDER_CALLS_SQL, [context.workspaceId, providerWindowMinutes]),
     ]);
 
+    // Off unless PIPELINE_BOARD_YIELD_REPORT_ENABLED=true; a query failure fails the report.
+    const boardYield = boardYieldReportEnabled()
+      ? summarizeBoardYield(
+        (await pool.query<BoardYieldRow>(BOARD_YIELD_SQL, [context.workspaceId, BOARD_YIELD_WINDOW_DAYS])).rows,
+      )
+      : null;
+
     const deadLetterHealthByType = new Map(
       deadLetterHealth.map((row) => [row.task_type, row]),
     );
@@ -505,6 +538,7 @@ async function run(): Promise<void> {
       requires_user_action_count: Number(userActions.rows[0]?.count ?? 0),
       provider_call_window_minutes: providerWindowMinutes,
       provider_calls_by_model: summarizeProviderCallRows(providerCallRows.rows),
+      board_yield: boardYield,
     };
     if (report.provider_calls_by_model.stop_rule_triggered) {
       console.error(

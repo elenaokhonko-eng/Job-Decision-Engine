@@ -7,6 +7,7 @@ import {
   extractTravelRequirement,
   GLOBAL_TITLE_EXCLUSIONS,
   isTechnicalRole,
+  nonTechnicalFunctionTitle,
   type GateResult,
 } from "../services/criteria.js";
 import { normalizeWorkMode } from "./workModeNormalizer.js";
@@ -317,6 +318,13 @@ export function applyPersistedRequirementGates(
         [`Non-target title exclusion: "${title}"`]
       );
     }
+  }
+  const nonTechnicalTitle = nonTechnicalFunctionTitle(title);
+  if (nonTechnicalTitle) {
+    return makeReject(
+      ["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"],
+      [`Non-technical function title "${nonTechnicalTitle}" in "${title}"`]
+    );
   }
 
   const functionRequirements = deterministicRequirements.filter(

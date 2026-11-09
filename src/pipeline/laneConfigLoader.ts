@@ -24,6 +24,8 @@ export interface LaneDefinition {
   positive_concepts?: string[];
   negative_concepts?: string[];
   included_domain_concepts?: string[];
+  /** scope.excluded_domain_concepts as written (concept codes or phrases); discovery negatives. */
+  excluded_domain_concepts?: string[];
   required_function_concepts?: string[];
   minimum_domain_score?: number;
   minimum_function_score?: number;
@@ -100,6 +102,7 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
     positive_concepts: positiveConcepts,
     negative_concepts: negativeConcepts,
     included_domain_concepts: concepts.map(normalizeConcept),
+    excluded_domain_concepts: [...excludedConcepts],
     required_function_concepts: requiredFunctions.map(normalizeConcept),
     minimum_domain_score: laneConfig.routing?.minimum_domain_score,
     minimum_function_score: laneConfig.routing?.minimum_function_score,

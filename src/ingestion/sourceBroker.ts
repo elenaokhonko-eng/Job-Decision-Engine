@@ -36,6 +36,13 @@ export interface SourceCandidateDispositionInput {
   readonly reasonDetail?: string | null;
   readonly canonicalJobId?: string | null;
   readonly observationId?: string | null;
+  /**
+   * FILTERED rows only (migration 105): the disposition row that already holds this posting's
+   * raw payload. The row then stores no payload of its own, only the hash, URL, title and location.
+   */
+  readonly rawPayloadDispositionId?: string | null;
+  readonly postingTitle?: string | null;
+  readonly postingLocation?: string | null;
 }
 
 export class SourceBroker {
@@ -218,19 +225,55 @@ export class SourceBroker {
     );
   }
 
-  async recordCandidateDisposition(input: SourceCandidateDispositionInput, planRunId: string | null): Promise<void> {
+  /** Records one candidate disposition and returns its id (null only from a mocked executor). */
+  async recordCandidateDisposition(input: SourceCandidateDispositionInput, planRunId: string | null): Promise<string | null> {
     if (!this.sourceRunId) throw new Error("Must start a source run before recording a candidate disposition.");
     const ctx = await this.ensureContext();
     const normalizedEvidence = input.normalizedEvidence
       ? JobSourceEvidenceSchema.parse(input.normalizedEvidence)
       : null;
-    await this.executor.query(
+    if (input.rawPayloadDispositionId) {
+      if (input.disposition !== "FILTERED") {
+        throw new Error("Only a FILTERED disposition may share another disposition's raw payload.");
+      }
+      const shared = await this.executor.query<{ id: string }>(
+        `INSERT INTO source_candidate_dispositions (
+           workspace_id, source_run_id, source_plan_run_id, source_plugin_key, plan_key,
+           lane_key, source_external_id, source_url, raw_payload_hash, raw_payload,
+           disposition, reason_code, reason_detail, canonical_job_id, job_observation_id,
+           normalized_evidence, evidence_schema_version,
+           raw_payload_disposition_id, posting_title, posting_location
+         )
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12, $13, $14, $15::jsonb, $16, holder.id, $18, $19
+         FROM source_candidate_dispositions AS holder
+         WHERE holder.workspace_id = $1
+           AND holder.id = $17
+           AND holder.raw_payload_hash = $9
+           AND holder.raw_payload IS NOT NULL
+         RETURNING id`,
+        [
+          ctx.workspaceId, this.sourceRunId, planRunId, input.sourcePluginKey, input.planKey,
+          input.laneKey, input.sourceExternalId, input.sourceUrl, input.rawPayloadHash,
+          input.disposition, input.reasonCode ?? null, input.reasonDetail ?? null,
+          input.canonicalJobId ?? null, input.observationId ?? null,
+          normalizedEvidence ? JSON.stringify(normalizedEvidence) : null, normalizedEvidence?.schema_version ?? null,
+          input.rawPayloadDispositionId, input.postingTitle ?? null, input.postingLocation ?? null,
+        ],
+      );
+      // The holder must exist with the same payload hash; otherwise the payload would be lost.
+      if (shared.rows.length !== 1) {
+        throw new Error("The disposition holding this posting's raw payload was not found with the same payload hash.");
+      }
+      return shared.rows[0].id;
+    }
+    const inserted = await this.executor.query<{ id: string }>(
       `INSERT INTO source_candidate_dispositions (
          workspace_id, source_run_id, source_plan_run_id, source_plugin_key, plan_key,
          lane_key, source_external_id, source_url, raw_payload_hash, raw_payload,
          disposition, reason_code, reason_detail, canonical_job_id, job_observation_id,
          normalized_evidence, evidence_schema_version
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb, $17)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb, $17)
+       RETURNING id`,
       [
         ctx.workspaceId, this.sourceRunId, planRunId, input.sourcePluginKey, input.planKey,
         input.laneKey, input.sourceExternalId, input.sourceUrl, input.rawPayloadHash,
@@ -239,6 +282,8 @@ export class SourceBroker {
         normalizedEvidence ? JSON.stringify(normalizedEvidence) : null, normalizedEvidence?.schema_version ?? null,
       ],
     );
+    // Mocked executors in unit tests may return no row; real INSERT ... RETURNING always does.
+    return inserted.rows[0]?.id ?? null;
   }
 
   async ensureSourcePluginRevision(plugin: SourcePlugin): Promise<string> {

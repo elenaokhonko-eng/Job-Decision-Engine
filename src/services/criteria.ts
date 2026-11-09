@@ -52,6 +52,26 @@ export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\b(store\s+manager|cashier|retail\s+associate)\b/i,
 ];
 
+// 1b. Non-technical function titles that passed the technical-function check on description
+// keywords alone (a designer or accountant posting that mentions SQL). A title match rejects as
+// NON_TECHNICAL_FUNCTION with the matched title as evidence. Product designers are not listed.
+export const NON_TECHNICAL_FUNCTION_TITLES: RegExp[] = [
+  /\bcustomer success\b/i,
+  /\b(?:general ledger |gl )?accountants?\b/i,
+  /\bpayroll (?:operations|specialists?|administrators?|coordinators?|officers?|managers?|leads?|associates?|analysts?|accountants?)\b/i,
+  /\bsupport specialists?\b/i,
+  /\b(?:graphic|visual|ux|ui|brand|motion)(?:\s*[/&,]\s*(?:graphic|visual|ux|ui|brand|motion))*\s+designers?\b/i,
+];
+
+/** The matched non-technical function title phrase, or null. */
+export function nonTechnicalFunctionTitle(title: string): string | null {
+  for (const pattern of NON_TECHNICAL_FUNCTION_TITLES) {
+    const match = String(title || "").match(pattern);
+    if (match) return match[0];
+  }
+  return null;
+}
+
 // 2. Axis 1: Target Technical Functions (Must pass)
 export const TECHNICAL_FUNCTION_KEYWORDS: RegExp[] = [
   /\b(software engineer|data engineer|ml engineer|machine learning engineer|ai engineer)\b/i,
@@ -847,6 +867,10 @@ export function applyGlobalGates(
     if (pattern.test(job.title || "")) {
       return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title exclusion: "${job.title}"`]);
     }
+  }
+  const nonTechnicalTitle = nonTechnicalFunctionTitle(job.title || "");
+  if (nonTechnicalTitle) {
+    return makeReject(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical function title "${nonTechnicalTitle}" in "${job.title}"`]);
   }
 
   // FDE is a global exclusion when the role itself is an FDE-family role.
