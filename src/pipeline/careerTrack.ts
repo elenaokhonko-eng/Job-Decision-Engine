@@ -15,7 +15,7 @@
 
 import { ExperienceByTrackSchema } from "../profile/contracts.js";
 
-export const CAREER_TRACK_POLICY_VERSION = "career_track_v1";
+export const CAREER_TRACK_POLICY_VERSION = "career_track_v2";
 
 export const CAREER_TRACKS = [
   "DATA_MANAGEMENT",
@@ -71,6 +71,8 @@ const DATA_GOVERNANCE = /\b(?:data governance|master data|mdm|reference data|dat
 const AI_DATA_GIG = /\b(?:ai trainers?|ai tutors?|annotators?|data label+ers?|data label+ing|raters?|evaluators?)\b/i;
 const ARCHITECTURE = /\barchitect(?:ure)?\b/i;
 const PRODUCT = /\b(?:product (?:manager|owner|lead|director|management|head)|head of product|chief product officer|cpo|group product manager)\b/i;
+// A data or platform product is a bridge into AI work for a senior product career.
+const PRODUCT_BRIDGE_SCOPE = /\b(?:data|analytics|platforms?)\b/i;
 const ENGINEERING = /\b(?:engineer(?:ing)?|developer|programmer|swe|sre|devops|dev ops|site reliability|full[- ]?stack|front[- ]?end|back[- ]?end|mobile|ios|android|qa|quality assurance|tester|coder)\b/i;
 
 const LEADERSHIP_LEVEL = /\b(?:director|head of|head,|vice president|vp|chief|cto|cdo|cio|cao|cpo|svp|evp|managing director|executive director)\b/i;
@@ -112,6 +114,7 @@ export function classifyCareerTrack(title: string, requirements: readonly TrackR
   }
   if (hasAi) return { track: "HANDS_ON_AI_DATA", basis: "AI, ML or data-science title" };
   if (ARCHITECTURE.test(text)) return { track: "ARCHITECTURE", basis: "architect title" };
+  if (PRODUCT.test(text) && PRODUCT_BRIDGE_SCOPE.test(text)) return { track: "PRODUCT", basis: "data or platform product management title" };
   // "Analytics engineer" and "data engineer" are hands-on coding even with "data analytics" in the title.
   if (DATA_ENGINEERING.test(text) && !DATA_GOVERNANCE.test(text)) return { track: "HANDS_ON_AI_DATA", basis: "data engineering title" };
   if (DATA_MANAGEMENT.test(text)) return { track: "DATA_MANAGEMENT", basis: "data management, governance or analytics title" };
@@ -220,7 +223,13 @@ export function assessCareerTrack(input: {
     };
   }
 
-  const fit = track === "AI_BRIDGE" && level === "MID" ? "FIT" : levelFit(years, level);
+  // A mid-level product role is a bridge when the product is AI, data or a platform; an
+  // associate or junior product role is out at any product tenure.
+  const productTitle = PRODUCT.test(normalizedTitle(input.title));
+  const productBridge = level === "MID" && productTitle && (track === "AI_BRIDGE" || (track === "PRODUCT" && PRODUCT_BRIDGE_SCOPE.test(input.title)));
+  const fit = track === "PRODUCT" && level === "ENTRY"
+    ? "OUT"
+    : (track === "AI_BRIDGE" && level === "MID") || productBridge ? "FIT" : levelFit(years, level);
   const tags: CareerTrackTag[] = [];
   let cap: "REVIEW" | "SKIP" | null = null;
   const reasons: string[] = [];
@@ -246,7 +255,8 @@ export function assessCareerTrack(input: {
     reasons.push(`${level.toLowerCase()} level fits ${years} years in ${track}`);
   }
 
-  if (track === "AI_BRIDGE") tags.push("BRIDGE");
+  if (track === "AI_BRIDGE" || productBridge) tags.push("BRIDGE");
+  if (productBridge) tags.push("TRANSITION");
   if (track === "HANDS_ON_AI_DATA" && years < 4 && fit !== "OUT") tags.push("TRANSITION");
   if (track === "GENERIC_SOFTWARE") {
     tags.push("OFF_TRACK");

@@ -132,10 +132,25 @@ describe("track-aware seniority", () => {
     expect(assess("Principal Enterprise Architect")).toMatchObject({ fit: "FIT", outcome_cap: null });
   });
 
-  it("treats a junior product role as a step down and mid or senior product roles as a fit", () => {
-    expect(assess("Associate Product Manager")).toMatchObject({ track: "PRODUCT", fit: "STEP_DOWN", outcome_cap: "REVIEW" });
+  it("keeps associate and junior product roles out and mid or senior product roles as a fit", () => {
+    expect(assess("Associate Product Manager")).toMatchObject({ track: "PRODUCT", fit: "OUT", outcome_cap: "SKIP" });
+    expect(assess("Junior Product Owner")).toMatchObject({ track: "PRODUCT", fit: "OUT", outcome_cap: "SKIP" });
     expect(assess("Product Manager")).toMatchObject({ fit: "FIT", outcome_cap: null });
     expect(assess("Senior Product Manager")).toMatchObject({ fit: "FIT", outcome_cap: null });
+  });
+
+  it("after a long product career, lets a mid-level AI, data or platform product role through as a bridge", () => {
+    const longProduct = (title: string) => assessCareerTrack({ title, experience: [{ track: "PRODUCT", years: 12 }, { track: "DATA_MANAGEMENT", years: 12 }] });
+    for (const title of ["Data Product Manager", "Product Manager, Data Platform", "Platform Product Owner", "AI Product Manager"]) {
+      const result = longProduct(title);
+      expect(result, title).toMatchObject({ fit: "FIT", outcome_cap: null });
+      expect(result.tags, title).toEqual(expect.arrayContaining(["BRIDGE", "TRANSITION"]));
+    }
+    expect(longProduct("Product Manager, Payments")).toMatchObject({ track: "PRODUCT", fit: "STEP_DOWN", outcome_cap: "REVIEW" });
+    expect(longProduct("Principal Product Manager, Payments")).toMatchObject({ fit: "FIT", outcome_cap: null });
+    expect(longProduct("Lead Product Manager")).toMatchObject({ fit: "FIT", outcome_cap: null });
+    expect(longProduct("Associate Product Manager, Data")).toMatchObject({ fit: "OUT", outcome_cap: "SKIP" });
+    expect(longProduct("Senior Data Product Manager").tags).not.toContain("TRANSITION");
   });
 
   it("prefers bridge roles, including unmarked ones", () => {
