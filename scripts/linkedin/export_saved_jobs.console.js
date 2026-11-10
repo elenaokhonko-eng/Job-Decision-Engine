@@ -5,7 +5,8 @@
  * WHAT IT IS
  *   A snippet YOU paste into the developer console of YOUR OWN signed-in browser
  *   tab, on the "Saved" tab of LinkedIn's Job Tracker
- *   (https://www.linkedin.com/my-items/saved-jobs/). It runs only when you start
+ *   (https://www.linkedin.com/jobs-tracker/, formerly
+ *   https://www.linkedin.com/my-items/saved-jobs/). It runs only when you start
  *   it, at human pace, and saves a JSON file for:
  *
  *     npm run import:linkedin-saved -- <path/to/linkedin_saved_jobs.json> --dry-run
@@ -29,7 +30,8 @@
  *     later to fetch the descriptions it has not fetched yet.
  *
  * HOW TO USE (Chrome/Edge: F12 or Ctrl+Shift+J -> Console; Firefox: Ctrl+Shift+K)
- *   1. Open https://www.linkedin.com/my-items/saved-jobs/ and go to page 1.
+ *   1. Open https://www.linkedin.com/jobs-tracker/ (Saved) and go to page 1.
+ *      Run these npm commands in a terminal, not in the browser console.
  *   2. Paste this whole file into the console and press Enter. It runs the
  *      collection, fetches descriptions, prints a summary (expected vs collected)
  *      and downloads linkedin_saved_jobs.json.
@@ -63,6 +65,9 @@
   const PAGE_CHANGE_TIMEOUT_MS = 15000;
   const DESCRIPTION_BASE_DELAY_MS = 2000;
   const DESCRIPTION_JITTER_MS = 1000;
+  const MAX_SCROLL_STEPS = 600;
+  const BOTTOM_IDLE_CHECKS = 3;
+  const BOTTOM_IDLE_WAIT_MS = 1500;
 
   const SELECTORS = {
     jobLink: "a[href*='/jobs/view/']",
@@ -185,15 +190,29 @@
     return null;
   }
 
-  /** Scroll the list container (when it scrolls itself) and the window in steps so lazy cards render. */
-  async function renderWholePage() {
+  /**
+   * Scroll the list container (when it scrolls itself) and the window in steps so lazy cards
+   * render, reading cards after every step: the Job Tracker list loads more cards as it scrolls
+   * and may drop cards that scrolled out of view. At the bottom it waits for more cards to load
+   * before treating the list as finished.
+   */
+  async function renderWholePage(onStep) {
     const container = scrollableAncestor(document.querySelector(SELECTORS.jobLink));
     for (const target of [container, document.scrollingElement].filter(Boolean)) {
-      let lastTop = -1;
-      for (let step = 0; step < 60 && target.scrollTop !== lastTop; step += 1) {
-        lastTop = target.scrollTop;
+      let idleAtBottom = 0;
+      for (let step = 0; step < MAX_SCROLL_STEPS && idleAtBottom < BOTTOM_IDLE_CHECKS; step += 1) {
+        const lastTop = target.scrollTop;
+        const lastHeight = target.scrollHeight;
         target.scrollTop = Math.min(target.scrollTop + Math.max(200, target.clientHeight * 0.8), target.scrollHeight);
         await sleep(300);
+        onStep();
+        if (target.scrollTop === lastTop && target.scrollHeight === lastHeight) {
+          idleAtBottom += 1;
+          await sleep(BOTTOM_IDLE_WAIT_MS);
+          onStep();
+        } else {
+          idleAtBottom = 0;
+        }
       }
     }
     await sleep(PAGE_SETTLE_MS);
@@ -249,8 +268,12 @@
 
   async function collectCards(state) {
     for (let page = 1; page <= MAX_PAGES; page += 1) {
-      await renderWholePage();
-      const added = readCards(state);
+      let added = 0;
+      await renderWholePage(() => { added += readCards(state); });
+      added += readCards(state);
+      if (state.order.length === 0) {
+        throw new StopError("No saved-job links were found on this page. Make sure the Saved tab of the Job Tracker is open and its list has loaded, then paste the snippet again.");
+      }
       state.pagesVisited += 1;
       saveState(state);
       console.log(`[jde] Page ${activePageNumber() ?? page}: ${added} new saved job(s), ${state.order.length} total.`);
@@ -374,8 +397,8 @@
 
   window.jdeLinkedInExport = { resume, download, clear, summary: () => summary(loadState()) };
 
-  if (!/\/my-items\/saved-jobs/.test(location.pathname)) {
-    console.error("[jde] Open https://www.linkedin.com/my-items/saved-jobs/ (Job Tracker > Saved), go to page 1, and paste the snippet again.");
+  if (!/\/(?:jobs-tracker|my-items\/saved-jobs)/.test(location.pathname)) {
+    console.error("[jde] Open https://www.linkedin.com/jobs-tracker/ (Job Tracker > Saved), go to page 1, and paste the snippet again.");
     return;
   }
   const state = loadState();
