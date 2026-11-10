@@ -768,4 +768,32 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       expect(result.rejection_codes).toContain("GATE_HIGH_INTERACTION");
     });
   });
+  describe("office location with an unrecognised country", () => {
+    const job = (location: string, workplaceType: string) => ({
+      id: `office-${workplaceType}-${location}`,
+      title: "Senior AI Platform Architect",
+      company_name: "Example AI",
+      raw_description: "Design and build machine learning platforms and AI agent infrastructure with Python and Kubernetes.",
+      location,
+      workplace_type: workplaceType,
+      employment_type: "PERMANENT",
+    });
+
+    it("sends a hybrid or on-site role in an unrecognised city to verification", () => {
+      for (const workplaceType of ["HYBRID", "ONSITE"]) {
+        const result = applyGlobalGates(job("Exampleville", workplaceType) as any);
+        expect(result.status, workplaceType).not.toBe("PASS");
+      }
+      expect(applyGlobalGates(job("Exampleville", "HYBRID") as any).status).toBe("NEEDS_VERIFICATION");
+    });
+
+    it("keeps a recognised country deciding the hybrid outcome", () => {
+      expect(applyGlobalGates(job("Singapore", "HYBRID") as any).status).toBe("PASS");
+      expect(applyGlobalGates(job("San Mateo, California, United States", "HYBRID") as any).rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+    });
+
+    it("still passes a remote role with no stated country", () => {
+      expect(applyGlobalGates(job("Remote", "REMOTE") as any).status).toBe("PASS");
+    });
+  });
 });
