@@ -539,7 +539,9 @@ export function evaluateWorkability(
   }
 
   const territoryEvidenceMissing = relevantLocationTerritories.length === 0 && workerTerritoryRequirements.length === 0;
-  if (effectivePolicy.unknownWorkAuthorizationNeedsVerification && territoryEvidenceMissing) {
+  // A hybrid or on-site role needs an office in a known country; without one, verify it.
+  const officeTerritoryUnknown = !isRemote && (wp === "HYBRID" || wp === "ONSITE");
+  if ((effectivePolicy.unknownWorkAuthorizationNeedsVerification || officeTerritoryUnknown) && territoryEvidenceMissing) {
     return {
       workable: true,
       needsVerify: true,
@@ -1134,7 +1136,9 @@ export function applyGlobalGates(
       facts: { location_restriction: null },
     };
   }
-  if (effectivePolicy.unknownWorkAuthorizationNeedsVerification
+  // A hybrid or on-site role needs an office in a known country; without one, verify it.
+  const officeTerritoryUnknown = !explicitlyRemote && (wp === "HYBRID" || wp === "ONSITE");
+  if ((effectivePolicy.unknownWorkAuthorizationNeedsVerification || officeTerritoryUnknown)
     && relevantLocationTerritories.length === 0
     && workerTerritoryRequirements.length === 0) {
     pendingVerification = {
