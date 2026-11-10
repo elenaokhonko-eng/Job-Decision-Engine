@@ -15,8 +15,8 @@
  *   1. It walks the pages of your saved-jobs list (scrolling each page so every
  *      card renders, then clicking the list's "Next" or next page-number button)
  *      and reads each card's title, company and location as rendered.
- *   2. It loads each saved job's public page (the page a signed-out visitor sees
- *      at the same /jobs/view/<id>/ address, requested without your session),
+ *   2. It loads each saved job's public guest posting page (the page a signed-out
+ *      visitor gets at /jobs-guest/jobs/api/jobPosting/<id>, requested without your session),
  *      one at a time, about 2 seconds apart (randomized), and reads the job
  *      description, title, company and location from it.
  *   3. It downloads linkedin_saved_jobs.json.
@@ -114,6 +114,8 @@
     }
   }
 
+  const guestPostingUrl = (id) => `${location.origin}/jobs-guest/jobs/api/jobPosting/${id}`;
+
   function loadState() {
     try {
       const state = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
@@ -138,7 +140,7 @@
   }
 
   function headerTotal() {
-    const candidates = [...document.querySelectorAll("h1, h2, h3, button, a, span")]
+    const candidates = [...document.querySelectorAll("h1, h2, h3, button, a, span, li, [role='tab']")]
       .map((element) => clean(element.innerText))
       .filter((text) => text.length < 60);
     for (const text of candidates) {
@@ -418,8 +420,9 @@
       let response;
       let html = "";
       try {
-        // The signed-in job page renders its description from script; the public page has it as HTML.
-        response = await fetch(job.url, { credentials: "omit", headers: { accept: "text/html" } });
+        // The signed-in job page renders its description from script, and LinkedIn refuses the
+        // anonymous /jobs/view/ page from a signed-in tab; the guest posting page has it as HTML.
+        response = await fetch(guestPostingUrl(job.linkedinJobId), { credentials: "omit", headers: { accept: "text/html" } });
         if (response.status === 429) {
           throw new StopError(`LinkedIn rate limited the request (HTTP 429) at job ${job.linkedinJobId}; ${pending.length - index} description(s) not fetched. Wait, then run: await jdeLinkedInExport.resume()`);
         }
@@ -437,9 +440,13 @@
       if (blocked) {
         throw new StopError(`LinkedIn returned ${blocked} at job ${job.linkedinJobId}; ${pending.length - index} description(s) not fetched. Resolve it in the browser, then run: await jdeLinkedInExport.resume()`);
       }
+      if (response.status === 999) {
+        throw new StopError(`LinkedIn blocked the request (HTTP 999) at job ${job.linkedinJobId}; ${pending.length - index} description(s) not fetched. Wait, then run: await jdeLinkedInExport.resume()`);
+      }
       if (!response.ok) {
         job.descriptionStatus = "FETCH_FAILED";
         job.description = null;
+        console.warn(`[jde] ${job.linkedinJobId}: LinkedIn answered HTTP ${response.status}.`);
       } else {
         const doc = await parseHtml(html);
         const description = descriptionFrom(doc);
