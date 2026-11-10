@@ -47,7 +47,7 @@ LINKEDIN = SavedJobsSource(
     script_path="scripts/linkedin/export_saved_jobs.console.js",
     export_file_name="linkedin_saved_jobs.json",
     saved_page_name="My jobs → Saved",
-    saved_page_url="https://www.linkedin.com/my-items/saved-jobs/",
+    saved_page_url="https://www.linkedin.com/jobs-tracker/",
     resume_call="await jdeLinkedInExport.resume()",
     cli_command="npm run import:linkedin-saved",
 )

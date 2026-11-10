@@ -248,6 +248,12 @@ describe("LinkedIn saved-jobs source registration and browser snippet", () => {
     expect(snippet).not.toMatch(/document\.cookie|li_at|localStorage\.getItem\(["']li_/);
     expect(snippet).not.toMatch(/Unknown Company|["']Singapore["']|Full description not available|Failed to fetch description/);
     expect(snippet).toMatch(/status === 429/);
+    // LinkedIn moved Saved jobs to the Job Tracker; both page paths must be accepted.
+    const pagePattern = snippet.match(/if \(!(\/.*?\/)\.test\(location\.pathname\)\)/)?.[1] ?? "";
+    const pathCheck = new RegExp(pagePattern.slice(1, -1));
+    expect(pathCheck.test("/jobs-tracker/")).toBe(true);
+    expect(pathCheck.test("/my-items/saved-jobs/")).toBe(true);
+    expect(pathCheck.test("/jobs/search/")).toBe(false);
     const emitted = snippet.match(/state\.jobs\[id\] = \{([\s\S]*?)\};/)?.[1] ?? "";
     const keys = [...emitted.matchAll(/^\s*([a-zA-Z]+)[:,]/gm)].map((match) => match[1]).sort();
     const schemaKeys = Object.keys(LinkedInSavedJobItemSchema.shape).filter((key) => !["salary", "postedAt"].includes(key)).sort();
