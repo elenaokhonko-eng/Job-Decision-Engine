@@ -271,6 +271,22 @@ describe("LinkedIn saved-jobs source registration and browser snippet", () => {
     expect(parseTrackerCard("Platform EngineerExample Co · Singapore (Remote)Reposted 3w ago"))
       .toEqual({ title: "Platform EngineerExample Co", company: null, location: "Singapore (Remote)" });
     expect(parseTrackerCard("Analyst")).toEqual({ title: "Analyst", company: null, location: null });
+
+    const runsBody = source.match(/function parseTrackerRuns\(runs\) \{[\s\S]*?\r?\n {2}\}\r?\n/)?.[0] ?? "";
+    const parseTrackerRuns = new Function("clean", `${runsBody}; return parseTrackerRuns;`)(clean);
+    expect(parseTrackerRuns(["Data Engineer", "(Verified job)", "Data Engineer", "Example Co · Singapore (Hybrid)", "Posted 2w ago"]))
+      .toEqual({ title: "Data Engineer", company: "Example Co", location: "Singapore (Hybrid)" });
+    expect(parseTrackerRuns(["Platform Engineer", "Example Co · Singapore", "(Remote)", "Reposted 3w ago"]))
+      .toEqual({ title: "Platform Engineer", company: "Example Co", location: "Singapore (Remote)" });
+    expect(parseTrackerRuns(["Platform Engineer Example Co"])).toBeNull();
+  });
+
+  it("reads the Job Tracker's \"Saved · N\" header count", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "scripts", "linkedin", "export_saved_jobs.console.js"), "utf8");
+    const pattern = source.match(/text\.match\((\/\^Saved\\s\*·.*?\/i)\)/)?.[1] ?? "";
+    const header = new RegExp(pattern.slice(1, -2), "i");
+    expect("Saved · 329".match(header)?.[1]).toBe("329");
+    expect("Applied · 261".match(header)).toBeNull();
   });
 
   it("reads descriptions from the public job page, requested without the session", () => {

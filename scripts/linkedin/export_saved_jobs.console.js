@@ -142,7 +142,9 @@
       .map((element) => clean(element.innerText))
       .filter((text) => text.length < 60);
     for (const text of candidates) {
-      const match = text.match(/^Saved\s*\((\d[\d,]*)\)$/i) || text.match(/^Saved jobs?\s*\(?(\d[\d,]*)\)?$/i);
+      const match = text.match(/^Saved\s*\((\d[\d,]*)\)$/i)
+        || text.match(/^Saved\s*·\s*(\d[\d,]*)$/i)
+        || text.match(/^Saved jobs?\s*\(?(\d[\d,]*)\)?$/i);
       if (match) return Number(match[1].replace(/,/g, ""));
     }
     return null;
@@ -168,6 +170,8 @@
   }
 
   const controlLabel = (element) => clean(element.getAttribute("aria-label") || element.innerText).toLowerCase();
+  const controlLabels = (element) => [clean(element.getAttribute("aria-label")), clean(element.innerText)].map((label) => label.toLowerCase()).filter(Boolean);
+  const labelMatches = (element, pattern) => controlLabels(element).some((label) => pattern.test(label));
 
   /** Buttons and links outside the job cards; a wrong click is caught by waitForPageChange. */
   function pageControls() {
@@ -195,10 +199,10 @@
       const group = element.parentElement && element.parentElement.parentElement;
       return Boolean(group) && [...group.querySelectorAll("button, a, span")].some((other) => other !== element && clean(other.innerText) === String(page));
     };
-    return controls.find((element) => /^(next|next page|view next page|go to next page)$/.test(controlLabel(element)))
-      || controls.find((element) => controlLabel(element) === `page ${nextNumber}`)
+    return controls.find((element) => labelMatches(element, /^(next|next page|view next page|go to next page)$/))
+      || controls.find((element) => labelMatches(element, new RegExp(`^page ${nextNumber}$`)))
       || controls.find((element) => clean(element.innerText) === nextNumber && besideCurrentPage(element))
-      || controls.find((element) => /^(show|see|load) more( jobs| results)?$/.test(controlLabel(element)))
+      || controls.find((element) => labelMatches(element, /^(show|see|load) more( jobs| results)?$/))
       || null;
   }
 
@@ -272,6 +276,28 @@
     return { title: title || null, company: company || null, location: place || null };
   }
 
+  /** The card's text runs, e.g. ["<title>", "(Verified job)", "<title>", "<company> · <location>", "Posted 2w ago"]. */
+  function textRuns(element) {
+    const runs = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = clean(node.nodeValue);
+      if (text) runs.push(text);
+    }
+    return runs;
+  }
+
+  function parseTrackerRuns(runs) {
+    const dotIndex = runs.findIndex((run) => run.includes("·"));
+    if (dotIndex <= 0) return null;
+    const [company, ...rest] = runs[dotIndex].split("·").map(clean);
+    let place = clean(rest.join(" · "));
+    const mode = runs[dotIndex + 1];
+    if (place && mode && /^\((hybrid|remote|on-site|onsite)\)$/i.test(mode)) place = `${place} ${mode}`;
+    const title = runs.slice(0, dotIndex).map((run) => clean(run.replace(/\(Verified job\)/gi, ""))).find(Boolean);
+    return { title: title || null, company: company || null, location: place || null };
+  }
+
   function readCards(state) {
     let added = 0;
     for (const link of document.querySelectorAll(SELECTORS.jobLink)) {
@@ -283,7 +309,7 @@
       let company = textOf(card, SELECTORS.company);
       let place = textOf(card, SELECTORS.location);
       if (!company && !place && title.includes("·")) {
-        const parsed = parseTrackerCard(title);
+        const parsed = parseTrackerRuns(textRuns(link)) || parseTrackerCard(title);
         title = parsed.title || title;
         company = parsed.company;
         place = parsed.location;
