@@ -262,7 +262,7 @@ describe("LinkedIn saved-jobs source registration and browser snippet", () => {
 
   it("splits a Job Tracker card's single text run into title, company and location", () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), "scripts", "linkedin", "export_saved_jobs.console.js"), "utf8");
-    const body = source.match(/function parseTrackerCard\(text\) \{[\s\S]*?\n {2}\}\n/)?.[0] ?? "";
+    const body = source.match(/function parseTrackerCard\(text\) \{[\s\S]*?\r?\n {2}\}\r?\n/)?.[0] ?? "";
     const clean = (value: string) => (value || "").replace(/\s+/g, " ").trim();
     const parseTrackerCard = new Function("clean", `${body}; return parseTrackerCard;`)(clean);
 
