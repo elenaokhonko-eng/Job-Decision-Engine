@@ -13,16 +13,18 @@
  *     npm run import:linkedin-saved -- <path/to/linkedin_saved_jobs.json>
  *
  *   1. It walks the pages of your saved-jobs list (scrolling each page so every
- *      card renders, then clicking the list's own "Next" button) and reads each
- *      card's title, company and location as rendered.
- *   2. It opens each saved job's page from this same tab, one at a time, about
- *      2 seconds apart (randomized), and reads the rendered job description -
- *      the same page you would see by clicking the job.
+ *      card renders, then clicking the list's "Next" or next page-number button)
+ *      and reads each card's title, company and location as rendered.
+ *   2. It loads each saved job's public page (the page a signed-out visitor sees
+ *      at the same /jobs/view/<id>/ address, requested without your session),
+ *      one at a time, about 2 seconds apart (randomized), and reads the job
+ *      description, title, company and location from it.
  *   3. It downloads linkedin_saved_jobs.json.
  *
  * WHAT IT IS NOT
  *   - It does not sign in, read or copy cookies or tokens, or use any LinkedIn API.
- *     Your browser sends its own session exactly as it does when you browse.
+ *     The saved-jobs list is read from the page you have open; job pages are
+ *     requested without your session.
  *   - It never unsaves, applies to, or changes anything.
  *   - Nothing in the repository runs it, schedules it, or drives a headless browser.
  *   - It stops at the first rate limit (HTTP 429), sign-in wall, checkpoint or
@@ -58,7 +60,7 @@
 (async () => {
   "use strict";
 
-  const STORAGE_KEY = "jde_linkedin_saved_export_v2";
+  const STORAGE_KEY = "jde_linkedin_saved_export_v3";
   const MAX_PAGES = 40;
   const PAGE_SETTLE_MS = 2000;
   const PAGE_CHANGE_POLL_MS = 250;
@@ -82,6 +84,9 @@
       "[aria-current='true']",
       "[aria-current='page']",
     ],
+    publicTitle: [".top-card-layout__title", ".topcard__title"],
+    publicCompany: [".topcard__org-name-link"],
+    publicLocation: [".topcard__flavor--bullet:not(.num-applicants__caption)"],
     description: [
       ".jobs-description-content",
       ".show-more-less-html__markup",
@@ -162,18 +167,44 @@
     return null;
   }
 
-  /** Next control of the list's own pagination only; a loose "next" text match elsewhere is ignored. */
-  function nextControl() {
+  const controlLabel = (element) => clean(element.getAttribute("aria-label") || element.innerText).toLowerCase();
+
+  /** Buttons and links outside the job cards; a wrong click is caught by waitForPageChange. */
+  function pageControls() {
+    return [...document.querySelectorAll("button, a")].filter((element) => !element.closest(SELECTORS.jobLink) && !element.querySelector(SELECTORS.jobLink));
+  }
+
+  /**
+   * The control that shows the next page of saved jobs: the list's pagination "Next" button,
+   * else any "Next" button, else the next page-number button beside the current page number,
+   * else a "Show more" button that appends cards.
+   */
+  function nextControl(page) {
     const root = paginationRoot();
-    if (!root) return null;
-    for (const selector of SELECTORS.nextButton) {
-      const element = root.querySelector(selector) || document.querySelector(selector);
-      if (element) return element;
+    if (root) {
+      for (const selector of SELECTORS.nextButton) {
+        const element = root.querySelector(selector) || document.querySelector(selector);
+        if (element) return element;
+      }
+      const inRoot = [...root.querySelectorAll("button, a")].find((element) => /^(next|next page)$/.test(controlLabel(element)));
+      if (inRoot) return inRoot;
     }
-    return [...root.querySelectorAll("button, a")].find((element) => {
-      const label = clean(element.getAttribute("aria-label") || element.innerText).toLowerCase();
-      return label === "next" || label === "next page";
-    }) || null;
+    const controls = pageControls();
+    const nextNumber = String(page + 1);
+    const besideCurrentPage = (element) => {
+      const group = element.parentElement && element.parentElement.parentElement;
+      return Boolean(group) && [...group.querySelectorAll("button, a, span")].some((other) => other !== element && clean(other.innerText) === String(page));
+    };
+    return controls.find((element) => /^(next|next page|view next page|go to next page)$/.test(controlLabel(element)))
+      || controls.find((element) => controlLabel(element) === `page ${nextNumber}`)
+      || controls.find((element) => clean(element.innerText) === nextNumber && besideCurrentPage(element))
+      || controls.find((element) => /^(show|see|load) more( jobs| results)?$/.test(controlLabel(element)))
+      || null;
+  }
+
+  function logControls() {
+    const labels = [...new Set(pageControls().map(controlLabel).filter((label) => label && label.length <= 40))];
+    console.warn(`[jde] No next-page control was found. If more saved jobs exist, send these control labels to whoever maintains the snippet: ${labels.slice(0, 80).join(" | ")}`);
   }
 
   function isDisabled(element) {
@@ -222,16 +253,41 @@
     return [...new Set([...document.querySelectorAll(SELECTORS.jobLink)].map((link) => jobIdFromHref(link.href)).filter(Boolean))];
   }
 
+  /**
+   * Job Tracker cards render as one text run, e.g.
+   * "<title> (Verified job)<title> <company> · <location> (Hybrid)Posted 2w ago".
+   */
+  function parseTrackerCard(text) {
+    const value = clean(text);
+    const dot = value.indexOf("·");
+    if (dot < 0) return { title: value || null, company: null, location: null };
+    const left = value.slice(0, dot).trim();
+    const right = value.slice(dot + 1).trim();
+    const place = clean(right.split(/(?:Re)?[Pp]osted\b|Promoted\b|Actively\b|Applied\b|Viewed\b|\d+\+? applicants?\b/)[0]);
+    const verified = left.match(/^(.*?)\s*\(Verified job\)\s*(.*)$/);
+    if (!verified) return { title: left || null, company: null, location: place || null };
+    const title = clean(verified[1]);
+    const rest = clean(verified[2]);
+    const company = rest.startsWith(title) ? clean(rest.slice(title.length)) : null;
+    return { title: title || null, company: company || null, location: place || null };
+  }
+
   function readCards(state) {
     let added = 0;
     for (const link of document.querySelectorAll(SELECTORS.jobLink)) {
       const id = jobIdFromHref(link.href);
       if (!id || state.jobs[id]) continue;
-      const title = firstLine(link.innerText);
+      let title = firstLine(link.innerText);
       if (!title) continue; // e.g. a logo link; the titled link for the same job follows.
       const card = link.closest(SELECTORS.card);
       let company = textOf(card, SELECTORS.company);
       let place = textOf(card, SELECTORS.location);
+      if (!company && !place && title.includes("·")) {
+        const parsed = parseTrackerCard(title);
+        title = parsed.title || title;
+        company = parsed.company;
+        place = parsed.location;
+      }
       if (company && !place && company.includes("·")) {
         const [left, right] = company.split("·").map(clean);
         company = left || null;
@@ -277,8 +333,12 @@
       state.pagesVisited += 1;
       saveState(state);
       console.log(`[jde] Page ${activePageNumber() ?? page}: ${added} new saved job(s), ${state.order.length} total.`);
-      const next = nextControl();
-      if (!next || isDisabled(next)) return;
+      const next = nextControl(activePageNumber() ?? page);
+      if (!next) {
+        logControls();
+        return;
+      }
+      if (isDisabled(next)) return;
       const ids = pageJobIds();
       const activePage = activePageNumber();
       next.click();
@@ -295,8 +355,27 @@
     return null;
   }
 
-  function descriptionFrom(html) {
-    const doc = new DOMParser().parseFromString(html, "text/html");
+  /**
+   * Parse fetched HTML outside the page's Trusted Types policy: LinkedIn's default policy
+   * sanitizes and logs every string handed to DOMParser, so the text is parsed by
+   * XMLHttpRequest from a same-origin blob URL instead (DOMParser only if that fails).
+   */
+  function parseHtml(html) {
+    const blobUrl = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.responseType = "document";
+      xhr.onload = () => resolve(xhr.response);
+      xhr.onerror = () => resolve(null);
+      xhr.open("GET", blobUrl);
+      xhr.send();
+    }).then((doc) => {
+      URL.revokeObjectURL(blobUrl);
+      return doc || new DOMParser().parseFromString(html, "text/html");
+    });
+  }
+
+  function descriptionFrom(doc) {
     for (const selector of SELECTORS.description) {
       const element = doc.querySelector(selector);
       const text = element && (element.textContent || "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -313,7 +392,8 @@
       let response;
       let html = "";
       try {
-        response = await fetch(job.url, { credentials: "include", headers: { accept: "text/html" } });
+        // The signed-in job page renders its description from script; the public page has it as HTML.
+        response = await fetch(job.url, { credentials: "omit", headers: { accept: "text/html" } });
         if (response.status === 429) {
           throw new StopError(`LinkedIn rate limited the request (HTTP 429) at job ${job.linkedinJobId}; ${pending.length - index} description(s) not fetched. Wait, then run: await jdeLinkedInExport.resume()`);
         }
@@ -335,9 +415,13 @@
         job.descriptionStatus = "FETCH_FAILED";
         job.description = null;
       } else {
-        const description = descriptionFrom(html);
+        const doc = await parseHtml(html);
+        const description = descriptionFrom(doc);
         job.description = description;
         job.descriptionStatus = description ? "OK" : "MISSING";
+        job.title = textOf(doc, SELECTORS.publicTitle) || job.title;
+        job.company = textOf(doc, SELECTORS.publicCompany) || job.company;
+        job.location = job.location || textOf(doc, SELECTORS.publicLocation);
       }
       job.exportedAt = new Date().toISOString();
       saveState(state);

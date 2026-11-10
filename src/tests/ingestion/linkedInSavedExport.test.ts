@@ -259,4 +259,25 @@ describe("LinkedIn saved-jobs source registration and browser snippet", () => {
     const schemaKeys = Object.keys(LinkedInSavedJobItemSchema.shape).filter((key) => !["salary", "postedAt"].includes(key)).sort();
     expect(keys).toEqual(schemaKeys);
   });
+
+  it("splits a Job Tracker card's single text run into title, company and location", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "scripts", "linkedin", "export_saved_jobs.console.js"), "utf8");
+    const body = source.match(/function parseTrackerCard\(text\) \{[\s\S]*?\n {2}\}\n/)?.[0] ?? "";
+    const clean = (value: string) => (value || "").replace(/\s+/g, " ").trim();
+    const parseTrackerCard = new Function("clean", `${body}; return parseTrackerCard;`)(clean);
+
+    expect(parseTrackerCard("Data Engineer (Verified job)Data Engineer Example Co · Singapore (Hybrid)Posted 2w ago"))
+      .toEqual({ title: "Data Engineer", company: "Example Co", location: "Singapore (Hybrid)" });
+    expect(parseTrackerCard("Platform EngineerExample Co · Singapore (Remote)Reposted 3w ago"))
+      .toEqual({ title: "Platform EngineerExample Co", company: null, location: "Singapore (Remote)" });
+    expect(parseTrackerCard("Analyst")).toEqual({ title: "Analyst", company: null, location: null });
+  });
+
+  it("reads descriptions from the public job page, requested without the session", () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), "scripts", "linkedin", "export_saved_jobs.console.js"), "utf8");
+    expect(source).toMatch(/fetch\(job\.url, \{ credentials: "omit"/);
+    expect(source).not.toMatch(/credentials: "include"/);
+    expect(source).toMatch(/\.show-more-less-html__markup/);
+    expect(source).toMatch(/xhr\.responseType = "document"/);
+  });
 });
