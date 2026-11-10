@@ -289,9 +289,11 @@ describe("LinkedIn saved-jobs source registration and browser snippet", () => {
     expect("Applied · 261".match(header)).toBeNull();
   });
 
-  it("reads descriptions from the public job page, requested without the session", () => {
+  it("reads descriptions from the guest posting page, requested without the session", () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), "scripts", "linkedin", "export_saved_jobs.console.js"), "utf8");
-    expect(source).toMatch(/fetch\(job\.url, \{ credentials: "omit"/);
+    expect(source).toMatch(/fetch\(guestPostingUrl\(job\.linkedinJobId\), \{ credentials: "omit"/);
+    expect(source).toMatch(/\/jobs-guest\/jobs\/api\/jobPosting\/\$\{id\}/);
+    expect(source).toMatch(/LinkedIn answered HTTP \$\{response\.status\}/);
     expect(source).not.toMatch(/credentials: "include"/);
     expect(source).toMatch(/\.show-more-less-html__markup/);
     expect(source).toMatch(/xhr\.responseType = "document"/);
