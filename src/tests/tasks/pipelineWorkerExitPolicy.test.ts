@@ -12,6 +12,7 @@ const healthyInput = {
   retryWaitCount: 0,
   oldestRetryWaitAgeSeconds: 0,
   activePendingCount: 0,
+  activeDuePendingCount: 0,
   oldestActivePendingAgeSeconds: 0,
   failOnRetryWait: false,
   maxRetryWaitCount: 5,
@@ -153,6 +154,32 @@ describe("pipeline worker exit policy", () => {
       ...healthyInput,
       claimedThisRun: 0,
       activePendingCount: 1,
+      activeDuePendingCount: 1,
     })).toThrow("No forward progress");
+  });
+
+  it("does not report missing progress when every remaining PENDING task is scheduled for later", () => {
+    // Nothing was due, so a run that claimed nothing has not stalled.
+    expect(() => enforcePipelineWorkerExitPolicy({
+      ...healthyInput,
+      claimedThisRun: 0,
+      completedThisRun: 0,
+      exitReason: "QUEUE_DRAINED",
+      activePendingCountBefore: 4,
+      activePendingCount: 4,
+      activeDuePendingCount: 0,
+    })).not.toThrow();
+  });
+
+  it("still fails when due work stays unclaimed next to scheduled work", () => {
+    expect(() => enforcePipelineWorkerExitPolicy({
+      ...healthyInput,
+      claimedThisRun: 0,
+      completedThisRun: 0,
+      exitReason: "QUEUE_DRAINED",
+      activePendingCountBefore: 4,
+      activePendingCount: 4,
+      activeDuePendingCount: 1,
+    })).toThrow("No forward progress: 1 due PENDING task(s) remain claimable after the worker run. 3 more are scheduled for later.");
   });
 });
