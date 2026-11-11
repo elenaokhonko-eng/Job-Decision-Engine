@@ -54,6 +54,8 @@ interface TaskHealthRow {
   oldest_age_seconds: number | null;
   /** Seconds since the longest-held task entered this status (v_pipeline_task_status_age). */
   oldest_status_age_seconds?: number | null;
+  /** PENDING only: seconds since the longest-waiting due task became claimable (v_pipeline_task_due_age). */
+  oldest_due_age_seconds?: number | null;
   actionable_dead_letter_count?: number;
   stale_historical_dead_letter_count?: number;
 }
@@ -208,7 +210,11 @@ export function summarizeTaskStages(rows: readonly TaskHealthRow[], maxPendingAg
     }
     const oldestAgeSeconds = Number(row.oldest_age_seconds ?? 0);
     if (row.status === "PENDING") {
-      summary.oldest_age_seconds = Math.max(summary.oldest_age_seconds, oldestAgeSeconds);
+      // Scheduled future work cannot be stalled yet; age counts only due tasks, from when they became due.
+      summary.oldest_age_seconds = Math.max(
+        summary.oldest_age_seconds,
+        row.oldest_due_age_seconds === undefined ? oldestAgeSeconds : Number(row.oldest_due_age_seconds ?? 0),
+      );
     }
     if (row.status === "RETRY_WAIT") {
       // Retry age counts from entry into RETRY_WAIT, not from task creation.
@@ -361,9 +367,11 @@ async function run(): Promise<void> {
     ] = await Promise.all([
       pool.query<TaskHealthRow>(
         `SELECT health.task_type, health.status, health.task_count, health.oldest_age_seconds,
-                status_age.oldest_status_age_seconds
+                status_age.oldest_status_age_seconds, due_age.oldest_due_age_seconds
          FROM v_pipeline_task_queue_health AS health
          LEFT JOIN v_pipeline_task_status_age AS status_age
+           USING (workspace_id, task_type, status)
+         LEFT JOIN v_pipeline_task_due_age AS due_age
            USING (workspace_id, task_type, status)
          WHERE health.workspace_id = $1
            AND health.status IN ('PENDING', 'RETRY_WAIT', 'BLOCKED_DEPENDENCY', 'DEAD_LETTER')

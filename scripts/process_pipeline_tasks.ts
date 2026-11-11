@@ -78,6 +78,8 @@ interface QueueHealthRow {
   oldest_age_seconds: number | null;
   /** Seconds since the longest-held task entered its current status (updated_at). */
   oldest_status_age_seconds: number | null;
+  /** PENDING only: seconds since the longest-waiting due task became claimable; null when none is due. */
+  oldest_due_age_seconds: number | null;
 }
 
 /**
@@ -89,6 +91,16 @@ export function oldestStatusAgeSeconds(rows: readonly QueueHealthRow[], status: 
   return rows
     .filter((row) => row.status === status)
     .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_status_age_seconds ?? 0)), 0);
+}
+
+/**
+ * Pending age for the SLO counts only due work, from the moment it became claimable: a task
+ * scheduled for later (available_at in the future) cannot be stalled yet.
+ */
+export function oldestDuePendingAgeSeconds(rows: readonly QueueHealthRow[]): number {
+  return rows
+    .filter((row) => row.status === "PENDING")
+    .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_due_age_seconds ?? 0)), 0);
 }
 
 interface QueueHealth {
@@ -189,7 +201,9 @@ async function readQueueHealth(
                 task.status,
                 COUNT(*)::INTEGER AS task_count,
                 EXTRACT(EPOCH FROM NOW() - MIN(task.created_at))::INTEGER AS oldest_age_seconds,
-                EXTRACT(EPOCH FROM NOW() - MIN(task.updated_at))::INTEGER AS oldest_status_age_seconds
+                EXTRACT(EPOCH FROM NOW() - MIN(task.updated_at))::INTEGER AS oldest_status_age_seconds,
+                EXTRACT(EPOCH FROM NOW() - MIN(GREATEST(task.created_at, task.available_at))
+                  FILTER (WHERE task.status = 'PENDING' AND task.available_at <= NOW()))::INTEGER AS oldest_due_age_seconds
          FROM pipeline_tasks AS task
          WHERE task.workspace_id = $1
            AND task.task_type = ANY($2::text[])
@@ -245,9 +259,6 @@ async function readQueueHealth(
       const byStatus = (status: string) => queueResult.rows
         .filter((row) => row.status === status)
         .reduce((total, row) => total + Number(row.task_count), 0);
-      const oldestAge = (status: string) => queueResult.rows
-        .filter((row) => row.status === status)
-        .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
 
       return {
         pending: byStatus("PENDING"),
@@ -256,7 +267,7 @@ async function readQueueHealth(
         deadLetter: actionableCurrentDeadLetter + staleHistoricalDeadLetter,
         actionableCurrentDeadLetter,
         staleHistoricalDeadLetter,
-        oldestPendingAgeSeconds: oldestAge("PENDING"),
+        oldestPendingAgeSeconds: oldestDuePendingAgeSeconds(queueResult.rows),
         oldestRetryWaitAgeSeconds: oldestStatusAgeSeconds(queueResult.rows, "RETRY_WAIT"),
         byType: queueResult.rows,
       };
@@ -264,9 +275,11 @@ async function readQueueHealth(
 
     const queueResult = await client.query<QueueHealthRow>(
       `SELECT health.task_type, health.status, health.task_count, health.oldest_age_seconds,
-              status_age.oldest_status_age_seconds
+              status_age.oldest_status_age_seconds, due_age.oldest_due_age_seconds
        FROM v_pipeline_task_queue_health AS health
        LEFT JOIN v_pipeline_task_status_age AS status_age
+         USING (workspace_id, task_type, status)
+       LEFT JOIN v_pipeline_task_due_age AS due_age
          USING (workspace_id, task_type, status)
        WHERE health.workspace_id = $1
        ORDER BY health.task_type, health.status`,
@@ -284,9 +297,6 @@ async function readQueueHealth(
     const byStatus = (status: string) => queueResult.rows
       .filter((row) => row.status === status)
       .reduce((total, row) => total + Number(row.task_count), 0);
-    const oldestAge = (status: string) => queueResult.rows
-      .filter((row) => row.status === status)
-      .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
 
     return {
       pending: byStatus("PENDING"),
@@ -295,7 +305,7 @@ async function readQueueHealth(
       deadLetter: actionableCurrentDeadLetter + staleHistoricalDeadLetter,
       actionableCurrentDeadLetter,
       staleHistoricalDeadLetter,
-      oldestPendingAgeSeconds: oldestAge("PENDING"),
+      oldestPendingAgeSeconds: oldestDuePendingAgeSeconds(queueResult.rows),
       oldestRetryWaitAgeSeconds: oldestStatusAgeSeconds(queueResult.rows, "RETRY_WAIT"),
       byType: queueResult.rows,
     };
@@ -327,13 +337,14 @@ async function readOldestPendingTask(
       `SELECT task.id::text AS id,
               task.task_type,
               task.created_at,
-              EXTRACT(EPOCH FROM NOW() - task.created_at)::INTEGER AS age_seconds
+              EXTRACT(EPOCH FROM NOW() - GREATEST(task.created_at, task.available_at))::INTEGER AS age_seconds
        FROM pipeline_tasks AS task
        WHERE task.workspace_id = $1
          AND task.status = 'PENDING'
+         AND task.available_at <= NOW()
          AND task.task_type = ANY($2::text[])
          ${targetClause}
-       ORDER BY task.created_at ASC, task.id ASC
+       ORDER BY GREATEST(task.created_at, task.available_at) ASC, task.id ASC
        LIMIT 1`,
       params,
     );
@@ -511,9 +522,7 @@ export async function processPipelineTasks(): Promise<void> {
     const activePendingBefore = activeQueueRowsBefore
       .filter((row) => row.status === "PENDING")
       .reduce((total, row) => total + Number(row.task_count), 0);
-    const oldestActivePendingAgeBefore = activeQueueRowsBefore
-      .filter((row) => row.status === "PENDING")
-      .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+    const oldestActivePendingAgeBefore = oldestDuePendingAgeSeconds(activeQueueRowsBefore);
     reconciliationReport.activePendingBefore = activePendingBefore;
     reconciliationReport.oldestActivePendingAgeSecondsBefore = oldestActivePendingAgeBefore;
     const summary = await runPipelineStageTaskWorker(pool, {
@@ -572,9 +581,7 @@ export async function processPipelineTasks(): Promise<void> {
     const activePending = activeQueueRows
       .filter((row) => row.status === "PENDING")
       .reduce((total, row) => total + Number(row.task_count), 0);
-    const oldestActivePendingAgeSeconds = activeQueueRows
-      .filter((row) => row.status === "PENDING")
-      .reduce((oldest, row) => Math.max(oldest, Number(row.oldest_age_seconds ?? 0)), 0);
+    const oldestActivePendingAgeSeconds = oldestDuePendingAgeSeconds(activeQueueRows);
     const oldestPendingTask = await readOldestPendingTask(
       pool,
       context.workspaceId,
