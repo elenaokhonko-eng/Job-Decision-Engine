@@ -36,6 +36,9 @@ prototypes:
 
 routing:
   minimum_domain_score: 0.60
+  # At least two distinct technology/data/AI phrases, so one incidental word cannot route
+  # a construction, events or retail role here.
+  minimum_domain_signals: 2
   minimum_function_score: 0.60
   minimum_semantic_score: 0.35
   secondary_lane_threshold: 0.30

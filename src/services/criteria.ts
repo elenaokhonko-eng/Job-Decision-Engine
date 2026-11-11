@@ -18,6 +18,7 @@ import {
   type WorkabilityPolicy,
 } from "../pipeline/workabilityPolicy.js";
 import { stripHtmlToText } from "../security/sanitize.js";
+import type { TargetLaneKey } from "../policy/laneIntentContracts.js";
 
 /**
  * Custom weights and criteria configuration file for the Job Decision Engine.
@@ -1335,7 +1336,8 @@ function getPendingVerificationCodes(reasonCode?: string): string[] {
   return ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"];
 }
 
-export const MULTI_LANE_SCORECARDS = {
+// One entry per lane in config/lanes/registry.yml; the AI evaluation prompts list every lane from here.
+export const MULTI_LANE_SCORECARDS: Readonly<Record<TargetLaneKey, { description: string; criteria: string }>> = {
   HEALTH_BIO_PHARMA: {
     description: "Life sciences, health and scientific ML",
     criteria: "Requires evidence of pharma, bioinformatics, biotech, or medical research domain AND a substantive AI/ML/data engineering function."
@@ -1351,6 +1353,22 @@ export const MULTI_LANE_SCORECARDS = {
   CORE_AI_DATA: {
     description: "General AI/data platforms and ML architecture",
     criteria: "General lane. Requires evidence of strong AI/Data platforms, ML architecture, or agentic workflows."
+  },
+  SOCIAL_IMPACT_MULTILATERAL: {
+    description: "Multilateral, public-sector and social-impact technology",
+    criteria: "Requires a multilateral, government, non-profit, climate or digital-public-infrastructure context AND a substantive technical, data or AI function."
+  },
+  UNIVERSITY_AI_RESEARCH: {
+    description: "University and research-institute AI research",
+    criteria: "Requires an academic institution, research institute or university laboratory context AND AI, machine learning or research engineering work."
+  },
+  TECHNICAL_PRODUCT_TRANSFORMATION: {
+    description: "Technical product, programme and transformation leadership",
+    criteria: "Requires a product management or ownership, technical programme/project delivery, transformation leadership or product policy function AND a technology, data or AI component. Sector membership alone is insufficient."
+  },
+  INVESTIGATIONS_ENFORCEMENT: {
+    description: "Investigations, enforcement and forensic roles",
+    criteria: "Requires an investigation, enforcement, forensic or fraud/financial-crime investigation function in a regulatory, statutory or compliance context."
   }
 };
 

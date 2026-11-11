@@ -33,7 +33,9 @@ dotenv.config({ path: ".env.local" });
 
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
-const LANE_ROUTER_RULE_VERSION = "lane_router_v2.3.2";
+// v2.4.0: routeLaneCandidates, bare-heading boilerplate end, 12k scope window, boilerplate
+// phrase stripping, product/transformation and investigation title families.
+const LANE_ROUTER_RULE_VERSION = "lane_router_v2.4.0";
 
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
@@ -64,12 +66,15 @@ function applyNegativeExclusion(description: string, laneDef: LaneDefinition): b
   return false;
 }
 export function containsConcept(text: string, concept: string): boolean {
-  return conceptVariants(concept).some((variant) => {
-    const normalized = variant.toLowerCase().replace(/_/g, " ").trim();
-    if (!normalized) return false;
-    const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-    return new RegExp(`\\b${escaped}\\b`, "i").test(text);
-  });
+  return conceptVariants(concept).some((variant) => containsPhrase(text, variant));
+}
+
+/** Whole-word, case-insensitive match of one phrase (no alias expansion). */
+function containsPhrase(text: string, phrase: string): boolean {
+  const normalized = phrase.toLowerCase().replace(/_/g, " ").trim();
+  if (!normalized) return false;
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
 }
 
 const CONCEPT_ALIASES: Record<string, string[]> = {
@@ -630,18 +635,41 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "digital platforms",
     "digital services",
     "digital government",
+    "digital channels",
     "govtech",
-    "software",
-    "saas",
-    "api",
-    "apis",
-    "cloud",
-    "agile",
-    "automation",
+    // Multi-word technology phrases only: bare "software", "agile", "api" or "automation"
+    // also appear in construction, events and retail roles.
+    "software development",
+    "software delivery",
+    "software products",
+    "software engineers",
+    "software engineering",
+    "ship software",
+    "saas platform",
+    "saas products",
+    "api platform",
+    "apis and integrations",
+    "cloud migration",
+    "cloud platforms",
+    "cloud-native",
+    "agile delivery",
+    "agile software",
+    "scrum teams",
+    "intelligent automation",
+    "process automation platform",
     "technology roadmap",
-    "product roadmap",
-    "engineers",
+    "technical roadmap",
     "engineering teams",
+    "engineering team",
+    "engineers and designers",
+    "machine learning engineers",
+    "data engineers",
+    "data scientists",
+    "data pipelines",
+    "case-management platform",
+    "solution architects",
+    "data center",
+    "data centre",
   ],
   "investigation": [
     "investigation",
@@ -888,9 +916,30 @@ export function hasRequiredInstitutionalContext(laneKey: string, text: string): 
   return true;
 }
 
-function laneDomainScopeScore(description: string, laneKey: string, concepts: string[] | undefined): number {
+/**
+ * Distinct domain phrases found in the text. A phrase contained in another found phrase
+ * ("cloud" in "cloud platform") is not counted separately.
+ */
+export function matchedDomainSignals(description: string, concepts: string[] | undefined): string[] {
+  const found = new Set<string>();
+  for (const concept of concepts ?? []) {
+    for (const variant of conceptVariants(concept)) {
+      if (containsPhrase(description, variant)) found.add(variant);
+    }
+  }
+  const signals = [...found];
+  return signals.filter((signal) => !signals.some((other) => other !== signal && other.includes(signal))).sort();
+}
+
+function laneDomainScopeScore(
+  description: string,
+  laneKey: string,
+  concepts: string[] | undefined,
+  minimumSignals = 1
+): number {
   if (!hasRequiredInstitutionalContext(laneKey, description)) return 0;
-  return conceptScopeScore(description, concepts);
+  if (minimumSignals <= 1) return conceptScopeScore(description, concepts);
+  return matchedDomainSignals(description, concepts).length >= minimumSignals ? 1 : 0;
 }
 
 type LaneCandidateEvaluation = {
@@ -1131,7 +1180,12 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
     );
     lanePreferenceAdjustments[laneKey] = lanePreference.tieBreakAdjustment;
     lanePreferenceEvidence[laneKey] = lanePreference.evidence;
-    domainScoreMap[laneKey] = laneDomainScopeScore(scopeText, laneKey, laneDef.included_domain_concepts);
+    domainScoreMap[laneKey] = laneDomainScopeScore(
+      scopeText,
+      laneKey,
+      laneDef.included_domain_concepts,
+      laneDef.minimum_domain_signals
+    );
     functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, title)
       ? 0
       : conceptScopeScore(scopeText, laneDef.required_function_concepts);

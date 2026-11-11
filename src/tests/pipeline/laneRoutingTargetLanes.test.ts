@@ -11,6 +11,7 @@ import {
   hasNonTechnicalRoleFamily,
   hasProductTransformationFunction,
   loadLanesConfig,
+  matchedDomainSignals,
   routeLaneCandidates,
   stripEmployerBoilerplatePhrases,
 } from "../../pipeline/laneRouter.js";
@@ -48,18 +49,18 @@ interface RoutingFixture {
   expected: readonly string[];
 }
 
-const GOVTECH_ABOUT = "About Us\nWe build digital government services and platforms for public agencies.\n";
+const PUBLIC_SECTOR_ABOUT = "About Us\nWe build digital government services and platforms for public agencies.\n";
 
 const TECHNICAL_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
   {
-    title: "Lead Product Manager (AGC)",
-    description: `${GOVTECH_ABOUT}What You Will Do\n- Own the product roadmap for a case-management platform used by public prosecutors.\n- Lead discovery with officers and work with engineers and designers to ship software every sprint.\n- Define success metrics and prioritise the backlog with agile delivery teams.`,
+    title: "Lead Product Manager, Legal Platforms",
+    description: `${PUBLIC_SECTOR_ABOUT}What You Will Do\n- Own the product roadmap for a case-management platform used by public prosecutors.\n- Lead discovery with officers and work with engineers and designers to ship software every sprint.\n- Define success metrics and prioritise the backlog with agile delivery teams.`,
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
   {
-    title: "Lead Product Manager, Judiciary",
-    description: `${GOVTECH_ABOUT}The Role\n- Lead a product team building digital court services.\n- Shape the product roadmap with engineers, designers and court administrators.\n- Use data to improve SaaS and in-house digital products.`,
+    title: "Lead Product Manager, Courts Platform",
+    description: `${PUBLIC_SECTOR_ABOUT}The Role\n- Lead a product team building digital court services.\n- Shape the product roadmap with engineering teams, designers and court administrators.\n- Use data to improve SaaS and in-house digital products.`,
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
@@ -71,7 +72,7 @@ const TECHNICAL_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
   },
   {
     title: "Product Manager (ESG)",
-    description: "Own the roadmap for an ESG reporting platform. Work with engineers on data pipelines, APIs and automation for sustainability disclosures.",
+    description: "Own the roadmap for an ESG reporting platform. Work with engineers on data pipelines and cloud-native APIs for sustainability disclosures.",
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
@@ -101,7 +102,7 @@ const TECHNICAL_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
   },
   {
     title: "Corporate Transformation Director",
-    description: "Lead the corporate transformation portfolio for an insurer: digital transformation, automation of operations and data-driven decision making across business units.",
+    description: "Lead the corporate transformation portfolio for an insurer: digital transformation, cloud migration and data-driven decision making across business units.",
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
@@ -119,7 +120,7 @@ const TECHNICAL_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
   },
   {
     title: "Sr. Technical Program Manager",
-    description: "Drive cross-functional technical programs across infrastructure and machine learning teams. Coordinate engineers, manage dependencies and land platform launches.",
+    description: "Drive cross-functional technical programs across infrastructure and machine learning teams. Coordinate software engineering and data center teams, manage dependencies and land platform launches.",
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
@@ -221,6 +222,48 @@ const OUT_OF_SCOPE_FIXTURES: readonly RoutingFixture[] = [
     expected: ["UNCLASSIFIED"],
   },
   {
+    title: "Project Manager",
+    description: "Deliver a mid-rise residential construction project: site programme, subcontractors and budget. Use scheduling software, run agile stand-ups with site teams and track automation of daily reports.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Programme Manager, Events",
+    description: "Run the hotel events programme: weddings, conferences and banqueting. Manage booking software and automation tools for confirmations, and coordinate venue and catering teams.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Product Owner, Private Label Apparel",
+    description: "Own the private-label apparel range: trend research, supplier sampling, pricing and in-store launches. Work with the API team occasionally on product data feeds for the online store.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Campaign Manager, Marketing",
+    description: "Plan and run multichannel campaigns, manage agencies and budgets, and use marketing automation software to report performance to the product team.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Facilities Project Manager",
+    description: "Manage office fit-outs and building maintenance projects, vendors and health-and-safety compliance. Oversee building automation systems and facilities software upgrades.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "HR Transformation Lead",
+    description: "Lead the HR transformation programme: operating model redesign, HRIS software rollout, agile ways of working and automation of payroll processes.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Transformation Manager, Retail Operations",
+    description: "Lead store operations transformation: layout changes, staffing models and supplier processes, with occasional software and automation pilots.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
     title: "Store Loss Prevention Investigator",
     description: "Investigate shoplifting and fraud incidents in retail stores and support loss prevention programmes.",
     favouredLane: "INVESTIGATIONS_ENFORCEMENT",
@@ -291,7 +334,7 @@ describe("Target-lane registry contract", () => {
 describe("Lane title families", () => {
   it("approves product, programme and transformation titles only for the product lane family", () => {
     for (const title of [
-      "Lead Product Manager (AGC)",
+      "Lead Product Manager, Legal Platforms",
       "Product Policy Manager / Lead",
       "Securities Services Ops Transformation, Chief Product Owner",
       "Sr. Technical Program Manager",
@@ -326,6 +369,21 @@ describe("Lane title families", () => {
     expect(hasNonTechnicalRoleFamily("Technical Product Lead - AI Finance")).toBe(false);
     expect(hasNonTechnicalRoleFamily("Technical Product Lead - AI Finance App")).toBe(false);
     expect(hasNonTechnicalRoleFamily("Engineer, Finance Platform")).toBe(false);
+  });
+});
+
+describe("Technical product lane domain signals", () => {
+  const lane = config.lanes.TECHNICAL_PRODUCT_TRANSFORMATION;
+
+  it("needs two distinct technology, data or AI phrases", () => {
+    expect(lane.minimum_domain_signals).toBe(2);
+    expect(matchedDomainSignals("scheduling software, agile stand-ups, the api team and automation tools", lane.included_domain_concepts)).toEqual([]);
+    expect(matchedDomainSignals("cloud migration and data pipelines for the platform", lane.included_domain_concepts))
+      .toEqual(["cloud migration", "data pipelines"]);
+  });
+
+  it("does not count a phrase contained in a longer matched phrase twice", () => {
+    expect(matchedDomainSignals("we run cloud platforms", lane.included_domain_concepts)).toEqual(["cloud platforms"]);
   });
 });
 

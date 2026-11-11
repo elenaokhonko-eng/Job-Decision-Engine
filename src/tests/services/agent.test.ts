@@ -4,9 +4,12 @@ import {
   generateContentAudited,
   generateEmbeddingWithProviderAndModel,
   preflightModelRoutes,
+  PROMPT_LANE_KEYS,
+  promptLaneUnion,
   runAgent,
   type SingleEvaluationJobInput,
 } from '../../services/agent.js';
+import { TARGET_LANE_KEYS } from '../../policy/laneIntentContracts.js';
 
 const originalEnv = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
@@ -397,6 +400,27 @@ describe('evaluateSingleCanonicalJob output validation', () => {
     stubOpenAiEvaluationResponse({});
 
     await expect(evaluateSingleCanonicalJob(job)).rejects.toThrow(/canonical_job_id/);
+  });
+
+  it("lists every registry lane in the evaluation prompt and keeps the routed lane authoritative", async () => {
+    configureOpenAiOnlyEvaluation();
+    const fetchMock = stubOpenAiEvaluationResponse(validEvaluationPayload({
+      primary_lane: "INVESTIGATIONS_ENFORCEMENT",
+      recommended_cv_version: "INVESTIGATIONS_ENFORCEMENT",
+    }));
+
+    await evaluateSingleCanonicalJob({ ...job, candidateLane: "INVESTIGATIONS_ENFORCEMENT" });
+
+    const prompt = JSON.stringify(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}")));
+    for (const laneKey of TARGET_LANE_KEYS) {
+      expect(prompt).toContain(laneKey);
+    }
+    expect(prompt).toContain(promptLaneUnion("null"));
+    expect(prompt).toContain(promptLaneUnion("None"));
+    expect(prompt).toContain("Pre-routed Candidate Lane: INVESTIGATIONS_ENFORCEMENT");
+    expect(prompt).toContain("your primary_lane is advisory only");
+    expect(prompt).not.toContain("CORE_AI_DATA | LEGAL_REGTECH | HEALTH_BIO_PHARMA | INVESTMENT_MARKETS_FINTECH | null");
+    expect([...PROMPT_LANE_KEYS].sort()).toEqual([...TARGET_LANE_KEYS].sort());
   });
 
   it('rejects evaluation output for the wrong job version', async () => {
