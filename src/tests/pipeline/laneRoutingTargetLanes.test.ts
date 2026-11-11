@@ -10,6 +10,7 @@ import {
   hasInvestigationFunction,
   hasNonTechnicalRoleFamily,
   hasProductTransformationFunction,
+  isRegulatorEmployer,
   legalFintechTieBreak,
   loadLanesConfig,
   matchedSector,
@@ -189,6 +190,14 @@ const SECTOR_TIE_BREAK_FIXTURES: readonly RoutingFixture[] = [
     title: "RegTech Engineer",
     description: "Join the regulatory authority's supervisory technology team. Build compliance automation and AML/KYC analytics that supervisors use to review banks, using Python data pipelines and software engineering practices.",
     expected: ["LEGAL_REGTECH"],
+  },
+  {
+    // AI work at a financial regulator without regtech/legal wording stays CORE_AI_DATA, even
+    // though the posting mentions banks and the embedding favours FINTECH.
+    title: "Deputy Director, AI Development",
+    description: "Join the financial regulator's technology division. Build the machine learning platform and LLM applications used across the authority, run MLOps pipelines and evaluate generative AI models; our work touches banks and financial institutions across the market.",
+    favouredLane: "INVESTMENT_MARKETS_FINTECH",
+    expected: ["CORE_AI_DATA"],
   },
 ];
 
@@ -473,6 +482,21 @@ describe("Sector rules", () => {
     expect(legalFintechTieBreak("Legal Engineer", "", "A legal AI platform for law firms.")).toBe("LEGAL_REGTECH");
     expect(legalFintechTieBreak("Technology Manager", "", "We are a digital bank and fintech.")).toBe("INVESTMENT_MARKETS_FINTECH");
     expect(legalFintechTieBreak("Compliance Engineer", "", "We build compliance software.")).toBeNull();
+  });
+
+  it("keeps a regulator's AI role out of FINTECH unless the title names banking or fintech", () => {
+    expect(isRegulatorEmployer("", "Join the financial regulator's technology division.")).toBe(true);
+    expect(isRegulatorEmployer("A Digital Bank", "We are a digital bank.")).toBe(false);
+    expect(isRegulatorEmployer("A Hedge Fund", "An asset manager regulated by the monetary authority.")).toBe(false);
+    const regulatorAi = SECTOR_TIE_BREAK_FIXTURES.find((f) => f.title === "Deputy Director, AI Development")!;
+    const result = route(regulatorAi.title, regulatorAi.description, regulatorAi.favouredLane);
+    expect(result.primaryLane).toBe("CORE_AI_DATA");
+    expect(result.laneEvidence).toContain("SECTOR_REGULATOR_EMPLOYER:CORE_AI_DATA_OVER_INVESTMENT_MARKETS_FINTECH");
+
+    const bankingTitle = route("AI Engineer, Banking Supervision Platforms", regulatorAi.description, "INVESTMENT_MARKETS_FINTECH");
+    expect(bankingTitle.primaryLane).toBe("INVESTMENT_MARKETS_FINTECH");
+    const investmentTitle = route("Lead Data Architect (Investment Management)", `${regulatorAi.description} Support portfolio management and asset management data.`, "INVESTMENT_MARKETS_FINTECH");
+    expect(investmentTitle.primaryLane).toBe("INVESTMENT_MARKETS_FINTECH");
   });
 
   it("records the tie-break and the matched sector as evidence", () => {

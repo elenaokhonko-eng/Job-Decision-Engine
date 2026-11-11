@@ -1066,6 +1066,18 @@ export function matchedSector(employerContext: string, sectorConcepts: string[] 
 const BANKING_FINTECH_CONTEXT = /\b(?:bank|banks|banking|neobank|fintech|digital\s+bank|financial\s+services|financial\s+institutions?|financial\s+products|financial\s+super\s*app|brokerage|stockbroking|payments|investing|savings|money\s+transfers?|e-money)\b/i;
 const LEGAL_REGULATORY_EMPLOYER = /\b(?:regulator|regulatory\s+(?:authority|body|agency)|monetary\s+authority|securities\s+commission|supervisory\s+authority|legal\s*tech|legal\s+technology|legal\s+ai|law\s+firms?|courts?|judiciary)\b/i;
 
+const REGULATOR_EMPLOYER = /\b(?:regulator|regulatory\s+(?:authority|body|agency)|monetary\s+authority|central\s+bank|securities\s+commission|(?:financial\s+)?supervisory\s+(?:authority|body|agency)|financial\s+conduct\s+authority|prudential\s+regulation\s+authority)\b/i;
+
+// "Regulated by the <regulator>" describes a regulated firm, not a regulator.
+const REGULATED_BY_PHRASE = /\b(?:regulated|licensed|authori[sz]ed|supervised|registered)\s+(?:by|with)\s+(?:the\s+)?[^.;]{0,80}/gi;
+// Investment and markets titles keep their FINTECH route at a regulator (e.g. reserve management).
+const INVESTMENT_MARKETS_TITLE = /\b(?:investment|investments|markets?|trading|portfolio|asset\s+management|wealth|reserves)\b/i;
+
+/** The employer is a financial regulator or supervisory body (company name or opening of the posting). */
+export function isRegulatorEmployer(companyName: string, employerIntro: string): boolean {
+  return REGULATOR_EMPLOYER.test(`${companyName} ${employerIntro}`.replace(REGULATED_BY_PHRASE, " "));
+}
+
 export type LegalFintechTieBreak = "INVESTMENT_MARKETS_FINTECH" | "LEGAL_REGTECH" | null;
 
 /**
@@ -1398,6 +1410,17 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
         qualifyingPrimary.splice(index, 1);
         laneEvidence.push(`SECTOR_TIE_BREAK:${sectorWinner}_OVER_${loser}`);
       }
+    }
+  }
+  // A regulator or supervisory body is not a fintech employer: unless the title itself names
+  // banking, fintech, investment or markets work, FINTECH never takes the job from
+  // CORE_AI_DATA or a qualifying LEGAL_REGTECH.
+  if (!BANKING_FINTECH_CONTEXT.test(title) && !INVESTMENT_MARKETS_TITLE.test(title)) {
+    const fintechIndex = qualifyingPrimary.findIndex((c) => c.laneKey === "INVESTMENT_MARKETS_FINTECH");
+    const keeper = qualifyingPrimary.find((c) => c.laneKey === "LEGAL_REGTECH" || c.laneKey === "CORE_AI_DATA");
+    if (fintechIndex >= 0 && keeper && isRegulatorEmployer(String(input.companyName ?? ""), employerIntro)) {
+      qualifyingPrimary.splice(fintechIndex, 1);
+      laneEvidence.push(`SECTOR_REGULATOR_EMPLOYER:${keeper.laneKey}_OVER_INVESTMENT_MARKETS_FINTECH`);
     }
   }
 
