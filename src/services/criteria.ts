@@ -879,7 +879,8 @@ function findEvidence(d: string, keywords: string[]): string[] {
   return quotes;
 }
 
-function findNonNegatedEvidence(d: string, keywords: string[]): string[] {
+/** Non-negated occurrences of the keywords, as the global gate reads them (also used by postingStatedFacts). */
+export function findNonNegatedEvidence(d: string, keywords: string[]): string[] {
   const quotes: string[] = [];
   for (const kw of keywords) {
     let startPos = 0;

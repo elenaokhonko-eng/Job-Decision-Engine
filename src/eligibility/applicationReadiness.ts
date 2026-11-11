@@ -45,6 +45,8 @@ export interface ApplicationReadinessFingerprintInput {
   readonly evidence_schema_version: string;
   readonly availability_evidence_hash: string | null;
   readonly availability_verification_revision?: string | null;
+  /** Identity of the employer-confirmed facts used; omitted from the hash when there are none. */
+  readonly confirmed_job_facts_hash?: string | null;
 }
 
 export function buildApplicationReadinessFingerprint(
@@ -73,6 +75,7 @@ export function buildApplicationReadinessFingerprint(
     evidence_schema_version: input.evidence_schema_version,
     availability_evidence_hash: input.availability_evidence_hash,
     availability_verification_revision: input.availability_verification_revision ?? null,
+    ...(input.confirmed_job_facts_hash ? { confirmed_job_facts_hash: input.confirmed_job_facts_hash } : {}),
   };
   return sha256Hex(stableStringify(normalized));
 }

@@ -11,15 +11,19 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
+  LINKEDIN_SAVED_AVAILABILITY_STATUSES,
   LINKEDIN_SAVED_DESCRIPTION_STATUSES,
   firstNonEmptyLine,
   isLegacyPlaceholderDescription,
 } from "./linkedInSavedExport.js";
+import { postingFactsPayload, type PostingFactsResult } from "./postingFacts.js";
 
 export const MCF_SAVED_SOURCE_NAME = "MCF_SAVED" as const;
 export const MCF_SAVED_PLUGIN_KEY = "mcf_saved" as const;
 export const MCF_SAVED_CONTENT_PROVENANCE = "MCF_SAVED_EXPORT" as const;
 export const MCF_SAVED_EXPORT_SCHEMA = "mcf_saved_export_v1" as const;
+/** How the export snippet reads posting facts: MCF's public job-details API, from the user's browser. */
+export const MCF_JOB_DETAILS_CHECK_METHOD = "MCF_JOB_DETAILS_API_USER_BROWSER" as const;
 /** Upper bound for one export file; a saved-jobs list is far smaller in practice. */
 export const MCF_SAVED_MAX_ITEMS = 2000;
 
@@ -96,6 +100,22 @@ export const McfSavedJobItemSchema = z.object({
     .refine((value) => MCF_JOB_UUID.test(value), "mcfJobUuid must be 32 hexadecimal characters"),
   exportedAt: optionalText("exportedAt", 100),
   sourcePage: optionalText("sourcePage", 2000),
+  /** MCF originalPostingDate; postedAt is the newer posting date when the job was reposted. */
+  originalPostedAt: optionalDate("originalPostedAt"),
+  /** OPEN / CLOSED from MCF's job status; UNKNOWN when it shows neither. */
+  availabilityStatus: z.enum(LINKEDIN_SAVED_AVAILABILITY_STATUSES, {
+    invalid_type_error: "availabilityStatus must be OPEN, CLOSED, UNKNOWN or null",
+  }).nullable().optional().transform((value) => value ?? null),
+  /** The status text it was read from, e.g. "MyCareersFuture job status: Open". */
+  availabilityEvidence: optionalText("availabilityEvidence", 300),
+  /** When the job details were read (ISO timestamp). */
+  postingCheckedAt: optionalText("postingCheckedAt", 100),
+  /**
+   * A later re-check (refresh()) that failed: when, and why (e.g. "HTTP 404").
+   * The facts above are then the earlier, successfully read ones with their own check time.
+   */
+  postingRecheckFailedAt: optionalText("postingRecheckFailedAt", 100),
+  postingRecheckFailure: optionalText("postingRecheckFailure", 300),
 }).strict();
 
 export type McfSavedJobItem = z.infer<typeof McfSavedJobItemSchema>;
@@ -119,6 +139,8 @@ export interface McfSavedJob {
   readonly employmentTypeRaw: McfEmploymentTypeRaw;
   readonly postedAt: string | null;
   readonly expiresAt: string | null;
+  /** Posting/repost/expiry dates and open/closed status as root payload facts; unknown facts are absent. */
+  readonly postingFacts: PostingFactsResult;
   /** Deterministic observation payload; its hash is the re-import idempotency key. */
   readonly rawPayload: Record<string, unknown>;
 }
@@ -241,10 +263,30 @@ export function mcfCompensationText(salary: McfSavedSalary | null): string | nul
   return `${salary.currency} ${amount} ${periodText}`;
 }
 
-function contentKey(job: Pick<McfSavedJob, "title" | "company" | "description" | "location" | "salary" | "employmentType" | "postedAt" | "expiresAt">): string {
+function contentKey(job: Pick<McfSavedJob, "title" | "company" | "description" | "location" | "salary" | "employmentType" | "postedAt" | "expiresAt" | "postingFacts">): string {
   return createHash("sha256")
-    .update(JSON.stringify([job.title, job.company, job.description, job.location, job.salary, job.employmentType, job.postedAt, job.expiresAt]), "utf8")
+    .update(JSON.stringify([job.title, job.company, job.description, job.location, job.salary, job.employmentType, job.postedAt, job.expiresAt, job.postingFacts.payload]), "utf8")
     .digest("hex");
+}
+
+/**
+ * Posting facts from MCF's job details. MCF shows absolute calendar dates (DAY
+ * precision). With originalPostedAt the original date is the publication date
+ * and a later postedAt is MCF's repost date; an older export without it keeps
+ * postedAt as the publication date MCF displayed. Status needs postingCheckedAt.
+ */
+export function mcfSavedPostingFacts(item: McfSavedJobItem, notAfter: string = new Date().toISOString()): PostingFactsResult {
+  const reposted = item.originalPostedAt !== null && item.postedAt !== null && item.postedAt !== item.originalPostedAt;
+  return postingFactsPayload({
+    postedAt: item.originalPostedAt ?? item.postedAt,
+    repostedAt: reposted ? item.postedAt : null,
+    expiresAt: item.expiresAt,
+    availabilityStatus: item.availabilityStatus,
+    availabilityEvidence: item.availabilityEvidence,
+    checkMethod: MCF_JOB_DETAILS_CHECK_METHOD,
+    checkedAt: item.postingCheckedAt,
+    notAfter,
+  });
 }
 
 function issueText(error: z.ZodError): string {
@@ -294,9 +336,20 @@ export function parseMcfSavedJobItem(value: unknown, index: number): McfSavedJob
   }
 
   const compensation = mcfCompensationText(item.salary);
+  if (item.availabilityStatus && item.availabilityStatus !== "UNKNOWN" && !item.postingCheckedAt) {
+    return `availabilityStatus ${item.availabilityStatus} needs postingCheckedAt (when the job details were read)`;
+  }
+  const postingFacts = mcfSavedPostingFacts(item);
+  const postingFactItemFields: Record<string, unknown> = {};
+  for (const key of ["originalPostedAt", "availabilityStatus", "availabilityEvidence", "postingCheckedAt", "postingRecheckFailedAt", "postingRecheckFailure"] as const) {
+    if (item[key] !== null && item[key] !== undefined) postingFactItemFields[key] = item[key];
+  }
   // exportedAt is left out of the hashed payload so re-exporting unchanged jobs
   // later deduplicates; the observation's retrieved_at records the import time.
+  // The exported dates are root facts (posted_at, source_expires_at), which the
+  // source-evidence builder reads; a posting check time is kept as new evidence.
   const rawPayload: Record<string, unknown> = {
+    ...postingFacts.payload,
     export_schema: MCF_SAVED_EXPORT_SCHEMA,
     content_provenance: MCF_SAVED_CONTENT_PROVENANCE,
     mcf_job_uuid: item.mcfJobUuid,
@@ -314,6 +367,7 @@ export function parseMcfSavedJobItem(value: unknown, index: number): McfSavedJob
       expiresAt: item.expiresAt,
       mcfJobUuid: item.mcfJobUuid,
       sourcePage: item.sourcePage,
+      ...postingFactItemFields,
     },
   };
   return {
@@ -330,6 +384,7 @@ export function parseMcfSavedJobItem(value: unknown, index: number): McfSavedJob
     employmentTypeRaw: mcfEmploymentTypeRaw(item.employmentType),
     postedAt: item.postedAt,
     expiresAt: item.expiresAt,
+    postingFacts,
     rawPayload,
   };
 }

@@ -1,0 +1,314 @@
+{
+  "$ref": "#/definitions/JobVerificationChecks",
+  "definitions": {
+    "JobVerificationChecks": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "job_verification_checks_v1"
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "canonical_job_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "job_version_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "gate_decision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "PASS",
+                "NEEDS_VERIFICATION",
+                "HARD_REJECT"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gate_rejection_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "gate_evidence_quotes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "gate_workability_facts": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": {}
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gate_decided_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "open_checks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "WORK_MODE",
+              "OFFICE_DAYS",
+              "TRAVEL_PCT",
+              "ON_CALL",
+              "EMPLOYMENT_TYPE",
+              "LOCATION"
+            ]
+          }
+        },
+        "confirmed_facts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "confirmed_fact_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "entry_kind": {
+                "type": "string",
+                "enum": [
+                  "CONFIRMATION",
+                  "WITHDRAWAL"
+                ]
+              },
+              "fact_type": {
+                "$ref": "#/definitions/JobVerificationChecks/properties/open_checks/items"
+              },
+              "fact_value": {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              "source_type": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "RECRUITER_EMAIL",
+                      "RECRUITER_CALL",
+                      "EMPLOYER_CAREERS_PAGE",
+                      "HIRING_MANAGER",
+                      "OTHER"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "source_note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "posting_assessment": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "FILLS_UNKNOWN",
+                      "MATCHES_POSTING",
+                      "CONFLICTS_WITH_POSTING"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "posting_evidence": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "enum": [
+                          "UNKNOWN",
+                          "STATED",
+                          "CONFLICTING"
+                        ]
+                      },
+                      "value": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "additionalProperties": {}
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "source": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "STRUCTURED_FIELD",
+                              "EXTRACTED_REQUIREMENT",
+                              "DESCRIPTION",
+                              "SOURCE_EVIDENCE"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "evidence": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "summary": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "value",
+                      "source",
+                      "evidence",
+                      "summary"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supersedes_fact_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "recorded_by_user_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "recorded_at": {
+                "$ref": "#/definitions/JobVerificationChecks/properties/gate_decided_at/anyOf/0"
+              }
+            },
+            "required": [
+              "confirmed_fact_id",
+              "entry_kind",
+              "fact_type",
+              "fact_value",
+              "source_type",
+              "source_note",
+              "source_url",
+              "posting_assessment",
+              "posting_evidence",
+              "supersedes_fact_id",
+              "recorded_by_user_id",
+              "recorded_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "confirmed_fact_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "fact_type": {
+                "$ref": "#/definitions/JobVerificationChecks/properties/open_checks/items"
+              },
+              "confirmed_value": {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              "confirmed_source_type": {
+                "$ref": "#/definitions/JobVerificationChecks/properties/confirmed_facts/items/properties/source_type/anyOf/0"
+              },
+              "posting_evidence": {
+                "$ref": "#/definitions/JobVerificationChecks/properties/confirmed_facts/items/properties/posting_evidence/anyOf/0"
+              }
+            },
+            "required": [
+              "confirmed_fact_id",
+              "fact_type",
+              "confirmed_value",
+              "confirmed_source_type",
+              "posting_evidence"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "confirmed_fact_history_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rerun_pending": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "workspace_id",
+        "canonical_job_id",
+        "job_version_id",
+        "gate_decision",
+        "gate_rejection_codes",
+        "gate_evidence_quotes",
+        "gate_workability_facts",
+        "gate_decided_at",
+        "open_checks",
+        "confirmed_facts",
+        "conflicts",
+        "confirmed_fact_history_count",
+        "rerun_pending"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

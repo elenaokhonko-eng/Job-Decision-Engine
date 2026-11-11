@@ -25,6 +25,12 @@ import {
   EmployerWatchlistPreferencesSchema,
   EmploymentStructurePreferencesSchema,
 } from './stage3Contracts.js';
+import {
+  APPROXIMATE_DATE_UNIT_MS,
+  isRepostFreshnessBasis,
+  parseFreshnessBasis,
+  type ApproximateDateUnit,
+} from '../contracts/postingFacts.js';
 
 // ============================================================================
 // 1. Freshness Evaluation & 60-Day Hard Gate
@@ -38,17 +44,90 @@ export interface JobFreshnessInput {
   freshness_basis?: string | null;
   is_repost?: boolean;
   posting_identity_is_new?: boolean;
+  /**
+   * The chosen date's approximation unit from its source evidence, when known.
+   * It applies whatever `freshness_basis` says (for example a NEW_POSTING_ID
+   * version later enriched with "4 weeks ago"), so an estimate is never read as exact.
+   */
+  approximate_unit?: ApproximateDateUnit | null;
 }
 
 export interface FreshnessEvaluationResult {
   status: 'FRESH' | 'AGING' | 'STALE' | 'UNKNOWN';
   job_age_days: number | null;
   freshness_score: number;
-  freshness_basis: 'REPOSTED_AT' | 'POSTED_AT' | 'NEW_POSTING_ID' | 'NO_DATE';
+  freshness_basis: 'REPOSTED_AT' | 'POSTED_AT' | 'POSTED_AT_APPROXIMATE' | 'REPOSTED_AT_APPROXIMATE' | 'NEW_POSTING_ID' | 'NO_DATE';
   freshness_confidence: 'HIGH' | 'MEDIUM' | 'LOW';
   is_hard_reject: boolean;
   rejection_code?: string;
   evidence: string;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function freshnessCurveScore(ageDays: number): number {
+  if (ageDays <= 3) return 100;
+  if (ageDays <= 7) return 90;
+  if (ageDays <= 14) return 80;
+  if (ageDays <= 30) return 60;
+  if (ageDays <= 45) return 40;
+  return 20;
+}
+
+/**
+ * Freshness for an approximate date, from both bounds: the newest possible date
+ * (stored) and the oldest (one unit earlier, less a millisecond). Stale only when
+ * even the newest bound exceeds the limit; within the limit only when even the
+ * oldest bound is; a range that straddles the limit stays UNKNOWN (verify).
+ */
+function evaluateApproximateFreshness(
+  newestDate: Date,
+  basis: 'POSTED_AT_APPROXIMATE' | 'REPOSTED_AT_APPROXIMATE',
+  unit: ApproximateDateUnit,
+  policy: FreshnessPolicy,
+  asOf: Date,
+): FreshnessEvaluationResult {
+  const oldestDate = new Date(newestDate.getTime() - APPROXIMATE_DATE_UNIT_MS[unit] + 1);
+  const minAgeDays = Math.max(0, Math.floor((asOf.getTime() - newestDate.getTime()) / DAY_MS));
+  const maxAgeDays = Math.max(0, Math.floor((asOf.getTime() - oldestDate.getTime()) / DAY_MS));
+  const range = minAgeDays === maxAgeDays ? `${minAgeDays}` : `${minAgeDays}-${maxAgeDays}`;
+  const label = `Approximate posting age of ${range} days (from relative source text, precision ${unit}; not an authoritative date)`;
+  const limit = policy.max_posting_age_days;
+  if (limit !== undefined && minAgeDays > limit) {
+    // How the source rounds months and years is not confirmed, so a stale verdict at that
+    // precision does not hard-reject; it stays STALE (readiness NEEDS_VERIFICATION).
+    const shouldHardReject = policy.stale_gate_disposition === 'HARD_REJECT' && unit !== 'MONTH' && unit !== 'YEAR';
+    return {
+      status: 'STALE',
+      job_age_days: minAgeDays,
+      freshness_score: 0,
+      freshness_basis: basis,
+      freshness_confidence: 'LOW',
+      is_hard_reject: shouldHardReject,
+      rejection_code: shouldHardReject ? 'GATE_STALE_POSTING' : undefined,
+      evidence: `${label}: at least ${minAgeDays} days exceeds the ${limit}-day limit.`,
+    };
+  }
+  if (limit !== undefined && maxAgeDays > limit) {
+    return {
+      status: 'UNKNOWN',
+      job_age_days: null,
+      freshness_score: freshnessCurveScore(maxAgeDays),
+      freshness_basis: basis,
+      freshness_confidence: 'LOW',
+      is_hard_reject: false,
+      evidence: `${label} may exceed the ${limit}-day limit; verify the posting date.`,
+    };
+  }
+  return {
+    status: maxAgeDays <= 14 ? 'FRESH' : 'AGING',
+    job_age_days: maxAgeDays,
+    freshness_score: freshnessCurveScore(maxAgeDays),
+    freshness_basis: basis,
+    freshness_confidence: 'LOW',
+    is_hard_reject: false,
+    evidence: `${label}; at most ${maxAgeDays} days${limit !== undefined ? `, within the ${limit}-day limit` : ''}.`,
+  };
 }
 
 export function evaluateJobFreshness(
@@ -73,7 +152,7 @@ export function evaluateJobFreshness(
   }
 
   // A repost date is authoritative only when the ingestion source has marked it as a genuine repost.
-  if (input.reposted_at && input.is_repost === true) {
+  if (input.reposted_at && (input.is_repost === true || isRepostFreshnessBasis(input.freshness_basis))) {
     const parsed = new Date(input.reposted_at);
     if (!isNaN(parsed.getTime())) {
       effectiveDate = parsed;
@@ -106,6 +185,43 @@ export function evaluateJobFreshness(
       is_hard_reject: false,
       evidence: 'No authoritative posting date or ATS timestamp available.',
     };
+  }
+
+  // A date more than a day ahead of the assessment is not a usable posting age.
+  if (effectiveDate.getTime() > asOf.getTime() + DAY_MS) {
+    return {
+      status: 'UNKNOWN',
+      job_age_days: null,
+      freshness_score: 50,
+      freshness_basis: 'NO_DATE',
+      freshness_confidence: 'LOW',
+      is_hard_reject: false,
+      evidence: 'The posting date is later than the assessment time; posting age is unknown.',
+    };
+  }
+
+  // A date converted from relative source text ("4 weeks ago") is the newest possible
+  // date; the source rounds down, so the posting may be up to one unit older.
+  const parsedBasis = parseFreshnessBasis(input.freshness_basis);
+  const approximateUnit = input.approximate_unit
+    ?? (parsedBasis.approximateUnit !== null
+      && parsedBasis.kind === (basis === 'REPOSTED_AT' ? 'REPOSTED_AT' : 'POSTED_AT')
+      ? parsedBasis.approximateUnit
+      : null);
+  // Fail-safe: an unrecognized basis never makes a date authoritative.
+  if (approximateUnit === null && parsedBasis.kind === 'UNRECOGNIZED') {
+    return {
+      status: 'UNKNOWN',
+      job_age_days: null,
+      freshness_score: 50,
+      freshness_basis: 'NO_DATE',
+      freshness_confidence: 'LOW',
+      is_hard_reject: false,
+      evidence: 'The posting date has an unrecognized freshness basis; posting age is unknown.',
+    };
+  }
+  if (approximateUnit !== null) {
+    return evaluateApproximateFreshness(effectiveDate, basis === 'REPOSTED_AT' ? 'REPOSTED_AT_APPROXIMATE' : 'POSTED_AT_APPROXIMATE', approximateUnit, policy, asOf);
   }
 
   const ageMs = asOf.getTime() - effectiveDate.getTime();

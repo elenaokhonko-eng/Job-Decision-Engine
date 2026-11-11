@@ -11,6 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { postingFactsPayload, type PostingFactsResult } from "./postingFacts.js";
 import { linkedInJobIdFromUrl, linkedInJobUrl } from "./searchApi/searchApiClient.js";
 import { isUnknownEmployerName } from "./postingIdentity.js";
 
@@ -38,6 +39,9 @@ const optionalText = (field: string, max: number) => z
   .transform((value) => (value ? value : null));
 
 export const LINKEDIN_SAVED_DESCRIPTION_STATUSES = ["OK", "MISSING", "FETCH_FAILED"] as const;
+export const LINKEDIN_SAVED_AVAILABILITY_STATUSES = ["OPEN", "CLOSED", "UNKNOWN"] as const;
+/** How the export snippet reads posting facts: the public guest posting page, requested without the session. */
+export const LINKEDIN_GUEST_POSTING_CHECK_METHOD = "LINKEDIN_GUEST_POSTING_PAGE_USER_BROWSER" as const;
 
 /**
  * Placeholder text the user's earlier console snippet wrote in place of a real
@@ -65,7 +69,26 @@ export const LinkedInSavedJobItemSchema = z.object({
   descriptionStatus: z.enum(LINKEDIN_SAVED_DESCRIPTION_STATUSES).nullable().optional(),
   location: optionalText("location", 300),
   salary: optionalText("salary", 300),
+  /** Absolute posting date from the guest page (JSON-LD datePosted or <time datetime>). */
   postedAt: optionalText("postedAt", 100),
+  /** The guest page's relative age text, e.g. "2 weeks ago" or "Reposted 3 days ago". */
+  postedAtText: optionalText("postedAtText", 100),
+  /** Absolute end of the application window (JSON-LD validThrough). */
+  validThrough: optionalText("validThrough", 100),
+  /** OPEN only with an apply control and no closed banner; CLOSED from the closed banner; else UNKNOWN. */
+  availabilityStatus: z.enum(LINKEDIN_SAVED_AVAILABILITY_STATUSES, {
+    invalid_type_error: "availabilityStatus must be OPEN, CLOSED, UNKNOWN or null",
+  }).nullable().optional().transform((value) => value ?? null),
+  /** The page text the status was read from, e.g. "No longer accepting applications". */
+  availabilityEvidence: optionalText("availabilityEvidence", 300),
+  /** When the guest posting page was read (ISO timestamp). */
+  postingCheckedAt: optionalText("postingCheckedAt", 100),
+  /**
+   * A later re-check (refresh()) that failed: when, and why (e.g. "HTTP 404").
+   * The facts above are then the earlier, successfully read ones with their own check time.
+   */
+  postingRecheckFailedAt: optionalText("postingRecheckFailedAt", 100),
+  postingRecheckFailure: optionalText("postingRecheckFailure", 300),
   linkedinJobId: z
     .union([z.string(), z.number().int()], { invalid_type_error: "linkedinJobId must be a string or integer" })
     .nullable()
@@ -90,6 +113,8 @@ export interface LinkedInSavedJob {
   readonly location: string | null;
   readonly salary: string | null;
   readonly postedAt: string | null;
+  /** Posting dates and open/closed status read from the guest page; unknown facts are absent. */
+  readonly postingFacts: PostingFactsResult;
   /** Work mode only from an explicit LinkedIn location label such as "Singapore (Hybrid)". */
   readonly workplaceType: "REMOTE" | "HYBRID" | "ONSITE" | "UNKNOWN";
   /** Legacy-shape repairs applied while reading the item (never added content). */
@@ -136,10 +161,29 @@ export function firstNonEmptyLine(value: string): string {
   return value.split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).find((line) => line !== "") ?? "";
 }
 
-function contentKey(job: Pick<LinkedInSavedJob, "title" | "company" | "description" | "location" | "salary" | "postedAt">): string {
+function contentKey(job: Pick<LinkedInSavedJob, "title" | "company" | "description" | "location" | "salary" | "postedAt" | "postingFacts">): string {
   return createHash("sha256")
-    .update(JSON.stringify([job.title, job.company, job.description, job.location, job.salary, job.postedAt]), "utf8")
+    .update(JSON.stringify([job.title, job.company, job.description, job.location, job.salary, job.postedAt, job.postingFacts.payload]), "utf8")
     .digest("hex");
+}
+
+/**
+ * Posting facts from the guest page. Relative age text and the open/closed
+ * status are anchored only to postingCheckedAt, the time that page was read;
+ * never to exportedAt, which a later (possibly failed) re-check also updates.
+ * A check time after `notAfter` (the import time) is not used.
+ */
+export function linkedInSavedPostingFacts(item: LinkedInSavedJobItem, notAfter: string = new Date().toISOString()): PostingFactsResult {
+  return postingFactsPayload({
+    postedAt: item.postedAt,
+    postedAtText: item.postedAtText,
+    expiresAt: item.validThrough,
+    availabilityStatus: item.availabilityStatus,
+    availabilityEvidence: item.availabilityEvidence,
+    checkMethod: LINKEDIN_GUEST_POSTING_CHECK_METHOD,
+    checkedAt: item.postingCheckedAt,
+    notAfter,
+  });
 }
 
 function issueText(error: z.ZodError): string {
@@ -206,9 +250,21 @@ export function parseLinkedInSavedJobItem(value: unknown, index: number): Linked
   }
 
   const canonicalUrl = linkedInJobUrl(linkedInJobId);
+  if (item.availabilityStatus && item.availabilityStatus !== "UNKNOWN" && !item.postingCheckedAt) {
+    return `availabilityStatus ${item.availabilityStatus} needs postingCheckedAt (when the posting page was read)`;
+  }
+  const postingFacts = linkedInSavedPostingFacts(item);
+  // The posting-fact fields are added only when the item has them, so an older
+  // export (without them) keeps exactly its earlier payload and hash.
+  const postingFactItemFields: Record<string, unknown> = {};
+  for (const key of ["postedAtText", "validThrough", "availabilityStatus", "availabilityEvidence", "postingCheckedAt", "postingRecheckFailedAt", "postingRecheckFailure"] as const) {
+    if (item[key] !== null && item[key] !== undefined) postingFactItemFields[key] = item[key];
+  }
   // exportedAt is left out of the hashed payload so re-exporting unchanged jobs
   // later deduplicates; the observation's retrieved_at records the import time.
+  // A posting check time, when present, is kept: each check is new availability evidence.
   const rawPayload: Record<string, unknown> = {
+    ...postingFacts.payload,
     export_schema: LINKEDIN_SAVED_EXPORT_SCHEMA,
     content_provenance: LINKEDIN_SAVED_CONTENT_PROVENANCE,
     linkedin_job_id: linkedInJobId,
@@ -226,6 +282,7 @@ export function parseLinkedInSavedJobItem(value: unknown, index: number): Linked
       postedAt: item.postedAt,
       linkedinJobId: item.linkedinJobId,
       sourcePage: item.sourcePage,
+      ...postingFactItemFields,
     },
   };
   return {
@@ -238,6 +295,7 @@ export function parseLinkedInSavedJobItem(value: unknown, index: number): Linked
     location,
     salary: item.salary,
     postedAt: item.postedAt,
+    postingFacts,
     workplaceType: linkedInWorkplaceTypeFromLocation(location),
     notes,
     rawPayload,
