@@ -28,6 +28,18 @@ import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { APPROXIMATE_DATE_UNIT_MS, isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
+import {
+  confirmedEmploymentType,
+  confirmedFactEvidenceKey,
+  confirmedFactEvidenceQuote,
+  confirmedJobFactsHash,
+  confirmedTravelEvidence,
+  confirmedWorkModeEvidence,
+  confirmedWorkplaceType,
+  gateAppliedConfirmedFacts,
+  loadCurrentConfirmedJobFacts,
+  withConfirmedTerritory,
+} from "./confirmedJobFacts.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -460,6 +472,13 @@ export async function runRecommendationDecider(
         : null;
       await client.query("BEGIN");
       try {
+        // Employer-confirmed facts for this exact job version, limited to those the latest gate decision
+        // applied (each filled a fact the posting leaves unknown); conflicting confirmations never apply.
+        const confirmedFacts = gateAppliedConfirmedFacts(
+          await loadCurrentConfirmedJobFacts(client, ctx.workspaceId, job.job_version_id),
+          normalizeWorkabilityFacts(job.workability_facts),
+        );
+        const confirmedFactsHash = confirmedJobFactsHash(confirmedFacts);
         const normalizedGateDecision =
           normalizeGateDecision(job.gate_decision) ??
           inferGateDecisionFromProcessingState(job.processing_state);
@@ -488,7 +507,7 @@ export async function runRecommendationDecider(
         const coverageScore =
           coverageScorePct == null ? null : Number((coverageScorePct / 100).toFixed(3));
         const evidenceCompleteness = computeEvidenceCompleteness(
-          job.workplace_type,
+          confirmedWorkplaceType(job.workplace_type, confirmedFacts),
           job.workability_facts
         );
 
@@ -701,11 +720,15 @@ export async function runRecommendationDecider(
 
         const workabilityEvidence = sourceEvidence?.workability;
         const territoryEvidence = workabilityEvidence?.hiring_territories ?? null;
-        const workAuthorization = assessHiringTerritoryReadiness(
-          sourceEvidence?.description.normalized_text ?? job.description_text ?? "",
-          territoryEvidence,
-          workabilityEvidence?.work_mode.value ?? null,
-          workabilityPolicyResolution.policy,
+        const workAuthorization = withConfirmedTerritory(
+          assessHiringTerritoryReadiness(
+            sourceEvidence?.description.normalized_text ?? job.description_text ?? "",
+            territoryEvidence,
+            workabilityEvidence?.work_mode.value ?? null,
+            workabilityPolicyResolution.policy,
+          ),
+          confirmedFacts,
+          workabilityPolicyResolution.policy.authorizedRegions,
         );
         readinessChecks.push(readinessCheck(
           "WORK_AUTHORIZATION",
@@ -722,7 +745,7 @@ export async function runRecommendationDecider(
         ));
 
         const workabilityFacts = normalizeWorkabilityFacts(job.workability_facts);
-        const modeEvidence = workabilityEvidence?.work_mode ?? null;
+        const modeEvidence = confirmedWorkModeEvidence(workabilityEvidence?.work_mode ?? null, confirmedFacts);
         // The same on-site exception evaluation the hard gate used.
         const onsiteException = findOnsiteException(
           { title: job.normalized_title, company_name: job.company_name, description: job.description_text },
@@ -753,7 +776,7 @@ export async function runRecommendationDecider(
 
         const travelAssessment = assessTravelReadiness(
           job.description_text ?? "",
-          workabilityEvidence?.travel_pct ?? null,
+          confirmedTravelEvidence(workabilityEvidence?.travel_pct ?? null, confirmedFacts),
           workabilityPolicyResolution.policy,
         );
         readinessChecks.push(readinessCheck(
@@ -770,16 +793,25 @@ export async function runRecommendationDecider(
           },
         ));
 
-        const employmentType = String(workabilityFacts["employment_type"] ?? job.employment_type ?? "UNKNOWN").toUpperCase();
+        const employment = confirmedEmploymentType(
+          String(workabilityFacts["employment_type"] ?? job.employment_type ?? "UNKNOWN").toUpperCase(),
+          confirmedFacts,
+        );
+        const employmentType = employment.employmentType;
         const employmentStatus = employmentType === "PERMANENT" || employmentType === "CONTRACT"
           ? "MET"
           : "NEEDS_VERIFICATION";
         readinessChecks.push(readinessCheck(
           "EMPLOYMENT_ROUTE",
           employmentStatus,
-          employmentStatus === "MET" ? `Employment type ${employmentType} is permitted under the direct-employer fixed-term policy.` : "Employment type or hiring route is unknown.",
+          employmentStatus === "MET"
+            ? `${employment.fact ? `${confirmedFactEvidenceQuote(employment.fact)}. ` : ""}Employment type ${employmentType} is permitted under the direct-employer fixed-term policy.`
+            : "Employment type or hiring route is unknown.",
           readinessAssessedAt,
-          { reasonCode: employmentStatus === "NEEDS_VERIFICATION" ? "EMPLOYMENT_ROUTE_UNKNOWN" : null },
+          {
+            reasonCode: employmentStatus === "NEEDS_VERIFICATION" ? "EMPLOYMENT_ROUTE_UNKNOWN" : null,
+            evidenceKeys: employment.fact ? [confirmedFactEvidenceKey(employment.fact)] : [],
+          },
         ));
 
         let mandatoryQualificationCheck: MaterialReadinessCheck;
@@ -902,6 +934,7 @@ export async function runRecommendationDecider(
           evidence_schema_version: sourceEvidence?.schema_version ?? "legacy_unknown",
           availability_evidence_hash: availabilityEvidenceHash,
           availability_verification_revision: availabilityVerificationRevision,
+          confirmed_job_facts_hash: confirmedFactsHash,
         });
         const readiness = assessApplicationReadiness({
           canonicalJobId: job.canonical_job_id,
@@ -985,6 +1018,7 @@ export async function runRecommendationDecider(
             workability_policy_hash: workabilityPolicyResolution.policyHash,
             career_track_policy_version: CAREER_TRACK_POLICY_VERSION,
             career_track_assessment_hash: sha256Json(careerTrack),
+            ...(confirmedFactsHash ? { confirmed_job_facts_hash: confirmedFactsHash } : {}),
           },
         });
 
