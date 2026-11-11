@@ -24,7 +24,7 @@ import { classifyRepairCategory } from "../../src/pipeline/repairClassification.
 import { evaluateMobilityMatch } from "../../src/policy/stage3PolicyEngine.js";
 import { Stage3WorkPreferencesSchema } from "../../src/policy/stage3Contracts.js";
 import { PersistedGateDecisionSchema } from "../../src/contracts/index.js";
-import { GATE_VERSION } from "../../src/contracts/version.js";
+import { GATE_VERSION, SCHEMA_VERSION } from "../../src/contracts/version.js";
 import {
   FUNCTION_DOMAIN_FIXTURES,
   LIFESTYLE_FIXTURES,
@@ -92,12 +92,30 @@ describe("Gate policy 2026-11 — rule 1: on-site exceptions", () => {
     expect(withOnsiteExceptionEmployers(basePolicy, [])).toBe(basePolicy);
   });
 
-  it("matches employer names on whole words or a long name prefix only", () => {
+  it("matches employer names on whole words, and on a name prefix only for the user's list", () => {
     expect(employerNameMatches("Standard Example Bank Singapore", "Standard Example Bank")).toBe(true);
-    expect(employerNameMatches("AcmeBankChase", "AcmeBank")).toBe(true);
     expect(employerNameMatches("Allen & Example LLP", "Allen & Example")).toBe(true);
-    expect(employerNameMatches("Acmeco Holdings", "Acm")).toBe(false);
     expect(employerNameMatches("Bigacme Corp", "Acme Corp")).toBe(false);
+    // Prefix matching is opt-in (user list) and needs a real remainder.
+    expect(employerNameMatches("AcmeBankChase", "AcmeBank")).toBe(false);
+    expect(employerNameMatches("AcmeBankChase", "AcmeBank", { allowPrefix: true })).toBe(true);
+    expect(employerNameMatches("Stripes Consulting", "Stripe", { allowPrefix: true })).toBe(false);
+    expect(employerNameMatches("Acmeco Holdings", "Acm", { allowPrefix: true })).toBe(false);
+  });
+
+  it("does not over-match public research-list entries", () => {
+    // "a*star" never prefix-matches.
+    expect(employerNameMatches("A*STAR", "a*star")).toBe(true);
+    expect(employerNameMatches("A*STAR Institute for Infocomm Research", "a*star")).toBe(true);
+    expect(employerNameMatches("Astar Technologies", "a*star")).toBe(false);
+    // Short abbreviations match only the whole employer name.
+    expect(employerNameMatches("NUS", "nus")).toBe(true);
+    expect(employerNameMatches("NTU Singapore", "ntu")).toBe(true);
+    expect(employerNameMatches("SIT Holdings Pte Ltd", "sit")).toBe(false);
+    expect(employerNameMatches("SMU Logistics", "smu")).toBe(false);
+    for (const company of ["SIT Holdings Pte Ltd", "Astar Technologies", "NUS Ventures Capital Partners"]) {
+      expect(findOnsiteException({ title: "Senior AI Engineer", company_name: company }, basePolicy), company).toBeNull();
+    }
   });
 
   it("G07: lifts explicit office days in the description; G07B: unknown work mode still needs verification", () => {
@@ -109,9 +127,17 @@ describe("Gate policy 2026-11 — rule 1: on-site exceptions", () => {
     expectFixture(ONSITE_FIXTURES.G08);
   });
 
-  it("does not treat 'data scientist' as a research title", () => {
+  it("does not treat 'data scientist' or a bare 'scientist' title at an industry employer as research", () => {
     expect(findOnsiteException({ title: "Lead Data Scientist", company_name: "Synthetic Retail" }, basePolicy)).toBeNull();
-    expect(findOnsiteException({ title: "Scientist, Computational Biology", company_name: "Synthetic Bio" }, basePolicy)?.kind).toBe("RESEARCH_ROLE");
+    for (const title of ["Applied Scientist", "ML Scientist", "Decision Scientist", "Scientist, Computational Biology"]) {
+      expect(findOnsiteException({ title, company_name: "Synthetic Bio" }, basePolicy), title).toBeNull();
+    }
+    // A research qualifier or a research employer still qualifies.
+    expect(findOnsiteException({ title: "Research Scientist", company_name: "Synthetic Bio" }, basePolicy)?.kind).toBe("RESEARCH_ROLE");
+    expect(findOnsiteException({ title: "Scientist, Computational Biology", company_name: "National University of Singapore" }, basePolicy)?.kind).toBe("RESEARCH_ROLE");
+    // The config switch restores the bare-scientist title exception.
+    const research = { ...basePolicy.researchOnsiteExceptions!, bareScientistTitleCounts: true };
+    expect(findOnsiteException({ title: "Applied Scientist", company_name: "Synthetic Bio" }, { ...basePolicy, researchOnsiteExceptions: research })?.kind).toBe("RESEARCH_ROLE");
   });
 
   it("lifts persisted OFFICE_DAYS and WORK_MODE requirements for an exception and records evidence", () => {
@@ -272,7 +298,7 @@ describe("Gate policy 2026-11 — rule 4: precise lifestyle codes", () => {
     }
     for (const codes of [["GATE_LIFESTYLE_INCOMPATIBLE"], ["GATE_TRAVEL_ABOVE_LIMIT"], ["GATE_ON_CALL_REQUIRED"]]) {
       expect(() => PersistedGateDecisionSchema.parse({
-        schema_version: GATE_VERSION,
+        schema_version: SCHEMA_VERSION,
         canonical_job_id: "00000000-0000-4000-8000-000000000001",
         job_version_id: "00000000-0000-4000-8000-000000000002",
         pipeline_run_id: "00000000-0000-4000-8000-000000000003",

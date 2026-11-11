@@ -5,16 +5,18 @@ import { applyPersistedRequirementGates } from "../../pipeline/hardGate.js";
 // Synthetic postings: each description mentions SQL/Python so the old keyword check passed them.
 const TECHNICAL_SOUNDING = "Use SQL and Python dashboards daily. Work closely with the data platform team.";
 
-describe("non-technical function titles in the hard gates", () => {
+// Since 2026-11 a non-technical function title is classification only, not a hard gate:
+// a non-technical role is acceptable when it fits a lane and the candidate's experience,
+// and lane routing decides (unrouted jobs end SKIP/UNCLASSIFIED).
+describe("non-technical function titles are classified but not hard-rejected", () => {
   it.each([
-    ["Customer Success Manager, Enterprise", "Customer Success"],
     ["Senior GL Accountant", "GL Accountant"],
     ["Accountant", "Accountant"],
     ["Manager, Payroll Operations - APAC", "Payroll Operations"],
     ["Fund Operations Support Specialist", "Support Specialist"],
     ["Sr. UX Designer, Security", "UX Designer"],
     ["Marketplace Creative Strategist/Graphic Designer", "Graphic Designer"],
-  ])("rejects %j as NON_TECHNICAL_FUNCTION with the matched title as evidence", (title, matched) => {
+  ])("classifies %j and leaves it to lane routing", (title, matched) => {
     expect(nonTechnicalFunctionTitle(title)).toBe(matched);
     const persisted = applyPersistedRequirementGates({
       title,
@@ -24,10 +26,8 @@ describe("non-technical function titles in the hard gates", () => {
       employment_type: "FULL_TIME",
       description: TECHNICAL_SOUNDING,
     }, []);
-    expect(persisted.status).toBe("HARD_REJECT");
-    expect(persisted.rejection_codes).toEqual(expect.arrayContaining(["GATE_OUT_OF_SCOPE_DOMAIN"]));
-    expect(persisted.rejection_codes.some((code) => code === "NON_TECHNICAL_FUNCTION" || code === "NON_TARGET_ROLE_FAMILY")).toBe(true);
-    expect(persisted.evidence_quotes.join(" ")).toContain(title);
+    expect(persisted.status).toBe("PASS");
+    expect(persisted.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
 
     const global = applyGlobalGates({
       id: `synthetic-${title}`,
@@ -38,20 +38,22 @@ describe("non-technical function titles in the hard gates", () => {
       workplace_type: "HYBRID",
       employment_type: "PERMANENT",
     } as never);
-    expect(global.status).toBe("HARD_REJECT");
+    expect(global.status).not.toBe("HARD_REJECT");
+    expect(global.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
   });
 
-  it("names NON_TECHNICAL_FUNCTION for a title the older exclusions did not cover", () => {
+  it("keeps the separate non-target role-family exclusion (customer success)", () => {
+    expect(nonTechnicalFunctionTitle("Customer Success Manager, Enterprise")).toBe("Customer Success");
     const result = applyPersistedRequirementGates({
-      title: "Senior GL Accountant",
+      title: "Customer Success Manager, Enterprise",
       company_name: "Example Company",
       location: "Singapore",
       workplace_type: "HYBRID",
       employment_type: "FULL_TIME",
       description: TECHNICAL_SOUNDING,
     }, []);
-    expect(result.rejection_codes).toEqual(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"]);
-    expect(result.evidence_quotes[0]).toBe('Non-technical function title "GL Accountant" in "Senior GL Accountant"');
+    expect(result.status).toBe("HARD_REJECT");
+    expect(result.rejection_codes).toEqual(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"]);
   });
 
   it.each([

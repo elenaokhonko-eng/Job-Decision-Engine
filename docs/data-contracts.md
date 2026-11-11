@@ -28,24 +28,36 @@ Canonical source names use uppercase values from `SourceNameSchema`. Schema test
 
 ## Hard-gate reason codes and on-site exceptions
 
-Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) and `canonical_jobs.rejection_reason` (text), so new codes are additive. `src/pipeline/gateReasonCodes.ts` holds the labels, including legacy codes.
+Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) and `canonical_jobs.rejection_reason` (text), so new codes are additive. `src/pipeline/gateReasonCodes.ts` holds the labels, including the legacy codes. Gate logic is versioned by `GATE_VERSION` (`src/contracts/version.ts`, now `gate-2026-11.1`). Since the 2026-11 policy it is independent of `SCHEMA_VERSION`.
 
 | Code | Meaning | Status |
 |---|---|---|
-| `GATE_TRAVEL_ABOVE_LIMIT` | Travel above the configured `max_travel_pct` (or frequent travel with no percentage) | New |
-| `GATE_ON_CALL_REQUIRED` | Regular on-call required while `regular_on_call_allowed` is false | New |
-| `GATE_SHIFT_WORK_REQUIRED` | Shift work required while `shift_work_allowed` is false | New |
-| `GATE_JOB_LOCATION_MISMATCH` | The job is located only outside the authorized regions | New (was `WORK_AUTHORIZATION_INCOMPATIBLE`) |
-| `GATE_LIFESTYLE_INCOMPATIBLE` | Legacy umbrella for travel, on-call and shift work | No longer emitted; stored rows stay valid |
-| `NON_TECHNICAL_FUNCTION`, `GATE_NOT_AI_DATA` | Axis 1 / Axis 2 failures | No longer emitted as hard gates; lane routing decides fit |
+| `GATE_TRAVEL_ABOVE_LIMIT` | Travel above the configured `max_travel_pct` (20% today), or frequent travel with no percentage. The evidence names the configured limit. | New |
+| `GATE_ON_CALL_REQUIRED` | Regular on-call is required while `regular_on_call_allowed` is false | New |
+| `GATE_SHIFT_WORK_REQUIRED` | Shift work is required while `shift_work_allowed` is false | New |
+| `GATE_JOB_LOCATION_MISMATCH` | The job is located only outside the authorized regions | New. Before, a job location was reported as `WORK_AUTHORIZATION_INCOMPATIBLE`, which now means only an explicit worker restriction. |
+| `GATE_LIFESTYLE_INCOMPATIBLE` | Legacy umbrella code for travel, on-call and shift work | No longer emitted. Stored rows stay valid. |
+| `NON_TECHNICAL_FUNCTION`, `GATE_NOT_AI_DATA` | Axis 1 (technical-function check), the non-technical title list (`NON_TECHNICAL_FUNCTION_TITLES`) and Axis 2 (AI/data domain) | No longer emitted. A non-technical role is acceptable when it fits a lane and the candidate's experience, and lane routing decides. The title list remains for classification only. |
+| `NON_TARGET_ROLE_FAMILY` + `GATE_OUT_OF_SCOPE_DOMAIN` | Explicit non-target title families (`GLOBAL_TITLE_EXCLUSIONS`): HR, sales, customer success, legal practice and counsel | Unchanged. Legal-technology titles ("Legal Engineer", "Legal Innovation Technologist") and the agency name "Attorney-General's Chambers" do not match. |
 
-The global rule still rejects a full-time on-site role. Two exceptions lift only the on-site and office-day rejections (`UNWORKABLE_LOCATION_MODEL`, `GATE_HIGH_OFFICE_DAYS`). Each lifted conflict is stored as an `ON-SITE EXCEPTION (...)` evidence quote. An unknown work mode still goes to `NEEDS_VERIFICATION`.
+### On-site exceptions
 
-- `RESEARCH_ROLE`: the public list `global_workability_gates.work_mode.onsite_exceptions` in `config/policies/workability.yml` (universities, research institutes, hospital research units, research titles).
-- `PREFERRED_EMPLOYER`: the optional stage3 preference field `mobility.onsite_exception_employers`.
+The global rule still rejects a full-time on-site role. Two exceptions lift only the on-site and office-day conflicts (`UNWORKABLE_LOCATION_MODEL`, `GATE_HIGH_OFFICE_DAYS`, and readiness `WORK_MODE_INCOMPATIBLE`). Each lifted gate conflict is stored as an evidence quote of the form `ON-SITE EXCEPTION (<KIND>): <reason>; ... Lifted conflict: <original conflict>`. Readiness records the evidence key `onsite_exception:<KIND>`. An unknown work mode still goes to `NEEDS_VERIFICATION`.
+
+- `RESEARCH_ROLE` comes from the public list `global_workability_gates.work_mode.onsite_exceptions` in `config/policies/workability.yml`. It covers universities and research institutes, hospital research units, and research titles such as "research fellow" and "research scientist". Rules for the list:
+  - A bare "scientist" title counts only at a research employer (`bare_scientist_title_counts: false`).
+  - Abbreviations of four characters or fewer ("NUS", "SIT") match only the whole employer name.
+  - Public-list entries never prefix-match.
+- `PREFERRED_EMPLOYER` comes from the optional stage3 preference field `mobility.onsite_exception_employers`.
 
 ```json
 { "mobility": { "onsite_exception_employers": ["Employer Name", "Another Employer"] } }
 ```
 
-The field is an optional array of 1–200 strings, each 2–120 characters. If the field is absent or empty, no employer exception applies. A name matches the employer either as whole words ("Example Bank" matches "Example Bank Singapore") or as a name prefix of at least five letters ("ExampleBank" matches "ExampleBankGroup"). Add the field to the private `work_preferences.json` under `mobility` and seed it through `scripts/seed_workspace_preferences.ts` (guarded staging path). When the list is non-empty, the workability policy hash includes it.
+The field is an optional array of 1–200 strings, each 2–120 characters. If it is absent or empty, no employer exception applies. A name matches the employer as whole words ("Example Bank" matches "Example Bank Singapore"). It also matches as a name prefix of at least five letters on the employer's first word, provided the rest of that word is empty or at least three letters ("ExampleBank" matches "ExampleBankGroup", but "Stripe" does not match "Stripes").
+
+One shared resolver, `resolveEffectiveWorkabilityPolicy` (`src/pipeline/effectiveWorkabilityPolicy.ts`), builds the workspace policy plus this list. The hard gate, the recommendation decider (readiness) and the HN pre-filter all use it, and they all call `findOnsiteException`. Gate, decision and readiness rows therefore carry the same `workability_policy_hash`.
+
+**Seeding.** Add the field to the private `work_preferences.json` under `mobility` and run `scripts/seed_workspace_preferences.ts --apply`. That script writes only to `STAGE3_STAGING_DATABASE_URL`. Activating the stage3 revision in production is a separate, owner-approved step. Re-gate after activation.
+
+**Policy hash on merge.** `workability_policy_hash` changes for every workspace when this policy ships, because the hashed policy now contains the on-site exception config. Every gate, decision and readiness row written afterwards carries the new hash, with or without the stage3 field. A non-empty employer list changes the hash again. Stored decisions are not re-gated automatically, so a scoped re-gate is expected. Run `scripts/replay_hard_gate_policy_2026_11.ts`: its default is a read-only dry run, and `--apply` is guarded.

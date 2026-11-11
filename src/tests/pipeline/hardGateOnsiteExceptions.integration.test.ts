@@ -178,4 +178,53 @@ describe.skipIf(skipReal)("hard-gate on-site exceptions (PostgreSQL)", () => {
     expect(new Set(rows.map((row) => row.workability_policy_hash)).size).toBe(1);
     expect(rows[0]!.workability_policy_hash).toMatch(/^[a-f0-9]{64}$/);
   }, 120_000);
+
+  it("carries the exception through decision and readiness with the gate's policy hash", async () => {
+    const { runRecommendationDecider } = await import("../../pipeline/recommendationDecider.js");
+    const summary = await runRecommendationDecider(db(), { context: ctx() });
+    expect(summary.errors).toBe(0);
+
+    const { rows } = await db().query<{
+      company_name: string;
+      gate_hash: string;
+      readiness_json: any;
+    }>(
+      `SELECT c.company_name,
+              (SELECT g.workability_policy_hash FROM gate_decisions g
+                WHERE g.workspace_id = c.workspace_id AND g.canonical_job_id = c.id
+                ORDER BY g.created_at DESC, g.id DESC LIMIT 1) AS gate_hash,
+              d.readiness_json
+       FROM canonical_jobs c
+       JOIN LATERAL (
+         SELECT dd.readiness_json FROM deterministic_decisions dd
+         WHERE dd.workspace_id = c.workspace_id AND dd.canonical_job_id = c.id
+         ORDER BY dd.created_at DESC, dd.id DESC LIMIT 1
+       ) d ON TRUE
+       WHERE c.workspace_id = $1`,
+      [ctx().workspaceId],
+    );
+    const readinessOf = (company: string) => {
+      const row = rows.find((candidate) => candidate.company_name === company);
+      expect(row, company).toBeDefined();
+      const readiness = typeof row!.readiness_json === "string" ? JSON.parse(row!.readiness_json) : row!.readiness_json;
+      const workMode = (readiness.checks as any[]).find((check) => check.key === "WORK_MODE");
+      return { row: row!, readiness, workMode };
+    };
+
+    for (const [company, kind] of [
+      ["Northwind Markets Singapore", "PREFERRED_EMPLOYER"],
+      ["Nanyang Technological University", "RESEARCH_ROLE"],
+    ] as const) {
+      const { row, readiness, workMode } = readinessOf(company);
+      expect(workMode.status, `${company} WORK_MODE`).toBe("MET");
+      expect(workMode.evidence_keys).toContain(`onsite_exception:${kind}`);
+      // Readiness cites the same effective policy hash that the gate stored.
+      expect(workMode.policy_reference).toBe(`workability_policy:${row.gate_hash}`);
+      expect(readiness.status, `${company} readiness`).not.toBe("BLOCKED");
+    }
+
+    const commercial = readinessOf("Synthetic Retail Analytics");
+    expect(commercial.workMode.status).toBe("BLOCKED");
+    expect(commercial.workMode.reason_code).toBe("WORK_MODE_INCOMPATIBLE");
+  }, 120_000);
 });

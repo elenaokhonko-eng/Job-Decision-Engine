@@ -44,16 +44,42 @@ function containsWords(text: string, phrase: string): boolean {
   return needle.length > 0 && ` ${text} `.includes(` ${needle} `);
 }
 
+/** Abbreviations such as "NUS" or "SIT" are this short or shorter. */
+const ABBREVIATION_MAX_LENGTH = 4;
+/** A prefix match must leave either nothing or a real word part ("Chase"), not a plural "s". */
+const PREFIX_MIN_REMAINDER = 3;
+
 /**
- * Whole-word match ("Example Bank" in "Example Bank Singapore"), or a
- * name prefix of at least five letters ("ExampleBank" for "ExampleBankGroup").
+ * Employer-name matching.
+ *
+ * - Whole words: "Example Bank" matches "Example Bank Singapore".
+ * - An abbreviation (4 characters or fewer, such as "NUS") matches only the whole
+ *   employer name, optionally followed by "Singapore" ("NUS", "NTU Singapore").
+ *   It never matches as one token inside a longer name such as "SIT Holdings".
+ * - With `allowPrefix` (the user's own list only): a name of at least five letters
+ *   may match the start of the employer's first word ("ExampleBank" matches
+ *   "ExampleBankGroup") when the rest is empty or at least three letters, so
+ *   "Stripe" does not match "Stripes Consulting". Public-list entries never
+ *   prefix-match, so "a*star" does not match "Astar Technologies".
  */
-export function employerNameMatches(companyName: string, configuredName: string): boolean {
+export function employerNameMatches(
+  companyName: string,
+  configuredName: string,
+  options: { allowPrefix?: boolean } = {},
+): boolean {
   const company = words(companyName);
-  if (!company) return false;
+  const name = words(configuredName);
+  if (!company || !name) return false;
+  if (compact(configuredName).length <= ABBREVIATION_MAX_LENGTH) {
+    return company === name || company === `${name} singapore`;
+  }
   if (containsWords(company, configuredName)) return true;
+  if (!options.allowPrefix) return false;
   const prefix = compact(configuredName);
-  return prefix.length >= 5 && compact(companyName).startsWith(prefix);
+  const firstWord = company.split(" ")[0] ?? "";
+  if (prefix.length < 5 || !firstWord.startsWith(prefix)) return false;
+  const remainder = firstWord.length - prefix.length;
+  return remainder === 0 || remainder >= PREFIX_MIN_REMAINDER;
 }
 
 function exception(kind: OnsiteExceptionKind, matched: string, reason: string): OnsiteException {
@@ -73,7 +99,7 @@ export function findOnsiteException(
   const research = policy.researchOnsiteExceptions;
 
   if (company) {
-    const preferred = (policy.onsiteExceptionEmployers ?? []).find((name) => employerNameMatches(company, name));
+    const preferred = (policy.onsiteExceptionEmployers ?? []).find((name) => employerNameMatches(company, name, { allowPrefix: true }));
     if (preferred) {
       return exception("PREFERRED_EMPLOYER", company, `employer "${company}" is on the user's on-site exception list`);
     }
@@ -105,7 +131,12 @@ export function findOnsiteException(
     const needle = words(excluded);
     if (needle) researchTitleText = researchTitleText.split(` ${needle} `).join(" ");
   }
-  const titleTerm = research.titleTerms.find((term) => containsWords(researchTitleText.trim(), term));
+  // A bare "scientist" title counts on its own only when the config switch
+  // `bare_scientist_title_counts` is on; otherwise it needs a research employer
+  // (handled above) or a research qualifier ("research scientist").
+  const titleTerm = research.titleTerms
+    .filter((term) => research.bareScientistTitleCounts === true || words(term) !== "scientist")
+    .find((term) => containsWords(researchTitleText.trim(), term));
   if (titleTerm) {
     return exception("RESEARCH_ROLE", titleTerm, `title "${job.title}" is a research role ("${titleTerm}")`);
   }

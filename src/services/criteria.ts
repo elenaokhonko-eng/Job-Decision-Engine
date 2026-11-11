@@ -51,7 +51,10 @@ export interface GateEvaluationResult {
 export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\b(human resources?|hr|recruiter|talent acquisition|people operations?|people partner)\b/i,
   /\b(executive assistant|office manager|receptionist|admin assistant|administrative assistant)\b/i,
-  /\b(legal counsel|attorney|lawyer|m&a|paralegal|contracts? manager)\b/i,
+  // Legal practice and counsel titles stay excluded; legal-technology titles ("Legal
+  // Engineer", "Legal Innovation Technologist") do not match. "Attorney-General" is an
+  // agency name ("Software Engineer, Attorney-General's Chambers"), not a lawyer title.
+  /\b(counsel|attorney(?![\s-]general)|lawyer|m&a|paralegal|contracts? manager)\b/i,
   /\b(sales\s+(?:manager|representative|rep|director|lead)|account executive|business development representative|bdr|sdr|(?<!technical\s+)account manager|customer\s+(?:success|support|service))\b/i,
   /\b(marketing manager|social media|content writer|pr manager|brand manager)\b/i,
   /\b(quality assurance coordinator|manual tester|qa tester)\b/i,
@@ -63,9 +66,10 @@ export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\bdata\s+infra(?:structure)?\b/i,
 ];
 
-// 1b. Non-technical function titles that passed the technical-function check on description
-// keywords alone (a designer or accountant posting that mentions SQL). A title match rejects as
-// NON_TECHNICAL_FUNCTION with the matched title as evidence. Product designers are not listed.
+// 1b. Non-technical function titles (customer success, accountant, payroll, support specialist,
+// graphic/UX designer). Since 2026-11 this is classification only, not a hard gate: a non-technical
+// role is acceptable when it fits a lane and the candidate's experience, and lane routing decides.
+// Kept for reporting (scripts/replay_discovery_prescreen.ts).
 export const NON_TECHNICAL_FUNCTION_TITLES: RegExp[] = [
   /\bcustomer success\b/i,
   /\b(?:general ledger |gl )?accountants?\b/i,
@@ -931,10 +935,6 @@ export function applyGlobalGates(
     if (pattern.test(job.title || "")) {
       return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title exclusion: "${job.title}"`]);
     }
-  }
-  const nonTechnicalTitle = nonTechnicalFunctionTitle(job.title || "");
-  if (nonTechnicalTitle) {
-    return makeReject(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical function title "${nonTechnicalTitle}" in "${job.title}"`]);
   }
 
   // FDE is a global exclusion when the role itself is an FDE-family role.

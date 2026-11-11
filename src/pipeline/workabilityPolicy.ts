@@ -57,6 +57,11 @@ export interface ResearchOnsiteExceptionConfig {
   titleTerms: string[];
   /** Title phrases that never count as a research title (for example "data scientist"). */
   titleExclusions: string[];
+  /**
+   * When true, a bare "scientist" title is a research exception at any employer.
+   * Default false: "scientist" then needs a research employer or qualifier.
+   */
+  bareScientistTitleCounts?: boolean;
 }
 
 /** The five persisted verification answers understood by deterministic gates. */
@@ -841,6 +846,7 @@ function researchOnsiteExceptionConfig(value: unknown): ResearchOnsiteExceptionC
     healthResearchUnitTerms: lowerStringArray(config.health_research_unit_terms),
     titleTerms: lowerStringArray(config.research_title_terms),
     titleExclusions: lowerStringArray(config.research_title_exclusions),
+    bareScientistTitleCounts: config.bare_scientist_title_counts === true,
   };
 }
 

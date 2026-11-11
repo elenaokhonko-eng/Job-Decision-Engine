@@ -80,6 +80,9 @@ global_workability_gates:
       # "Data scientist" is an industry analytics title, not a research role.
       research_title_exclusions:
         - data scientist
+      # A bare "scientist" title ("Applied Scientist", "ML Scientist") counts as a
+      # research exception only at a research employer unless this is true.
+      bare_scientist_title_counts: false
 
   territory:
     # Default profile policy. User preference modes can override this list.
