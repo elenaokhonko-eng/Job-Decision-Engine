@@ -247,14 +247,58 @@ function dateEvidence(
   const raw = firstValue(records, keys);
   const parsed = dateValue(raw);
   const value = normalizedValue ?? parsed.iso;
+  const sourceKey = keys.find((key) => firstValue(records, [key]) !== null) ?? basis;
+  const derivation = sourceKey === basis ? null : dateDerivation(records, sourceKey);
+  // A date converted from relative age text ("2 weeks ago") says so in its quote and is LOW confidence.
+  const quote = derivation?.basis === "RELATIVE_SOURCE_TEXT"
+    ? `${sourceKey}: ${String(raw)} (derived from source text "${derivation.sourceText}" read at ${derivation.anchorAt ?? "unknown time"}; precision ${derivation.precision})`
+    : derivation
+      ? `${sourceKey}: ${String(raw)} (source date "${derivation.sourceText}"; precision ${derivation.precision})`
+      : `${sourceKey}: ${String(raw)}`;
   return {
     status: value ? "SUPPORTED" as const : "UNKNOWN" as const,
     value,
     basis: value ? basis : "UNKNOWN" as const,
     raw_value: parsed.raw,
     timestamp_unit: parsed.unit,
-    evidence: value ? [evidenceSpan(input, `DATE_${basis}`, `${keys.find((key) => firstValue(records, [key]) !== null) ?? basis}: ${String(raw)}`)] : [],
+    evidence: value ? [evidenceSpan(input, `DATE_${basis}`, quote, derivation?.basis === "RELATIVE_SOURCE_TEXT" ? "LOW" : "MEDIUM")] : [],
   };
+}
+
+/** How a payload date was obtained, from the `date_derivations` record written with posting facts (postingFacts.ts). */
+function dateDerivation(
+  records: readonly Record<string, unknown>[],
+  key: string,
+): { basis: string; precision: string; sourceText: string; anchorAt: string | null } | null {
+  for (const record of records) {
+    const derivations = asRecord(record.date_derivations);
+    const entry = asRecord(derivations?.[key]);
+    if (!entry) continue;
+    const basis = typeof entry.basis === "string" ? entry.basis : null;
+    const precision = typeof entry.precision === "string" ? entry.precision : null;
+    const sourceText = typeof entry.source_text === "string" ? entry.source_text.slice(0, 200) : null;
+    if (!basis || !precision || !sourceText) continue;
+    return { basis, precision, sourceText, anchorAt: typeof entry.anchor_at === "string" ? entry.anchor_at : null };
+  }
+  return null;
+}
+
+/**
+ * When an explicit source status was read: `availability_checked_at` (an ISO
+ * timestamp no later than the observation's retrieval). The saved-jobs exports
+ * read the posting in the user's browser before the import, so the check time,
+ * not the import time, is the verification time. Missing -> null; present but
+ * unusable -> "INVALID", which leaves the explicit status unverified.
+ */
+function explicitStatusCheckedAt(records: readonly Record<string, unknown>[], retrievedAt: string): string | null | "INVALID" {
+  const raw = firstValue(records, ["availability_checked_at"]);
+  if (raw === null) return null;
+  if (typeof raw !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(raw)) return "INVALID";
+  const checked = new Date(raw);
+  if (!Number.isFinite(checked.getTime())) return "INVALID";
+  // Five minutes of clock skew between the browser and the importer is tolerated.
+  if (checked.getTime() > new Date(retrievedAt).getTime() + 5 * 60 * 1000) return "INVALID";
+  return checked.toISOString();
 }
 
 function normalizedWorkMode(value: string | null): "REMOTE" | "HYBRID" | "ONSITE" | "UNKNOWN" {
@@ -635,6 +679,20 @@ export function buildEvidenceRevisionHash(evidence: JobSourceEvidence): string {
   return sha256Hex(stableStringify(stableEvidenceProjection(evidence)));
 }
 
+/** " (read via <method> at <time>: "<page text>")" for a status read before staging; "" otherwise. */
+function availabilityCheckDetail(
+  records: readonly Record<string, unknown>[],
+  verifiedAt: string,
+  checkedAt: string | null,
+): string {
+  if (checkedAt === null || checkedAt === "INVALID" || verifiedAt !== checkedAt) return "";
+  const method = firstValue(records, ["availability_check_method"]);
+  const text = firstValue(records, ["availability_evidence_text"]);
+  const methodText = typeof method === "string" && method.trim() ? ` via ${method.trim().slice(0, 80)}` : "";
+  const quote = typeof text === "string" && text.trim() ? `: "${text.replace(/\s+/g, " ").trim().slice(0, 300)}"` : "";
+  return ` (read${methodText} at ${checkedAt}${quote})`;
+}
+
 export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobSourceEvidence {
   const records = payloadRecords(input.rawPayload);
   const normalizedDescription = normalizeDescription(input);
@@ -649,12 +707,15 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
   });
   const at = new Date(input.retrievedAt);
   const retrievedAt = Number.isFinite(at.getTime()) ? at.toISOString() : new Date().toISOString();
-  const explicitStatus = String(firstValue(records, ["status", "jobStatus", "applicationStatus"]) ?? "").toLowerCase();
+  const statusCheckedAt = explicitStatusCheckedAt(records, retrievedAt);
+  const explicitStatus = statusCheckedAt === "INVALID"
+    ? ""
+    : String(firstValue(records, ["status", "jobStatus", "applicationStatus"]) ?? "").toLowerCase();
   const directAts = ["GREENHOUSE", "LEVER", "ASHBY", "WORKABLE", "SMARTRECRUITERS", "WORKDAY"].includes(input.sourceName.toUpperCase());
   const isClosed = /^(closed|expired|filled|inactive|not accepting applications)$/.test(explicitStatus)
-    || firstValue(records, ["isClosed", "closed"]) === true;
+    || (statusCheckedAt !== "INVALID" && firstValue(records, ["isClosed", "closed"]) === true);
   const isExplicitOpen = /^(open|active|published|live)$/.test(explicitStatus)
-    || firstValue(records, ["isOpen", "active"]) === true;
+    || (statusCheckedAt !== "INVALID" && firstValue(records, ["isOpen", "active"]) === true);
   const completePostingRetrieved = quality.status === "COMPLETE"
     && (directAts
       || (input.fetchedPostingLineage !== undefined
@@ -665,17 +726,21 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
     : directAts || isExplicitOpen || completePostingRetrieved
       ? "OPEN"
       : "UNKNOWN";
-  const availabilityVerifiedAt = availabilityStatus === "UNKNOWN" ? null : retrievedAt;
+  // A status read before this observation was staged is verified as of that read, not the staging time.
+  const statusVerifiedAt = typeof statusCheckedAt === "string" && statusCheckedAt !== "INVALID" && !directAts && !completePostingRetrieved
+    ? statusCheckedAt
+    : retrievedAt;
+  const availabilityVerifiedAt = availabilityStatus === "UNKNOWN" ? null : statusVerifiedAt;
   const availabilityExpiresAt = availabilityVerifiedAt
     ? new Date(new Date(availabilityVerifiedAt).getTime() + (availabilityStatus === "OPEN" && completePostingRetrieved ? 7 : 1) * 24 * 60 * 60 * 1000).toISOString()
     : null;
   const availabilityEvidence = availabilityStatus === "UNKNOWN"
     ? []
-    : [evidenceSpan(input, "AVAILABILITY", isClosed
+    : [evidenceSpan(input, "AVAILABILITY", `${isClosed
       ? `Source status: ${explicitStatus || "closed"}`
       : completePostingRetrieved
           ? `Complete posting retrieved from ${input.sourceName}`
-          : `Active public listing observed from ${input.sourceName}`)];
+          : `Active public listing observed from ${input.sourceName}`}${availabilityCheckDetail(records, statusVerifiedAt, statusCheckedAt)}`)];
   const modeValue = normalizedWorkMode(input.workplaceTypeRaw);
   const assumedMode = (input.workplaceTypeRaw ?? "").toUpperCase() === "ASSUMED_HYBRID";
   const officeDaysMatch = input.descriptionText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i);

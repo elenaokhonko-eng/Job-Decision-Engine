@@ -146,8 +146,9 @@ describe("MCF saved-jobs export parsing", () => {
       "unknown field(s): isHideSalary",
     ]);
     expect(Object.keys(McfSavedJobItemSchema.shape).sort()).toEqual([
-      "company", "description", "descriptionStatus", "employmentType", "expiresAt", "exportedAt", "location",
-      "mcfJobUuid", "postedAt", "salary", "sourcePage", "title", "url",
+      "availabilityEvidence", "availabilityStatus", "company", "description", "descriptionStatus", "employmentType",
+      "expiresAt", "exportedAt", "location", "mcfJobUuid", "originalPostedAt", "postedAt", "postingCheckedAt", "salary",
+      "sourcePage", "title", "url",
     ]);
   });
 
@@ -486,6 +487,19 @@ describe("MCF saved-jobs browser snippet", () => {
       expiresAt: "2026-12-01",
       mcfJobUuid: UUID_A,
       sourcePage: "https://www.mycareersfuture.gov.sg/saved-jobs",
+    });
+    // Posting facts: MCF's original posting date, its job status and when the details were read.
+    expect(exported[0]).toMatchObject({
+      originalPostedAt: "2026-10-01",
+      availabilityStatus: "OPEN",
+      availabilityEvidence: "MyCareersFuture job status: Open",
+    });
+    expect(String(exported[0]?.postingCheckedAt)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(parseMcfSavedExport(exported).valid[0]?.rawPayload).toMatchObject({
+      posted_at: "2026-10-01T00:00:00.000Z",
+      reposted_at: "2026-11-01T00:00:00.000Z",
+      source_expires_at: "2026-12-01T00:00:00.000Z",
+      status: "open",
     });
     // Hidden salary and address stay null; the hiring employer is shown for agency posts.
     expect(exported[1]).toMatchObject({ company: "EXAMPLE SYNTHETIC EMPLOYER PTE. LTD.", salary: null, location: null });

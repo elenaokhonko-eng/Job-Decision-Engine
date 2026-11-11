@@ -256,7 +256,7 @@ describe("LinkedIn saved-jobs source registration and browser snippet", () => {
     expect(pathCheck.test("/jobs/search/")).toBe(false);
     const emitted = snippet.match(/state\.jobs\[id\] = \{([\s\S]*?)\};/)?.[1] ?? "";
     const keys = [...emitted.matchAll(/^\s*([a-zA-Z]+)[:,]/gm)].map((match) => match[1]).sort();
-    const schemaKeys = Object.keys(LinkedInSavedJobItemSchema.shape).filter((key) => !["salary", "postedAt"].includes(key)).sort();
+    const schemaKeys = Object.keys(LinkedInSavedJobItemSchema.shape).filter((key) => key !== "salary").sort();
     expect(keys).toEqual(schemaKeys);
   });
 
