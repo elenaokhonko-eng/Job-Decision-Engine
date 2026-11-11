@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { simpleParser } from "mailparser";
 import { decodeHTML } from "entities";
-import { isUnknownEmployerName } from "./postingIdentity.js";
+import { isUnknownEmployerName, MAX_EMPLOYER_NAME_CHARS } from "./postingIdentity.js";
 import { linkedInJobIdFromUrl } from "./searchApi/searchApiClient.js";
 
 const MAX_EMAIL_BYTES = 10 * 1024 * 1024;
@@ -29,7 +29,12 @@ export interface EmailJobCard {
 
 export class EmailExtractionError extends Error {
   constructor(
-    public readonly code: "INVALID_RAW_EMAIL" | "EMAIL_TOO_LARGE" | "MIME_STRUCTURE_LIMIT" | "MISSING_POSTING_URL",
+    public readonly code:
+      | "INVALID_RAW_EMAIL"
+      | "EMAIL_TOO_LARGE"
+      | "MIME_STRUCTURE_LIMIT"
+      | "MISSING_POSTING_URL"
+      | "TOO_MANY_JOB_CARDS",
     message: string,
   ) {
     super(message);
@@ -482,10 +487,27 @@ interface CardGroup {
 /** Upper bound on one LinkedIn card's markup; real cards carry long tracking URLs. */
 const LINKEDIN_CARD_MAX_CHARS = 20_000;
 
+/** At most this many cards (distinct postings) per email; a larger email is blocked, never truncated. */
+export const MAX_JOB_CARDS_PER_EMAIL = 250;
+
+/** Alt texts kept per card; the employer fallback reads the first usable one. */
+const MAX_IMAGE_ALTS_PER_CARD = 8;
+
+/**
+ * Alt texts of images inside a job anchor. Only name-sized values are read:
+ * an alt longer than an employer name (untrusted, possibly megabytes) is
+ * ignored before any decoding or pattern check.
+ */
 function anchorImageAlts(innerHtml: string): string[] {
-  return [...innerHtml.matchAll(/<img\b([^>]*)>/gi)]
-    .map((image) => decodeHtmlEntities(anchorAttribute(image[1] ?? "", "alt") ?? "").replace(/\s+/g, " ").trim())
-    .filter(Boolean);
+  const alts: string[] = [];
+  for (const image of innerHtml.matchAll(/<img\b([^>]*)>/gi)) {
+    const raw = anchorAttribute(image[1] ?? "", "alt") ?? "";
+    // Entities at most shrink the text; 4x leaves room for "&amp;"-style encoding.
+    if (raw.length > MAX_EMPLOYER_NAME_CHARS * 4) continue;
+    const alt = decodeHtmlEntities(raw).replace(/\s+/g, " ").trim();
+    if (alt && alt.length <= MAX_EMPLOYER_NAME_CHARS) alts.push(alt);
+  }
+  return alts;
 }
 
 /** Per-email link accounting: `linksSeen = jobCards + nonJobLinksSkipped + duplicateLinksCollapsed`. */
@@ -578,16 +600,25 @@ export async function extractEmailJobCardsWithLinkSummary(
     if (existing) {
       duplicateLinksCollapsed += 1;
       existing.occurrences.push({ text: visibleText, context });
-      existing.imageAlts.push(...imageAlts);
+      // Only the first few alts are ever consulted; keep the list bounded.
+      existing.imageAlts.push(...imageAlts.slice(0, Math.max(0, MAX_IMAGE_ALTS_PER_CARD - existing.imageAlts.length)));
       if (anchor && existing.htmlStart === null) existing.htmlStart = anchor.index;
       return;
+    }
+    if (groups.size >= MAX_JOB_CARDS_PER_EMAIL) {
+      // Blocking the whole email (never staging a truncated subset) keeps every
+      // posting recoverable: the raw alert stays stored with this reason.
+      throw new EmailExtractionError(
+        "TOO_MANY_JOB_CARDS",
+        `Email links more than ${MAX_JOB_CARDS_PER_EMAIL} distinct postings; nothing was staged and the raw alert is kept for review.`,
+      );
     }
     groups.set(classification.key, {
       canonicalUrl: classification.canonicalUrl,
       occurrences: [{ text: visibleText, context }],
       linkedIn: classification.key.startsWith("linkedin:"),
       htmlStart: anchor ? anchor.index : null,
-      imageAlts,
+      imageAlts: imageAlts.slice(0, MAX_IMAGE_ALTS_PER_CARD),
       cardLines: [],
     });
   };
@@ -605,10 +636,12 @@ export async function extractEmailJobCardsWithLinkSummary(
     .map((group) => group.htmlStart)
     .filter((start): start is number => start !== null)
     .sort((left, right) => left - right);
+  // Each start is a distinct anchor offset, so the next card's start is one lookup.
+  const nextCardStart = new Map(cardStarts.map((start, position) => [start, cardStarts[position + 1] ?? bodies.html.length]));
   for (const group of groups.values()) {
     const start = group.htmlStart;
     if (!group.linkedIn || start === null) continue;
-    const next = cardStarts.find((candidate) => candidate > start) ?? bodies.html.length;
+    const next = nextCardStart.get(start) ?? bodies.html.length;
     const markup = withoutPartialTags(bodies.html.slice(start, Math.min(next, start + LINKEDIN_CARD_MAX_CHARS)));
     group.cardLines = htmlToPlainText(markup).split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
   }

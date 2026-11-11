@@ -78,7 +78,7 @@ export function isNoVacancyFunnelBroken(parsedEmails: number, noVacancyEmails: n
 type EmailOutcome =
   | { readonly kind: "STAGED"; readonly links: number; readonly linkSummary: EmailLinkSummary }
   | { readonly kind: "NO_VACANCY"; readonly linkSummary: EmailLinkSummary }
-  | { readonly kind: "BLOCKED"; readonly linkSummary: EmailLinkSummary | null }
+  | { readonly kind: "BLOCKED"; readonly code: string; readonly linkSummary: EmailLinkSummary | null }
   | { readonly kind: "FAILED"; readonly linkSummary: EmailLinkSummary };
 
 function linkSummaryPayload(summary: EmailLinkSummary): Record<string, number> {
@@ -157,7 +157,7 @@ async function stageEmail(
       return { kind: "NO_VACANCY", linkSummary };
     }
     broker.recordError(message);
-    return { kind: "BLOCKED", linkSummary };
+    return { kind: "BLOCKED", code: error instanceof EmailExtractionError ? error.code : "EMAIL_EXTRACTION_FAILED", linkSummary };
   }
   const extractedLinks: EmailLinkSummary = linkSummary;
   const emailLinkSummary = linkSummaryPayload(extractedLinks);
@@ -396,7 +396,9 @@ export async function parseEmails(
         detail = "recorded as SOURCE_BLOCKED (no vacancy link in this email)";
       } else {
         failedEmails += 1;
-        detail = outcome.kind === "BLOCKED" ? "blocked (no stageable vacancy link)" : "failed; left unprocessed for retry";
+        detail = outcome.kind === "BLOCKED"
+          ? `blocked (${outcome.code}; raw alert kept as SOURCE_BLOCKED)`
+          : "failed; left unprocessed for retry";
       }
       log(
         `Gmail extraction progress: batch ${batch} alert ${parsedEmails + noVacancyEmails + failedEmails} ${detail}${links}; ` +

@@ -7,15 +7,22 @@ const TRACKING_PARAMETER = /^(?:utm_.+|trk|ref|source|gh_src|lever-source|campai
  * `...?e=1&t=x" alt="Ex`. Domain-style names such as "Booking.com" are names.
  */
 function looksLikeUrlOrMarkup(value: string): boolean {
-  return /[a-z][a-z0-9+.-]*:\/\//i.test(value)
+  // Every quantifier is bounded, so each pattern is linear in the (already capped) input.
+  return /[a-z][a-z0-9+.-]{0,30}:\/\//i.test(value)
     || /^(?:\/\/|www\.)/i.test(value)
     || /[<>]/.test(value)
-    || /\b[a-z][a-z-]*\s*=\s*["']/i.test(value)
+    || /\b[a-z][a-z-]{0,30}\s{0,5}=\s{0,5}["']/i.test(value)
     || /[?&][a-z][\w-]{0,30}=/i.test(value)
-    || /(?:company-logo|logo_\d+_\d+|\.(?:png|jpe?g|gif|svg|webp)(?:[?#"']|$))/i.test(value)
+    || /(?:company-logo|logo_\d{1,5}_\d{1,5}|\.(?:png|jpe?g|gif|svg|webp)(?:[?#"']|$))/i.test(value)
     // A whitespace-free token with two or more "/" is a path, not a name.
-    || /(?:^|\s)[^\s/]*\/[^\s/]*\/\S*/.test(value);
+    || /(?:^|\s)[^\s/]{0,200}\/[^\s/]{0,200}\//.test(value);
 }
+
+/**
+ * Longer than any employer name. Values over it are never names, and the
+ * pattern checks only ever see bounded input (email alt text is untrusted).
+ */
+export const MAX_EMPLOYER_NAME_CHARS = 200;
 
 /**
  * Whether a discovery card's employer value names no employer: empty, the
@@ -26,6 +33,7 @@ function looksLikeUrlOrMarkup(value: string): boolean {
  */
 export function isUnknownEmployerName(value: string | null | undefined): boolean {
   const trimmed = (value ?? "").trim();
+  if (trimmed.length > MAX_EMPLOYER_NAME_CHARS) return true;
   const key = trimmed.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   if (!key || key === "unknown" || key === "unknown company") return true;
   return looksLikeUrlOrMarkup(trimmed);

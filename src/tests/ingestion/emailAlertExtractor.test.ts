@@ -3,7 +3,9 @@ import {
   decodeGmailRawEmail,
   extractEmailJobCards,
   extractEmailJobCardsWithLinkSummary,
+  EmailExtractionError,
   isEmailAlertPostingLink,
+  MAX_JOB_CARDS_PER_EMAIL,
   type EmailJobCard,
 } from "../../ingestion/emailAlertExtractor.js";
 import {
@@ -213,6 +215,46 @@ describe("job-card link classification and collapsing", () => {
 
       expect(cards).toEqual([]);
       expect(links.nonJobLinksSkipped).toBe(links.linksSeen);
+    });
+  });
+
+  describe("bounded work on untrusted alert markup", () => {
+    it("ignores a 1 MB adversarial logo alt text quickly and leaves the employer unknown", async () => {
+      const alt = "a".repeat(1_000_000);
+      const html = `<table><tr><td><a href="https://www.linkedin.com/comm/jobs/view/4400000301/"><img src="https://static.example.com/x.png" alt="${alt}"></a>`
+        + '<a href="https://www.linkedin.com/comm/jobs/view/4400000301/">Synthetic Data Steward</a></td></tr></table>';
+      const raw = htmlRaw(html);
+
+      const started = performance.now();
+      const { cards } = await extractEmailJobCardsWithLinkSummary(raw);
+      const elapsed = performance.now() - started;
+
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ title: "Synthetic Data Steward", companyName: "", companySource: null });
+      // MIME decoding of a 1 MB body dominates; the quadratic patterns alone took ~0.6 s at 40 KB.
+      expect(elapsed).toBeLessThan(500);
+    });
+
+    function linkedInCardsHtml(count: number): string {
+      return Array.from({ length: count }, (_, index) =>
+        `<tr><td><a href="https://www.linkedin.com/comm/jobs/view/${4_500_000_000 + index}/">Synthetic Role ${index}</a>`
+        + `<p>Example Org ${index} &middot; Example City</p></td></tr>`).join("");
+    }
+
+    it(`stages up to ${MAX_JOB_CARDS_PER_EMAIL} cards from one email, each with its own employer`, async () => {
+      const { cards } = await extractEmailJobCardsWithLinkSummary(htmlRaw(`<table>${linkedInCardsHtml(MAX_JOB_CARDS_PER_EMAIL)}</table>`));
+
+      expect(cards).toHaveLength(MAX_JOB_CARDS_PER_EMAIL);
+      expect(cards[MAX_JOB_CARDS_PER_EMAIL - 1]?.companyName).toBe(`Example Org ${MAX_JOB_CARDS_PER_EMAIL - 1}`);
+    });
+
+    it("blocks an email with more distinct postings than the cap instead of staging a truncated subset", async () => {
+      const raw = htmlRaw(`<table>${linkedInCardsHtml(MAX_JOB_CARDS_PER_EMAIL + 1)}</table>`);
+
+      const error = await extractEmailJobCardsWithLinkSummary(raw).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(EmailExtractionError);
+      expect(error).toMatchObject({ code: "TOO_MANY_JOB_CARDS" });
     });
   });
 

@@ -29,6 +29,26 @@ describe("unknown employer values", () => {
     expect(isUnknownEmployerName(value)).toBe(false);
   });
 
+  it.each([
+    ["a letter run", "a".repeat(1_000_000)],
+    ["a scheme-like run", "a".repeat(1_000_000) + ":/"],
+    ["an attribute-like run", "a-".repeat(500_000) + " = "],
+    ["a slash-free token run", "x/".repeat(1) + "y".repeat(1_000_000)],
+  ])("checks 1 MB of adversarial text (%s) in linear time", (_label, value) => {
+    const started = performance.now();
+    expect(isUnknownEmployerName(value)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  it("checks name-sized adversarial text quickly through every pattern", () => {
+    const values = ["a".repeat(199), "a-".repeat(99), "a".repeat(198) + ":/", "a ".repeat(99)];
+    const started = performance.now();
+    for (let round = 0; round < 200; round += 1) {
+      for (const value of values) isUnknownEmployerName(value);
+    }
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
   it("matches on the posting alone when the card employer is a logo URL, but never on an empty posting employer", () => {
     for (const expected of LOGO_LIKE_EMPLOYERS) {
       expect(companyMatches(expected, "Example Holdings", "linkedin.com")).toBe(true);
