@@ -808,13 +808,15 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "stock exchange",
     "finance app",
   ],
+  // Bare "university" or "academic" names an employer, not research work.
   "research academic sector": [
-    "university",
     "research institute",
     "research agency",
     "research centre",
     "research center",
-    "academic",
+    "university research",
+    "academic research",
+    "research laboratory",
     "national laboratory",
   ],
   "public social sector": [
@@ -1030,6 +1032,23 @@ export function hasInvestigationFunction(title: string): boolean {
   return /\b(?:investigat\w*|enforcement|forensics?|financial\s+crimes?\s+(?:investigat\w*|analyst|specialist|manager|lead)|fraud\s+(?:investigat\w*|analyst|examiner|risk|specialist|manager|lead)|counter[- ]fraud|anti[- ]fraud|market\s+surveillance|misconduct)\b/i.test(value);
 }
 
+// A title qualifier that makes a project/programme/transformation title half-technical.
+const TECHNICAL_TITLE_QUALIFIER = /\b(?:technical|technology|tech|digital|data|ai|ml|platforms?|products?|it|software|engineering|systems|cloud|cyber|automation|analytics)\b/i;
+// Non-technical project subjects: building, estates, facilities, events and fundraising work.
+const NON_TECHNICAL_PROJECT_TITLE = /\b(?:construction|redevelopment|refurbishment|fit[- ]?out|estates?|facilities|property|real\s+estate|events?|venues?|catering|fundraising|campaigns?|maintenance|interiors?)\b/i;
+const NON_TECHNICAL_PROJECT_SCOPE = /\b(?:construction\s+(?:project|works|site|programme|program)|building\s+works|site\s+works|redevelopment|refurbishment|fit[- ]?out|campus\s+estates|estates\s+(?:management|programme|program|team)|facilities\s+management|office\s+moves?|cleaning\s+contracts?|galas?|fundraising\s+events?|donor\s+events?|events\s+programme|event\s+management|venue\s+management|catering|property\s+development)\b/i;
+
+/**
+ * TECHNICAL_PRODUCT_TRANSFORMATION excludes project, programme and transformation roles whose
+ * subject is non-technical. A non-technical subject in the title always excludes the role.
+ * A title without a technical qualifier is also excluded when its own scope describes
+ * building, estates, facilities, events or fundraising work.
+ */
+export function hasNonTechnicalProjectSubject(title: string, scopeText: string): boolean {
+  if (NON_TECHNICAL_PROJECT_TITLE.test(title)) return true;
+  return !TECHNICAL_TITLE_QUALIFIER.test(title) && NON_TECHNICAL_PROJECT_SCOPE.test(scopeText);
+}
+
 export function hasApprovedLaneFunction(laneKey: string, title: string): boolean {
   if (laneKey === "INVESTIGATIONS_ENFORCEMENT") return hasInvestigationFunction(title);
   if (hasNonTechnicalRoleFamily(title)) return false;
@@ -1059,8 +1078,8 @@ export function hasRequiredInstitutionalContext(laneKey: string, text: string): 
  * ("cloud" in "cloud platform") is not counted separately.
  */
 /** Sector phrases (title, employer and full description) matched for a lane's required sectors. */
-export function matchedSector(employerContext: string, sectorConcepts: string[] | undefined): string[] {
-  return matchedDomainSignals(employerContext, sectorConcepts);
+export function matchedSector(jobScopeText: string, sectorConcepts: string[] | undefined): string[] {
+  return matchedDomainSignals(jobScopeText, sectorConcepts);
 }
 
 const BANKING_FINTECH_CONTEXT = /\b(?:bank|banks|banking|neobank|fintech|digital\s+bank|financial\s+services|financial\s+institutions?|financial\s+products|financial\s+super\s*app|brokerage|stockbroking|payments|investing|savings|money\s+transfers?|e-money)\b/i;
@@ -1111,10 +1130,10 @@ function laneDomainScopeScore(
   concepts: string[] | undefined,
   minimumSignals = 1,
   sectorConcepts?: string[],
-  employerContext = ""
+  jobScopeText = description
 ): number {
   if (!hasRequiredInstitutionalContext(laneKey, description)) return 0;
-  if (sectorConcepts?.length && matchedSector(employerContext, sectorConcepts).length === 0) return 0;
+  if (sectorConcepts?.length && matchedSector(jobScopeText, sectorConcepts).length === 0) return 0;
   if (minimumSignals <= 1) return conceptScopeScore(description, concepts);
   return matchedDomainSignals(description, concepts).length >= minimumSignals ? 1 : 0;
 }
@@ -1324,12 +1343,9 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
   const preferenceEnabled = input.preferenceEnabled ?? (() => true);
   const preferenceRank = input.preferenceRank ?? (() => 1000);
   const exclusionText = extractCoreJobText(title, description, LANE_EXCLUSION_TEXT_MAX_CHARS).toLowerCase();
-  // Employer context keeps "About Us" text that extractCoreJobText drops as boilerplate.
-  const rawPlain = stripHtmlToText(description);
-  const employerIntro = rawPlain.slice(0, 800);
-  const employerContext = stripEmployerBoilerplatePhrases(
-    `${title}. ${input.companyName ?? ""}. ${rawPlain.slice(0, LANE_SCOPE_TEXT_MAX_CHARS)}`
-  ).toLowerCase();
+  // The employer intro feeds only the LEGAL/FINTECH tie-break and the regulator rule. Sector and
+  // technology checks read the job's own scope (title and role text, without "About Us" blocks).
+  const employerIntro = stripHtmlToText(description).slice(0, 800);
   const scopeText = stripEmployerBoilerplatePhrases(
     extractCoreJobText(title, description, LANE_SCOPE_TEXT_MAX_CHARS)
   ).toLowerCase();
@@ -1369,9 +1385,10 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
       laneDef.included_domain_concepts,
       laneDef.minimum_domain_signals,
       laneDef.required_sector_concepts,
-      employerContext
+      scopeText
     );
     functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, title)
+      || (laneKey === "TECHNICAL_PRODUCT_TRANSFORMATION" && hasNonTechnicalProjectSubject(title, scopeText))
       ? 0
       : conceptScopeScore(scopeText, laneDef.required_function_concepts);
     if (score > bestScore) {
@@ -1514,7 +1531,7 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
           `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
           `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
           ...(config.lanes[bestLane]?.required_sector_concepts?.length
-            ? [`${bestLane}:sector=${matchedSector(employerContext, config.lanes[bestLane].required_sector_concepts).join("|")}`]
+            ? [`${bestLane}:sector=${matchedSector(scopeText, config.lanes[bestLane].required_sector_concepts).join("|")}`]
             : []),
         ],
     processingStatus: noActiveLaneMatch ? "UNMATCHED" : "LANE_ROUTED",

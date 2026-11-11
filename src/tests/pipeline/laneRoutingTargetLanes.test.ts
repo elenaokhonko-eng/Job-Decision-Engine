@@ -8,6 +8,7 @@ import {
   extractCoreJobText,
   hasApprovedLaneFunction,
   hasInvestigationFunction,
+  hasNonTechnicalProjectSubject,
   hasNonTechnicalRoleFamily,
   hasProductTransformationFunction,
   isRegulatorEmployer,
@@ -216,6 +217,30 @@ const IN_SECTOR_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
     expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
   },
   {
+    title: "Product Manager, Clinical Data Platform",
+    description: "Own the clinical data platform for a hospital group: data pipelines from electronic medical records, a cloud-native analytics layer and roadmap delivery with engineering teams.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
+  },
+  {
+    title: "Technical Programme Manager, Payments Modernisation",
+    description: "Run the bank's payments modernisation programme: cloud migration of payment engines, apis and integrations with card schemes, and agile delivery with software engineers.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
+  },
+  {
+    title: "Product Owner, Contract Analytics",
+    description: "Own a legal technology product for law firms: contract analytics with machine learning engineers, data pipelines for clause extraction and a saas platform roadmap.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
+  },
+  {
+    title: "Digital Transformation Lead",
+    description: "Lead digital transformation for a government agency: digital services for citizens, cloud migration of case systems and data pipelines with engineering teams.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["TECHNICAL_PRODUCT_TRANSFORMATION"],
+  },
+  {
     title: "Product Lead, Legal Technology",
     description: "Lead legal technology products for a government ministry's legal service: case-management platform roadmap, software engineers and data pipelines for court filings.",
     favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
@@ -223,8 +248,33 @@ const IN_SECTOR_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
   },
 ];
 
-// ...but not outside them, even with the same technology vocabulary.
+// ...but not outside them, even with the same technology vocabulary. The last four are
+// in-sector employers whose project is not technology work.
 const OUT_OF_SECTOR_PRODUCT_FIXTURES: readonly RoutingFixture[] = [
+  {
+    title: "Project Manager, Hospital Redevelopment",
+    description: "Deliver the redevelopment of a hospital wing for a construction contractor: construction works, subcontractors and handover. Use the digital platform for site reporting and the cloud platform for document control; track data analytics dashboards.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Programme Manager, Campus Estates",
+    description: "Run the university's campus estates programme: facilities management, cleaning contracts and maintenance. Roll out a room-booking digital platform and data analytics dashboards for space use.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Events Programme Manager",
+    description: "Plan the non-profit's galas and donor events. Promote events through digital channels, use data analytics for donor segmentation and manage venues and suppliers.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
+  {
+    title: "Project Manager, Office Fit-out",
+    description: "Manage the law firm's office fit-out: contractors, furniture, moves and budget. Coordinate the digital platform for move bookings and the cloud platform for floor plans with the IT team.",
+    favouredLane: "TECHNICAL_PRODUCT_TRANSFORMATION",
+    expected: ["UNCLASSIFIED"],
+  },
   {
     title: "Digital Transformation Manager",
     description: "Lead digital transformation for a luxury hotel group: cloud migration of property systems, data pipelines for guest analytics and agile delivery with engineering teams.",
@@ -511,6 +561,26 @@ describe("Sector rules", () => {
     expect(sectors).toHaveLength(7);
     expect(matchedSector("a luxury hotel group and a fashion house", sectors)).toEqual([]);
     expect(matchedSector("a pharmaceutical company", sectors)).toEqual(["pharmaceutical"]);
+  });
+
+  it("excludes non-technical project subjects from the product lane", () => {
+    expect(hasNonTechnicalProjectSubject("Project Manager, Hospital Redevelopment", "")).toBe(true);
+    expect(hasNonTechnicalProjectSubject("Events Programme Manager", "")).toBe(true);
+    expect(hasNonTechnicalProjectSubject("Project Manager", "manage the office fit-out and moves")).toBe(true);
+    // A technical qualifier in the title keeps scope mentions of facilities from excluding the role.
+    expect(hasNonTechnicalProjectSubject("Technical Programme Manager", "migrate facilities management systems to the cloud")).toBe(false);
+    expect(hasNonTechnicalProjectSubject("Project Manager", "deliver cloud migration and data pipelines for the bank")).toBe(false);
+  });
+
+  it("reads the product-lane sector from the job's own scope, not the employer's About Us", () => {
+    const sectors = config.lanes.TECHNICAL_PRODUCT_TRANSFORMATION.required_sector_concepts;
+    expect(matchedSector("a university and an academic environment", sectors)).toEqual([]);
+    const aboutOnly = route(
+      "Digital Transformation Manager",
+      "About Us\nWe are a leading bank.\nThe Role\nLead digital transformation for our hotel portfolio: cloud migration of property systems and data pipelines with engineering teams.",
+      "TECHNICAL_PRODUCT_TRANSFORMATION",
+    );
+    expect(aboutOnly.primaryLane).toBe("UNCLASSIFIED");
   });
 
   it("treats a technology-adjacent director or head as a product-lane title", () => {
