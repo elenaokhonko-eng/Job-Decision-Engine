@@ -23,6 +23,7 @@ import {
 } from "../../ingestion/postingFacts.js";
 import type { LinkedInJobDetail, SearchApiCallResult } from "../../ingestion/searchApi/searchApiClient.js";
 import { evaluateJobFreshness } from "../../policy/stage3PolicyEngine.js";
+import { FRESHNESS_BASIS_PATTERN, parseFreshnessBasis } from "../../contracts/postingFacts.js";
 import {
   GUEST_PAGE_CLOSED,
   GUEST_PAGE_NO_SIGNALS,
@@ -157,16 +158,16 @@ describe("relative and absolute posting dates", () => {
   });
 
   it("keeps a status unknown without a check time and ignores dates later than the check", () => {
-    const noCheck = postingFactsPayload({ availabilityStatus: "OPEN", checkMethod: "TEST" });
+    const noCheck = postingFactsPayload({ availabilityStatus: "OPEN", checkMethod: "TEST", notAfter: IMPORTED_AT });
     expect(noCheck.availability).toBe("UNKNOWN");
     expect(noCheck.payload).toEqual({});
     expect(noCheck.ignored).toContain("availabilityStatus has no valid check time");
 
-    const future = postingFactsPayload({ postedAt: "2026-12-01", checkMethod: "TEST", checkedAt: CHECKED_AT });
+    const future = postingFactsPayload({ postedAt: "2026-12-01", checkMethod: "TEST", checkedAt: CHECKED_AT, notAfter: IMPORTED_AT });
     expect(future.publishedAt).toBeNull();
     expect(future.ignored).toContain("postedAt is later than the check time");
 
-    const both = postingFactsPayload({ postedAt: "2026-10-28", postedAtText: "2 weeks ago", checkMethod: "TEST", checkedAt: CHECKED_AT });
+    const both = postingFactsPayload({ postedAt: "2026-10-28", postedAtText: "2 weeks ago", checkMethod: "TEST", checkedAt: CHECKED_AT, notAfter: IMPORTED_AT });
     expect(both.publishedAt).toBe("2026-10-28T00:00:00.000Z");
     expect(both.payload.date_derivations).toEqual({ posted_at: { basis: "ABSOLUTE_SOURCE_DATE", precision: "DAY", source_text: "2026-10-28", anchor_at: null } });
   });
@@ -509,6 +510,30 @@ describe("approximate dates downstream", () => {
     expect(freshness("1 month ago", 45).result.status).toBe("UNKNOWN");
     expect(freshness("1 month ago", 60).result).toMatchObject({ status: "AGING", job_age_days: 59 });
     expect(freshness("2 months ago", 59).result.status).toBe("STALE");
+  });
+
+  it("parses freshness_basis fail-safe: an unrecognized value is never an authoritative date", () => {
+    for (const basis of ["POSTED_AT", "REPOSTED_AT", "NEW_POSTING_ID", "NO_DATE", "UNKNOWN", ...["MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "YEAR"].flatMap((unit) => [`POSTED_AT_APPROXIMATE_${unit}`, `REPOSTED_AT_APPROXIMATE_${unit}`])]) {
+      expect(FRESHNESS_BASIS_PATTERN.test(basis), basis).toBe(true);
+      expect(parseFreshnessBasis(basis).kind, basis).not.toBe("UNRECOGNIZED");
+    }
+    for (const basis of ["POSTED_AT_APPROXIMATE_FORTNIGHT", "POSTED_AT_APPROXIMATE", "posted_at", "AUTHORITATIVE"]) {
+      expect(parseFreshnessBasis(basis), basis).toEqual({ kind: "UNRECOGNIZED", approximateUnit: null });
+      expect(evaluateJobFreshness({ posted_at: "2026-11-01T00:00:00.000Z", freshness_basis: basis }, { max_posting_age_days: 30 } as never, AS_OF), basis)
+        .toMatchObject({ status: "UNKNOWN", freshness_confidence: "LOW", is_hard_reject: false });
+    }
+  });
+
+  it("reads an estimate from its evidence whatever the identity basis says", () => {
+    const derived = parseRelativePostedText("4 weeks ago", AS_OF.toISOString());
+    const result = evaluateJobFreshness({ posted_at: derived?.iso, freshness_basis: "NEW_POSTING_ID", approximate_unit: "WEEK" }, { max_posting_age_days: 30 } as never, AS_OF);
+    expect(result).toMatchObject({ status: "UNKNOWN", freshness_basis: "POSTED_AT_APPROXIMATE", freshness_confidence: "LOW" });
+    expect(result.evidence).not.toMatch(/Authoritative/);
+  });
+
+  it("does not hard-reject on month or year precision, whose rounding is unconfirmed", () => {
+    expect(freshness("2 months ago", 45).result).toMatchObject({ status: "STALE", is_hard_reject: false });
+    expect(freshness("9 weeks ago", 60).result).toMatchObject({ status: "STALE", is_hard_reject: true });
   });
 
   it("carries both bounds in the source evidence and treats a future date as unknown age", () => {

@@ -649,12 +649,22 @@ export async function runRecommendationDecider(
         ));
 
         const freshnessPolicy = preferenceContext.stage3?.freshness;
+        // The latest source evidence says whether the stored date is an estimate; that
+        // applies whatever identity basis the version carries.
+        const usesRepost = isRepostFreshnessBasis(job.freshness_basis) && job.reposted_at !== null;
+        const evidenceDate = usesRepost ? sourceEvidence?.dates.reposted_at : sourceEvidence?.dates.published_at;
+        const columnDate = asIso(usesRepost ? job.reposted_at : job.source_published_at);
+        const evidenceApproximateUnit = evidenceDate?.approximation && columnDate !== null
+          && evidenceDate.value !== null && new Date(evidenceDate.value).getTime() === new Date(columnDate).getTime()
+          ? evidenceDate.approximation.precision
+          : null;
         const freshness = evaluateJobFreshness({
           posted_at: job.source_published_at,
           reposted_at: job.reposted_at,
           source_updated_at: job.source_updated_at,
           freshness_basis: job.freshness_basis,
           is_repost: isRepostFreshnessBasis(job.freshness_basis),
+          approximate_unit: evidenceApproximateUnit,
         }, freshnessPolicy);
         const freshnessStatus = !freshnessPolicy?.max_posting_age_days
           ? "NEEDS_VERIFICATION"
@@ -662,7 +672,7 @@ export async function runRecommendationDecider(
             ? freshness.is_hard_reject ? "BLOCKED" : "NEEDS_VERIFICATION"
             : freshness.status === "UNKNOWN" ? "NEEDS_VERIFICATION" : "MET";
         // An approximate (relative-text) date expires from its oldest possible value.
-        const approximateUnit = parseFreshnessBasis(job.freshness_basis).approximateUnit;
+        const approximateUnit = evidenceApproximateUnit ?? parseFreshnessBasis(job.freshness_basis).approximateUnit;
         const freshnessReference = asIso(job.reposted_at ?? job.source_published_at);
         const freshnessExpiry = freshnessReference && asIso(job.source_published_at ?? job.reposted_at)
           && freshnessPolicy?.max_posting_age_days

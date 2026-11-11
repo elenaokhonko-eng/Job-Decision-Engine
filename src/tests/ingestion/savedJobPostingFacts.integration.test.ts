@@ -305,4 +305,61 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     expect((await version(expired.jobVersionId)).source_expires_at?.toISOString()).toBe(`${isoDate(-2 * DAY)}T00:00:00.000Z`);
     expect(await readiness(expired.canonicalJobId)).toEqual({ AVAILABILITY: "BLOCKED", FRESHNESS: "MET" });
   });
+
+  // Runs last: it switches the workspace's posting-age limit to 30 days.
+  it("enriching a NEW_POSTING_ID version with \"4 weeks ago\" stays NEEDS_VERIFICATION against a 30-day limit", async () => {
+    await saveWorkspacePreferenceRevision(db(), ctx(), {
+      preferenceDomain: "stage3",
+      schemaVersion: "3.0.0",
+      activate: true,
+      preferenceValue: { schema_version: "3.0.0", freshness: { max_posting_age_days: 30, stale_gate_disposition: "HARD_REJECT" } },
+    });
+    const [legacyId] = await importLinkedIn([linkedInItem("4300000206")]);
+    const target = (await normalizeAndDecide([legacyId as string])).get(legacyId as string);
+    if (!target) throw new Error("legacy saved job was not normalized");
+    // The state a version reaches when it was first seen as a new posting identity, with no date.
+    await db().query(
+      "UPDATE job_versions SET freshness_basis = 'NEW_POSTING_ID', freshness_confidence = 75 WHERE id = $1::uuid",
+      [target.jobVersionId],
+    );
+
+    const reExport = [{ ...linkedInItem("4300000206"), postedAtText: "4 weeks ago", availabilityStatus: "OPEN", postingCheckedAt: iso(-HOUR) }];
+    const applied = await runLinkedInSavedEnrichment(db(), ctx(), await planLinkedInSavedEnrichment(db(), ctx(), reExport), { dryRun: false, plugin: linkedInPlugin as SourcePlugin });
+    expect(linkedInSavedEnrichmentExitCode(applied)).toBe(0);
+    expect(applied.items[0]).toMatchObject({ outcome: "STAGED", canonicalJobId: target.canonicalJobId });
+
+    // The filled date brings its approximate basis onto the existing version.
+    const enriched = await version(target.jobVersionId);
+    expect(enriched.source_published_at).not.toBeNull();
+    expect(enriched.freshness_basis).toBe("POSTED_AT_APPROXIMATE_WEEK");
+
+    const freshnessCheck = async () => {
+      const { rows } = await db().query<{ readiness_json: { checks: Array<{ key: string; status: string; rationale: string }> } }>(
+        `SELECT readiness_json FROM deterministic_decisions WHERE workspace_id = $1 AND canonical_job_id = $2::uuid ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [ctx().workspaceId, target.canonicalJobId],
+      );
+      return rows[0]?.readiness_json.checks.find((check) => check.key === "FRESHNESS");
+    };
+    const first = await freshnessCheck();
+    expect(first?.status).toBe("NEEDS_VERIFICATION");
+    expect(first?.rationale).toMatch(/^Approximate posting age of 28-3[45] days/);
+    expect(first?.rationale).not.toMatch(/Authoritative/);
+
+    // Even if a version still carries the identity basis, the decider reads the estimate from the evidence.
+    // (Decisions are immutable; a 31-day limit, which "4 weeks ago" still straddles, forces a new one.)
+    await db().query("UPDATE job_versions SET freshness_basis = 'NEW_POSTING_ID' WHERE id = $1::uuid", [target.jobVersionId]);
+    await saveWorkspacePreferenceRevision(db(), ctx(), {
+      preferenceDomain: "stage3",
+      schemaVersion: "3.0.0",
+      activate: true,
+      preferenceValue: { schema_version: "3.0.0", freshness: { max_posting_age_days: 31, stale_gate_disposition: "HARD_REJECT" } },
+    });
+    const decided = await runRecommendationDecider(db(), { context: ctx(), canonicalJobIds: [target.canonicalJobId] });
+    expect(decided.errors).toBe(0);
+    expect(decided.decisionsInserted).toBe(1);
+    const second = await freshnessCheck();
+    expect(second?.status).toBe("NEEDS_VERIFICATION");
+    expect(second?.rationale).toMatch(/may exceed the 31-day limit/);
+    expect(second?.rationale).not.toMatch(/Authoritative/);
+  });
 });

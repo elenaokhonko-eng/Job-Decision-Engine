@@ -79,18 +79,34 @@ export function approximateFreshnessBasis(kind: "POSTED_AT" | "REPOSTED_AT", uni
   return `${kind}_APPROXIMATE_${unit}`;
 }
 
+/**
+ * The documented `job_versions.freshness_basis` values (the column is free text
+ * with a non-blank CHECK, migration 075). Normalization writes POSTED_AT,
+ * REPOSTED_AT, NEW_POSTING_ID and the approximate forms; the hard gate may
+ * write NO_DATE / UNKNOWN when no age is known. Anything else is unrecognized
+ * and is never read as an authoritative date.
+ */
+export const FRESHNESS_BASIS_PATTERN = /^(?:NEW_POSTING_ID|NO_DATE|UNKNOWN|(?:POSTED_AT|REPOSTED_AT)(?:_APPROXIMATE_(?:MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))?)$/;
+
 export interface ParsedFreshnessBasis {
-  readonly kind: "POSTED_AT" | "REPOSTED_AT" | "NEW_POSTING_ID" | "OTHER" | null;
+  /**
+   * POSTED_AT / REPOSTED_AT (exact or approximate), NEW_POSTING_ID, NO_DATE
+   * (also UNKNOWN), or UNRECOGNIZED for any value outside the documented set,
+   * including a malformed approximate value. Null when absent (legacy rows).
+   */
+  readonly kind: "POSTED_AT" | "REPOSTED_AT" | "NEW_POSTING_ID" | "NO_DATE" | "UNRECOGNIZED" | null;
   /** Set for an approximate (relative-text) date; null for an authoritative one. */
   readonly approximateUnit: ApproximateDateUnit | null;
 }
 
+/** Fail-safe: a value it cannot recognize is UNRECOGNIZED, which consumers treat as unknown age. */
 export function parseFreshnessBasis(basis: string | null | undefined): ParsedFreshnessBasis {
-  if (!basis) return { kind: null, approximateUnit: null };
+  if (basis === null || basis === undefined || basis.trim() === "") return { kind: null, approximateUnit: null };
+  if (!FRESHNESS_BASIS_PATTERN.test(basis)) return { kind: "UNRECOGNIZED", approximateUnit: null };
+  if (basis === "NO_DATE" || basis === "UNKNOWN") return { kind: "NO_DATE", approximateUnit: null };
   if (basis === "POSTED_AT" || basis === "REPOSTED_AT" || basis === "NEW_POSTING_ID") return { kind: basis, approximateUnit: null };
-  const match = basis.match(/^(POSTED_AT|REPOSTED_AT)_APPROXIMATE_(MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)$/);
-  if (match) return { kind: match[1] as "POSTED_AT" | "REPOSTED_AT", approximateUnit: match[2] as ApproximateDateUnit };
-  return { kind: "OTHER", approximateUnit: null };
+  const [kind, unit] = basis.split("_APPROXIMATE_") as ["POSTED_AT" | "REPOSTED_AT", ApproximateDateUnit];
+  return { kind, approximateUnit: unit };
 }
 
 /** Exact or approximate genuine-repost basis. */

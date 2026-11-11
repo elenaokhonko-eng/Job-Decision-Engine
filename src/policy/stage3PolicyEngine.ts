@@ -44,6 +44,12 @@ export interface JobFreshnessInput {
   freshness_basis?: string | null;
   is_repost?: boolean;
   posting_identity_is_new?: boolean;
+  /**
+   * The chosen date's approximation unit from its source evidence, when known.
+   * It applies whatever `freshness_basis` says (for example a NEW_POSTING_ID
+   * version later enriched with "4 weeks ago"), so an estimate is never read as exact.
+   */
+  approximate_unit?: ApproximateDateUnit | null;
 }
 
 export interface FreshnessEvaluationResult {
@@ -88,7 +94,9 @@ function evaluateApproximateFreshness(
   const label = `Approximate posting age of ${range} days (from relative source text, precision ${unit}; not an authoritative date)`;
   const limit = policy.max_posting_age_days;
   if (limit !== undefined && minAgeDays > limit) {
-    const shouldHardReject = policy.stale_gate_disposition === 'HARD_REJECT';
+    // How the source rounds months and years is not confirmed, so a stale verdict at that
+    // precision does not hard-reject; it stays STALE (readiness NEEDS_VERIFICATION).
+    const shouldHardReject = policy.stale_gate_disposition === 'HARD_REJECT' && unit !== 'MONTH' && unit !== 'YEAR';
     return {
       status: 'STALE',
       job_age_days: minAgeDays,
@@ -195,10 +203,23 @@ export function evaluateJobFreshness(
   // A date converted from relative source text ("4 weeks ago") is the newest possible
   // date; the source rounds down, so the posting may be up to one unit older.
   const parsedBasis = parseFreshnessBasis(input.freshness_basis);
-  const approximateUnit = parsedBasis.approximateUnit !== null
-    && parsedBasis.kind === (basis === 'REPOSTED_AT' ? 'REPOSTED_AT' : 'POSTED_AT')
-    ? parsedBasis.approximateUnit
-    : null;
+  const approximateUnit = input.approximate_unit
+    ?? (parsedBasis.approximateUnit !== null
+      && parsedBasis.kind === (basis === 'REPOSTED_AT' ? 'REPOSTED_AT' : 'POSTED_AT')
+      ? parsedBasis.approximateUnit
+      : null);
+  // Fail-safe: an unrecognized basis never makes a date authoritative.
+  if (approximateUnit === null && parsedBasis.kind === 'UNRECOGNIZED') {
+    return {
+      status: 'UNKNOWN',
+      job_age_days: null,
+      freshness_score: 50,
+      freshness_basis: 'NO_DATE',
+      freshness_confidence: 'LOW',
+      is_hard_reject: false,
+      evidence: 'The posting date has an unrecognized freshness basis; posting age is unknown.',
+    };
+  }
   if (approximateUnit !== null) {
     return evaluateApproximateFreshness(effectiveDate, basis === 'REPOSTED_AT' ? 'REPOSTED_AT_APPROXIMATE' : 'POSTED_AT_APPROXIMATE', approximateUnit, policy, asOf);
   }

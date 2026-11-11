@@ -136,7 +136,7 @@ export interface PostingFactsInput {
    * than this plus five minutes of clock skew is not used, so no date or status
    * is derived from it.
    */
-  readonly notAfter?: string | null;
+  readonly notAfter: string;
 }
 
 export interface PostingFactsResult {
@@ -159,8 +159,9 @@ export function postingFactsPayload(input: PostingFactsInput): PostingFactsResul
   const ignored: string[] = [];
   const notAfter = parseCheckTime(input.notAfter);
   const parsedCheck = parseCheckTime(input.checkedAt);
-  const checkInFuture = parsedCheck !== null && notAfter !== null
-    && new Date(parsedCheck).getTime() > new Date(notAfter).getTime() + 5 * 60 * 1000;
+  // Without a valid notAfter the check time cannot be bounded, so it is not used.
+  const checkInFuture = parsedCheck !== null && (notAfter === null
+    || new Date(parsedCheck).getTime() > new Date(notAfter).getTime() + 5 * 60 * 1000);
   const checkedAt = checkInFuture ? null : parsedCheck;
   if (input.checkedAt && !parsedCheck) ignored.push("checkedAt is not an ISO timestamp");
   if (checkInFuture) ignored.push("checkedAt is later than the import time");
