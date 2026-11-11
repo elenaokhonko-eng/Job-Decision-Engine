@@ -66,6 +66,33 @@ ${DESCRIPTION}
 ${SIMILAR_JOBS}
 </section>`;
 
+/** Open posting whose description mentions the closed phrase about something else. */
+export const GUEST_PAGE_OPEN_PHRASE_IN_DESCRIPTION = `<section class="core-rail">
+${TOP_CARD("5 days ago", APPLY_BUTTON)}
+<div class="description__text description__text--rich">
+  <div class="show-more-less-html__markup">
+    <p>About the role: Example Synthetic Analytics is hiring a data engineer for its synthetic platform team.</p>
+    <p>Note: we are no longer accepting applications from recruitment agencies for this role.</p>
+  </div>
+</div>
+${SIMILAR_JOBS}
+</section>`;
+
+/** Open posting whose "similar jobs" list contains a closed job card with its own banner. */
+export const GUEST_PAGE_OPEN_CLOSED_SIMILAR_JOB = `<section class="core-rail">
+${TOP_CARD("5 days ago", APPLY_BUTTON)}
+${DESCRIPTION}
+<section class="similar-jobs">
+  <ul>
+    <li><div class="base-card job-search-card">
+      <h3 class="base-search-card__title">Synthetic Other Role</h3>
+      <figure class="closed-job"><figcaption class="closed-job__flavor--closed">No longer accepting applications</figcaption></figure>
+      <span class="posted-time-ago__text">3 months ago</span>
+    </div></li>
+  </ul>
+</section>
+</section>`;
+
 /** Neither a posted age nor an apply button nor a closed banner. */
 export const GUEST_PAGE_NO_SIGNALS = `<section class="core-rail">
 ${TOP_CARD(null)}

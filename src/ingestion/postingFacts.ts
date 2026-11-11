@@ -16,19 +16,14 @@
  *   unknown, and so does any fact without a valid check time.
  */
 
-export const POSTING_FACTS_SCHEMA = "posting_facts_v1" as const;
+import {
+  POSTING_FACTS_SCHEMA_VERSION,
+  type PostingDateDerivation,
+  type PostingDatePrecision,
+} from "../contracts/postingFacts.js";
 
-export type PostingDatePrecision = "EXACT" | "DAY" | "MINUTE" | "HOUR" | "WEEK" | "MONTH" | "YEAR";
-export type PostingDateBasis = "ABSOLUTE_SOURCE_DATE" | "RELATIVE_SOURCE_TEXT";
-
-export interface PostingDateDerivation {
-  readonly basis: PostingDateBasis;
-  readonly precision: PostingDatePrecision;
-  /** The text or value exactly as the source showed it. */
-  readonly source_text: string;
-  /** For relative text: the time the text was read, used as the anchor. */
-  readonly anchor_at: string | null;
-}
+export type { PostingDateDerivation, PostingDatePrecision } from "../contracts/postingFacts.js";
+export const POSTING_FACTS_SCHEMA = POSTING_FACTS_SCHEMA_VERSION;
 
 export interface DerivedPostingDate {
   readonly iso: string;
@@ -136,6 +131,12 @@ export interface PostingFactsInput {
   readonly checkMethod: string;
   /** When the posting page or API response was read. */
   readonly checkedAt?: string | null;
+  /**
+   * Latest acceptable check time (normally "now" at import). A check time later
+   * than this plus five minutes of clock skew is not used, so no date or status
+   * is derived from it.
+   */
+  readonly notAfter?: string | null;
 }
 
 export interface PostingFactsResult {
@@ -156,10 +157,16 @@ export interface PostingFactsResult {
  */
 export function postingFactsPayload(input: PostingFactsInput): PostingFactsResult {
   const ignored: string[] = [];
-  const checkedAt = parseCheckTime(input.checkedAt);
-  if (input.checkedAt && !checkedAt) ignored.push("checkedAt is not an ISO timestamp");
+  const notAfter = parseCheckTime(input.notAfter);
+  const parsedCheck = parseCheckTime(input.checkedAt);
+  const checkInFuture = parsedCheck !== null && notAfter !== null
+    && new Date(parsedCheck).getTime() > new Date(notAfter).getTime() + 5 * 60 * 1000;
+  const checkedAt = checkInFuture ? null : parsedCheck;
+  if (input.checkedAt && !parsedCheck) ignored.push("checkedAt is not an ISO timestamp");
+  if (checkInFuture) ignored.push("checkedAt is later than the import time");
   const checkedMs = checkedAt ? new Date(checkedAt).getTime() : null;
-  const notAfterCheck = (iso: string) => checkedMs === null || new Date(iso).getTime() <= checkedMs;
+  const latestMs = checkedMs ?? (notAfter ? new Date(notAfter).getTime() + 5 * 60 * 1000 : null);
+  const notAfterCheck = (iso: string) => latestMs === null || new Date(iso).getTime() <= latestMs;
 
   const derivations: Record<string, PostingDateDerivation> = {};
   let publishedAt: string | null = null;

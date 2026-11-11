@@ -110,6 +110,12 @@ export const McfSavedJobItemSchema = z.object({
   availabilityEvidence: optionalText("availabilityEvidence", 300),
   /** When the job details were read (ISO timestamp). */
   postingCheckedAt: optionalText("postingCheckedAt", 100),
+  /**
+   * A later re-check (refresh()) that failed: when, and why (e.g. "HTTP 404").
+   * The facts above are then the earlier, successfully read ones with their own check time.
+   */
+  postingRecheckFailedAt: optionalText("postingRecheckFailedAt", 100),
+  postingRecheckFailure: optionalText("postingRecheckFailure", 300),
 }).strict();
 
 export type McfSavedJobItem = z.infer<typeof McfSavedJobItemSchema>;
@@ -269,7 +275,7 @@ function contentKey(job: Pick<McfSavedJob, "title" | "company" | "description" |
  * and a later postedAt is MCF's repost date; an older export without it keeps
  * postedAt as the publication date MCF displayed. Status needs postingCheckedAt.
  */
-export function mcfSavedPostingFacts(item: McfSavedJobItem): PostingFactsResult {
+export function mcfSavedPostingFacts(item: McfSavedJobItem, notAfter: string = new Date().toISOString()): PostingFactsResult {
   const reposted = item.originalPostedAt !== null && item.postedAt !== null && item.postedAt !== item.originalPostedAt;
   return postingFactsPayload({
     postedAt: item.originalPostedAt ?? item.postedAt,
@@ -279,6 +285,7 @@ export function mcfSavedPostingFacts(item: McfSavedJobItem): PostingFactsResult 
     availabilityEvidence: item.availabilityEvidence,
     checkMethod: MCF_JOB_DETAILS_CHECK_METHOD,
     checkedAt: item.postingCheckedAt,
+    notAfter,
   });
 }
 
@@ -334,7 +341,7 @@ export function parseMcfSavedJobItem(value: unknown, index: number): McfSavedJob
   }
   const postingFacts = mcfSavedPostingFacts(item);
   const postingFactItemFields: Record<string, unknown> = {};
-  for (const key of ["originalPostedAt", "availabilityStatus", "availabilityEvidence", "postingCheckedAt"] as const) {
+  for (const key of ["originalPostedAt", "availabilityStatus", "availabilityEvidence", "postingCheckedAt", "postingRecheckFailedAt", "postingRecheckFailure"] as const) {
     if (item[key] !== null && item[key] !== undefined) postingFactItemFields[key] = item[key];
   }
   // exportedAt is left out of the hashed payload so re-exporting unchanged jobs

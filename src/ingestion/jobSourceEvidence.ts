@@ -4,6 +4,16 @@ import { ManualFetchSourceEvidenceSchema } from "../contracts/manualApplication.
 import { stripHtmlToText } from "../security/sanitize.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
 import { extractFreshnessEvidence } from "./freshnessEvidence.js";
+import {
+  APPROXIMATE_DATE_UNIT_MS,
+  POSTING_FACTS_SCHEMA_VERSION,
+  PostingDateDerivationSchema,
+  PostingDateDerivationsSchema,
+  PostingFactsPayloadSchema,
+  type ApproximateDateUnit,
+  type PostingDateDerivation,
+} from "../contracts/postingFacts.js";
+import { POSTING_FACT_PAYLOAD_KEYS } from "./postingFacts.js";
 import { extractExplicitWorkerTerritoryRequirements, splitWorkabilityClauses } from "../pipeline/workabilityPolicy.js";
 
 export interface BuildJobSourceEvidenceInput {
@@ -247,13 +257,18 @@ function dateEvidence(
   const raw = firstValue(records, keys);
   const parsed = dateValue(raw);
   const value = normalizedValue ?? parsed.iso;
-  const sourceKey = keys.find((key) => firstValue(records, [key]) !== null) ?? basis;
-  const derivation = sourceKey === basis ? null : dateDerivation(records, sourceKey);
-  // A date converted from relative age text ("2 weeks ago") says so in its quote and is LOW confidence.
-  const quote = derivation?.basis === "RELATIVE_SOURCE_TEXT"
-    ? `${sourceKey}: ${String(raw)} (derived from source text "${derivation.sourceText}" read at ${derivation.anchorAt ?? "unknown time"}; precision ${derivation.precision})`
+  const found = firstValueWithRecord(records, keys);
+  const sourceKey = found?.key ?? basis;
+  const derivation = found ? dateDerivation(found.record, found.key) : null;
+  const relative = derivation?.basis === "RELATIVE_SOURCE_TEXT" && derivation.precision !== "EXACT" && derivation.anchor_at !== null
+    ? derivation as typeof derivation & { precision: ApproximateDateUnit; anchor_at: string }
+    : null;
+  // A date converted from relative age text ("2 weeks ago") is an estimate: its quote
+  // says so, it is LOW confidence, and it carries both of its bounds.
+  const quote = relative
+    ? `${sourceKey}: ${String(raw)} (approximate: derived from source text "${relative.source_text}" read at ${relative.anchor_at}; precision ${relative.precision}, so up to one ${relative.precision.toLowerCase()} older)`
     : derivation
-      ? `${sourceKey}: ${String(raw)} (source date "${derivation.sourceText}"; precision ${derivation.precision})`
+      ? `${sourceKey}: ${String(raw)} (source date "${derivation.source_text}"; precision ${derivation.precision})`
       : `${sourceKey}: ${String(raw)}`;
   return {
     status: value ? "SUPPORTED" as const : "UNKNOWN" as const,
@@ -261,26 +276,69 @@ function dateEvidence(
     basis: value ? basis : "UNKNOWN" as const,
     raw_value: parsed.raw,
     timestamp_unit: parsed.unit,
-    evidence: value ? [evidenceSpan(input, `DATE_${basis}`, quote, derivation?.basis === "RELATIVE_SOURCE_TEXT" ? "LOW" : "MEDIUM")] : [],
+    evidence: value ? [evidenceSpan(input, `DATE_${basis}`, quote, relative ? "LOW" : "MEDIUM")] : [],
+    ...(value && relative ? {
+      approximation: {
+        basis: "RELATIVE_SOURCE_TEXT" as const,
+        precision: relative.precision,
+        earliest_value: new Date(new Date(value).getTime() - APPROXIMATE_DATE_UNIT_MS[relative.precision] + 1).toISOString(),
+        source_text: relative.source_text,
+        anchor_at: relative.anchor_at,
+      },
+    } : {}),
   };
 }
 
-/** How a payload date was obtained, from the `date_derivations` record written with posting facts (postingFacts.ts). */
-function dateDerivation(
+function firstValueWithRecord(
   records: readonly Record<string, unknown>[],
-  key: string,
-): { basis: string; precision: string; sourceText: string; anchorAt: string | null } | null {
+  keys: readonly string[],
+): { key: string; record: Record<string, unknown> } | null {
   for (const record of records) {
-    const derivations = asRecord(record.date_derivations);
-    const entry = asRecord(derivations?.[key]);
-    if (!entry) continue;
-    const basis = typeof entry.basis === "string" ? entry.basis : null;
-    const precision = typeof entry.precision === "string" ? entry.precision : null;
-    const sourceText = typeof entry.source_text === "string" ? entry.source_text.slice(0, 200) : null;
-    if (!basis || !precision || !sourceText) continue;
-    return { basis, precision, sourceText, anchorAt: typeof entry.anchor_at === "string" ? entry.anchor_at : null };
+    for (const key of keys) {
+      const value = record[key];
+      if (value !== null && value !== undefined && value !== "") return { key, record };
+    }
   }
   return null;
+}
+
+/** How a payload date was obtained, from the same record's `date_derivations` (validated by validatePostingFacts). */
+function dateDerivation(record: Record<string, unknown>, key: string): PostingDateDerivation | null {
+  const derivations = asRecord(record.date_derivations);
+  const parsed = PostingDateDerivationSchema.safeParse(derivations?.[key]);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Posting facts must match their contract (src/contracts/postingFacts.ts): a
+ * record that declares `posting_facts_schema`, or carries `date_derivations`,
+ * and does not match is rejected so the observation's evidence is quarantined
+ * (the broker records the error) instead of being read in part. A relative date
+ * anchored after this observation's retrieval (beyond five minutes of skew) is
+ * rejected the same way.
+ */
+function validatePostingFacts(records: readonly Record<string, unknown>[], retrievedAt: string): void {
+  const latestAnchor = new Date(retrievedAt).getTime() + 5 * 60 * 1000;
+  for (const record of records) {
+    if (record.posting_facts_schema !== undefined) {
+      const facts: Record<string, unknown> = {};
+      for (const key of POSTING_FACT_PAYLOAD_KEYS) if (record[key] !== undefined) facts[key] = record[key];
+      const parsed = PostingFactsPayloadSchema.safeParse(facts);
+      if (!parsed.success) {
+        throw new Error(`Posting facts do not match ${POSTING_FACTS_SCHEMA_VERSION}: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "facts"}: ${issue.message}`).join("; ")}`);
+      }
+    }
+    if (record.date_derivations === undefined) continue;
+    const derivations = PostingDateDerivationsSchema.safeParse(record.date_derivations);
+    if (!derivations.success) {
+      throw new Error(`Date derivations are malformed: ${derivations.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
+    }
+    for (const [key, derivation] of Object.entries(derivations.data)) {
+      if (derivation?.anchor_at && new Date(derivation.anchor_at).getTime() > latestAnchor) {
+        throw new Error(`Date derivation ${key} is anchored after the observation was retrieved.`);
+      }
+    }
+  }
 }
 
 /**
@@ -707,6 +765,7 @@ export function buildJobSourceEvidence(input: BuildJobSourceEvidenceInput): JobS
   });
   const at = new Date(input.retrievedAt);
   const retrievedAt = Number.isFinite(at.getTime()) ? at.toISOString() : new Date().toISOString();
+  validatePostingFacts(records, retrievedAt);
   const statusCheckedAt = explicitStatusCheckedAt(records, retrievedAt);
   const explicitStatus = statusCheckedAt === "INVALID"
     ? ""

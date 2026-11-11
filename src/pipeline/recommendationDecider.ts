@@ -25,6 +25,7 @@ import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { resolveWorkspaceWorkabilityPolicy } from "./workabilityPolicy.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
+import { APPROXIMATE_DATE_UNIT_MS, isRepostFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
 
 dotenv.config();
@@ -653,16 +654,21 @@ export async function runRecommendationDecider(
           reposted_at: job.reposted_at,
           source_updated_at: job.source_updated_at,
           freshness_basis: job.freshness_basis,
-          is_repost: job.freshness_basis === "REPOSTED_AT",
+          is_repost: isRepostFreshnessBasis(job.freshness_basis),
         }, freshnessPolicy);
         const freshnessStatus = !freshnessPolicy?.max_posting_age_days
           ? "NEEDS_VERIFICATION"
           : freshness.status === "STALE"
             ? freshness.is_hard_reject ? "BLOCKED" : "NEEDS_VERIFICATION"
             : freshness.status === "UNKNOWN" ? "NEEDS_VERIFICATION" : "MET";
-        const freshnessExpiry = asIso(job.source_published_at ?? job.reposted_at)
+        // An approximate (relative-text) date expires from its oldest possible value.
+        const approximateUnit = parseFreshnessBasis(job.freshness_basis).approximateUnit;
+        const freshnessReference = asIso(job.reposted_at ?? job.source_published_at);
+        const freshnessExpiry = freshnessReference && asIso(job.source_published_at ?? job.reposted_at)
           && freshnessPolicy?.max_posting_age_days
-          ? new Date(new Date(asIso(job.reposted_at ?? job.source_published_at) as string).getTime() + freshnessPolicy.max_posting_age_days * 24 * 60 * 60 * 1000).toISOString()
+          ? new Date(new Date(freshnessReference).getTime()
+            - (approximateUnit ? APPROXIMATE_DATE_UNIT_MS[approximateUnit] - 1 : 0)
+            + freshnessPolicy.max_posting_age_days * 24 * 60 * 60 * 1000).toISOString()
           : null;
         readinessChecks.push(readinessCheck(
           "FRESHNESS",

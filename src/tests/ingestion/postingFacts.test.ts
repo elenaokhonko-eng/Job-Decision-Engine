@@ -22,9 +22,12 @@ import {
   postingFactsPayload,
 } from "../../ingestion/postingFacts.js";
 import type { LinkedInJobDetail, SearchApiCallResult } from "../../ingestion/searchApi/searchApiClient.js";
+import { evaluateJobFreshness } from "../../policy/stage3PolicyEngine.js";
 import {
   GUEST_PAGE_CLOSED,
   GUEST_PAGE_NO_SIGNALS,
+  GUEST_PAGE_OPEN_CLOSED_SIMILAR_JOB,
+  GUEST_PAGE_OPEN_PHRASE_IN_DESCRIPTION,
   GUEST_PAGE_OPEN_ABSOLUTE,
   GUEST_PAGE_OPEN_RELATIVE,
 } from "../fixtures/linkedInGuestPostingPages.js";
@@ -81,13 +84,44 @@ function evidenceFor(job: { rawPayload: Record<string, unknown>; title: string; 
 }
 
 /** postingFactsFromHtml and its helpers, taken from the browser snippet itself. */
-function snippetPostingFacts(): (html: string) => Record<string, unknown> {
+interface SnippetFunctions {
+  readonly postingFactsFromHtml: (html: string) => Record<string, unknown>;
+  readonly htmlText: (html: string) => string;
+  readonly needsFetch: (job: Record<string, unknown>, state: Record<string, unknown>) => boolean;
+  readonly recordFailedRead: (job: Record<string, unknown>, reason: string) => void;
+}
+
+function snippetFunctions(): SnippetFunctions {
   const source = fs.readFileSync(path.resolve(process.cwd(), "scripts", "linkedin", "export_saved_jobs.console.js"), "utf8");
-  const block = source.match(/ {2}const decodeEntities[\s\S]*?\n {2}function postingFactsFromHtml\(html\) \{[\s\S]*?\r?\n {2}\}\r?\n/)?.[0];
-  if (!block) throw new Error("postingFactsFromHtml was not found in the snippet.");
+  const block = source.match(/ {2}const decodeEntities[\s\S]*?\n {2}function recordFailedRead\(job, reason\) \{[\s\S]*?\r?\n {2}\}\r?\n/)?.[0];
+  if (!block) throw new Error("The posting-fact functions were not found in the snippet.");
   const clean = (value: string) => (value || "").replace(/\s+/g, " ").trim();
   // eslint-disable-next-line @typescript-eslint/no-implied-eval -- evaluates the repository's own snippet source
-  return new Function("clean", `${block}; return postingFactsFromHtml;`)(clean) as (html: string) => Record<string, unknown>;
+  return new Function("clean", `${block}; return { postingFactsFromHtml, htmlText, needsFetch, recordFailedRead };`)(clean) as SnippetFunctions;
+}
+
+function snippetPostingFacts(): (html: string) => Record<string, unknown> {
+  return snippetFunctions().postingFactsFromHtml;
+}
+
+/** Median of three runs, as in the email-extractor complexity checks. */
+function medianMs(run: () => unknown): number {
+  const samples: number[] = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const started = performance.now();
+    run();
+    samples.push(performance.now() - started);
+  }
+  return samples.sort((left, right) => left - right)[1] as number;
+}
+
+/** Linear growth is ~4x for 4x the input; a quadratic scan needs ~16x. */
+function expectLinear(build: (size: number) => () => unknown, size: number): void {
+  build(size / 16)();
+  const small = medianMs(build(size / 4));
+  const large = medianMs(build(size));
+  expect(large).toBeLessThan(2_000);
+  expect(large / Math.max(small, 5)).toBeLessThan(10);
 }
 
 describe("relative and absolute posting dates", () => {
@@ -175,9 +209,69 @@ describe("LinkedIn guest posting page (export snippet)", () => {
 
   it("emits the posting-fact fields for every saved job and records when the page was read", () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), "scripts", "linkedin", "export_saved_jobs.console.js"), "utf8");
-    expect(source).toMatch(/Object\.assign\(job, postingFactsFromHtml\(html\), \{ postingCheckedAt: readAt \}\)/);
-    expect(source).toMatch(/const needsFetch = \(job\) => job\.descriptionStatus !== "OK" \|\| !job\.postingCheckedAt;/);
+    expect(source).toMatch(/Object\.assign\(job, postingFactsFromHtml\(html\), \{ postingCheckedAt: readAt, postingRecheckFailedAt: null, postingRecheckFailure: null \}\)/);
+    expect(source).toMatch(/recordFailedRead\(job, `HTTP \$\{response\.status\}`\)/);
     expect(source).toMatch(/window\.jdeLinkedInExport = \{ resume, refresh,/);
+    // refresh() keeps earlier facts and their check times; it only requests a re-read.
+    expect(source).not.toMatch(/postingCheckedAt = null/);
+  });
+
+  it("never reads the closed phrase from the description or another job's card", () => {
+    expect(facts(GUEST_PAGE_OPEN_PHRASE_IN_DESCRIPTION)).toMatchObject({ availabilityStatus: "OPEN", postedAtText: "5 days ago" });
+    expect(facts(GUEST_PAGE_OPEN_CLOSED_SIMILAR_JOB)).toMatchObject({ availabilityStatus: "OPEN", postedAtText: "5 days ago" });
+    // Without the posting's own top card nothing is read, even if other parts carry signals.
+    expect(facts(`<div class="description__text">No longer accepting applications</div><span class="posted-time-ago__text">1 day ago</span>`))
+      .toMatchObject({ availabilityStatus: "UNKNOWN", postedAtText: null });
+  });
+
+  it("keeps earlier facts and their check time when a refresh() re-read fails", () => {
+    const { needsFetch, recordFailedRead } = snippetFunctions();
+    const read = {
+      descriptionStatus: "OK",
+      description: DESCRIPTION,
+      postedAtText: "2 weeks ago",
+      availabilityStatus: "OPEN",
+      postingCheckedAt: "2026-11-01T08:00:00.000Z",
+      postingRecheckFailedAt: null,
+      postingRecheckFailure: null,
+    };
+    const state = { refreshRequestedAt: "2026-11-10T08:00:00.000Z" };
+    expect(needsFetch(read, {})).toBe(false);
+    expect(needsFetch(read, state)).toBe(true);
+    const job: Record<string, unknown> = { ...read };
+    recordFailedRead(job, "HTTP 404");
+    expect(job).toMatchObject({
+      descriptionStatus: "OK",
+      description: DESCRIPTION,
+      postedAtText: "2 weeks ago",
+      availabilityStatus: "OPEN",
+      postingCheckedAt: "2026-11-01T08:00:00.000Z",
+      postingRecheckFailure: "HTTP 404",
+    });
+    // The failed attempt is not retried within the same refresh.
+    expect(needsFetch(job, state)).toBe(false);
+
+    // Imported, the facts stay anchored to the earlier read and the item stays valid.
+    const imported = parsedLinkedIn({ ...job, exportedAt: "2026-11-10T08:05:00.000Z" });
+    expect(imported.rawPayload.posted_at).toBe(new Date(new Date("2026-11-01T08:00:00.000Z").getTime() - 14 * DAY).toISOString());
+    expect(imported.rawPayload.availability_checked_at).toBe("2026-11-01T08:00:00.000Z");
+    expect(imported.rawPayload.exported_item).toMatchObject({ postingRecheckFailure: "HTTP 404" });
+  });
+
+  it("htmlText and postingFactsFromHtml stay linear on hostile markup", () => {
+    const { htmlText, postingFactsFromHtml } = snippetFunctions();
+    expectLinear((size) => {
+      const html = "<".repeat(size);
+      return () => htmlText(html);
+    }, 160_000);
+    expectLinear((size) => {
+      const html = `<section class="top-card-layout">${"<span class=\"posted-time-ago__text".repeat(Math.floor(size / 36))}`;
+      return () => postingFactsFromHtml(html);
+    }, 400_000);
+    expectLinear((size) => {
+      const html = `${"<script type=\"application/ld+json\">{".repeat(Math.floor(size / 37))}<section class="top-card-layout"><div class="closed-job ${"x".repeat(size)}`;
+      return () => postingFactsFromHtml(html);
+    }, 400_000);
   });
 });
 
@@ -374,6 +468,83 @@ describe("MyCareersFuture saved export posting facts", () => {
     const closed = parsedMcf({ availabilityStatus: "CLOSED", postingCheckedAt: CHECKED_AT });
     expect(evidenceFor(closed, "MCF_SAVED").availability.status).toBe("CLOSED");
     expect(parseMcfSavedJobItem(mcfItem({ availabilityStatus: "OPEN" }), 0)).toMatch(/needs postingCheckedAt/);
+  });
+});
+
+describe("approximate dates downstream", () => {
+  const AS_OF = new Date("2026-11-10T08:00:00.000Z");
+  const freshness = (text: string, limit: number) => {
+    const derived = parseRelativePostedText(text, AS_OF.toISOString());
+    if (!derived) throw new Error(text);
+    const basis = extractFreshnessEvidence({
+      rawPayload: { posted_at: derived.iso, date_derivations: { posted_at: derived.derivation } },
+      sourceName: "LINKEDIN_SAVED",
+      sourceExternalId: null,
+      canonicalUrl: null,
+      contentHash: "x",
+    });
+    return { basis, result: evaluateJobFreshness({ posted_at: derived.iso, freshness_basis: basis.freshnessBasis }, { max_posting_age_days: limit, stale_gate_disposition: "HARD_REJECT" } as never, AS_OF) };
+  };
+
+  it("marks relative-text dates approximate with lower confidence, not authoritative", () => {
+    const { basis, result } = freshness("2 weeks ago", 60);
+    expect(basis).toMatchObject({ freshnessBasis: "POSTED_AT_APPROXIMATE_WEEK", approximateUnit: "WEEK", freshnessConfidence: 50 });
+    expect(result).toMatchObject({ status: "AGING", freshness_basis: "POSTED_AT_APPROXIMATE", freshness_confidence: "LOW", job_age_days: 20 });
+    expect(result.evidence).toMatch(/^Approximate posting age of 14-20 days/);
+    expect(result.evidence).not.toMatch(/Authoritative/);
+    // An absolute date keeps the authoritative basis.
+    expect(evaluateJobFreshness({ posted_at: "2026-10-27T08:00:00.000Z", freshness_basis: "POSTED_AT" }, { max_posting_age_days: 60 } as never, AS_OF))
+      .toMatchObject({ freshness_basis: "POSTED_AT", freshness_confidence: "HIGH" });
+  });
+
+  it("is within the limit only when the oldest possible date is, and stale only when the newest is past it", () => {
+    // "4 weeks ago" means 28-34 days.
+    expect(freshness("4 weeks ago", 30).result).toMatchObject({ status: "UNKNOWN", is_hard_reject: false });
+    expect(freshness("4 weeks ago", 33).result.status).toBe("UNKNOWN");
+    expect(freshness("4 weeks ago", 34).result).toMatchObject({ status: "AGING", job_age_days: 34 });
+    expect(freshness("3 weeks ago", 30).result).toMatchObject({ status: "AGING", job_age_days: 27 });
+    expect(freshness("5 weeks ago", 30).result).toMatchObject({ status: "STALE", is_hard_reject: true, rejection_code: "GATE_STALE_POSTING" });
+    expect(freshness("4 weeks ago", 27).result).toMatchObject({ status: "STALE", job_age_days: 28 });
+    // "1 month ago" means 30-59 days: never within a 30-day limit, unknown against 45, within 60.
+    expect(freshness("1 month ago", 45).result.status).toBe("UNKNOWN");
+    expect(freshness("1 month ago", 60).result).toMatchObject({ status: "AGING", job_age_days: 59 });
+    expect(freshness("2 months ago", 59).result.status).toBe("STALE");
+  });
+
+  it("carries both bounds in the source evidence and treats a future date as unknown age", () => {
+    const job = parsedLinkedIn({ postedAtText: "4 weeks ago", postingCheckedAt: CHECKED_AT });
+    const evidence = evidenceFor(job);
+    expect(evidence.dates.published_at.approximation).toEqual({
+      basis: "RELATIVE_SOURCE_TEXT",
+      precision: "WEEK",
+      earliest_value: new Date(new Date(CHECKED_AT).getTime() - 35 * DAY + 1).toISOString(),
+      source_text: "4 weeks ago",
+      anchor_at: CHECKED_AT,
+    });
+    expect(evidenceFor(parsedLinkedIn({ postedAt: "2026-10-28", postingCheckedAt: CHECKED_AT })).dates.published_at.approximation).toBeUndefined();
+    expect(evaluateJobFreshness({ posted_at: "2026-11-20T00:00:00.000Z", freshness_basis: "POSTED_AT" }, { max_posting_age_days: 60 } as never, AS_OF))
+      .toMatchObject({ status: "UNKNOWN", job_age_days: null });
+  });
+
+  it("derives no date or status from a check time later than the import", () => {
+    const future = new Date(Date.now() + 10 * DAY).toISOString();
+    const job = parsedLinkedIn({ postedAtText: "1 day ago", availabilityStatus: "OPEN", postingCheckedAt: future });
+    expect(job.rawPayload.posted_at).toBeUndefined();
+    expect(job.rawPayload.status).toBeUndefined();
+    expect(job.postingFacts.ignored).toContain("checkedAt is later than the import time");
+    // Relative text is never re-anchored to exportedAt.
+    const unanchored = parsedLinkedIn({ postedAtText: "2 weeks ago", postingCheckedAt: null, exportedAt: new Date().toISOString() });
+    expect(unanchored.rawPayload.posted_at).toBeUndefined();
+  });
+
+  it("quarantines malformed or future-anchored posting facts instead of reading them in part", () => {
+    const base = parsedLinkedIn({ postedAtText: "2 weeks ago", postingCheckedAt: CHECKED_AT });
+    const malformed = { ...base, rawPayload: { ...base.rawPayload, date_derivations: { posted_at: { basis: "RELATIVE_SOURCE_TEXT", precision: "WEEK", source_text: "2 weeks ago", anchor_at: null } } } };
+    expect(() => evidenceFor(malformed)).toThrow(/Posting facts do not match posting_facts_v1|Date derivations are malformed/);
+    const statusOnly = { ...base, rawPayload: { ...base.rawPayload, status: "open" } };
+    expect(() => evidenceFor(statusOnly)).toThrow(/availability_checked_at/);
+    const futureAnchor = { ...base, rawPayload: { ...base.rawPayload, date_derivations: { posted_at: { basis: "RELATIVE_SOURCE_TEXT", precision: "WEEK", source_text: "2 weeks ago", anchor_at: "2026-11-20T00:00:00.000Z" } } } };
+    expect(() => evidenceFor(futureAnchor, "LINKEDIN_SAVED", IMPORTED_AT)).toThrow(/anchored after the observation was retrieved/);
   });
 });
 

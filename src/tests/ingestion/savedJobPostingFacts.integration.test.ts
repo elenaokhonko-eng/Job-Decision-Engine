@@ -215,7 +215,8 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     }
     const updated = await version(target.jobVersionId);
     expect(updated.source_published_at?.toISOString()).toBe(new Date(new Date(checkedAt).getTime() - 14 * DAY).toISOString());
-    expect(updated).toMatchObject({ freshness_basis: "POSTED_AT", availability_status: "OPEN" });
+    // The date came from "2 weeks ago": stored as the newest possible date with an approximate basis.
+    expect(updated).toMatchObject({ freshness_basis: "POSTED_AT_APPROXIMATE_WEEK", availability_status: "OPEN" });
     expect(updated.availability_verified_at?.toISOString()).toBe(checkedAt);
     expect(updated.availability_recheck_at?.toISOString()).toBe(new Date(new Date(checkedAt).getTime() + DAY).toISOString());
     expect(await readiness(target.canonicalJobId)).toEqual({ AVAILABILITY: "MET", FRESHNESS: "MET" });
@@ -237,6 +238,21 @@ describe.skipIf(skipReal)("saved-jobs posting facts -> readiness (PostgreSQL)", 
     if (!target) throw new Error("closed saved job was not normalized");
     expect((await version(target.jobVersionId)).availability_status).toBe("CLOSED");
     expect(await readiness(target.canonicalJobId)).toEqual({ AVAILABILITY: "BLOCKED", FRESHNESS: "MET" });
+  });
+
+  it("keeps freshness unverified when an approximate age straddles the limit, and stale only past it", async () => {
+    // "8 weeks ago" means 56-62 days against the 60-day limit; "9 weeks ago" is at least 63.
+    const [straddleId, staleId] = await importLinkedIn([
+      linkedInItem("4300000204", { postedAtText: "8 weeks ago", availabilityStatus: "OPEN", postingCheckedAt: iso(-HOUR) }),
+      linkedInItem("4300000205", { postedAtText: "9 weeks ago", availabilityStatus: "OPEN", postingCheckedAt: iso(-HOUR) }),
+    ]);
+    const mapped = await normalizeAndDecide([straddleId as string, staleId as string]);
+    const straddle = mapped.get(straddleId as string);
+    const stale = mapped.get(staleId as string);
+    if (!straddle || !stale) throw new Error("approximate saved jobs were not normalized");
+    expect((await version(straddle.jobVersionId)).freshness_basis).toBe("POSTED_AT_APPROXIMATE_WEEK");
+    expect(await readiness(straddle.canonicalJobId)).toEqual({ AVAILABILITY: "MET", FRESHNESS: "NEEDS_VERIFICATION" });
+    expect(await readiness(stale.canonicalJobId)).toEqual({ AVAILABILITY: "MET", FRESHNESS: "BLOCKED" });
   });
 
   it("blocks freshness for a stale posting date and leaves an expired check unverified", async () => {

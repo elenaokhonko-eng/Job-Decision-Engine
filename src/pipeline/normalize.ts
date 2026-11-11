@@ -8,6 +8,7 @@ import { classifyDescriptionQuality, MIN_COMPLETE_DESCRIPTION_CHARS } from "./de
 import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
 import { extractFreshnessEvidence } from "../ingestion/freshnessEvidence.js";
 import { JobSourceEvidenceSchema, type JobSourceEvidence } from "../contracts/jobSourceEvidence.js";
+import { approximateFreshnessBasis, parseFreshnessBasis } from "../contracts/postingFacts.js";
 import { assessJobArchiveAge, referenceIsOlderThanCutoff, subtractCalendarMonths } from "../services/jobArchivePolicy.js";
 import { reactivateGenuineRepost } from "../services/jobArchive.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
@@ -350,11 +351,17 @@ export async function runNormalization(
           !existingVersionId &&
           typeof obs.source_external_id === 'string' &&
           obs.source_external_id.trim().length > 0;
-        let effectiveFreshnessBasis: 'REPOSTED_AT' | 'POSTED_AT' | 'NEW_POSTING_ID' | null = null;
+        // A date converted from relative source text keeps an approximate basis
+        // (e.g. POSTED_AT_APPROXIMATE_WEEK) so freshness uses both of its bounds.
+        const approximateBasisFor = (kind: 'REPOSTED_AT' | 'POSTED_AT'): string =>
+          freshnessEvidence.approximateUnit !== null && parseFreshnessBasis(freshnessEvidence.freshnessBasis).kind === kind
+            ? approximateFreshnessBasis(kind, freshnessEvidence.approximateUnit)
+            : kind;
+        let effectiveFreshnessBasis: string | null = null;
         if (incomingRepostedAt !== null) {
-          effectiveFreshnessBasis = 'REPOSTED_AT';
+          effectiveFreshnessBasis = approximateBasisFor('REPOSTED_AT');
         } else if (incomingSourcePublishedAt !== null) {
-          effectiveFreshnessBasis = 'POSTED_AT';
+          effectiveFreshnessBasis = approximateBasisFor('POSTED_AT');
         } else if (newSourcePostingIdentity) {
           effectiveFreshnessBasis = 'NEW_POSTING_ID';
         }
@@ -362,7 +369,7 @@ export async function runNormalization(
           ? 75
           : effectiveFreshnessBasis === null
             ? null
-            : 100;
+            : parseFreshnessBasis(effectiveFreshnessBasis).approximateUnit ? 50 : 100;
 
         let resolvedVersionId = existingVersionId;
         let createdNewVersion = false;
@@ -417,12 +424,12 @@ export async function runNormalization(
                    ELSE reposted_at
                  END,
                  freshness_basis = CASE
-                   WHEN $6::text = 'REPOSTED_AT' THEN 'REPOSTED_AT'
+                   WHEN $6::text LIKE 'REPOSTED_AT%' THEN $6
                    WHEN freshness_basis IS NULL THEN $6
                    ELSE freshness_basis
                  END,
                  freshness_confidence = CASE
-                   WHEN $6::text = 'REPOSTED_AT' THEN $7
+                   WHEN $6::text LIKE 'REPOSTED_AT%' THEN $7
                    WHEN freshness_confidence IS NULL THEN $7
                    ELSE freshness_confidence
                  END,

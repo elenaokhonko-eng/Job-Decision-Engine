@@ -45,6 +45,8 @@ export const LINKEDIN_POSTING_FACT_FIELDS = [
   "availabilityStatus",
   "availabilityEvidence",
   "postingCheckedAt",
+  "postingRecheckFailedAt",
+  "postingRecheckFailure",
 ] as const;
 
 /** Stored export-item fields reused unchanged, so the content (and job version) stays the same. */
@@ -208,8 +210,6 @@ export async function planLinkedInSavedEnrichment(
     for (const field of LINKEDIN_POSTING_FACT_FIELDS) {
       if (item[field] !== null && item[field] !== undefined) rebuilt[field] = item[field];
     }
-    // The export time anchors relative age text when the file has no separate check time.
-    if (item.exportedAt) rebuilt.exportedAt = item.exportedAt;
     const descriptionDiffers = typeof item.description === "string" && item.description.trim() !== ""
       && item.description.trim() !== String(storedItem.description ?? "").trim();
 

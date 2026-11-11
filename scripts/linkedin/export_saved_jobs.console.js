@@ -51,13 +51,17 @@
  * OUTPUT (validated by LinkedInSavedJobItemSchema in src/ingestion/linkedInSavedExport.ts)
  *   [{ "title", "company", "url", "location", "description", "descriptionStatus",
  *      "linkedinJobId", "exportedAt", "sourcePage", "postedAt", "postedAtText",
- *      "validThrough", "availabilityStatus", "availabilityEvidence", "postingCheckedAt" }]
+ *      "validThrough", "availabilityStatus", "availabilityEvidence", "postingCheckedAt",
+ *      "postingRecheckFailedAt", "postingRecheckFailure" }]
  *   - postedAtText is the page's age text exactly as shown ("2 weeks ago",
  *     "Reposted 3 days ago"); the importer converts it against postingCheckedAt
  *     and records that the date is approximate. postedAt / validThrough are set
  *     only when the page carries an absolute date (JSON-LD datePosted /
  *     validThrough). availabilityStatus is OPEN, CLOSED or UNKNOWN (neither
  *     signal found); availabilityEvidence is the page text it was read from.
+ *   - postingRecheckFailedAt / postingRecheckFailure: a refresh() re-read that
+ *     failed (e.g. HTTP 404). The job then keeps the facts from its last
+ *     successful read, with that read's postingCheckedAt.
  *   - url is https://www.linkedin.com/jobs/view/<id>/ and linkedinJobId is <id>.
  *   - Anything not shown on the page is null - never "Unknown Company", a default
  *     city, or placeholder description text. descriptionStatus is OK, MISSING
@@ -351,6 +355,8 @@
         availabilityStatus: null,
         availabilityEvidence: null,
         postingCheckedAt: null,
+        postingRecheckFailedAt: null,
+        postingRecheckFailure: null,
       };
       state.order.push(id);
       added += 1;
@@ -439,50 +445,114 @@
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&amp;/g, "&");
-  const htmlText = (html) => clean(decodeEntities((html || "").replace(/<[^>]*>/g, " ")));
+  // [^<>] keeps the tag pattern linear on hostile input (many "<" with no closing ">").
+  const htmlText = (html) => clean(decodeEntities((html || "").replace(/<[^<>]*>/g, " ")));
   const isoDateText = (value) => (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value.trim()) ? value.trim() : null);
+  const TOP_CARD_MAX_CHARS = 30000;
+  /** Markers where the posting's own top card has ended: its description, or lists of other jobs. */
+  const TOP_CARD_END_MARKERS = ["show-more-less-html__markup", "description__text", "similar-jobs", "people-also-viewed", "job-search-card"];
+
+  /** The posting's own top card: from "top-card-layout" to its description or the first other-job list. */
+  function topCardRegion(html) {
+    const start = html.indexOf("top-card-layout");
+    if (start < 0) return "";
+    let end = Math.min(html.length, start + TOP_CARD_MAX_CHARS);
+    for (const marker of TOP_CARD_END_MARKERS) {
+      const at = html.indexOf(marker, start);
+      if (at > start && at < end) end = at;
+    }
+    return html.slice(start, end);
+  }
+
+  /** Inner text of the first element carrying `className` in `html` (up to the next tag), or null. */
+  function elementLeadText(html, className) {
+    const at = html.indexOf(className);
+    if (at < 0) return null;
+    const open = html.indexOf(">", at);
+    if (open < 0) return null;
+    const close = html.indexOf("<", open + 1);
+    return htmlText(html.slice(open + 1, close < 0 ? html.length : close)) || null;
+  }
+
+  /** JSON-LD JobPosting objects, found with indexOf (no regex over the whole page). */
+  function jsonLdJobPostings(html) {
+    const postings = [];
+    let from = 0;
+    for (;;) {
+      const at = html.indexOf("application/ld+json", from);
+      if (at < 0) break;
+      const open = html.indexOf(">", at);
+      const close = open < 0 ? -1 : html.indexOf("</script", open);
+      if (open < 0 || close < 0) break;
+      try {
+        const data = JSON.parse(html.slice(open + 1, close));
+        const items = Array.isArray(data) ? data : data && Array.isArray(data["@graph"]) ? data["@graph"] : [data];
+        for (const item of items) if (item && item["@type"] === "JobPosting") postings.push(item);
+      } catch (error) {
+        // Unreadable structured data is ignored; the visible top card still counts.
+      }
+      from = close + 1;
+    }
+    return postings;
+  }
 
   /**
    * Posting facts from the guest posting page's HTML, read as text so the same function runs in
    * the browser and in the repository's tests. Only the posting's own top card counts: the page
-   * also lists other jobs ("similar jobs") with their own dates, so generic <time> elements are
-   * not read. Anything not found stays null / UNKNOWN.
+   * also carries the description and other jobs ("similar jobs") with their own dates and
+   * banners, so the age text, the closed banner and the apply control are read only from the
+   * top card. Anything not found stays null / UNKNOWN.
    */
   function postingFactsFromHtml(html) {
     const facts = { postedAt: null, postedAtText: null, validThrough: null, availabilityStatus: "UNKNOWN", availabilityEvidence: null };
-    const postings = [];
-    for (const match of html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
-      try {
-        const data = JSON.parse(match[1]);
-        const items = Array.isArray(data) ? data : data && Array.isArray(data["@graph"]) ? data["@graph"] : [data];
-        for (const item of items) if (item && item["@type"] === "JobPosting") postings.push(item);
-      } catch (error) {
-        // Unreadable structured data is ignored; the visible text below still counts.
-      }
-    }
+    const postings = jsonLdJobPostings(html);
     if (postings.length === 1) {
       facts.postedAt = isoDateText(postings[0].datePosted);
       facts.validThrough = isoDateText(postings[0].validThrough);
     }
-    const posted = html.match(/<(?:span|time)[^>]*class=["'][^"']*\bposted-time-ago__text\b[^"']*["'][^>]*>([\s\S]*?)<\/(?:span|time)>/i);
-    if (posted) facts.postedAtText = htmlText(posted[1]).slice(0, 100) || null;
-    const closedBanner = html.match(/<(figure|div|section|span|p)[^>]*class=["'][^"']*\bclosed-job\b[^"']*["'][^>]*>([\s\S]*?)<\/\1>/i);
-    const closedText = htmlText(html).match(/no longer accepting applications/i);
-    if (closedBanner || closedText) {
+    const card = topCardRegion(html);
+    if (!card) return facts;
+    const postedText = elementLeadText(card, "posted-time-ago__text");
+    if (postedText) facts.postedAtText = postedText.slice(0, 100);
+    const closedText = htmlText(card).match(/no longer accepting applications/i);
+    if (closedText || card.indexOf("closed-job") >= 0) {
       facts.availabilityStatus = "CLOSED";
-      facts.availabilityEvidence = (closedText && closedText[0]) || htmlText(closedBanner[2]).slice(0, 300) || "closed-job banner";
-    } else if (/class=["'][^"']*\b(?:apply-button|top-card-layout__cta--primary)\b[^"']*["']|data-tracking-control-name=["']public_jobs_apply-link/i.test(html)) {
+      facts.availabilityEvidence = closedText ? closedText[0] : "closed-job banner";
+    } else if (/apply-button|top-card-layout__cta--primary|public_jobs_apply-link/.test(card)) {
       facts.availabilityStatus = "OPEN";
       facts.availabilityEvidence = "Apply button shown; no \"No longer accepting applications\" banner";
     }
     return facts;
   }
 
-  /** Jobs whose description or posting facts have not been read yet. */
-  const needsFetch = (job) => job.descriptionStatus !== "OK" || !job.postingCheckedAt;
+  /**
+   * Jobs to (re)read: no description yet, posting facts never read, or a refresh() requested
+   * after the last successful read that has not yet been attempted.
+   */
+  const needsFetch = (job, state) => job.descriptionStatus !== "OK"
+    || !job.postingCheckedAt
+    || Boolean(state.refreshRequestedAt
+      && job.postingCheckedAt < state.refreshRequestedAt
+      && !(job.postingRecheckFailedAt && job.postingRecheckFailedAt >= state.refreshRequestedAt));
+
+  /**
+   * A failed request or HTTP error. A job read before keeps its description and its posting facts
+   * with their original postingCheckedAt (never re-anchored to now); the failure is recorded so the
+   * importer and the user can see the re-check did not happen.
+   */
+  function recordFailedRead(job, reason) {
+    if (job.descriptionStatus !== "OK") {
+      job.descriptionStatus = "FETCH_FAILED";
+      job.description = null;
+    }
+    if (job.postingCheckedAt) {
+      job.postingRecheckFailedAt = new Date().toISOString();
+      job.postingRecheckFailure = reason.slice(0, 300);
+    }
+  }
 
   async function fetchDescriptions(state) {
-    const pending = state.order.filter((id) => needsFetch(state.jobs[id]));
+    const pending = state.order.filter((id) => needsFetch(state.jobs[id], state));
     console.log(`[jde] Fetching ${pending.length} description(s), one at a time, about ${DESCRIPTION_BASE_DELAY_MS / 1000}s apart.`);
     for (let index = 0; index < pending.length; index += 1) {
       const job = state.jobs[pending[index]];
@@ -500,11 +570,7 @@
         readAt = new Date().toISOString();
       } catch (error) {
         if (error instanceof StopError) throw error;
-        // A re-check that fails keeps the description already read; only the posting facts stay unread.
-        if (job.descriptionStatus !== "OK") {
-          job.descriptionStatus = "FETCH_FAILED";
-          job.description = null;
-        }
+        recordFailedRead(job, `request failed (${(error && error.message) || "network error"})`);
         saveState(state);
         console.warn(`[jde] ${job.linkedinJobId}: request failed (${error && error.message}).`);
         await sleep(jitter());
@@ -518,20 +584,19 @@
         throw new StopError(`LinkedIn blocked the request (HTTP 999) at job ${job.linkedinJobId}; ${pending.length - index} description(s) not fetched. Wait, then run: await jdeLinkedInExport.resume()`);
       }
       if (!response.ok) {
-        if (job.descriptionStatus !== "OK") {
-          job.descriptionStatus = "FETCH_FAILED";
-          job.description = null;
-        }
+        recordFailedRead(job, `HTTP ${response.status}`);
         console.warn(`[jde] ${job.linkedinJobId}: LinkedIn answered HTTP ${response.status}.`);
       } else {
         const doc = await parseHtml(html);
         const description = descriptionFrom(doc);
-        job.description = description;
-        job.descriptionStatus = description ? "OK" : "MISSING";
+        if (description || job.descriptionStatus !== "OK") {
+          job.description = description;
+          job.descriptionStatus = description ? "OK" : "MISSING";
+        }
         job.title = textOf(doc, SELECTORS.publicTitle) || job.title;
         job.company = textOf(doc, SELECTORS.publicCompany) || job.company;
         job.location = job.location || textOf(doc, SELECTORS.publicLocation);
-        Object.assign(job, postingFactsFromHtml(html), { postingCheckedAt: readAt });
+        Object.assign(job, postingFactsFromHtml(html), { postingCheckedAt: readAt, postingRecheckFailedAt: null, postingRecheckFailure: null });
       }
       job.exportedAt = new Date().toISOString();
       saveState(state);
@@ -589,8 +654,9 @@
 
   /** Re-reads every saved job's posting page (posted date and open/closed status), then downloads. */
   async function refresh() {
+    // Earlier facts and their check times are kept until a re-read succeeds.
     const state = loadState();
-    for (const id of state.order) state.jobs[id].postingCheckedAt = null;
+    state.refreshRequestedAt = new Date().toISOString();
     saveState(state);
     await runDescriptions(state);
   }

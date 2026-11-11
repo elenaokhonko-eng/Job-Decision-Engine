@@ -147,7 +147,7 @@ describe("MCF saved-jobs export parsing", () => {
     ]);
     expect(Object.keys(McfSavedJobItemSchema.shape).sort()).toEqual([
       "availabilityEvidence", "availabilityStatus", "company", "description", "descriptionStatus", "employmentType",
-      "expiresAt", "exportedAt", "location", "mcfJobUuid", "originalPostedAt", "postedAt", "postingCheckedAt", "salary",
+      "expiresAt", "exportedAt", "location", "mcfJobUuid", "originalPostedAt", "postedAt", "postingCheckedAt", "postingRecheckFailedAt", "postingRecheckFailure", "salary",
       "sourcePage", "title", "url",
     ]);
   });
@@ -301,6 +301,8 @@ interface SnippetRun {
   readonly fetches: Array<{ url: string; init: Record<string, unknown> }>;
   readonly downloads: unknown[];
   readonly logs: string[];
+  /** The snippet's window, for calling jdeMcfExport.refresh() after the first run. */
+  window?: Record<string, unknown>;
 }
 
 const SNIPPET_PATH = path.resolve(process.cwd(), "scripts", "mcf", "export_saved_jobs.console.js");
@@ -439,6 +441,7 @@ async function runSnippet(
   });
   (context as Record<string, unknown>).window = context;
   await vm.runInContext(fs.readFileSync(SNIPPET_PATH, "utf8"), context);
+  run.window = context as Record<string, unknown>;
   return run;
 }
 
@@ -509,6 +512,29 @@ describe("MCF saved-jobs browser snippet", () => {
     expect(parsed.invalid).toEqual([]);
     expect(parsed.valid.map((job) => job.mcfJobUuid)).toEqual([UUID_A, UUID_B, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
     expect(run.logs.join("\n")).toMatch(/pagination implies 3-4; collected: 3 over 2 page\(s\)/);
+  });
+
+  it("refresh() keeps earlier details and their check time when a re-read returns HTTP 404", async () => {
+    const run = await runSnippet([[cardA, cardB]], (uuid, call) => (call >= 2 && uuid === UUID_A ? { status: 404, body: { message: "Not found" } } : { status: 200, body: apiDetail(uuid) }));
+    const first = run.downloads[0] as Array<Record<string, unknown>>;
+    const refresh = (run.window?.jdeMcfExport as { refresh: () => Promise<void> }).refresh;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await refresh();
+    expect(run.downloads).toHaveLength(2);
+    const second = run.downloads[1] as Array<Record<string, unknown>>;
+    expect(second[0]).toMatchObject({
+      descriptionStatus: "OK",
+      availabilityStatus: "OPEN",
+      postedAt: first[0]?.postedAt,
+      postingCheckedAt: first[0]?.postingCheckedAt,
+      postingRecheckFailure: "HTTP 404",
+    });
+    // The other job was re-read successfully: a newer check time and no failure.
+    expect(String(second[1]?.postingCheckedAt) >= String(first[1]?.postingCheckedAt)).toBe(true);
+    expect(second[1]?.postingRecheckFailure).toBeNull();
+    const parsed = parseMcfSavedExport(second);
+    expect(parsed.invalid).toEqual([]);
+    expect(parsed.valid[0]?.rawPayload).toMatchObject({ availability_checked_at: first[0]?.postingCheckedAt });
   });
 
   it("stops at HTTP 429 without fetching further jobs and leaves the rest unfetched", async () => {

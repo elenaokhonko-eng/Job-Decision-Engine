@@ -51,12 +51,15 @@
  *   [{ "title", "company", "url", "description", "descriptionStatus", "location",
  *      "salary": { "min", "max", "currency", "period" } | null, "employmentType",
  *      "postedAt", "expiresAt", "mcfJobUuid", "exportedAt", "sourcePage",
- *      "originalPostedAt", "availabilityStatus", "availabilityEvidence", "postingCheckedAt" }]
+ *      "originalPostedAt", "availabilityStatus", "availabilityEvidence", "postingCheckedAt",
+ *      "postingRecheckFailedAt", "postingRecheckFailure" }]
  *   - postedAt is MCF's posting date (its newPostingDate, else originalPostingDate);
  *     originalPostedAt is originalPostingDate, so a repost can be told apart.
  *     availabilityStatus is OPEN / CLOSED from MCF's job status ("Open",
  *     "Re-open", "Closed"), else UNKNOWN; postingCheckedAt is when the job
- *     details were read. `await jdeMcfExport.refresh()` re-reads every job.
+ *     details were read. `await jdeMcfExport.refresh()` re-reads every job; a
+ *     re-read that fails (e.g. HTTP 404) keeps the earlier details and check
+ *     time and sets postingRecheckFailedAt / postingRecheckFailure.
  *   - url is the card's https://www.mycareersfuture.gov.sg/job/<category>/<slug>-<id>
  *     without its query string; mcfJobUuid is the trailing 32-hex <id>.
  *   - Anything MCF does not show is null: a hidden employer, hidden salary or
@@ -228,6 +231,8 @@
           availabilityStatus: null,
           availabilityEvidence: null,
           postingCheckedAt: null,
+          postingRecheckFailedAt: null,
+          postingRecheckFailure: null,
         };
         state.order.push(job.uuid);
         added += 1;
@@ -317,11 +322,24 @@
     job.availabilityEvidence = jobStatus ? `MyCareersFuture job status: ${jobStatus}`.slice(0, 300) : null;
   }
 
-  /** Jobs whose details (description, dates and status) have not been read yet. */
-  const needsFetch = (job) => job.descriptionStatus !== "OK" || !job.postingCheckedAt;
+  /**
+   * Jobs to (re)read: no details yet, never checked, or a refresh() requested after the last
+   * successful read that has not yet been attempted.
+   */
+  const needsFetch = (job, state) => job.descriptionStatus !== "OK"
+    || !job.postingCheckedAt
+    || Boolean(state.refreshRequestedAt
+      && job.postingCheckedAt < state.refreshRequestedAt
+      && !(job.postingRecheckFailedAt && job.postingRecheckFailedAt >= state.refreshRequestedAt));
+
+  /** A re-check that failed: earlier details and facts keep their original postingCheckedAt; the failure is recorded. */
+  function recordFailedRecheck(job, reason) {
+    job.postingRecheckFailedAt = new Date().toISOString();
+    job.postingRecheckFailure = reason.slice(0, 300);
+  }
 
   async function fetchDetails(state) {
-    const pending = state.order.filter((uuid) => needsFetch(state.jobs[uuid]));
+    const pending = state.order.filter((uuid) => needsFetch(state.jobs[uuid], state));
     console.log(`[jde] Fetching ${pending.length} job detail(s), one at a time, about ${DETAIL_BASE_DELAY_MS / 1000}s apart.`);
     for (let index = 0; index < pending.length; index += 1) {
       const job = state.jobs[pending[index]];
@@ -343,10 +361,13 @@
         throw new StopError(`MyCareersFuture returned an error page (HTTP ${response.status}) at job ${job.mcfJobUuid}; ${remaining} detail(s) not fetched. Try later with: await jdeMcfExport.resume()`);
       }
       const readAt = new Date().toISOString();
-      if (response.status === 404 || response.status === 410) {
+      const previouslyRead = job.descriptionStatus === "OK" && Boolean(job.postingCheckedAt);
+      if (!response.ok && previouslyRead) {
+        // A failed re-check (including 404/410) keeps what was read before, with its own check time.
+        recordFailedRecheck(job, `HTTP ${response.status}`);
+      } else if (response.status === 404 || response.status === 410) {
         job.descriptionStatus = "MISSING";
       } else if (!response.ok) {
-        // A re-check that fails keeps the details already read; only the check stays pending.
         if (job.descriptionStatus !== "OK") job.descriptionStatus = "FETCH_FAILED";
       } else {
         if (!/application\/json/i.test(response.headers.get("content-type") || "")) {
@@ -358,6 +379,8 @@
         }
         applyDetail(job, detail);
         job.postingCheckedAt = readAt;
+        job.postingRecheckFailedAt = null;
+        job.postingRecheckFailure = null;
       }
       job.exportedAt = new Date().toISOString();
       saveState(state);
@@ -420,8 +443,9 @@
 
   /** Re-reads every saved job's details (dates and open/closed status), then downloads. */
   async function refresh() {
+    // Earlier details and their check times are kept until a re-read succeeds.
     const state = loadState();
-    for (const uuid of state.order) state.jobs[uuid].postingCheckedAt = null;
+    state.refreshRequestedAt = new Date().toISOString();
     saveState(state);
     await runDetails(state);
   }

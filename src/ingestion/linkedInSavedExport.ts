@@ -82,6 +82,12 @@ export const LinkedInSavedJobItemSchema = z.object({
   availabilityEvidence: optionalText("availabilityEvidence", 300),
   /** When the guest posting page was read (ISO timestamp). */
   postingCheckedAt: optionalText("postingCheckedAt", 100),
+  /**
+   * A later re-check (refresh()) that failed: when, and why (e.g. "HTTP 404").
+   * The facts above are then the earlier, successfully read ones with their own check time.
+   */
+  postingRecheckFailedAt: optionalText("postingRecheckFailedAt", 100),
+  postingRecheckFailure: optionalText("postingRecheckFailure", 300),
   linkedinJobId: z
     .union([z.string(), z.number().int()], { invalid_type_error: "linkedinJobId must be a string or integer" })
     .nullable()
@@ -161,12 +167,12 @@ function contentKey(job: Pick<LinkedInSavedJob, "title" | "company" | "descripti
 }
 
 /**
- * Posting facts from the guest page. Relative age text is converted against the
- * time the page was read (postingCheckedAt, else the item's exportedAt, which the
- * snippet sets right after reading the page); the open/closed status needs
- * postingCheckedAt itself.
+ * Posting facts from the guest page. Relative age text and the open/closed
+ * status are anchored only to postingCheckedAt, the time that page was read;
+ * never to exportedAt, which a later (possibly failed) re-check also updates.
+ * A check time after `notAfter` (the import time) is not used.
  */
-export function linkedInSavedPostingFacts(item: LinkedInSavedJobItem): PostingFactsResult {
+export function linkedInSavedPostingFacts(item: LinkedInSavedJobItem, notAfter: string = new Date().toISOString()): PostingFactsResult {
   return postingFactsPayload({
     postedAt: item.postedAt,
     postedAtText: item.postedAtText,
@@ -174,7 +180,8 @@ export function linkedInSavedPostingFacts(item: LinkedInSavedJobItem): PostingFa
     availabilityStatus: item.availabilityStatus,
     availabilityEvidence: item.availabilityEvidence,
     checkMethod: LINKEDIN_GUEST_POSTING_CHECK_METHOD,
-    checkedAt: item.postingCheckedAt ?? (item.postedAt || item.postedAtText ? item.exportedAt : null),
+    checkedAt: item.postingCheckedAt,
+    notAfter,
   });
 }
 
@@ -249,7 +256,7 @@ export function parseLinkedInSavedJobItem(value: unknown, index: number): Linked
   // The posting-fact fields are added only when the item has them, so an older
   // export (without them) keeps exactly its earlier payload and hash.
   const postingFactItemFields: Record<string, unknown> = {};
-  for (const key of ["postedAtText", "validThrough", "availabilityStatus", "availabilityEvidence", "postingCheckedAt"] as const) {
+  for (const key of ["postedAtText", "validThrough", "availabilityStatus", "availabilityEvidence", "postingCheckedAt", "postingRecheckFailedAt", "postingRecheckFailure"] as const) {
     if (item[key] !== null && item[key] !== undefined) postingFactItemFields[key] = item[key];
   }
   // exportedAt is left out of the hashed payload so re-exporting unchanged jobs
