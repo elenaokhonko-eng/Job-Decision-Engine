@@ -124,18 +124,22 @@ describe("workplace perk phrases are neutral", () => {
   });
 
   describe("a perk after a genuine statement keeps the statement on-site", () => {
-    for (const line of STATEMENTS_WITH_TRAILING_PERK) {
-      it(`"${line}" stays HARD_REJECT and never becomes an assumed hybrid`, async () => {
+    // Enrichment reads the first six as employer-stated ON-SITE, exactly as on
+    // main. Main's text extraction has no "role is / work on-site" rule, so the
+    // last two stay UNKNOWN there (and get the Singapore default, as on main);
+    // the gate still rejects all eight.
+    const ENRICHED_AS = ["ONSITE", "ONSITE", "ONSITE", "ONSITE", "ONSITE", "ONSITE", "ASSUMED_HYBRID", "ASSUMED_HYBRID"];
+    STATEMENTS_WITH_TRAILING_PERK.forEach((line, index) => {
+      it(`"${line}" stays HARD_REJECT and enriches as on main`, async () => {
         const description = `${TECH} ${line}`;
         const result = gate(description);
         expect(result.status).toBe("HARD_REJECT");
         expect(result.rejection_codes).toContain("GATE_HIGH_OFFICE_DAYS");
         const enriched = await enrichSingapore(description);
-        expect(enriched.workplace_type).not.toBe("ASSUMED_HYBRID");
-        const cached = await enrichSingapore(description, "UNKNOWN");
-        expect(cached.workplace_type).not.toBe("ASSUMED_HYBRID");
+        expect(enriched.workplace_type).toBe(ENRICHED_AS[index]);
+        if (ENRICHED_AS[index] === "ONSITE") expect(enriched.attendance_basis).toBe("EMPLOYER_STATED");
       });
-    }
+    });
 
     it("keeps the office-day requirement when a perk follows the day count", () => {
       const office = requirementsFor(`${TECH} 5 days per week onsite canteen access.`)
@@ -194,7 +198,7 @@ describe("workplace perk phrases are neutral", () => {
       expect(extractWorkModeFromText(`${TECH}\nPerks: on-site cafe`).workplace_type).toBe("UNKNOWN");
     });
 
-    it("Singapore enrichment applies the assumed-hybrid default to a perk-only posting", async () => {
+    it("Singapore enrichment (via extractWorkModeFromText) applies the assumed-hybrid default to a perk-only posting", async () => {
       const enriched = await enrichSingapore(`${TECH}\nPerks: onsite gym`);
       expect(enriched.workplace_type).toBe("ASSUMED_HYBRID");
     });

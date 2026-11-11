@@ -11,18 +11,11 @@ const FETCH_TIMEOUT_MS = 15_000;
 function isSingaporeUnknownWorkModeEligible(location: string | null | undefined, description: string | null | undefined): boolean {
   const loc = String(location || "").toLowerCase();
   const desc = String(description || "").toLowerCase();
-  // Workplace perks ("Perks: onsite gym") are neutral; genuine statements are kept.
-  const workModeText = neutralizeWorkplacePerkPhrases(desc);
   const isSingapore = /\b(?:singapore|sg)\b/i.test(loc)
     || /\b(?:based\s+in\s+singapore|location\s*:\s*singapore|office\s+in\s+singapore)\b/i.test(desc);
-  // The assumed-hybrid default never overrides an explicit on-site statement:
-  // the same statements the hard gate reads as on-site, plus text extraction.
-  const explicitOnsite = /\b(?:100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(workModeText)
-    || /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i.test(workModeText)
-    || /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i.test(workModeText)
-    || /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i.test(workModeText)
-    || /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i.test(workModeText)
-    || extractWorkModeFromText(desc).workplace_type === "ONSITE";
+  // These statements are not perk phrases, so they are read on the raw text.
+  const explicitOnsite = /\b(?:100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(desc)
+    || /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i.test(desc);
   return isSingapore && !explicitOnsite;
 }
 
