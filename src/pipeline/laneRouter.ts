@@ -35,6 +35,9 @@ const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
 // v2.4.0: routeLaneCandidates, bare-heading boilerplate end, 12k scope window, boilerplate
 // phrase stripping, product/transformation and investigation title families.
+// v2.5.0: HEALTH_BIO_PHARMA sector requirement (job scope or employer description, a matched
+// sector counts as domain evidence), benefits-clause stripping, industry-list stripping and the
+// uncovered-sector exclusion with covered-sector override and AI/data exemption.
 const LANE_ROUTER_RULE_VERSION = "lane_router_v2.5.0";
 
 
@@ -785,7 +788,8 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "judiciary",
     "regtech",
   ],
-  // The work is about a healthcare system of some sort: a pharma, biotech or medtech company,
+  // "emr" is left out: it is also AWS Elastic MapReduce in data engineering postings.
+// The work is about a healthcare system of some sort: a pharma, biotech or medtech company,
   // a hospital or health system, clinical research, patients and their records, drug
   // development or medical devices. Benefit, perk and EEO words ("health insurance",
   // "wellness", "work-life", "customer care", "be patient", "innovation lab") are not here
@@ -822,6 +826,28 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "global health",
     "health services",
     "health insurer",
+    "health insurers",
+    // Singular only: "top-performing life-health insurance companies" is an award line, not a
+    // health insurer describing itself.
+    "health insurance company",
+    "health insurance provider",
+    "healthcare company",
+    "health technology company",
+    "health and well-being provider",
+    "health and wellbeing provider",
+    "health plan members",
+    "medical claims",
+    "healthcare claims",
+    "health claims",
+    "claims and clinical data",
+    "provider network",
+    "managed care",
+    "medicare",
+    "medicaid",
+    "healthcare payer",
+    "healthcare payers",
+    "health payer",
+    "health payers",
     "healthcare institutions",
     "healthcare provider",
     "healthcare providers",
@@ -834,7 +860,6 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "electronic health records",
     "electronic medical records",
     "ehr",
-    "emr",
     "telehealth",
     "telemedicine",
     "clinical",
@@ -864,7 +889,15 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "financial services",
     "financial institution",
     "insurer",
+    "insurers",
     "insurance",
+    "insurtech",
+    // Bare "payments" is also a retailer's checkout; name the payments business.
+    "payments company",
+    "payments provider",
+    "payment provider",
+    "payments platform",
+    "payment platform",
     "asset management",
     "wealth management",
     "investment management",
@@ -1323,10 +1356,12 @@ function laneDomainScopeScore(
   laneKey: string,
   concepts: string[] | undefined,
   minimumSignals = 1,
-  sectorFound = true
+  sectorFound = true,
+  sectorIsDomain = false
 ): number {
   if (!hasRequiredInstitutionalContext(laneKey, description)) return 0;
   if (!sectorFound) return 0;
+  if (sectorIsDomain) return 1;
   if (minimumSignals <= 1) return conceptScopeScore(description, concepts);
   return matchedDomainSignals(description, concepts).length >= minimumSignals ? 1 : 0;
 }
@@ -1501,9 +1536,10 @@ export const EMPLOYER_INTRO_MAX_CHARS = 800;
 
 /**
  * The employer's own description: the company name, the opening of the posting and its
- * "About Us"-type sections. Benefits, perks and EEO sections are not included, and benefit
- * and EEO phrases are stripped, so a perk list cannot make the employer look like a health
- * or finance company.
+ * "About Us"-type sections. Benefits, perks and EEO sections are not included and a perk
+ * clause ("medical, dental and paid time off") is removed, so a perk list cannot make the
+ * employer look like a health company. Other wording is kept as written: "a health insurance
+ * company" or "travel insurance" describes the business.
  */
 export function extractEmployerContextText(companyName: string, description: string): string {
   const sections = splitJobSections(description);
@@ -1517,7 +1553,7 @@ export function extractEmployerContextText(companyName: string, description: str
     .flatMap((s) => s.body)
     .join(" ")
     .slice(0, LANE_SCOPE_TEXT_MAX_CHARS);
-  return stripEmployerBoilerplatePhrases(`${companyName} ${intro} ${about}`).toLowerCase();
+  return stripBenefitClauses(`${companyName} ${intro} ${about}`).toLowerCase();
 }
 
 /** Negative-concept exclusion keeps its original window: title plus the first 2,000 kept characters. */
@@ -1531,21 +1567,29 @@ export const LANE_SCOPE_TEXT_MAX_CHARS = 12000;
 /**
  * Employer boilerplate describes the employer, not the role's domain: employee benefits
  * ("healthcare coverage", "support your mental health") and recruitment-scam warnings
- * ("recruitment fraud"). It is removed before domain/function matching.
+ * ("recruitment fraud"). It is removed from the role text before domain/function matching.
+ * An insurance or plan phrase that describes the business ("a health insurance company",
+ * "health plan members", "travel insurance") is kept: only employee-benefit wording is removed.
  */
-const EMPLOYER_BOILERPLATE_PHRASES = /\b(?:(?:comprehensive|private|family|group)\s+)?(?:health(?:care)?|medical|dental|vision|life)\s+(?:insurance|coverage|cover|benefits?|plans?|care\s+(?:benefits?|plans?|coverage))\b|\bmental\s+health\b|\bhealth\s+(?:and|&)\s+(?:well-?being|wellness|safety)\b|\b(?:occupational|employee)\s+health\b|\b(?:wellness|well-?being)\s+(?:programs?|programmes?|benefits?|allowance|stipend|days?)\b|\b(?:group|staff|employee|travel)\s+insurance\b|\b(?:recruitment|recruiting|hiring|job|employment)\s+(?:fraud|scams?)\b|\b(?:medical|health)\s+(?:condition|conditions|status|leave|history)\b|\bgenetic\s+information\b|\bwork[- ]life\b|\bcustomer\s+care\b/gi;
+const EMPLOYER_BOILERPLATE_PHRASES = /\b(?<!\b(?:a|an|the|leading|digital|online|global|regional|national|largest)\s)(?:(?:comprehensive|private|family|group)\s+)?(?:health(?:care)?|medical|dental|vision|life)\s+(?:insurance|coverage|cover|benefits?|plans?|care\s+(?:benefits?|plans?|coverage))\b(?!\s+(?:company|companies|provider|providers|products?|platform|platforms|carrier|carriers|business|businesses|market|markets|industry|sector|claims?|policies|policy|members?|customers|payers?|products))|\bmental\s+health\b|\bhealth\s+(?:and|&)\s+(?:well-?being|wellness|safety)\b|\b(?:occupational|employee)\s+health\b|\b(?:wellness|well-?being)\s+(?:programs?|programmes?|benefits?|allowance|stipend|days?)\b|\b(?:group|staff|employee)\s+insurance\b|\b(?:recruitment|recruiting|hiring|job|employment)\s+(?:fraud|scams?)\b|\b(?:medical|health)\s+(?:condition|conditions|status|leave|history)\b|\bgenetic\s+information\b|\bwork[- ]life\b|\bcustomer\s+care\b/gi;
 
 /**
  * A benefits enumeration ("benefit offerings such as medical, dental, and flexible time off",
  * "healthcare, 401(k) and paid time off") names perks, not the role's sector, even when no
  * "insurance" or "coverage" follows the health word. The clause around a perk marker is
  * removed, bounded to 160 characters either side so a list without punctuation cannot erase
- * the role description.
+ * the role description. A pension or retirement phrase that names the business ("pension plan
+ * administration", "retirement plan recordkeeping") is role substance and is not a marker.
  */
-const BENEFIT_CLAUSE = /[^.!?;:]{0,160}\b(?:dental|401\s*\(?k\)?|paid\s+time\s+off|pto|parental\s+leave|maternity\s+leave|flexible\s+time\s+off|retirement\s+(?:plans?|savings|benefits?)|pension(?:\s+(?:plans?|scheme|contributions?))?|benefits?\s+(?:package|packages|offerings?|include|includes)|perks|multisport|(?:private|free|subsidi[sz]ed)\s+(?:health(?:care)?|medical))\b[^.!?;:]{0,160}/gi;
+const BENEFIT_CLAUSE = /[^.!?;:]{0,160}\b(?:dental|401\s*\(?k\)?|paid\s+time\s+off|pto|parental\s+leave|maternity\s+leave|flexible\s+time\s+off|(?:retirement\s+(?:plans?|savings|benefits?)|pension(?:\s+(?:plans?|scheme|contributions?))?)(?!\s+(?:plans?|schemes?|contributions?|savings|and\s+benefits\s+administration|administration|administrators?|recordkeeping|funds?|industry|sector|market|management|providers?|platforms?|software|systems?|products?|clients?|participants?))|benefits?\s+(?:package|packages|offerings?|include|includes)|perks|multisport|(?:private|free|subsidi[sz]ed)\s+(?:health(?:care)?|medical))\b[^.!?;:]{0,160}/gi;
 
 export function stripEmployerBoilerplatePhrases(text: string): string {
   return text.replace(BENEFIT_CLAUSE, " ").replace(EMPLOYER_BOILERPLATE_PHRASES, " ");
+}
+
+/** Removes only perk-anchored benefits clauses; the employer's self-description is otherwise kept. */
+export function stripBenefitClauses(text: string): string {
+  return text.replace(BENEFIT_CLAUSE, " ");
 }
 
 // A list of three or more short items ("finance, manufacturing, defense, healthcare, and the
@@ -1558,7 +1602,7 @@ const SHORT_LIST = new RegExp(
 );
 // Industries outside health and life sciences; one of them in the same list makes it a list
 // of industries served, not the employer's sector.
-const OTHER_INDUSTRY = /\b(?:finance|financial\s+services|banking|insurance|payments|benefits|manufacturing|defen[cs]e|aerospace|space|energy|utilities|power\s+grids?|telecom\w*|retail|consumer|e-?commerce|logistics|transportation|automotive|education|government|public\s+sector|state\s+and\s+local|nonprofit|non-profit|media|entertainment|gaming|hospitality|travel|real\s+estate|construction|agriculture|software|technology|business\s+services|legal|industrial)\b/;
+const OTHER_INDUSTRY = /\b(?:finance|financial\s+services|banking|insurance|payments|benefits|manufacturing|defen[cs]e|aerospace|space|energy|utilities|power\s+grids?|telecom\w*|retail|consumer|e-?commerce|logistics|transportation|automotive|education|government|public\s+sector|state\s+and\s+local|nonprofit|non-profit|media|entertainment|gaming|hospitality|travel|real\s+estate|construction|agriculture|software|technology|business\s+services|legal|industrial|schools|businesses)\b/;
 
 /**
  * Removes lists of industries ("serves the defense, space, healthcare, and energy sectors";
@@ -1627,9 +1671,9 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
   // Lanes with sector_evidence JOB_SCOPE_OR_EMPLOYER also read the employer's own description
   // (company name, opening, About Us; never benefits, perks or EEO text) for their required
   // sector. The uncovered-sector exclusion always reads it.
-  const employerSectorText = stripIndustryLists(
-    `${scopeText} ${extractEmployerContextText(String(input.companyName ?? ""), description)}`
-  );
+  const employerContext = extractEmployerContextText(String(input.companyName ?? ""), description);
+  const employerSectorText = stripIndustryLists(`${scopeText} ${employerContext}`);
+  const employerOnlySectorText = stripIndustryLists(employerContext);
   const laneSectorText = (laneDef: LaneDefinition): string =>
     laneDef.sector_evidence === "JOB_SCOPE_OR_EMPLOYER" ? employerSectorText : sectorText;
   const sectorEvidenceByLane: Record<string, LaneSectorEvidence> = {};
@@ -1665,14 +1709,19 @@ export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult 
     lanePreferenceEvidence[laneKey] = lanePreference.evidence;
     const sectorEvidence = laneSectorEvidence(laneDef, scopeText, laneSectorText(laneDef), title, employerSectorText);
     sectorEvidenceByLane[laneKey] = sectorEvidence;
-    // A lane whose sector may come from the employer reads its domain phrases there too, so a
-    // pharma company's generic engineering role is in the lane's domain.
+    // A lane whose sector may come from the employer reads its domain phrases there too, and a
+    // matched sector counts as its domain, so a pharma company's or a hospital's generic
+    // engineering role is in the lane's domain.
     domainScoreMap[laneKey] = laneDomainScopeScore(
       laneDef.sector_evidence === "JOB_SCOPE_OR_EMPLOYER" ? employerSectorText : scopeText,
       laneKey,
       laneDef.included_domain_concepts,
       laneDef.minimum_domain_signals,
-      sectorQualifies(sectorEvidence)
+      sectorQualifies(sectorEvidence),
+      // A recognised sector employer (a hospital, health system, health insurer or pharma company
+      // in the company name, opening or About Us) is itself the lane's domain evidence.
+      laneDef.sector_evidence === "JOB_SCOPE_OR_EMPLOYER"
+        && matchedSector(employerOnlySectorText, laneDef.required_sector_concepts).length > 0
     );
     functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, title)
       || (laneKey === "TECHNICAL_PRODUCT_TRANSFORMATION" && hasNonTechnicalProjectSubject(title, scopeText))

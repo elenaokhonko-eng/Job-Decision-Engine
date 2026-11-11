@@ -185,6 +185,99 @@ describe("Sector scope: user fixtures", () => {
   });
 });
 
+describe("Sector scope: review regressions (PR #179) stay in scope", () => {
+  it("routes a health insurer's claims-data platform engineer to HEALTH_BIO_PHARMA", () => {
+    const description = [
+      "Example Health Plan is a health insurer serving 2 million members.",
+      "The Role",
+      "- Build pipelines for claims and member data on our cloud platform.",
+      "- Own the platform services that provider and care-management teams depend on.",
+      BENEFITS_SENTENCE,
+    ].join("\n");
+    const result = route("Platform Engineer, Claims Data", description, "Example Health Plan", "HEALTH_BIO_PHARMA");
+    expect(result.primaryLane).toBe("HEALTH_BIO_PHARMA");
+    expect(result.laneEvidence.find((e) => e.startsWith("HEALTH_BIO_PHARMA:sector="))).toContain("health insurer");
+  });
+
+  it("keeps 'a health insurance company' in the employer description as a health signal", () => {
+    const description = [
+      "About Us",
+      "Example Cover is a health insurance company for families and employers.",
+      "The Role",
+      "- Build pipelines for claims and member data on our cloud platform.",
+    ].join("\n");
+    const result = route("Platform Engineer, Claims Data", description, "Example Cover", "HEALTH_BIO_PHARMA");
+    expect(result.primaryLane).toBe("HEALTH_BIO_PHARMA");
+    expect(result.laneEvidence.find((e) => e.startsWith("HEALTH_BIO_PHARMA:sector="))).toContain("health insurance company");
+  });
+
+  it("routes a hospital group's systems engineer with no clinical wording to HEALTH_BIO_PHARMA", () => {
+    const description = [
+      "About Us",
+      "Example Healthcare Group operates five hospitals in Singapore.",
+      "The Role",
+      "- Maintain servers, networks, identity and backups for our sites.",
+      "- Automate infrastructure with scripts and configuration management.",
+    ].join("\n");
+    const result = route("Systems Engineer", description, "Example Healthcare Group", "HEALTH_BIO_PHARMA");
+    expect(result.primaryLane).toBe("HEALTH_BIO_PHARMA");
+    expect(result.domainScores.HEALTH_BIO_PHARMA).toBe(1);
+  });
+
+  it("routes a travel-insurance insurtech's backend engineer to INVESTMENT_MARKETS_FINTECH, not UNCLASSIFIED", () => {
+    const description = [
+      "About Us",
+      "Example Assure is an insurtech offering travel insurance and payments to airlines and travel companies.",
+      "The Role",
+      "- Build backend services for policy purchase, card payments and claims payouts.",
+      "- Run our services on a cloud platform with Kubernetes.",
+    ].join("\n");
+    const result = route("Senior Backend Engineer, Payments", description, "Example Assure", "INVESTMENT_MARKETS_FINTECH");
+    expect(result.primaryLane).toBe("INVESTMENT_MARKETS_FINTECH");
+    expect(result.laneEvidence.some((e) => e.includes("excluded_sector="))).toBe(false);
+  });
+
+  it("keeps 'pension plan administration' as role substance, not a perk clause", () => {
+    const text = "experience in pension plan administration or financial services industry experience using azure devops for test management";
+    expect(stripEmployerBoilerplatePhrases(text)).toContain("azure devops");
+    expect(stripEmployerBoilerplatePhrases("we offer a pension plan, dental cover and paid time off")).not.toContain("dental");
+  });
+
+  it("routes a health-and-wellbeing provider's QA analyst to HEALTH_BIO_PHARMA", () => {
+    const description = [
+      "Example Health is a global-leading health and well-being provider improving health outcomes for millions.",
+      "The Role",
+      "- Test our pension and benefits administration software and track defects in Azure DevOps.",
+      "- Experience in pension plan administration is an asset.",
+    ].join("\n");
+    const result = route("Quality Assurance Analyst", description, "Example Health", "HEALTH_BIO_PHARMA");
+    expect(result.primaryLane).toBe("HEALTH_BIO_PHARMA");
+  });
+
+  it("documents the known false negative: a game studio engineer with only two AI/data phrases", () => {
+    const description = [
+      "About Us",
+      "Example Games is a game studio making video games.",
+      "The Role",
+      "- Build machine learning models on our data platform.",
+    ].join("\n");
+    const result = route("Senior Engineer", description, "Example Games", "CORE_AI_DATA");
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+  });
+
+  it("still treats 'travel insurance' in a perk clause as a benefit", () => {
+    const description = [
+      "About Us",
+      "Example Games is a game studio making video games.",
+      "The Role",
+      "- Build backend services on a cloud platform with Kubernetes.",
+      "We offer dental cover, travel insurance and paid time off.",
+    ].join("\n");
+    const result = route("Backend Engineer", description, "Example Games", "INVESTMENT_MARKETS_FINTECH");
+    expect(result.primaryLane).toBe("UNCLASSIFIED");
+  });
+});
+
 describe("Sector scope: benefit, perk and EEO words are never health signals", () => {
   // Each phrase sits in an otherwise generic engineering posting at an employer of unknown sector.
   const BOILERPLATE_PHRASES = [
