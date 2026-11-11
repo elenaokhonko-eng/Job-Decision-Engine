@@ -24,13 +24,15 @@ Job searching often presents overwhelming cognitive fatigue, rejection trauma fr
 2. **Deterministic Hard Gates Before AI**: Hard constraints (location restrictions, remote vs office days, employment type, compensation minimums) are checked locally by deterministic code *before* any LLM evaluation. Non-fits are filtered out without incurring AI costs or hallucinated justifications.
 3. **Operational Failures Are Never Career Rejections**: Parser timeouts, network hiccups, schema mismatches, or API rate limits transition to `RETRY_WAIT` and `NEEDS_MANUAL_REVIEW`. They never become `HARD_REJECTED`.
 4. **Unknowns Stay Explicit**: An unknown workplace model is rejected after available evidence is examined; other unresolved workability facts produce `NEEDS_VERIFICATION`, never fabricated assumptions.
-5. **Multi-Lane Strategic Discovery**: Discovers broadly across six strategic lanes:
+5. **Multi-Lane Strategic Discovery**: Discovers broadly across six strategic lanes and routes to eight target lanes:
    - `CORE_AI_DATA`
    - `LEGAL_REGTECH`
    - `HEALTH_BIO_PHARMA`
    - `INVESTMENT_MARKETS_FINTECH`
    - `SOCIAL_IMPACT_MULTILATERAL`
    - `UNIVERSITY_AI_RESEARCH`
+   - `TECHNICAL_PRODUCT_TRANSFORMATION` (routing only; no discovery source plan yet)
+   - `INVESTIGATIONS_ENFORCEMENT` (routing only; no discovery source plan yet)
 6. **Bring Your Own Keys (BYOK)**: Connect your own Google Gemini or OpenAI API keys. Generative AI evaluation runs automatically as part of the bounded E2E pipeline after deterministic gates pass.
 7. **Factual Evidence-Grounded Documents**: Generates customized DOCX resumes and cover letters from verified profile evidence and the current job match context.
 

@@ -420,7 +420,7 @@ describe("Composed Pipeline Integration — Six Lane Routes & Multi-Lane Selecti
       const normalized = text.toLowerCase();
       if (normalized.includes("senior legal ai") || (normalized.includes("mlops") && normalized.includes("regtech"))) {
         // High similarity to both CORE_AI_DATA (dim 0) and LEGAL_REGTECH (dim 1)
-        return [0.707, 0.707, 0, 0, 0, 0];
+        return [0.707, 0.707, 0, 0, 0, 0, 0, 0];
       }
       return deterministicLaneEmbedding(text);
     });

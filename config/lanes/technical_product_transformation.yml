@@ -1,0 +1,61 @@
+schema_version: "2.2.0"
+lane_key: TECHNICAL_PRODUCT_TRANSFORMATION
+display_name: "Technical Product & Transformation"
+description: "Roles between business product management and hands-on AI engineering: technical product management and ownership, product leadership (including AI and data products), technical programme and project delivery, technology or data transformation leadership, and product policy in government technology."
+
+# The title must name a product, programme/project or transformation function
+# (hasProductTransformationFunction in src/pipeline/laneRouter.ts); the description
+# must show a technology, data or AI component.
+scope:
+  required_function_concepts:
+    any:
+      - PRODUCT_MANAGEMENT
+      - TECHNICAL_PRODUCT_DELIVERY
+      - PROGRAMME_MANAGEMENT
+      - TECHNICAL_PROGRAMME_DELIVERY
+      - TECHNICAL_PROJECT_DELIVERY
+      - TRANSFORMATION_LEADERSHIP
+      - PRODUCT_POLICY
+
+  included_domain_concepts:
+    any:
+      - DIGITAL_TECHNOLOGY
+      - AI
+      - DATA_PLATFORM
+      - DATA_INTELLIGENCE
+      - CLOUD_PLATFORM
+      - SOFTWARE_PLATFORM
+
+prototypes:
+  - prototype_key: technical_product_leadership
+    text: "Technical product management and product leadership for software, data and AI products: product ownership, roadmaps, discovery and delivery with engineering teams."
+    weight: 1.0
+  - prototype_key: technology_transformation
+    text: "Technology and data transformation leadership, technical programme and project management, digital transformation portfolios and product policy for government technology."
+    weight: 0.9
+
+routing:
+  minimum_domain_score: 0.60
+  minimum_function_score: 0.60
+  minimum_semantic_score: 0.35
+  secondary_lane_threshold: 0.30
+
+budget:
+  maximum_ai_interpretations_per_run: 3
+
+documents:
+  include_criteria_snapshot: true
+positive_concepts:
+  - product roadmap
+  - product management
+  - digital transformation
+  - technology transformation
+  - technical programme
+  - technical program
+  - data product
+  - ai product
+negative_concepts:
+  - presales
+  - customer success
+  - technical account management
+semantic_threshold: 0.35
