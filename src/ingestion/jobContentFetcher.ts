@@ -8,6 +8,7 @@ import { isUnknownEmployerName } from "./postingIdentity.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
+import { findExplicitOnsiteStatement, hasOnsiteWorkModeValue, isSingaporeLocatedJob } from "../pipeline/onsiteStatements.js";
 import { parseAbsoluteSourceDate, parseRelativePostedText, type PostingDateDerivation } from "./postingFacts.js";
 import {
   linkedInJobIdFromUrl,
@@ -1341,7 +1342,11 @@ function parseEmployerHtml(
       : /\bfully remote|remote-first|work from anywhere\b/.test(workText)
         ? "REMOTE"
         : /\bhybrid\b/.test(workText) ? "HYBRID"
-          : /\bon[- ]site\b/.test(workText) ? "ONSITE" : "UNKNOWN";
+          // Only an explicit on-site statement, never a noun modifier ("on-site training").
+          : findExplicitOnsiteStatement(workText, workText, { singapore: isSingaporeLocatedJob(location, workText) }) !== null
+            || hasOnsiteWorkModeValue(workText)
+            ? "ONSITE"
+            : "UNKNOWN";
   const jsonLdEmploymentType = matchedJsonLd?.posting.employmentType;
   const employmentType = Array.isArray(jsonLdEmploymentType)
     ? jsonLdEmploymentType.map(stringValue).filter((item): item is string => Boolean(item)).join(", ") || null

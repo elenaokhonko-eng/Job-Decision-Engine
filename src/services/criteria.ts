@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
 import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
+import { findExplicitOnsiteStatement, isSingaporeLocatedJob } from "../pipeline/onsiteStatements.js";
 import { isOccurrenceNegated } from "../requirements/clauseAnalysis.js";
 
 export { normalizeWorkMode };
@@ -381,61 +382,7 @@ export interface WorkabilityEvaluation {
   suppressedOnsiteReason?: string;
 }
 
-/** A Singapore-located job: Singapore in the location, or a stated Singapore base. */
-export function isSingaporeLocatedJob(location: string | null | undefined, description: string | null | undefined): boolean {
-  return /\b(?:singapore|sg)\b/i.test(String(location || ""))
-    || /\b(?:based\s+in\s+singapore|location\s*:\s*singapore|office\s+in\s+singapore)\b/i.test(String(description || ""));
-}
-
-/** Explicit on-site statements the gate reads for every job. */
-const ONSITE_STATEMENT_PATTERNS: readonly RegExp[] = [
-  /\b(?:100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i,
-  /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i,
-  /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i,
-  /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i,
-];
-
-/**
- * Owner rule (2026-11): for a Singapore-located job any explicit on-site
- * statement means on-site (not hybrid, no work from home), including these
- * forms. A partial-attendance count right after the statement ("must be
- * on-site 3 days a week") is a hybrid fact, not an on-site statement.
- */
-const SINGAPORE_ONSITE_STATEMENT_PATTERNS: readonly RegExp[] = [
-  /(?:^|\n)[ \t]*(?:on-?site|onsite)\b(?![^\n.]{0,40}\b[1-3]\s*(?:-\s*\d\s*)?(?:days?|x)\b)/im,
-  /\b(?:on-?site|onsite)\s+(?:role|position|job)\b/i,
-  /\b(?:must|required\s+to|need\s+to|expected\s+to)\s+be\s+(?:on-?site|onsite)\b(?![^\n.]{0,40}\b[1-3]\s*(?:-\s*\d\s*)?(?:days?|x)\b)/i,
-  /\boffice[- ]based\s+(?:role|position|job)\b/i,
-  /\b(?:role|position|job)\s+is\s+office[- ]based\b/i,
-];
-
-/** A hybrid or remote statement makes the Singapore-only forms ambiguous; they are then not read. */
-const FLEXIBLE_WORK_STATEMENT = /\bhybrid\b|\bwork(?:ing)?\s+from\s+home\b|\bwfh\b|\bremote(?:ly)?\b/i;
-
-/**
- * The first explicit on-site statement in `workModeText` (lowercase,
- * perk-neutralised, same length as `originalText`), quoted from `originalText`;
- * null when there is none. Workplace perks never match because the caller
- * neutralises them first.
- */
-export function findExplicitOnsiteStatement(
-  workModeText: string,
-  originalText: string,
-  options: { singapore: boolean },
-): string | null {
-  const withoutNegations = workModeText.replace(/\b(?:no|not|non)[- ]?(?:remote|hybrid)\b|\b(?:remote|hybrid)\s*:\s*no\b/gi, " ");
-  const patterns = options.singapore && !FLEXIBLE_WORK_STATEMENT.test(withoutNegations)
-    ? [...ONSITE_STATEMENT_PATTERNS, ...SINGAPORE_ONSITE_STATEMENT_PATTERNS]
-    : ONSITE_STATEMENT_PATTERNS;
-  for (const pattern of patterns) {
-    const match = pattern.exec(workModeText);
-    if (match) {
-      const start = match.index;
-      return originalText.slice(start, start + match[0].length).replace(/^[\s|·•:]+/, "").trim() || match[0].trim();
-    }
-  }
-  return null;
-}
+export { findExplicitOnsiteStatement, isSingaporeLocatedJob };
 
 // 3. Workability Requirements (Zero tolerance for on-premises-only lab/clinic)
 export function evaluateWorkability(

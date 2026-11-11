@@ -331,6 +331,70 @@ describe("Singapore explicit on-site statements override the assumed-hybrid defa
     expect(gate(`${TECH}\nHybrid role. This is an on-site role during onboarding.`).status).not.toBe("HARD_REJECT");
   });
 
+  // Review of 331f128: a noun-modifier use of on-site is not a statement.
+  const NOUN_MODIFIER_LINES = [
+    "On-site training provided.",
+    "• On-site training provided",
+    "On-site client support as required.",
+    "• On-site support for new hires",
+    "On-site visits to partner labs.",
+    "Occasional on-site meetings with stakeholders.",
+    "On-site events every quarter.",
+    "On-site interviews in the final round.",
+    "On-site orientation in week one.",
+    "• On-site induction programme",
+    "Benefits: on-site parking and an onsite gym.",
+  ];
+  for (const line of NOUN_MODIFIER_LINES) {
+    it(`"${line}" is not an on-site statement (Singapore and elsewhere)`, async () => {
+      const description = `${TECH}\n${line}`;
+      for (const workplaceType of ["UNKNOWN", "ASSUMED_HYBRID"]) {
+        expect(gate(description, workplaceType).status).toBe("NEEDS_VERIFICATION");
+      }
+      const enriched = await enrichSingapore(description);
+      expect(enriched.workplace_type).toBe("ASSUMED_HYBRID");
+      expect(extractWorkModeFromText(description).workplace_type).toBe("UNKNOWN");
+      const london = evaluateWorkability("London, United Kingdom", "UNKNOWN", description, "PERMANENT");
+      expect(london.reasonCode).not.toBe("GATE_HIGH_OFFICE_DAYS");
+    });
+  }
+
+  it("does not read a noun-modifier on-site mention on an employer page as on-site", async () => {
+    expect(postingWorkplaceType(await employerPage("On-site training provided."))).toBe("UNKNOWN");
+    expect(postingWorkplaceType(await employerPage("This role is on-site."))).toBe("ONSITE");
+  });
+
+  // Review of 331f128: a 1-3 day count after any Singapore form is partial
+  // attendance (hybrid); 4-5 days or "daily" is on-site.
+  const SINGAPORE_FORMS = [
+    "On-site role",
+    "Office-based role",
+    "This role is on-site",
+    "You must be on-site",
+    "Work on-site at our office",
+    "Location: On-site",
+    "Engineering | On-site",
+    "On-site",
+  ];
+  for (const form of SINGAPORE_FORMS) {
+    for (const days of ["1 day a week", "2 days", "3 days a week", "1-3 days per week"]) {
+      it(`"${form}, ${days}" is partial attendance, not a hard reject`, async () => {
+        const description = `${TECH}\n${form}, ${days}.`;
+        const enriched = await enrichSingapore(description);
+        expect(gate(description, enriched.workplace_type).status).not.toBe("HARD_REJECT");
+      });
+    }
+    for (const days of ["4 days a week", "5 days a week", "daily"]) {
+      it(`"${form}, ${days}" is on-site: HARD_REJECT`, async () => {
+        const description = `${TECH}\n${form}, ${days}.`;
+        const enriched = await enrichSingapore(description);
+        expect(enriched.workplace_type).not.toBe("ASSUMED_HYBRID");
+        expect(gate(description, enriched.workplace_type).status).toBe("HARD_REJECT");
+        expect(gate(description, "ASSUMED_HYBRID").status).toBe("HARD_REJECT");
+      });
+    }
+  }
+
   it("applies the Singapore-only forms to Singapore jobs only", () => {
     const london = evaluateWorkability("London, United Kingdom", "UNKNOWN", `${TECH}\nThis is an on-site role.`, "PERMANENT");
     expect(london.reasonCode).not.toBe("GATE_HIGH_OFFICE_DAYS");

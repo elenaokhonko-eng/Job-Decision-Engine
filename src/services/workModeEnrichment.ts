@@ -2,13 +2,13 @@ import crypto from "node:crypto";
 import pg from "pg";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { type WorkspaceContext } from "../workspace/context.js";
-import {
-  extractHybridAttendance,
-  findExplicitOnsiteStatement,
-  isSingaporeLocatedJob,
-  type HybridAttendanceFacts,
-} from "./criteria.js";
+import { extractHybridAttendance, type HybridAttendanceFacts } from "./criteria.js";
 import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
+import {
+  findExplicitOnsiteStatement,
+  hasOnsiteWorkModeValue,
+  isSingaporeLocatedJob,
+} from "../pipeline/onsiteStatements.js";
 
 const EXTRACTOR_VERSION = "work_mode_enrichment_v1";
 const FETCH_TIMEOUT_MS = 15_000;
@@ -124,7 +124,7 @@ export function extractWorkModeFromText(text: string): {
   const officeDaysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
     || d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
   const isExplicitOnsite = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
-    || /(?:^|[|·•:,])\s*(?:on-?site|onsite)\b/i.test(d)
+    || hasOnsiteWorkModeValue(d)
     || /\b(?:workplace|work\s+model|workplace\s+type|work\s+type)\s*:\s*(?:on-?site|onsite)\b/i.test(d)
     || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= 4);
 
