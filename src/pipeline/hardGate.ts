@@ -6,6 +6,7 @@ import {
   extractHybridAttendance,
   extractTravelRequirement,
   GLOBAL_TITLE_EXCLUSIONS,
+  nonTechnicalFunctionTitle,
   type GateResult,
 } from "../services/criteria.js";
 import { findOnsiteException } from "./onsiteExceptions.js";
@@ -337,9 +338,19 @@ export function applyPersistedRequirementGates(
       );
     }
   }
-  // Neither the non-technical title list nor the technical-function check
-  // (Axis 1) is a hard gate: a non-technical role can fit a lane and the
-  // candidate's experience. Lane routing decides.
+  // Non-target title families (accountant, payroll, support specialist,
+  // graphic/UX designer) stay hard rejects, with the same code as the other
+  // role-family exclusions.
+  const nonTargetFunctionTitle = nonTechnicalFunctionTitle(title);
+  if (nonTargetFunctionTitle) {
+    return makeReject(
+      ["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"],
+      [`Non-target title family "${nonTargetFunctionTitle}" in "${title}"`]
+    );
+  }
+  // The generic technical-function check (Axis 1) is not a hard gate: a
+  // non-technical PM, programme, policy or investigator role can fit a lane
+  // and the candidate's experience. Lane routing decides.
 
   for (const requirement of deterministicRequirements) {
     const buildingPct = structuredNumber(requirement, [

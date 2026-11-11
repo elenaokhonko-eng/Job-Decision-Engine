@@ -37,8 +37,8 @@ Gate reason codes are free strings in `gate_decisions.rejection_codes` (JSONB) a
 | `GATE_SHIFT_WORK_REQUIRED` | Shift work is required while `shift_work_allowed` is false | New |
 | `GATE_JOB_LOCATION_MISMATCH` | The job is located only outside the authorized regions | New. Before, a job location was reported as `WORK_AUTHORIZATION_INCOMPATIBLE`, which now means only an explicit worker restriction. |
 | `GATE_LIFESTYLE_INCOMPATIBLE` | Legacy umbrella code for travel, on-call and shift work | No longer emitted. Stored rows stay valid. |
-| `NON_TECHNICAL_FUNCTION`, `GATE_NOT_AI_DATA` | Axis 1 (technical-function check), the non-technical title list (`NON_TECHNICAL_FUNCTION_TITLES`) and Axis 2 (AI/data domain) | No longer emitted. A non-technical role is acceptable when it fits a lane and the candidate's experience, and lane routing decides. The title list remains for classification only. |
-| `NON_TARGET_ROLE_FAMILY` + `GATE_OUT_OF_SCOPE_DOMAIN` | Explicit non-target title families (`GLOBAL_TITLE_EXCLUSIONS`): HR, sales, customer success, legal practice and counsel | Unchanged. Legal-technology titles ("Legal Engineer", "Legal Innovation Technologist") and the agency name "Attorney-General's Chambers" do not match. |
+| `NON_TECHNICAL_FUNCTION`, `GATE_NOT_AI_DATA` | Axis 1 (generic technical-function check) and Axis 2 (AI/data domain) | No longer emitted. A non-technical PM, programme, transformation, product-policy or investigator role is acceptable when it fits a lane and the candidate's experience, and lane routing decides. |
+| `NON_TARGET_ROLE_FAMILY` + `GATE_OUT_OF_SCOPE_DOMAIN` | Explicit non-target title families: `GLOBAL_TITLE_EXCLUSIONS` (HR, sales, customer success, legal practice and counsel) and `NON_TECHNICAL_FUNCTION_TITLES` (accountant, payroll, support specialist, graphic/UX designer) | Still hard rejects. The second list emitted `NON_TECHNICAL_FUNCTION` before 2026-11 and now uses this role-family code. Legal-technology titles ("Legal Engineer", "Legal Innovation Technologist") and the agency name "Attorney-General's Chambers" do not match. |
 
 ### On-site exceptions
 

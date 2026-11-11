@@ -5,10 +5,30 @@ import { applyPersistedRequirementGates } from "../../pipeline/hardGate.js";
 // Synthetic postings: each description mentions SQL/Python so the old keyword check passed them.
 const TECHNICAL_SOUNDING = "Use SQL and Python dashboards daily. Work closely with the data platform team.";
 
-// Since 2026-11 a non-technical function title is classification only, not a hard gate:
-// a non-technical role is acceptable when it fits a lane and the candidate's experience,
-// and lane routing decides (unrouted jobs end SKIP/UNCLASSIFIED).
-describe("non-technical function titles are classified but not hard-rejected", () => {
+function gates(title: string, description = TECHNICAL_SOUNDING) {
+  const persisted = applyPersistedRequirementGates({
+    title,
+    company_name: "Example Company",
+    location: "Singapore",
+    workplace_type: "HYBRID",
+    employment_type: "FULL_TIME",
+    description,
+  }, []);
+  const global = applyGlobalGates({
+    id: `synthetic-${title}`,
+    title,
+    company_name: "Example Company",
+    raw_description: description,
+    location: "Singapore",
+    workplace_type: "HYBRID",
+    employment_type: "PERMANENT",
+  } as never);
+  return { persisted, global };
+}
+
+// Non-target title families stay hard rejects with the role-family code. The generic
+// technical-function check (Axis 1) is not a gate, so in-lane non-technical roles pass.
+describe("non-target title families in the hard gates", () => {
   it.each([
     ["Senior GL Accountant", "GL Accountant"],
     ["Accountant", "Accountant"],
@@ -16,44 +36,41 @@ describe("non-technical function titles are classified but not hard-rejected", (
     ["Fund Operations Support Specialist", "Support Specialist"],
     ["Sr. UX Designer, Security", "UX Designer"],
     ["Marketplace Creative Strategist/Graphic Designer", "Graphic Designer"],
-  ])("classifies %j and leaves it to lane routing", (title, matched) => {
+  ])("rejects %j as NON_TARGET_ROLE_FAMILY with the matched title as evidence", (title, matched) => {
     expect(nonTechnicalFunctionTitle(title)).toBe(matched);
-    const persisted = applyPersistedRequirementGates({
-      title,
-      company_name: "Example Company",
-      location: "Singapore",
-      workplace_type: "HYBRID",
-      employment_type: "FULL_TIME",
-      description: TECHNICAL_SOUNDING,
-    }, []);
-    expect(persisted.status).toBe("PASS");
-    expect(persisted.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
-
-    const global = applyGlobalGates({
-      id: `synthetic-${title}`,
-      title,
-      company_name: "Example Company",
-      raw_description: TECHNICAL_SOUNDING,
-      location: "Singapore",
-      workplace_type: "HYBRID",
-      employment_type: "PERMANENT",
-    } as never);
-    expect(global.status).not.toBe("HARD_REJECT");
-    expect(global.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+    const { persisted, global } = gates(title);
+    for (const result of [persisted, global]) {
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toEqual(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"]);
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.evidence_quotes.join(" ")).toContain(matched);
+    }
+    expect(persisted.evidence_quotes[0]).toBe(`Non-target title family "${matched}" in "${title}"`);
   });
 
-  it("keeps the separate non-target role-family exclusion (customer success)", () => {
-    expect(nonTechnicalFunctionTitle("Customer Success Manager, Enterprise")).toBe("Customer Success");
-    const result = applyPersistedRequirementGates({
-      title: "Customer Success Manager, Enterprise",
-      company_name: "Example Company",
-      location: "Singapore",
-      workplace_type: "HYBRID",
-      employment_type: "FULL_TIME",
-      description: TECHNICAL_SOUNDING,
-    }, []);
-    expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toEqual(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"]);
+  it("keeps the customer-success role-family exclusion", () => {
+    const { persisted } = gates("Customer Success Manager, Enterprise");
+    expect(persisted.status).toBe("HARD_REJECT");
+    expect(persisted.rejection_codes).toEqual(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"]);
+  });
+
+  it.each([
+    "Lead Product Manager (Courts and Legal Services)",
+    "Senior Product Manager, Data Programme",
+    "Product Policy Manager / Lead",
+    "Corporate Transformation Director",
+    "Regulatory & Controls Program Manager - Banking",
+    "Assistant Director, Enforcement (Investigator)",
+    "Manager, Investigation Department",
+    "Lead, Transformation Portfolio & Strategic Initiatives",
+  ])("does not re-block the in-lane non-technical role %j", (title) => {
+    expect(nonTechnicalFunctionTitle(title)).toBeNull();
+    const { persisted, global } = gates(title, "Lead the programme with policy owners and stakeholders, and report outcomes to leadership.");
+    for (const result of [persisted, global]) {
+      expect(result.status, `${title}: ${JSON.stringify(result.rejection_codes)}`).not.toBe("HARD_REJECT");
+      expect(result.rejection_codes).not.toContain("NON_TARGET_ROLE_FAMILY");
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+    }
   });
 
   it.each([

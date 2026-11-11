@@ -66,10 +66,11 @@ export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\bdata\s+infra(?:structure)?\b/i,
 ];
 
-// 1b. Non-technical function titles (customer success, accountant, payroll, support specialist,
-// graphic/UX designer). Since 2026-11 this is classification only, not a hard gate: a non-technical
-// role is acceptable when it fits a lane and the candidate's experience, and lane routing decides.
-// Kept for reporting (scripts/replay_discovery_prescreen.ts).
+// 1b. Non-target title families that can pass on description keywords alone (a designer or
+// accountant posting that mentions SQL): customer success, accountant, payroll, support specialist,
+// graphic/UX designer. A title match is a hard reject as NON_TARGET_ROLE_FAMILY +
+// GATE_OUT_OF_SCOPE_DOMAIN, like the other role-family exclusions. Since 2026-11 the generic
+// technical-function check (Axis 1) is not a gate. Product designers are not listed.
 export const NON_TECHNICAL_FUNCTION_TITLES: RegExp[] = [
   /\bcustomer success\b/i,
   /\b(?:general ledger |gl )?accountants?\b/i,
@@ -935,6 +936,10 @@ export function applyGlobalGates(
     if (pattern.test(job.title || "")) {
       return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title exclusion: "${job.title}"`]);
     }
+  }
+  const nonTargetFunctionTitle = nonTechnicalFunctionTitle(job.title || "");
+  if (nonTargetFunctionTitle) {
+    return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title family "${nonTargetFunctionTitle}" in "${job.title}"`]);
   }
 
   // FDE is a global exclusion when the role itself is an FDE-family role.
