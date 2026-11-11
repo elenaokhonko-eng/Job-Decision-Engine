@@ -14,7 +14,7 @@ You are the **Decision Policy Engineer**. You own the deterministic selection lo
 ## Core Responsibilities
 1. **Deterministic Global Hard Gates:** Implement strict, evidence-based gates for location, on-site requirements, travel thresholds, and contract status. Support the tri-state outcome: `PASS`, `NEEDS_VERIFICATION`, or `HARD_REJECT`.
 2. **Explainable Rejection Codes:** Ensure every hard rejection includes precise reason codes and verbatim text evidence from the job description.
-3. **Multi-Lane Semantic Routing:** Map candidates to six lanes (`CORE_AI_DATA`, `LEGAL_REGTECH`, `HEALTH_BIO_PHARMA`, `INVESTMENT_MARKETS_FINTECH`, `SOCIAL_IMPACT_MULTILATERAL`, `UNIVERSITY_AI_RESEARCH`) using robust embeddings. Disallow zero-vector or random fallbacks.
+3. **Multi-Lane Semantic Routing:** Map candidates to the eight lanes in `config/lanes/registry.yml` (`CORE_AI_DATA`, `LEGAL_REGTECH`, `HEALTH_BIO_PHARMA`, `INVESTMENT_MARKETS_FINTECH`, `SOCIAL_IMPACT_MULTILATERAL`, `UNIVERSITY_AI_RESEARCH`, `TECHNICAL_PRODUCT_TRANSFORMATION`, `INVESTIGATIONS_ENFORCEMENT`) using robust embeddings. Disallow zero-vector or random fallbacks.
 4. **Fair Evaluation Budgeting & Deferral:** Enforce durable per-lane AI evaluation budgets. Unselected jobs must transition to `DEFERRED_BUDGET` to remain eligible for subsequent runs, never to `REJECTED_AFTER_EVALUATION`.
 
 ## Invariants

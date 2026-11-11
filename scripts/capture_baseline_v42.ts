@@ -38,7 +38,10 @@ async function run() {
       count(CASE WHEN lg.rejection_codes ? 'WORK_AUTHORIZATION_INCOMPATIBLE' THEN 1 END) as work_auth,
       count(CASE WHEN lg.rejection_codes = '["WORK_AUTHORIZATION_INCOMPATIBLE"]'::jsonb THEN 1 END) as work_auth_sole,
       count(CASE WHEN lg.rejection_codes ? 'GATE_LIFESTYLE_INCOMPATIBLE' THEN 1 END) as lifestyle,
-      count(CASE WHEN lg.rejection_codes = '["GATE_LIFESTYLE_INCOMPATIBLE"]'::jsonb THEN 1 END) as lifestyle_sole
+      count(CASE WHEN lg.rejection_codes = '["GATE_LIFESTYLE_INCOMPATIBLE"]'::jsonb THEN 1 END) as lifestyle_sole,
+      -- 2026-11 codes that replace the legacy lifestyle / location reasons.
+      count(CASE WHEN lg.rejection_codes ?| ARRAY['GATE_LIFESTYLE_INCOMPATIBLE', 'GATE_TRAVEL_ABOVE_LIMIT', 'GATE_ON_CALL_REQUIRED', 'GATE_SHIFT_WORK_REQUIRED'] THEN 1 END) as lifestyle_any_code,
+      count(CASE WHEN lg.rejection_codes ? 'GATE_JOB_LOCATION_MISMATCH' THEN 1 END) as job_location_mismatch
     FROM canonical_jobs c
     JOIN latest_gates lg ON lg.canonical_job_id = c.id
     WHERE NOT c.is_test_fixture

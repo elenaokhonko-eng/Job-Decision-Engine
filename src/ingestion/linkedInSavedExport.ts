@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { linkedInJobIdFromUrl, linkedInJobUrl } from "./searchApi/searchApiClient.js";
+import { isUnknownEmployerName } from "./postingIdentity.js";
 
 export const LINKEDIN_SAVED_SOURCE_NAME = "LINKEDIN_SAVED" as const;
 export const LINKEDIN_SAVED_PLUGIN_KEY = "linkedin_saved" as const;
@@ -322,7 +323,7 @@ export function savedPostingMatchesDiscovery(
   }
   const expectedCompany = normalizeIdentity(discovery.companyName);
   const actualCompany = normalizeIdentity(saved.companyName);
-  const companyUnknown = !expectedCompany || expectedCompany === "unknown" || expectedCompany === "unknown company";
+  const companyUnknown = isUnknownEmployerName(discovery.companyName);
   if (!actualCompany || (!companyUnknown
     && expectedCompany !== actualCompany
     && !expectedCompany.includes(actualCompany)

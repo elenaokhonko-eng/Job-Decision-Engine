@@ -20,6 +20,7 @@ scope:
       - TECHNICAL_PRODUCT_DELIVERY
       - TECHNICAL_ARCHITECTURE
       - TECHNICAL_DELIVERY
+      - TECHNICAL_LEADERSHIP
 
   included_domain_concepts:
     any:
@@ -35,6 +36,8 @@ scope:
       - DOCUMENT_INTELLIGENCE
       - LEGAL_NLP
       - KNOWLEDGE_GRAPHS
+      - LEGAL_INDUSTRY
+      - REGULATORY_REPORTING
 
 prototypes:
   - prototype_key: regtech_compliance

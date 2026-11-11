@@ -6,14 +6,20 @@ import {
   extractHybridAttendance,
   extractTravelRequirement,
   GLOBAL_TITLE_EXCLUSIONS,
-  isTechnicalRole,
   nonTechnicalFunctionTitle,
   type GateResult,
 } from "../services/criteria.js";
+import { findOnsiteException } from "./onsiteExceptions.js";
+import {
+  GATE_ON_CALL_REQUIRED,
+  GATE_SHIFT_WORK_REQUIRED,
+  GATE_TRAVEL_ABOVE_LIMIT,
+  travelAboveLimitEvidence,
+} from "./gateReasonCodes.js";
 import { normalizeWorkMode } from "./workModeNormalizer.js";
 import { enrichWorkModeIfNeeded } from "../services/workModeEnrichment.js";
 import { PersistedGateDecisionSchema } from "../contracts/index.js";
-import { GATE_VERSION } from "../contracts/version.js";
+import { GATE_VERSION, SCHEMA_VERSION } from "../contracts/version.js";
 import { pgPoolConfig } from "../db/pgSsl.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../workspace/context.js";
 import { calculateProfessionalExperienceYears, compareStructuredRequirement, type ComparableFact } from "./requirementComparators.js";
@@ -28,10 +34,10 @@ import {
   normalizeVerificationDegreeSubjects,
   VERIFICATION_ANSWER_KEYS,
   normalizeVerificationExperienceDomains,
-  resolveWorkspaceWorkabilityPolicy,
   type VerificationAnswerContext,
   type WorkabilityPolicy,
 } from "./workabilityPolicy.js";
+import { resolveEffectiveWorkabilityPolicy, resolveOnsiteExceptionPolicy } from "./effectiveWorkabilityPolicy.js";
 
 import {
   evaluateJobFreshness,
@@ -59,7 +65,7 @@ dotenv.config({ path: ".env.local" });
 
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
-interface PersistedRequirement {
+export interface PersistedRequirement {
   requirement_key: string;
   requirement_type: string;
   importance?: string;
@@ -228,6 +234,19 @@ export function applyPersistedRequirementGates(
   const title = job.title || "";
   let pendingVerification: { codes: string[]; evidence: string[]; facts?: Partial<GateResult["workability_facts"]> } | null = null;
   let inferredWorkabilityFacts: Partial<GateResult["workability_facts"]> = {};
+  // Research/university roles and user-listed employers lift on-site and
+  // office-day rejections only; each lifted conflict is kept as evidence.
+  const onsiteException = findOnsiteException(
+    { title: job.title, company_name: job.company_name, description: job.description },
+    effectivePolicy,
+  );
+  const exceptionEvidence: string[] = [];
+  const liftOnsiteConflict = (conflict: string): boolean => {
+    if (!onsiteException) return false;
+    const line = `${onsiteException.evidence} Lifted conflict: "${conflict}"`;
+    if (!exceptionEvidence.includes(line)) exceptionEvidence.push(line);
+    return true;
+  };
 
   // Stage 3: Freshness only uses authoritative publication or genuine-repost timestamps.
   const freshness = evaluateJobFreshness({
@@ -319,37 +338,19 @@ export function applyPersistedRequirementGates(
       );
     }
   }
-  const nonTechnicalTitle = nonTechnicalFunctionTitle(title);
-  if (nonTechnicalTitle) {
+  // Non-target title families (accountant, payroll, support specialist,
+  // graphic/UX designer) stay hard rejects, with the same code as the other
+  // role-family exclusions.
+  const nonTargetFunctionTitle = nonTechnicalFunctionTitle(title);
+  if (nonTargetFunctionTitle) {
     return makeReject(
-      ["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"],
-      [`Non-technical function title "${nonTechnicalTitle}" in "${title}"`]
+      ["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"],
+      [`Non-target title family "${nonTargetFunctionTitle}" in "${title}"`]
     );
   }
-
-  const functionRequirements = deterministicRequirements.filter(
-    (r) => r.requirement_type === "FUNCTION"
-  );
-  const domainRequirements = deterministicRequirements.filter(
-    (r) => r.requirement_type === "DOMAIN"
-  );
-
-  const semanticCorpus = [...functionRequirements, ...domainRequirements]
-    .map((r) => quoteOrText(r).toLowerCase())
-    .concat(job.description ? [job.description.toLowerCase()] : [])
-    .join(" \n");
-
-  const techCheck = isTechnicalRole(title, semanticCorpus);
-  const hasTechnicalEvidence = techCheck.isTechnical;
-
-  if (!hasTechnicalEvidence) {
-    return makeReject(
-      ["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"],
-      [
-        "Axis 1 Failed: Role lacks evidence of technical function",
-      ]
-    );
-  }
+  // The generic technical-function check (Axis 1) is not a hard gate: a
+  // non-technical PM, programme, policy or investigator role can fit a lane
+  // and the candidate's experience. Lane routing decides.
 
   for (const requirement of deterministicRequirements) {
     const buildingPct = structuredNumber(requirement, [
@@ -382,9 +383,11 @@ export function applyPersistedRequirementGates(
       "maximum_travel_pct",
     ]);
     if (travelPct !== null && travelPct > effectivePolicy.maxTravelPct) {
-      return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(requirement)], {
-        travel_pct_max: travelPct,
-      });
+      return makeReject(
+        [GATE_TRAVEL_ABOVE_LIMIT],
+        [travelAboveLimitEvidence(effectivePolicy.maxTravelPct, travelPct), quoteOrText(requirement)],
+        { travel_pct_max: travelPct },
+      );
     }
   }
 
@@ -399,6 +402,9 @@ export function applyPersistedRequirementGates(
   const officeReq = officeRequirements[0];
   for (const requirement of officeRequirements) {
     const days = detectOfficeDays(requirement);
+    if (days !== null && days > effectivePolicy.maxOfficeDaysPerWeek && liftOnsiteConflict(quoteOrText(requirement))) {
+      continue;
+    }
     if (days !== null && days >= effectivePolicy.hardFailOfficeDaysPerWeek) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
@@ -442,7 +448,7 @@ export function applyPersistedRequirementGates(
       mode.includes("fully onsite") ||
       mode.includes("100% on-site") ||
       mode.includes("100% onsite")
-    )) {
+    ) && !liftOnsiteConflict(quoteOrText(workModeReq))) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
         [quoteOrText(workModeReq)],
@@ -469,8 +475,8 @@ export function applyPersistedRequirementGates(
     }
     if (travelPct !== null && travelPct > effectivePolicy.maxTravelPct) {
       return makeReject(
-        ["GATE_LIFESTYLE_INCOMPATIBLE"],
-        [quoteOrText(requirement)],
+        [GATE_TRAVEL_ABOVE_LIMIT],
+        [travelAboveLimitEvidence(effectivePolicy.maxTravelPct, travelPct), quoteOrText(requirement)],
         { travel_pct_max: travelPct }
       );
     }
@@ -482,8 +488,8 @@ export function applyPersistedRequirementGates(
       };
     } else if (!hasTravelAnswer && txt.includes("frequent travel") && !effectivePolicy.frequentTravelAllowed) {
       return makeReject(
-        ["GATE_LIFESTYLE_INCOMPATIBLE"],
-        [quoteOrText(requirement)],
+        [GATE_TRAVEL_ABOVE_LIMIT],
+        [travelAboveLimitEvidence(effectivePolicy.maxTravelPct, travelPct), quoteOrText(requirement)],
         { travel_pct_max: travelPct }
       );
     }
@@ -491,12 +497,12 @@ export function applyPersistedRequirementGates(
 
   const onCallReq = deterministicRequirements.find((r) => r.requirement_type === "ON_CALL");
   if (onCallReq && !effectivePolicy.regularOnCallAllowed) {
-    return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(onCallReq)]);
+    return makeReject([GATE_ON_CALL_REQUIRED], [quoteOrText(onCallReq)]);
   }
 
   const shiftReq = deterministicRequirements.find((r) => r.requirement_type === "SHIFT_WORK");
   if (shiftReq && !effectivePolicy.shiftWorkAllowed) {
-    return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(shiftReq)]);
+    return makeReject([GATE_SHIFT_WORK_REQUIRED], [quoteOrText(shiftReq)]);
   }
 
   const workAuthRequirements = deterministicRequirements.filter((r) => r.requirement_type === "WORK_AUTH");
@@ -533,14 +539,17 @@ export function applyPersistedRequirementGates(
 
   if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {
     const attendance = extractHybridAttendance(quoteOrText(workModeReq));
-    if (attendance?.contradictory || (attendance && attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek)) {
+    const attendanceConflict = Boolean(attendance?.contradictory
+      || (attendance && attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek));
+    const attendanceLifted = attendanceConflict && liftOnsiteConflict(quoteOrText(workModeReq));
+    if (!attendanceLifted && (attendance?.contradictory || (attendance && attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek))) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
         attendance?.evidence || [quoteOrText(workModeReq)],
         { office_days_min: attendance?.office_days_min ?? null, office_days_max: attendance?.office_days_max ?? null },
       );
     }
-    if (attendance && attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) {
+    if (!attendanceLifted && attendance && attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
         attendance.evidence,
@@ -577,18 +586,19 @@ export function applyPersistedRequirementGates(
   if (pendingVerification) {
     return makeVerification(
       pendingVerification.codes,
-      pendingVerification.evidence,
+      [...pendingVerification.evidence, ...exceptionEvidence],
       { ...inferredWorkabilityFacts, ...pendingVerification.facts },
     );
   }
 
-  return makePass({
+  const passed = makePass({
     ...inferredWorkabilityFacts,
     office_days_min: officeReq ? detectOfficeDays(officeReq) : inferredWorkabilityFacts.office_days_min ?? null,
     office_days_max: officeReq ? detectOfficeDays(officeReq) : inferredWorkabilityFacts.office_days_max ?? null,
     travel_pct_max: travelReq ? detectTravelPct(travelReq) : null,
     employment_type: employmentType,
   });
+  return exceptionEvidence.length > 0 ? { ...passed, evidence_quotes: [...passed.evidence_quotes, ...exceptionEvidence] } : passed;
 }
 
 /**
@@ -752,6 +762,89 @@ export function applyExactProfileGates(
   return makePass();
 }
 
+export { resolveOnsiteExceptionPolicy };
+
+/** Inputs for one job's hard-gate evaluation; shared by runHardGates and the replay script. */
+export interface HardGateJobInput {
+  readonly title: string;
+  readonly company_name: string;
+  readonly description: string | null;
+  readonly location: string | null;
+  readonly workplace_type: string | null;
+  readonly employment_type: string | null;
+  readonly compensation_raw: string | null;
+  readonly posted_at?: string | Date | null;
+  readonly reposted_at?: string | Date | null;
+  readonly source_updated_at?: string | Date | null;
+  readonly freshness_basis?: string | null;
+  readonly source_observation_name?: string | null;
+  readonly source_location_raw?: string | null;
+}
+
+/**
+ * The pure hard-gate evaluation of one job: global gates, persisted
+ * requirement gates, exact profile gates and the remote-territory gate,
+ * combined. No database access and no writes.
+ */
+export function evaluateHardGatesForJob(input: {
+  readonly job: HardGateJobInput;
+  readonly requirements: PersistedRequirement[];
+  readonly profileFacts: ComparableFact[];
+  readonly policy: WorkabilityPolicy;
+  readonly stage3Preferences: Stage3PolicyPreferences;
+  readonly territoryScope: RemoteTerritoryScope | null;
+  readonly answerContext?: VerificationAnswerContext | null;
+}): GateResult {
+  const { job, requirements, profileFacts, policy, stage3Preferences, territoryScope } = input;
+  const answerContext = input.answerContext ?? null;
+  const requirementHints = requirements
+    .map((r) => r.quote_text || r.requirement_text)
+    .filter(Boolean)
+    .slice(0, 60)
+    .join("\n");
+  const description = job.description ?? "";
+  const globalGateResult = applyGlobalGates({
+    id: "hard-gate",
+    title: job.title,
+    company_name: job.company_name,
+    source: "canonical",
+    location: job.location ?? undefined,
+    workplace_type: job.workplace_type ?? undefined,
+    employment_type: job.employment_type ?? undefined,
+    compensation_raw: job.compensation_raw,
+    raw_description: requirementHints
+      ? `${description}\n\n---\nExtracted requirements:\n${requirementHints}`
+      : description,
+  } as any, policy, answerContext);
+  const persistedGateResult = applyPersistedRequirementGates(
+    {
+      title: job.title,
+      company_name: job.company_name,
+      employment_type: job.employment_type ?? undefined,
+      workplace_type: job.workplace_type ?? undefined,
+      location: job.location ?? undefined,
+      description,
+      posted_at: job.posted_at,
+      reposted_at: job.reposted_at,
+      source_updated_at: job.source_updated_at,
+      freshness_basis: job.freshness_basis,
+      compensation_raw: job.compensation_raw,
+    },
+    requirements,
+    policy,
+    answerContext,
+    stage3Preferences,
+  );
+  const exactProfileGateResult = applyExactProfileGates(requirements, profileFacts, answerContext);
+  const remoteTerritoryGateResult = applyRemoteTerritoryGate({
+    sourceName: job.source_observation_name ?? null,
+    location: job.source_location_raw ?? job.location ?? null,
+    workplaceType: job.workplace_type ?? null,
+    description,
+  }, territoryScope);
+  return combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult, remoteTerritoryGateResult]);
+}
+
 export async function runHardGates(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options?: {
@@ -789,7 +882,12 @@ export async function runHardGates(
   const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['stage3']);
   const stage3Preferences: Stage3PolicyPreferences = preferenceContext.stage3 ?? {};
   const pipelineRunId = crypto.randomUUID();
-  const policyResolution = await resolveWorkspaceWorkabilityPolicy(client as any, { context: ctx });
+  // One effective policy (workspace policy + stage3 on-site exception employers)
+  // shared with the recommendation decider, so gate and readiness agree.
+  const policyResolution = await resolveEffectiveWorkabilityPolicy(client as any, {
+    context: ctx,
+    stage3: stage3Preferences,
+  });
   const territoryScope = remoteTerritoryScopeForPolicy(policyResolution.policy);
   console.log(
     `Hard Gate workability policy: ${policyResolution.source}` +
@@ -970,11 +1068,6 @@ export async function runHardGates(
           );
           profileFacts = profileFactRows as ComparableFact[];
         }
-        const requirementHints = deterministicRequirements
-          .map((r) => r.quote_text || r.requirement_text)
-          .filter(Boolean)
-          .slice(0, 60)
-          .join("\n");
 
         if (normalizeWorkMode(rawJobAdapter.workplace_type) === "UNKNOWN") {
           const enriched = await enrichWorkModeIfNeeded(client, ctx, {
@@ -996,43 +1089,29 @@ export async function runHardGates(
           }
         }
 
-        const globalGateResult = applyGlobalGates({
-          ...(rawJobAdapter as any),
-          raw_description: requirementHints
-            ? `${rawJobAdapter.raw_description}\n\n---\nExtracted requirements:\n${requirementHints}`
-            : rawJobAdapter.raw_description,
-        } as any, policyResolution.policy, jobAnswerContext);
-        const persistedGateResult = applyPersistedRequirementGates(
-          {
+        const gateResult = evaluateHardGatesForJob({
+          job: {
             title: rawJobAdapter.title,
             company_name: rawJobAdapter.company_name,
-            employment_type: rawJobAdapter.employment_type,
-            workplace_type: rawJobAdapter.workplace_type,
-            location: rawJobAdapter.location,
-            description: rawJobAdapter.raw_description,
+            description: rawJobAdapter.raw_description ?? null,
+            location: rawJobAdapter.location ?? null,
+            workplace_type: rawJobAdapter.workplace_type ?? null,
+            employment_type: rawJobAdapter.employment_type ?? null,
+            compensation_raw: rawJobAdapter.compensation_raw ?? null,
             posted_at: job.posted_at,
             reposted_at: job.reposted_at,
             source_updated_at: job.source_updated_at,
             freshness_basis: job.freshness_basis,
-            compensation_raw: rawJobAdapter.compensation_raw,
+            source_observation_name: job.source_observation_name ?? null,
+            source_location_raw: job.source_location_raw ?? null,
           },
-          deterministicRequirements,
-          policyResolution.policy,
-          jobAnswerContext,
-          stage3Preferences
-        );
-        const exactProfileGateResult = applyExactProfileGates(
-          deterministicRequirements,
+          requirements: deterministicRequirements,
           profileFacts,
-          jobAnswerContext,
-        );
-        const remoteTerritoryGateResult = applyRemoteTerritoryGate({
-          sourceName: job.source_observation_name ?? null,
-          location: job.source_location_raw ?? rawJobAdapter.location ?? null,
-          workplaceType: rawJobAdapter.workplace_type ?? null,
-          description: rawJobAdapter.raw_description ?? null,
-        }, territoryScope);
-        const gateResult = combineGateResults([globalGateResult, persistedGateResult, exactProfileGateResult, remoteTerritoryGateResult]);
+          policy: policyResolution.policy,
+          stage3Preferences,
+          territoryScope,
+          answerContext: jobAnswerContext,
+        });
 
         let processingStatus: string;
         switch (gateResult.status) {
@@ -1097,7 +1176,7 @@ export async function runHardGates(
 
         // Validate the complete audit envelope before writing the immutable row.
         const persistedGateDecision = PersistedGateDecisionSchema.parse({
-          schema_version: GATE_VERSION,
+          schema_version: SCHEMA_VERSION,
           canonical_job_id: job.id,
           job_version_id: job.job_version_id,
           pipeline_run_id: pipelineRunId,
@@ -1137,7 +1216,8 @@ export async function runHardGates(
         await client.query("COMMIT");
 
         const codeStr = gateResult.rejection_codes.length ? ` [${gateResult.rejection_codes.join(", ")}]` : "";
-        console.log(`-> ${job.company_name} - ${job.normalized_title} : ${gateResult.status}${codeStr}`);
+        // Job ids only: Actions logs are public, so employer names and titles are not logged.
+        console.log(`-> job ${job.id} : ${gateResult.status}${codeStr}`);
       } catch (err) {
         await client.query("ROLLBACK");
         errorCount++;

@@ -641,7 +641,7 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       requirement_text: 'Design and maintain reference data models and market data standards.',
       quote_text: 'Design and maintain reference data models and market data standards.',
     },
-  ] as const)('uses persisted $requirement_type requirements as technical ownership evidence', (requirement) => {
+  ] as const)('does not hard-reject on the technical axis with or without persisted $requirement_type evidence', (requirement) => {
     const job = {
       title: 'Data Governance Lead',
       company_name: 'Investment Data Co',
@@ -675,7 +675,10 @@ describe('Stage 3: Mobility, Freshness, Compensation & Employer Watchlist', () =
       approvedStage3Preferences,
     );
 
-    expect(withoutPersistedEvidence.rejection_codes).toContain('NON_TECHNICAL_FUNCTION');
+    // Axis 1 is not a hard gate: lane routing decides whether the role fits.
+    expect(withoutPersistedEvidence.status).toBe('PASS');
+    expect(withoutPersistedEvidence.rejection_codes).not.toContain('NON_TECHNICAL_FUNCTION');
+    expect(withoutPersistedEvidence.rejection_codes).not.toContain('GATE_OUT_OF_SCOPE_DOMAIN');
     expect(withPersistedEvidence.status).toBe('PASS');
     expect(withPersistedEvidence.rejection_codes).not.toContain('NON_TECHNICAL_FUNCTION');
   });

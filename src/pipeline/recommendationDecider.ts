@@ -22,7 +22,8 @@ import type { MaterialReadinessCheck } from "../contracts/applicationReadiness.j
 import { assessApplicationReadiness, buildApplicationReadinessFingerprint, QUALIFICATION_COMPARATOR_VERSION } from "../eligibility/applicationReadiness.js";
 import { assessHiringTerritoryReadiness, assessTravelReadiness, assessWorkModeReadiness } from "../eligibility/workabilityReadiness.js";
 import { buildEvidenceRevisionHash } from "../ingestion/jobSourceEvidence.js";
-import { resolveWorkspaceWorkabilityPolicy } from "./workabilityPolicy.js";
+import { resolveEffectiveWorkabilityPolicy } from "./effectiveWorkabilityPolicy.js";
+import { findOnsiteException } from "./onsiteExceptions.js";
 import { buildPipelineTaskContextFingerprint } from "./artifactContext.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
 import { assessCareerTrack, capOutcome, CAREER_TRACK_POLICY_VERSION, parseTrackExperience, type TrackRequirement } from "./careerTrack.js";
@@ -212,7 +213,12 @@ export async function runRecommendationDecider(
   try {
     const ctx = options?.context ?? (await resolveWorkspaceContext(client as any));
     const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['lane_intent', 'stage3']);
-    const workabilityPolicyResolution = await resolveWorkspaceWorkabilityPolicy(client as any, { context: ctx });
+    // The same effective policy as the hard gate (including stage3 on-site
+    // exception employers), so gate, decision and readiness share one hash.
+    const workabilityPolicyResolution = await resolveEffectiveWorkabilityPolicy(client as any, {
+      context: ctx,
+      stage3: preferenceContext.stage3 ?? null,
+    });
     const snapshot = await resolveWorkspacePolicySnapshot(client as any, { context: ctx });
 
     const jobVersionIds = options?.jobVersionIds?.filter(Boolean) ?? [];
@@ -701,6 +707,11 @@ export async function runRecommendationDecider(
 
         const workabilityFacts = normalizeWorkabilityFacts(job.workability_facts);
         const modeEvidence = workabilityEvidence?.work_mode ?? null;
+        // The same on-site exception evaluation the hard gate used.
+        const onsiteException = findOnsiteException(
+          { title: job.normalized_title, company_name: job.company_name, description: job.description_text },
+          workabilityPolicyResolution.policy,
+        );
         const workModeAssessment = assessWorkModeReadiness(
           modeEvidence,
           job.workplace_type,
@@ -708,6 +719,7 @@ export async function runRecommendationDecider(
           workabilityFacts["attendance_basis"],
           normalizedGateDecision,
           workabilityPolicyResolution.policy,
+          onsiteException,
         );
         readinessChecks.push(readinessCheck(
           "WORK_MODE",

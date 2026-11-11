@@ -5,53 +5,71 @@ import { applyPersistedRequirementGates } from "../../pipeline/hardGate.js";
 // Synthetic postings: each description mentions SQL/Python so the old keyword check passed them.
 const TECHNICAL_SOUNDING = "Use SQL and Python dashboards daily. Work closely with the data platform team.";
 
-describe("non-technical function titles in the hard gates", () => {
+function gates(title: string, description = TECHNICAL_SOUNDING) {
+  const persisted = applyPersistedRequirementGates({
+    title,
+    company_name: "Example Company",
+    location: "Singapore",
+    workplace_type: "HYBRID",
+    employment_type: "FULL_TIME",
+    description,
+  }, []);
+  const global = applyGlobalGates({
+    id: `synthetic-${title}`,
+    title,
+    company_name: "Example Company",
+    raw_description: description,
+    location: "Singapore",
+    workplace_type: "HYBRID",
+    employment_type: "PERMANENT",
+  } as never);
+  return { persisted, global };
+}
+
+// Non-target title families stay hard rejects with the role-family code. The generic
+// technical-function check (Axis 1) is not a gate, so in-lane non-technical roles pass.
+describe("non-target title families in the hard gates", () => {
   it.each([
-    ["Customer Success Manager, Enterprise", "Customer Success"],
     ["Senior GL Accountant", "GL Accountant"],
     ["Accountant", "Accountant"],
     ["Manager, Payroll Operations - APAC", "Payroll Operations"],
     ["Fund Operations Support Specialist", "Support Specialist"],
     ["Sr. UX Designer, Security", "UX Designer"],
     ["Marketplace Creative Strategist/Graphic Designer", "Graphic Designer"],
-  ])("rejects %j as NON_TECHNICAL_FUNCTION with the matched title as evidence", (title, matched) => {
+  ])("rejects %j as NON_TARGET_ROLE_FAMILY with the matched title as evidence", (title, matched) => {
     expect(nonTechnicalFunctionTitle(title)).toBe(matched);
-    const persisted = applyPersistedRequirementGates({
-      title,
-      company_name: "Example Company",
-      location: "Singapore",
-      workplace_type: "HYBRID",
-      employment_type: "FULL_TIME",
-      description: TECHNICAL_SOUNDING,
-    }, []);
-    expect(persisted.status).toBe("HARD_REJECT");
-    expect(persisted.rejection_codes).toEqual(expect.arrayContaining(["GATE_OUT_OF_SCOPE_DOMAIN"]));
-    expect(persisted.rejection_codes.some((code) => code === "NON_TECHNICAL_FUNCTION" || code === "NON_TARGET_ROLE_FAMILY")).toBe(true);
-    expect(persisted.evidence_quotes.join(" ")).toContain(title);
-
-    const global = applyGlobalGates({
-      id: `synthetic-${title}`,
-      title,
-      company_name: "Example Company",
-      raw_description: TECHNICAL_SOUNDING,
-      location: "Singapore",
-      workplace_type: "HYBRID",
-      employment_type: "PERMANENT",
-    } as never);
-    expect(global.status).toBe("HARD_REJECT");
+    const { persisted, global } = gates(title);
+    for (const result of [persisted, global]) {
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toEqual(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"]);
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.evidence_quotes.join(" ")).toContain(matched);
+    }
+    expect(persisted.evidence_quotes[0]).toBe(`Non-target title family "${matched}" in "${title}"`);
   });
 
-  it("names NON_TECHNICAL_FUNCTION for a title the older exclusions did not cover", () => {
-    const result = applyPersistedRequirementGates({
-      title: "Senior GL Accountant",
-      company_name: "Example Company",
-      location: "Singapore",
-      workplace_type: "HYBRID",
-      employment_type: "FULL_TIME",
-      description: TECHNICAL_SOUNDING,
-    }, []);
-    expect(result.rejection_codes).toEqual(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"]);
-    expect(result.evidence_quotes[0]).toBe('Non-technical function title "GL Accountant" in "Senior GL Accountant"');
+  it("keeps the customer-success role-family exclusion", () => {
+    const { persisted } = gates("Customer Success Manager, Enterprise");
+    expect(persisted.status).toBe("HARD_REJECT");
+    expect(persisted.rejection_codes).toEqual(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"]);
+  });
+
+  it.each([
+    "Lead Product Manager (Courts and Legal Services)",
+    "Senior Product Manager, Data Programme",
+    "Product Policy Manager / Lead",
+    "Corporate Transformation Director",
+    "Regulatory & Controls Program Manager - Banking",
+    "Assistant Director, Enforcement (Investigator)",
+    "Manager, Investigation Department",
+    "Lead, Transformation Portfolio & Strategic Initiatives",
+  ])("does not re-block the in-lane non-technical role %j", (title) => {
+    expect(nonTechnicalFunctionTitle(title)).toBeNull();
+    const { persisted, global } = gates(title, "Lead the programme with policy owners and stakeholders, and report outcomes to leadership.");
+    for (const result of [persisted, global]) {
+      expect(result.status, `${title}: ${JSON.stringify(result.rejection_codes)}`).toBe("PASS");
+      expect(result.rejection_codes).toEqual([]);
+    }
   });
 
   it.each([

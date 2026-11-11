@@ -44,6 +44,17 @@ export interface WorkModeEnrichmentResult {
   source_type: "STRUCTURED_METADATA" | "CANONICAL_PAGE" | "STORED_DESCRIPTION" | "CACHED";
   status: "ENRICHED" | "FAILED" | "SKIPPED" | "GENUINELY_UNKNOWN";
   fingerprint: string;
+  /** Read-only preview only: a canonical-page fetch would have been attempted but was skipped. */
+  fetch_skipped?: boolean;
+}
+
+export interface WorkModeEnrichmentOptions {
+  /**
+   * Preview without side effects: no cache update, no persisted enrichment row
+   * and no network fetch. Used by read-only replays so they follow the same
+   * steps as the hard gate. `fetch_skipped` marks results that could differ.
+   */
+  readonly readOnly?: boolean;
 }
 
 export function generateEnrichmentFingerprint(
@@ -344,8 +355,13 @@ export async function enrichWorkModeIfNeeded(
     workplace_type?: string | null;
     location?: string | null;
     description_text?: string | null;
-  }
+  },
+  options: WorkModeEnrichmentOptions = {},
 ): Promise<WorkModeEnrichmentResult> {
+  const readOnly = options.readOnly === true;
+  const persist = (result: WorkModeEnrichmentResult): Promise<void> =>
+    readOnly ? Promise.resolve() : persistEnrichmentResult(clientOrPool, context, job, result);
+  let fetchSkipped = false;
   const currentMode = String(job.workplace_type || "").trim().toUpperCase();
   const fingerprint = generateEnrichmentFingerprint(job.canonical_url ?? null, job.job_version_id);
 
@@ -376,6 +392,7 @@ export async function enrichWorkModeIfNeeded(
         && isSingaporeUnknownWorkModeEligible(job.location, job.description_text)
       ) {
         const assumed = makeSingaporeAssumedHybridResult(fingerprint);
+        if (readOnly) return assumed;
         await clientOrPool.query(
           `UPDATE work_mode_enrichments
            SET workplace_type = $1,
@@ -422,7 +439,7 @@ export async function enrichWorkModeIfNeeded(
         status: "ENRICHED",
         fingerprint,
       };
-      await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => undefined);
+      await persist(result).catch(() => undefined);
       return result;
     }
   }
@@ -457,7 +474,7 @@ export async function enrichWorkModeIfNeeded(
           status: "ENRICHED",
           fingerprint,
         };
-        await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => undefined);
+        await persist(result).catch(() => undefined);
         return result;
       }
 
@@ -477,7 +494,7 @@ export async function enrichWorkModeIfNeeded(
             status: "ENRICHED",
             fingerprint,
           };
-          await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => undefined);
+          await persist(result).catch(() => undefined);
           return result;
         }
       }
@@ -486,8 +503,10 @@ export async function enrichWorkModeIfNeeded(
     if (err?.code !== "42P01") throw err;
   }
 
-  // 4. Fetch canonical posting URL
-  if (job.canonical_url) {
+  // 4. Fetch canonical posting URL (never in a read-only preview)
+  if (job.canonical_url && readOnly) {
+    fetchSkipped = true;
+  } else if (job.canonical_url) {
     const fetched = await fetchCanonicalWorkMode(job.canonical_url);
     if (fetched.workplace_type !== "UNKNOWN") {
       const result: WorkModeEnrichmentResult = {
@@ -495,7 +514,7 @@ export async function enrichWorkModeIfNeeded(
         source_type: "CANONICAL_PAGE",
         fingerprint,
       };
-      await persistEnrichmentResult(clientOrPool, context, job, result).catch(() => undefined);
+      await persist(result).catch(() => undefined);
       return result;
     }
   }
@@ -509,8 +528,8 @@ export async function enrichWorkModeIfNeeded(
       ...makeSingaporeAssumedHybridResult(fingerprint),
       source_type: "STORED_DESCRIPTION",
     };
-    await persistEnrichmentResult(clientOrPool, context, job, sgResult).catch(() => undefined);
-    return sgResult;
+    await persist(sgResult).catch(() => undefined);
+    return fetchSkipped ? { ...sgResult, fetch_skipped: true } : sgResult;
   }
 
   const fallbackResult: WorkModeEnrichmentResult = {
@@ -525,8 +544,8 @@ export async function enrichWorkModeIfNeeded(
     status: "GENUINELY_UNKNOWN",
     fingerprint,
   };
-  await persistEnrichmentResult(clientOrPool, context, job, fallbackResult).catch(() => undefined);
-  return fallbackResult;
+  await persist(fallbackResult).catch(() => undefined);
+  return fetchSkipped ? { ...fallbackResult, fetch_skipped: true } : fallbackResult;
 }
 
 async function persistEnrichmentResult(

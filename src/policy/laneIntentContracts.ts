@@ -12,6 +12,18 @@ export const SixLaneKeySchema = z.enum([
 ]);
 export type SixLaneKey = z.infer<typeof SixLaneKeySchema>;
 
+/**
+ * Every target lane in config/lanes/registry.yml. The two later lanes are optional in stored
+ * preferences, so revisions written for the original six lanes stay valid.
+ */
+export const TargetLaneKeySchema = z.enum([
+  ...SixLaneKeySchema.options,
+  'TECHNICAL_PRODUCT_TRANSFORMATION',
+  'INVESTIGATIONS_ENFORCEMENT',
+]);
+export type TargetLaneKey = z.infer<typeof TargetLaneKeySchema>;
+export const TARGET_LANE_KEYS: readonly TargetLaneKey[] = TargetLaneKeySchema.options;
+
 const RequiredLaneWeightsSchema = z.object({
   CORE_AI_DATA: z.number().min(0).max(100),
   LEGAL_REGTECH: z.number().min(0).max(100),
@@ -19,12 +31,14 @@ const RequiredLaneWeightsSchema = z.object({
   HEALTH_BIO_PHARMA: z.number().min(0).max(100),
   INVESTMENT_MARKETS_FINTECH: z.number().min(0).max(100),
   SOCIAL_IMPACT_MULTILATERAL: z.number().min(0).max(100),
+  TECHNICAL_PRODUCT_TRANSFORMATION: z.number().min(0).max(100).optional(),
+  INVESTIGATIONS_ENFORCEMENT: z.number().min(0).max(100).optional(),
 }).superRefine((weights, context) => {
-  const total = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
+  const total = Object.values(weights).reduce<number>((sum, weight) => sum + (weight ?? 0), 0);
   if (total !== 100) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      message: `Six-lane preference weights must total 100; received ${total}.`,
+      message: `Lane preference weights must total 100; received ${total}.`,
     });
   }
 });
@@ -66,7 +80,7 @@ export type CrossLaneWorkStyleSignals = z.infer<typeof CrossLaneWorkStyleSignals
 export const LaneIntentPreferencesSchema = z.object({
   schema_version: z.string().default(LANE_INTENT_SCHEMA_VERSION),
   lane_weights: RequiredLaneWeightsSchema,
-  lane_preferences: z.record(SixLaneKeySchema, LanePreferenceTaxonomySchema).default({}),
+  lane_preferences: z.record(TargetLaneKeySchema, LanePreferenceTaxonomySchema).default({}),
   cross_lane_work_style_signals: CrossLaneWorkStyleSignalsSchema.default({}),
 }).strict();
 export type LaneIntentPreferences = z.infer<typeof LaneIntentPreferencesSchema>;

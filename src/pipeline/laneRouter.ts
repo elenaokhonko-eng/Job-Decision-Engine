@@ -20,7 +20,7 @@ import {
 import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
 import { PersistedLaneDecisionSchema, SCHEMA_VERSION } from "../contracts/index.js";
 import { resolveWorkspacePreferenceContext } from "../policy/workspacePreferenceRegistry.js";
-import { SixLaneKeySchema, type LaneIntentPreferences, type LanePreferenceTaxonomy } from "../policy/laneIntentContracts.js";
+import { TargetLaneKeySchema, type LaneIntentPreferences, type LanePreferenceTaxonomy } from "../policy/laneIntentContracts.js";
 import { sourceContentEvidencePredicate } from "./descriptionQuality.js";
 import { routableWorkabilityVerificationSql } from "./verificationRouting.js";
 import { publicErrorSummary } from "../security/publicErrorSummary.js";
@@ -33,7 +33,9 @@ dotenv.config({ path: ".env.local" });
 
 const defaultPool = new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
 
-const LANE_ROUTER_RULE_VERSION = "lane_router_v2.3.2";
+// v2.4.0: routeLaneCandidates, bare-heading boilerplate end, 12k scope window, boilerplate
+// phrase stripping, product/transformation and investigation title families.
+const LANE_ROUTER_RULE_VERSION = "lane_router_v2.4.0";
 
 
 // ── Cosine similarity ─────────────────────────────────────────────────────────
@@ -64,12 +66,15 @@ function applyNegativeExclusion(description: string, laneDef: LaneDefinition): b
   return false;
 }
 export function containsConcept(text: string, concept: string): boolean {
-  return conceptVariants(concept).some((variant) => {
-    const normalized = variant.toLowerCase().replace(/_/g, " ").trim();
-    if (!normalized) return false;
-    const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-    return new RegExp(`\\b${escaped}\\b`, "i").test(text);
-  });
+  return conceptVariants(concept).some((variant) => containsPhrase(text, variant));
+}
+
+/** Whole-word, case-insensitive match of one phrase (no alias expansion). */
+function containsPhrase(text: string, phrase: string): boolean {
+  const normalized = phrase.toLowerCase().replace(/_/g, " ").trim();
+  if (!normalized) return false;
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
 }
 
 const CONCEPT_ALIASES: Record<string, string[]> = {
@@ -244,7 +249,10 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "regulatory compliance",
     "policy automation",
     "sanctions",
-    "due diligence",
+    // Customer due diligence, not "technical due diligence" in architecture roles.
+    "customer due diligence",
+    "enhanced due diligence",
+    "kyc due diligence",
   ],
   "fraud detection": [
     "fraud detection",
@@ -380,6 +388,9 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
   "regtech": [
     "regtech",
     "regulatory technology",
+    "suptech",
+    "supervisory technology",
+    "financial supervision",
     "compliance automation",
     "aml",
     "kyc",
@@ -506,6 +517,345 @@ const CONCEPT_ALIASES: Record<string, string[]> = {
     "faculty laboratory",
     "ai laboratory",
   ],
+  "technical leadership": [
+    "technical lead",
+    "tech lead",
+    "technology lead",
+    "technology manager",
+    "engineering lead",
+    "engineering manager",
+    "head of engineering",
+    "head of technology",
+    "director of engineering",
+    "engineering director",
+    "lead engineer",
+    "principal engineer",
+    "head of it",
+    "it applications",
+    "it delivery",
+  ],
+  "cloud platform": [
+    "cloud platform",
+    "cloud platforms",
+    "cloud infrastructure",
+    "cloud architecture",
+    "cloud architect",
+    "cloud native",
+    "cloud-native",
+    "aws",
+    "azure",
+    "gcp",
+    "google cloud",
+    "kubernetes",
+    "hybrid cloud",
+    "multi-cloud",
+  ],
+  "devops": [
+    "devops",
+    "devsecops",
+    "ci/cd",
+    "continuous integration",
+    "continuous delivery",
+    "site reliability",
+    "sre",
+    "infrastructure as code",
+    "terraform",
+    "observability",
+  ],
+  "software platform": [
+    "software architecture",
+    "distributed systems",
+    "microservices",
+    "backend systems",
+    "platform engineering",
+    "system design",
+    "system architecture",
+    "systems architecture",
+    "technical architecture",
+    "software development lifecycle",
+    "sdlc",
+    "solution architecture",
+    "enterprise architecture",
+    "software engineering",
+  ],
+  "product management": [
+    "product manager",
+    "product owner",
+    "chief product owner",
+    "product lead",
+    "head of product",
+    "product director",
+    "director of product",
+    "group product manager",
+    "principal product manager",
+    "lead product manager",
+    "product management",
+    "technical product manager",
+    "technical product owner",
+    "ai product manager",
+    "data product manager",
+    "digital products",
+  ],
+  "programme management": [
+    "programme manager",
+    "program manager",
+    "project manager",
+    "project lead",
+    "programme lead",
+    "program lead",
+    "programme director",
+    "program director",
+    "delivery manager",
+    "portfolio delivery",
+    "pmo",
+    "technical program manager",
+    "technical programme manager",
+  ],
+  "transformation leadership": [
+    "transformation lead",
+    "transformation manager",
+    "transformation director",
+    "head of transformation",
+    "transformation office",
+    "transformation portfolio",
+    "transformation programme",
+    "transformation program",
+    "transformation",
+    "strategic initiatives",
+  ],
+  "product policy": [
+    "product policy",
+    "policy manager",
+    "technology policy",
+    "tech policy",
+    "digital policy",
+  ],
+  "digital technology": [
+    "digital transformation",
+    "technology transformation",
+    "digitalisation",
+    "digitalization",
+    "digital products",
+    "digital product",
+    "digital platform",
+    "digital platforms",
+    "digital services",
+    "digital government",
+    "digital channels",
+    "govtech",
+    // Multi-word technology phrases only: bare "software", "agile", "api" or "automation"
+    // also appear in construction, events and retail roles.
+    "software development",
+    "software delivery",
+    "software products",
+    "software engineers",
+    "software engineering",
+    "ship software",
+    "saas platform",
+    "saas products",
+    "api platform",
+    "apis and integrations",
+    "cloud migration",
+    "cloud platforms",
+    "cloud-native",
+    "agile delivery",
+    "agile software",
+    "scrum teams",
+    "intelligent automation",
+    "process automation platform",
+    "technology roadmap",
+    "technical roadmap",
+    "engineering teams",
+    "engineering team",
+    "engineers and designers",
+    "machine learning engineers",
+    "data engineers",
+    "data scientists",
+    "data pipelines",
+    "case-management platform",
+    "solution architects",
+    "data center",
+    "data centre",
+  ],
+  "investigation": [
+    "investigation",
+    "investigations",
+    "investigator",
+    "investigators",
+    "investigative",
+    "investigate",
+    "investigating",
+    "forensic",
+    "forensics",
+    "enforcement",
+    "inquiries",
+  ],
+  "regulatory enforcement": [
+    "enforcement",
+    "enforcement action",
+    "enforcement actions",
+    "regulatory breach",
+    "regulatory breaches",
+    "misconduct",
+    "market misconduct",
+    "securities law",
+    "offence",
+    "offences",
+    "prosecution",
+    "prosecutions",
+    "statutory",
+    "non-compliance",
+    "regulatory investigation",
+    "regulatory investigations",
+  ],
+  "banking fintech": [
+    "banking",
+    "banks",
+    "fintech",
+    "neobank",
+    "digital bank",
+    "digital banking",
+    "financial services",
+    "financial institution",
+    "financial institutions",
+    "payments",
+    "brokerage",
+    "stockbroking",
+  ],
+  "legal industry": [
+    "law firm",
+    "law firms",
+    "lawyers",
+    "legal professionals",
+    "legal industry",
+    "legal workflows",
+    "legal work",
+    "in-house legal",
+  ],
+  "regulatory reporting": [
+    "regulatory reporting",
+    "regulatory change",
+    "regulatory requirements",
+  ],
+  // Industry sectors of the other lanes; TECHNICAL_PRODUCT_TRANSFORMATION requires one.
+  "technology sector": [
+    "technology company",
+    "tech company",
+    "software company",
+    "saas company",
+    "saas provider",
+    "ai company",
+    "technology firm",
+    "cloud provider",
+    "enterprise software",
+    "semiconductor",
+    "semiconductors",
+    "high-performance computing",
+    "accelerated computing",
+    "gpus",
+    "technology group",
+    "it services",
+  ],
+  "legal regulatory sector": [
+    "legal technology",
+    "legaltech",
+    "legal tech",
+    "legal ai",
+    "law firm",
+    "law firms",
+    "legal services",
+    "regulator",
+    "regulatory authority",
+    "regulatory body",
+    "prosecutors",
+    "courts",
+    "court services",
+    "judiciary",
+    "regtech",
+  ],
+  "health life sciences sector": [
+    "pharmaceutical",
+    "pharma",
+    "biotech",
+    "biotechnology",
+    "life sciences",
+    "hospital",
+    "hospitals",
+    "public healthcare",
+    "healthcare institutions",
+    "healthcare provider",
+    "medical devices",
+    "healthtech",
+    "health tech",
+  ],
+  "financial services sector": [
+    "bank",
+    "banks",
+    "banking",
+    "fintech",
+    "neobank",
+    "financial services",
+    "financial institution",
+    "insurer",
+    "insurance",
+    "asset management",
+    "wealth management",
+    "investment management",
+    "capital markets",
+    "securities",
+    "stockbroking",
+    "brokerage",
+    "stock exchange",
+    "finance app",
+  ],
+  // Bare "university" or "academic" names an employer, not research work.
+  "research academic sector": [
+    "research institute",
+    "research agency",
+    "research centre",
+    "research center",
+    "university research",
+    "academic research",
+    "research laboratory",
+    "national laboratory",
+  ],
+  "public social sector": [
+    "government agency",
+    "government agencies",
+    "public sector",
+    "public service",
+    "public agencies",
+    "public officers",
+    "whole-of-government",
+    "ministry",
+    "statutory board",
+    "govtech",
+    "digital government",
+    "multilateral",
+    "non-profit",
+    "nonprofit",
+    "united nations",
+    "international development",
+  ],
+  "enforcement sector": [
+    "law enforcement",
+    "regulatory enforcement",
+    "enforcement agency",
+  ],
+  "financial crime": [
+    "financial crime",
+    "financial crimes",
+    "money laundering",
+    "anti-money laundering",
+    "aml",
+    "fraud",
+    "bribery",
+    "corruption",
+    "insider trading",
+    "market manipulation",
+    "sanctions",
+    "terrorism financing",
+  ],
 };
 
 function conceptVariants(concept: string): string[] {
@@ -538,7 +888,7 @@ export function assessLaneIntentPreference(
   companyName: string,
   preferences: LaneIntentPreferences | null,
 ): LaneIntentPreferenceAssessment {
-  const parsedLane = SixLaneKeySchema.safeParse(laneKey);
+  const parsedLane = TargetLaneKeySchema.safeParse(laneKey);
   const taxonomy: LanePreferenceTaxonomy | undefined = parsedLane.success
     ? preferences?.lane_preferences[parsedLane.data]
     : undefined;
@@ -640,7 +990,15 @@ export function assessLaneIntentPreference(
   };
 }
 
-const NON_TECHNICAL_ROLE_FAMILY = /\b(?:sales|business\s+development|account\s+(?:executive|manager|cto)|customer\s+success|counselor|social\s+worker|people\s+(?:partner|business)|human\s+resources|hr\b|brand(?:s)?|marketing|finance|fp\s*&\s*a|accounting|tax|designer|design\s+director|art\s+director|leather|investigator|recruiter|talent|operations?)\b/i;
+// "finance" is a role family ("Finance Manager", "Head of Finance") but not when it names the
+// product's domain ("Technical Product Lead - AI Finance App"), so the domain forms are skipped.
+const NON_TECHNICAL_ROLE_FAMILY = /\b(?:sales|business\s+development|account\s+(?:executive|manager|cto)|customer\s+success|counselor|social\s+worker|people\s+(?:partner|business)|human\s+resources|hr\b|brand(?:s)?|marketing|(?<!\b(?:ai|digital|decentralised|decentralized|embedded|open)\s)finance(?!\s+(?:app|apps|application|applications|platform|platforms|technology|tech|data|product|products|engineering)\b)|fp\s*&\s*a|accounting|tax|designer|design\s+director|art\s+director|leather|investigator|recruiter|talent|operations?)\b/i;
+
+/** Investigator titles are the approved function of INVESTIGATIONS_ENFORCEMENT and nowhere else. */
+const NON_TECHNICAL_ROLE_FAMILY_EXCEPT_INVESTIGATOR = new RegExp(
+  NON_TECHNICAL_ROLE_FAMILY.source.replace("|investigator", ""),
+  "i"
+);
 
 export function hasNonTechnicalRoleFamily(title: string): boolean {
   return NON_TECHNICAL_ROLE_FAMILY.test(String(title || ""));
@@ -650,11 +1008,58 @@ export function hasCoreTechnicalFunction(title: string): boolean {
   const value = String(title || "").toLowerCase();
   if (!value || hasNonTechnicalRoleFamily(value)) return false;
 
-  return /\b(?:software|data|machine\s+learning|ml|ai|platform|cloud|devops|sre|site\s+reliability|backend|back-end|frontend|front-end|full[- ]stack|engineering|engineer|developer|architect|scientist|researcher|quantitative|bioinformatics|mlops|technical\s+(?:product|program|programme|project|delivery)|automation|cyber\s+security|security\s+engineer)\b/i.test(value);
+  return /\b(?:software|data|machine\s+learning|ml|ai|platform|cloud|devops|sre|site\s+reliability|backend|back-end|frontend|front-end|full[- ]stack|engineering|engineer|developer|architect|scientist|researcher|research\s+fellow|quantitative|bioinformatics|mlops|technical\s+(?:product|program|programme|project|delivery|lead)|tech\s+lead|technology\s+(?:lead|manager)|automation|cyber\s+security|security\s+engineer)\b/i.test(value);
+}
+
+/**
+ * Title families of TECHNICAL_PRODUCT_TRANSFORMATION: product management/ownership, programme and
+ * project delivery, and transformation leadership. A bare "portfolio manager" is an investment role,
+ * so only technology/product portfolio titles qualify.
+ */
+export function hasProductTransformationFunction(title: string): boolean {
+  const value = String(title || "");
+  if (!value || hasNonTechnicalRoleFamily(value)) return false;
+  return /\b(?:product\s+(?:manager|owner|lead|director|head|management|policy|portfolio)|head\s+of\s+product|chief\s+product|(?:digital|data|ai)\s+products?|(?:programme|program|project|delivery)\s+(?:manager|lead|director|head|management|owner)|(?:ai|product|technology|digital|data)\s+portfolio\s+(?:manager|lead)|portfolio\s+(?:delivery|lead)|pmo|transformation|strategic\s+initiatives|technical\s+(?:program|programme|project|product)|(?:head|director)\b[^;()]{0,30}\b(?:technology|digital|data|ai|it|engineering|platforms?|innovation))\b/i.test(value);
+}
+
+/**
+ * Title families of INVESTIGATIONS_ENFORCEMENT: investigation, enforcement, forensic and
+ * fraud/financial-crime investigation roles. Other non-technical families still block the lane.
+ */
+export function hasInvestigationFunction(title: string): boolean {
+  const value = String(title || "");
+  if (!value || NON_TECHNICAL_ROLE_FAMILY_EXCEPT_INVESTIGATOR.test(value)) return false;
+  return /\b(?:investigat\w*|enforcement|forensics?|financial\s+crimes?\s+(?:investigat\w*|analyst|specialist|manager|lead)|fraud\s+(?:investigat\w*|analyst|examiner|risk|specialist|manager|lead)|counter[- ]fraud|anti[- ]fraud|market\s+surveillance|misconduct)\b/i.test(value);
+}
+
+// A title qualifier that makes a project/programme/transformation title half-technical.
+const TECHNICAL_TITLE_QUALIFIER = /\b(?:technical|technology|tech|digital|data|ai|ml|platforms?|products?|it|software|engineering|systems|cloud|cyber|automation|analytics)\b/i;
+// Non-technical project subjects: building, estates, facilities, events and fundraising work.
+const NON_TECHNICAL_PROJECT_TITLE = /\b(?:construction|redevelopment|refurbishment|fit[- ]?out|estates?|facilities|property|real\s+estate|events?|venues?|catering|fundraising|campaigns?|maintenance|interiors?)\b/i;
+const NON_TECHNICAL_PROJECT_SCOPE = /\b(?:construction\s+(?:project|works|site|programme|program)|building\s+works|site\s+works|redevelopment|refurbishment|fit[- ]?out|campus\s+estates|estates\s+(?:management|programme|program|team)|facilities\s+management|office\s+moves?|cleaning\s+contracts?|galas?|fundraising\s+events?|donor\s+events?|events\s+programme|event\s+management|venue\s+management|catering|property\s+development)\b/i;
+
+/**
+ * TECHNICAL_PRODUCT_TRANSFORMATION excludes project, programme and transformation roles whose
+ * subject is non-technical. A non-technical subject in the title always excludes the role.
+ * A title without a technical qualifier is also excluded when its own scope describes
+ * building, estates, facilities, events or fundraising work.
+ */
+// A title that itself names technology work may take its sector from the employer context.
+const TECHNOLOGY_WORK_TITLE = /\b(?:technology|tech|digital|data|ai|it|platforms?)\b/i;
+
+export function titleNamesTechnologyWork(title: string): boolean {
+  return TECHNOLOGY_WORK_TITLE.test(title);
+}
+
+export function hasNonTechnicalProjectSubject(title: string, scopeText: string): boolean {
+  if (NON_TECHNICAL_PROJECT_TITLE.test(title)) return true;
+  return !TECHNICAL_TITLE_QUALIFIER.test(title) && NON_TECHNICAL_PROJECT_SCOPE.test(scopeText);
 }
 
 export function hasApprovedLaneFunction(laneKey: string, title: string): boolean {
+  if (laneKey === "INVESTIGATIONS_ENFORCEMENT") return hasInvestigationFunction(title);
   if (hasNonTechnicalRoleFamily(title)) return false;
+  if (laneKey === "TECHNICAL_PRODUCT_TRANSFORMATION") return hasProductTransformationFunction(title);
   return laneKey === "CORE_AI_DATA" ? hasCoreTechnicalFunction(title) : true;
 }
 
@@ -675,9 +1080,69 @@ export function hasRequiredInstitutionalContext(laneKey: string, text: string): 
   return true;
 }
 
-function laneDomainScopeScore(description: string, laneKey: string, concepts: string[] | undefined): number {
+/**
+ * Distinct domain phrases found in the text. A phrase contained in another found phrase
+ * ("cloud" in "cloud platform") is not counted separately.
+ */
+/** Sector phrases (title, employer and full description) matched for a lane's required sectors. */
+export function matchedSector(jobScopeText: string, sectorConcepts: string[] | undefined): string[] {
+  return matchedDomainSignals(jobScopeText, sectorConcepts);
+}
+
+const BANKING_FINTECH_CONTEXT = /\b(?:bank|banks|banking|neobank|fintech|digital\s+bank|financial\s+services|financial\s+institutions?|financial\s+products|financial\s+super\s*app|brokerage|stockbroking|payments|investing|savings|money\s+transfers?|e-money)\b/i;
+const LEGAL_REGULATORY_EMPLOYER = /\b(?:regulator|regulatory\s+(?:authority|body|agency)|monetary\s+authority|securities\s+commission|supervisory\s+authority|legal\s*tech|legal\s+technology|legal\s+ai|law\s+firms?|courts?|judiciary)\b/i;
+
+const REGULATOR_EMPLOYER = /\b(?:regulator|regulatory\s+(?:authority|body|agency)|monetary\s+authority|central\s+bank|securities\s+commission|(?:financial\s+)?supervisory\s+(?:authority|body|agency)|financial\s+conduct\s+authority|prudential\s+regulation\s+authority)\b/i;
+
+// "Regulated by the <regulator>" describes a regulated firm, not a regulator.
+const REGULATED_BY_PHRASE = /\b(?:regulated|licensed|authori[sz]ed|supervised|registered)\s+(?:by|with)\s+(?:the\s+)?[^.;]{0,80}/gi;
+// Investment and markets titles keep their FINTECH route at a regulator (e.g. reserve management).
+const INVESTMENT_MARKETS_TITLE = /\b(?:investment|investments|markets?|trading|portfolio|asset\s+management|wealth|reserves)\b/i;
+
+/** The employer is a financial regulator or supervisory body (company name or opening of the posting). */
+export function isRegulatorEmployer(companyName: string, employerIntro: string): boolean {
+  return REGULATOR_EMPLOYER.test(`${companyName} ${employerIntro}`.replace(REGULATED_BY_PHRASE, " "));
+}
+
+export type LegalFintechTieBreak = "INVESTMENT_MARKETS_FINTECH" | "LEGAL_REGTECH" | null;
+
+/**
+ * Sector tie-break when both LEGAL_REGTECH and INVESTMENT_MARKETS_FINTECH qualify:
+ * banking or fintech in the title wins FINTECH; otherwise a regulatory body or legal-tech
+ * employer wins LEGAL_REGTECH; otherwise banking or fintech in the employer context
+ * (company name, opening of the posting) wins FINTECH; otherwise no tie-break.
+ */
+export function legalFintechTieBreak(title: string, companyName: string, employerIntro: string): LegalFintechTieBreak {
+  if (BANKING_FINTECH_CONTEXT.test(title)) return "INVESTMENT_MARKETS_FINTECH";
+  const employer = `${companyName} ${employerIntro}`;
+  if (LEGAL_REGULATORY_EMPLOYER.test(`${title} ${employer}`)) return "LEGAL_REGTECH";
+  if (BANKING_FINTECH_CONTEXT.test(employer)) return "INVESTMENT_MARKETS_FINTECH";
+  return null;
+}
+
+export function matchedDomainSignals(description: string, concepts: string[] | undefined): string[] {
+  const found = new Set<string>();
+  for (const concept of concepts ?? []) {
+    for (const variant of conceptVariants(concept)) {
+      if (containsPhrase(description, variant)) found.add(variant);
+    }
+  }
+  const signals = [...found];
+  return signals.filter((signal) => !signals.some((other) => other !== signal && other.includes(signal))).sort();
+}
+
+function laneDomainScopeScore(
+  description: string,
+  laneKey: string,
+  concepts: string[] | undefined,
+  minimumSignals = 1,
+  sectorConcepts?: string[],
+  jobScopeText = description
+): number {
   if (!hasRequiredInstitutionalContext(laneKey, description)) return 0;
-  return conceptScopeScore(description, concepts);
+  if (sectorConcepts?.length && matchedSector(jobScopeText, sectorConcepts).length === 0) return 0;
+  if (minimumSignals <= 1) return conceptScopeScore(description, concepts);
+  return matchedDomainSignals(description, concepts).length >= minimumSignals ? 1 : 0;
 }
 
 type LaneCandidateEvaluation = {
@@ -737,7 +1202,16 @@ function buildNoMatchEvidence(candidates: LaneCandidateEvaluation[]): string[] {
   return evidence;
 }
 
-function extractCoreJobText(title: string, description: string): string {
+/** A short title-like line with no sentence punctuation, e.g. "What You Will Do" or "Key Responsibilities". */
+function isBareSectionHeading(line: string): boolean {
+  const value = line.trim();
+  if (value.length < 4 || value.length > 60) return false;
+  if (/^[-•*·–—▪◦●>]/.test(value) || /[.!?,;]$/.test(value)) return false;
+  if (value.split(/\s+/).length > 8) return false;
+  return /^[A-Z0-9]/.test(value);
+}
+
+export function extractCoreJobText(title: string, description: string, maxChars = 2000): string {
   const raw = (description || "").trim();
 
   let mergedText = raw;
@@ -799,6 +1273,12 @@ function extractCoreJobText(title: string, description: string): string {
       current.heading = normalizedHeading;
       continue;
     }
+    // A boilerplate section ("About Us") ends at the next bare heading such as
+    // "What You Will Do"; otherwise the whole role description after it is dropped.
+    if (current.heading && boilerplateHeadings.has(current.heading) && isBareSectionHeading(line)) {
+      flush();
+      current.heading = normalizedHeading;
+    }
     current.body.push(line);
   }
   flush();
@@ -807,9 +1287,270 @@ function extractCoreJobText(title: string, description: string): string {
     .filter((s) => !s.heading || !boilerplateHeadings.has(s.heading))
     .flatMap((s) => s.body)
     .join(" ")
-    .slice(0, 2000);
+    .slice(0, maxChars);
 
   return `${title}. ${kept}`.trim();
+}
+
+/** Negative-concept exclusion keeps its original window: title plus the first 2,000 kept characters. */
+export const LANE_EXCLUSION_TEXT_MAX_CHARS = 2000;
+/**
+ * Domain and function evidence reads the whole kept description (bounded like the job embedding
+ * input), so scope terms after the first 2,000 characters still count.
+ */
+export const LANE_SCOPE_TEXT_MAX_CHARS = 12000;
+
+/**
+ * Employer boilerplate describes the employer, not the role's domain: employee benefits
+ * ("healthcare coverage", "support your mental health") and recruitment-scam warnings
+ * ("recruitment fraud"). It is removed before domain/function matching.
+ */
+const EMPLOYER_BOILERPLATE_PHRASES = /\b(?:(?:comprehensive|private|family|group)\s+)?(?:health(?:care)?|medical|dental|vision|life)\s+(?:insurance|coverage|cover|benefits?|plans?)\b|\bmental\s+health\b|\bhealth\s+(?:and|&)\s+well-?being\b|\bwellness\s+(?:programs?|programmes?|benefits?|allowance)\b|\b(?:group|staff|employee|travel)\s+insurance\b|\b(?:recruitment|recruiting|hiring|job|employment)\s+(?:fraud|scams?)\b/gi;
+
+export function stripEmployerBoilerplatePhrases(text: string): string {
+  return text.replace(EMPLOYER_BOILERPLATE_PHRASES, " ");
+}
+
+export type LaneRoutingConfidence = "High" | "Medium" | "Low" | "None";
+
+export interface LaneRoutingInput {
+  config: GlobalLanesConfig;
+  title: string;
+  descriptionText: string;
+  companyName?: string;
+  /** Cosine similarity between the job and the lane prototype in one embedding space. */
+  semanticScore: (laneKey: string) => number;
+  preferenceEnabled?: (laneKey: string) => boolean;
+  preferenceRank?: (laneKey: string) => number;
+  laneIntent?: LaneIntentPreferences | null;
+}
+
+export interface LaneRoutingResult {
+  primaryLane: string;
+  bestScore: number;
+  laneConfidence: LaneRoutingConfidence;
+  secondaryLanes: string[];
+  semanticScores: Record<string, number>;
+  domainScores: Record<string, number>;
+  functionScores: Record<string, number>;
+  laneEvidence: string[];
+  processingStatus: "LANE_ROUTED" | "UNMATCHED";
+}
+
+/**
+ * Deterministic lane selection for one job version, given its semantic score per lane.
+ * A lane qualifies when it is enabled, not excluded by a negative concept, and meets its
+ * semantic, domain and function minimums; no qualifying lane yields UNCLASSIFIED with
+ * per-lane blocker evidence. Pure: the router and offline dry runs share it.
+ */
+export function routeLaneCandidates(input: LaneRoutingInput): LaneRoutingResult {
+  const { config } = input;
+  const title = input.title || "";
+  const description = input.descriptionText || "";
+  const preferenceEnabled = input.preferenceEnabled ?? (() => true);
+  const preferenceRank = input.preferenceRank ?? (() => 1000);
+  const exclusionText = extractCoreJobText(title, description, LANE_EXCLUSION_TEXT_MAX_CHARS).toLowerCase();
+  // Technology phrases and, by default, the sector come from the job's own scope (title and
+  // role text, without "About Us" blocks). The employer intro feeds the LEGAL/FINTECH
+  // tie-break and the regulator rule. When the title itself names technology work, the
+  // sector may also come from the employer context (company name and About Us).
+  const rawPlain = stripHtmlToText(description);
+  const employerIntro = rawPlain.slice(0, 800);
+  const scopeText = stripEmployerBoilerplatePhrases(
+    extractCoreJobText(title, description, LANE_SCOPE_TEXT_MAX_CHARS)
+  ).toLowerCase();
+  const sectorText = titleNamesTechnologyWork(title)
+    ? stripEmployerBoilerplatePhrases(
+        `${scopeText} ${input.companyName ?? ""} ${rawPlain.slice(0, LANE_SCOPE_TEXT_MAX_CHARS)}`
+      ).toLowerCase()
+    : scopeText;
+
+  let bestLane = "UNCLASSIFIED";
+  let bestScore = -1;
+  const scoreMap: Record<string, number> = {};
+  const domainScoreMap: Record<string, number> = {};
+  const functionScoreMap: Record<string, number> = {};
+  const lanePreferenceAdjustments: Record<string, number> = {};
+  const lanePreferenceEvidence: Record<string, readonly string[]> = {};
+  const laneEvidence: string[] = [];
+
+  for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
+    if (!preferenceEnabled(laneKey)) {
+      scoreMap[laneKey] = -1;
+      continue;
+    }
+    if (applyNegativeExclusion(exclusionText, laneDef)) {
+      scoreMap[laneKey] = -1;
+      continue;
+    }
+    const score = input.semanticScore(laneKey);
+    scoreMap[laneKey] = score;
+    const lanePreference = assessLaneIntentPreference(
+      laneKey,
+      title,
+      description,
+      String(input.companyName ?? ""),
+      input.laneIntent ?? null,
+    );
+    lanePreferenceAdjustments[laneKey] = lanePreference.tieBreakAdjustment;
+    lanePreferenceEvidence[laneKey] = lanePreference.evidence;
+    domainScoreMap[laneKey] = laneDomainScopeScore(
+      scopeText,
+      laneKey,
+      laneDef.included_domain_concepts,
+      laneDef.minimum_domain_signals,
+      laneDef.required_sector_concepts,
+      sectorText
+    );
+    functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, title)
+      || (laneKey === "TECHNICAL_PRODUCT_TRANSFORMATION" && hasNonTechnicalProjectSubject(title, scopeText))
+      ? 0
+      : conceptScopeScore(scopeText, laneDef.required_function_concepts);
+    if (score > bestScore) {
+      bestScore = score;
+    }
+  }
+
+  const minSimilarityFloor = config.unclassified_policy.min_similarity_floor || 0.25;
+  const primaryCandidates = Object.entries(config.lanes).map(([laneKey, laneDef]) => ({
+    laneKey,
+    laneDef,
+    threshold: laneDef.semantic_threshold ?? laneDef.threshold ?? minSimilarityFloor,
+    score: scoreMap[laneKey] ?? -1,
+    domainScore: domainScoreMap[laneKey] ?? 0,
+    functionScore: functionScoreMap[laneKey] ?? 0,
+    rank: preferenceRank(laneKey),
+    preferenceAdjustment: lanePreferenceAdjustments[laneKey] ?? 0,
+    enabled: preferenceEnabled(laneKey),
+    negativeExcluded: applyNegativeExclusion(exclusionText, laneDef),
+  }));
+  const qualifyingPrimary = primaryCandidates
+    .filter((c) => c.enabled)
+    .filter((c) => c.score >= c.threshold)
+    .filter((c) => c.domainScore >= (c.laneDef.minimum_domain_score ?? 0))
+    .filter((c) => c.functionScore >= (c.laneDef.minimum_function_score ?? 0))
+    .filter((c) => !c.negativeExcluded);
+
+  // Sector rule: when the winning sector lane qualifies, it also takes precedence over the
+  // generic CORE_AI_DATA lane. TECHNICAL_PRODUCT_TRANSFORMATION (a role-family lane) is unaffected.
+  const sectorWinner = legalFintechTieBreak(title, String(input.companyName ?? ""), employerIntro);
+  if (sectorWinner && qualifyingPrimary.some((c) => c.laneKey === sectorWinner)) {
+    const overridden = [sectorWinner === "LEGAL_REGTECH" ? "INVESTMENT_MARKETS_FINTECH" : "LEGAL_REGTECH", "CORE_AI_DATA"];
+    for (const loser of overridden) {
+      const index = qualifyingPrimary.findIndex((c) => c.laneKey === loser);
+      if (index >= 0) {
+        qualifyingPrimary.splice(index, 1);
+        laneEvidence.push(`SECTOR_TIE_BREAK:${sectorWinner}_OVER_${loser}`);
+      }
+    }
+  }
+  // A regulator or supervisory body is not a fintech employer: unless the title itself names
+  // banking, fintech, investment or markets work, FINTECH never takes the job from
+  // CORE_AI_DATA or a qualifying LEGAL_REGTECH.
+  if (!BANKING_FINTECH_CONTEXT.test(title) && !INVESTMENT_MARKETS_TITLE.test(title)) {
+    const fintechIndex = qualifyingPrimary.findIndex((c) => c.laneKey === "INVESTMENT_MARKETS_FINTECH");
+    const keeper = qualifyingPrimary.find((c) => c.laneKey === "LEGAL_REGTECH" || c.laneKey === "CORE_AI_DATA");
+    if (fintechIndex >= 0 && keeper && isRegulatorEmployer(String(input.companyName ?? ""), employerIntro)) {
+      qualifyingPrimary.splice(fintechIndex, 1);
+      laneEvidence.push(`SECTOR_REGULATOR_EMPLOYER:${keeper.laneKey}_OVER_INVESTMENT_MARKETS_FINTECH`);
+    }
+  }
+
+  if (qualifyingPrimary.length === 0) {
+    laneEvidence.push(...buildNoMatchEvidence(primaryCandidates));
+    bestScore = Math.max(0, bestScore);
+  } else {
+    qualifyingPrimary.sort((a, b) => {
+      const scoreDifference = Math.abs(a.score - b.score);
+      if (scoreDifference > 0.03) return b.score - a.score;
+      const preferenceDifference = b.preferenceAdjustment - a.preferenceAdjustment;
+      if (Math.abs(preferenceDifference) > 1e-9) return preferenceDifference;
+      if (scoreDifference > 1e-9) return b.score - a.score;
+      return a.rank - b.rank;
+    });
+    bestLane = qualifyingPrimary[0].laneKey;
+    bestScore = qualifyingPrimary[0].score;
+  }
+
+  const selectedLaneDef = bestLane === "UNCLASSIFIED" ? null : config.lanes[bestLane];
+  if (bestLane !== "UNCLASSIFIED") {
+    laneEvidence.push(...(lanePreferenceEvidence[bestLane] ?? []));
+  }
+  const selectedThreshold =
+    selectedLaneDef?.semantic_threshold ?? selectedLaneDef?.threshold ?? minSimilarityFloor;
+
+  const laneConfidence: LaneRoutingConfidence =
+    bestLane === "UNCLASSIFIED"
+      ? "None"
+      : bestScore >= selectedThreshold + 0.2
+        ? "High"
+        : bestScore >= selectedThreshold + 0.1
+          ? "Medium"
+          : "Low";
+
+  // Secondary lanes: must meet per-lane threshold, have positive concept evidence, and not be excluded.
+  // Preference rank is applied as a stable ordering (not a classifier).
+  const secondaryCandidates: Array<{ laneKey: string; score: number; rank: number; preferenceAdjustment: number }> = [];
+  for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
+    if (laneKey === bestLane) continue;
+    if (!preferenceEnabled(laneKey)) continue;
+    const threshold = laneDef.secondary_lane_threshold
+      ?? laneDef.semantic_threshold
+      ?? laneDef.threshold
+      ?? minSimilarityFloor;
+    const score = scoreMap[laneKey] || 0;
+    const domainScore = domainScoreMap[laneKey] ?? 0;
+    const functionScore = functionScoreMap[laneKey] ?? 0;
+    if (
+      score >= threshold
+      && domainScore >= (laneDef.minimum_domain_score ?? 0)
+      && functionScore >= (laneDef.minimum_function_score ?? 0)
+      && !applyNegativeExclusion(exclusionText, laneDef)
+    ) {
+      // Require at least one positive concept match for secondary lane qualification
+      const positiveConcept = laneDef.positive_concepts?.find((pc) => containsConcept(exclusionText, pc));
+      if (positiveConcept) {
+        secondaryCandidates.push({
+          laneKey,
+          score,
+          rank: preferenceRank(laneKey),
+          preferenceAdjustment: lanePreferenceAdjustments[laneKey] ?? 0,
+        });
+        laneEvidence.push(...(lanePreferenceEvidence[laneKey] ?? []));
+        laneEvidence.push(`${laneKey}: "${positiveConcept}"`);
+      }
+    }
+  }
+  secondaryCandidates.sort((a, b) => {
+    const scoreDifference = Math.abs(a.score - b.score);
+    if (scoreDifference > 0.03) return b.score - a.score;
+    const preferenceDifference = b.preferenceAdjustment - a.preferenceAdjustment;
+    if (Math.abs(preferenceDifference) > 1e-9) return preferenceDifference;
+    if (scoreDifference > 1e-9) return b.score - a.score;
+    return a.rank - b.rank;
+  });
+
+  const noActiveLaneMatch = bestLane === "UNCLASSIFIED";
+  return {
+    primaryLane: bestLane,
+    bestScore,
+    laneConfidence,
+    secondaryLanes: secondaryCandidates.map((c) => c.laneKey),
+    semanticScores: scoreMap,
+    domainScores: domainScoreMap,
+    functionScores: functionScoreMap,
+    laneEvidence: noActiveLaneMatch
+      ? [...laneEvidence, "NO_ACTIVE_LANE_MATCH"]
+      : [
+          ...laneEvidence,
+          `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
+          `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
+          ...(config.lanes[bestLane]?.required_sector_concepts?.length
+            ? [`${bestLane}:sector=${matchedSector(sectorText, config.lanes[bestLane].required_sector_concepts).join("|")}`]
+            : []),
+        ],
+    processingStatus: noActiveLaneMatch ? "UNMATCHED" : "LANE_ROUTED",
+  };
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -1496,171 +2237,24 @@ export async function runLaneRouter(
             continue;
           }
 
-          let bestLane: string | null = null;
-          let bestScore = -1;
-          const scoreMap: Record<string, number> = {};
-          const domainScoreMap: Record<string, number> = {};
-          const functionScoreMap: Record<string, number> = {};
-          const lanePreferenceAdjustments: Record<string, number> = {};
-          const lanePreferenceEvidence: Record<string, readonly string[]> = {};
-          const laneEvidence: string[] = [];
-          const descText = extractCoreJobText(
-            job.normalized_title || "",
-            job.description_text || ""
-          ).toLowerCase();
-
-          for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
-            if (!preferenceEnabled(laneKey)) {
-              scoreMap[laneKey] = -1;
-              continue;
-            }
-            // If excluded by lane's negative concepts, skip
-            if (applyNegativeExclusion(descText, laneDef)) {
-              scoreMap[laneKey] = -1;
-              continue;
-            }
-            const score = cosineSimilarity(jobEmbedding, laneEmbeddings[laneKey]);
-            scoreMap[laneKey] = score;
-            const lanePreference = assessLaneIntentPreference(
-              laneKey,
-              job.normalized_title || "",
-              job.description_text || "",
-              String(job.company_name ?? ""),
-              preferenceContext.laneIntent,
-            );
-            lanePreferenceAdjustments[laneKey] = lanePreference.tieBreakAdjustment;
-            lanePreferenceEvidence[laneKey] = lanePreference.evidence;
-            domainScoreMap[laneKey] = laneDomainScopeScore(descText, laneKey, laneDef.included_domain_concepts);
-            functionScoreMap[laneKey] = !hasApprovedLaneFunction(laneKey, job.normalized_title || "")
-              ? 0
-              : conceptScopeScore(descText, laneDef.required_function_concepts);
-            if (score > bestScore) {
-              bestScore = score;
-              bestLane = laneKey;
-            }
-          }
-
-          const minSimilarityFloor = config.unclassified_policy.min_similarity_floor || 0.25;
-          const primaryCandidates = Object.entries(config.lanes)
-            .map(([laneKey, laneDef]) => {
-              const threshold = laneDef.semantic_threshold ?? laneDef.threshold ?? minSimilarityFloor;
-              const score = scoreMap[laneKey] ?? -1;
-              const domainScore = domainScoreMap[laneKey] ?? 0;
-              const functionScore = functionScoreMap[laneKey] ?? 0;
-              return {
-                laneKey,
-                laneDef,
-                threshold,
-                score,
-                domainScore,
-                functionScore,
-                rank: preferenceRank(laneKey),
-                preferenceAdjustment: lanePreferenceAdjustments[laneKey] ?? 0,
-                preferenceEvidence: lanePreferenceEvidence[laneKey] ?? [],
-                enabled: preferenceEnabled(laneKey),
-                negativeExcluded: applyNegativeExclusion(descText, laneDef),
-              };
-            });
-          const qualifyingPrimary = primaryCandidates
-            .filter((c) => c.enabled)
-            .filter((c) => c.score >= c.threshold)
-            .filter((c) => c.domainScore >= (c.laneDef.minimum_domain_score ?? 0))
-            .filter((c) => c.functionScore >= (c.laneDef.minimum_function_score ?? 0))
-            .filter((c) => !c.negativeExcluded);
-
-          if (qualifyingPrimary.length === 0) {
-            laneEvidence.push(...buildNoMatchEvidence(primaryCandidates));
-            bestLane = "UNCLASSIFIED";
-            bestScore = Math.max(0, bestScore);
-          } else {
-            qualifyingPrimary.sort((a, b) => {
-              const scoreDifference = Math.abs(a.score - b.score);
-              if (scoreDifference > 0.03) return b.score - a.score;
-              const preferenceDifference = b.preferenceAdjustment - a.preferenceAdjustment;
-              if (Math.abs(preferenceDifference) > 1e-9) return preferenceDifference;
-              if (scoreDifference > 1e-9) return b.score - a.score;
-              return a.rank - b.rank;
-            });
-            bestLane = qualifyingPrimary[0].laneKey;
-            bestScore = qualifyingPrimary[0].score;
-          }
-
-          const selectedLaneDef = bestLane === "UNCLASSIFIED" ? null : config.lanes[bestLane];
-          if (bestLane !== "UNCLASSIFIED") {
-            laneEvidence.push(...(lanePreferenceEvidence[bestLane] ?? []));
-          }
-          const selectedThreshold =
-            selectedLaneDef?.semantic_threshold ?? selectedLaneDef?.threshold ?? minSimilarityFloor;
-
-          const laneConfidence =
-            bestLane === "UNCLASSIFIED"
-              ? "None"
-              : bestScore >= selectedThreshold + 0.2
-                ? "High"
-                : bestScore >= selectedThreshold + 0.1
-                  ? "Medium"
-                  : "Low";
-
-          // Secondary lanes: must meet per-lane threshold, have positive concept evidence, and not be excluded.
-          // Preference rank is applied as a stable ordering (not a classifier).
-          const secondaryCandidates: Array<{ laneKey: string; score: number; rank: number; preferenceAdjustment: number }> = [];
-          for (const [laneKey, laneDef] of Object.entries(config.lanes)) {
-            if (laneKey === bestLane) continue;
-            if (!preferenceEnabled(laneKey)) continue;
-            const threshold = laneDef.secondary_lane_threshold
-              ?? laneDef.semantic_threshold
-              ?? laneDef.threshold
-              ?? minSimilarityFloor;
-            const score = scoreMap[laneKey] || 0;
-            const domainScore = domainScoreMap[laneKey] ?? 0;
-            const functionScore = functionScoreMap[laneKey] ?? 0;
-            if (
-              score >= threshold
-              && domainScore >= (laneDef.minimum_domain_score ?? 0)
-              && functionScore >= (laneDef.minimum_function_score ?? 0)
-              && !applyNegativeExclusion(descText, laneDef)
-            ) {
-              // Require at least one positive concept match for secondary lane qualification
-              const hasPositiveEvidence = laneDef.positive_concepts?.some((pc) => containsConcept(descText, pc));
-              if (hasPositiveEvidence) {
-                secondaryCandidates.push({
-                  laneKey,
-                  score,
-                  rank: preferenceRank(laneKey),
-                  preferenceAdjustment: lanePreferenceAdjustments[laneKey] ?? 0,
-                });
-                laneEvidence.push(...(lanePreferenceEvidence[laneKey] ?? []));
-                if (laneDef.positive_concepts) {
-                  for (const pc of laneDef.positive_concepts) {
-                    if (containsConcept(descText, pc)) {
-                      laneEvidence.push(`${laneKey}: "${pc}"`);
-                      break;
-                    }
-                  }
-                }
-              }
-            }
-          }
-          secondaryCandidates.sort((a, b) => {
-            const scoreDifference = Math.abs(a.score - b.score);
-            if (scoreDifference > 0.03) return b.score - a.score;
-            const preferenceDifference = b.preferenceAdjustment - a.preferenceAdjustment;
-            if (Math.abs(preferenceDifference) > 1e-9) return preferenceDifference;
-            if (scoreDifference > 1e-9) return b.score - a.score;
-            return a.rank - b.rank;
+          const routing = routeLaneCandidates({
+            config,
+            title: job.normalized_title || "",
+            descriptionText: job.description_text || "",
+            companyName: String(job.company_name ?? ""),
+            semanticScore: (laneKey) => cosineSimilarity(jobEmbedding, laneEmbeddings[laneKey]),
+            preferenceEnabled,
+            preferenceRank,
+            laneIntent: preferenceContext.laneIntent,
           });
-          const secondaryLanes = secondaryCandidates.map((c) => c.laneKey);
-
-          const noActiveLaneMatch = bestLane === "UNCLASSIFIED";
-          const processingStatus = noActiveLaneMatch ? "UNMATCHED" : "LANE_ROUTED";
-          const finalLaneEvidence =
-            noActiveLaneMatch
-              ? [...laneEvidence, "NO_ACTIVE_LANE_MATCH"]
-              : [
-                  ...laneEvidence,
-                  `${bestLane}:domain_score=${(domainScoreMap[bestLane] ?? 0).toFixed(3)}`,
-                  `${bestLane}:function_score=${(functionScoreMap[bestLane] ?? 0).toFixed(3)}`,
-                ];
+          const bestLane = routing.primaryLane;
+          const bestScore = routing.bestScore;
+          const laneConfidence = routing.laneConfidence;
+          const secondaryLanes = routing.secondaryLanes;
+          const scoreMap = routing.semanticScores;
+          const finalLaneEvidence = routing.laneEvidence;
+          const processingStatus = routing.processingStatus;
+          const noActiveLaneMatch = processingStatus === "UNMATCHED";
 
           const evaluatedAt = new Date().toISOString();
           const laneDecisionId = await persistLaneDecision({

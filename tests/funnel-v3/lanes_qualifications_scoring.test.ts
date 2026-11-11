@@ -92,7 +92,7 @@ describe("Funnel V3 Independent Test Suite — Lanes & Routing", () => {
     )).toBe(true);
   });
 
-  it("L12: pure UN fundraising role is rejected on non-technical axis", () => {
+  it("L12: pure UN fundraising role is not hard-rejected on the non-technical axis; lane routing decides", () => {
     const fixture = LANE_FIXTURES.L12;
     const result = applyGlobalGates({
       id: fixture.id,
@@ -103,8 +103,8 @@ describe("Funnel V3 Independent Test Suite — Lanes & Routing", () => {
       raw_description: fixture.raw_description,
     });
 
-    expect(result.status).toBe("HARD_REJECT");
-    expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+    expect(result.status).toBe("PASS");
+    expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
   });
 });
 

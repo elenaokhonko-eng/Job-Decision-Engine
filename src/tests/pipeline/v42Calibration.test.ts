@@ -127,7 +127,7 @@ describe("CareerDecisionEngine V4.2 Calibration & Funnel Tests", () => {
       } as any, policy);
 
       expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+      expect(result.rejection_codes).toContain("GATE_ON_CALL_REQUIRED");
     });
 
     it("does NOT reject retrospective on-call experience or incident management", () => {

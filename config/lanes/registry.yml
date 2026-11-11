@@ -1,5 +1,5 @@
 schema_version: "2.2.0"
-config_version: "lanes_2.2.0"
+config_version: "lanes_2.3.0"
 
 lanes:
   - lane_key: CORE_AI_DATA
@@ -24,4 +24,12 @@ lanes:
 
   - lane_key: UNIVERSITY_AI_RESEARCH
     config_file: university_ai_research.yml
+    enabled_by_default: true
+
+  - lane_key: TECHNICAL_PRODUCT_TRANSFORMATION
+    config_file: technical_product_transformation.yml
+    enabled_by_default: true
+
+  - lane_key: INVESTIGATIONS_ENFORCEMENT
+    config_file: investigations_enforcement.yml
     enabled_by_default: true

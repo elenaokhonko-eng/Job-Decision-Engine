@@ -152,6 +152,8 @@ export function rejectionBucket(row: Pick<ReplayJobRow, "gate_decision" | "rejec
   if (row.gate_decision !== "HARD_REJECT") return row.gate_decision ?? "NO_GATE";
   const codes = row.rejection_codes ?? [];
   if (codes.includes("WORK_AUTHORIZATION_INCOMPATIBLE")) return "WORK_AUTHORIZATION_INCOMPATIBLE";
+  // Since 2026-11 a job located outside the authorized region has its own code.
+  if (codes.includes("GATE_JOB_LOCATION_MISMATCH")) return "WORK_AUTHORIZATION_INCOMPATIBLE";
   if (codes.some((code) => ROLE_CODES.has(code))) return "ROLE_CODES";
   if (codes.includes("GATE_OUT_OF_SCOPE_DOMAIN")) return "GATE_OUT_OF_SCOPE_DOMAIN";
   return codes[0] ?? "HARD_REJECT_UNCODED";

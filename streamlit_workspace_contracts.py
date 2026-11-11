@@ -17,6 +17,21 @@ from streamlit_application_workflow import has_current_ready_assessment
 
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
+# Target lanes in config/lanes/registry.yml order; primary_lane is one of these or
+# UNCLASSIFIED. tests/python/test_streamlit_workspace_contracts.py keeps them in sync.
+TARGET_LANE_KEYS = (
+    "CORE_AI_DATA",
+    "LEGAL_REGTECH",
+    "HEALTH_BIO_PHARMA",
+    "INVESTMENT_MARKETS_FINTECH",
+    "SOCIAL_IMPACT_MULTILATERAL",
+    "UNIVERSITY_AI_RESEARCH",
+    "TECHNICAL_PRODUCT_TRANSFORMATION",
+    "INVESTIGATIONS_ENFORCEMENT",
+)
+UNCLASSIFIED_LANE = "UNCLASSIFIED"
+LANE_FILTER_OPTIONS = ("All Lanes", *TARGET_LANE_KEYS, UNCLASSIFIED_LANE)
+
 
 APPLICATION_STATUSES = frozenset(
     {

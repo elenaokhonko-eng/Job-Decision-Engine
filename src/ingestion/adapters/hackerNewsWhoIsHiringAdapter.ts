@@ -21,6 +21,7 @@
  */
 import { ExtractedJob, SCHEMA_VERSION, SourceName } from "../../contracts/index.js";
 import { stripHtmlToText } from "../../security/sanitize.js";
+import { findOnsiteException } from "../../pipeline/onsiteExceptions.js";
 import {
   evaluateWorkerTerritoryRequirements,
   extractExplicitWorkerTerritoryRequirements,
@@ -71,7 +72,7 @@ export interface HackerNewsRunStats {
 
 export interface HackerNewsAdapterOptions {
   /** Workability policy used for the volume pre-filter. Without it only parse skips apply. */
-  readonly workabilityPolicy?: Pick<WorkabilityPolicy, "authorizedRegions" | "rejectExplicitForeignTerritory" | "onsiteOnlyAllowed" | "allowedWorkModes">;
+  readonly workabilityPolicy?: Pick<WorkabilityPolicy, "authorizedRegions" | "rejectExplicitForeignTerritory" | "onsiteOnlyAllowed" | "allowedWorkModes" | "researchOnsiteExceptions" | "onsiteExceptionEmployers">;
   readonly concurrency?: number;
   readonly maxCommentsPerRun?: number;
   /** Newest `whoishiring` submissions inspected while looking for the hiring thread. */
@@ -455,7 +456,13 @@ export function prefilterWhoIsHiringPost(
   policy: NonNullable<HackerNewsAdapterOptions["workabilityPolicy"]>,
 ): { reasonCode: HackerNewsSkipReason; reasonDetail: string } | null {
   const onsiteAllowed = policy.onsiteOnlyAllowed || policy.allowedWorkModes.includes("ONSITE");
-  if (!onsiteAllowed && post.workMode === "ONSITE" && !post.mentionsRemoteOrHybrid && !post.attendanceQualified) {
+  // The same on-site exceptions as the hard gate: a research/university role or a
+  // user-listed employer is left for the gate instead of being filtered out here.
+  const onsiteException = findOnsiteException(
+    { title: post.title, company_name: post.company, description: post.description },
+    policy,
+  );
+  if (!onsiteAllowed && !onsiteException && post.workMode === "ONSITE" && !post.mentionsRemoteOrHybrid && !post.attendanceQualified) {
     return {
       reasonCode: "PREFILTER_ONSITE_ONLY",
       reasonDetail: `Header states on-site work and the post never mentions remote or hybrid work; the workability policy does not allow on-site-only roles. Header: ${post.headerLine}`,
