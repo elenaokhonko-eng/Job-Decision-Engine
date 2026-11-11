@@ -120,6 +120,11 @@ describe('process backlog workflow', () => {
     expect(script).toContain('PIPELINE_TASK_WORKER_RECONCILIATION_REPORT_FILE');
     expect(script).toContain('PIPELINE_TASK_WORKER_MAX_RETRY_WAIT_COUNT');
     expect(script).toContain('PIPELINE_TASK_WORKER_MAX_PENDING_AGE_SECONDS');
+    // Pending SLO and no-progress inputs count only due work, never created_at age of scheduled tasks.
+    expect(script).toContain('oldestDuePendingAgeSeconds');
+    expect(script).toContain('task.available_at <= NOW()');
+    expect(script).toContain('activeDuePendingCount: activeDuePending');
+    expect(script).toContain('scheduled_pending=${activeScheduledPending}');
     expect(script).toContain('process.exitCode = workerError instanceof PipelineWorkerCancelledError ? 130 : 1');
   });
 });

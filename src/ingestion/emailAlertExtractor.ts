@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { simpleParser } from "mailparser";
 import { decodeHTML } from "entities";
+import { isUnknownEmployerName, MAX_EMPLOYER_NAME_CHARS } from "./postingIdentity.js";
 import { linkedInJobIdFromUrl } from "./searchApi/searchApiClient.js";
 
 const MAX_EMAIL_BYTES = 10 * 1024 * 1024;
@@ -28,7 +29,12 @@ export interface EmailJobCard {
 
 export class EmailExtractionError extends Error {
   constructor(
-    public readonly code: "INVALID_RAW_EMAIL" | "EMAIL_TOO_LARGE" | "MIME_STRUCTURE_LIMIT" | "MISSING_POSTING_URL",
+    public readonly code:
+      | "INVALID_RAW_EMAIL"
+      | "EMAIL_TOO_LARGE"
+      | "MIME_STRUCTURE_LIMIT"
+      | "MISSING_POSTING_URL"
+      | "TOO_MANY_JOB_CARDS",
     message: string,
   ) {
     super(message);
@@ -93,16 +99,98 @@ export function decodeHtmlEntities(value: string): string {
   return decodeHTML(value);
 }
 
+/*
+ * Linear-time markup scanning. Alert HTML is untrusted and may be megabytes,
+ * so no pattern here may retry an unbounded scan from every "<". A tag pattern
+ * that ends in ">" can only match before the text's last ">", and inside that
+ * prefix every "<" has a ">" after it, so each attempt succeeds and consumes
+ * its scan; patterns that need a closing tag stop once no close remains.
+ */
+
+/** `value.replace(pattern, replacement)` for a pattern whose matches end in ">", without quadratic failed attempts after the last ">". */
+function replaceTags(value: string, pattern: RegExp, replacement: string): string {
+  const cut = value.lastIndexOf(">") + 1;
+  return value.slice(0, cut).replace(pattern, replacement) + value.slice(cut);
+}
+
+/** Removes `<!-- ... -->` comments; an unclosed comment and everything after it is left as is. */
+function removeComments(value: string): string {
+  let out = "";
+  let cursor = 0;
+  for (;;) {
+    const open = value.indexOf("<!--", cursor);
+    if (open < 0) break;
+    const close = value.indexOf("-->", open + 4);
+    if (close < 0) break;
+    out += value.slice(cursor, open) + " ";
+    cursor = close + 3;
+  }
+  return out + value.slice(cursor);
+}
+
+/** Removes `<script|style|head ...> ... </same>` blocks; a block without its close tag is left to tag stripping. */
+function removeRawTextBlocks(value: string): string {
+  const lastClose = new Map<string, number>();
+  for (const close of value.matchAll(/<\/(script|style|head)\s*>/gi)) lastClose.set((close[1] ?? "").toLowerCase(), close.index ?? 0);
+  if (lastClose.size === 0) return value;
+  const open = /<(script|style|head)\b[^<>]*>/gi;
+  let out = "";
+  let cursor = 0;
+  for (let match = open.exec(value); match; match = open.exec(value)) {
+    const name = (match[1] ?? "").toLowerCase();
+    const contentStart = match.index + match[0].length;
+    if ((lastClose.get(name) ?? -1) < contentStart) continue;
+    const close = new RegExp("<\\/" + name + "\\s*>", "gi");
+    close.lastIndex = contentStart;
+    const closing = close.exec(value);
+    if (!closing) continue;
+    out += value.slice(cursor, match.index) + " ";
+    cursor = closing.index + closing[0].length;
+    open.lastIndex = cursor;
+  }
+  return out + value.slice(cursor);
+}
+
 export function htmlToPlainText(value: string): string {
-  return decodeHtmlEntities(
-    value
-      .replace(/<!--[\s\S]*?-->/g, " ")
-      .replace(/<(script|style|head)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
-      .replace(/<(?:br|hr)\b[^>]*\/?>/gi, "\n")
-      .replace(/<\/(?:p|div|tr|td|th|li|h[1-6]|section|article|table)\s*>/gi, "\n")
-      .replace(/<(?:p|div|tr|td|th|li|h[1-6]|section|article|table)\b[^>]*>/gi, "\n")
-      .replace(/<[^>]*>/g, " ")
-  ).replace(/[ \t\f\v]+/g, " ").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  let text = removeRawTextBlocks(removeComments(value));
+  text = replaceTags(text, /<(?:br|hr)\b[^>]*\/?>/gi, "\n");
+  text = text.replace(/<\/(?:p|div|tr|td|th|li|h[1-6]|section|article|table)\s*>/gi, "\n");
+  text = replaceTags(text, /<(?:p|div|tr|td|th|li|h[1-6]|section|article|table)\b[^>]*>/gi, "\n");
+  text = replaceTags(text, /<[^>]*>/g, " ");
+  return decodeHtmlEntities(text)
+    .replace(/[ \t\f\v]+/g, " ").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+interface ScannedElement {
+  readonly index: number;
+  readonly attributes: string;
+  readonly inner: string;
+}
+
+/**
+ * The same matches as `html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)`, in
+ * linear time: once an opening tag has no `</a>` after it, no later one does.
+ */
+function* scanAnchors(html: string): Generator<ScannedElement> {
+  const openings = html.slice(0, html.lastIndexOf(">") + 1);
+  const open = /<a\b([^>]*)>/gi;
+  const close = /<\/a\s*>/gi;
+  let closing: RegExpExecArray | null = null;
+  for (let match = open.exec(openings); match; match = open.exec(openings)) {
+    const contentStart = match.index + match[0].length;
+    if (!closing || closing.index < contentStart) {
+      close.lastIndex = contentStart;
+      closing = close.exec(html);
+      if (!closing) return;
+    }
+    yield { index: match.index, attributes: match[1] ?? "", inner: html.slice(contentStart, closing.index) };
+    open.lastIndex = closing.index + closing[0].length;
+  }
+}
+
+/** The attribute runs of `<img ...>` tags, as `matchAll(/<img\b([^>]*)>/gi)` gives them, in linear time. */
+function imageTagAttributes(html: string): string[] {
+  return [...html.slice(0, html.lastIndexOf(">") + 1).matchAll(/<img\b([^>]*)>/gi)].map((image) => image[1] ?? "");
 }
 
 function safeAbsoluteHttpUrl(value: string): string | null {
@@ -248,6 +336,19 @@ function withoutCampaignParameters(urlValue: string): string {
   return url.toString();
 }
 
+/**
+ * An image or media asset, never a posting: LinkedIn's media CDN (licdn.com),
+ * a `/dms/image/` or `company-logo_<w>_<h>` path, or an image file extension.
+ * HTML-only alerts get a generated text part that spells out every image URL.
+ */
+function isImageAssetUrl(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  return host === "licdn.com" || host.endsWith(".licdn.com")
+    || /\.(?:png|jpe?g|gif|svg|webp|ico|bmp)$/i.test(url.pathname)
+    || /\/dms\/image\//i.test(url.pathname)
+    || url.pathname.split("/").some((segment) => /^company-logo_\d+_\d+$/i.test(segment));
+}
+
 type LinkClassification =
   | { readonly kind: "JOB"; readonly key: string; readonly canonicalUrl: string }
   | { readonly kind: "NON_JOB" };
@@ -268,6 +369,7 @@ function classifyLink(url: string, text: string, context: string): LinkClassific
   } catch {
     return { kind: "NON_JOB" };
   }
+  if (isImageAssetUrl(parsed)) return { kind: "NON_JOB" };
   if (isLinkedInHost(parsed.hostname)) {
     const jobId = /\/(?:comm\/)?jobs\/view\//i.test(parsed.pathname) ? linkedInJobIdFromUrl(parsed.toString()) : null;
     if (!jobId) return { kind: "NON_JOB" };
@@ -311,37 +413,67 @@ function anchorAttribute(attributes: string, name: string): string | null {
 
 function nearestMarkupBlock(html: string, index: number): string {
   let best: { start: number; end: number; length: number } | null = null;
-  const lower = html.toLowerCase();
+  // A block longer than MAX_CONTEXT_CHARS is never chosen, so only a window of
+  // that radius is searched; this keeps the work per link bounded.
+  const offset = Math.max(0, index - MAX_CONTEXT_CHARS);
+  const window = html.slice(offset, Math.min(html.length, index + MAX_CONTEXT_CHARS));
+  const lowered = window.toLowerCase();
+  const lower = lowered.length === window.length ? lowered : window;
+  const local = index - offset;
   for (const tag of ["tr", "article", "li", "section", "div"]) {
-    const start = lower.lastIndexOf("<" + tag, index);
-    const close = lower.indexOf("</" + tag + ">", index);
+    const start = lower.lastIndexOf("<" + tag, local);
+    const close = lower.indexOf("</" + tag + ">", local);
     if (start < 0 || close < 0) continue;
     const end = close + tag.length + 3;
     const length = end - start;
-    if (length <= MAX_CONTEXT_CHARS && (!best || length < best.length)) best = { start, end, length };
+    if (length <= MAX_CONTEXT_CHARS && (!best || length < best.length)) best = { start: offset + start, end: offset + end, length };
   }
   if (best) return html.slice(best.start, best.end);
-  return html.slice(Math.max(0, index - 900), Math.min(html.length, index + 1_400));
+  return withoutPartialTags(html.slice(Math.max(0, index - 900), Math.min(html.length, index + 1_400)));
+}
+
+/**
+ * Drops a tag cut in half at either end of a fixed-width HTML window, so an
+ * attribute tail such as `.../company-logo_100_100/...?e=1" alt="Ex` never
+ * survives tag stripping as visible text.
+ */
+function withoutPartialTags(fragment: string): string {
+  let result = fragment;
+  const firstClose = result.indexOf(">");
+  const firstOpen = result.indexOf("<");
+  if (firstClose >= 0 && (firstOpen < 0 || firstClose < firstOpen)) result = result.slice(firstClose + 1);
+  const lastOpen = result.lastIndexOf("<");
+  if (lastOpen >= 0 && result.indexOf(">", lastOpen) < 0) result = result.slice(0, lastOpen);
+  return result;
 }
 
 function textFromPlainAround(text: string, index: number, length: number): string {
-  return text.slice(Math.max(0, index - 600), Math.min(text.length, index + length + 600));
+  // A URL may be arbitrarily long; the context keeps at most MAX_CONTEXT_CHARS of it.
+  return text.slice(Math.max(0, index - 600), Math.min(text.length, index + Math.min(length, MAX_CONTEXT_CHARS) + 600));
 }
 
 function genericAnchorText(value: string): boolean {
   return /^(?:apply(?: now)?|view (?:job|role|posting|details)?|learn more|see details|click here|read more|open position)$/i.test(value.trim());
 }
 
+/** How much of a link's context is searched for heading/title markup. */
+const MARKUP_TITLE_SEARCH_CHARS = 2_000;
+
 function extractTitle(anchorText: string, context: string): string {
   const compact = anchorText.replace(/\s+/g, " ").trim();
   if (compact && !genericAnchorText(compact) && compact.length <= 180) return compact;
   const explicit = context.match(/(?:job title|position|role)\s*[:\-]\s*([^\n|]{4,180})/i)?.[1]?.trim();
   if (explicit && !genericAnchorText(explicit)) return explicit;
-  const heading = [...context.matchAll(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]\s*>/gi)]
+  // Markup left in a context (entity-encoded tags) is untrusted: only a bounded
+  // prefix is searched, and every run stops at the next "<", so each scan is linear.
+  const markup = context.slice(0, MARKUP_TITLE_SEARCH_CHARS);
+  const heading = [...markup.matchAll(/<h[1-6]\b[^<>]{0,300}>([^<]{0,400})<\/h[1-6]\s*>/gi)]
     .map((match) => htmlToPlainText(match[1] ?? ""))
     .find((value) => value.length >= 4 && value.length <= 180 && !genericAnchorText(value));
   if (heading) return heading;
-  const titleElement = context.match(/<(?:span|div|p)\b[^>]*(?:class|id)\s*=\s*["'][^"']*(?:job|position|role)[-_ ]?title[^"']*["'][^>]*>([\s\S]*?)<\/(?:span|div|p)\s*>/i)?.[1];
+  const titleElement = [...markup.matchAll(/<(?:span|div|p)\b([^<>]{0,300})>([^<]{0,400})<\/(?:span|div|p)\s*>/gi)]
+    .find((match) => [...(match[1] ?? "").matchAll(/(?:class|id)\s{0,5}=\s{0,5}(["'])([^"']{0,200})\1/gi)]
+      .some((attribute) => /(?:job|position|role)[-_ ]?title/i.test(attribute[2] ?? "")))?.[2];
   const markedTitle = titleElement ? htmlToPlainText(titleElement) : "";
   if (markedTitle.length >= 4 && markedTitle.length <= 180 && !genericAnchorText(markedTitle)) return markedTitle;
   const lines = htmlToPlainText(context).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -355,9 +487,35 @@ function extractTitle(anchorText: string, context: string): string {
   return candidate ?? "Unknown Title";
 }
 
-/** The employer the card's context names ("Company: X"), or "" when it names none. */
+/**
+ * The employer the card's context names ("Company: X"), or "" when it names
+ * none. The label must be a whole word, so `company-logo_100_100/...` in a
+ * logo URL is not a label, and a URL-, logo- or markup-like value is never an
+ * employer.
+ */
 function extractCompany(context: string): string {
-  return context.match(/(?:company|employer)\s*[:\-]\s*([^\n|,]{2,120})/i)?.[1]?.trim() ?? "";
+  const value = context.match(/(?:^|[^\w/.-])(?:company|employer)\s*[:\-]\s*([^\n|,]{2,120})/i)?.[1]?.trim() ?? "";
+  return isUnknownEmployerName(value) ? "" : value;
+}
+
+/** LinkedIn's card subtitle "Company · Location" (U+00B7 middle dot). */
+const LINKEDIN_CARD_SUBTITLE = /^(.{2,120}?)\s+·\s+\S/;
+
+/**
+ * The employer of a LinkedIn job-alert card. A card is a logo link, a title
+ * link and a "Company · Location" subtitle line; the subtitle is read from the
+ * first lines of the card's markup (the title line is skipped). Without a
+ * subtitle the company-logo image's alt text is used. A URL-, logo- or
+ * markup-like value is never an employer, so the result may be "" (unknown).
+ */
+function linkedInCardEmployer(cardLines: readonly string[], title: string, imageAlts: readonly string[]): string {
+  const titleKey = title.replace(/\s+/g, " ").trim().toLowerCase();
+  for (const line of cardLines.slice(0, 6)) {
+    if (line.toLowerCase() === titleKey) continue;
+    const company = line.match(LINKEDIN_CARD_SUBTITLE)?.[1]?.trim() ?? "";
+    if (company && !isUnknownEmployerName(company)) return company;
+  }
+  return imageAlts.find((alt) => !isUnknownEmployerName(alt) && !/^(?:company )?logo$/i.test(alt)) ?? "";
 }
 
 const GENERIC_SENDER_NAME = /^(?:no[- ]?reply|do[- ]?not[- ]?reply|notifications?|alerts?|job alerts?|jobs?|careers?|recruit(?:ing|ment|er)?|talent(?: acquisition)?|hr|team|support|info|admin|mailer|linkedin|indeed|glassdoor|jobstreet|mycareersfuture)$/i;
@@ -412,7 +570,47 @@ interface LinkOccurrence {
 
 interface CardGroup {
   readonly canonicalUrl: string;
+  /** The first MAX_OCCURRENCES_PER_CARD links to the posting, whose facts are compared. */
   readonly occurrences: LinkOccurrence[];
+  /** Every link to the posting, including those beyond the compared ones. */
+  linkCount: number;
+  /** True for a LinkedIn `/jobs/view/<id>` card. */
+  readonly linkedIn: boolean;
+  /** Offset of the job's first HTML anchor, or null when it was only linked from plain text. */
+  htmlStart: number | null;
+  /** Decoded alt texts of images inside the job's anchors (the LinkedIn company logo). */
+  readonly imageAlts: string[];
+  /** Plain-text lines of the card's markup, from its first anchor to the next job's (LinkedIn only). */
+  cardLines: readonly string[];
+}
+
+/** Upper bound on one LinkedIn card's markup; real cards carry long tracking URLs. */
+const LINKEDIN_CARD_MAX_CHARS = 20_000;
+
+/** At most this many cards (distinct postings) per email; a larger email is blocked, never truncated. */
+export const MAX_JOB_CARDS_PER_EMAIL = 250;
+
+/** Links per card whose title/company/location are compared; real cards repeat a link a handful of times. */
+const MAX_OCCURRENCES_PER_CARD = 16;
+
+/** Alt texts kept per card; the employer fallback reads the first usable one. */
+const MAX_IMAGE_ALTS_PER_CARD = 8;
+
+/**
+ * Alt texts of images inside a job anchor. Only name-sized values are read:
+ * an alt longer than an employer name (untrusted, possibly megabytes) is
+ * ignored before any decoding or pattern check.
+ */
+function anchorImageAlts(innerHtml: string): string[] {
+  const alts: string[] = [];
+  for (const attributes of imageTagAttributes(innerHtml)) {
+    const raw = anchorAttribute(attributes, "alt") ?? "";
+    // Entities at most shrink the text; 4x leaves room for "&amp;"-style encoding.
+    if (raw.length > MAX_EMPLOYER_NAME_CHARS * 4) continue;
+    const alt = decodeHtmlEntities(raw).replace(/\s+/g, " ").trim();
+    if (alt && alt.length <= MAX_EMPLOYER_NAME_CHARS) alts.push(alt);
+  }
+  return alts;
 }
 
 /** Per-email link accounting: `linksSeen = jobCards + nonJobLinksSkipped + duplicateLinksCollapsed`. */
@@ -458,7 +656,8 @@ function mergeCardGroup(group: CardGroup, senderName: string): CollapsedEmailJob
   const best = <T>(values: readonly T[], rank: (value: T) => number): T =>
     values.reduce((chosen, value) => (rank(value) > rank(chosen) ? value : chosen));
   const titled = best(scored, (entry) => entry.titleRank);
-  const cardCompany = best(scored, (entry) => (entry.company === "" ? 0 : 1)).company;
+  const linkedInCompany = group.linkedIn ? linkedInCardEmployer(group.cardLines, titled.title, group.imageAlts) : "";
+  const cardCompany = linkedInCompany || best(scored, (entry) => (entry.company === "" ? 0 : 1)).company;
   const senderCompany = cardCompany ? "" : employerFromSender(senderName, group.canonicalUrl);
   const location = best(scored, (entry) => (entry.location === "Unknown" ? 0 : 1)).location;
   const evidence = best(scored, (entry) => entry.occurrence.context.length).occurrence;
@@ -468,7 +667,7 @@ function mergeCardGroup(group: CardGroup, senderName: string): CollapsedEmailJob
     companyName: cardCompany || senderCompany,
     location,
     descriptionRaw: evidence.context || evidence.text || "Posting link discovered in Gmail alert; employer content retrieval is pending.",
-    linkCount: group.occurrences.length,
+    linkCount: group.linkCount,
     companySource: cardCompany ? "EMAIL_CARD" : senderCompany ? "EMAIL_SENDER" : null,
   };
 }
@@ -486,7 +685,12 @@ export async function extractEmailJobCardsWithLinkSummary(
   let nonJobLinksSkipped = 0;
   let duplicateLinksCollapsed = 0;
 
-  const addLink = (urlValue: string, visibleText: string, context: string): void => {
+  const addLink = (
+    urlValue: string,
+    visibleText: string,
+    context: string,
+    anchor?: { readonly index: number; readonly innerHtml: string },
+  ): void => {
     linksSeen += 1;
     const url = safeAbsoluteHttpUrl(urlValue);
     const classification: LinkClassification = url ? classifyLink(url, visibleText, context) : { kind: "NON_JOB" };
@@ -494,21 +698,56 @@ export async function extractEmailJobCardsWithLinkSummary(
       nonJobLinksSkipped += 1;
       return;
     }
+    const imageAlts = anchor ? anchorImageAlts(anchor.innerHtml) : [];
     const existing = groups.get(classification.key);
     if (existing) {
       duplicateLinksCollapsed += 1;
-      existing.occurrences.push({ text: visibleText, context });
+      existing.linkCount += 1;
+      if (existing.occurrences.length < MAX_OCCURRENCES_PER_CARD) existing.occurrences.push({ text: visibleText, context });
+      // Only the first few alts are ever consulted; keep the list bounded.
+      existing.imageAlts.push(...imageAlts.slice(0, Math.max(0, MAX_IMAGE_ALTS_PER_CARD - existing.imageAlts.length)));
+      if (anchor && existing.htmlStart === null) existing.htmlStart = anchor.index;
       return;
     }
-    groups.set(classification.key, { canonicalUrl: classification.canonicalUrl, occurrences: [{ text: visibleText, context }] });
+    if (groups.size >= MAX_JOB_CARDS_PER_EMAIL) {
+      // Blocking the whole email (never staging a truncated subset) keeps every
+      // posting recoverable: the raw alert stays stored with this reason.
+      throw new EmailExtractionError(
+        "TOO_MANY_JOB_CARDS",
+        `Email links more than ${MAX_JOB_CARDS_PER_EMAIL} distinct postings; nothing was staged and the raw alert is kept for review.`,
+      );
+    }
+    groups.set(classification.key, {
+      canonicalUrl: classification.canonicalUrl,
+      occurrences: [{ text: visibleText, context }],
+      linkCount: 1,
+      linkedIn: classification.key.startsWith("linkedin:"),
+      htmlStart: anchor ? anchor.index : null,
+      imageAlts: imageAlts.slice(0, MAX_IMAGE_ALTS_PER_CARD),
+      cardLines: [],
+    });
   };
 
-  for (const match of bodies.html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)) {
-    const rawHref = anchorAttribute(match[1] ?? "", "href");
+  for (const anchor of scanAnchors(bodies.html)) {
+    const rawHref = anchorAttribute(anchor.attributes, "href");
     if (!rawHref) continue;
-    const index = match.index ?? 0;
-    const context = htmlToPlainText(nearestMarkupBlock(bodies.html, index));
-    addLink(rawHref, htmlToPlainText(match[2] ?? ""), context);
+    const context = htmlToPlainText(nearestMarkupBlock(bodies.html, anchor.index));
+    addLink(rawHref, htmlToPlainText(anchor.inner), context, { index: anchor.index, innerHtml: anchor.inner });
+  }
+
+  // A LinkedIn card's markup runs from its first anchor to the next job's first anchor.
+  const cardStarts = [...groups.values()]
+    .map((group) => group.htmlStart)
+    .filter((start): start is number => start !== null)
+    .sort((left, right) => left - right);
+  // Each start is a distinct anchor offset, so the next card's start is one lookup.
+  const nextCardStart = new Map(cardStarts.map((start, position) => [start, cardStarts[position + 1] ?? bodies.html.length]));
+  for (const group of groups.values()) {
+    const start = group.htmlStart;
+    if (!group.linkedIn || start === null) continue;
+    const next = nextCardStart.get(start) ?? bodies.html.length;
+    const markup = withoutPartialTags(bodies.html.slice(start, Math.min(next, start + LINKEDIN_CARD_MAX_CHARS)));
+    group.cardLines = htmlToPlainText(markup).split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
   }
 
   const plain = bodies.text || htmlToPlainText(bodies.html);

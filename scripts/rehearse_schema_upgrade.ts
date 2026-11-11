@@ -198,6 +198,8 @@ async function main() {
     'v_current_user_actions',
     'v_canonical_shortlist_actions_scoped',
     'v_pipeline_task_queue_health',
+    'v_pipeline_task_status_age',
+    'v_pipeline_task_due_age',
     'v_matchable_nodes',
     'v_published_semantic_embeddings',
     'v_application_tracker',
