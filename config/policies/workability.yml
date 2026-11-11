@@ -10,6 +10,76 @@ global_workability_gates:
     hybrid_without_office_days_allowed: true
     # An unestablished workplace model is unresolved evidence, not a career conflict.
     unknown_work_mode_policy: NEEDS_VERIFICATION
+    # On-site exceptions. A full-time on-site role is still rejected unless one
+    # applies. Research and university roles qualify because researchers'
+    # on-site attendance is effectively hybrid. This public list holds no
+    # personal data; user-preferred employers come only from the stage3
+    # preference field mobility.onsite_exception_employers.
+    onsite_exceptions:
+      research_employers:
+        - nanyang technological university
+        - ntu
+        - national university of singapore
+        - nus
+        - duke-nus
+        - a*star
+        - agency for science, technology and research
+        - singapore institute of technology
+        - sit
+        - singapore university of technology and design
+        - sutd
+        - singapore management university
+        - smu
+        - singapore university of social sciences
+        - suss
+        - singapore-mit alliance for research and technology
+        - institute for infocomm research
+        - genome institute of singapore
+        - bioinformatics institute
+        - centre for quantum technologies
+        - lee kong chian school of medicine
+      # Employer-name words that mark other universities and research institutes.
+      research_employer_name_terms:
+        - university
+        - universiti
+        - polytechnic
+        - research institute
+        - research centre
+        - research center
+        - institute of technology
+      # Hospital and health bodies qualify through their research units.
+      health_research_employers:
+        - singhealth
+        - singapore health services
+        - tan tock seng hospital
+        - national university health system
+        - nuhs
+        - national healthcare group
+        - national university hospital
+        - singapore general hospital
+        - national cancer centre singapore
+        - changi general hospital
+        - khoo teck puat hospital
+      health_research_unit_terms:
+        - research
+        - lab
+        - laboratory
+        - institute
+        - innovation
+        - clinical trials
+        - centre of excellence
+      research_title_terms:
+        - research engineer
+        - research fellow
+        - research scientist
+        - research associate
+        - research assistant
+        - postdoc
+        - postdoctoral
+        - scientist
+      # "Data scientist" is an industry analytics title, not a research role.
+      research_title_exclusions:
+        - data scientist
 
   territory:
     # Default profile policy. User preference modes can override this list.

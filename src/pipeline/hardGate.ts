@@ -6,10 +6,16 @@ import {
   extractHybridAttendance,
   extractTravelRequirement,
   GLOBAL_TITLE_EXCLUSIONS,
-  isTechnicalRole,
   nonTechnicalFunctionTitle,
   type GateResult,
 } from "../services/criteria.js";
+import { findOnsiteException } from "./onsiteExceptions.js";
+import {
+  GATE_ON_CALL_REQUIRED,
+  GATE_SHIFT_WORK_REQUIRED,
+  GATE_TRAVEL_ABOVE_LIMIT,
+  travelAboveLimitEvidence,
+} from "./gateReasonCodes.js";
 import { normalizeWorkMode } from "./workModeNormalizer.js";
 import { enrichWorkModeIfNeeded } from "../services/workModeEnrichment.js";
 import { PersistedGateDecisionSchema } from "../contracts/index.js";
@@ -29,9 +35,11 @@ import {
   VERIFICATION_ANSWER_KEYS,
   normalizeVerificationExperienceDomains,
   resolveWorkspaceWorkabilityPolicy,
+  withOnsiteExceptionEmployers,
   type VerificationAnswerContext,
   type WorkabilityPolicy,
 } from "./workabilityPolicy.js";
+import { sha256Hex, stableStringify } from "../config/structuredLoader.js";
 
 import {
   evaluateJobFreshness,
@@ -228,6 +236,19 @@ export function applyPersistedRequirementGates(
   const title = job.title || "";
   let pendingVerification: { codes: string[]; evidence: string[]; facts?: Partial<GateResult["workability_facts"]> } | null = null;
   let inferredWorkabilityFacts: Partial<GateResult["workability_facts"]> = {};
+  // Research/university roles and user-listed employers lift on-site and
+  // office-day rejections only; each lifted conflict is kept as evidence.
+  const onsiteException = findOnsiteException(
+    { title: job.title, company_name: job.company_name, description: job.description },
+    effectivePolicy,
+  );
+  const exceptionEvidence: string[] = [];
+  const liftOnsiteConflict = (conflict: string): boolean => {
+    if (!onsiteException) return false;
+    const line = `${onsiteException.evidence} Lifted conflict: "${conflict}"`;
+    if (!exceptionEvidence.includes(line)) exceptionEvidence.push(line);
+    return true;
+  };
 
   // Stage 3: Freshness only uses authoritative publication or genuine-repost timestamps.
   const freshness = evaluateJobFreshness({
@@ -327,29 +348,8 @@ export function applyPersistedRequirementGates(
     );
   }
 
-  const functionRequirements = deterministicRequirements.filter(
-    (r) => r.requirement_type === "FUNCTION"
-  );
-  const domainRequirements = deterministicRequirements.filter(
-    (r) => r.requirement_type === "DOMAIN"
-  );
-
-  const semanticCorpus = [...functionRequirements, ...domainRequirements]
-    .map((r) => quoteOrText(r).toLowerCase())
-    .concat(job.description ? [job.description.toLowerCase()] : [])
-    .join(" \n");
-
-  const techCheck = isTechnicalRole(title, semanticCorpus);
-  const hasTechnicalEvidence = techCheck.isTechnical;
-
-  if (!hasTechnicalEvidence) {
-    return makeReject(
-      ["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"],
-      [
-        "Axis 1 Failed: Role lacks evidence of technical function",
-      ]
-    );
-  }
+  // The technical-function check (Axis 1) is not a hard gate: a non-technical
+  // role can fit a lane and the candidate's experience. Lane routing decides.
 
   for (const requirement of deterministicRequirements) {
     const buildingPct = structuredNumber(requirement, [
@@ -382,9 +382,11 @@ export function applyPersistedRequirementGates(
       "maximum_travel_pct",
     ]);
     if (travelPct !== null && travelPct > effectivePolicy.maxTravelPct) {
-      return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(requirement)], {
-        travel_pct_max: travelPct,
-      });
+      return makeReject(
+        [GATE_TRAVEL_ABOVE_LIMIT],
+        [travelAboveLimitEvidence(effectivePolicy.maxTravelPct, travelPct), quoteOrText(requirement)],
+        { travel_pct_max: travelPct },
+      );
     }
   }
 
@@ -399,6 +401,9 @@ export function applyPersistedRequirementGates(
   const officeReq = officeRequirements[0];
   for (const requirement of officeRequirements) {
     const days = detectOfficeDays(requirement);
+    if (days !== null && days > effectivePolicy.maxOfficeDaysPerWeek && liftOnsiteConflict(quoteOrText(requirement))) {
+      continue;
+    }
     if (days !== null && days >= effectivePolicy.hardFailOfficeDaysPerWeek) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
@@ -442,7 +447,7 @@ export function applyPersistedRequirementGates(
       mode.includes("fully onsite") ||
       mode.includes("100% on-site") ||
       mode.includes("100% onsite")
-    )) {
+    ) && !liftOnsiteConflict(quoteOrText(workModeReq))) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
         [quoteOrText(workModeReq)],
@@ -469,8 +474,8 @@ export function applyPersistedRequirementGates(
     }
     if (travelPct !== null && travelPct > effectivePolicy.maxTravelPct) {
       return makeReject(
-        ["GATE_LIFESTYLE_INCOMPATIBLE"],
-        [quoteOrText(requirement)],
+        [GATE_TRAVEL_ABOVE_LIMIT],
+        [travelAboveLimitEvidence(effectivePolicy.maxTravelPct, travelPct), quoteOrText(requirement)],
         { travel_pct_max: travelPct }
       );
     }
@@ -482,8 +487,8 @@ export function applyPersistedRequirementGates(
       };
     } else if (!hasTravelAnswer && txt.includes("frequent travel") && !effectivePolicy.frequentTravelAllowed) {
       return makeReject(
-        ["GATE_LIFESTYLE_INCOMPATIBLE"],
-        [quoteOrText(requirement)],
+        [GATE_TRAVEL_ABOVE_LIMIT],
+        [travelAboveLimitEvidence(effectivePolicy.maxTravelPct, travelPct), quoteOrText(requirement)],
         { travel_pct_max: travelPct }
       );
     }
@@ -491,12 +496,12 @@ export function applyPersistedRequirementGates(
 
   const onCallReq = deterministicRequirements.find((r) => r.requirement_type === "ON_CALL");
   if (onCallReq && !effectivePolicy.regularOnCallAllowed) {
-    return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(onCallReq)]);
+    return makeReject([GATE_ON_CALL_REQUIRED], [quoteOrText(onCallReq)]);
   }
 
   const shiftReq = deterministicRequirements.find((r) => r.requirement_type === "SHIFT_WORK");
   if (shiftReq && !effectivePolicy.shiftWorkAllowed) {
-    return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], [quoteOrText(shiftReq)]);
+    return makeReject([GATE_SHIFT_WORK_REQUIRED], [quoteOrText(shiftReq)]);
   }
 
   const workAuthRequirements = deterministicRequirements.filter((r) => r.requirement_type === "WORK_AUTH");
@@ -533,14 +538,17 @@ export function applyPersistedRequirementGates(
 
   if (workModeReq && quoteOrText(workModeReq).toLowerCase().includes("hybrid") && officeRequirements.length === 0) {
     const attendance = extractHybridAttendance(quoteOrText(workModeReq));
-    if (attendance?.contradictory || (attendance && attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek)) {
+    const attendanceConflict = Boolean(attendance?.contradictory
+      || (attendance && attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek));
+    const attendanceLifted = attendanceConflict && liftOnsiteConflict(quoteOrText(workModeReq));
+    if (!attendanceLifted && (attendance?.contradictory || (attendance && attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek))) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
         attendance?.evidence || [quoteOrText(workModeReq)],
         { office_days_min: attendance?.office_days_min ?? null, office_days_max: attendance?.office_days_max ?? null },
       );
     }
-    if (attendance && attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) {
+    if (!attendanceLifted && attendance && attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) {
       return makeReject(
         ["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"],
         attendance.evidence,
@@ -577,18 +585,19 @@ export function applyPersistedRequirementGates(
   if (pendingVerification) {
     return makeVerification(
       pendingVerification.codes,
-      pendingVerification.evidence,
+      [...pendingVerification.evidence, ...exceptionEvidence],
       { ...inferredWorkabilityFacts, ...pendingVerification.facts },
     );
   }
 
-  return makePass({
+  const passed = makePass({
     ...inferredWorkabilityFacts,
     office_days_min: officeReq ? detectOfficeDays(officeReq) : inferredWorkabilityFacts.office_days_min ?? null,
     office_days_max: officeReq ? detectOfficeDays(officeReq) : inferredWorkabilityFacts.office_days_max ?? null,
     travel_pct_max: travelReq ? detectTravelPct(travelReq) : null,
     employment_type: employmentType,
   });
+  return exceptionEvidence.length > 0 ? { ...passed, evidence_quotes: exceptionEvidence } : passed;
 }
 
 /**
@@ -752,6 +761,27 @@ export function applyExactProfileGates(
   return makePass();
 }
 
+/**
+ * Add the user's on-site exception employers (stage3 `mobility.onsite_exception_employers`)
+ * to the workability policy. The policy hash changes only when the list is non-empty, so
+ * existing decisions keep their hash when the optional field is absent.
+ */
+export function resolveOnsiteExceptionPolicy<T extends { policy: WorkabilityPolicy; policyHash: string }>(
+  resolution: T,
+  stage3Preferences: Stage3PolicyPreferences | null | undefined,
+): T {
+  const policy = withOnsiteExceptionEmployers(resolution.policy, stage3Preferences?.mobility?.onsite_exception_employers);
+  if (policy === resolution.policy) return resolution;
+  return {
+    ...resolution,
+    policy,
+    policyHash: sha256Hex(stableStringify({
+      base_policy_hash: resolution.policyHash,
+      onsite_exception_employers: policy.onsiteExceptionEmployers,
+    })),
+  };
+}
+
 export async function runHardGates(
   clientOrPool?: pg.Pool | pg.PoolClient,
   options?: {
@@ -789,7 +819,10 @@ export async function runHardGates(
   const preferenceContext = await resolveWorkspacePreferenceContext(client as pg.PoolClient, ctx, ['stage3']);
   const stage3Preferences: Stage3PolicyPreferences = preferenceContext.stage3 ?? {};
   const pipelineRunId = crypto.randomUUID();
-  const policyResolution = await resolveWorkspaceWorkabilityPolicy(client as any, { context: ctx });
+  const policyResolution = resolveOnsiteExceptionPolicy(
+    await resolveWorkspaceWorkabilityPolicy(client as any, { context: ctx }),
+    stage3Preferences,
+  );
   const territoryScope = remoteTerritoryScopeForPolicy(policyResolution.policy);
   console.log(
     `Hard Gate workability policy: ${policyResolution.source}` +

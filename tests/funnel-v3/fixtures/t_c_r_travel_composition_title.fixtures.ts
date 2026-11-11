@@ -170,9 +170,9 @@ export const COMPOSITION_FIXTURES: Record<string, TestJobFixture> = {
     location: "Singapore",
     workplace_type: "HYBRID",
     raw_description: "100% vendor relationship management and business partner liaisons. Conclusively zero technical contribution.",
-    expectedStatus: "HARD_REJECT",
-    expectedRejectionCode: "NON_TECHNICAL_FUNCTION",
-    notes: "conclusively zero technical contribution rejects",
+    expectedStatus: "PASS",
+    expectedRejectionCode: null,
+    notes: "Axis 1 is not a hard gate; lane routing decides fit and ends unrouted jobs as SKIP",
   },
   C10: {
     id: "C10",
@@ -214,8 +214,8 @@ export const TITLE_FIXTURES: Record<string, TestJobFixture> = {
     location: "Singapore",
     workplace_type: "HYBRID",
     raw_description: "Manage project timelines, budgets, and status reports for various initiatives.",
-    expectedStatus: "HARD_REJECT",
-    expectedRejectionCode: "NON_TECHNICAL_FUNCTION",
+    expectedStatus: "PASS",
+    expectedRejectionCode: null,
     notes: "generic Director / Programme / Project / Delivery / Consultant without technical scope rejects",
   },
   R03: {

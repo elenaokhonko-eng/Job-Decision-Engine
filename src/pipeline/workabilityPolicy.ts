@@ -31,6 +31,32 @@ export interface WorkabilityPolicy {
   externalClientPrimaryAllowed: boolean;
   peopleManagementPrimaryAllowed: boolean;
   blacklistedCompanies: string[];
+  /**
+   * Public, non-personal research/university on-site exception (repo config).
+   * Researchers' "on-site" is effectively hybrid, so these roles are not
+   * rejected for on-site attendance alone.
+   */
+  researchOnsiteExceptions?: ResearchOnsiteExceptionConfig;
+  /**
+   * Personal on-site exception employers. Supplied only by the user's stage3
+   * preference (`mobility.onsite_exception_employers`); empty means no exception.
+   */
+  onsiteExceptionEmployers?: string[];
+}
+
+export interface ResearchOnsiteExceptionConfig {
+  /** Universities and research institutes (full names and common abbreviations). */
+  employers: string[];
+  /** Words in an employer name that mark a university or research institute. */
+  employerNameTerms: string[];
+  /** Hospital/health bodies whose research units qualify when a research-unit signal is present. */
+  healthResearchEmployers: string[];
+  /** Words that mark a research unit inside a health employer posting. */
+  healthResearchUnitTerms: string[];
+  /** Research title words. */
+  titleTerms: string[];
+  /** Title phrases that never count as a research title (for example "data scientist"). */
+  titleExclusions: string[];
 }
 
 /** The five persisted verification answers understood by deterministic gates. */
@@ -96,7 +122,37 @@ const defaults: WorkabilityPolicy = {
   externalClientPrimaryAllowed: false,
   peopleManagementPrimaryAllowed: false,
   blacklistedCompanies: [],
+  researchOnsiteExceptions: {
+    employers: [],
+    employerNameTerms: [],
+    healthResearchEmployers: [],
+    healthResearchUnitTerms: [],
+    titleTerms: [],
+    titleExclusions: [],
+  },
+  onsiteExceptionEmployers: [],
 };
+
+/**
+ * Regional terms that include an authorized country. A worker restriction to
+ * "Southeast Asia" or "APAC" includes Singapore; it is not a foreign territory.
+ */
+const REGION_MEMBERS: Readonly<Record<string, readonly string[]>> = {
+  SOUTHEAST_ASIA: ["SINGAPORE", "MALAYSIA", "INDONESIA", "THAILAND", "VIETNAM", "PHILIPPINES"],
+  ASIA_PACIFIC: [
+    "SINGAPORE", "MALAYSIA", "INDONESIA", "THAILAND", "VIETNAM", "PHILIPPINES", "JAPAN", "CHINA",
+    "HONG_KONG", "TAIWAN", "SOUTH_KOREA", "INDIA", "AUSTRALIA", "NEW_ZEALAND",
+  ],
+};
+
+/** True when a territory is authorized directly or is a region that contains an authorized country. */
+export function isTerritoryAuthorized(territory: string, authorizedRegions: Iterable<string>): boolean {
+  const allowed = new Set(normalizeTerritories([...authorizedRegions]));
+  const canonical = normalizeTerritory(territory);
+  if (!canonical) return false;
+  if (allowed.has(canonical)) return true;
+  return (REGION_MEMBERS[canonical] ?? []).some((member) => allowed.has(member));
+}
 
 const TERRITORY_ALIASES: Array<[string, string[]]> = [
   ["SINGAPORE", ["singapore", "sg"]],
@@ -145,6 +201,9 @@ const TERRITORY_ALIASES: Array<[string, string[]]> = [
   ["ARGENTINA", ["argentina", "argentinian", "buenos aires"]],
   ["CHILE", ["chile", "chilean", "santiago"]],
   ["COLOMBIA", ["colombia", "colombian", "bogota"]],
+  // Regions are listed after countries; isTerritoryAuthorized resolves their members.
+  ["SOUTHEAST_ASIA", ["southeast asia", "south east asia", "south-east asia", "asean"]],
+  ["ASIA_PACIFIC", ["apac", "asia pacific", "asia-pacific", "apj"]],
 ];
 
 function escapeRegExp(value: string): string {
@@ -577,12 +636,13 @@ export function evaluateWorkerTerritoryRequirements(
       unresolvedRequirements.push(requirement);
       continue;
     }
-    const permittedCount = territories.filter((territory) => allowed.size === 0 || allowed.has(territory)).length;
+    const permitted = (territory: string) => allowed.size === 0 || isTerritoryAuthorized(territory, allowed);
+    const permittedCount = territories.filter(permitted).length;
     const satisfied = requirement.operator === "ANY"
       ? permittedCount > 0
       : permittedCount === territories.length;
     if (!satisfied && rejectExplicitForeignTerritory && allowed.size > 0) {
-      incompatibleTerritories.push(...territories.filter((territory) => !allowed.has(territory)));
+      incompatibleTerritories.push(...territories.filter((territory) => !permitted(territory)));
     }
   }
   const uniqueIncompatible = [...new Set(incompatibleTerritories)];
@@ -611,6 +671,17 @@ export function hasExplicitTerritoryRestriction(value: unknown, territory: strin
     // A company HQ, employer background, client mention, or generic display location
     // is not a worker territory restriction.
     const isEmployerOrContext = /\b(?:we\s+are\b|our\s+(?:company|team|office|headquarters|hq|firm|business|clients?|customers?)\b|headquartered|head\s+office|employer\s+based|startup\s+based|company\s+based|firm\s+based|company\s+location|hq\s*[:=-]|headquarters\s*[:=-]|founded\s+in|serve\s+(?:[\w-]+\s+){0,3}clients?|working\s+with\s+(?:[\w-]+\s+){0,3}clients?)\b/i.test(sentence);
+    // A language requirement ("proficiency in Chinese is required", "fluency in
+    // Mandarin ... with partners across Greater China") or an export-control
+    // licence condition names a country without restricting where the worker
+    // may live or work. Only an explicit residence, citizenship, permit or
+    // work-location condition in the same sentence keeps it a restriction.
+    const namesWorkerLocation = /\b(?:citizen(?:s|ship)?|national(?:ity|s)?\s+only|work\s+permit|visa|right\s+to\s+work|eligible\s+to\s+work|authori[sz]ed\s+to\s+work|authori[sz]ation\s+to\s+work|work\s+authori[sz]ation|reside|residing|residen(?:cy|ts?)|(?:must|need\s+to|required\s+to)\s+(?:be\s+)?(?:based|located|living|relocate))\b/i.test(sentence);
+    const isLanguageRequirement = /\b(?:fluen(?:t|cy)|proficien(?:t|cy)|speak(?:er|ers|ing)?|spoken|written|language|bilingual|native|mandarin|cantonese|putonghua)\b/i.test(sentence);
+    const isExportControlCondition = /\bexport\s+(?:control|controls|laws?|regulations?|licen[cs]e|administration)\b/i.test(sentence)
+      && !/\bcitizen(?:s|ship)?\b|\bpermanent\s+resident\b/i.test(sentence);
+    if ((isLanguageRequirement && !namesWorkerLocation) || isExportControlCondition) return false;
+
     const hasExplicitWorkerConstraint = /\b(authorization|authorised|authorized|work\s+permit|visa|citizen(?:ship)?|residen(?:cy|tial|ts?)|right\s+to\s+work|eligible\s+to\s+work)\b/i.test(sentence)
       || /\b(?:must\s+(?:be\s+)?(?:residing|living|based|located|authorized)|must\s+reside|must\s+live)\b/i.test(sentence)
       || /\b(?:only\s+(?:open\s+to|applicants?|candidates?|engineers?|developers?|people|individuals)\s+(?:in|from|based|located|residing))\b/i.test(sentence)
@@ -751,7 +822,39 @@ export function loadWorkabilityPolicy(): WorkabilityPolicy {
     blacklistedCompanies: Array.isArray(document?.blacklisted_companies)
       ? document.blacklisted_companies.map((value: unknown) => String(value).trim().toLowerCase()).filter(Boolean)
       : defaults.blacklistedCompanies,
+    researchOnsiteExceptions: researchOnsiteExceptionConfig(workMode.onsite_exceptions),
+    // Personal employer exceptions are never read from repo config.
+    onsiteExceptionEmployers: [],
   };
+}
+
+function lowerStringArray(value: unknown): string[] {
+  return stringArray(value).map((item) => item.toLowerCase());
+}
+
+function researchOnsiteExceptionConfig(value: unknown): ResearchOnsiteExceptionConfig {
+  const config = objectValue(value);
+  return {
+    employers: lowerStringArray(config.research_employers),
+    employerNameTerms: lowerStringArray(config.research_employer_name_terms),
+    healthResearchEmployers: lowerStringArray(config.health_research_employers),
+    healthResearchUnitTerms: lowerStringArray(config.health_research_unit_terms),
+    titleTerms: lowerStringArray(config.research_title_terms),
+    titleExclusions: lowerStringArray(config.research_title_exclusions),
+  };
+}
+
+/**
+ * Add the user's on-site exception employers from the stage3 preference
+ * (`mobility.onsite_exception_employers`). Absent or empty means no exception.
+ */
+export function withOnsiteExceptionEmployers(
+  policy: WorkabilityPolicy,
+  employers: readonly string[] | null | undefined,
+): WorkabilityPolicy {
+  const names = [...new Set((employers ?? []).map((name) => String(name).trim()).filter(Boolean))];
+  if (names.length === 0) return policy;
+  return { ...policy, onsiteExceptionEmployers: names };
 }
 
 export interface WorkspaceWorkabilityPolicyResolution {
