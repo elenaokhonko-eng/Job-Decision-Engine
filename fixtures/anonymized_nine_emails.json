@@ -85,7 +85,7 @@
     "employment_type_raw": "PERMANENT",
     "expected_lane": "UNCLASSIFIED",
     "expected_gate": "HARD_REJECT",
-    "expected_rejection_codes": ["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"],
+    "expected_rejection_codes": ["GATE_PURE_GOVERNANCE_ZERO_BUILD"],
     "expected_action": "HARD_REJECT",
     "expected_recommendation_outcome": "SKIP",
     "expected_status": "HARD_REJECTED",

@@ -7,6 +7,7 @@ from streamlit_formatters import (
     format_percent,
     format_score,
     format_signal,
+    safe_http_url,
 )
 
 
@@ -74,3 +75,47 @@ def test_format_signal_keeps_missing_culture_data_unknown():
 )
 def test_format_career_track_renders_only_known_codes(track, level, tags, expected):
     assert format_career_track(track, level, tags) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.test/jobs/123",
+        "http://careers.example.test/apply?id=7&src=li#top",
+        "HTTPS://Example.test/path",
+        "  https://example.test/padded  ",
+    ],
+)
+def test_safe_http_url_accepts_well_formed_http_links(url):
+    assert safe_http_url(url) == url.strip()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        None,
+        "",
+        42,
+        "javascript:alert(1)",
+        "JavaScript:alert(1)",
+        "data:text/html;base64,PHNjcmlwdD4=",
+        "file:///etc/passwd",
+        "ftp://example.test/file",
+        "//example.test/no-scheme",
+        "example.test/no-scheme",
+        "https://",
+        "https:///path-only",
+        "https://example.test/a b",
+        "https://example.test/\tx",
+        "https://example.test/\nx",
+        "https://example.test/\x00",
+        "https://example.test/\x7f",
+        "https://example.test/x)](javascript:alert(1))",
+        "https://example.test/<script>",
+        "https://user:pass@example.test/",
+        "https://example.test:99999/",
+        "https://" + "a" * 2050 + ".test/",
+    ],
+)
+def test_safe_http_url_rejects_unsafe_or_malformed_links(url):
+    assert safe_http_url(url) is None

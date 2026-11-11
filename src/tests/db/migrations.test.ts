@@ -1566,7 +1566,9 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
             'v_archived_jobs_scoped',
             'v_job_archive_operational_status',
             'v_canonical_shortlist_scoped',
-            'v_pipeline_task_queue_health'
+            'v_pipeline_task_queue_health',
+            'v_pipeline_task_status_age',
+            'v_pipeline_task_due_age'
           )
       `);
       expect(views.map((row) => row.view_name)).toEqual(expect.arrayContaining([
@@ -1574,6 +1576,9 @@ describe.skipIf(skipReal)("P0-03: Real PostgreSQL Migration Verification", () =>
         'v_job_archive_operational_status',
         'v_canonical_shortlist_scoped',
         'v_pipeline_task_queue_health',
+        // Worker and status-report SLO inputs: retry status age (099) and pending due age (107).
+        'v_pipeline_task_status_age',
+        'v_pipeline_task_due_age',
       ]));
 
       const { rows: shortlistDefinition } = await client.query<{ definition: string }>(

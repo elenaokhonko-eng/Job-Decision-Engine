@@ -17,7 +17,7 @@ import { JobicyAdapter } from "../src/ingestion/adapters/jobicyAdapter.js";
 import { RemotiveAdapter } from "../src/ingestion/adapters/remotiveAdapter.js";
 import { createWeWorkRemotelyAdapter } from "../src/ingestion/adapters/attributedRssAdapter.js";
 import { HackerNewsWhoIsHiringAdapter } from "../src/ingestion/adapters/hackerNewsWhoIsHiringAdapter.js";
-import { resolveWorkspaceWorkabilityPolicy } from "../src/pipeline/workabilityPolicy.js";
+import { resolveEffectiveWorkabilityPolicy } from "../src/pipeline/effectiveWorkabilityPolicy.js";
 import {
   WORKDAY_HOST_PATTERN,
   WORKDAY_SITE_PATTERN,
@@ -942,7 +942,8 @@ Polling ${label} for lanes ${laneKeys.join(", ")}...`);
       let hackerNews: HackerNewsWhoIsHiringAdapter;
       try {
         ledgerPool ??= new pg.Pool(pgPoolConfig(process.env.DATABASE_URL));
-        const workability = await resolveWorkspaceWorkabilityPolicy(ledgerPool);
+        // The effective policy includes the stage3 on-site exception employers, as the gate does.
+        const workability = await resolveEffectiveWorkabilityPolicy(ledgerPool);
         hackerNews = new HackerNewsWhoIsHiringAdapter(plugin.request.endpoint, {
           workabilityPolicy: workability.policy,
           requestTimeoutMs: plugin.request.timeout_ms,
