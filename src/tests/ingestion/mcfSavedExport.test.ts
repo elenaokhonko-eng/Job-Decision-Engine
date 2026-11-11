@@ -146,8 +146,9 @@ describe("MCF saved-jobs export parsing", () => {
       "unknown field(s): isHideSalary",
     ]);
     expect(Object.keys(McfSavedJobItemSchema.shape).sort()).toEqual([
-      "company", "description", "descriptionStatus", "employmentType", "expiresAt", "exportedAt", "location",
-      "mcfJobUuid", "postedAt", "salary", "sourcePage", "title", "url",
+      "availabilityEvidence", "availabilityStatus", "company", "description", "descriptionStatus", "employmentType",
+      "expiresAt", "exportedAt", "location", "mcfJobUuid", "originalPostedAt", "postedAt", "postingCheckedAt", "postingRecheckFailedAt", "postingRecheckFailure", "salary",
+      "sourcePage", "title", "url",
     ]);
   });
 
@@ -300,6 +301,8 @@ interface SnippetRun {
   readonly fetches: Array<{ url: string; init: Record<string, unknown> }>;
   readonly downloads: unknown[];
   readonly logs: string[];
+  /** The snippet's window, for calling jdeMcfExport.refresh() after the first run. */
+  window?: Record<string, unknown>;
 }
 
 const SNIPPET_PATH = path.resolve(process.cwd(), "scripts", "mcf", "export_saved_jobs.console.js");
@@ -438,6 +441,7 @@ async function runSnippet(
   });
   (context as Record<string, unknown>).window = context;
   await vm.runInContext(fs.readFileSync(SNIPPET_PATH, "utf8"), context);
+  run.window = context as Record<string, unknown>;
   return run;
 }
 
@@ -487,6 +491,19 @@ describe("MCF saved-jobs browser snippet", () => {
       mcfJobUuid: UUID_A,
       sourcePage: "https://www.mycareersfuture.gov.sg/saved-jobs",
     });
+    // Posting facts: MCF's original posting date, its job status and when the details were read.
+    expect(exported[0]).toMatchObject({
+      originalPostedAt: "2026-10-01",
+      availabilityStatus: "OPEN",
+      availabilityEvidence: "MyCareersFuture job status: Open",
+    });
+    expect(String(exported[0]?.postingCheckedAt)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(parseMcfSavedExport(exported).valid[0]?.rawPayload).toMatchObject({
+      posted_at: "2026-10-01T00:00:00.000Z",
+      reposted_at: "2026-11-01T00:00:00.000Z",
+      source_expires_at: "2026-12-01T00:00:00.000Z",
+      status: "open",
+    });
     // Hidden salary and address stay null; the hiring employer is shown for agency posts.
     expect(exported[1]).toMatchObject({ company: "EXAMPLE SYNTHETIC EMPLOYER PTE. LTD.", salary: null, location: null });
     expect(String(exported[0]?.description)).toContain("Requirements: experience with SQL");
@@ -495,6 +512,29 @@ describe("MCF saved-jobs browser snippet", () => {
     expect(parsed.invalid).toEqual([]);
     expect(parsed.valid.map((job) => job.mcfJobUuid)).toEqual([UUID_A, UUID_B, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
     expect(run.logs.join("\n")).toMatch(/pagination implies 3-4; collected: 3 over 2 page\(s\)/);
+  });
+
+  it("refresh() keeps earlier details and their check time when a re-read returns HTTP 404", async () => {
+    const run = await runSnippet([[cardA, cardB]], (uuid, call) => (call >= 2 && uuid === UUID_A ? { status: 404, body: { message: "Not found" } } : { status: 200, body: apiDetail(uuid) }));
+    const first = run.downloads[0] as Array<Record<string, unknown>>;
+    const refresh = (run.window?.jdeMcfExport as { refresh: () => Promise<void> }).refresh;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await refresh();
+    expect(run.downloads).toHaveLength(2);
+    const second = run.downloads[1] as Array<Record<string, unknown>>;
+    expect(second[0]).toMatchObject({
+      descriptionStatus: "OK",
+      availabilityStatus: "OPEN",
+      postedAt: first[0]?.postedAt,
+      postingCheckedAt: first[0]?.postingCheckedAt,
+      postingRecheckFailure: "HTTP 404",
+    });
+    // The other job was re-read successfully: a newer check time and no failure.
+    expect(String(second[1]?.postingCheckedAt) >= String(first[1]?.postingCheckedAt)).toBe(true);
+    expect(second[1]?.postingRecheckFailure).toBeNull();
+    const parsed = parseMcfSavedExport(second);
+    expect(parsed.invalid).toEqual([]);
+    expect(parsed.valid[0]?.rawPayload).toMatchObject({ availability_checked_at: first[0]?.postingCheckedAt });
   });
 
   it("stops at HTTP 429 without fetching further jobs and leaves the rest unfetched", async () => {

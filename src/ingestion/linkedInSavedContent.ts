@@ -3,13 +3,16 @@
  * task before any network fetch. LinkedIn posting pages require sign-in, so a
  * Gmail LinkedIn alert card is otherwise blocked; when the user has exported the
  * same job (same LinkedIn job id) from their own browser, that export is the
- * posting content. It is persisted without an HTTP fetch receipt, so it completes
- * the content fetch but never establishes that the job is still open.
+ * posting content. It is persisted without an HTTP fetch receipt, so content
+ * completeness alone never establishes that the job is still open; only the
+ * posting facts the export read from the posting page (posted date, open/closed
+ * status with its check time) are carried to the derived observation.
  */
 import { createHash } from "node:crypto";
 import type pg from "pg";
 import type { RawJobObservation } from "./types.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
+import { pickPostingFactPayload } from "./postingFacts.js";
 import { linkedInJobIdFromUrl } from "./searchApi/searchApiClient.js";
 import {
   LINKEDIN_SAVED_CONTENT_PROVENANCE,
@@ -35,6 +38,8 @@ export interface StoredLinkedInSavedPosting {
   readonly location: string | null;
   readonly compensation: string | null;
   readonly postedAt: string | null;
+  /** Root posting-fact fields of the saved export (postingFacts.ts); empty when the export had none. */
+  readonly postingFacts?: Record<string, unknown>;
   readonly importedAt: string;
   readonly exportPayloadHash: string;
 }
@@ -64,9 +69,10 @@ export async function findStoredLinkedInSavedPosting(
     posted_at: string | null;
     retrieved_at: Date | string;
     raw_payload_hash: string;
+    raw_payload: unknown;
   }>(
     `SELECT id::text AS id, source_url, title, company_name, description_raw, location_raw, compensation_raw,
-            raw_payload#>>'{exported_item,postedAt}' AS posted_at, retrieved_at, raw_payload_hash
+            raw_payload#>>'{exported_item,postedAt}' AS posted_at, retrieved_at, raw_payload_hash, raw_payload
      FROM raw_job_observations
      WHERE workspace_id = $1
        AND source_name = $2
@@ -95,6 +101,7 @@ export async function findStoredLinkedInSavedPosting(
       location: row.location_raw,
       compensation: row.compensation_raw,
       postedAt: row.posted_at,
+      postingFacts: pickPostingFactPayload(row.raw_payload),
       importedAt: new Date(row.retrieved_at).toISOString(),
       exportPayloadHash: row.raw_payload_hash,
     },
@@ -126,6 +133,8 @@ export function savedPostingDerivedObservation(
   };
   const contentHash = createHash("sha256").update(JSON.stringify(postingRecord), "utf8").digest("hex");
   const rawPayload = {
+    // Present only when the export read them, so earlier attaches keep their payload hash.
+    ...(posting.postingFacts ?? {}),
     source_content_status: "COMPLETE",
     content_provenance: LINKEDIN_SAVED_CONTENT_PROVENANCE,
     discovery_observation_id: discoveryObservationId,

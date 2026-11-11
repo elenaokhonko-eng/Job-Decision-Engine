@@ -469,6 +469,47 @@
                             "additionalProperties": false
                           },
                           "default": []
+                        },
+                        "approximation": {
+                          "type": "object",
+                          "properties": {
+                            "basis": {
+                              "type": "string",
+                              "const": "RELATIVE_SOURCE_TEXT"
+                            },
+                            "precision": {
+                              "type": "string",
+                              "enum": [
+                                "MINUTE",
+                                "HOUR",
+                                "DAY",
+                                "WEEK",
+                                "MONTH",
+                                "YEAR"
+                              ]
+                            },
+                            "earliest_value": {
+                              "type": "string",
+                              "format": "date-time"
+                            },
+                            "source_text": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 200
+                            },
+                            "anchor_at": {
+                              "type": "string",
+                              "format": "date-time"
+                            }
+                          },
+                          "required": [
+                            "basis",
+                            "precision",
+                            "earliest_value",
+                            "source_text",
+                            "anchor_at"
+                          ],
+                          "additionalProperties": false
                         }
                       },
                       "required": [

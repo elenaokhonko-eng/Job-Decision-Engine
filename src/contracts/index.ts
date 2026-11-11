@@ -20,6 +20,13 @@ export {
   type JobEvidenceSpan,
 } from "./jobSourceEvidence.js";
 export {
+  POSTING_FACTS_SCHEMA_VERSION,
+  PostingDateDerivationSchema,
+  PostingFactsPayloadSchema,
+  type PostingDateDerivation,
+  type PostingFactsPayload,
+} from "./postingFacts.js";
+export {
   ExperienceRequirementScopeSchema,
   ProfileExperienceEvidenceSchema,
   type ExperienceRequirementScope,
