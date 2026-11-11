@@ -7,8 +7,8 @@
  *
  * - A confirmed fact is applied only when the posting leaves that fact unknown in every kind of
  *   posting evidence (`assessPostingFacts`: structured fields, extracted requirements, the
- *   description through the gate's own extractors) AND the assessment stored when the fact was
- *   recorded (which also saw the normalized source evidence) says it fills an unknown. A fact the
+ *   description through the gate's own extraction, and the latest normalized source evidence) at
+ *   gate time AND the assessment stored when the fact was recorded says it fills an unknown. A fact the
  *   posting states always wins; a contradicting confirmation is reported as a conflict, not applied.
  * - Every applied fact adds "User-confirmed (source: <source>): <fact>" to the gate evidence; every
  *   conflict adds "User confirmation not applied ...: the posting states ...". The gate rules decide,
@@ -38,6 +38,7 @@ import {
   type ConfirmedFactAssessmentOutcome,
   type PostingFactEvidence,
   type PostingRequirementRow,
+  type PostingSourceEvidence,
 } from "./postingStatedFacts.js";
 
 type QueryClient = Pick<pg.PoolClient, "query">;
@@ -188,6 +189,8 @@ export interface GateJobInput {
   readonly sourceLocation: string | null | undefined;
   readonly description: string | null | undefined;
   readonly companyName?: string | null | undefined;
+  /** Latest normalized source evidence of the version, as readiness and the record-time check read it. */
+  readonly sourceEvidence?: PostingSourceEvidence | null;
 }
 
 export interface ConfirmedFactConflict {
@@ -254,6 +257,7 @@ export function applyConfirmedFactsToGateInput(
     description: job.description,
     companyName: job.companyName,
     requirements,
+    sourceEvidence: job.sourceEvidence ?? null,
     policy,
   });
 

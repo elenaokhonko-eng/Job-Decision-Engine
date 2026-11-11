@@ -56,7 +56,7 @@ let pool: pg.Pool | undefined;
 let client: pg.PoolClient | undefined;
 let schemaName = "";
 let context: WorkspaceContext | undefined;
-const jobs: Record<"hybrid" | "onsite" | "statedRemote", FixtureJob> = {} as never;
+const jobs: Record<"hybrid" | "onsite" | "statedRemote" | "boilerplate", FixtureJob> = {} as never;
 
 function db(): pg.PoolClient {
   if (!client) throw new Error("The integration test database client is not initialized.");
@@ -76,7 +76,10 @@ async function syntheticEmbedding(text: string): Promise<number[]> {
  * A Singapore job whose posting never states a work mode (stored as the SG policy assumption), or,
  * with `statedRemote`, one whose description says it is fully remote.
  */
-async function seedUnknownWorkModeJob(key: string, options: { statedRemote?: boolean } = {}): Promise<FixtureJob> {
+async function seedUnknownWorkModeJob(
+  key: string,
+  options: { statedRemote?: boolean; boilerplateEmployment?: boolean } = {},
+): Promise<FixtureJob> {
   const workspaceId = ctx().workspaceId;
   const title = `Zebra Telemetry Platform Engineer ${key}`;
   const company = `Synthetic Zebra Confirmed Fixture ${key}`;
@@ -86,15 +89,21 @@ async function seedUnknownWorkModeJob(key: string, options: { statedRemote?: boo
     "Responsibilities: build and operate zebra telemetry ingestion services, write software, review designs and support releases.",
     "Requirements: production platform engineering experience with streaming telemetry systems and Python.",
     ...(options.statedRemote ? ["This position is fully remote within Singapore."] : []),
+    // Words the gate does not read as an employment type.
+    ...(options.boilerplateEmployment ? ["Smart casual dress code. Sponsorship for a part-time MBA. Perks: free lunch, onsite gym."] : []),
   ].join(" ");
   const canonical = await db().query<{ id: string }>(
     `INSERT INTO canonical_jobs (
        workspace_id, company_name, normalized_title, canonical_url,
        location, location_summary, workplace_type, employment_type,
        processing_status, processing_state
-     ) VALUES ($1, $2, $3, $4, 'Singapore', 'Singapore', $5, 'PERMANENT', 'RAW_STAGED', 'RAW_STAGED')
+     ) VALUES ($1, $2, $3, $4, 'Singapore', 'Singapore', $5, $6, 'RAW_STAGED', 'RAW_STAGED')
      RETURNING id`,
-    [workspaceId, company, title, url, options.statedRemote ? "UNKNOWN" : "ASSUMED_HYBRID"],
+    [
+      workspaceId, company, title, url,
+      options.statedRemote ? "UNKNOWN" : "ASSUMED_HYBRID",
+      options.boilerplateEmployment ? "UNKNOWN" : "PERMANENT",
+    ],
   );
   const canonicalJobId = canonical.rows[0].id;
   const contentHash = `zebra-confirmed-content-${key}`;
@@ -124,7 +133,7 @@ async function seedUnknownWorkModeJob(key: string, options: { statedRemote?: boo
     title,
     locationRaw: "Singapore",
     workplaceTypeRaw: null,
-    employmentTypeRaw: "Permanent",
+    employmentTypeRaw: options.boilerplateEmployment ? null : "Permanent",
     compensationRaw: null,
     descriptionText: description,
   });
@@ -313,6 +322,7 @@ describe.skipIf(skipReal)("employer-confirmed job facts through the gate, matchi
     jobs.hybrid = await seedUnknownWorkModeJob("verify-a");
     jobs.onsite = await seedUnknownWorkModeJob("verify-b");
     jobs.statedRemote = await seedUnknownWorkModeJob("stated-remote", { statedRemote: true });
+    jobs.boilerplate = await seedUnknownWorkModeJob("verify-c", { boilerplateEmployment: true });
 
     // The first pipeline pass: the gate cannot establish the work mode, so the job is routed and
     // matched as a workability verification and the decision is VERIFY.
@@ -563,6 +573,36 @@ describe.skipIf(skipReal)("employer-confirmed job facts through the gate, matchi
     expect(checks?.rerun_pending).toBe(false);
     const history = await loadConfirmedFactHistory(db(), ctx(), jobs.hybrid.canonicalJobId, jobs.hybrid.jobVersionId);
     expect(history.map((entry) => entry.entry_kind)).toEqual(["WITHDRAWAL", "CONFIRMATION", "CONFIRMATION"]);
+  }, 120_000);
+
+  it("boilerplate employment words do not block a confirmed permanent role; the employment check closes", async () => {
+    const before = await jobState(jobs.boilerplate);
+    expect(readinessCheck(before, "EMPLOYMENT_ROUTE")).toMatchObject({ status: "NEEDS_VERIFICATION", reason_code: "EMPLOYMENT_ROUTE_UNKNOWN" });
+    const recorded = await confirm(jobs.boilerplate, {
+      fact_type: "EMPLOYMENT_TYPE",
+      value: { employment_type: "PERMANENT" },
+      source_type: "RECRUITER_EMAIL",
+    });
+    expect(recorded.fact.posting_assessment).toBe("FILLS_UNKNOWN");
+    const mode = await confirm(jobs.boilerplate, {
+      fact_type: "WORK_MODE",
+      value: { work_mode: "HYBRID" },
+      source_type: "RECRUITER_EMAIL",
+    });
+    expect(mode.fact.posting_assessment).toBe("FILLS_UNKNOWN");
+    await runStages(jobs.boilerplate);
+
+    const gate = await latestGate(jobs.boilerplate);
+    expect(gate.decision).toBe("PASS");
+    expect(gate.evidence_quotes).toContain("User-confirmed (source: recruiter email): permanent employment");
+    const after = await jobState(jobs.boilerplate);
+    const employment = readinessCheck(after, "EMPLOYMENT_ROUTE");
+    expect(employment).toMatchObject({ status: "MET", reason_code: null });
+    expect(employment?.evidence_keys.some((key) => key.startsWith("user_confirmed:EMPLOYMENT_TYPE:"))).toBe(true);
+    expect(readinessCheck(after, "WORK_MODE")).toMatchObject({ status: "MET" });
+    const checks = await loadJobVerificationChecks(db(), ctx(), jobs.boilerplate.canonicalJobId);
+    expect(checks?.conflicts).toEqual([]);
+    expect(checks?.open_checks).not.toContain("EMPLOYMENT_TYPE");
   }, 120_000);
 
   it("refuses a fact for a job version that is not the job's current version", async () => {

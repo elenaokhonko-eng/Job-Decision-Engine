@@ -2,15 +2,30 @@
  * What the posting itself states about each workability fact a user can confirm.
  *
  * A confirmed fact may fill only a fact that is unknown in every kind of posting evidence the gate
- * and readiness read: structured fields, extracted requirement rows, the description (through the
- * same extractors the gate uses: `evaluateWorkability`, `extractWorkModeFromText`,
- * `extractHybridAttendance`, `extractTravelRequirement`, the territory extractors) and, when
- * available, the normalized source evidence readiness uses. A CONFLICTING source statement counts
- * as stated: the posting contradicts itself and the user is shown the conflict instead.
+ * and readiness read: structured fields, extracted requirement rows, the description, and the
+ * normalized source evidence readiness uses. A CONFLICTING source statement counts as stated: the
+ * posting contradicts itself and the user is shown the conflict instead.
+ *
+ * The description is read ONLY through the extraction the gate itself applies, never through a wider
+ * keyword scan, so this check can never be stricter than the gate: when the gate's own extraction
+ * yields unknown, the fact counts as not stated.
+ * - work mode: `evaluateWorkability` (the global gate's work-mode evaluation);
+ * - office days: `extractHybridAttendance`, as the gate does for hybrid roles;
+ * - travel: `extractTravelRequirement` and the gate's non-negated "frequent travel" keywords;
+ * - on-call: an ON_CALL requirement row, or the gate's non-negated, non-historical on-call keywords;
+ * - employment type: the structured field, an EMPLOYMENT_TYPE row, or `evaluateWorkability`'s
+ *   CONTRACT/PERMANENT inference;
+ * - location: the structured location and the gate's worker-territory extractor.
  */
 import type { ConfirmedFactType } from "../contracts/jobConfirmedFacts.js";
-import { evaluateWorkability, extractHybridAttendance, extractTravelRequirement } from "../services/criteria.js";
-import { extractWorkModeFromText } from "../services/workModeEnrichment.js";
+import { JobSourceEvidenceSchema } from "../contracts/jobSourceEvidence.js";
+import {
+  evaluateWorkability,
+  extractDescriptionText,
+  extractHybridAttendance,
+  extractTravelRequirement,
+  findNonNegatedEvidence,
+} from "../services/criteria.js";
 import { normalizeWorkMode } from "./workModeNormalizer.js";
 import {
   extractExplicitWorkerTerritoryRequirements,
@@ -106,10 +121,6 @@ function workModeOf(input: PostingFactInput): PostingFactEvidence {
     return stated({ work_mode: source.value }, "SOURCE_EVIDENCE", `normalized source evidence: ${source.value}`);
   }
   const description = String(input.description ?? "");
-  const fromText = extractWorkModeFromText(description);
-  if (fromText.workplace_type !== "UNKNOWN") {
-    return stated({ work_mode: fromText.workplace_type }, "DESCRIPTION", fromText.evidence_quote);
-  }
   // The gate's own work-mode evaluation, with territory and agency rules neutralized so only the
   // work-mode signals decide. Anything other than "unknown work mode" means the posting states one.
   const probe = evaluateWorkability(
@@ -181,8 +192,18 @@ function officeDaysOf(input: PostingFactInput, workMode: PostingFactEvidence): P
   return UNKNOWN;
 }
 
-const TRAVEL_NEGATION = /\b(?:no|without)\s+(?:required\s+|regular\s+|business\s+)?(?:travel|business trips?)\b|\b(?:travel|business trips?)\b[^;\n]{0,40}\b(?:not required|not expected|not needed|isn't required|is not required|is not expected)\b/i;
-const FREQUENT_TRAVEL = /\b(?:frequent(?:ly)?\s+travel|travel(?:ling|ing)?\s+(?:extensively|frequently)|extensive\s+travel)\b/i;
+/** The global gate's frequent-travel keywords (criteria.ts applyGlobalGates). */
+const FREQUENT_TRAVEL_KEYWORDS = ["frequent travel", "travel extensively"];
+/** The global gate's regular on-call keywords and its historical-mention filter (criteria.ts applyGlobalGates). */
+const ON_CALL_KEYWORDS = ["on-call rotation", "regular on-call", "24/7 support"];
+const HISTORICAL_ON_CALL = [
+  /\b(?:previously|prior\s+experience|has\s+been|past\s+experience|experience\s+(?:participating|with|in))\s+(?:on[- ]call|an\s+on[- ]call)/i,
+  /\b(?:leadership|experience)\s+(?:through|with|during)\s+production\s+incidents\b/i,
+];
+
+function gateDescription(description: string | null | undefined): string {
+  return extractDescriptionText({ raw_description: String(description ?? "") } as Parameters<typeof extractDescriptionText>[0]);
+}
 
 function travelOf(input: PostingFactInput): PostingFactEvidence {
   for (const requirement of input.requirements) {
@@ -200,24 +221,18 @@ function travelOf(input: PostingFactInput): PostingFactEvidence {
   const description = String(input.description ?? "");
   const pct = extractTravelRequirement(description);
   if (pct) return stated({ travel_pct_max: pct.max_pct }, "DESCRIPTION", pct.evidence);
-  const frequent = description.match(FREQUENT_TRAVEL);
-  if (frequent) return stated({ travel: "FREQUENT" }, "DESCRIPTION", frequent[0]);
-  const negation = description.match(TRAVEL_NEGATION);
-  if (negation) return stated({ travel_pct_max: 0 }, "DESCRIPTION", negation[0]);
+  const frequent = findNonNegatedEvidence(gateDescription(description), FREQUENT_TRAVEL_KEYWORDS);
+  if (frequent.length > 0) return stated({ travel: "FREQUENT" }, "DESCRIPTION", frequent[0]);
   return UNKNOWN;
 }
-
-const ON_CALL = /\bon[- ]call\b|\b24\/7 support\b/i;
-const ON_CALL_NEGATION = /\b(?:no|without)\s+(?:regular\s+)?on[- ]call\b|\bon[- ]call\b[^.;\n]{0,30}\bnot required\b/i;
 
 function onCallOf(input: PostingFactInput): PostingFactEvidence {
   const requirement = input.requirements.find((row) => row.requirement_type === "ON_CALL");
   if (requirement) return stated({ on_call_required: true }, "EXTRACTED_REQUIREMENT", text(requirement));
-  const description = String(input.description ?? "");
-  const negation = description.match(ON_CALL_NEGATION);
-  if (negation) return stated({ on_call_required: false }, "DESCRIPTION", negation[0]);
-  const mention = description.match(ON_CALL);
-  if (mention) return stated({ on_call_required: true }, "DESCRIPTION", mention[0]);
+  // The gate never reads a "no on-call" statement, so only a required on-call can be stated.
+  const evidence = findNonNegatedEvidence(gateDescription(input.description), ON_CALL_KEYWORDS)
+    .filter((snippet) => !HISTORICAL_ON_CALL.some((pattern) => pattern.test(snippet.toLowerCase())));
+  if (evidence.length > 0) return stated({ on_call_required: true }, "DESCRIPTION", evidence[0]);
   return UNKNOWN;
 }
 
@@ -227,8 +242,6 @@ function employmentValue(raw: string): string {
   if (upper.includes("PERMANENT") || /FULL[-_ ]?TIME/.test(upper) || upper === "FTE") return "PERMANENT";
   return upper.replace(/[\s-]+/g, "_");
 }
-
-const NON_STANDARD_EMPLOYMENT = /\b(?:intern(?:ship)?|part[- ]time|apprentice(?:ship)?|freelance|casual|temporary|temp)\b/i;
 
 function employmentOf(input: PostingFactInput): PostingFactEvidence {
   const requirement = input.requirements.find((row) => row.requirement_type === "EMPLOYMENT_TYPE");
@@ -243,8 +256,6 @@ function employmentOf(input: PostingFactInput): PostingFactEvidence {
   if (inferred === "PERMANENT" || inferred === "CONTRACT") {
     return stated({ employment_type: inferred }, "DESCRIPTION", `employment inferred from the description: ${inferred.toLowerCase()}`);
   }
-  const other = description.match(NON_STANDARD_EMPLOYMENT);
-  if (other) return stated({ employment_type: employmentValue(other[0]) }, "DESCRIPTION", other[0]);
   return UNKNOWN;
 }
 
@@ -264,6 +275,28 @@ function locationOf(input: PostingFactInput): PostingFactEvidence {
     return stated({ territories }, "DESCRIPTION", requirements[0].evidenceText);
   }
   return UNKNOWN;
+}
+
+/** The workability block of stored normalized source evidence, or null when absent or invalid. */
+export function postingSourceEvidence(normalizedEvidence: unknown): PostingSourceEvidence | null {
+  if (!normalizedEvidence) return null;
+  const parsed = JobSourceEvidenceSchema.safeParse(
+    typeof normalizedEvidence === "string" ? safeJson(normalizedEvidence) : normalizedEvidence,
+  );
+  if (!parsed.success) return null;
+  return {
+    work_mode: parsed.data.workability.work_mode,
+    travel_pct: parsed.data.workability.travel_pct,
+    hiring_territories: parsed.data.workability.hiring_territories,
+  };
+}
+
+function safeJson(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
 }
 
 export function assessPostingFacts(input: PostingFactInput): PostingFacts {

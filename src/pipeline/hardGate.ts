@@ -58,6 +58,7 @@ import {
   loadCurrentConfirmedJobFacts,
   withConfirmedFactEvidence,
 } from "./confirmedJobFacts.js";
+import { postingSourceEvidence } from "./postingStatedFacts.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -845,7 +846,8 @@ export async function runHardGates(
              jv.last_seen_at,
              source_observation.compensation_raw,
              source_observation.source_name AS source_observation_name,
-             source_observation.location_raw AS source_location_raw
+             source_observation.location_raw AS source_location_raw,
+             source_evidence.normalized_evidence AS source_normalized_evidence
       FROM canonical_jobs c
       JOIN job_versions jv ON jv.id = COALESCE(
         c.latest_job_version_id,
@@ -866,6 +868,16 @@ export async function runHardGates(
         ORDER BY observation.retrieved_at DESC, observation.id DESC
         LIMIT 1
       ) AS source_observation ON TRUE
+      -- Latest normalized source evidence of the version, read only by the confirmed-fact check.
+      LEFT JOIN LATERAL (
+        SELECT observation.normalized_evidence
+        FROM raw_job_observations AS observation
+        WHERE observation.workspace_id = jv.workspace_id
+          AND observation.job_version_id = jv.id
+          AND observation.normalized_evidence IS NOT NULL
+        ORDER BY observation.retrieved_at DESC, observation.id DESC
+        LIMIT 1
+      ) AS source_evidence ON TRUE
       WHERE c.workspace_id = $1
         AND c.archived_at IS NULL
         AND jv.workspace_id = $1
@@ -959,6 +971,7 @@ export async function runHardGates(
             sourceLocation: job.source_location_raw ?? null,
             description: rawJobAdapter.raw_description,
             companyName: rawJobAdapter.company_name,
+            sourceEvidence: postingSourceEvidence(job.source_normalized_evidence),
           },
           requirementRows as PersistedRequirement[],
           await loadCurrentConfirmedJobFacts(client, ctx.workspaceId, job.job_version_id),

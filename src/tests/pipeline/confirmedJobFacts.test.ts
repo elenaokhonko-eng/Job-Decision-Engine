@@ -290,6 +290,74 @@ describe("posting evidence always wins over a confirmed fact (review probes)", (
   });
 });
 
+describe("the posting-stated check is never stricter than the gate (re-review probes)", () => {
+  it("boilerplate words are not a stated employment type, so a confirmed permanent role applies", () => {
+    for (const sentence of [
+      "Smart casual dress code.",
+      "We have casual Fridays.",
+      "Sponsorship for a part-time MBA.",
+      "You will supervise the summer intern.",
+      "Work with freelance designers.",
+    ]) {
+      const description = `${DESCRIPTION} ${sentence}`;
+      expect(globalGate(applyConfirmedFactsToGateInput(gateInput({ description }), [], [], POLICY), description)
+        .workability_facts.employment_type, sentence).toBe("UNKNOWN");
+      const posting = assessPostingFacts({ ...gateInput({ description }), requirements: [], policy: POLICY });
+      expect(posting.EMPLOYMENT_TYPE.state, sentence).toBe("UNKNOWN");
+      const merged = applyConfirmedFactsToGateInput(gateInput({ description }), [], [PERMANENT], POLICY);
+      expect(merged.applied, sentence).toEqual([PERMANENT]);
+      expect(merged.conflicts).toEqual([]);
+      expect(globalGate(merged, description).workability_facts.employment_type).toBe("PERMANENT");
+      // Readiness closes EMPLOYMENT_ROUTE with the applied fact.
+      expect(confirmedEmploymentType("UNKNOWN", merged.applied)).toEqual({ employmentType: "PERMANENT", fact: PERMANENT });
+    }
+  });
+
+  it("an onsite perk is not a stated work mode, so a confirmed hybrid role applies", () => {
+    const description = `${DESCRIPTION} Perks: free lunch, onsite gym.`;
+    const posting = assessPostingFacts({ ...gateInput({ workplaceType: "UNKNOWN", description }), requirements: [], policy: POLICY });
+    expect(posting.WORK_MODE.state).toBe("UNKNOWN");
+    const merged = applyConfirmedFactsToGateInput(gateInput({ workplaceType: "UNKNOWN", description }), [], [HYBRID], POLICY);
+    expect(merged.applied).toEqual([HYBRID]);
+    expect(globalGate(merged, description).status).toBe("PASS");
+  });
+
+  it("a bare on-call mention is not a required on-call; the gate's on-call keywords are", () => {
+    const noOnCall = { on_call_required: false };
+    for (const sentence of ["On-call allowance provided.", "Build tools for on-call engineers.", "Prior experience with on-call rotation is a plus."]) {
+      const posting = assessPostingFacts({ ...gateInput({ description: `${DESCRIPTION} ${sentence}` }), requirements: [], policy: POLICY });
+      expect(posting.ON_CALL.state, sentence).toBe("UNKNOWN");
+      expect(assessConfirmedValue("ON_CALL", noOnCall, posting.ON_CALL)).toBe("FILLS_UNKNOWN");
+    }
+    const required = assessPostingFacts({
+      ...gateInput({ description: `${DESCRIPTION} You will join a regular on-call rotation.` }),
+      requirements: [],
+      policy: POLICY,
+    });
+    expect(required.ON_CALL).toMatchObject({ state: "STATED", value: { on_call_required: true } });
+    expect(assessConfirmedValue("ON_CALL", noOnCall, required.ON_CALL)).toBe("CONFLICTS_WITH_POSTING");
+  });
+
+  it("a travel phrase the gate does not read is not a stated travel percentage", () => {
+    const description = `${DESCRIPTION} Work without travel restrictions.`;
+    const merged = applyConfirmedFactsToGateInput(gateInput({ description }), [], [TRAVEL_10], POLICY);
+    expect(merged.applied).toEqual([TRAVEL_10]);
+  });
+
+  it("the gate path reads normalized source evidence, so later SUPPORTED evidence wins over an older confirmation", () => {
+    const merged = applyConfirmedFactsToGateInput(
+      { ...gateInput({ workplaceType: "UNKNOWN" }), sourceEvidence: { work_mode: { status: "SUPPORTED", value: "REMOTE", office_days_max: 0 } } },
+      [],
+      [ONSITE],
+      POLICY,
+    );
+    expect(merged.applied).toEqual([]);
+    expect(merged.conflicts).toHaveLength(1);
+    expect(merged.conflicts[0].posting).toMatchObject({ state: "STATED", source: "SOURCE_EVIDENCE", value: { work_mode: "REMOTE" } });
+    expect(merged.workplaceType).toBe("UNKNOWN");
+  });
+});
+
 describe("confirmed facts that fill an unknown", () => {
   it("fills an unknown or assumed work mode and records the evidence quote", () => {
     for (const workplaceType of ["UNKNOWN", "", "ASSUMED_HYBRID", null]) {

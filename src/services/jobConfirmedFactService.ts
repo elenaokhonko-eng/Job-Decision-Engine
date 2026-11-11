@@ -24,13 +24,12 @@ import {
   type JobVerificationChecks,
   type PostingFactEvidenceRecord,
 } from "../contracts/jobConfirmedFacts.js";
-import { JobSourceEvidenceSchema } from "../contracts/jobSourceEvidence.js";
 import {
   assessConfirmedValue,
   assessPostingFacts,
   describePostingValue,
+  postingSourceEvidence,
   type ConfirmedFactAssessmentOutcome,
-  type PostingSourceEvidence,
 } from "../pipeline/postingStatedFacts.js";
 import { extractTerritories, resolveWorkspaceWorkabilityPolicy } from "../pipeline/workabilityPolicy.js";
 import { enqueuePipelineTask } from "../tasks/pipelineTasks.js";
@@ -41,6 +40,11 @@ import type { WorkspaceContext } from "../workspace/context.js";
 type QueryClient = Pick<pg.PoolClient, "query">;
 
 export const CONFIRMED_FACT_RERUN_PRODUCER = "api.job_confirmed_fact" as const;
+
+/** Only OWNER and MEMBER may record or withdraw; any other or future role is read-only. */
+export function canWriteConfirmedFacts(ctx: Pick<WorkspaceContext, "role">): boolean {
+  return ctx.role === "OWNER" || ctx.role === "MEMBER";
+}
 
 export class ConfirmedFactRequestError extends Error {
   constructor(
@@ -205,14 +209,7 @@ export async function assessFactAgainstPosting(
      ORDER BY jr.requirement_key ASC`,
     [ctx.workspaceId, jobVersionId],
   );
-  const parsedEvidence = job.normalized_evidence ? JobSourceEvidenceSchema.safeParse(job.normalized_evidence) : null;
-  const sourceEvidence: PostingSourceEvidence | null = parsedEvidence?.success
-    ? {
-        work_mode: parsedEvidence.data.workability.work_mode,
-        travel_pct: parsedEvidence.data.workability.travel_pct,
-        hiring_territories: parsedEvidence.data.workability.hiring_territories,
-      }
-    : null;
+  const sourceEvidence = postingSourceEvidence(job.normalized_evidence);
   const { policy } = await resolveWorkspaceWorkabilityPolicy(client, { context: ctx });
   const posting = assessPostingFacts({
     workplaceType: job.workplace_type,
@@ -242,7 +239,7 @@ export async function recordConfirmedJobFact(
   request: JobConfirmedFactRequest,
   options: { readonly manageTransaction?: boolean } = {},
 ): Promise<RecordConfirmedFactResult> {
-  if (ctx.role === "READER") {
+  if (!canWriteConfirmedFacts(ctx)) {
     throw new ConfirmedFactRequestError(403, "FORBIDDEN", "A writable workspace role is required to record a confirmed fact.");
   }
   const manageTransaction = options.manageTransaction !== false;
@@ -296,7 +293,7 @@ export async function withdrawConfirmedJobFact(
   request: JobConfirmedFactWithdrawRequest,
   options: { readonly manageTransaction?: boolean } = {},
 ): Promise<RecordConfirmedFactResult> {
-  if (ctx.role === "READER") {
+  if (!canWriteConfirmedFacts(ctx)) {
     throw new ConfirmedFactRequestError(403, "FORBIDDEN", "A writable workspace role is required to withdraw a confirmed fact.");
   }
   const manageTransaction = options.manageTransaction !== false;

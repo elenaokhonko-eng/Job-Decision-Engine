@@ -28,6 +28,7 @@ import {
 } from "../../contracts/jobConfirmedFacts.js";
 import {
   ConfirmedFactRequestError,
+  canWriteConfirmedFacts,
   loadConfirmedFactHistory,
   loadJobVerificationChecks,
   recordConfirmedJobFact,
@@ -102,7 +103,7 @@ export function createJobConfirmedFactsRouter(deps: JobConfirmedFactsRouterDeps)
     "/:canonical_job_id/confirmed-facts",
     asyncRoute(async (req, res) => {
       const ctx = deps.resolveContext(req);
-      if (ctx.role === "READER") {
+      if (!canWriteConfirmedFacts(ctx)) {
         res.status(403).json({ ok: false, error: "FORBIDDEN", message: "A writable workspace role is required to record a confirmed fact." });
         return;
       }
@@ -129,7 +130,7 @@ export function createJobConfirmedFactsRouter(deps: JobConfirmedFactsRouterDeps)
     "/:canonical_job_id/confirmed-facts/:confirmed_fact_id/withdraw",
     asyncRoute(async (req, res) => {
       const ctx = deps.resolveContext(req);
-      if (ctx.role === "READER") {
+      if (!canWriteConfirmedFacts(ctx)) {
         res.status(403).json({ ok: false, error: "FORBIDDEN", message: "A writable workspace role is required to withdraw a confirmed fact." });
         return;
       }
