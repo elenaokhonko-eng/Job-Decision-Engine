@@ -53,7 +53,7 @@ export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\b(executive assistant|office manager|receptionist|admin assistant|administrative assistant)\b/i,
   // Legal practice and counsel titles stay excluded; legal-technology titles ("Legal
   // Engineer", "Legal Innovation Technologist") do not match. "Attorney-General" is an
-  // agency name ("Software Engineer, Attorney-General's Chambers"), not a lawyer title.
+  // agency name ("Software Engineer, Attorney-General's Office"), not a lawyer title.
   /\b(counsel|attorney(?![\s-]general)|lawyer|m&a|paralegal|contracts? manager)\b/i,
   /\b(sales\s+(?:manager|representative|rep|director|lead)|account executive|business development representative|bdr|sdr|(?<!technical\s+)account manager|customer\s+(?:success|support|service))\b/i,
   /\b(marketing manager|social media|content writer|pr manager|brand manager)\b/i,

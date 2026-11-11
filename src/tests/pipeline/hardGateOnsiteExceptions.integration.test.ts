@@ -19,6 +19,7 @@ import { saveWorkspacePreferenceRevision } from "../../policy/workspacePreferenc
 import { STAGE3_SCHEMA_VERSION } from "../../policy/stage3Contracts.js";
 import { resolveWorkspaceContext, type WorkspaceContext } from "../../workspace/context.js";
 import { processSourcePage } from "../../../scripts/run_adapters.js";
+import { checkRegateEligibility, regateJobIds } from "../../../scripts/regate_job_ids.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || "";
 const skipReal = !databaseUrl || !isLocalPostgresConnectionString(databaseUrl);
@@ -226,5 +227,41 @@ describe.skipIf(skipReal)("hard-gate on-site exceptions (PostgreSQL)", () => {
     const commercial = readinessOf("Synthetic Retail Analytics");
     expect(commercial.workMode.status).toBe("BLOCKED");
     expect(commercial.workMode.reason_code).toBe("WORK_MODE_INCOMPATIBLE");
+  }, 120_000);
+
+  it("re-gates an explicit id list, reports skipped ids with reasons and verifies the processed count", async () => {
+    const { rows: jobs } = await db().query<{ id: string; company_name: string }>(
+      `SELECT id::text AS id, company_name FROM canonical_jobs WHERE workspace_id = $1 ORDER BY company_name`,
+      [ctx().workspaceId],
+    );
+    expect(jobs).toHaveLength(3);
+    const incomplete = jobs.find((job) => job.company_name === "Synthetic Retail Analytics")!.id;
+    await db().query(
+      `UPDATE canonical_jobs SET description_quality_status = 'INCOMPLETE' WHERE workspace_id = $1 AND id = $2`,
+      [ctx().workspaceId, incomplete],
+    );
+    const unknownId = randomUUID();
+    const ids = [...jobs.map((job) => job.id), unknownId];
+
+    const eligibility = await checkRegateEligibility(db(), ctx().workspaceId, ids);
+    expect(eligibility.eligible).toHaveLength(2);
+    expect(eligibility.skipped).toEqual(expect.arrayContaining([
+      { id: incomplete, reasons: ["DESCRIPTION_NOT_COMPLETE"] },
+      { id: unknownId, reasons: ["NOT_FOUND"] },
+    ]));
+
+    const before = await db().query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM gate_decisions WHERE workspace_id = $1`,
+      [ctx().workspaceId],
+    );
+    const outcome = await regateJobIds(db(), ctx(), ids, { batchSize: 2 });
+    expect(outcome).toMatchObject({ requested: 4, eligible: 2, regated: 2, errors: 0, unprocessed: 0, ok: true });
+    expect(outcome.skipped).toHaveLength(2);
+    const after = await db().query<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM gate_decisions WHERE workspace_id = $1`,
+      [ctx().workspaceId],
+    );
+    // Gate decisions are append-only: exactly one new row per re-gated job.
+    expect(after.rows[0]!.count - before.rows[0]!.count).toBe(2);
   }, 120_000);
 });

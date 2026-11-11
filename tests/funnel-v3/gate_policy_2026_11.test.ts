@@ -99,7 +99,7 @@ describe("Gate policy 2026-11 — rule 1: on-site exceptions", () => {
     // Prefix matching is opt-in (user list) and needs a real remainder.
     expect(employerNameMatches("AcmeBankChase", "AcmeBank")).toBe(false);
     expect(employerNameMatches("AcmeBankChase", "AcmeBank", { allowPrefix: true })).toBe(true);
-    expect(employerNameMatches("Stripes Consulting", "Stripe", { allowPrefix: true })).toBe(false);
+    expect(employerNameMatches("Northwinds Consulting", "Northwind", { allowPrefix: true })).toBe(false);
     expect(employerNameMatches("Acmeco Holdings", "Acm", { allowPrefix: true })).toBe(false);
   });
 

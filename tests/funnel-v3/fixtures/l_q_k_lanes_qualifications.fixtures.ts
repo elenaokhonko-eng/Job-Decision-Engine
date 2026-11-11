@@ -130,7 +130,6 @@ export const LANE_FIXTURES: Record<string, TestJobFixture & { expectedLanes?: st
     workplace_type: "HYBRID",
     raw_description: "Manage donor campaigns, philanthropic grants, and fundraising events for humanitarian aid.",
     expectedStatus: "PASS",
-    expectedRejectionCode: null,
     notes: "the non-technical axis is not a hard gate; lane routing decides fit",
   },
   L13: {

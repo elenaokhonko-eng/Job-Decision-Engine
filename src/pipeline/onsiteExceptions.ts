@@ -59,7 +59,7 @@ const PREFIX_MIN_REMAINDER = 3;
  * - With `allowPrefix` (the user's own list only): a name of at least five letters
  *   may match the start of the employer's first word ("ExampleBank" matches
  *   "ExampleBankGroup") when the rest is empty or at least three letters, so
- *   "Stripe" does not match "Stripes Consulting". Public-list entries never
+ *   "Northwind" does not match "Northwinds Consulting". Public-list entries never
  *   prefix-match, so "a*star" does not match "Astar Technologies".
  */
 export function employerNameMatches(

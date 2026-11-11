@@ -5,7 +5,15 @@ import { loadWorkabilityPolicy, withOnsiteExceptionEmployers } from "../../src/p
 import { findOnsiteException } from "../../src/pipeline/onsiteExceptions.js";
 import { assessWorkModeReadiness } from "../../src/eligibility/workabilityReadiness.js";
 import { prefilterWhoIsHiringPost } from "../../src/ingestion/adapters/hackerNewsWhoIsHiringAdapter.js";
-import { AFFECTED_CODES, parseReplayArgs, summarizeReplay } from "../../scripts/replay_hard_gate_policy_2026_11.js";
+import {
+  AFFECTED_CODES,
+  assertApplyAllowed,
+  compareApplied,
+  parseReplayArgs,
+  summarizeReplay,
+} from "../../scripts/replay_hard_gate_policy_2026_11.js";
+import { parseJobIds, summarizeSkips } from "../../scripts/regate_job_ids.js";
+import { enrichWorkModeIfNeeded } from "../../src/services/workModeEnrichment.js";
 
 const basePolicy = loadWorkabilityPolicy();
 const ENGINEERING = "Build data pipelines and deploy machine learning services in Python on Kubernetes.";
@@ -81,11 +89,11 @@ describe("Gate policy 2026-11 — user decisions", () => {
     "Legal Engineer",
     "Legal Innovation Technologist",
     "Legal Technology Lead",
-    "Software Engineer, Attorney-General's Chambers",
+    "Software Engineer, Attorney-General's Office",
   ])("does not reject the legal-technology title %j", (title) => {
     const result = gate(title);
-    expect(result.status, JSON.stringify(result.rejection_codes)).not.toBe("HARD_REJECT");
-    expect(result.rejection_codes).not.toContain("NON_TARGET_ROLE_FAMILY");
+    expect(result.status, JSON.stringify(result.rejection_codes)).toBe("PASS");
+    expect(result.rejection_codes).toEqual([]);
   });
 
   it("lifts the on-site rule for a scientist only at a research employer", () => {
@@ -138,9 +146,76 @@ describe("Gate policy 2026-11 — replay script", () => {
     expect(AFFECTED_CODES).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
   });
 
+  it("A1: refuses --apply when any job would newly become HARD_REJECT unless the exact count is allowed", () => {
+    const base = { includeNonRejected: false, idsFile: null, allowNewRejections: null };
+    expect(() => assertApplyAllowed({ newlyRejected: 0 }, base)).not.toThrow();
+    expect(() => assertApplyAllowed({ newlyRejected: 2 }, base)).toThrow(/would newly become HARD_REJECT/);
+    expect(() => assertApplyAllowed({ newlyRejected: 2 }, { ...base, allowNewRejections: 1 })).toThrow();
+    expect(() => assertApplyAllowed({ newlyRejected: 2 }, { ...base, allowNewRejections: 2 })).not.toThrow();
+    expect(() => assertApplyAllowed({ newlyRejected: 0 }, { ...base, allowNewRejections: 3 })).toThrow(/does not match/);
+    // --include-non-rejected and --ids-file always need the explicit guard, even at 0.
+    expect(() => assertApplyAllowed({ newlyRejected: 0 }, { ...base, includeNonRejected: true })).toThrow(/require --allow-new-rejections/);
+    expect(() => assertApplyAllowed({ newlyRejected: 0 }, { ...base, includeNonRejected: true, allowNewRejections: 0 })).not.toThrow();
+    expect(() => assertApplyAllowed({ newlyRejected: 0 }, { ...base, idsFile: "ids.txt" })).toThrow(/require --allow-new-rejections/);
+  });
+
+  it("A2/A3: compares applied decisions with the dry run and counts applied new rejections", () => {
+    const rows = [
+      { canonicalJobId: "a", oldDecision: "HARD_REJECT" as const, oldCodes: ["GATE_NOT_AI_DATA"], newStatus: "PASS" as const, newCodes: [], label: null },
+      { canonicalJobId: "b", oldDecision: "PASS" as const, oldCodes: [], newStatus: "PASS" as const, newCodes: [], label: null },
+      { canonicalJobId: "c", oldDecision: "HARD_REJECT" as const, oldCodes: ["GATE_LIFESTYLE_INCOMPATIBLE"], newStatus: "HARD_REJECT" as const, newCodes: ["GATE_TRAVEL_ABOVE_LIMIT"], label: null },
+    ];
+    const applied = new Map([
+      ["a", { decision: "PASS" as const, codes: [] }],
+      ["b", { decision: "HARD_REJECT" as const, codes: ["GATE_HIGH_OFFICE_DAYS"] }],
+    ]);
+    const comparison = compareApplied(rows, applied);
+    expect(comparison.matched).toBe(1);
+    expect(comparison.differed).toHaveLength(1);
+    expect(comparison.missing).toEqual(["c"]);
+    expect(comparison.appliedNewlyRejected).toBe(1);
+  });
+
+  it("A4: parses an ids file strictly and summarizes skip reasons", () => {
+    expect(parseJobIds("# rollback\n\n00000000-0000-4000-8000-000000000001\r\n00000000-0000-4000-8000-000000000001\n")).toEqual(["00000000-0000-4000-8000-000000000001"]);
+    expect(() => parseJobIds("not-a-uuid\n")).toThrow(/invalid line/);
+    expect(summarizeSkips([{ id: "a", reasons: ["DESCRIPTION_NOT_COMPLETE"] }, { id: "b", reasons: ["ARCHIVED", "DESCRIPTION_NOT_COMPLETE"] }]))
+      .toEqual({ DESCRIPTION_NOT_COMPLETE: 2, ARCHIVED: 1 });
+  });
+
+  it("A3: previews work-mode enrichment without writes or page fetches", async () => {
+    const statements: string[] = [];
+    const client = {
+      query: async (sql: string) => {
+        statements.push(sql.trim().split(/\s+/)[0]!.toUpperCase());
+        return { rows: [] };
+      },
+    };
+    const fetchSpy = globalThis.fetch;
+    let fetched = false;
+    globalThis.fetch = (async () => { fetched = true; throw new Error("no network in tests"); }) as typeof fetch;
+    try {
+      const result = await enrichWorkModeIfNeeded(client as never, { workspaceId: "w", userId: "u" } as never, {
+        canonical_job_id: "00000000-0000-4000-8000-000000000001",
+        job_version_id: "00000000-0000-4000-8000-000000000002",
+        canonical_url: "https://jobs.example.test/role",
+        workplace_type: "UNKNOWN",
+        location: "Exampleville",
+        description_text: "Build data pipelines in Python.",
+      }, { readOnly: true });
+      expect(fetched).toBe(false);
+      expect(statements.every((statement) => statement === "SELECT")).toBe(true);
+      expect(result.fetch_skipped).toBe(true);
+    } finally {
+      globalThis.fetch = fetchSpy;
+    }
+  });
+
   it("is read-only unless --apply is passed", () => {
     expect(parseReplayArgs([])).toMatchObject({ apply: false, confirmWorkspace: null, showTitles: false, includeNonRejected: false });
     expect(parseReplayArgs(["--include-non-rejected"])).toMatchObject({ includeNonRejected: true, allHardRejected: true });
+    expect(parseReplayArgs(["--ids-file=ids.txt", "--allow-new-rejections=0"])).toMatchObject({ idsFile: "ids.txt", allowNewRejections: 0 });
+    expect(parseReplayArgs(["--allow-new-rejections=-1"]).allowNewRejections).toBeNull();
     expect(parseReplayArgs(["--apply", "--confirm-workspace=abc", "--source=LINKEDIN_SAVED", "--limit=5"])).toMatchObject({
       apply: true, confirmWorkspace: "abc", source: "LINKEDIN_SAVED", limit: 5,
     });

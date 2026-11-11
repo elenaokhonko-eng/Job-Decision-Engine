@@ -42,7 +42,7 @@ export const TRAVEL_FIXTURES: Record<string, TestJobFixture> = {
     workplace_type: "HYBRID",
     raw_description: "Implement customer integrations. Position involves 20-30% international travel.",
     expectedStatus: "HARD_REJECT",
-    expectedRejectionCode: "GATE_LIFESTYLE_INCOMPATIBLE",
+    expectedRejectionCode: "GATE_TRAVEL_ABOVE_LIMIT",
     expectedFacts: { travel_pct_max: 30 },
     notes: "range 20-30% travel rejects (upper bound 30 > 20)",
   },
@@ -54,7 +54,7 @@ export const TRAVEL_FIXTURES: Record<string, TestJobFixture> = {
     workplace_type: "HYBRID",
     raw_description: "Direct technical client deployments. Required travel: 21% of schedule.",
     expectedStatus: "HARD_REJECT",
-    expectedRejectionCode: "GATE_LIFESTYLE_INCOMPATIBLE",
+    expectedRejectionCode: "GATE_TRAVEL_ABOVE_LIMIT",
     expectedFacts: { travel_pct_max: 21 },
     notes: "fixed 21% travel rejects (> 20)",
   },
@@ -66,7 +66,7 @@ export const TRAVEL_FIXTURES: Record<string, TestJobFixture> = {
     workplace_type: "HYBRID",
     raw_description: "Frequent travel required across APAC region for developer conferences and client workshops.",
     expectedStatus: "HARD_REJECT",
-    expectedRejectionCode: "GATE_LIFESTYLE_INCOMPATIBLE",
+    expectedRejectionCode: "GATE_TRAVEL_ABOVE_LIMIT",
     notes: "frequent travel even with no % rejects",
   },
   T07: {
@@ -171,7 +171,6 @@ export const COMPOSITION_FIXTURES: Record<string, TestJobFixture> = {
     workplace_type: "HYBRID",
     raw_description: "100% vendor relationship management and business partner liaisons. Conclusively zero technical contribution.",
     expectedStatus: "PASS",
-    expectedRejectionCode: null,
     notes: "Axis 1 is not a hard gate; lane routing decides fit and ends unrouted jobs as SKIP",
   },
   C10: {
@@ -215,7 +214,6 @@ export const TITLE_FIXTURES: Record<string, TestJobFixture> = {
     workplace_type: "HYBRID",
     raw_description: "Manage project timelines, budgets, and status reports for various initiatives.",
     expectedStatus: "PASS",
-    expectedRejectionCode: null,
     notes: "generic Director / Programme / Project / Delivery / Consultant without technical scope rejects",
   },
   R03: {

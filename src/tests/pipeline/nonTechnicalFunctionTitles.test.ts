@@ -67,9 +67,8 @@ describe("non-target title families in the hard gates", () => {
     expect(nonTechnicalFunctionTitle(title)).toBeNull();
     const { persisted, global } = gates(title, "Lead the programme with policy owners and stakeholders, and report outcomes to leadership.");
     for (const result of [persisted, global]) {
-      expect(result.status, `${title}: ${JSON.stringify(result.rejection_codes)}`).not.toBe("HARD_REJECT");
-      expect(result.rejection_codes).not.toContain("NON_TARGET_ROLE_FAMILY");
-      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.status, `${title}: ${JSON.stringify(result.rejection_codes)}`).toBe("PASS");
+      expect(result.rejection_codes).toEqual([]);
     }
   });
 
