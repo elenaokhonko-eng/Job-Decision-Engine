@@ -1,0 +1,52 @@
+schema_version: "2.2.0"
+lane_key: INVESTIGATIONS_ENFORCEMENT
+display_name: "Investigations & Enforcement"
+description: "Investigation, enforcement, forensic and regulatory-investigation roles: regulator enforcement investigators, statutory-board and corporate-regulator investigation officers, and compliance, fraud and financial-crime investigators."
+
+# The title must name an investigation, enforcement, forensic or fraud/financial-crime
+# investigation function (hasInvestigationFunction in src/pipeline/laneRouter.ts); the
+# description must show a regulatory, statutory or financial-crime context.
+scope:
+  required_function_concepts:
+    any:
+      - INVESTIGATION
+
+  included_domain_concepts:
+    any:
+      - REGULATORY_ENFORCEMENT
+      - FINANCIAL_CRIME
+      - FRAUD_DETECTION
+      - REGTECH
+      - COMPLIANCE_AUTOMATION
+
+prototypes:
+  - prototype_key: regulatory_enforcement
+    text: "Regulatory enforcement and investigation: investigating breaches of securities, corporate and statutory law, gathering evidence, interviewing witnesses and recommending enforcement action."
+    weight: 1.0
+  - prototype_key: financial_crime_investigation
+    text: "Fraud, financial crime, money laundering and compliance investigations, forensic analysis and case management."
+    weight: 0.9
+
+routing:
+  minimum_domain_score: 0.60
+  minimum_function_score: 0.60
+  minimum_semantic_score: 0.35
+  secondary_lane_threshold: 0.30
+
+budget:
+  maximum_ai_interpretations_per_run: 3
+
+documents:
+  include_criteria_snapshot: true
+positive_concepts:
+  - investigation
+  - enforcement
+  - forensic
+  - financial crime
+  - fraud
+  - money laundering
+negative_concepts:
+  - loss prevention
+  - security guard
+  - private investigator
+semantic_threshold: 0.35

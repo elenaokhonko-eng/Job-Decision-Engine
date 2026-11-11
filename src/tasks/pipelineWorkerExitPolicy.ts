@@ -9,7 +9,13 @@ export interface PipelineWorkerExitPolicyInput {
   retryWaitCount: number;
   oldestRetryWaitAgeSeconds: number;
   activePendingCountBefore: number;
+  /** All active PENDING tasks, including those scheduled for later (available_at in the future). */
   activePendingCount: number;
+  /**
+   * Active PENDING tasks whose available_at has passed: the only work a run could have claimed.
+   * The no-forward-progress rule counts these, so a queue that holds only scheduled work does not fail.
+   */
+  activeDuePendingCount: number;
   oldestActivePendingAgeSecondsBefore: number;
   oldestActivePendingAgeSeconds: number;
   oldestActivePendingTaskType?: string | null;
@@ -73,9 +79,12 @@ export function enforcePipelineWorkerExitPolicy(input: PipelineWorkerExitPolicyI
       `Pending queue age exceeded SLO: ${input.oldestActivePendingAgeSeconds}s > ${input.maxPendingAgeSeconds}s.${oldestStage}${repeatedOldest}`,
     );
   }
-  if (input.claimedThisRun === 0 && input.activePendingCount >= input.noProgressPendingThreshold) {
+  // Only due work could have been claimed; tasks scheduled for later are not a stall.
+  if (input.claimedThisRun === 0 && input.activeDuePendingCount >= input.noProgressPendingThreshold) {
+    const scheduledPending = Math.max(0, input.activePendingCount - input.activeDuePendingCount);
+    const scheduledNote = scheduledPending > 0 ? ` ${scheduledPending} more are scheduled for later.` : "";
     throw new Error(
-      `No forward progress: ${input.activePendingCount} active PENDING task(s) remain claimable after the worker run.`,
+      `No forward progress: ${input.activeDuePendingCount} due PENDING task(s) remain claimable after the worker run.${scheduledNote}`,
     );
   }
 }

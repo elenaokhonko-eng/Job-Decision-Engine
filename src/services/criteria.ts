@@ -11,13 +11,23 @@ import {
   extractTerritories,
   normalizeTerritories,
   splitWorkabilityClauses,
+  isTerritoryAuthorized,
   isVerificationAnswerProvided,
   loadWorkabilityPolicy,
   VERIFICATION_ANSWER_KEYS,
   type VerificationAnswerContext,
   type WorkabilityPolicy,
 } from "../pipeline/workabilityPolicy.js";
+import { findOnsiteException, type OnsiteException } from "../pipeline/onsiteExceptions.js";
+import {
+  GATE_JOB_LOCATION_MISMATCH,
+  GATE_ON_CALL_REQUIRED,
+  GATE_SHIFT_WORK_REQUIRED,
+  GATE_TRAVEL_ABOVE_LIMIT,
+  travelAboveLimitEvidence,
+} from "../pipeline/gateReasonCodes.js";
 import { stripHtmlToText } from "../security/sanitize.js";
+import type { TargetLaneKey } from "../policy/laneIntentContracts.js";
 
 /**
  * Custom weights and criteria configuration file for the Job Decision Engine.
@@ -42,7 +52,10 @@ export interface GateEvaluationResult {
 export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\b(human resources?|hr|recruiter|talent acquisition|people operations?|people partner)\b/i,
   /\b(executive assistant|office manager|receptionist|admin assistant|administrative assistant)\b/i,
-  /\b(legal counsel|attorney|lawyer|m&a|paralegal|contracts? manager)\b/i,
+  // Legal practice and counsel titles stay excluded; legal-technology titles ("Legal
+  // Engineer", "Legal Innovation Technologist") do not match. "Attorney-General" is an
+  // agency name ("Software Engineer, Attorney-General's Office"), not a lawyer title.
+  /\b(counsel|attorney(?![\s-]general)|lawyer|m&a|paralegal|contracts? manager)\b/i,
   /\b(sales\s+(?:manager|representative|rep|director|lead)|account executive|business development representative|bdr|sdr|(?<!technical\s+)account manager|customer\s+(?:success|support|service))\b/i,
   /\b(marketing manager|social media|content writer|pr manager|brand manager)\b/i,
   /\b(quality assurance coordinator|manual tester|qa tester)\b/i,
@@ -54,9 +67,11 @@ export const GLOBAL_TITLE_EXCLUSIONS: RegExp[] = [
   /\bdata\s+infra(?:structure)?\b/i,
 ];
 
-// 1b. Non-technical function titles that passed the technical-function check on description
-// keywords alone (a designer or accountant posting that mentions SQL). A title match rejects as
-// NON_TECHNICAL_FUNCTION with the matched title as evidence. Product designers are not listed.
+// 1b. Non-target title families that can pass on description keywords alone (a designer or
+// accountant posting that mentions SQL): customer success, accountant, payroll, support specialist,
+// graphic/UX designer. A title match is a hard reject as NON_TARGET_ROLE_FAMILY +
+// GATE_OUT_OF_SCOPE_DOMAIN, like the other role-family exclusions. Since 2026-11 the generic
+// technical-function check (Axis 1) is not a gate. Product designers are not listed.
 export const NON_TECHNICAL_FUNCTION_TITLES: RegExp[] = [
   /\bcustomer success\b/i,
   /\b(?:general ledger |gl )?accountants?\b/i,
@@ -353,6 +368,18 @@ export function extractTravelRequirement(description: string): TravelRequirement
   return null;
 }
 
+export interface WorkabilityEvaluation {
+  workable: boolean;
+  needsVerify: boolean;
+  reason?: string;
+  reasonCode?: string;
+  facts?: Partial<GateResult["workability_facts"]>;
+  /** Set when an on-site exception lifted an on-site / office-day rejection. */
+  onsiteExceptionApplied?: OnsiteException;
+  /** The on-site / office-day conflict that the exception lifted. */
+  suppressedOnsiteReason?: string;
+}
+
 // 3. Workability Requirements (Zero tolerance for on-premises-only lab/clinic)
 export function evaluateWorkability(
   location: string,
@@ -362,7 +389,29 @@ export function evaluateWorkability(
   policy: WorkabilityPolicy = loadWorkabilityPolicy(),
   answerContext?: VerificationAnswerContext | null,
   companyName?: string,
-): { workable: boolean; needsVerify: boolean; reason?: string; reasonCode?: string; facts?: Partial<GateResult["workability_facts"]> } {
+  onsiteException?: OnsiteException | null,
+): WorkabilityEvaluation {
+  const strict = evaluateWorkabilityRules(location, workplaceType, description, employmentType, policy, answerContext, companyName, false);
+  if (!onsiteException || strict.workable || strict.reasonCode !== "GATE_HIGH_OFFICE_DAYS") return strict;
+  // The exception lifts only the on-site / office-day conflict. Every other
+  // rule (territory, contract placement, unknown facts) is evaluated again.
+  // The strict rejection proves explicit on-site evidence, so an unset
+  // workplace field is read as on-site rather than as an unknown work mode.
+  const exceptedWorkplace = normalizeWorkMode(workplaceType) === "UNKNOWN" ? "ONSITE" : workplaceType;
+  const excepted = evaluateWorkabilityRules(location, exceptedWorkplace, description, employmentType, policy, answerContext, companyName, true);
+  return { ...excepted, onsiteExceptionApplied: onsiteException, suppressedOnsiteReason: strict.reason };
+}
+
+function evaluateWorkabilityRules(
+  location: string,
+  workplaceType: string,
+  description: string,
+  employmentType: string | undefined,
+  policy: WorkabilityPolicy,
+  answerContext: VerificationAnswerContext | null | undefined,
+  companyName: string | undefined,
+  onsiteAccepted: boolean,
+): WorkabilityEvaluation {
   const effectivePolicy = applyVerificationAnswerOverrides(policy, answerContext);
   const officeDaysAnswerUnknown = isVerificationAnswerProvided(
     answerContext,
@@ -468,7 +517,7 @@ export function evaluateWorkability(
     || /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i.test(d)
     || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek);
 
-  if (wp !== "UNKNOWN" && !effectivePolicy.allowedWorkModes.includes(wp)) {
+  if (wp !== "UNKNOWN" && !effectivePolicy.allowedWorkModes.includes(wp) && !(onsiteAccepted && wp === "ONSITE")) {
     return {
       workable: false,
       needsVerify: false,
@@ -478,7 +527,7 @@ export function evaluateWorkability(
     };
   }
 
-  if ((!effectivePolicy.allowedWorkModes.includes("ONSITE") && wp === "ONSITE") || (!effectivePolicy.allowedWorkModes.includes("ONSITE") && isExplicitOnsiteText)) {
+  if (!onsiteAccepted && ((!effectivePolicy.allowedWorkModes.includes("ONSITE") && wp === "ONSITE") || (!effectivePolicy.allowedWorkModes.includes("ONSITE") && isExplicitOnsiteText))) {
     const minDays = officeDaysMatch ? Number(officeDaysMatch[1]) : 4;
     const maxDays = officeDaysMatch ? Number(officeDaysMatch[1]) : 5;
     return {
@@ -512,20 +561,37 @@ export function evaluateWorkability(
     [...authorizedRegions],
     effectivePolicy.rejectExplicitForeignTerritory,
   );
-  const explicitlyDisallowedTerritories = relevantLocationTerritories.filter((territory) =>
+  const disallowedLocationTerritories = relevantLocationTerritories.filter((territory) =>
     effectivePolicy.rejectExplicitForeignTerritory
     && authorizedRegions.size > 0
-    && !authorizedRegions.has(territory)
+    && !isTerritoryAuthorized(territory, authorizedRegions)
   );
-  explicitlyDisallowedTerritories.push(...workerTerritoryEvaluation.incompatibleTerritories);
+  const explicitlyDisallowedTerritories: string[] = [...workerTerritoryEvaluation.incompatibleTerritories];
   if (explicitlyDisallowedTerritories.length > 0 || workerTerritoryEvaluation.status === "INCOMPATIBLE") {
     const territory = explicitlyDisallowedTerritories[0] ?? workerTerritoryEvaluation.incompatibleTerritories[0] ?? "UNKNOWN";
     return {
       workable: false,
       needsVerify: false,
-      reason: `Explicit work-authorization or job-location restriction conflicts with the active preference: ${territory}`,
+      reason: `Explicit work-authorization restriction conflicts with the active preference: ${territory}`,
       reasonCode: "WORK_AUTHORIZATION_INCOMPATIBLE",
       facts: { ...baseFacts, location_restriction: territory }
+    };
+  }
+  // An explicit worker restriction is reported first. A job located only
+  // outside the authorized regions is a location mismatch, not a
+  // work-authorization restriction. A location that also names an authorized
+  // region ("Singapore / Kuala Lumpur") is not a mismatch.
+  const locationIncludesAuthorizedRegion = relevantLocationTerritories.some((territory) =>
+    isTerritoryAuthorized(territory, authorizedRegions)
+  );
+  if (disallowedLocationTerritories.length > 0 && !locationIncludesAuthorizedRegion) {
+    const territory = disallowedLocationTerritories[0] ?? "UNKNOWN";
+    return {
+      workable: false,
+      needsVerify: false,
+      reason: `Job location is outside the authorized region (${[...authorizedRegions].join(", ")}): ${territory}`,
+      reasonCode: GATE_JOB_LOCATION_MISMATCH,
+      facts: { ...baseFacts, location_restriction: territory },
     };
   }
   if (workerTerritoryEvaluation.status === "NEEDS_VERIFICATION") {
@@ -573,7 +639,7 @@ export function evaluateWorkability(
   if (wp === "HYBRID" || /\bhybrid\b/i.test(d) || /\bhybrid\b/i.test(loc)) {
     const attendance = extractHybridAttendance(d);
     if (attendance) {
-      if (attendance.contradictory || attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek) {
+      if (!onsiteAccepted && (attendance.contradictory || attendance.office_days_max >= effectivePolicy.hardFailOfficeDaysPerWeek)) {
         return {
           workable: false,
           needsVerify: false,
@@ -592,7 +658,7 @@ export function evaluateWorkability(
           facts: { ...baseFacts, office_days_min: attendance.office_days_min, office_days_max: attendance.office_days_max, attendance_basis: "EMPLOYER_STATED" },
         };
       }
-      if (attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) {
+      if (!onsiteAccepted && attendance.office_days_max > effectivePolicy.maxOfficeDaysPerWeek) {
         return {
           workable: false,
           needsVerify: false,
@@ -872,9 +938,9 @@ export function applyGlobalGates(
       return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title exclusion: "${job.title}"`]);
     }
   }
-  const nonTechnicalTitle = nonTechnicalFunctionTitle(job.title || "");
-  if (nonTechnicalTitle) {
-    return makeReject(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-technical function title "${nonTechnicalTitle}" in "${job.title}"`]);
+  const nonTargetFunctionTitle = nonTechnicalFunctionTitle(job.title || "");
+  if (nonTargetFunctionTitle) {
+    return makeReject(["NON_TARGET_ROLE_FAMILY", "GATE_OUT_OF_SCOPE_DOMAIN"], [`Non-target title family "${nonTargetFunctionTitle}" in "${job.title}"`]);
   }
 
   // FDE is a global exclusion when the role itself is an FDE-family role.
@@ -893,6 +959,18 @@ export function applyGlobalGates(
   }
 
   // ── 0a. Workability Check (location / workplace / employment type) ──
+  // A research/university role or a user-listed employer lifts on-site and
+  // office-day rejections only; the exception is recorded as evidence.
+  const onsiteException = findOnsiteException(
+    { title: job.title, company_name: job.company_name, description: d },
+    effectivePolicy,
+  );
+  const exceptionEvidence: string[] = [];
+  const recordOnsiteException = (suppressed: string | undefined) => {
+    if (!onsiteException) return;
+    const line = `${onsiteException.evidence}${suppressed ? ` Lifted conflict: ${suppressed}` : ""}`;
+    if (!exceptionEvidence.includes(line)) exceptionEvidence.push(line);
+  };
   const workability = evaluateWorkability(
     job.location || "",
     job.workplace_type || "",
@@ -901,7 +979,9 @@ export function applyGlobalGates(
     effectivePolicy,
     answerContext,
     job.company_name || "",
+    onsiteException,
   );
+  if (workability.onsiteExceptionApplied) recordOnsiteException(workability.suppressedOnsiteReason);
   if (!workability.workable) {
     if (workability.reasonCode === "GATE_UNKNOWN_WORK_MODE") {
       pendingVerification = {
@@ -919,15 +999,19 @@ export function applyGlobalGates(
       if (workability.reasonCode === "WORK_AUTHORIZATION_INCOMPATIBLE") {
         return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [workability.reason || "Explicit work-authorization restriction detected"], workability.facts);
       }
+      if (workability.reasonCode === GATE_JOB_LOCATION_MISMATCH) {
+        return makeReject([GATE_JOB_LOCATION_MISMATCH], [workability.reason || "Job location is outside the authorized region"], workability.facts);
+      }
       return makeReject(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"], [workability.reason || "Unworkable location/workplace model"], workability.facts);
     }
   }
 
-  // ── 0c. Unified Technical Function Check (Axis 1) ──
+  // ── 0c. Technical-function signal (Axis 1) ──
+  // Not a hard gate: a non-technical role is acceptable when it fits a lane and
+  // the candidate's experience, and hard gates run before lane routing. Lane
+  // routing decides fit; unrouted jobs end as SKIP/UNCLASSIFIED there. The
+  // signal still guards the title-family exclusions below.
   const techCheck = isTechnicalRole(job.title || "", d);
-  if (!techCheck.isTechnical) {
-    return makeReject(["NON_TECHNICAL_FUNCTION", "GATE_OUT_OF_SCOPE_DOMAIN"], [techCheck.reason || "Axis 1 Failed: Role lacks evidence of technical function"]);
-  }
 
   if (workability.needsVerify) {
     pendingVerification = {
@@ -979,14 +1063,14 @@ export function applyGlobalGates(
     };
   } else if (travelRequirement && travelRequirement.max_pct > effectivePolicy.maxTravelPct) {
     return makeReject(
-      ["GATE_LIFESTYLE_INCOMPATIBLE"],
-      [travelRequirement.evidence],
+      [GATE_TRAVEL_ABOVE_LIMIT],
+      [travelAboveLimitEvidence(effectivePolicy.maxTravelPct, travelRequirement.max_pct), travelRequirement.evidence],
       { travel_pct_max: travelRequirement.max_pct }
     );
   } else if (frequentTravelEvidence.length > 0 && !effectivePolicy.frequentTravelAllowed && !travelAnswerProvided) {
     return makeReject(
-      ["GATE_LIFESTYLE_INCOMPATIBLE"],
-      frequentTravelEvidence,
+      [GATE_TRAVEL_ABOVE_LIMIT],
+      [travelAboveLimitEvidence(effectivePolicy.maxTravelPct, null), ...frequentTravelEvidence],
       { travel_pct_max: null }
     );
   } else if (!effectivePolicy.minimalTravelAllowed && /\bminimal\s+(?:business\s+)?travel\b/i.test(d)) {
@@ -1055,8 +1139,11 @@ export function applyGlobalGates(
     "i"
   );
   const configuredOfficeDaysMatch = d.match(configuredOfficeDaysRegex);
-  if (configuredOfficeDaysMatch && (Number(configuredOfficeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek
-    || Number(configuredOfficeDaysMatch[1]) > effectivePolicy.maxOfficeDaysPerWeek)) {
+  const configuredOfficeDaysConflict = configuredOfficeDaysMatch !== null && (Number(configuredOfficeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek
+    || Number(configuredOfficeDaysMatch[1]) > effectivePolicy.maxOfficeDaysPerWeek);
+  if (configuredOfficeDaysConflict && onsiteException) {
+    recordOnsiteException(`"${configuredOfficeDaysMatch?.[0]}"`);
+  } else if (configuredOfficeDaysMatch && configuredOfficeDaysConflict) {
     return makeReject(
       ["GATE_HIGH_OFFICE_DAYS"],
       [configuredOfficeDaysMatch[0]],
@@ -1071,7 +1158,9 @@ export function applyGlobalGates(
   const hardOnsiteDays = hardOnsiteKeyword?.match(/\b([45])\s*days?\b/i)?.[1] ?? hardOnsiteMatch?.[1];
   const hardOnsiteAllowedByAnswer =
     hardOnsiteDays !== undefined && effectivePolicy.maxOfficeDaysPerWeek >= Number(hardOnsiteDays);
-  if ((hardOnsiteKeyword !== undefined || hardOnsiteMatch !== null) && !hardOnsiteAllowedByAnswer) {
+  if ((hardOnsiteKeyword !== undefined || hardOnsiteMatch !== null) && !hardOnsiteAllowedByAnswer && onsiteException) {
+    recordOnsiteException(`"${hardOnsiteKeyword ?? hardOnsiteMatch?.[0] ?? "on-site requirement"}"`);
+  } else if ((hardOnsiteKeyword !== undefined || hardOnsiteMatch !== null) && !hardOnsiteAllowedByAnswer) {
     const evidenceKeyword = hardOnsiteKeyword ?? hardOnsiteMatch?.[0] ?? "on-site requirement";
     return makeReject(["GATE_HIGH_OFFICE_DAYS"], findEvidence(d, [evidenceKeyword]), { office_days_min: 4, office_days_max: 5 });
   }
@@ -1113,20 +1202,29 @@ export function applyGlobalGates(
     : [];
   const relevantLocationTerritories = explicitlyRemote ? remoteLocationTerritories : locationTerritories;
   const workerTerritoryRequirements = extractExplicitWorkerTerritoryRequirements(d);
-  const disallowedTerritories = relevantLocationTerritories.filter((territory) =>
+  const disallowedLocationTerritories = relevantLocationTerritories.filter((territory) =>
     effectivePolicy.rejectExplicitForeignTerritory
     && authorizedRegions.size > 0
-    && !authorizedRegions.has(territory)
+    && !isTerritoryAuthorized(territory, authorizedRegions)
   );
   const workerTerritoryEvaluation = evaluateWorkerTerritoryRequirements(
     workerTerritoryRequirements,
     [...authorizedRegions],
     effectivePolicy.rejectExplicitForeignTerritory,
   );
-  disallowedTerritories.push(...workerTerritoryEvaluation.incompatibleTerritories);
+  const disallowedTerritories: string[] = [...workerTerritoryEvaluation.incompatibleTerritories];
   if (disallowedTerritories.length > 0 || workerTerritoryEvaluation.status === "INCOMPATIBLE") {
     const territory = disallowedTerritories[0] ?? workerTerritoryEvaluation.incompatibleTerritories[0] ?? "UNKNOWN";
-    return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit worker-territory or job-location restriction: ${territory}`], {
+    return makeReject(["WORK_AUTHORIZATION_INCOMPATIBLE"], [`Explicit worker-territory restriction: ${territory}`], {
+      location_restriction: territory,
+    });
+  }
+  const locationIncludesAuthorizedRegion = relevantLocationTerritories.some((territory) =>
+    isTerritoryAuthorized(territory, authorizedRegions)
+  );
+  if (disallowedLocationTerritories.length > 0 && !locationIncludesAuthorizedRegion) {
+    const territory = disallowedLocationTerritories[0] ?? "UNKNOWN";
+    return makeReject([GATE_JOB_LOCATION_MISMATCH], [`Job location is outside the authorized region: ${territory}`], {
       location_restriction: territory,
     });
   }
@@ -1186,7 +1284,17 @@ export function applyGlobalGates(
       // answer-adjusted maxTravelPct above; do not apply the legacy generic
       // frequent-travel reject a second time.
       if (hasTravelAnswer && travelPct !== null) continue;
-      return makeReject(["GATE_LIFESTYLE_INCOMPATIBLE"], activeEvidence, { travel_pct_max: travelPct });
+      // A stated percentage within the configured limit is not a conflict.
+      if (isTravelConflict && travelPct !== null && travelPct <= effectivePolicy.maxTravelPct) continue;
+      const lifestyleCode = isShiftConflict
+        ? GATE_SHIFT_WORK_REQUIRED
+        : isOnCallConflict
+          ? GATE_ON_CALL_REQUIRED
+          : GATE_TRAVEL_ABOVE_LIMIT;
+      const lifestyleEvidence = lifestyleCode === GATE_TRAVEL_ABOVE_LIMIT
+        ? [travelAboveLimitEvidence(effectivePolicy.maxTravelPct, travelPct), ...activeEvidence]
+        : activeEvidence;
+      return makeReject([lifestyleCode], lifestyleEvidence, { travel_pct_max: travelPct });
     }
   }
 
@@ -1306,27 +1414,22 @@ export function applyGlobalGates(
       && hasProductTechnicalDutyEvidence(d)
       && /\b(?:ai|ml|genai|machine learning|generative ai|llm|large language model|data|analytics?)\b/i.test(`${t}\n${d}`));
 
-  if (!hasDomainRelevance) {
-    if (pendingVerification) {
-      return makeVerification(
-        getPendingVerificationCodes(pendingVerification.reasonCode),
-        [pendingVerification.reason],
-        pendingVerification.facts
-      );
-    }
-    return makeReject(["GATE_NOT_AI_DATA"], ["Axis 2 Failed: No signal found for target domains (AI/Data, RegTech, Bio/Pharma, Quant/FinTech)"]);
-  }
+  // Axis 2 is not a hard gate either. A role without an AI/data signal can
+  // still fit a lane (legal, health, markets) and the candidate's experience;
+  // lane routing decides, and unrouted jobs end as SKIP/UNCLASSIFIED.
+  void hasDomainRelevance;
 
   // ── All deterministic gates passed ──
   if (pendingVerification) {
     return makeVerification(
       getPendingVerificationCodes(pendingVerification.reasonCode),
-      [pendingVerification.reason],
+      [pendingVerification.reason, ...exceptionEvidence],
       pendingVerification.facts
     );
   }
 
-  return makePass(workability.facts);
+  const passed = makePass(workability.facts);
+  return exceptionEvidence.length > 0 ? { ...passed, evidence_quotes: exceptionEvidence } : passed;
 }
 
 function getPendingVerificationCodes(reasonCode?: string): string[] {
@@ -1335,7 +1438,8 @@ function getPendingVerificationCodes(reasonCode?: string): string[] {
   return ["NEEDS_VERIFICATION", "NEEDS_VERIFICATION_OFFICE_DAYS"];
 }
 
-export const MULTI_LANE_SCORECARDS = {
+// One entry per lane in config/lanes/registry.yml; the AI evaluation prompts list every lane from here.
+export const MULTI_LANE_SCORECARDS: Readonly<Record<TargetLaneKey, { description: string; criteria: string }>> = {
   HEALTH_BIO_PHARMA: {
     description: "Life sciences, health and scientific ML",
     criteria: "Requires evidence of pharma, bioinformatics, biotech, or medical research domain AND a substantive AI/ML/data engineering function."
@@ -1351,6 +1455,22 @@ export const MULTI_LANE_SCORECARDS = {
   CORE_AI_DATA: {
     description: "General AI/data platforms and ML architecture",
     criteria: "General lane. Requires evidence of strong AI/Data platforms, ML architecture, or agentic workflows."
+  },
+  SOCIAL_IMPACT_MULTILATERAL: {
+    description: "Multilateral, public-sector and social-impact technology",
+    criteria: "Requires a multilateral, government, non-profit, climate or digital-public-infrastructure context AND a substantive technical, data or AI function."
+  },
+  UNIVERSITY_AI_RESEARCH: {
+    description: "University and research-institute AI research",
+    criteria: "Requires an academic institution, research institute or university laboratory context AND AI, machine learning or research engineering work."
+  },
+  TECHNICAL_PRODUCT_TRANSFORMATION: {
+    description: "Technical product, programme and transformation leadership",
+    criteria: "Requires a product management or ownership, technical programme/project delivery, transformation leadership or product policy function AND a technology, data or AI component. Sector membership alone is insufficient."
+  },
+  INVESTIGATIONS_ENFORCEMENT: {
+    description: "Investigations, enforcement and forensic roles",
+    criteria: "Requires an investigation, enforcement, forensic or fraud/financial-crime investigation function in a regulatory, statutory or compliance context."
   }
 };
 

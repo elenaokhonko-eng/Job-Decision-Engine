@@ -86,7 +86,8 @@ export interface Job {
   gate_version?: string;
   
   // Lane Classification
-  primary_lane?: "CORE_AI_DATA" | "LEGAL_REGTECH" | "HEALTH_BIO_PHARMA" | "INVESTMENT_MARKETS_FINTECH" | string | null;
+  // Lane keys come from config/lanes/registry.yml (TargetLaneKeySchema) or UNCLASSIFIED.
+  primary_lane?: string | null;
   secondary_lanes?: string[]; // Stored as JSONB in DB
   lane_confidence?: string;
   lane_evidence?: string;

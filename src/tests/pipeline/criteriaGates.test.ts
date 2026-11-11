@@ -102,7 +102,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       }
     });
 
-    it("rejects non-technical titles even if they mention compliance without building evidence", () => {
+    it("does not hard-reject a non-technical compliance title; lane routing decides fit", () => {
       const complianceJob = {
         id: "test-nontech",
         title: "Compliance Officer",
@@ -114,10 +114,12 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       };
 
       const result = applyGlobalGates(complianceJob as any);
-      expect(result.status).toBe("HARD_REJECT");
+      expect(result.status).toBe("PASS");
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.rejection_codes).not.toContain("GATE_OUT_OF_SCOPE_DOMAIN");
     });
 
-    it("does not treat investment management context alone as a target technical domain", () => {
+    it("does not hard-reject investment management context without technical evidence (Axis 1 is not a gate)", () => {
       const result = applyGlobalGates({
         id: "investment-interconnection-manager",
         title: "Interconnection Execution Manager",
@@ -128,11 +130,11 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
         employment_type: "PERMANENT",
       } as any);
 
-      expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.status).toBe("PASS");
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
     });
 
-    it("rejects technical roles outside the target domains at Axis 2", () => {
+    it("does not hard-reject technical roles without an AI/data signal (Axis 2 is not a gate)", () => {
       const result = applyGlobalGates({
         id: "network-engineer-out-of-domain",
         title: "Network Engineer",
@@ -144,11 +146,11 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
 
       expect(isTechnicalRole("Network Engineer", "Configure enterprise routing, switching, firewalls, and network operations.").isTechnical).toBe(true);
-      expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("GATE_NOT_AI_DATA");
+      expect(result.status).toBe("PASS");
+      expect(result.rejection_codes).not.toContain("GATE_NOT_AI_DATA");
     });
 
-    it("does not let the Technical Product Manager title override Axis 2", () => {
+    it("leaves a Technical Product Manager without an AI/data signal to lane routing", () => {
       const description = "Own product roadmaps, stakeholder alignment, and delivery planning for enterprise software.";
       const result = applyGlobalGates({
         id: "technical-product-manager-out-of-domain",
@@ -161,8 +163,8 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
 
       expect(isTechnicalRole("Technical Product Manager", description).isTechnical).toBe(true);
-      expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("GATE_NOT_AI_DATA");
+      expect(result.status).toBe("PASS");
+      expect(result.rejection_codes).not.toContain("GATE_NOT_AI_DATA");
     });
   });
 
@@ -349,7 +351,8 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       );
 
       expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("GATE_LIFESTYLE_INCOMPATIBLE");
+      expect(result.rejection_codes).toContain("GATE_TRAVEL_ABOVE_LIMIT");
+      expect(result.rejection_codes).not.toContain("GATE_LIFESTYLE_INCOMPATIBLE");
       expect(result.evidence_quotes.join(" ")).toContain("30% travel");
       expect(minimalTravel.status).toBe("PASS");
       expect(unacceptedMinimalTravel.status).toBe("NEEDS_VERIFICATION");
@@ -423,7 +426,7 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       expect(result.status).toBe("PASS");
     });
 
-    it("does not admit a data-product owner without technical ownership evidence", () => {
+    it("classifies a data-product owner without technical ownership as non-technical but leaves fit to lane routing", () => {
       const title = "Data Product Owner";
       const description = "Coordinate customer feedback, feature prioritization, release schedules, and stakeholder updates.";
       const result = applyGlobalGates({
@@ -436,10 +439,10 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
         employment_type: "PERMANENT",
       } as any);
       expect(isTechnicalRole(title, description).isTechnical).toBe(false);
-      expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
     });
 
-    it("does not treat a data-governance leadership title alone as technical ownership evidence", () => {
+    it("classifies a data-governance title alone as non-technical without hard-rejecting it", () => {
       const title = "Data Governance Manager";
       const description = "Coordinate governance policy committees, privacy training, and stakeholder reporting.";
       const result = applyGlobalGates({
@@ -453,11 +456,11 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
 
       expect(isTechnicalRole(title, description).isTechnical).toBe(false);
-      expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.status).not.toBe("HARD_REJECT");
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
     });
 
-    it("does not count negated data-ownership statements as technical evidence", () => {
+    it("does not count negated data-ownership statements as technical evidence, and does not hard-reject", () => {
       const title = "Data Governance Manager";
       const description = "We are hiring a Data Governance Manager. You will not be responsible for data quality or own data lineage; coordinate governance committees and stakeholder reporting.";
       const result = applyGlobalGates({
@@ -471,11 +474,11 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
 
       expect(isTechnicalRole(title, description).isTechnical).toBe(false);
-      expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.status).not.toBe("HARD_REJECT");
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
     });
 
-    it("admits the reviewed GenAI product-manager role, but not a generic product manager", () => {
+    it("passes GenAI and generic product-manager roles to lane routing instead of hard-rejecting", () => {
       const genAiRole = applyGlobalGates({
         id: "genai-product-manager",
         title: "Senior Product Manager - GenAI",
@@ -523,20 +526,20 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
 
       expect(genAiRole.status).toBe("PASS");
-      expect(strategyOnlyGenAiRole.status).toBe("HARD_REJECT");
-      expect(strategyOnlyGenAiRole.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
-      expect(adoptionOnlyGenAiRole.status).toBe("HARD_REJECT");
-      expect(adoptionOnlyGenAiRole.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
-      expect(negatedTechnicalGenAiRole.status).toBe("HARD_REJECT");
-      expect(negatedTechnicalGenAiRole.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
-      expect(genericRole.status).toBe("HARD_REJECT");
-      expect(genericRole.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+      expect(strategyOnlyGenAiRole.status).not.toBe("HARD_REJECT");
+      expect(strategyOnlyGenAiRole.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+      expect(adoptionOnlyGenAiRole.status).not.toBe("HARD_REJECT");
+      expect(adoptionOnlyGenAiRole.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+      expect(negatedTechnicalGenAiRole.status).not.toBe("HARD_REJECT");
+      expect(negatedTechnicalGenAiRole.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
+      expect(genericRole.status).not.toBe("HARD_REJECT");
+      expect(genericRole.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
     });
 
     it.each([
       "Assess customer demand for generative AI, market positioning, and launch strategy.",
       "Research the market for machine learning products and define the product roadmap.",
-    ])("rejects strategy-only product work despite AI market language: %s", (description) => {
+    ])("classifies strategy-only product work as non-technical without hard-rejecting: %s", (description) => {
       const title = "Senior Product Manager - GenAI";
       const result = applyGlobalGates({
         id: "genai-product-manager-market-research-only",
@@ -549,11 +552,11 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
 
       expect(isTechnicalRole(title, description).isTechnical).toBe(false);
-      expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.status).not.toBe("HARD_REJECT");
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
     });
 
-    it.each(["AI Product Manager", "AI Product Owner"])("does not treat the %s title alone as technical evidence", (title) => {
+    it.each(["AI Product Manager", "AI Product Owner"])("does not treat the %s title alone as technical evidence, and does not hard-reject", (title) => {
       const description = `${title}. Own customer research, roadmap prioritization, launch plans, and stakeholder updates.`;
       const result = applyGlobalGates({
         id: "ai-product-leadership-no-technical-duties",
@@ -566,8 +569,8 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
       } as any);
 
       expect(isTechnicalRole(title, description).isTechnical).toBe(false);
-      expect(result.status).toBe("HARD_REJECT");
-      expect(result.rejection_codes).toContain("NON_TECHNICAL_FUNCTION");
+      expect(result.status).not.toBe("HARD_REJECT");
+      expect(result.rejection_codes).not.toContain("NON_TECHNICAL_FUNCTION");
     });
 
     it("requires technical ownership evidence for a product owner in a data domain", () => {
@@ -789,7 +792,11 @@ describe("Criteria Hard Gates & Workability Unit Tests", () => {
 
     it("keeps a recognised country deciding the hybrid outcome", () => {
       expect(applyGlobalGates(job("Singapore", "HYBRID") as any).status).toBe("PASS");
-      expect(applyGlobalGates(job("San Mateo, California, United States", "HYBRID") as any).rejection_codes).toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
+      // A job located outside the authorized region is a location mismatch, not a work-authorization claim.
+      const foreignOffice = applyGlobalGates(job("San Mateo, California, United States", "HYBRID") as any);
+      expect(foreignOffice.status).toBe("HARD_REJECT");
+      expect(foreignOffice.rejection_codes).toContain("GATE_JOB_LOCATION_MISMATCH");
+      expect(foreignOffice.rejection_codes).not.toContain("WORK_AUTHORIZATION_INCOMPATIBLE");
     });
 
     it("still passes a remote role with no stated country", () => {

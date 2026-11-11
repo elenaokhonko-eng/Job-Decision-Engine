@@ -11,6 +11,7 @@ export const LaneScopeSchema = z
     required_function_concepts: LaneConceptSetSchema.optional(),
     included_domain_concepts: LaneConceptSetSchema.optional(),
     excluded_domain_concepts: LaneConceptSetSchema.optional(),
+    required_sector_concepts: LaneConceptSetSchema.optional(),
   })
   .passthrough();
 
@@ -27,6 +28,7 @@ export const LaneRoutingSchema = z
     minimum_domain_score: z.number().min(0).max(1).optional(),
     minimum_function_score: z.number().min(0).max(1).optional(),
     minimum_semantic_score: z.number().min(0).max(1).optional(),
+    minimum_domain_signals: z.number().int().min(1).max(10).optional(),
     secondary_lane_threshold: z.number().min(0).max(1).optional(),
   })
   .passthrough();

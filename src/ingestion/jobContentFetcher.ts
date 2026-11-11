@@ -4,6 +4,7 @@ import { request as httpRequest } from "node:http";
 import { isIP } from "node:net";
 import { request as httpsRequest } from "node:https";
 import { htmlToPlainText } from "./emailAlertExtractor.js";
+import { isUnknownEmployerName } from "./postingIdentity.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { parseAbsoluteSourceDate, parseRelativePostedText, type PostingDateDerivation } from "./postingFacts.js";
@@ -178,7 +179,9 @@ export function normalizeIdentity(value: string): string {
 export function companyMatches(expected: string, actual: string, hostname: string): boolean {
   const expectedKey = normalizeIdentity(expected);
   const actualKey = normalizeIdentity(actual);
-  if (!expectedKey || expectedKey === "unknown company" || expectedKey === "unknown") return Boolean(actualKey);
+  // An unknown card employer ("", a legacy placeholder, or a stored logo URL / markup
+  // fragment) leaves the title as the identity; the posting must still name an employer.
+  if (isUnknownEmployerName(expected)) return Boolean(actualKey);
   if (actualKey && (expectedKey === actualKey || expectedKey.includes(actualKey) || actualKey.includes(expectedKey))) return true;
   const expectedTokens = expectedKey.split(" ").filter((token) => token.length >= 3);
   const actualHaystack = normalizeIdentity(actualKey + " " + hostname.replace(/\./g, " "));
@@ -1078,10 +1081,9 @@ export function parseGreenhousePosting(
   }, evidence);
 }
 
-/** A discovery card without an employer ("", or the legacy "Unknown Company" placeholder). */
+/** A discovery card without an employer ("", a legacy placeholder, or a stored logo URL / markup fragment). */
 function expectedEmployerUnknown(companyName: string): boolean {
-  const key = normalizeIdentity(companyName);
-  return !key || key === "unknown company" || key === "unknown";
+  return isUnknownEmployerName(companyName);
 }
 
 /**

@@ -11,15 +11,17 @@ describe("P1-07: Real-Job Calibration, Counterfactual & Yield Suite", () => {
     "SOCIAL_IMPACT_MULTILATERAL",
     "UNIVERSITY_AI_RESEARCH",
   ];
+  // Routing-only lanes: registered for lane routing, no discovery source plan yet.
+  const routingOnlyLanes = ["TECHNICAL_PRODUCT_TRANSFORMATION", "INVESTIGATIONS_ENFORCEMENT"];
+  const registryLanes = [...expectedLanes, ...routingOnlyLanes];
 
-  it("should verify the six-lane registry has valid prototype queries", () => {
+  it("should verify the lane registry has valid prototype queries", () => {
     const config = loadLanesConfig();
     const laneKeys = Object.keys(config.lanes);
 
-    expect(laneKeys).toEqual(expect.arrayContaining(expectedLanes));
-    expect(laneKeys).toHaveLength(expectedLanes.length);
+    expect(laneKeys).toEqual(registryLanes);
 
-    for (const lane of expectedLanes) {
+    for (const lane of registryLanes) {
       expect(config.lanes[lane].threshold).toBeGreaterThan(0.2);
       expect(config.lanes[lane].prototype_query.length).toBeGreaterThan(20);
       expect(config.lanes[lane].keywords.length).toBeGreaterThan(3);
