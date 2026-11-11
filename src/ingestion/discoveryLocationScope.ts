@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { load } from "js-yaml";
+import { configPath } from "../config/configPaths.js";
 import { z } from "zod";
 import type { ExtractedJob } from "../contracts/index.js";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
@@ -138,7 +139,7 @@ function territoryPolicy(policyPath: string): TerritoryPolicy {
 
 /** The `location_scope` block of the source plan, or null when the plan has none. */
 export function loadLocationScopeConfig(
-  planPath = path.resolve(process.cwd(), "config/source-plans/six_lane_sources.yml"),
+  planPath = configPath("source-plans", "six_lane_sources.yml"),
 ): LocationScopeConfig | null {
   const plan = readYaml(planPath);
   const block = plan !== null && typeof plan === "object" && !Array.isArray(plan)
@@ -153,8 +154,8 @@ export function loadLocationScopeConfig(
  * widen or narrow discovery.
  */
 export function loadDiscoveryLocationScope(
-  planPath = path.resolve(process.cwd(), "config/source-plans/six_lane_sources.yml"),
-  policyPath = path.resolve(process.cwd(), "config/policies/workability.yml"),
+  planPath = configPath("source-plans", "six_lane_sources.yml"),
+  policyPath = configPath("policies", "workability.yml"),
 ): DiscoveryLocationScope | null {
   const config = loadLocationScopeConfig(planPath);
   if (config === null) return null;

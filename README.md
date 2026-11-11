@@ -129,22 +129,22 @@ Job Decision Engine supports two distribution modes:
    cd Job-Decision-Engine
    npm ci
    ```
-2. Configure your environment:
+2. Run the one-command setup:
    ```bash
-   cp .env.example .env.local
-   # Edit .env.local with your DATABASE_URL, GEMINI_API_KEY, etc.
+   npm run setup
    ```
-3. Run migrations and initialize spaces:
-   ```bash
-   npm run migrate
-   npm run embeddings:registry:init
-   ```
-4. Run the desktop app in development:
+   It checks your Node version, asks for a PostgreSQL connection string, applies the migration chain, seeds embedding spaces and lanes, verifies your AI provider key, and writes `.env.local`.
+
+   Any PostgreSQL server works — Neon, Supabase, Railway, RDS, or self-hosted. No database yet? `npm run setup -- --docker` starts one locally.
+3. Run the desktop app in development:
    ```bash
    npm run desktop:dev
    ```
 
+**AI providers:** Gemini and OpenAI are supported directly. Any OpenAI-compatible endpoint (Ollama, Groq, Together, OpenRouter, vLLM, LM Studio) works through `--provider openai-compatible --base-url <url>`.
+
 See [Quickstart Guide](docs/quickstart.md) for complete instructions.
+
 
 ---
 

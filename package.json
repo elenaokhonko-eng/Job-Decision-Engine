@@ -23,6 +23,7 @@
     "desktop:e2e-gate": "tsx scripts/check_desktop_e2e_gate.ts",
     "dev:setup": "tsx scripts/dev_setup.ts",
     "db:init": "tsx scripts/db_init.ts",
+    "setup": "tsx scripts/setup.ts",
     "eval:run": "tsx scripts/evaluate_jobs.ts",
     "eval:requeue-manual-review": "tsx scripts/requeue_manual_review_evaluations.ts",
     "profile:import": "tsx scripts/import_profile.ts",
@@ -79,6 +80,15 @@
     "asar": true,
     "asarUnpack": [
       "desktop/electron/dist-backend/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "config",
+        "to": "config",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "generateUpdatesFilesForAllChannels": true,
     "win": {

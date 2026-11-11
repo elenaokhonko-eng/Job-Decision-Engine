@@ -53,7 +53,9 @@ Developers and technical users can clone or fork the repository and run the engi
 ### 1. Prerequisites
 - Node.js 20+ or 22+
 - npm or pnpm
-- A Neon PostgreSQL database
+- npm or pnpm
+- PostgreSQL — Neon, Supabase, Railway, RDS, self-hosted, or local Docker (no single provider is required)
+
 
 ### 2. Setup Environment
 ```bash
@@ -68,30 +70,37 @@ npm ci
 cp .env.example .env.local
 ```
 
-Edit `.env.local` with your credentials:
+Edit `.env.local` with your credentials, or let `npm run setup` write them for you:
 ```env
-# Neon PostgreSQL database connections
-DATABASE_URL=postgresql://user:password@ep-xyz-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require
-DATABASE_URL_UNPOOLED=postgresql://user:password@ep-xyz.us-east-2.aws.neon.tech/neondb?sslmode=require
+# Any PostgreSQL server: Neon, Supabase, Railway, RDS, self-hosted, or Docker.
+# Use the pooled URL for the app and the direct (unpooled) URL for migrations.
+DATABASE_URL=[REDACTED]
+DATABASE_URL_UNPOOLED=[REDACTED]
 
 # AI Provider API Keys (at least one required)
-GEMINI_API_KEY=your_gemini_api_key_here
-# OPENAI_API_KEY=your_openai_api_key_here
+GEMINI_API_KEY=[REDACTED]
+# OPENAI_API_KEY=[REDACTED]
 
-# User Consents (required for AI evaluation and document synthesis)
-ALLOW_AI_EVALUATION=true
-ALLOW_DOCUMENTS=true
-
+# Any OpenAI-compatible endpoint (Ollama, Groq, Together, OpenRouter, vLLM, LM Studio)
+# OPENAI_COMPATIBLE_BASE_URL="http://127.0.0.1:11434/v1"
+# OPENAI_COMPATIBLE_API_KEY="local"
 ```
 
-### 3. Initialize Database & Run Migrations
+
+### 3. Initialize Database, Spaces & Lanes
 ```bash
-# Run schema migrations (001 through 046)
-npm run migrate
-
-# Initialize embedding spaces and model routes
-npm run embeddings:registry:init
+# One command: migrates, seeds embedding spaces and lanes, verifies your provider
+npm run setup
 ```
+
+Prefer to do it by hand? The individual steps are:
+
+```bash
+npm run db:init    # apply the migration chain only
+```
+
+`npm run setup` is the supported path — it also seeds embedding spaces and the six lanes, which `db:init` does not.
+
 
 ### 4. Run the Desktop Application
 ```bash

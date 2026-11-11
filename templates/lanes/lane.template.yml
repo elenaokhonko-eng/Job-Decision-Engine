@@ -1,0 +1,83 @@
+# Blank lane template.
+#
+# Copy this file to config/lanes/<your_lane>.yml, give it a unique lane_key, and
+# register it in config/lanes/registry.yml:
+#
+#   lanes:
+#     - lane_key: YOUR_LANE
+#       config_file: your_lane.yml
+#       enabled_by_default: true
+#
+# Then seed it into the database with:
+#   npm run sources:sync      # reload source plugins
+#   npx tsx scripts/workspace_lanes.ts --help
+#
+# Every field below is required unless it is commented out.
+
+schema_version: "2.2.0"
+lane_key: YOUR_LANE
+display_name: "Your Lane Name"
+description: "One sentence describing the work this lane should surface."
+
+scope:
+  # Function concepts the role must involve. These are normalised to spaces
+  # (AI_ENGINEERING -> "ai engineering") when compared.
+  required_function_concepts:
+    any:
+      - SOFTWARE_ENGINEERING
+      - TECHNICAL_PROJECT_DELIVERY
+
+  # Domain concepts that make a posting relevant to this lane.
+  included_domain_concepts:
+    any:
+      - YOUR_DOMAIN
+      - YOUR_OTHER_DOMAIN
+
+  # Phrases that disqualify a posting for this lane. Quoted phrases are matched
+  # literally; unquoted values are concept codes.
+  excluded_domain_concepts:
+    any:
+      - "your excluded phrase"
+
+# Example postings used for the semantic comparison. Two or three is usually
+# enough; weight lets you favour the most representative one.
+prototypes:
+  - prototype_key: your_lane_primary
+    text: "A short description of the work you actually want."
+    weight: 1.0
+  - prototype_key: your_lane_secondary
+    text: "A second flavour of the same work."
+    weight: 0.9
+
+routing:
+  # Scores are 0..1. Raising these narrows the lane; lowering widens it.
+  minimum_domain_score: 0.60
+  minimum_function_score: 0.60
+  minimum_semantic_score: 0.35
+  secondary_lane_threshold: 0.30
+
+sourcing:
+  # Source keys must match config/source-plugins/<key>.yml (lowercase in the plan).
+  enabled_sources:
+    - GREENHOUSE
+    - ASHBY
+    - LEVER
+    - HIMALAYAS
+  # Used for discovery search against sources that support queries.
+  query_sets:
+    - "remote your role title"
+
+budget:
+  # AI interpretations allowed for this lane per pipeline run. Costs money, so
+  # keep it low until the lane proves useful.
+  maximum_ai_interpretations_per_run: 3
+
+documents:
+  include_criteria_snapshot: true
+
+positive_concepts:
+  - your positive phrase
+negative_concepts:
+  - your negative phrase
+
+semantic_threshold: 0.35
