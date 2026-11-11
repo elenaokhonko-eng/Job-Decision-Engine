@@ -10,6 +10,7 @@ import {
   findFirstNonNegatedMatch,
   findAllMatches,
 } from './clauseAnalysis.js';
+import { neutralizeWorkplacePerkPhrases } from '../pipeline/workplacePerkPhrases.js';
 
 export { isOccurrenceNegated };
 
@@ -107,9 +108,13 @@ function expandShortMatch(description: string, start: number, end: number): Matc
   return best;
 }
 
-function findFirstMatch(description: string, patterns: RegExp[]): MatchInfo | null {
+/**
+ * `matchText` must have the same length as `description` (for example the
+ * perk-neutralised text); the quote and offsets always come from `description`.
+ */
+function findFirstMatch(description: string, patterns: RegExp[], matchText: string = description): MatchInfo | null {
   for (const pattern of patterns) {
-    const match = description.match(pattern);
+    const match = matchText.match(pattern);
     if (!match || typeof match.index !== 'number') {
       continue;
     }
@@ -386,7 +391,7 @@ export function extractDeterministicRequirements(
   const officeDays = findFirstMatch(description, [
     /\b([1-5])\s*days?\s*(?:a|per|\/)?\s*week\s*(?:in|on)?\s*(?:the)?\s*(?:office|on[- ]?site)\b/i,
     /\b(?:office|on[- ]?site)\s*[\w\s]{0,30}?\b([1-5])\s*days?\b/i,
-  ]);
+  ], neutralizeWorkplacePerkPhrases(description));
   if (officeDays) {
     const dayMatch = officeDays.quote_text.match(/([1-5])/);
     const days = dayMatch ? Number(dayMatch[1]) : null;

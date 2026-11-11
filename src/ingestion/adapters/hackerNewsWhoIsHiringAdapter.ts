@@ -26,6 +26,7 @@ import {
   extractExplicitWorkerTerritoryRequirements,
   type WorkabilityPolicy,
 } from "../../pipeline/workabilityPolicy.js";
+import { neutralizeWorkplacePerkPhrases } from "../../pipeline/workplacePerkPhrases.js";
 import {
   BaseSourceAdapter,
   type AdapterFetchOptions,
@@ -314,7 +315,8 @@ function workModeFrom(text: string): ParsedHiringPost["workMode"] {
   const remote = REMOTE_PATTERN.test(text) && !REMOTE_NEGATED_PATTERN.test(text);
   if (remote) return "REMOTE";
   if (HYBRID_PATTERN.test(text)) return "HYBRID";
-  if (ONSITE_PATTERN.test(text)) return "ONSITE";
+  // A workplace perk ("Onsite gym") is neutral, never on-site evidence.
+  if (ONSITE_PATTERN.test(neutralizeWorkplacePerkPhrases(text))) return "ONSITE";
   return "UNKNOWN";
 }
 
@@ -368,7 +370,7 @@ export function parseWhoIsHiringComment(item: HnItem, threadId: number): ParsedC
         salaries.push(segment);
         continue;
       }
-      if (!hasRole && WORK_MODE_PATTERN.test(segment)) {
+      if (!hasRole && WORK_MODE_PATTERN.test(neutralizeWorkplacePerkPhrases(segment))) {
         // A bare "REMOTE"/"ONSITE" sets the work mode only; a qualified one ("Remote (EU)") is also location text.
         if (!isBareWorkModeSegment(segment)) locations.push(segment);
         continue;

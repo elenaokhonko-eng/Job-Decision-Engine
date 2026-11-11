@@ -3,13 +3,14 @@ import pg from "pg";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { type WorkspaceContext } from "../workspace/context.js";
 import { extractHybridAttendance, type HybridAttendanceFacts } from "./criteria.js";
+import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
 
 const EXTRACTOR_VERSION = "work_mode_enrichment_v1";
 const FETCH_TIMEOUT_MS = 15_000;
 
 function isSingaporeUnknownWorkModeEligible(location: string | null | undefined, description: string | null | undefined): boolean {
   const loc = String(location || "").toLowerCase();
-  const desc = String(description || "").toLowerCase();
+  const desc = neutralizeWorkplacePerkPhrases(String(description || "").toLowerCase());
   const isSingapore = /\b(?:singapore|sg)\b/i.test(loc)
     || /\b(?:based\s+in\s+singapore|location\s*:\s*singapore|office\s+in\s+singapore)\b/i.test(desc);
   const explicitOnsite = /\b(?:100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(desc)
@@ -95,7 +96,8 @@ export function extractWorkModeFromText(text: string): {
   attendance_basis: string;
   evidence_quote: string | null;
 } {
-  const d = (text || "").toLowerCase();
+  // Workplace perks ("onsite gym", "on-site cafe") are neutral, never work-mode evidence.
+  const d = neutralizeWorkplacePerkPhrases((text || "").toLowerCase());
 
   // 1. Check explicit on-site presence or office days >= 4
   const officeDaysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)

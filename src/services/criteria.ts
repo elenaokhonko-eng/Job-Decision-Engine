@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { RawJob } from "../db/db.ts";
 import { normalizeWorkMode } from "../pipeline/workModeNormalizer.js";
+import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
 import { isOccurrenceNegated } from "../requirements/clauseAnalysis.js";
 
 export { normalizeWorkMode };
@@ -460,12 +461,14 @@ export function evaluateWorkability(
   // Source adapters frequently leave workplace_type UNKNOWN while the posting
   // itself says "Full-time · Onsite" or "Location: On-site". Those are still
   // explicit work-location evidence and must be evaluated here.
-  const officeDaysMatch = d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
-    || d.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
-  const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(d)
-    || /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i.test(d)
-    || /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i.test(d)
-    || /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i.test(d)
+  // Workplace perks ("onsite gym", "on-site cafe") are neutral, never work-mode evidence.
+  const workModeText = neutralizeWorkplacePerkPhrases(d);
+  const officeDaysMatch = workModeText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
+    || workModeText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
+  const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(workModeText)
+    || /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i.test(workModeText)
+    || /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i.test(workModeText)
+    || /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i.test(workModeText)
     || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek);
 
   if (wp !== "UNKNOWN" && !effectivePolicy.allowedWorkModes.includes(wp)) {
@@ -639,7 +642,7 @@ export function evaluateWorkability(
     "office expectations", "workplace arrangement", "workplace expectations",
     "office to be evaluated", "partner discussions", "location flexible", "location tbd"
   ];
-  if (ambiguousClues.some(c => d.includes(c) || loc.includes(c))) {
+  if (ambiguousClues.some(c => workModeText.includes(c) || loc.includes(c))) {
     return unknownWorkModeOutcome();
   }
 
@@ -1054,7 +1057,9 @@ export function applyGlobalGates(
     `\\b(\\d+)\\s*days?\\s*(?:per\\s*week|a\\s*week|\\/week)?\\s*(?:in|at)?\\s*(?:the\\s*)?(?:office|on-?site)\\b`,
     "i"
   );
-  const configuredOfficeDaysMatch = d.match(configuredOfficeDaysRegex);
+  // Workplace perks ("in-office snacks", "onsite gym") are neutral for office-day reads.
+  const workModeText = neutralizeWorkplacePerkPhrases(d);
+  const configuredOfficeDaysMatch = workModeText.match(configuredOfficeDaysRegex);
   if (configuredOfficeDaysMatch && (Number(configuredOfficeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek
     || Number(configuredOfficeDaysMatch[1]) > effectivePolicy.maxOfficeDaysPerWeek)) {
     return makeReject(
@@ -1066,8 +1071,8 @@ export function applyGlobalGates(
       }
     );
   }
-  const hardOnsiteKeyword = hardOnsiteKw.find((kw) => d.includes(kw));
-  const hardOnsiteMatch = d.match(hardOnsiteRegex);
+  const hardOnsiteKeyword = hardOnsiteKw.find((kw) => workModeText.includes(kw));
+  const hardOnsiteMatch = workModeText.match(hardOnsiteRegex);
   const hardOnsiteDays = hardOnsiteKeyword?.match(/\b([45])\s*days?\b/i)?.[1] ?? hardOnsiteMatch?.[1];
   const hardOnsiteAllowedByAnswer =
     hardOnsiteDays !== undefined && effectivePolicy.maxOfficeDaysPerWeek >= Number(hardOnsiteDays);
@@ -1082,9 +1087,9 @@ export function applyGlobalGates(
     "office expectations", "workplace arrangement", "workplace expectations",
     "office to be evaluated", "partner discussions", "location flexible", "location tbd"
   ];
-  const hasExplicitDays = hardOnsiteKw.some(k => d.includes(k))
-    || hardOnsiteRegex.test(d)
-    || /\b[1-5]\s*(?:day|days)\s*(?:per week|a week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i.test(d)
+  const hasExplicitDays = hardOnsiteKw.some(k => workModeText.includes(k))
+    || hardOnsiteRegex.test(workModeText)
+    || /\b[1-5]\s*(?:day|days)\s*(?:per week|a week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office/i.test(workModeText)
     || d.includes("1 day/week") || d.includes("2 days/week") || d.includes("3 days/week")
     || d.includes("remote-first") || d.includes("fully remote") || d.includes("work from home");
 
@@ -1097,7 +1102,7 @@ export function applyGlobalGates(
     || /\b(remote|remote-first|fully remote|work from home)\b/i.test(d)
     || wp === "REMOTE"
     || wp === "HYBRID";
-  if (!hasExplicitDays && ambiguousOfficeKw.some(k => d.includes(k)) && !pendingVerification && !hasAcceptedFlexibleWorkMode) {
+  if (!hasExplicitDays && ambiguousOfficeKw.some(k => workModeText.includes(k)) &&!pendingVerification && !hasAcceptedFlexibleWorkMode) {
     pendingVerification = {
       reason: "Workplace model ambiguous/unspecified; needs manual verification",
       facts: { office_days_min: null, office_days_max: null },
