@@ -204,3 +204,83 @@ export function careerSiteAlertRaw(options: { readonly senderName: string }): st
   ].join("\r\n");
   return Buffer.from(mime, "utf8").toString("base64url");
 }
+
+/** One card of the LinkedIn-layout fixture; every name is invented. */
+export interface LinkedInLayoutCard {
+  readonly jobId: string;
+  readonly title: string;
+  /** The "Company · Location" subtitle line, or null when the card has none. */
+  readonly subtitle: string | null;
+  /** The company-logo image's alt text ("" for an empty alt). */
+  readonly logoAlt: string;
+}
+
+/**
+ * Non-posting links a LinkedIn or MyCareersFuture alert carries: the alert
+ * itself ("Your job alert for ..."), Job Alert Manager with an alert id,
+ * search results and a MyCareersFuture "remove this alert" link. None of them
+ * names one posting.
+ */
+export const LINKEDIN_ALERT_MANAGEMENT_LINKS = [
+  { url: "https://www.linkedin.com/comm/jobs/alerts?trk=eml-jobalert", text: "Your job alert for synthetic legal technology" },
+  { url: "https://www.linkedin.com/jobs/jam/manage/7300000001?trk=eml", text: "Synthetic legal technology" },
+  { url: "https://www.linkedin.com/comm/jobs/jam/manage/7300000002?trk=eml", text: "Synthetic pharma data AI architect" },
+  { url: "https://www.linkedin.com/comm/jobs/search-results/?currentJobId=4400000001&keywords=synthetic", text: "See all jobs" },
+  { url: "https://www.mycareersfuture.gov.sg/jobalert/remove/0123456789abcdef0123456789abcdef", text: "Synthetic pharma data AI architect" },
+] as const;
+
+/** A long per-recipient tracking value, so each link is close to a real one (~900 characters). */
+function linkedInTracking(variant: string): string {
+  return `?trackingId=${variant}%3D%3D&amp;refId=${variant}&amp;lipi=urn%3Ali%3Apage%3Aemail_email_job_alert_digest_01`
+    + `&amp;midToken=${"AQ" + "x".repeat(120)}&amp;midSig=${"0" + "y".repeat(40)}&amp;trk=eml-email_job_alert_digest_01-job_card-0-${variant}`
+    + `&amp;trkEmail=eml-email_job_alert_digest_01-job_card-0-${variant}-null-${"z".repeat(30)}&amp;eid=${"e".repeat(40)}`
+    + `&amp;otpToken=${"0123456789abcdef".repeat(14)}`;
+}
+
+function linkedInLayoutCardHtml(card: LinkedInLayoutCard, index: number): string {
+  const link = (variant: string) => `https://www.linkedin.com/comm/jobs/view/${card.jobId}/${linkedInTracking(variant + index)}`;
+  const style = "-webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; mso-table-lspace: 0pt; mso-table-rspace: 0pt; ";
+  const logo = `https://media.example.com/dms/image/v2/C4E0BAQsynthetic${index}/company-logo_100_100/company-logo_100_100/0/16314256248${index}/synthetic_${index}_logo`
+    + `?e=2147483647&amp;v=beta&amp;t=${"Tq".repeat(20)}`;
+  return [
+    `<tr><td><table width="100%" style="${style}"><tbody><tr>`,
+    `<td width="56" style="${style}width: 56px;"><a href="${link("logo")}" target="_blank" style="${style}color: #0a66c2;">`,
+    `<img class="inline-block relative bg-color-entity-ghost-background clip-path-circle-8" src="${logo}" alt="${card.logoAlt}" style="${style.repeat(3)}height: 48px; width: 48px;" width="48" height="48"></a></td>`,
+    `<td style="${style}"><a href="${link("card")}" target="_blank" style="${style}color: #0a66c2;"><table width="100%"><tbody>`,
+    `<tr><td style="${style}"><a href="${link("title")}" target="_blank" style="${style}">${card.title}</a></td></tr>`,
+    card.subtitle === null ? "" : `<tr><td style="${style}"><p style="${style}">${card.subtitle}</p></td></tr>`,
+    "<tr><td><p>SGD 9K-12K / month</p></td></tr>",
+    `<tr><td><table><tbody><tr><td width="16"><img src="https://static.example.com/badge-${index}.png" alt="" width="16" height="16"></td><td><p>Actively recruiting</p></td></tr></tbody></table></td></tr>`,
+    "</tbody></table></a></td>",
+    "</tr></tbody></table></td></tr>",
+  ].join("\n");
+}
+
+/**
+ * Synthetic LinkedIn job-alert email in the layout LinkedIn sends: a logo
+ * cell (a company-logo image with a long licdn-style `src`) and a card cell
+ * holding the title link and a "Company · Location" subtitle, all wrapped in
+ * long tracking links, followed by alert-management links. HTML only: the
+ * card markup is what carries the employer.
+ */
+export function linkedInLayoutAlertRaw(cards: readonly LinkedInLayoutCard[]): string {
+  const html = [
+    "<html><body><table><tbody>",
+    `<tr><td><h2>Your job alert for synthetic legal technology</h2><p>${cards.length} new jobs match your preferences.</p></td></tr>`,
+    ...cards.map(linkedInLayoutCardHtml),
+    `<tr><td>${LINKEDIN_ALERT_MANAGEMENT_LINKS.map((link) => `<a href="${link.url.replace(/&/g, "&amp;")}">${link.text}</a>`).join(" ")}</td></tr>`,
+    "</tbody></table></body></html>",
+  ].join("\n");
+  const mime = [
+    "MIME-Version: 1.0",
+    "Subject: Synthetic legal technology: new jobs",
+    "From: LinkedIn Job Alerts <jobalerts@example.com>",
+    "To: candidate@example.com",
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    Buffer.from(html, "utf8").toString("base64").replace(/.{76}/g, "$&\r\n"),
+    "",
+  ].join("\r\n");
+  return Buffer.from(mime, "utf8").toString("base64url");
+}

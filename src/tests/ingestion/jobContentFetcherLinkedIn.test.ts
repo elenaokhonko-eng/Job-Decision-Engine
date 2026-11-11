@@ -81,6 +81,57 @@ describe("fetchJobContent for LinkedIn URLs through SearchAPI", () => {
     expect(result.kind).toBe("IDENTITY_CONFLICT");
   });
 
+  describe("with a legacy card employer that is a logo URL fragment", () => {
+    // Synthetic shapes of the values older Gmail cards stored as the employer.
+    const LOGO_EMPLOYERS = [
+      "logo_100_100/company-logo_100_100/0/1631425624819/example_analytics_logo?e=2147483647&v=beta&t=abc",
+      "logo_100_100/B56ZexampleQ-/0/1750812406096?e=2147483647&t=abc\" alt=\"Exa",
+      "https://media.example.com/dms/image/v2/C4E0BAQ/company-logo_100_100/0/1/example_logo.png",
+    ];
+
+    it.each(LOGO_EMPLOYERS)("treats the employer as unknown and matches on the title alone: %s", async (companyName) => {
+      const { deps } = dependencies(detail());
+
+      const result = await fetchJobContent(`https://www.linkedin.com/jobs/view/${JOB_ID}`, { ...EXPECTED, companyName }, deps);
+
+      expect(result.kind).toBe("COMPLETE");
+      if (result.kind !== "COMPLETE") return;
+      expect(result.posting.companyName).toBe("Example Analytics");
+    });
+
+    it("still conflicts when the title differs", async () => {
+      const { deps } = dependencies(detail({ title: "Different Role" }));
+
+      const result = await fetchJobContent(
+        `https://www.linkedin.com/jobs/view/${JOB_ID}`,
+        { ...EXPECTED, companyName: LOGO_EMPLOYERS[0]! },
+        deps,
+      );
+
+      expect(result.kind).toBe("IDENTITY_CONFLICT");
+    });
+
+    it("still conflicts when LinkedIn names no employer at all", async () => {
+      const { deps } = dependencies(detail({ company_name: "" }));
+
+      const result = await fetchJobContent(
+        `https://www.linkedin.com/jobs/view/${JOB_ID}`,
+        { ...EXPECTED, companyName: LOGO_EMPLOYERS[0]! },
+        deps,
+      );
+
+      expect(result.kind).toBe("IDENTITY_CONFLICT");
+    });
+  });
+
+  it("keeps the conflict when the card names a real employer that differs", async () => {
+    const { deps } = dependencies(detail({ company_name: "Other Holdings" }));
+
+    const result = await fetchJobContent(`https://www.linkedin.com/jobs/view/${JOB_ID}`, EXPECTED, deps);
+
+    expect(result.kind).toBe("IDENTITY_CONFLICT");
+  });
+
   it("keeps a thin LinkedIn description blocked rather than complete", async () => {
     const { deps } = dependencies(detail({ description: "Short teaser text." }));
 
