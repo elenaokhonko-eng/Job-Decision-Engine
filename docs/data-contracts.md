@@ -30,6 +30,7 @@ Canonical source names use uppercase values from `SourceNameSchema`. Schema test
 
 `scripts/seed_workspace_preferences.ts` stays the staging-only seeder: it writes only to `STAGE3_STAGING_DATABASE_URL` and refuses `DATABASE_URL`. A production change to the active `stage3` or `lane_intent` revision goes through `scripts/activate_workspace_preferences.ts` (logic in `src/policy/preferenceActivation.ts`), with these guards:
 
+- **Explicit target database.** The script loads no `.env` or `.env.local`. The URL comes only from `--env=<file>`, which is parsed and never merged into the process environment, or, without `--env`, from the environment the caller set (for example `npx tsx --env-file=<file>`). Within that one source, `DATABASE_URL_UNPOOLED` wins over `DATABASE_URL`. Every dry run and apply prints `targetDatabase`: host, port, `current_database()`, the cluster `system_identifier` (`pg_control_system()`, null when the role cannot read it), the variable name and the source. Credentials are never printed.
 - **Dry run by default.** The dry run opens a `READ ONLY` transaction, so it cannot write. It prints:
   - the active revision id, number and `preference_hash` of each domain, and the proposed hash;
   - the changed field paths, with list counts (`itemsAdded`, `itemsRemoved`, `reordered`). Values are printed only with `--show-values`;
@@ -43,45 +44,52 @@ Canonical source names use uppercase values from `SourceNameSchema`. Schema test
   - `PREFERENCES_PROD_ACTIVATION_ALLOWED=true` in the environment;
   - `--expect-diff-hash=<hash>`, equal to the hash recomputed under lock;
   - `--operator=<who>` and `--reason=<why>`;
-  - the OWNER role;
+  - an OWNER membership for the resolved workspace;
   - migration 108.
 
-  The diff hash binds the action, the workspace and user, each domain's starting revision id and hash, and the target content hash. A different file, a different selection, or any activation between the dry run and the apply is therefore refused with `DIFF_HASH_MISMATCH`.
-- **One transaction.** One transaction takes an advisory lock and `FOR UPDATE` on the active pointers, then saves the revision (`saveWorkspacePreferenceRevision`, which reuses an identical stored revision), moves the active pointer (the migration-075 trigger writes the `SWITCH` event), verifies the active hash and writes one `workspace_user_preference_change_audit` row per domain. Any failure rolls back everything. Revisions are never updated or deleted, and audit rows are append-only.
+  `PREFERENCES_PROD_ACTIVATION_ALLOWED` is read from the process environment only, never from the `--env` file.
+
+  The OWNER check is a target-membership check, not authentication. It confirms that `WORKSPACE_KEY` / `WORKSPACE_USER_KEY` resolve to an active OWNER membership in the target database. Anyone who holds the database credentials can pass it, so access to those credentials is the real control.
+
+  The diff hash binds the action, the target database (host, port, database name and `system_identifier`), the workspace and user, each domain's starting revision id and hash, and the target content hash. Each of the following is therefore refused with `DIFF_HASH_MISMATCH`:
+  - an apply against a different database than the dry run, including a different host for the same cluster;
+  - a different file or a different selection;
+  - any activation between the dry run and the apply.
+- **One transaction.** One transaction takes an advisory lock and `FOR UPDATE` on the active pointers, then saves the revision (`saveWorkspacePreferenceRevision`, which reuses an identical stored revision), moves the active pointer (the migration-075 trigger writes the `SWITCH` event), verifies the active hash and writes one `workspace_user_preference_change_audit` row per domain. Any failure rolls back everything. Revisions are never updated or deleted. Audit rows are append-only: row triggers reject UPDATE and DELETE, and a statement trigger rejects TRUNCATE.
 - **Rollback.** `--rollback-to=<revision id>` re-activates a stored revision of the same workspace user, under the same guards and with its own diff hash. It creates no revision. The old revision must still validate against today's schema.
 
 `workspace_user_preference_change_audit` (migration 108) records the domain, `APPLY` or `ROLLBACK`, the previous and active revision ids and hashes, the activation event id, the diff hash, the operator, the reason, the changed field paths (never values), the tool and the database role.
 
 ### Runbook
 
-Pass the private `work_preferences.json` with `--file` (the default is `$PROFILE_DIR/work_preferences.json`, else `private/profile/work_preferences.json`). `<prod env file>` holds the production `DATABASE_URL_UNPOOLED` or `DATABASE_URL`. Do not paste preference values into `--reason`.
+Pass the private `work_preferences.json` with `--file` (the default is `$PROFILE_DIR/work_preferences.json`, else `private/profile/work_preferences.json`). `<prod env file>` holds the production `DATABASE_URL_UNPOOLED` or `DATABASE_URL`. Use the same `--env` file for the dry run and the apply, and check that `targetDatabase` in the output is production. Do not paste preference values into `--reason`.
 
 ```bash
 # 1. Dry run (read-only). Note workspaceId and diffHash.
-npx tsx --env-file=<prod env file> scripts/activate_workspace_preferences.ts \
+npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> \
   --file=<path to private work_preferences.json> --only=mobility.onsite_exception_employers
 
 # Optional: the same dry run with values, on a private terminal only.
-npx tsx --env-file=<prod env file> scripts/activate_workspace_preferences.ts \
+npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> \
   --file=<path to private work_preferences.json> --only=mobility.onsite_exception_employers --show-values
 
 # 2. Apply exactly what was reviewed.
-PREFERENCES_PROD_ACTIVATION_ALLOWED=true npx tsx --env-file=<prod env file> scripts/activate_workspace_preferences.ts \
+PREFERENCES_PROD_ACTIVATION_ALLOWED=true npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> \
   --file=<path to private work_preferences.json> --only=mobility.onsite_exception_employers \
   --apply --confirm-workspace=<workspaceId> --expect-diff-hash=<diffHash> \
   --operator=<your name> --reason="<why, without values>"
 
 # 3. Rollback: dry run, then apply with the rollback diff hash.
 #    <previous revision id> is domains[].activeRevisionId from step 1.
-npx tsx --env-file=<prod env file> scripts/activate_workspace_preferences.ts --rollback-to=<previous revision id>
-PREFERENCES_PROD_ACTIVATION_ALLOWED=true npx tsx --env-file=<prod env file> scripts/activate_workspace_preferences.ts \
+npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> --rollback-to=<previous revision id>
+PREFERENCES_PROD_ACTIVATION_ALLOWED=true npx tsx scripts/activate_workspace_preferences.ts --env=<prod env file> \
   --rollback-to=<previous revision id> --apply --confirm-workspace=<workspaceId> \
   --expect-diff-hash=<rollback diffHash> --operator=<your name> --reason="<why>"
 ```
 
 In PowerShell, set `$env:PREFERENCES_PROD_ACTIVATION_ALLOWED = 'true'` before step 2 and remove it afterwards with `Remove-Item Env:PREFERENCES_PROD_ACTIVATION_ALLOWED`.
 
-**After activation.** New gate, routing and decision runs read the new revision at once. Stored rows are not re-processed automatically, so run the dry run's `followUps`, each from its own reviewed dry run:
+**After activation.** New gate, routing and decision runs read the new revision at once. Stored rows are not re-processed automatically, so run the dry run's `followUps`, each from its own reviewed dry run. The re-gate step needs PR #173's scripts, `scripts/replay_hard_gate_policy_2026_11.ts` and `scripts/regate_job_ids.ts`. Until #173 is merged, main has no scoped re-gate for these changes, so do not activate a stage3 change that needs one before #173 is deployed.
 
 | Changed path | Follow-up |
 |---|---|

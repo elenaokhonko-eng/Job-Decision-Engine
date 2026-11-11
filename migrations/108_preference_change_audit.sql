@@ -5,7 +5,8 @@
 -- not who approved it, why, or which reviewed diff it applied. This table adds that, one row per
 -- preference domain per apply or rollback, written in the same transaction as the activation. It holds
 -- revision ids, preference hashes, the reviewed diff hash, the operator, the reason and the names of
--- changed fields; never preference values. Rows are append-only: UPDATE and DELETE are rejected.
+-- changed fields; never preference values. Rows are append-only: UPDATE, DELETE and TRUNCATE are
+-- rejected.
 --
 -- Additive only. Rollback (human approval required, because it removes audit history):
 --   DROP TABLE workspace_user_preference_change_audit;
@@ -65,3 +66,10 @@ DROP TRIGGER IF EXISTS trg_workspace_user_preference_change_audit_append_only
 CREATE TRIGGER trg_workspace_user_preference_change_audit_append_only
 BEFORE UPDATE OR DELETE ON workspace_user_preference_change_audit
 FOR EACH ROW EXECUTE FUNCTION jdec_reject_preference_change_audit_mutation();
+
+-- Row triggers do not fire on TRUNCATE, so a statement-level trigger rejects it too.
+DROP TRIGGER IF EXISTS trg_workspace_user_preference_change_audit_no_truncate
+  ON workspace_user_preference_change_audit;
+CREATE TRIGGER trg_workspace_user_preference_change_audit_no_truncate
+BEFORE TRUNCATE ON workspace_user_preference_change_audit
+FOR EACH STATEMENT EXECUTE FUNCTION jdec_reject_preference_change_audit_mutation();

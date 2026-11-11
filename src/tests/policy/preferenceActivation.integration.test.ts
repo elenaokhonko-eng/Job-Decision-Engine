@@ -69,21 +69,31 @@ function ctx(): WorkspaceContext {
 }
 
 const ENV = { [PREFERENCE_ACTIVATION_ENV_FLAG]: 'true' };
+// Every run names its target. The tests always hand back the test client, so a different
+// URL below models "the same command pointed at another database" without a second server.
+const TARGET_URL = 'postgres://fixture_user:fixture-secret-pw@localhost:47999/fixturedb';
+const OTHER_TARGET_URL = 'postgres://fixture_user:fixture-secret-pw@other-host.example.test:47999/fixturedb';
+let envFileText = '';
+const connectedUrls: string[] = [];
 
+function connectTestClient(target: { databaseUrl: string }) {
+  connectedUrls.push(target.databaseUrl);
+  return Promise.resolve({ client: db(), close: async () => undefined });
+}
 function run(argv: string[], env: Record<string, string> = {}): Promise<PreferenceActivationReport> {
   return runPreferenceActivation({
     argv: ['--file=fixture.json', ...argv],
-    env,
-    readFile: async () => fileText,
-    connect: async () => ({ client: db(), close: async () => undefined }),
+    env: { DATABASE_URL: TARGET_URL, ...env },
+    readFile: async (filePath) => (filePath.endsWith('.env') ? envFileText : fileText),
+    connect: connectTestClient,
   });
 }
 function runRollback(argv: string[], env: Record<string, string> = {}): Promise<PreferenceActivationReport> {
   return runPreferenceActivation({
     argv,
-    env,
+    env: { DATABASE_URL: TARGET_URL, ...env },
     readFile: async () => { throw new Error('A rollback must not read the preferences file.'); },
-    connect: async () => ({ client: db(), close: async () => undefined }),
+    connect: connectTestClient,
   });
 }
 function applyArgs(diffHash: string, extra: string[] = []): string[] {
@@ -307,6 +317,8 @@ describe.skipIf(skipReal)('preference activation (PostgreSQL)', () => {
     // Audit rows are append-only.
     await expect(db().query('UPDATE workspace_user_preference_change_audit SET reason = $1', ['edited'])).rejects.toThrow(/append-only/);
     await expect(db().query('DELETE FROM workspace_user_preference_change_audit')).rejects.toThrow(/append-only/);
+    await expect(db().query('TRUNCATE workspace_user_preference_change_audit')).rejects.toThrow(/append-only \(TRUNCATE rejected\)/);
+    expect((await counts()).audits).toBe(before.audits + 1);
 
     // Rollback: guarded the same way, re-activates the stored revision without creating one.
     expect(await refusal(runRollback([`--rollback-to=${current.id}`]))).toBe('ROLLBACK_REVISION_ALREADY_ACTIVE');
@@ -363,6 +375,38 @@ describe.skipIf(skipReal)('preference activation (PostgreSQL)', () => {
     expect(applied.domains.every((domain) => domain.auditId)).toBe(true);
     expect(await counts()).toEqual({ revisions: before.revisions + 2, events: before.events + 2, audits: before.audits + 2 });
     expect((await activeRevision('lane_intent')).value.lane_weights.LEGAL_REGTECH).toBe(25);
+  });
+
+  it('prints the target database without credentials and refuses an apply against another database', async () => {
+    const before = await counts();
+    const dry = await run(['--only=watchlist.excluded_employers']);
+    const { rows } = await db().query<{ database: string }>('SELECT current_database() AS database');
+    expect(dry.targetDatabase).toMatchObject({
+      host: 'localhost',
+      port: '47999',
+      database: rows[0]?.database,
+      urlVariable: 'DATABASE_URL',
+      source: 'PROCESS_ENVIRONMENT',
+    });
+    expect(dry.targetDatabase.systemIdentifier).toMatch(/^\d+$/);
+    expect(JSON.stringify(dry)).not.toMatch(/fixture_user|fixture-secret-pw/);
+    expect(dry.nextStep).toContain('localhost/');
+
+    // Same file, selection and active revision, but another database: refused, nothing written.
+    expect(await refusal(run(['--only=watchlist.excluded_employers', ...applyArgs(dry.diffHash)], { ...ENV, DATABASE_URL: OTHER_TARGET_URL }))).toBe('DIFF_HASH_MISMATCH');
+    expect(await counts()).toEqual(before);
+
+    // --env names the only file the URL may come from; the process environment is ignored.
+    envFileText = `DATABASE_URL_UNPOOLED=${OTHER_TARGET_URL}\n`;
+    connectedUrls.length = 0;
+    const viaEnvFile = await run(['--env=target.env', '--only=watchlist.excluded_employers'], { DATABASE_URL_UNPOOLED: TARGET_URL });
+    expect(connectedUrls).toEqual([OTHER_TARGET_URL]);
+    expect(viaEnvFile.targetDatabase).toMatchObject({ host: 'other-host.example.test', urlVariable: 'DATABASE_URL_UNPOOLED', source: 'ENV_FILE' });
+    expect(viaEnvFile.diffHash).not.toBe(dry.diffHash);
+    // The apply with the matching --env file and its own reviewed hash goes through.
+    const applied = await run(['--env=target.env', '--only=watchlist.excluded_employers', ...applyArgs(viaEnvFile.diffHash)], ENV);
+    expect(applied.mode).toBe('APPLIED');
+    expect(applied.targetDatabase.host).toBe('other-host.example.test');
   });
 
   it.runIf(ONSITE_FIELD_KNOWN)('activates mobility.onsite_exception_employers when the schema defines it', async () => {

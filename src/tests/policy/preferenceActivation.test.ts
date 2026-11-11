@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -6,7 +8,9 @@ import {
   buildProposedDomainValues,
   computePreferenceDiffHash,
   defaultPreferenceSelectors,
+  describeConnectionTarget,
   describePreferenceFollowUps,
+  resolveTargetDatabase,
   diffPreferenceValues,
   findUnknownKeys,
   parsePreferenceActivationArgs,
@@ -221,8 +225,9 @@ describe('preference diff output', () => {
     expect(describePreferenceFollowUps([{ path: 'stage3.research_geographies.preferred_regions', change: 'CHANGED', valueKind: 'list' }])).toEqual([]);
   });
 
-  it('binds the diff hash to the starting revision and the target content', () => {
-    const base = { action: 'APPLY' as const, workspaceId: WORKSPACE, userId: WORKSPACE };
+  it('binds the diff hash to the target database, the starting revision and the target content', () => {
+    const database = { host: 'db.example.test', port: '5432', database: 'appdb', systemIdentifier: '7000000000000000001' };
+    const base = { action: 'APPLY' as const, workspaceId: WORKSPACE, userId: WORKSPACE, database };
     const domain = { domain: 'stage3' as const, fromRevisionId: 'r1', fromPreferenceHash: 'h1', toPreferenceHash: 'h2' };
     const hash = computePreferenceDiffHash({ ...base, domains: [domain] });
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
@@ -230,5 +235,67 @@ describe('preference diff output', () => {
     expect(computePreferenceDiffHash({ ...base, domains: [{ ...domain, fromRevisionId: 'r0' }] })).not.toBe(hash);
     expect(computePreferenceDiffHash({ ...base, domains: [{ ...domain, toPreferenceHash: 'h3' }] })).not.toBe(hash);
     expect(computePreferenceDiffHash({ ...base, action: 'ROLLBACK', domains: [domain] })).not.toBe(hash);
+    for (const other of [
+      { ...database, host: 'other.example.test' },
+      { ...database, port: '6543' },
+      { ...database, database: 'otherdb' },
+      { ...database, systemIdentifier: '7000000000000000002' },
+      { ...database, systemIdentifier: null },
+    ]) {
+      expect(computePreferenceDiffHash({ ...base, database: other, domains: [domain] })).not.toBe(hash);
+    }
+  });
+});
+
+describe('target database resolution', () => {
+  const PROD_URL = 'postgres://prod_user:prod-secret-pw@prod.example.test:5433/proddb?sslmode=require';
+  const LOCAL_URL = 'postgres://local_user:local-secret-pw@localhost:5432/localdb';
+
+  it('describes a connection string by host, port and database only', () => {
+    const target = describeConnectionTarget(PROD_URL);
+    expect(target).toEqual({ host: 'prod.example.test', port: '5433', database: 'proddb' });
+    expect(JSON.stringify(target)).not.toMatch(/prod_user|prod-secret-pw/);
+    expect(describeConnectionTarget('postgresql://u@h.example.test/db').port).toBe('5432');
+    expect(refusalCode(() => describeConnectionTarget('mysql://u:p@h/db'))).toBe('TARGET_DATABASE_MISSING');
+    try {
+      describeConnectionTarget('not a url with secret-pw');
+      throw new Error('Expected a refusal.');
+    } catch (error) {
+      expect((error as Error).message).not.toContain('secret-pw');
+    }
+  });
+
+  it('with --env reads only that file and ignores the process environment', async () => {
+    const reads: string[] = [];
+    const readFile = async (filePath: string) => {
+      reads.push(filePath);
+      return `# production\nDATABASE_URL=${PROD_URL}\n`;
+    };
+    const target = await resolveTargetDatabase({ envFile: 'prod.env' }, { DATABASE_URL_UNPOOLED: LOCAL_URL, DATABASE_URL: LOCAL_URL }, readFile);
+    expect(reads).toEqual(['prod.env']);
+    expect(target).toMatchObject({ source: 'ENV_FILE', urlVariable: 'DATABASE_URL', host: 'prod.example.test', urlDatabase: 'proddb' });
+    expect(target.databaseUrl).toBe(PROD_URL);
+  });
+
+  it('prefers DATABASE_URL_UNPOOLED within one source and never reads another file', async () => {
+    const readFile = async () => { throw new Error('No file may be read without --env.'); };
+    const target = await resolveTargetDatabase({ envFile: null }, { DATABASE_URL_UNPOOLED: PROD_URL, DATABASE_URL: LOCAL_URL }, readFile);
+    expect(target).toMatchObject({ source: 'PROCESS_ENVIRONMENT', urlVariable: 'DATABASE_URL_UNPOOLED', host: 'prod.example.test' });
+  });
+
+  it('refuses a missing URL or an unreadable --env file', async () => {
+    const readFile = async () => 'OTHER=1\n';
+    expect(await asyncRefusalCode(resolveTargetDatabase({ envFile: 'prod.env' }, { DATABASE_URL: LOCAL_URL }, readFile))).toBe('TARGET_DATABASE_MISSING');
+    expect(await asyncRefusalCode(resolveTargetDatabase({ envFile: null }, {}, readFile))).toBe('TARGET_DATABASE_MISSING');
+    expect(await asyncRefusalCode(resolveTargetDatabase({ envFile: 'missing.env' }, {}, async () => { throw new Error('ENOENT'); }))).toBe('ENV_FILE_UNREADABLE');
+  });
+
+  it('the CLI script loads no .env or .env.local file', async () => {
+    const source = await fs.readFile(path.resolve(process.cwd(), 'scripts/activate_workspace_preferences.ts'), 'utf8');
+    // Strip comments: the script explains in a comment why it does not load dotenv.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    expect(code).not.toMatch(/dotenv/);
+    expect(code).not.toMatch(/['"`][^'"`]*\.env(?:\.local)?['"`]/);
+    expect(code).not.toMatch(/process\.env\.DATABASE_URL/);
   });
 });

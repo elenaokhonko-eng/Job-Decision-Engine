@@ -1,5 +1,4 @@
 import pg from 'pg';
-import dotenv from 'dotenv';
 
 import { pgPoolConfig } from '../src/db/pgSsl.js';
 import {
@@ -11,16 +10,17 @@ import {
 // Dry run by default (READ ONLY transaction). See docs/data-contracts.md,
 // "Activating workspace preferences in production", for the runbook.
 // scripts/seed_workspace_preferences.ts remains the staging-only seeder.
-dotenv.config();
-dotenv.config({ path: '.env.local' });
+//
+// Deliberately no dotenv.config(): .env and .env.local are never loaded, so a
+// local file cannot redirect this command to another database. The target URL
+// comes only from --env=<file> or from the environment the caller set up
+// (for example `npx tsx --env-file=<file>`).
 
 async function main(): Promise<void> {
   const report = await runPreferenceActivation({
     argv: process.argv.slice(2),
     env: process.env,
-    connect: async () => {
-      const databaseUrl = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
-      if (!databaseUrl) throw new Error('Set DATABASE_URL_UNPOOLED or DATABASE_URL to the target database.');
+    connect: async ({ databaseUrl }) => {
       const pool = new pg.Pool(pgPoolConfig(databaseUrl));
       const client = await pool.connect();
       return {

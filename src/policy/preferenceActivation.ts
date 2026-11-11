@@ -19,6 +19,7 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import dotenv from 'dotenv';
 import type pg from 'pg';
 import { z } from 'zod';
 
@@ -78,7 +79,9 @@ export type PreferenceActivationRefusalCode =
   | 'SCHEMA_VALIDATION_FAILED'
   | 'NO_CHANGE'
   | 'ROLLBACK_REVISION_NOT_FOUND'
-  | 'ROLLBACK_REVISION_ALREADY_ACTIVE';
+  | 'ROLLBACK_REVISION_ALREADY_ACTIVE'
+  | 'ENV_FILE_UNREADABLE'
+  | 'TARGET_DATABASE_MISSING';
 
 /** A refusal is an expected, operator-facing stop. Its message never contains preference values. */
 export class PreferenceActivationRefusal extends Error {
@@ -94,6 +97,8 @@ export class PreferenceActivationRefusal extends Error {
 
 export interface PreferenceActivationArgs {
   readonly file: string | null;
+  /** The only env file the target database URL may come from (see resolveTargetDatabase). */
+  readonly envFile: string | null;
   readonly only: readonly string[];
   readonly showValues: boolean;
   readonly apply: boolean;
@@ -104,7 +109,7 @@ export interface PreferenceActivationArgs {
   readonly reason: string | null;
 }
 
-const VALUE_FLAGS = ['--file', '--only', '--confirm-workspace', '--expect-diff-hash', '--rollback-to', '--operator', '--reason'] as const;
+const VALUE_FLAGS = ['--file', '--env', '--only', '--confirm-workspace', '--expect-diff-hash', '--rollback-to', '--operator', '--reason'] as const;
 const BOOLEAN_FLAGS = ['--apply', '--show-values'] as const;
 
 export function parsePreferenceActivationArgs(argv: readonly string[]): PreferenceActivationArgs {
@@ -138,6 +143,7 @@ export function parsePreferenceActivationArgs(argv: readonly string[]): Preferen
     .filter((value) => value.length > 0);
   const args: PreferenceActivationArgs = {
     file: single('--file'),
+    envFile: single('--env'),
     only,
     showValues: booleans.has('--show-values'),
     apply: booleans.has('--apply'),
@@ -482,7 +488,8 @@ export interface DiffHashDomain {
 }
 
 /**
- * The diff hash binds the action, the workspace and user, the exact active
+ * The diff hash binds the action, the target database (host, port, database
+ * name and cluster system identifier), the workspace and user, the exact active
  * revision each domain starts from and the exact content it moves to. A
  * different file, a different selection, or another activation in between
  * all produce a different hash, so --apply runs only what was reviewed.
@@ -491,11 +498,18 @@ export function computePreferenceDiffHash(input: {
   action: 'APPLY' | 'ROLLBACK';
   workspaceId: string;
   userId: string;
+  database: TargetDatabaseIdentity;
   domains: readonly DiffHashDomain[];
 }): string {
   return sha256Hex(stableStringify({
     schema: PREFERENCE_ACTIVATION_DIFF_SCHEMA,
     action: input.action,
+    database: {
+      host: input.database.host,
+      port: input.database.port,
+      database: input.database.database,
+      system_identifier: input.database.systemIdentifier,
+    },
     workspace_id: input.workspaceId,
     user_id: input.userId,
     domains: [...input.domains]
@@ -693,6 +707,107 @@ async function insertChangeAudit(client: pg.PoolClient, context: WorkspaceContex
 }
 
 // ============================================================================
+// Target database
+// ============================================================================
+
+export interface TargetDatabaseIdentity {
+  readonly host: string;
+  readonly port: string;
+  /** current_database() as reported by the server. */
+  readonly database: string;
+  /** pg_control_system().system_identifier, or null when the role cannot read it. */
+  readonly systemIdentifier: string | null;
+}
+
+export interface TargetDatabaseReport extends TargetDatabaseIdentity {
+  /** Name of the variable the URL came from; never its value. */
+  readonly urlVariable: 'DATABASE_URL_UNPOOLED' | 'DATABASE_URL';
+  readonly source: 'ENV_FILE' | 'PROCESS_ENVIRONMENT';
+}
+
+export interface ResolvedTargetDatabase {
+  readonly databaseUrl: string;
+  readonly urlVariable: TargetDatabaseReport['urlVariable'];
+  readonly source: TargetDatabaseReport['source'];
+  readonly host: string;
+  readonly port: string;
+  readonly urlDatabase: string;
+}
+
+/** Host, port and database name of a connection string. Credentials are never returned. */
+export function describeConnectionTarget(databaseUrl: string): { host: string; port: string; database: string } {
+  let url: URL;
+  try {
+    url = new URL(databaseUrl);
+  } catch {
+    // The message must not repeat the string: it may hold a password.
+    throw new PreferenceActivationRefusal('TARGET_DATABASE_MISSING', 'The target database URL is not a valid postgres:// URL.');
+  }
+  if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
+    throw new PreferenceActivationRefusal('TARGET_DATABASE_MISSING', 'The target database URL is not a postgres:// URL.');
+  }
+  return {
+    host: url.hostname.toLowerCase(),
+    port: url.port || '5432',
+    database: decodeURIComponent(url.pathname.replace(/^\//, '')) || '(default)',
+  };
+}
+
+/**
+ * Pick the target database URL. With --env=<file>, only that file is read
+ * (parsed, not loaded into process.env), so no other env file and no shell
+ * variable can redirect the command. Without --env, only the process
+ * environment is used, as set by the caller (for example
+ * `npx tsx --env-file=<file>`); .env and .env.local are never loaded.
+ * DATABASE_URL_UNPOOLED wins over DATABASE_URL within the chosen source.
+ */
+export async function resolveTargetDatabase(
+  args: Pick<PreferenceActivationArgs, 'envFile'>,
+  processEnv: Readonly<Record<string, string | undefined>>,
+  readFile: (filePath: string) => Promise<string>,
+): Promise<ResolvedTargetDatabase> {
+  let source: ResolvedTargetDatabase['source'] = 'PROCESS_ENVIRONMENT';
+  let env: Readonly<Record<string, string | undefined>> = processEnv;
+  if (args.envFile) {
+    let text: string;
+    try {
+      text = await readFile(args.envFile);
+    } catch {
+      throw new PreferenceActivationRefusal('ENV_FILE_UNREADABLE', 'The --env file could not be read.');
+    }
+    env = dotenv.parse(text);
+    source = 'ENV_FILE';
+  }
+  const urlVariable = env.DATABASE_URL_UNPOOLED?.trim() ? 'DATABASE_URL_UNPOOLED' : env.DATABASE_URL?.trim() ? 'DATABASE_URL' : null;
+  if (!urlVariable) {
+    throw new PreferenceActivationRefusal(
+      'TARGET_DATABASE_MISSING',
+      source === 'ENV_FILE'
+        ? 'The --env file defines neither DATABASE_URL_UNPOOLED nor DATABASE_URL.'
+        : 'Neither DATABASE_URL_UNPOOLED nor DATABASE_URL is set; pass --env=<file>.',
+    );
+  }
+  const databaseUrl = (env[urlVariable] as string).trim();
+  const endpoint = describeConnectionTarget(databaseUrl);
+  return { databaseUrl, urlVariable, source, host: endpoint.host, port: endpoint.port, urlDatabase: endpoint.database };
+}
+
+async function readDatabaseIdentity(client: pg.PoolClient, target: ResolvedTargetDatabase): Promise<TargetDatabaseIdentity> {
+  const { rows } = await client.query<{ database: string }>('SELECT current_database() AS database');
+  let systemIdentifier: string | null = null;
+  await client.query('SAVEPOINT jdec_preference_activation_identity');
+  try {
+    const result = await client.query<{ id: string }>('SELECT system_identifier::text AS id FROM pg_control_system()');
+    systemIdentifier = result.rows[0]?.id ?? null;
+    await client.query('RELEASE SAVEPOINT jdec_preference_activation_identity');
+  } catch {
+    // Not readable by every role; host, port and database name still bind the hash.
+    await client.query('ROLLBACK TO SAVEPOINT jdec_preference_activation_identity');
+  }
+  return { host: target.host, port: target.port, database: rows[0]?.database ?? target.urlDatabase, systemIdentifier };
+}
+
+// ============================================================================
 // Command
 // ============================================================================
 
@@ -722,9 +837,11 @@ export interface PreferenceActivationReport {
   readonly followUps: readonly PreferenceFollowUp[];
   readonly workabilityPolicyHashNote?: string;
   readonly auditTableReady: boolean;
+  readonly targetDatabase: TargetDatabaseReport;
   readonly nextStep: string;
 }
 
+/** The caller opens the connection to the URL resolved by resolveTargetDatabase. */
 export interface PreferenceActivationConnection {
   readonly client: pg.PoolClient;
   close(): Promise<void>;
@@ -733,7 +850,7 @@ export interface PreferenceActivationConnection {
 export interface RunPreferenceActivationInput {
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string | undefined>>;
-  readonly connect: () => Promise<PreferenceActivationConnection>;
+  readonly connect: (target: { readonly databaseUrl: string }) => Promise<PreferenceActivationConnection>;
   readonly readFile?: (filePath: string) => Promise<string>;
   readonly defaultFile?: string;
 }
@@ -784,6 +901,7 @@ async function planApply(
   selectors: readonly PreferenceSelector[],
   showValues: boolean,
   forUpdate: boolean,
+  database: TargetDatabaseIdentity,
 ): Promise<Plan> {
   const active = await readActivePreferenceRevisions(client, context, { forUpdate });
   const activeValues: Partial<Record<PreferenceDomain, Record<string, unknown>>> = {};
@@ -816,6 +934,7 @@ async function planApply(
       action: 'APPLY',
       workspaceId: context.workspaceId,
       userId: context.userId,
+      database,
       domains: domains.filter((entry) => entry.changed).map((entry) => ({
         domain: entry.domain,
         fromRevisionId: entry.active?.revisionId ?? null,
@@ -832,6 +951,7 @@ async function planRollback(
   revisionId: string,
   showValues: boolean,
   forUpdate: boolean,
+  database: TargetDatabaseIdentity,
 ): Promise<Plan> {
   const { rows } = await client.query<{ preference_domain: PreferenceDomain; preference_value: unknown; preference_hash: string }>(
     `SELECT preference_domain, preference_value, preference_hash
@@ -858,6 +978,7 @@ async function planRollback(
       action: 'ROLLBACK',
       workspaceId: context.workspaceId,
       userId: context.userId,
+      database,
       domains: [{
         domain,
         fromRevisionId: active?.revisionId ?? null,
@@ -872,7 +993,7 @@ async function planRollback(
 function reportFor(
   plan: Plan,
   context: WorkspaceContext,
-  options: { mode: 'DRY_RUN' | 'APPLIED'; showValues: boolean; auditTableReady: boolean; applied?: Map<PreferenceDomain, Partial<PreferenceActivationDomainReport>> },
+  options: { mode: 'DRY_RUN' | 'APPLIED'; showValues: boolean; auditTableReady: boolean; targetDatabase: TargetDatabaseReport; applied?: Map<PreferenceDomain, Partial<PreferenceActivationDomainReport>> },
 ): PreferenceActivationReport {
   const changes = plan.domains.flatMap((entry) => entry.entries);
   const touchesOnsiteList = changes.some((entry) => entry.path === 'stage3.mobility.onsite_exception_employers');
@@ -881,6 +1002,7 @@ function reportFor(
     mode: options.mode,
     action: plan.action,
     workspaceId: context.workspaceId,
+    targetDatabase: options.targetDatabase,
     selectors: plan.selectors,
     valuesShown: options.showValues,
     domains: plan.domains.map((entry) => ({
@@ -905,7 +1027,8 @@ function reportFor(
       : !plan.domains.some((entry) => entry.changed)
         ? 'Nothing to activate: the proposed values equal the active revisions.'
         : `Review the changes, then re-run with the same arguments plus: ${flag}--apply --confirm-workspace=${context.workspaceId} ` +
-          `--expect-diff-hash=${plan.diffHash} --operator=<you> --reason=<why> and ${PREFERENCE_ACTIVATION_ENV_FLAG}=true` +
+          `--expect-diff-hash=${plan.diffHash} --operator=<you> --reason=<why> and ${PREFERENCE_ACTIVATION_ENV_FLAG}=true, ` +
+          `against the same database (${options.targetDatabase.host}/${options.targetDatabase.database})` +
           (options.auditTableReady ? '' : ' (migration 108 must be applied first)'),
   };
 }
@@ -924,7 +1047,8 @@ export async function runPreferenceActivation(input: RunPreferenceActivationInpu
     if (selectors.length === 0) throw new PreferenceActivationRefusal('NO_CHANGE', 'The preferences file has no stage3 section and no lane_intent package.');
   }
 
-  const connection = await input.connect();
+  const target = await resolveTargetDatabase(args, input.env, readFile);
+  const connection = await input.connect({ databaseUrl: target.databaseUrl });
   const { client } = connection;
   let open = false;
   try {
@@ -932,13 +1056,17 @@ export async function runPreferenceActivation(input: RunPreferenceActivationInpu
     open = true;
     const context = await resolveWorkspaceContext(client);
     const auditTableReady = await auditTableExists(client);
+    const database = await readDatabaseIdentity(client, target);
+    const targetDatabase: TargetDatabaseReport = { ...database, urlVariable: target.urlVariable, source: target.source };
 
     if (args.apply) {
       if (args.confirmWorkspace?.toLowerCase() !== context.workspaceId.toLowerCase()) {
         throw new PreferenceActivationRefusal('CONFIRM_WORKSPACE_MISMATCH', '--confirm-workspace does not match the workspace this connection resolves to.');
       }
       if (context.role !== 'OWNER') {
-        throw new PreferenceActivationRefusal('NOT_WORKSPACE_OWNER', 'Only the workspace OWNER may activate preferences.');
+        // A target-membership check on WORKSPACE_KEY / WORKSPACE_USER_KEY, not authentication: whoever
+        // holds the database credentials can act as any member. The credentials are the real control.
+        throw new PreferenceActivationRefusal('NOT_WORKSPACE_OWNER', 'The resolved workspace membership is not OWNER; preferences are activated only for an OWNER membership.');
       }
       if (!auditTableReady) {
         throw new PreferenceActivationRefusal('AUDIT_TABLE_MISSING', `${PREFERENCE_CHANGE_AUDIT_TABLE} does not exist; apply migration 108 first.`);
@@ -951,13 +1079,13 @@ export async function runPreferenceActivation(input: RunPreferenceActivationInpu
     }
 
     const plan = args.rollbackTo
-      ? await planRollback(client, context, args.rollbackTo, args.showValues, args.apply)
-      : await planApply(client, context, file as Record<string, unknown>, selectors, args.showValues, args.apply);
+      ? await planRollback(client, context, args.rollbackTo, args.showValues, args.apply, database)
+      : await planApply(client, context, file as Record<string, unknown>, selectors, args.showValues, args.apply, database);
 
     if (!args.apply) {
       await client.query('ROLLBACK');
       open = false;
-      return reportFor(plan, context, { mode: 'DRY_RUN', showValues: args.showValues, auditTableReady });
+      return reportFor(plan, context, { mode: 'DRY_RUN', showValues: args.showValues, auditTableReady, targetDatabase });
     }
 
     if (!plan.domains.some((entry) => entry.changed)) {
@@ -966,7 +1094,7 @@ export async function runPreferenceActivation(input: RunPreferenceActivationInpu
     if (plan.diffHash !== args.expectDiffHash) {
       throw new PreferenceActivationRefusal(
         'DIFF_HASH_MISMATCH',
-        'The change differs from the reviewed dry run (the file, the selection or the active revision changed). Nothing was written; run the dry run again.',
+        'The change differs from the reviewed dry run (the target database, the file, the selection or the active revision changed). Nothing was written; run the dry run again.',
       );
     }
 
@@ -1031,7 +1159,7 @@ export async function runPreferenceActivation(input: RunPreferenceActivationInpu
 
     await client.query('COMMIT');
     open = false;
-    return reportFor(plan, context, { mode: 'APPLIED', showValues: args.showValues, auditTableReady, applied });
+    return reportFor(plan, context, { mode: 'APPLIED', showValues: args.showValues, auditTableReady, targetDatabase, applied });
   } catch (error) {
     if (open) {
       try {
