@@ -67,6 +67,7 @@ import {
   type ConfirmedJobFact,
 } from "./confirmedJobFacts.js";
 import { postingSourceEvidence, type PostingSourceEvidence } from "./postingStatedFacts.js";
+import { isRepostFreshnessBasis } from "../contracts/postingFacts.js";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -262,7 +263,7 @@ export function applyPersistedRequirementGates(
     reposted_at: job.reposted_at,
     source_updated_at: job.source_updated_at,
     freshness_basis: job.freshness_basis,
-    is_repost: job.freshness_basis === 'REPOSTED_AT',
+    is_repost: isRepostFreshnessBasis(job.freshness_basis),
     posting_identity_is_new: job.freshness_basis === 'NEW_POSTING_ID',
   }, stage3Preferences?.freshness);
   if (freshness.is_hard_reject) {
@@ -1052,7 +1053,7 @@ export async function runHardGates(
           source_updated_at: job.source_updated_at,
           first_seen_at: job.first_seen_at,
           freshness_basis: job.freshness_basis,
-          is_repost: job.freshness_basis === 'REPOSTED_AT',
+          is_repost: isRepostFreshnessBasis(job.freshness_basis),
           posting_identity_is_new: job.freshness_basis === 'NEW_POSTING_ID',
         }, stage3Preferences.freshness);
         await client.query(
