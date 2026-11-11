@@ -69,7 +69,7 @@ describe.skipIf(skipReal)("v_pipeline_task_status_age (PostgreSQL)", () => {
     const policyInput = {
       claimedThisRun: 10, completedThisRun: 10, failedThisRun: 0, exitReason: "MAX_TASKS_REACHED" as const, deadLetteredThisRun: 0,
       actionableCurrentDeadLetterCount: 0, staleHistoricalDeadLetterCount: 0, retryWaitCount: 1,
-      activePendingCountBefore: 10, activePendingCount: 5, oldestActivePendingAgeSecondsBefore: 0, oldestActivePendingAgeSeconds: 0,
+      activePendingCountBefore: 10, activePendingCount: 5, activeDuePendingCount: 5, oldestActivePendingAgeSecondsBefore: 0, oldestActivePendingAgeSeconds: 0,
       oldestActivePendingTaskType: null, oldestPendingTaskSameRuns: 0, pendingAgeTrendRuns: 3, failOnRetryWait: false,
       maxRetryWaitCount: 500, maxRetryWaitAgeSeconds: 21_600, maxPendingAgeSeconds: 7_200, noProgressPendingThreshold: 1,
     };
@@ -118,7 +118,7 @@ describe.skipIf(skipReal)("v_pipeline_task_status_age (PostgreSQL)", () => {
     const policyInput = {
       claimedThisRun: 10, completedThisRun: 10, failedThisRun: 0, exitReason: "MAX_TASKS_REACHED" as const, deadLetteredThisRun: 0,
       actionableCurrentDeadLetterCount: 0, staleHistoricalDeadLetterCount: 0, retryWaitCount: 0, oldestRetryWaitAgeSeconds: 0,
-      activePendingCountBefore: 10, activePendingCount: 5, oldestActivePendingAgeSecondsBefore: dueAge,
+      activePendingCountBefore: 10, activePendingCount: 5, activeDuePendingCount: 5, oldestActivePendingAgeSecondsBefore: dueAge,
       oldestActivePendingTaskType: taskType, oldestPendingTaskSameRuns: 3, pendingAgeTrendRuns: 3, failOnRetryWait: false,
       maxRetryWaitCount: 500, maxRetryWaitAgeSeconds: 21_600, maxPendingAgeSeconds: 7_200, noProgressPendingThreshold: 1,
     };
