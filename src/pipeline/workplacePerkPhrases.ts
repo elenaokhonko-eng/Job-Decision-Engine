@@ -4,10 +4,12 @@
  * are neutral: never evidence of an on-site, hybrid or remote work mode.
  *
  * Every text-based work-mode reader runs its patterns over
- * `neutralizeWorkplacePerkPhrases(text)`. Only the on-site / in-office token of
- * a perk phrase is blanked, with spaces of the same length, so offsets and the
- * rest of the text (including "wet lab", "lab-based", "laboratory-based",
- * "fully on-site", "5 days in office", "hybrid", "remote") are unchanged.
+ * `neutralizeWorkplacePerkPhrases(text)`. Only an on-site / in-office token that
+ * directly modifies a perk noun is blanked, with spaces of the same length, so
+ * offsets and the rest of the text (including "wet lab", "lab-based",
+ * "laboratory-based", "hybrid", "remote") are unchanged. A token that is itself
+ * a work-mode statement ("fully on-site", "5 days in office", "role is onsite",
+ * "Location: On-site") is kept even when a perk follows on the same line.
  */
 
 const PRESENCE_TOKEN = String.raw`on[- ]?site|in[- ]?office`;
@@ -52,16 +54,36 @@ const PERK_NOUNS = [
   String.raw`perks?`,
 ].join("|");
 
-/** "Fully on-site" and "100% on-site" stay genuine work-mode statements. */
-const NOT_AFTER_FULL = String.raw`(?<!\bfully[ \t]+|100%[ \t]*)`;
+/**
+ * A token that already forms a work-mode statement is never blanked, even when
+ * a perk follows on the same line ("5 days on-site meals provided",
+ * "Location: On-site Parking available", "Full-time · On-site Free parking",
+ * "This role is on-site facilities based", "Work on-site facilities daily").
+ */
+const STATEMENT_BEFORE_TOKEN = [
+  // "fully on-site", "100% onsite", "strictly onsite"
+  String.raw`\b(?:fully|entirely|strictly|exclusively|completely|only)[ \t]+`,
+  String.raw`\b100[ \t]*%[ \t]*`,
+  // "5 days on-site", "4-5 days per week in office", "3 days a week at the on-site"
+  String.raw`\b\d+(?:\s*(?:-|–|to)\s*\d+)?\s*(?:days?|d|x)\b\s*(?:(?:per|a)\s+week\s*|\/\s*week\s*)?(?:(?:in|at)\s+(?:the\s+)?)?`,
+  // Header separators: "Full-time · On-site", "Remote | On-site"
+  String.raw`[|·][ \t]*`,
+  // Work-mode labels: "Location: On-site", "Workplace type: Onsite"
+  String.raw`\b(?:location|workplace|work[ \t]*mode|work(?:place)?[ \t]+(?:type|model|mode|location|arrangement|setting|style)|working[ \t]+(?:model|arrangement|pattern)|job[ \t]+type|employment[ \t]+type)[ \t]*:[ \t]*`,
+  // "role is on-site", "work on-site", "working onsite", "based onsite"
+  String.raw`\b(?:role|position|job|work|works|working|presence|based)[ \t]+(?:(?:is|are|will[ \t]+be|must[ \t]+be|required)[ \t]+)?`,
+].join("|");
+
+const NOT_A_STATEMENT = String.raw`(?<!${STATEMENT_BEFORE_TOKEN})`;
 
 // The perk must follow on the same line; a newline, comma or period ends the phrase.
 const TOKEN_BEFORE_PERK = new RegExp(
-  String.raw`${NOT_AFTER_FULL}\b(${PRESENCE_TOKEN})(?=[ \t]+${PERK_MODIFIERS}(?:${PERK_NOUNS})\b(?!-))`,
+  String.raw`${NOT_A_STATEMENT}\b(${PRESENCE_TOKEN})(?=[ \t]+${PERK_MODIFIERS}(?:${PERK_NOUNS})\b(?!-))`,
   "gi",
 );
+// "parking on-site", "gym is available onsite"; never "... on-site only" or "... on-site 5 days".
 const PERK_BEFORE_TOKEN = new RegExp(
-  String.raw`(?<=\b(?:${PERK_NOUNS})[ \t]+(?:(?:is|are|available|provided)[ \t]+){0,2})(${PRESENCE_TOKEN})\b`,
+  String.raw`(?<=\b(?:${PERK_NOUNS})[ \t]+(?:(?:is|are|available|provided)[ \t]+){0,2})(${PRESENCE_TOKEN})\b(?![ \t]*(?:only\b|\d))`,
   "gi",
 );
 

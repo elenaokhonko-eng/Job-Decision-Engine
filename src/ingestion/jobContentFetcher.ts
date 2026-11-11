@@ -7,6 +7,7 @@ import { htmlToPlainText } from "./emailAlertExtractor.js";
 import { isUnknownEmployerName } from "./postingIdentity.js";
 import { classifyDescriptionQuality } from "../pipeline/descriptionQuality.js";
 import { stripHtmlToText } from "../security/sanitize.js";
+import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
 import {
   linkedInJobIdFromUrl,
   linkedInJobUrl,
@@ -1323,7 +1324,8 @@ function parseEmployerHtml(
     return { kind: "IDENTITY_CONFLICT", reason: "Employer page requisition ID did not match the discovered posting identity." };
   }
 
-  const workText = description.toLowerCase();
+  // Workplace perks ("Perks: on-site gym") are neutral, never work-mode evidence.
+  const workText = neutralizeWorkplacePerkPhrases(description.toLowerCase());
   const structuredWorkplace = stringValue(matchedJsonLd?.posting.jobLocationType);
   const workplaceType = structuredWorkplace?.toUpperCase() === "TELECOMMUTE"
     ? "REMOTE"

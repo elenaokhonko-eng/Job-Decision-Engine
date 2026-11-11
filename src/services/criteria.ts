@@ -1191,7 +1191,7 @@ export function applyGlobalGates(
     || /\b(remote|remote-first|fully remote|work from home)\b/i.test(d)
     || wp === "REMOTE"
     || wp === "HYBRID";
-  if (!hasExplicitDays && ambiguousOfficeKw.some(k => workModeText.includes(k)) &&!pendingVerification && !hasAcceptedFlexibleWorkMode) {
+  if (!hasExplicitDays && ambiguousOfficeKw.some(k => workModeText.includes(k)) && !pendingVerification && !hasAcceptedFlexibleWorkMode) {
     pendingVerification = {
       reason: "Workplace model ambiguous/unspecified; needs manual verification",
       facts: { office_days_min: null, office_days_max: null },
