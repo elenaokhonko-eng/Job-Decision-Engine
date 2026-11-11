@@ -27,8 +27,12 @@ export interface LaneDefinition {
   /** scope.excluded_domain_concepts as written (concept codes or phrases); discovery negatives. */
   excluded_domain_concepts?: string[];
   required_function_concepts?: string[];
+  /** scope.required_sector_concepts: industry sectors one of which must appear (title, employer, description). */
+  required_sector_concepts?: string[];
   minimum_domain_score?: number;
   minimum_function_score?: number;
+  /** Distinct domain phrases required before the domain score counts (default 1). */
+  minimum_domain_signals?: number;
   secondary_lane_threshold?: number;
   maximum_ai_interpretations_per_run: number;
   prototype_query: string;
@@ -74,6 +78,7 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
   const concepts = laneConfig.scope?.included_domain_concepts?.any || [];
   const requiredFunctions = laneConfig.scope?.required_function_concepts?.any || [];
   const excludedConcepts = laneConfig.scope?.excluded_domain_concepts?.any || [];
+  const sectorConcepts = laneConfig.scope?.required_sector_concepts?.any || [];
 
   const prototypeTexts = (laneConfig.prototypes || [])
     .map((p) => p.text.trim())
@@ -104,8 +109,10 @@ function laneConfigToDefinition(laneConfig: LaneFileConfig): LaneDefinition {
     included_domain_concepts: concepts.map(normalizeConcept),
     excluded_domain_concepts: [...excludedConcepts],
     required_function_concepts: requiredFunctions.map(normalizeConcept),
+    required_sector_concepts: sectorConcepts.length ? sectorConcepts.map(normalizeConcept) : undefined,
     minimum_domain_score: laneConfig.routing?.minimum_domain_score,
     minimum_function_score: laneConfig.routing?.minimum_function_score,
+    minimum_domain_signals: laneConfig.routing?.minimum_domain_signals,
     secondary_lane_threshold: laneConfig.routing?.secondary_lane_threshold,
     maximum_ai_interpretations_per_run: laneConfig.budget?.maximum_ai_interpretations_per_run ?? 0,
     prototype_query: prototypeTexts.join(" ") || laneConfig.description,

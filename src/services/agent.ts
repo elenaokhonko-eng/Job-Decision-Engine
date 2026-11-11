@@ -58,6 +58,29 @@ import {
   ND_FRIENDLY_DIMENSIONS,
   POLITICS_STRESS_RISK_DIMENSIONS
 } from "./criteria.ts";
+import { TARGET_LANE_KEYS } from "../policy/laneIntentContracts.js";
+
+/**
+ * Lane vocabulary for the evaluation prompts: every lane in config/lanes/registry.yml
+ * (TARGET_LANE_KEYS is pinned to the registry by tests). The model's lane is advisory;
+ * the deterministic router's lane is the one persisted (invariant 11).
+ */
+export const PROMPT_LANE_KEYS: readonly string[] = TARGET_LANE_KEYS;
+
+export function promptLaneUnion(terminal: "null" | "None"): string {
+  return [...PROMPT_LANE_KEYS, terminal].join(" | ");
+}
+
+function promptLaneQuotedList(): string {
+  return PROMPT_LANE_KEYS.map((laneKey) => `"${laneKey}"`).join(", ");
+}
+
+function promptLaneCriteriaLines(): string {
+  return TARGET_LANE_KEYS.map((laneKey) => `- ${laneKey}: ${MULTI_LANE_SCORECARDS[laneKey].criteria}`).join("\n");
+}
+
+const ADVISORY_LANE_INSTRUCTION =
+  "The pre-routed candidate lane was assigned by deterministic routing and is the lane of record; your primary_lane is advisory only. Every listed lane is a target lane: never set next_action to \"REJECTED\" because the job belongs to a lane other than CORE_AI_DATA. Base next_action on fit evidence.";
 
 dotenv.config();
 dotenv.config({ path: ".env.local" });
@@ -2668,10 +2691,9 @@ ${candidateProfileContext}
 #### STAGE 1: MULTI-LANE CLASSIFICATION
 You must categorize the job into one PRIMARY lane and zero or more SECONDARY lanes.
 Lanes:
-- HEALTH_BIO_PHARMA: ${MULTI_LANE_SCORECARDS.HEALTH_BIO_PHARMA.criteria}
-- LEGAL_REGTECH: ${MULTI_LANE_SCORECARDS.LEGAL_REGTECH.criteria}
-- INVESTMENT_MARKETS_FINTECH: ${MULTI_LANE_SCORECARDS.INVESTMENT_MARKETS_FINTECH.criteria}
-- CORE_AI_DATA: ${MULTI_LANE_SCORECARDS.CORE_AI_DATA.criteria}
+${promptLaneCriteriaLines()}
+
+${ADVISORY_LANE_INSTRUCTION}
 
 Assign lane_confidence (High, Medium, Low) based on explicit evidence in the job description. Do NOT rely on exact keyword matching alone; read the semantic context. Output the verbatim quotes as lane_evidence. If no lane matches (e.g., standard SWE without data/ML), set primary_lane to null.
 
@@ -2689,7 +2711,7 @@ Assign lane_confidence (High, Medium, Low) based on explicit evidence in the job
 
 #### STAGE 3: ACTION PLAN
 - strategic_value: Summary of the present-day value of the role for the candidate.
-- recommended_cv_version: "HEALTH_BIO_PHARMA", "LEGAL_REGTECH", "INVESTMENT_MARKETS_FINTECH", "CORE_AI_DATA" or "None".
+- recommended_cv_version: ${promptLaneQuotedList()} or "None".
 - next_action: "PRIORITY_APPLY" (High confidence lane, high ND friendly, low politics), "APPLY_AFTER_VERIFICATION", "LOW_STRATEGIC_VALUE", or "REJECTED" (if primary_lane is null).
 
 ### MANDATED TYPED OUTPUT FORMAT:
@@ -2702,7 +2724,7 @@ You MUST return a JSON object matching this schema exactly.
       "job_title": "string",
       "company": "string",
       "careers_portal_url": "string",
-      "primary_lane": "CORE_AI_DATA | LEGAL_REGTECH | HEALTH_BIO_PHARMA | INVESTMENT_MARKETS_FINTECH | null",
+      "primary_lane": "${promptLaneUnion("null")}",
       "secondary_lanes": ["string"],
       "lane_confidence": "High | Medium | Low",
       "lane_evidence": "string",
@@ -3218,7 +3240,7 @@ ${job.candidateProfileContext}
 ${job.descriptionText}
 
 ### MANDATED INSTRUCTIONS:
-1. Classify into primary_lane ("CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", or null).
+1. Classify into primary_lane (${promptLaneQuotedList()}, or null). ${ADVISORY_LANE_INSTRUCTION}
 2. For every 0-100 score, return null when evidence is unavailable. Never use 0 to mean unknown or unavailable. Use integer scores for the other metrics. For building_research_ratio and interaction_load, return a finite number from 0 to 100 when evidence supports a measurement or null when unavailable; these two measurements need not be integers. A zero is valid only when the evidence supports an actual zero.
 3. Use higher focus_protection_score for protected, uninterrupted work. building_research_ratio is the estimated percent of hands-on building/research; higher interaction_load means more interaction. Higher strategic_value_score, technical_depth_score, and role_ownership_score mean stronger value, technical depth, and end-to-end ownership. For ambiguity_burden, meeting_burden, travel_burden, and on_call_burden, 0 is low burden and 100 is high burden.
 4. Set career_trajectory to ADVANCING, LATERAL, DETOUR, or UNKNOWN; use UNKNOWN when candidate-profile or role evidence is insufficient. Judge seniority and strategic value against the candidate's experience_by_track for the job's own track, not against the candidate's longest career: a mid-level role in a track where the candidate has under 4 years (for example hands-on AI/ML engineering) is a deliberate transition, not a step down; a mid-level role in a track where the candidate has 8 or more years is a step down. Roles that combine the candidate's senior experience with AI (AI architecture, AI product, forward-deployed or AI solutions engineering, AI governance) are preferred. When experience_by_track is empty, do not infer seniority mismatch from total career length alone. Keep evaluation_summary concise (one or two short sentences) and list evidence-based strengths, gaps, and risk_flags.
@@ -3234,7 +3256,7 @@ ${job.descriptionText}
     {
       "canonical_job_id": "${job.canonicalJobId}",
       "job_version_id": "${job.jobVersionId}",
-      "primary_lane": "CORE_AI_DATA | LEGAL_REGTECH | HEALTH_BIO_PHARMA | INVESTMENT_MARKETS_FINTECH | null",
+      "primary_lane": "${promptLaneUnion("null")}",
       "secondary_lanes": ["string"],
       "lane_confidence": "High | Medium | Low",
       "lane_evidence": "string",
@@ -3272,7 +3294,7 @@ ${job.descriptionText}
       ],
       "rejection_codes": ["string"],
       "strategic_value": "Present-day value of the role",
-      "recommended_cv_version": "HEALTH_BIO_PHARMA | LEGAL_REGTECH | INVESTMENT_MARKETS_FINTECH | CORE_AI_DATA | None",
+      "recommended_cv_version": "${promptLaneUnion("None")}",
       "next_action": "PRIORITY_APPLY | APPLY_AFTER_VERIFICATION | LOW_STRATEGIC_VALUE | REJECTED"
     }
   ]

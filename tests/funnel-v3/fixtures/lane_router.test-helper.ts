@@ -13,16 +13,29 @@ export const ACTIVE_LANE_KEYS = [
 
 export type ActiveLaneKey = (typeof ACTIVE_LANE_KEYS)[number];
 
-const LANE_VECTORS: Readonly<Record<ActiveLaneKey, readonly number[]>> = {
-  CORE_AI_DATA: [1, 0, 0, 0, 0, 0],
-  LEGAL_REGTECH: [0, 1, 0, 0, 0, 0],
-  HEALTH_BIO_PHARMA: [0, 0, 1, 0, 0, 0],
-  INVESTMENT_MARKETS_FINTECH: [0, 0, 0, 1, 0, 0],
-  SOCIAL_IMPACT_MULTILATERAL: [0, 0, 0, 0, 1, 0],
-  UNIVERSITY_AI_RESEARCH: [0, 0, 0, 0, 0, 1],
+/**
+ * Lanes in config/lanes/registry.yml that the funnel fixtures do not target. Their prototypes
+ * still need a deterministic vector, orthogonal to every fixture lane.
+ */
+export const UNTARGETED_REGISTRY_LANE_KEYS = [
+  "TECHNICAL_PRODUCT_TRANSFORMATION",
+  "INVESTIGATIONS_ENFORCEMENT",
+] as const;
+
+type EmbeddedLaneKey = ActiveLaneKey | (typeof UNTARGETED_REGISTRY_LANE_KEYS)[number];
+
+const LANE_VECTORS: Readonly<Record<EmbeddedLaneKey, readonly number[]>> = {
+  CORE_AI_DATA: [1, 0, 0, 0, 0, 0, 0, 0],
+  LEGAL_REGTECH: [0, 1, 0, 0, 0, 0, 0, 0],
+  HEALTH_BIO_PHARMA: [0, 0, 1, 0, 0, 0, 0, 0],
+  INVESTMENT_MARKETS_FINTECH: [0, 0, 0, 1, 0, 0, 0, 0],
+  SOCIAL_IMPACT_MULTILATERAL: [0, 0, 0, 0, 1, 0, 0, 0],
+  UNIVERSITY_AI_RESEARCH: [0, 0, 0, 0, 0, 1, 0, 0],
+  TECHNICAL_PRODUCT_TRANSFORMATION: [0, 0, 0, 0, 0, 0, 1, 0],
+  INVESTIGATIONS_ENFORCEMENT: [0, 0, 0, 0, 0, 0, 0, 1],
 };
 
-const TEXT_MARKERS: readonly [string, ActiveLaneKey][] = [
+const TEXT_MARKERS: readonly [string, EmbeddedLaneKey][] = [
   ["mlops", "CORE_AI_DATA"],
   ["regtech", "LEGAL_REGTECH"],
   ["bioinformatics", "HEALTH_BIO_PHARMA"],
@@ -35,6 +48,9 @@ const TEXT_MARKERS: readonly [string, ActiveLaneKey][] = [
   ["solutions consultant", "CORE_AI_DATA"],
   ["reservation", "CORE_AI_DATA"],
   ["hotel", "CORE_AI_DATA"],
+  // Prototype-only markers (config/lanes/technical_product_transformation.yml, investigations_enforcement.yml).
+  ["product ownership", "TECHNICAL_PRODUCT_TRANSFORMATION"],
+  ["interviewing witnesses", "INVESTIGATIONS_ENFORCEMENT"],
 ];
 
 export function deterministicLaneEmbedding(text: string): number[] {

@@ -21,7 +21,10 @@ scope:
       - TECHNICAL_PRODUCT_DELIVERY
       - TECHNICAL_ARCHITECTURE
       - TECHNICAL_DELIVERY
+      - TECHNICAL_LEADERSHIP
 
+  # Cloud, DevOps and software-platform engineering are in scope with AI and data; the
+  # title must still pass hasCoreTechnicalFunction.
   included_domain_concepts:
     any:
       - AI
@@ -35,6 +38,9 @@ scope:
       - DATA_INTELLIGENCE
       - MLOPS
       - AI_INFRASTRUCTURE
+      - CLOUD_PLATFORM
+      - DEVOPS
+      - SOFTWARE_PLATFORM
 
   excluded_domain_concepts:
     any:

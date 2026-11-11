@@ -42,6 +42,7 @@ from streamlit_job_review import (
     verification_question_for_job,
 )
 from streamlit_workspace_contracts import (
+    LANE_FILTER_OPTIONS,
     validate_application_row,
     validate_application_workspace_summary,
     validate_document_selection_row,
@@ -1998,7 +1999,7 @@ if st.sidebar.button("⚡ Run Job Discovery & Evaluation Pipeline", help="Runs t
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔍 Filter Listings")
 search_query = st.sidebar.text_input("Keyword Search", "")
-lane_filter = st.sidebar.selectbox("Filter Target Lane", ["All Lanes", "CORE_AI_DATA", "LEGAL_REGTECH", "HEALTH_BIO_PHARMA", "INVESTMENT_MARKETS_FINTECH", "UNCLASSIFIED"])
+lane_filter = st.sidebar.selectbox("Filter Target Lane", list(LANE_FILTER_OPTIONS))
 status_filter = st.sidebar.selectbox(
     "Filter Pipeline Status",
     [
