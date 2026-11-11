@@ -4,6 +4,7 @@ import {
   extractEmailJobCards,
   extractEmailJobCardsWithLinkSummary,
   EmailExtractionError,
+  htmlToPlainText,
   isEmailAlertPostingLink,
   MAX_JOB_CARDS_PER_EMAIL,
   type EmailJobCard,
@@ -219,6 +220,75 @@ describe("job-card link classification and collapsing", () => {
   });
 
   describe("bounded work on untrusted alert markup", () => {
+    /**
+     * CI-safe complexity check: the median time for 4x the input must grow far
+     * less than the 16x a quadratic scan needs. A generous absolute budget for
+     * the large size catches gross regressions without depending on runner speed.
+     */
+    async function medianMs(run: () => Promise<unknown> | unknown): Promise<number> {
+      const samples: number[] = [];
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const started = performance.now();
+        await run();
+        samples.push(performance.now() - started);
+      }
+      return samples.sort((left, right) => left - right)[1]!;
+    }
+
+    async function expectLinear(build: (size: number) => () => Promise<unknown> | unknown, size: number): Promise<void> {
+      await build(size / 16)(); // warm-up
+      const small = await medianMs(build(size / 4));
+      const large = await medianMs(build(size));
+      expect(large).toBeLessThan(2_000);
+      // Linear growth is ~4x; quadratic is ~16x. Small timings are padded so timer noise cannot fail the ratio.
+      expect(large / Math.max(small, 5)).toBeLessThan(10);
+    }
+
+    it("scans 400 KB of unclosed <img tags inside a job anchor in linear time", async () => {
+      await expectLinear((size) => {
+        const raw = htmlRaw('<a href="https://www.linkedin.com/comm/jobs/view/4400000401/">'
+          + "<img ".repeat(Math.floor(size / 5)) + "Synthetic Data Steward</a>");
+        return () => extractEmailJobCardsWithLinkSummary(raw);
+      }, 400_000);
+    });
+
+    it("scans 400 KB of unclosed <a tags in linear time and still finds the real posting", async () => {
+      await expectLinear((size) => {
+        const raw = htmlRaw('<a href="https://www.linkedin.com/comm/jobs/view/4400000402/">Synthetic Data Steward</a>'
+          + "<a ".repeat(Math.floor(size / 3)));
+        return async () => {
+          const { cards } = await extractEmailJobCardsWithLinkSummary(raw);
+          expect(cards.map((card) => card.sourceUrl)).toEqual(["https://www.linkedin.com/jobs/view/4400000402"]);
+        };
+      }, 400_000);
+    });
+
+    it("scans 400 KB of opened-but-never-closed anchors (<a ...> without </a>) in linear time", async () => {
+      await expectLinear((size) => {
+        const raw = htmlRaw('<a href="https://www.linkedin.com/comm/jobs/view/4400000403/">Synthetic Data Steward</a>'
+          + '<a href="x">'.repeat(Math.floor(size / 12)));
+        return () => extractEmailJobCardsWithLinkSummary(raw);
+      }, 400_000);
+    });
+
+    it("strips 400 KB of unclosed tags, comments and raw-text blocks in linear time with the regexes running on the full input", async () => {
+      for (const unit of ["<", "<br ", "<p ", "<!--", "<style>", "<script x", "</p   "]) {
+        await expectLinear((size) => {
+          const html = "<p>Synthetic Data Steward</p>" + unit.repeat(Math.floor(size / unit.length));
+          return () => htmlToPlainText(html);
+        }, 400_000);
+      }
+      expect(htmlToPlainText("<p>Synthetic Data Steward</p><style>.a{}</style><!-- c --><br/>Example City"))
+        .toBe("Synthetic Data Steward\n\nExample City");
+    });
+
+    it("parses many well-formed anchors without per-link full-document scans", async () => {
+      await expectLinear((size) => {
+        const raw = htmlRaw(`<a href="https://www.example.com/about">About us</a>`.repeat(Math.floor(size / 52)));
+        return () => extractEmailJobCardsWithLinkSummary(raw);
+      }, 200_000);
+    });
+
     it("ignores a 1 MB adversarial logo alt text quickly and leaves the employer unknown", async () => {
       const alt = "a".repeat(1_000_000);
       const html = `<table><tr><td><a href="https://www.linkedin.com/comm/jobs/view/4400000301/"><img src="https://static.example.com/x.png" alt="${alt}"></a>`
