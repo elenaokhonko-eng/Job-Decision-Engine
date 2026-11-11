@@ -117,6 +117,7 @@ describe("workplace perk phrases are neutral", () => {
       "100 % onsite gym", "strictly onsite canteen", "entirely on-site cafe",
       "Hybrid", "Remote", "Wet lab work", "lab-based role", "laboratory-based role",
       "Location: On-site\nParking available", "on-site clinic-based role", "parking on-site only",
+      "Position: On-site Parking available",
       ...STATEMENTS_WITH_TRAILING_PERK,
     ]) {
       expect(neutralizeWorkplacePerkPhrases(text)).toBe(text);
@@ -124,13 +125,13 @@ describe("workplace perk phrases are neutral", () => {
   });
 
   describe("a perk after a genuine statement keeps the statement on-site", () => {
-    // Enrichment reads the first six as employer-stated ON-SITE, exactly as on
-    // main. Main's text extraction has no "role is / work on-site" rule, so the
-    // last two stay UNKNOWN there (and get the Singapore default, as on main);
-    // the gate still rejects all eight.
-    const ENRICHED_AS = ["ONSITE", "ONSITE", "ONSITE", "ONSITE", "ONSITE", "ONSITE", "ASSUMED_HYBRID", "ASSUMED_HYBRID"];
+    // Text extraction reads the first six as employer-stated ON-SITE. It has no
+    // "role is / work on-site" rule, so the last two stay UNKNOWN, and the
+    // Singapore assumed-hybrid default is not applied to them (owner rule
+    // 2026-11); the gate rejects all eight.
+    const ENRICHED_AS = ["ONSITE", "ONSITE", "ONSITE", "ONSITE", "ONSITE", "ONSITE", "UNKNOWN", "UNKNOWN"];
     STATEMENTS_WITH_TRAILING_PERK.forEach((line, index) => {
-      it(`"${line}" stays HARD_REJECT and enriches as on main`, async () => {
+      it(`"${line}" stays HARD_REJECT and is never an assumed hybrid`, async () => {
         const description = `${TECH} ${line}`;
         const result = gate(description);
         expect(result.status).toBe("HARD_REJECT");
@@ -138,7 +139,19 @@ describe("workplace perk phrases are neutral", () => {
         const enriched = await enrichSingapore(description);
         expect(enriched.workplace_type).toBe(ENRICHED_AS[index]);
         if (ENRICHED_AS[index] === "ONSITE") expect(enriched.attendance_basis).toBe("EMPLOYER_STATED");
+        // Enrich-then-gate order, as in hardGate.ts.
+        expect(gate(description, enriched.workplace_type).status).toBe("HARD_REJECT");
       });
+    });
+
+    it("rejects a perk plus a separate 'role is onsite' sentence in Singapore (no assumed hybrid)", async () => {
+      const description = `${TECH}\nPerks: onsite gym and free lunch.\nThis role is onsite.`;
+      const enriched = await enrichSingapore(description);
+      expect(enriched.workplace_type).not.toBe("ASSUMED_HYBRID");
+      const result = gate(description, enriched.workplace_type);
+      expect(result.status).toBe("HARD_REJECT");
+      expect(result.rejection_codes).toEqual(expect.arrayContaining(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"]));
+      expect(gate(description, "ASSUMED_HYBRID").status).toBe("HARD_REJECT");
     });
 
     it("keeps the office-day requirement when a perk follows the day count", () => {
@@ -243,5 +256,83 @@ describe("workplace perk phrases are neutral", () => {
       expect(postingWorkplaceType(await employerPage("Perks: on-site gym and free lunch."))).toBe("UNKNOWN");
       expect(postingWorkplaceType(await employerPage("Location: On-site Parking available."))).toBe("ONSITE");
     });
+  });
+});
+
+// Owner rule (2026-11): for a Singapore-located job any explicit on-site
+// statement means on-site (not hybrid, no work from home). It overrides the
+// assumed-hybrid default and the gate rejects it unless an on-site exception
+// applies. Workplace perks stay neutral.
+describe("Singapore explicit on-site statements override the assumed-hybrid default", () => {
+  const SINGAPORE_ONSITE_STATEMENTS = [
+    "This role is on-site facilities based",
+    "Work on-site facilities daily",
+    "This role is on-site.",
+    "On-site, facilities based.",
+    "Work on-site at our facilities daily.",
+    "This is an on-site role.",
+    "You will be based on-site at our Jurong campus.",
+    "You must be on-site.",
+    "This is an office-based role.",
+    "5 days in office.",
+    "Fully on-site.",
+    "Location: On-site",
+    "Engineering | Onsite | Full-time",
+  ];
+
+  for (const line of SINGAPORE_ONSITE_STATEMENTS) {
+    it(`"${line}" is on-site: no assumed hybrid, HARD_REJECT`, async () => {
+      const description = `${TECH}\n${line}`;
+      const enriched = await enrichSingapore(description);
+      expect(enriched.workplace_type).not.toBe("ASSUMED_HYBRID");
+      const cached = await enrichSingapore(description, "UNKNOWN");
+      expect(cached.workplace_type).not.toBe("ASSUMED_HYBRID");
+      for (const workplaceType of [enriched.workplace_type, "ASSUMED_HYBRID"]) {
+        const result = gate(description, workplaceType);
+        expect(result.status).toBe("HARD_REJECT");
+        expect(result.rejection_codes).toEqual(expect.arrayContaining(["UNWORKABLE_LOCATION_MODEL", "GATE_HIGH_OFFICE_DAYS"]));
+      }
+    });
+  }
+
+  it("still passes a Singapore preferred-employer or research on-site job through the exception", () => {
+    const description = `${TECH}\nThis is an on-site role.`;
+    const preferred = { ...loadWorkabilityPolicy(), onsiteExceptionEmployers: ["Example Analytics"] };
+    for (const workplaceType of ["UNKNOWN", "ASSUMED_HYBRID"]) {
+      const result = gate(description, workplaceType, preferred as any);
+      expect(result.status).toBe("PASS");
+      expect(result.evidence_quotes.join(" ")).toContain("ON-SITE EXCEPTION (PREFERRED_EMPLOYER)");
+    }
+    const research = applyGlobalGates({
+      id: "perk-fixture-research",
+      title: "Research Engineer",
+      company_name: "National University of Singapore",
+      raw_description: description,
+      location: "Singapore",
+      workplace_type: "UNKNOWN",
+      employment_type: "PERMANENT",
+    } as any, loadWorkabilityPolicy());
+    expect(research.status).toBe("PASS");
+    expect(research.evidence_quotes.join(" ")).toContain("ON-SITE EXCEPTION (RESEARCH_ROLE)");
+  });
+
+  it("keeps perk-only Singapore lines at the assumed hybrid / NEEDS_VERIFICATION", async () => {
+    for (const line of ["Perks: onsite gym", "• On-site cafe\n• Free parking", "Benefits include on-site childcare and an onsite medical clinic."]) {
+      const description = `${TECH}\n${line}`;
+      const enriched = await enrichSingapore(description);
+      expect(enriched.workplace_type).toBe("ASSUMED_HYBRID");
+      expect(gate(description, "ASSUMED_HYBRID").status).toBe("NEEDS_VERIFICATION");
+      expect(gate(description, "UNKNOWN").status).toBe("NEEDS_VERIFICATION");
+    }
+  });
+
+  it("does not read a partial-attendance or hybrid statement as on-site", () => {
+    expect(gate(`${TECH}\nYou must be on-site 2 days a week.`).status).not.toBe("HARD_REJECT");
+    expect(gate(`${TECH}\nHybrid role. This is an on-site role during onboarding.`).status).not.toBe("HARD_REJECT");
+  });
+
+  it("applies the Singapore-only forms to Singapore jobs only", () => {
+    const london = evaluateWorkability("London, United Kingdom", "UNKNOWN", `${TECH}\nThis is an on-site role.`, "PERMANENT");
+    expect(london.reasonCode).not.toBe("GATE_HIGH_OFFICE_DAYS");
   });
 });

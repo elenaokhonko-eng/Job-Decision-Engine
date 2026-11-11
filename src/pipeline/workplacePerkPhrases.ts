@@ -69,7 +69,7 @@ const STATEMENT_BEFORE_TOKEN = [
   // Header separators: "Full-time · On-site", "Remote | On-site"
   String.raw`[|·][ \t]*`,
   // Work-mode labels: "Location: On-site", "Workplace type: Onsite"
-  String.raw`\b(?:location|workplace|work[ \t]*mode|work(?:place)?[ \t]+(?:type|model|mode|location|arrangement|setting|style)|working[ \t]+(?:model|arrangement|pattern)|job[ \t]+type|employment[ \t]+type)[ \t]*:[ \t]*`,
+  String.raw`\b(?:location|workplace|position|role|work[ \t]*mode|work(?:place)?[ \t]+(?:type|model|mode|location|arrangement|setting|style)|working[ \t]+(?:model|arrangement|pattern)|job[ \t]+type|employment[ \t]+type)[ \t]*:[ \t]*`,
   // "role is on-site", "work on-site", "working onsite", "based onsite"
   String.raw`\b(?:role|position|job|work|works|working|presence|based)[ \t]+(?:(?:is|are|will[ \t]+be|must[ \t]+be|required)[ \t]+)?`,
 ].join("|");

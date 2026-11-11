@@ -2,7 +2,12 @@ import crypto from "node:crypto";
 import pg from "pg";
 import { stripHtmlToText } from "../security/sanitize.js";
 import { type WorkspaceContext } from "../workspace/context.js";
-import { extractHybridAttendance, type HybridAttendanceFacts } from "./criteria.js";
+import {
+  extractHybridAttendance,
+  findExplicitOnsiteStatement,
+  isSingaporeLocatedJob,
+  type HybridAttendanceFacts,
+} from "./criteria.js";
 import { neutralizeWorkplacePerkPhrases } from "../pipeline/workplacePerkPhrases.js";
 
 const EXTRACTOR_VERSION = "work_mode_enrichment_v1";
@@ -11,11 +16,15 @@ const FETCH_TIMEOUT_MS = 15_000;
 function isSingaporeUnknownWorkModeEligible(location: string | null | undefined, description: string | null | undefined): boolean {
   const loc = String(location || "").toLowerCase();
   const desc = String(description || "").toLowerCase();
-  const isSingapore = /\b(?:singapore|sg)\b/i.test(loc)
-    || /\b(?:based\s+in\s+singapore|location\s*:\s*singapore|office\s+in\s+singapore)\b/i.test(desc);
-  // These statements are not perk phrases, so they are read on the raw text.
-  const explicitOnsite = /\b(?:100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(desc)
-    || /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i.test(desc);
+  const isSingapore = isSingaporeLocatedJob(loc, desc);
+  // Owner rule (2026-11): any explicit on-site statement in a Singapore job
+  // means on-site, so the assumed-hybrid default never overrides it. The hard
+  // gate reads the same statements on the same perk-neutral text; a workplace
+  // perk ("onsite gym") alone is neutral and keeps the default.
+  const workModeText = neutralizeWorkplacePerkPhrases(desc);
+  const explicitOnsite = /\b[45]\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i.test(workModeText)
+    || findExplicitOnsiteStatement(workModeText, desc, { singapore: isSingapore }) !== null
+    || extractWorkModeFromText(desc).workplace_type === "ONSITE";
   return isSingapore && !explicitOnsite;
 }
 

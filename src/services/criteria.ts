@@ -381,6 +381,62 @@ export interface WorkabilityEvaluation {
   suppressedOnsiteReason?: string;
 }
 
+/** A Singapore-located job: Singapore in the location, or a stated Singapore base. */
+export function isSingaporeLocatedJob(location: string | null | undefined, description: string | null | undefined): boolean {
+  return /\b(?:singapore|sg)\b/i.test(String(location || ""))
+    || /\b(?:based\s+in\s+singapore|location\s*:\s*singapore|office\s+in\s+singapore)\b/i.test(String(description || ""));
+}
+
+/** Explicit on-site statements the gate reads for every job. */
+const ONSITE_STATEMENT_PATTERNS: readonly RegExp[] = [
+  /\b(?:100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i,
+  /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i,
+  /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i,
+  /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i,
+];
+
+/**
+ * Owner rule (2026-11): for a Singapore-located job any explicit on-site
+ * statement means on-site (not hybrid, no work from home), including these
+ * forms. A partial-attendance count right after the statement ("must be
+ * on-site 3 days a week") is a hybrid fact, not an on-site statement.
+ */
+const SINGAPORE_ONSITE_STATEMENT_PATTERNS: readonly RegExp[] = [
+  /(?:^|\n)[ \t]*(?:on-?site|onsite)\b(?![^\n.]{0,40}\b[1-3]\s*(?:-\s*\d\s*)?(?:days?|x)\b)/im,
+  /\b(?:on-?site|onsite)\s+(?:role|position|job)\b/i,
+  /\b(?:must|required\s+to|need\s+to|expected\s+to)\s+be\s+(?:on-?site|onsite)\b(?![^\n.]{0,40}\b[1-3]\s*(?:-\s*\d\s*)?(?:days?|x)\b)/i,
+  /\boffice[- ]based\s+(?:role|position|job)\b/i,
+  /\b(?:role|position|job)\s+is\s+office[- ]based\b/i,
+];
+
+/** A hybrid or remote statement makes the Singapore-only forms ambiguous; they are then not read. */
+const FLEXIBLE_WORK_STATEMENT = /\bhybrid\b|\bwork(?:ing)?\s+from\s+home\b|\bwfh\b|\bremote(?:ly)?\b/i;
+
+/**
+ * The first explicit on-site statement in `workModeText` (lowercase,
+ * perk-neutralised, same length as `originalText`), quoted from `originalText`;
+ * null when there is none. Workplace perks never match because the caller
+ * neutralises them first.
+ */
+export function findExplicitOnsiteStatement(
+  workModeText: string,
+  originalText: string,
+  options: { singapore: boolean },
+): string | null {
+  const withoutNegations = workModeText.replace(/\b(?:no|not|non)[- ]?(?:remote|hybrid)\b|\b(?:remote|hybrid)\s*:\s*no\b/gi, " ");
+  const patterns = options.singapore && !FLEXIBLE_WORK_STATEMENT.test(withoutNegations)
+    ? [...ONSITE_STATEMENT_PATTERNS, ...SINGAPORE_ONSITE_STATEMENT_PATTERNS]
+    : ONSITE_STATEMENT_PATTERNS;
+  for (const pattern of patterns) {
+    const match = pattern.exec(workModeText);
+    if (match) {
+      const start = match.index;
+      return originalText.slice(start, start + match[0].length).replace(/^[\s|·•:]+/, "").trim() || match[0].trim();
+    }
+  }
+  return null;
+}
+
 // 3. Workability Requirements (Zero tolerance for on-premises-only lab/clinic)
 export function evaluateWorkability(
   location: string,
@@ -398,7 +454,10 @@ export function evaluateWorkability(
   // rule (territory, contract placement, unknown facts) is evaluated again.
   // The strict rejection proves explicit on-site evidence, so an unset
   // workplace field is read as on-site rather than as an unknown work mode.
-  const exceptedWorkplace = normalizeWorkMode(workplaceType) === "UNKNOWN" ? "ONSITE" : workplaceType;
+  const exceptedWorkplace = normalizeWorkMode(workplaceType) === "UNKNOWN"
+    || String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID"
+    ? "ONSITE"
+    : workplaceType;
   const excepted = evaluateWorkabilityRules(location, exceptedWorkplace, description, employmentType, policy, answerContext, companyName, true);
   return { ...excepted, onsiteExceptionApplied: onsiteException, suppressedOnsiteReason: strict.reason };
 }
@@ -418,7 +477,7 @@ function evaluateWorkabilityRules(
     answerContext,
     VERIFICATION_ANSWER_KEYS.workplaceOfficeDays,
   ) && answerContext?.overrides.workplaceOfficeDaysCap === null;
-  const wp = normalizeWorkMode(workplaceType);
+  const wpRaw = normalizeWorkMode(workplaceType);
   const loc = (location || "").toLowerCase().trim();
   const d = (description || "").toLowerCase().trim();
   const emp = (employmentType || "").toUpperCase().trim();
@@ -497,15 +556,6 @@ function evaluateWorkabilityRules(
     };
   };
 
-  // An inferred hybrid signal is never affirmative employer evidence.
-  const isAssumedHybrid = String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID";
-  if (isAssumedHybrid) {
-    if (!effectivePolicy.allowedWorkModes.includes("HYBRID")) {
-      return unknownWorkModeOutcome(true);
-    }
-    return unknownWorkModeOutcome(true);
-  }
-
   // 1. Explicit ONSITE structured field or work-mode heading/text -> HARD REJECT.
   // Source adapters frequently leave workplace_type UNKNOWN while the posting
   // itself says "Full-time · Onsite" or "Location: On-site". Those are still
@@ -514,11 +564,20 @@ function evaluateWorkabilityRules(
   const workModeText = neutralizeWorkplacePerkPhrases(d);
   const officeDaysMatch = workModeText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*(?:in|at)?\s*(?:the\s*)?office\b/i)
     || workModeText.match(/\b([1-5])\s*days?\s*(?:per\s*week|a\s*week|\/week)?\s*on-?site\b/i);
-  const isExplicitOnsiteText = /\b(100%\s*on-?site|fully\s*on-?site|on-premises\s*only|lab-based|wet\s*lab|clinic-based)\b/i.test(workModeText)
-    || /(?:^|[|·•:])\s*(?:on-?site|onsite)\b/i.test(workModeText)
-    || /\b(?:location|workplace|work\s+location)\s*:\s*(?:on-?site|onsite)\b/i.test(workModeText)
-    || /\b(?:role|position|work|working|presence|based)\s+(?:is\s+)?(?:on-?site|onsite)\b/i.test(workModeText)
+  const onsiteStatement = findExplicitOnsiteStatement(workModeText, d, {
+    singapore: isSingaporeLocatedJob(loc, d),
+  });
+  const isExplicitOnsiteText = onsiteStatement !== null
     || (officeDaysMatch !== null && Number(officeDaysMatch[1]) >= effectivePolicy.hardFailOfficeDaysPerWeek);
+
+  // An inferred hybrid signal is never affirmative employer evidence, and it
+  // never overrides an explicit on-site statement (owner rule 2026-11): such a
+  // job is read as on-site below, with no work-mode field.
+  const isAssumedHybrid = String(workplaceType || "").toUpperCase() === "ASSUMED_HYBRID";
+  if (isAssumedHybrid && !isExplicitOnsiteText) {
+    return unknownWorkModeOutcome(true);
+  }
+  const wp = isAssumedHybrid ? "UNKNOWN" : wpRaw;
 
   if (wp !== "UNKNOWN" && !effectivePolicy.allowedWorkModes.includes(wp) && !(onsiteAccepted && wp === "ONSITE")) {
     return {
@@ -536,7 +595,7 @@ function evaluateWorkabilityRules(
     return {
       workable: false,
       needsVerify: false,
-      reason: "Requires 100% on-premises / on-site presence (ONSITE mode not workable)",
+      reason: `Requires 100% on-premises / on-site presence (ONSITE mode not workable)${onsiteStatement ? `. Posting evidence: "${onsiteStatement}"` : ""}`,
       reasonCode: "GATE_HIGH_OFFICE_DAYS",
       facts: { ...baseFacts, office_days_min: minDays, office_days_max: maxDays }
     };
