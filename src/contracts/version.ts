@@ -9,6 +9,10 @@ export const SchemaVersionSchema = z.enum(schemaVersions);
 export type SchemaVersion = z.infer<typeof SchemaVersionSchema>;
 
 // Version pins for persisted artifacts (kept central to avoid drift across stages).
-export const GATE_VERSION = SCHEMA_VERSION;
+// Gate-logic version, independent of the schema version. Bump it whenever gate
+// semantics change so stored decisions can be selected by the logic that wrote them.
+// 2026-11: on-site exceptions, Axis 1/2 rejects removed, title families as NON_TARGET_ROLE_FAMILY,
+// precise travel/on-call/shift/location codes.
+export const GATE_VERSION = "gate-2026-11.1" as const;
 export const PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;
 

@@ -1,3 +1,5 @@
+import { LIFESTYLE_GATE_CODES } from "./gateReasonCodes.js";
+
 export type RepairCategory =
   | "LEGACY_BUDGET_CAP"
   | "QUOTED_PROVIDER_FAILURE"
@@ -86,9 +88,10 @@ export function classifyRepairCategory(
   // Detect false-negative lifestyle rejection caused by negated keywords ("no on-call", "no regular on-call", "zero travel", etc.)
   const evidenceText = (row.evidence_quotes || []).join(" ").toLowerCase();
   const codes = (row.rejection_reason_codes || []).map((c) => c.toUpperCase());
+  // Legacy rows carry GATE_LIFESTYLE_INCOMPATIBLE; current rows carry the precise codes.
   const isLifestyleRejection =
-    codes.includes("GATE_LIFESTYLE_INCOMPATIBLE") ||
-    (row.rejection_reason || "").includes("GATE_LIFESTYLE_INCOMPATIBLE");
+    LIFESTYLE_GATE_CODES.some((code) => codes.includes(code)) ||
+    LIFESTYLE_GATE_CODES.some((code) => (row.rejection_reason || "").includes(code));
 
   if (
     (row.processing_state === "HARD_REJECTED" || row.gate_decision === "HARD_REJECT") &&

@@ -45,7 +45,8 @@ async function run() {
     JOIN job_versions jv ON jv.id = c.latest_job_version_id
     WHERE c.workspace_id = $1
       AND NOT c.is_test_fixture
-      AND lg.rejection_codes ? 'WORK_AUTHORIZATION_INCOMPATIBLE'
+      -- Job-location mismatches were reported as work authorization before 2026-11.
+      AND lg.rejection_codes ?| ARRAY['WORK_AUTHORIZATION_INCOMPATIBLE', 'GATE_JOB_LOCATION_MISMATCH']
     ORDER BY c.created_at ASC
     LIMIT 100
   `;
